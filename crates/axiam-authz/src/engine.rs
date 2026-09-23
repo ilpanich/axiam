@@ -77,8 +77,31 @@ where
 ///
 /// * the **role** is global — it applies wherever it is assigned;
 /// * the **assignment** names no resource — it is tenant-wide;
-/// * the assignment names the target resource, or any ancestor of it
-///   (hierarchy inheritance).
+/// * the assignment names the target resource — always, whatever its
+///   `inherit` flag says: the node itself is in scope by definition;
+/// * the assignment names an ancestor of the target **and is inheritable**
+///   (`inherit: true`, the default) — hierarchy inheritance.
+///
+/// ## `inherit: false` stops an assignment at its node
+///
+/// A non-inheritable assignment applies at the resource it names and nowhere
+/// below it (`claude_dev/deny-override-design.md` §2.2 rows 9–11). The flag
+/// governs where an *assignment* applies, not what its grants say, so it
+/// filters allows and denies identically — and precedence is untouched:
+/// whatever survives this filter is evaluated under deny-override exactly as
+/// before.
+///
+/// It does not reach the other two rules. A global role applies everywhere
+/// whatever the assignment says, and an assignment naming no resource has no
+/// node to stop at; the REST API refuses `inherit: false` on both rather than
+/// store a flag this function would ignore. Nor does it reach
+/// [`global_role_ids`], which never looks at resource scope at all.
+///
+/// **This clause is the one whose regressions only end-to-end tests see.**
+/// Deleting the ancestor term — or the `inherit` guard on it — leaves every
+/// unit test of the evaluator green, because those tests hand it role ids that
+/// are applicable by construction. `tests/authz_engine_test.rs` proves rows
+/// 9–11 through both `evaluate` and `evaluate_batch`.
 ///
 /// ## The second rule used to be missing
 ///
@@ -119,7 +142,7 @@ fn applicable_role_ids(
             a.role.is_global
                 || match a.resource_id {
                     None => true,
-                    Some(rid) => rid == resource_id || ancestor_ids.contains(&rid),
+                    Some(rid) => rid == resource_id || (a.inherit && ancestor_ids.contains(&rid)),
                 }
         })
         .map(|a| a.role.id)
@@ -1128,9 +1151,10 @@ enum ScopeResolution {
 
 #[cfg(test)]
 mod tests {
-    use super::{GrantOutcome, ScopeContext, decision_for, evaluate_grants};
+    use super::{GrantOutcome, ScopeContext, applicable_role_ids, decision_for, evaluate_grants};
     use crate::types::AccessDecision;
     use axiam_core::models::permission::{PermissionEffect, PermissionGrant};
+    use axiam_core::models::role::{Role, RoleAssignment};
     use chrono::Utc;
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -1438,6 +1462,248 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // T22.11 — `inherit: false` (deny-override-design.md §2.2 rows 9–11)
+    //
+    // These compose `applicable_role_ids` with `evaluate_grants`, which is the
+    // layer the flag lives in. They are NOT a substitute for the end-to-end
+    // rows in `tests/authz_engine_test.rs` (§5.1): they pin the rule, those
+    // prove that the real repositories deliver the flag to it.
+    // -----------------------------------------------------------------
+
+    /// `/fleet` → `/fleet/decommissioned` → `/fleet/decommissioned/unit-7`,
+    /// in that order.
+    const FLEET: usize = 0;
+    const DECOMMISSIONED: usize = 1;
+    const UNIT_7: usize = 2;
+
+    /// One assignment of a single-grant role: at `node`, with `effect` on
+    /// `read`, inheritable or not.
+    #[derive(Clone, Copy, Debug)]
+    struct Placed {
+        node: usize,
+        effect: PermissionEffect,
+        inherit: bool,
+    }
+
+    impl Placed {
+        fn allow(node: usize, inherit: bool) -> Self {
+            Self {
+                node,
+                effect: PermissionEffect::Allow,
+                inherit,
+            }
+        }
+
+        fn deny(node: usize, inherit: bool) -> Self {
+            Self {
+                node,
+                effect: PermissionEffect::Deny,
+                inherit,
+            }
+        }
+    }
+
+    /// Decide `read` on `nodes[target]` for a subject holding `placed`, one
+    /// role per entry, through the same two functions `evaluate` and
+    /// `evaluate_batch` call.
+    fn decide(nodes: &[Uuid; 3], placed: &[Placed], target: usize) -> GrantOutcome {
+        let now = Utc::now();
+        let mut assignments = Vec::new();
+        let mut grants = HashMap::new();
+        for p in placed {
+            let role_id = Uuid::new_v4();
+            assignments.push(RoleAssignment {
+                role: Role {
+                    id: role_id,
+                    tenant_id: Uuid::nil(),
+                    name: String::new(),
+                    description: String::new(),
+                    is_global: false,
+                    created_at: now,
+                    updated_at: now,
+                },
+                resource_id: Some(nodes[p.node]),
+                tenant_scope: None,
+                inherit: p.inherit,
+            });
+            grants.insert(role_id, vec![grant_with("read", p.effect, vec![])]);
+        }
+        // Ancestors are every node above the target in the chain.
+        let ancestors: HashSet<Uuid> = nodes[..target].iter().copied().collect();
+        let ids = applicable_role_ids(&assignments, nodes[target], &ancestors);
+        evaluate_grants(&ids, &grants, "read", &unscoped())
+    }
+
+    fn fleet() -> [Uuid; 3] {
+        [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()]
+    }
+
+    /// Row 9: an allow on `/fleet` with `inherit: false` stops at `/fleet`.
+    #[test]
+    fn row_9_a_non_inheritable_allow_stops_at_its_node() {
+        let nodes = fleet();
+        let rules = [Placed::allow(FLEET, false)];
+        assert_eq!(decide(&nodes, &rules, FLEET), GrantOutcome::Allowed);
+        assert_eq!(
+            decide(&nodes, &rules, DECOMMISSIONED),
+            GrantOutcome::NoGrant
+        );
+        assert_eq!(decide(&nodes, &rules, UNIT_7), GrantOutcome::NoGrant);
+        // I1: the same allow, inheritable, is row 1.
+        let rules = [Placed::allow(FLEET, true)];
+        assert_eq!(decide(&nodes, &rules, UNIT_7), GrantOutcome::Allowed);
+    }
+
+    /// Row 10: a non-inheritable deny on `/fleet` beside an inheritable allow
+    /// there. The deny holds at `/fleet` and does not reach `unit-7`, where the
+    /// allow therefore stands.
+    #[test]
+    fn row_10_a_non_inheritable_deny_denies_at_its_node_only() {
+        let nodes = fleet();
+        let rules = [Placed::deny(FLEET, false), Placed::allow(FLEET, true)];
+        assert_eq!(decide(&nodes, &rules, FLEET), GrantOutcome::DeniedByRule);
+        assert_eq!(
+            decide(&nodes, &rules, DECOMMISSIONED),
+            GrantOutcome::Allowed
+        );
+        assert_eq!(decide(&nodes, &rules, UNIT_7), GrantOutcome::Allowed);
+    }
+
+    /// Row 11: `inherit: false` never removes the node itself.
+    #[test]
+    fn row_11_the_node_itself_is_always_in_scope() {
+        let nodes = fleet();
+        assert_eq!(
+            decide(&nodes, &[Placed::allow(UNIT_7, false)], UNIT_7),
+            GrantOutcome::Allowed
+        );
+        assert_eq!(
+            decide(&nodes, &[Placed::deny(UNIT_7, false)], UNIT_7),
+            GrantOutcome::DeniedByRule
+        );
+    }
+
+    /// Every assignment the property tests draw from: each node × each effect
+    /// × each value of the flag.
+    fn candidates() -> Vec<Placed> {
+        let mut out = Vec::new();
+        for node in [FLEET, DECOMMISSIONED, UNIT_7] {
+            for inherit in [true, false] {
+                out.push(Placed::allow(node, inherit));
+                out.push(Placed::deny(node, inherit));
+            }
+        }
+        out
+    }
+
+    /// Run `check(base, target)` over every subset of [`candidates`] and every
+    /// node of the chain.
+    fn for_every_rule_set(mut check: impl FnMut(&[Placed], usize)) {
+        let all = candidates();
+        for mask in 0u32..(1 << all.len()) {
+            let base: Vec<Placed> = all
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, p)| *p)
+                .collect();
+            for target in [FLEET, DECOMMISSIONED, UNIT_7] {
+                check(&base, target);
+            }
+        }
+    }
+
+    /// §2.1's property with the flag as a dimension: adding a deny — inheritable
+    /// or not, at any node — never turns a non-allow into an allow. A
+    /// non-inheritable deny is a deny that reaches fewer nodes, never a
+    /// widening of any allow.
+    #[test]
+    fn adding_a_deny_never_widens_access_whatever_its_inherit_flag() {
+        let nodes = fleet();
+        let extras: Vec<Placed> = candidates()
+            .into_iter()
+            .filter(|p| p.effect.is_deny())
+            .collect();
+        for_every_rule_set(|base, target| {
+            if decide(&nodes, base, target) == GrantOutcome::Allowed {
+                return;
+            }
+            for extra in &extras {
+                let mut widened = base.to_vec();
+                widened.push(*extra);
+                assert_ne!(
+                    decide(&nodes, &widened, target),
+                    GrantOutcome::Allowed,
+                    "adding {extra:?} to {base:?} widened access at node {target}"
+                );
+            }
+        });
+    }
+
+    /// The clause the flag adds to §2.1: setting `inherit: false` on an
+    /// **allow** never widens access — it only takes nodes away from the allow.
+    #[test]
+    fn making_an_allow_non_inheritable_never_widens_access() {
+        let nodes = fleet();
+        for_every_rule_set(|base, target| {
+            if decide(&nodes, base, target) == GrantOutcome::Allowed {
+                return;
+            }
+            for (i, p) in base.iter().enumerate() {
+                if p.effect.is_deny() || !p.inherit {
+                    continue;
+                }
+                let mut narrowed = base.to_vec();
+                narrowed[i].inherit = false;
+                assert_ne!(
+                    decide(&nodes, &narrowed, target),
+                    GrantOutcome::Allowed,
+                    "making {p:?} non-inheritable in {base:?} widened access at node {target}"
+                );
+            }
+        });
+    }
+
+    /// …and on a **deny** it can, which is why the design document says so and
+    /// why changing the flag is an unassign-and-assign (both invalidate the
+    /// subject's cached decisions). Asserted in both directions: the converse —
+    /// making a deny inheritable — never widens, and a witness exists for the
+    /// widening, which is row 10.
+    #[test]
+    fn making_a_deny_non_inheritable_can_widen_access_and_row_10_is_the_witness() {
+        let nodes = fleet();
+        let mut widened_somewhere = false;
+        for_every_rule_set(|base, target| {
+            for (i, p) in base.iter().enumerate() {
+                if !p.effect.is_deny() || !p.inherit {
+                    continue;
+                }
+                let mut narrowed = base.to_vec();
+                narrowed[i].inherit = false;
+                let before = decide(&nodes, base, target);
+                let after = decide(&nodes, &narrowed, target);
+                if before != GrantOutcome::Allowed && after == GrantOutcome::Allowed {
+                    widened_somewhere = true;
+                }
+                // The converse: turning `narrowed` back into `base` extends a
+                // deny's reach, and that can never widen.
+                if after != GrantOutcome::Allowed {
+                    assert_ne!(
+                        before,
+                        GrantOutcome::Allowed,
+                        "making {p:?} inheritable again widened access at node {target}"
+                    );
+                }
+            }
+        });
+        assert!(
+            widened_somewhere,
+            "no rule set in which a non-inheritable deny re-opens access was found — \
+             row 10 says one exists"
+        );
     }
 
     // -----------------------------------------------------------------

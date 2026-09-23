@@ -316,7 +316,9 @@ worth being precise about which one you are using:
   assigned, including when the assignment does name a resource.
 
 An assignment that **does** name a resource reaches that resource and cascades
-to its descendants in the hierarchy, unless a deny overrides it.
+to its descendants in the hierarchy, unless a deny overrides it — or unless the
+assignment was made with `inherit: false`, which stops it at that resource (see
+[Stopping an assignment at its resource](#stopping-an-assignment-at-its-resource-inherit-false)).
 
 > **Upgrade note.** Up to and including `1.0.0-beta08`, an assignment naming no
 > resource granted nothing at all unless the role also carried `is_global` — the
@@ -378,6 +380,54 @@ Groups themselves are created via `POST /api/v1/groups` and populated via
 `POST /api/v1/groups/{group_id}/members`. Assigning a role to a group is the
 recommended pattern for managing access for a team rather than granting
 roles to individual users one at a time.
+
+### Stopping an assignment at its resource (`inherit: false`)
+
+A resource-scoped assignment reaches its resource and every descendant. Send
+`inherit: false` to make it reach **that resource only** — "here and no
+further" — on any of the three assign routes:
+
+```
+POST /api/v1/roles/{role_id}/users
+{ "user_id": "<uuid>", "resource_id": "<building>", "inherit": false }
+```
+
+The flag belongs to the assignment, not to the role's grants, so it stops
+allows and denies alike. With `/fleet` → `/fleet/decommissioned` →
+`/fleet/decommissioned/unit-7`:
+
+| Assignments | `/fleet` | `unit-7` |
+|---|---|---|
+| allow on `/fleet`, `inherit: false` | allowed | `no_grant` — the allow stops at `/fleet` |
+| deny on `/fleet`, `inherit: false`; allow on `/fleet`, inheritable | `denied_by_rule` | allowed — the deny stops at `/fleet` |
+| allow on `unit-7`, `inherit: false` | `no_grant` | allowed — the node itself is always in scope |
+
+Precedence is unchanged: whatever assignments reach a resource are evaluated
+under deny-override exactly as before, so a non-inheritable allow below an
+inheritable deny is still denied. What changes is only which assignments reach
+it.
+
+- **Omitted, or `true`, is today's behaviour.** Every assignment written before
+  the field existed reads back as `inherit: true`, and every client that does
+  not send it keeps getting a cascading assignment.
+- **Two requests are refused with 400**, because the flag would be stored and
+  then ignored: `inherit: false` with no `resource_id` (a tenant-wide
+  assignment has no resource to stop at), and `inherit: false` for a role with
+  `is_global: true` (a global role applies everywhere by definition). Making a
+  role global *after* assigning it non-inheritably widens that assignment to
+  everywhere, as it widens every other assignment of the role.
+- **The flag is part of the assignment.** A subject holds a given role at most
+  once, so there is no update: to change it, unassign
+  (`DELETE .../users/{user_id}?resource_id=<uuid>`) and assign again. Both
+  calls flush the subject's cached decisions. Note which way the change moves
+  access: `false` on an allow narrows it, but `false` on a **deny** widens it,
+  because the descendants the deny used to reach are no longer denied.
+- **The listings show it.** Every assignment listing —
+  `GET /api/v1/roles/{role_id}/users|groups|service-accounts`,
+  `GET /api/v1/users/{user_id}/roles`, `GET /api/v1/groups/{group_id}/roles`,
+  `GET /api/v1/service-accounts/{id}/roles` — carries `inherit` beside
+  `resource_id`. The admin console does not yet offer the flag in its
+  assignment dialogs; set it through the API.
 
 ### Service accounts hold roles too
 

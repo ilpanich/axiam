@@ -3,7 +3,9 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::error::AxiamError;
 use axiam_core::models::group::Group;
-use axiam_core::models::role::{AssignmentScope, CreateRole, Role, RoleAssignment, UpdateRole};
+use axiam_core::models::role::{
+    AssignmentScope, CreateRole, Role, RoleAssignment, UpdateRole, default_inherit,
+};
 use axiam_core::repository::{
     GroupRepository, PaginatedResult, Pagination, RoleRepository, ServiceAccountRepository,
     TenantRepository, UserRepository,
@@ -48,6 +50,20 @@ pub struct AssignRoleToUserRequest {
     /// tenant.
     #[serde(default)]
     pub tenant_scope: Option<Vec<Uuid>>,
+    /// Whether the assignment also reaches the descendants of `resource_id`.
+    ///
+    /// Omitted — the default — or `true` is today's behaviour: a
+    /// resource-scoped assignment applies at its resource and everywhere below
+    /// it. `false` applies it at `resource_id` only, "here and no further",
+    /// for allow and deny grants alike.
+    ///
+    /// Refused with 400 when `false` is sent with no `resource_id` (a
+    /// tenant-wide assignment has no node to stop at) or for a role with
+    /// `is_global: true` (a global role applies everywhere by definition).
+    /// The flag is part of the assignment: to change it, unassign and assign
+    /// again.
+    #[serde(default)]
+    pub inherit: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -67,6 +83,20 @@ pub struct AssignRoleToGroupRequest {
     /// tenant.
     #[serde(default)]
     pub tenant_scope: Option<Vec<Uuid>>,
+    /// Whether the assignment also reaches the descendants of `resource_id`.
+    ///
+    /// Omitted — the default — or `true` is today's behaviour: a
+    /// resource-scoped assignment applies at its resource and everywhere below
+    /// it. `false` applies it at `resource_id` only, "here and no further",
+    /// for allow and deny grants alike.
+    ///
+    /// Refused with 400 when `false` is sent with no `resource_id` (a
+    /// tenant-wide assignment has no node to stop at) or for a role with
+    /// `is_global: true` (a global role applies everywhere by definition).
+    /// The flag is part of the assignment: to change it, unassign and assign
+    /// again.
+    #[serde(default)]
+    pub inherit: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -86,6 +116,20 @@ pub struct AssignRoleToServiceAccountRequest {
     /// tenant.
     #[serde(default)]
     pub tenant_scope: Option<Vec<Uuid>>,
+    /// Whether the assignment also reaches the descendants of `resource_id`.
+    ///
+    /// Omitted — the default — or `true` is today's behaviour: a
+    /// resource-scoped assignment applies at its resource and everywhere below
+    /// it. `false` applies it at `resource_id` only, "here and no further",
+    /// for allow and deny grants alike.
+    ///
+    /// Refused with 400 when `false` is sent with no `resource_id` (a
+    /// tenant-wide assignment has no node to stop at) or for a role with
+    /// `is_global: true` (a global role applies everywhere by definition).
+    /// The flag is part of the assignment: to change it, unassign and assign
+    /// again.
+    #[serde(default)]
+    pub inherit: Option<bool>,
 }
 
 // -----------------------------------------------------------------------
@@ -111,6 +155,9 @@ pub struct RoleUserAssignment {
     /// deliberately narrowed grant from an organization-wide one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant_scope: Option<Vec<Uuid>>,
+    /// Whether the assignment also reaches the descendants of `resource_id`
+    /// (`true`, the default) or applies at that resource only (`false`).
+    pub inherit: bool,
 }
 
 /// A group together with the resource scope of its assignment of this role.
@@ -125,6 +172,9 @@ pub struct RoleGroupAssignment {
     /// deliberately narrowed grant from an organization-wide one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant_scope: Option<Vec<Uuid>>,
+    /// Whether the assignment also reaches the descendants of `resource_id`
+    /// (`true`, the default) or applies at that resource only (`false`).
+    pub inherit: bool,
 }
 
 /// A service account together with the resource scope of its assignment.
@@ -140,6 +190,9 @@ pub struct RoleServiceAccountAssignment {
     /// deliberately narrowed grant from an organization-wide one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant_scope: Option<Vec<Uuid>>,
+    /// Whether the assignment also reaches the descendants of `resource_id`
+    /// (`true`, the default) or applies at that resource only (`false`).
+    pub inherit: bool,
 }
 
 // -----------------------------------------------------------------------
@@ -368,10 +421,7 @@ async fn validate_tenant_scope<C: Connection + Clone>(
     tenant_scope: Option<Vec<Uuid>>,
 ) -> Result<AssignmentScope, AxiamApiError> {
     let Some(tenants) = tenant_scope else {
-        return Ok(AssignmentScope {
-            resource_id,
-            tenant_scope: None,
-        });
+        return Ok(AssignmentScope::from(resource_id));
     };
 
     let invalid = |reason: &str| -> AxiamApiError {
@@ -426,7 +476,63 @@ async fn validate_tenant_scope<C: Connection + Clone>(
         // Deduplicated and ordered, so two requests naming the same tenants in
         // different orders produce the same stored edge.
         tenant_scope: Some(seen.into_iter().collect()),
+        inherit: default_inherit(),
     })
+}
+
+/// Check a requested `inherit` flag and resolve it to the value to store.
+///
+/// # What the flag means, and where it is legal
+///
+/// `inherit: false` stops a resource-scoped assignment at the resource it
+/// names: it applies there and at no descendant (T22.11, DF-021;
+/// `claude_dev/deny-override-design.md` §2.2 rows 9–11). Omitted or `true` is
+/// the assignment every client has always written.
+///
+/// # The two refusals
+///
+/// Both are cases where the engine would store the flag and then ignore it, so
+/// accepting them would be a silent no-op — an operator who wrote "here and no
+/// further" and got a 204 would reasonably believe the assignment stopped
+/// somewhere.
+///
+/// * **No `resource_id`.** A tenant-wide assignment applies at every resource
+///   of the tenant; it has no node to stop at.
+/// * **A global role.** `is_global` applies the role everywhere whatever the
+///   assignment says.
+///
+/// Only the first is decidable from the request, so it is checked first and
+/// the role is read only when it has to be. An unknown role is left to the
+/// assignment itself to report, exactly as it is for an inheritable one.
+async fn validate_inherit<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    role_id: Uuid,
+    resource_id: Option<Uuid>,
+    inherit: Option<bool>,
+) -> Result<bool, AxiamApiError> {
+    if inherit != Some(false) {
+        return Ok(default_inherit());
+    }
+    let invalid = |reason: &str| -> AxiamApiError {
+        AxiamApiError(AxiamError::Validation {
+            message: format!("inherit: {reason}"),
+        })
+    };
+    if resource_id.is_none() {
+        return Err(invalid(
+            "false needs a resource_id — an assignment that names no resource \
+             applies across the whole tenant and has no resource to stop at",
+        ));
+    }
+    match state.role_repo.get_by_id(tenant_id, role_id).await {
+        Ok(role) if role.is_global => Err(invalid(
+            "false cannot be set on a global role — a global role applies to \
+             every resource whatever its assignment names",
+        )),
+        Ok(_) | Err(AxiamError::NotFound { .. }) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -474,6 +580,8 @@ pub async fn assign_to_user<C: Connection + Clone>(
             // rule that cannot see whether a grant spans every tenant of the
             // organization or two of them is reviewing half of it.
             "tenant_scope": req.tenant_scope,
+            // And whether it reaches below its resource at all.
+            "inherit": req.inherit,
             "tenant_id": user.tenant_id,
             // Who is asking — the half a four-eyes rule is actually about.
             "actor_id": user.user_id,
@@ -481,13 +589,24 @@ pub async fn assign_to_user<C: Connection + Clone>(
     )
     .await?;
 
-    let scope = validate_tenant_scope(
+    let inherit = validate_inherit(
         state.get_ref(),
         user.tenant_id,
+        role_id,
         req.resource_id,
-        req.tenant_scope,
+        req.inherit,
     )
     .await?;
+    let scope = AssignmentScope {
+        inherit,
+        ..validate_tenant_scope(
+            state.get_ref(),
+            user.tenant_id,
+            req.resource_id,
+            req.tenant_scope,
+        )
+        .await?
+    };
     state
         .role_repo
         .assign_to_user(user.tenant_id, req.user_id, role_id, scope)
@@ -602,19 +721,32 @@ pub async fn assign_to_service_account<C: Connection + Clone>(
             // rule that cannot see whether a grant spans every tenant of the
             // organization or two of them is reviewing half of it.
             "tenant_scope": req.tenant_scope,
+            // And whether it reaches below its resource at all.
+            "inherit": req.inherit,
             "tenant_id": user.tenant_id,
             "actor_id": user.user_id,
         }),
     )
     .await?;
 
-    let scope = validate_tenant_scope(
+    let inherit = validate_inherit(
         state.get_ref(),
         user.tenant_id,
+        role_id,
         req.resource_id,
-        req.tenant_scope,
+        req.inherit,
     )
     .await?;
+    let scope = AssignmentScope {
+        inherit,
+        ..validate_tenant_scope(
+            state.get_ref(),
+            user.tenant_id,
+            req.resource_id,
+            req.tenant_scope,
+        )
+        .await?
+    };
     state
         .role_repo
         .assign_to_service_account(user.tenant_id, req.service_account_id, role_id, scope)
@@ -713,6 +845,7 @@ pub async fn list_service_accounts<C: Connection + Clone>(
             ),
             resource_id: a.resource_id,
             tenant_scope: a.tenant_scope.clone(),
+            inherit: a.inherit,
         });
     }
     Ok(HttpResponse::Ok().json(rows))
@@ -801,19 +934,32 @@ pub async fn assign_to_group<C: Connection + Clone>(
             // rule that cannot see whether a grant spans every tenant of the
             // organization or two of them is reviewing half of it.
             "tenant_scope": req.tenant_scope,
+            // And whether it reaches below its resource at all.
+            "inherit": req.inherit,
             "tenant_id": user.tenant_id,
             "actor_id": user.user_id,
         }),
     )
     .await?;
 
-    let scope = validate_tenant_scope(
+    let inherit = validate_inherit(
         state.get_ref(),
         user.tenant_id,
+        role_id,
         req.resource_id,
-        req.tenant_scope,
+        req.inherit,
     )
     .await?;
+    let scope = AssignmentScope {
+        inherit,
+        ..validate_tenant_scope(
+            state.get_ref(),
+            user.tenant_id,
+            req.resource_id,
+            req.tenant_scope,
+        )
+        .await?
+    };
     state
         .role_repo
         .assign_to_group(user.tenant_id, req.group_id, role_id, scope)
@@ -914,6 +1060,7 @@ pub async fn list_users<C: Connection + Clone>(
             ),
             resource_id: a.resource_id,
             tenant_scope: a.tenant_scope.clone(),
+            inherit: a.inherit,
         });
     }
     Ok(HttpResponse::Ok().json(rows))
@@ -958,6 +1105,7 @@ pub async fn list_groups<C: Connection + Clone>(
                 .await?,
             resource_id: a.resource_id,
             tenant_scope: a.tenant_scope.clone(),
+            inherit: a.inherit,
         });
     }
     Ok(HttpResponse::Ok().json(rows))

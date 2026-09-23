@@ -183,6 +183,7 @@ async fn user_with_role(
             AssignmentScope {
                 resource_id: None,
                 tenant_scope,
+                inherit: true,
             },
         )
         .await

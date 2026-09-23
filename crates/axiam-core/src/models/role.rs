@@ -92,13 +92,50 @@ pub fn tenant_scope_reaches(tenant_scope: &TenantScope, tenant_id: Uuid) -> bool
 /// `Option<Uuid>` and `Option<Vec<Uuid>>` sitting next to each other in a call
 /// are two arguments nobody can read at the call site, and the two mean
 /// genuinely different things.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AssignmentScope {
     /// `None` assigns the role globally — every resource in reach.
     pub resource_id: Option<Uuid>,
     /// `None` reaches wherever the role does. See [`TenantScope`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_scope: Option<Vec<Uuid>>,
+    /// Whether the assignment also applies to the descendants of
+    /// `resource_id` (`true`, the default) or at that resource only (`false`).
+    #[serde(default = "default_inherit")]
+    pub inherit: bool,
+}
+
+/// The value `inherit` takes when nothing says otherwise: `true`.
+///
+/// # What the flag means
+///
+/// A resource-scoped assignment applies at its resource and — with `inherit:
+/// true`, which is what every assignment meant before the field existed — at
+/// every descendant of it. With `inherit: false` it applies at its resource
+/// **only**: "here and no further". The node itself is always in scope.
+///
+/// The flag is a property of the assignment (the `has_role` edge), not of the
+/// role's grants, because inheritance is about *where* an assignment applies,
+/// which is what `resource_id` already answers. It therefore governs allows and
+/// denies alike: a role whose grants are denies, assigned non-inheritably,
+/// denies at that node and nowhere below it.
+///
+/// It says nothing about an assignment with no resource (tenant-wide) or of a
+/// global role (everywhere by definition); the REST API refuses `false` on
+/// both rather than store a flag the engine would ignore.
+#[must_use]
+pub const fn default_inherit() -> bool {
+    true
+}
+
+impl Default for AssignmentScope {
+    fn default() -> Self {
+        Self {
+            resource_id: None,
+            tenant_scope: None,
+            inherit: default_inherit(),
+        }
+    }
 }
 
 impl AssignmentScope {
@@ -115,6 +152,18 @@ impl AssignmentScope {
         Self {
             resource_id: Some(resource_id),
             tenant_scope: None,
+            inherit: default_inherit(),
+        }
+    }
+
+    /// Scoped to one resource and to that resource only — its descendants are
+    /// not reached. See [`default_inherit`].
+    #[must_use]
+    pub fn resource_only(resource_id: Uuid) -> Self {
+        Self {
+            resource_id: Some(resource_id),
+            tenant_scope: None,
+            inherit: false,
         }
     }
 }
@@ -126,6 +175,7 @@ impl From<Option<Uuid>> for AssignmentScope {
         Self {
             resource_id,
             tenant_scope: None,
+            inherit: default_inherit(),
         }
     }
 }
@@ -139,6 +189,12 @@ pub struct RoleAssignment {
     /// The tenants this assignment reaches. See [`TenantScope`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_scope: Option<Vec<Uuid>>,
+    /// Whether the assignment reaches the descendants of `resource_id` as
+    /// well as the resource itself (`true`, the default, and the value of every
+    /// assignment written before the field existed) or applies at that
+    /// resource only (`false`).
+    #[serde(default = "default_inherit")]
+    pub inherit: bool,
 }
 
 impl RoleAssignment {
@@ -168,6 +224,10 @@ pub struct RoleSubjectAssignment {
     /// The tenants this assignment reaches. See [`TenantScope`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_scope: Option<Vec<Uuid>>,
+    /// Whether the assignment reaches the descendants of `resource_id`
+    /// (`true`, the default) or applies at that resource only (`false`).
+    #[serde(default = "default_inherit")]
+    pub inherit: bool,
 }
 
 /// How far across an organization's tenants a principal's assignments reach.
@@ -257,7 +317,29 @@ mod tests {
             },
             resource_id: None,
             tenant_scope,
+            inherit: true,
         }
+    }
+
+    /// I1 for the flag: every `has_role` edge and every request written before
+    /// `inherit` existed carries no such field, and must mean what it always
+    /// meant — the assignment reaches the resource's descendants.
+    #[test]
+    fn an_absent_inherit_field_reads_as_inheritable() {
+        let scope: AssignmentScope =
+            serde_json::from_str(r#"{"resource_id":null}"#).expect("decodes");
+        assert!(scope.inherit);
+        assert!(AssignmentScope::global().inherit);
+        assert!(AssignmentScope::resource(Uuid::new_v4()).inherit);
+        assert!(AssignmentScope::from(Some(Uuid::new_v4())).inherit);
+        assert!(!AssignmentScope::resource_only(Uuid::new_v4()).inherit);
+
+        let subject: RoleSubjectAssignment = serde_json::from_str(&format!(
+            r#"{{"subject_id":"{}","resource_id":null}}"#,
+            Uuid::new_v4()
+        ))
+        .expect("decodes");
+        assert!(subject.inherit);
     }
 
     #[test]

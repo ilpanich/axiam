@@ -10,9 +10,9 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_authz::AuthorizationEngine;
 use axiam_core::models::organization::CreateOrganization;
-use axiam_core::models::permission::CreatePermission;
+use axiam_core::models::permission::{CreatePermission, PermissionEffect};
 use axiam_core::models::resource::CreateResource;
-use axiam_core::models::role::CreateRole;
+use axiam_core::models::role::{AssignmentScope, CreateRole};
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
@@ -739,4 +739,200 @@ async fn concurrent_check_access_all_resolve_correctly() {
             "task {i}: expected allowed={expected}, got allowed={actual}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// T22.11 — `inherit: false` over gRPC (deny-override-design.md §2.2 rows 9–11)
+//
+// The engine is shared, so these add no transport logic; they assert that
+// `CheckAccess` — and `BatchCheckAccess`, which takes the coalesced path —
+// return the rows' answers over the wire, reason codes included.
+// ---------------------------------------------------------------------------
+
+/// `/fleet` → `/fleet/decommissioned` → `/fleet/decommissioned/unit-7`, and the
+/// one `read` permission every role in these rows grants or denies.
+async fn fleet_tree(db: &Surreal<TestDb>, tenant_id: Uuid) -> ([Uuid; 3], Uuid) {
+    let repo = SurrealResourceRepository::new(db.clone());
+    let mut nodes = [Uuid::nil(); 3];
+    let mut parent_id = None;
+    for (i, name) in ["fleet", "decommissioned", "unit-7"]
+        .into_iter()
+        .enumerate()
+    {
+        let res = repo
+            .create(CreateResource {
+                tenant_id,
+                name: name.into(),
+                resource_type: "service".into(),
+                parent_id,
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        nodes[i] = res.id;
+        parent_id = Some(res.id);
+    }
+    let read = SurrealPermissionRepository::new(db.clone())
+        .create(CreatePermission {
+            tenant_id,
+            action: "read".into(),
+            description: "Can read".into(),
+        })
+        .await
+        .unwrap();
+    (nodes, read.id)
+}
+
+/// A role granting (or denying) `read`, assigned to the user where `scope`
+/// says.
+async fn assign_read(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    read_permission_id: Uuid,
+    role_name: &str,
+    effect: PermissionEffect,
+    scope: AssignmentScope,
+) {
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: role_name.into(),
+            description: format!("Role: {role_name}"),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    SurrealPermissionRepository::new(db.clone())
+        .grant_to_role_with_effect(tenant_id, role.id, read_permission_id, vec![], effect)
+        .await
+        .unwrap();
+    role_repo
+        .assign_to_user(tenant_id, user_id, role.id, scope)
+        .await
+        .unwrap();
+}
+
+/// `read` on each node, one `CheckAccess` per node and one `BatchCheckAccess`
+/// over all three; asserts the two agree and returns the reason codes.
+async fn reason_codes_over_grpc(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    nodes: &[Uuid; 3],
+) -> Vec<String> {
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
+    let (endpoint, _shutdown) = start_test_server(make_engine(db), auth_config).await;
+    let mut client = authed_client!(endpoint, token);
+
+    let requests: Vec<CheckAccessRequest> = nodes
+        .iter()
+        .map(|node| CheckAccessRequest {
+            tenant_id: tenant_id.to_string(),
+            subject_id: user_id.to_string(),
+            action: "read".into(),
+            resource_id: node.to_string(),
+            scope: None,
+        })
+        .collect();
+
+    let mut singly = Vec::new();
+    for req in &requests {
+        let resp = client.check_access(req.clone()).await.unwrap().into_inner();
+        assert_eq!(resp.allowed, resp.reason_code == "allowed");
+        singly.push(resp.reason_code);
+    }
+    let batched: Vec<String> = client
+        .batch_check_access(BatchCheckAccessRequest { requests })
+        .await
+        .unwrap()
+        .into_inner()
+        .results
+        .into_iter()
+        .map(|r| r.reason_code)
+        .collect();
+    assert_eq!(
+        batched, singly,
+        "CheckAccess and BatchCheckAccess must agree"
+    );
+    singly
+}
+
+/// Row 9 — an allow on `/fleet`, `inherit: false`, stops at `/fleet`.
+#[tokio::test]
+async fn check_access_row_9_a_non_inheritable_allow_stops_at_its_node() {
+    let (db, tenant_id, user_id) = setup().await;
+    let (nodes, read) = fleet_tree(&db, tenant_id).await;
+    assign_read(
+        &db,
+        tenant_id,
+        user_id,
+        read,
+        "fleet-reader",
+        PermissionEffect::Allow,
+        AssignmentScope::resource_only(nodes[0]),
+    )
+    .await;
+
+    assert_eq!(
+        reason_codes_over_grpc(&db, tenant_id, user_id, &nodes).await,
+        ["allowed", "no_grant", "no_grant"]
+    );
+}
+
+/// Row 10 — a non-inheritable deny on `/fleet` beside an inheritable allow on
+/// `/fleet`: denied at `/fleet`, allowed below it.
+#[tokio::test]
+async fn check_access_row_10_a_non_inheritable_deny_denies_at_its_node_only() {
+    let (db, tenant_id, user_id) = setup().await;
+    let (nodes, read) = fleet_tree(&db, tenant_id).await;
+    assign_read(
+        &db,
+        tenant_id,
+        user_id,
+        read,
+        "fleet-blocked-here",
+        PermissionEffect::Deny,
+        AssignmentScope::resource_only(nodes[0]),
+    )
+    .await;
+    assign_read(
+        &db,
+        tenant_id,
+        user_id,
+        read,
+        "fleet-reader",
+        PermissionEffect::Allow,
+        AssignmentScope::resource(nodes[0]),
+    )
+    .await;
+
+    assert_eq!(
+        reason_codes_over_grpc(&db, tenant_id, user_id, &nodes).await,
+        ["denied_by_rule", "allowed", "allowed"]
+    );
+}
+
+/// Row 11 — `inherit: false` on `unit-7` itself: the node is always in scope.
+#[tokio::test]
+async fn check_access_row_11_the_node_itself_is_always_in_scope() {
+    let (db, tenant_id, user_id) = setup().await;
+    let (nodes, read) = fleet_tree(&db, tenant_id).await;
+    assign_read(
+        &db,
+        tenant_id,
+        user_id,
+        read,
+        "unit7-reader",
+        PermissionEffect::Allow,
+        AssignmentScope::resource_only(nodes[2]),
+    )
+    .await;
+
+    assert_eq!(
+        reason_codes_over_grpc(&db, tenant_id, user_id, &nodes).await,
+        ["no_grant", "no_grant", "allowed"]
+    );
 }

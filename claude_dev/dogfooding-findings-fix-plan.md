@@ -1304,6 +1304,104 @@ reach before — RBAC is default-deny, and the sweep test proves it.
 
 ### S-10 — a role assignment can be non-inheritable (DF-021) — Opus 5
 
+> **EXECUTED — 2026-09-22, PR D, one commit.**
+>
+> **Shipped.** `inherit: bool` on `AssignmentScope`, `RoleAssignment` and
+> `RoleSubjectAssignment`, default `true`; schema **v66**
+> (`DEFINE FIELD IF NOT EXISTS inherit ON TABLE has_role TYPE option<bool>`,
+> tripwire `Some(&66)`, plus a v66 test that it is additive DDL only). The engine
+> clause is exactly the plan's, at `engine.rs:145`. The three
+> `AssignRoleTo*Request` DTOs take `inherit: Option<bool>`; the three role-side
+> listing DTOs carry `inherit: bool`, and the subject-side listings return
+> `RoleAssignment`, which carries it. OpenAPI and the management registry
+> regenerated.
+>
+> **Tests.** `engine.rs`: rows 9–11 through `applicable_role_ids` +
+> `evaluate_grants`, and three property tests over every rule set of a
+> three-node chain (12 candidate assignments, 4 096 subsets, three targets).
+> `authz_engine_test.rs`: rows 9–11 decided through **both** `check_access`
+> (`evaluate`) and `check_access_batch` under `Coalesced` (`evaluate_batch`),
+> asserted equal item for item, plus the I1 twin, row 4 beside a
+> non-inheritable allow, a group-inherited non-inheritable assignment, and the
+> unassign-and-assign change. `grpc_authz_test.rs`: one test per row, each
+> through `CheckAccess` and `BatchCheckAccess`. `role_assignment_scope_test.rs`:
+> both 400s on all three routes, the I4 twin
+> `an_assignment_without_the_field_inherits`, the flag accepted and listed on
+> every path, and a recording `AuthzChecker` proving both halves of a change
+> invalidate.
+>
+> **The clause was broken on purpose, twice, before the tests were trusted.**
+> Dropping `a.inherit &&`: 3 unit tests red (rows 9 and 10, the row-10 witness),
+> 4 end-to-end red (rows 9 and 10, the group row, the change row), 2 gRPC red
+> (rows 9 and 10). Dropping the whole ancestor term: the same 3 unit tests and 12
+> end-to-end tests red, including the pre-existing rows 3 and 4. Row 11 stays
+> green under both, correctly — it is about the node itself.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **`AssignmentScope` derived `Default`, and a derived default for a
+>    `bool` is `false`.** Following the plan literally — add the field, keep the
+>    derive — makes `AssignmentScope::default()` and `global()` produce
+>    **non-inheritable** scopes, and any `AssignmentScope { resource_id, ..
+>    Default::default() }` a silent "here and no further". `Default` is now a
+>    manual impl through `default_inherit()`, the same function serde uses, and
+>    an axiam-core test pins that every constructor and an absent field read
+>    `true`.
+> 2. **The existing property test cannot take the flag as a dimension.**
+>    `adding_a_deny_can_never_widen_access` runs over `evaluate_grants`, which
+>    receives role ids already filtered and never sees an assignment. The flag
+>    lives one layer up, so the new property tests compose
+>    `applicable_role_ids` with `evaluate_grants`. The plan's clause is made
+>    executable in both directions: `false` on an allow never widens; `false` on
+>    a deny **can**, asserted existentially with row 10 as the witness, and its
+>    converse — making a deny inheritable — never widens. Table, tests, design
+>    document, admin guide and website say the same thing.
+> 3. **Group-inherited assignments reach the engine through a second SELECT.**
+>    `get_user_role_assignments` reads direct and group edges in two statements;
+>    the field had to be projected in both, and in the group and role-side
+>    listings — four readers, not "the readers". A group end-to-end test pins it:
+>    without the projection a non-inheritable group allow would cascade for every
+>    member.
+> 4. **The write stores `NONE` for `true`.** Only a departure from the default
+>    is written, so a post-v66 inheritable edge is byte-identical to a pre-v66
+>    one; the read maps absent to `true`.
+> 5. **The global-role 400 needs a role read the plan did not mention.** It is
+>    done only when `inherit: false` arrives with a resource; a missing role
+>    falls through to the assignment's own error, as for an inheritable request,
+>    and any other lookup error is returned rather than swallowed.
+> 6. **`is_global` can be set after the assignment.** The write-time refusal
+>    cannot stop `PUT /roles/{id}` making a role global later, which widens a
+>    non-inheritable assignment of it to everywhere. That is what making a role
+>    global does to every assignment of it, so it is documented as a residual in
+>    the admin guide and T-285 rather than refused.
+> 7. **Toggling is unassign-then-assign, verified rather than assumed.**
+>    `has_role` is `UNIQUE(in, out)`: a second assign with the other value is a
+>    409 and changes nothing (engine and REST tests). Both calls invalidate — the
+>    plan's line numbers had moved, the claim had not — and a REST test with a
+>    recording checker now pins it. The `grant.pre_assign` reactor payload
+>    carries `inherit`, so a four-eyes rule sees what it approves.
+> 8. **`deny-override-design.md` §6 had no "here and no further" item to move.**
+>    It lists *deny exceptions* ("the subtree except this leaf"), which the flag
+>    does not deliver and which stays out of scope; §6 now says so and
+>    distinguishes the two. §3's sentence claiming `effect` on an assignment is
+>    replaced with a note on why it was never needed, not deleted silently.
+> 9. **There is no `docs/` authorization page.** Role assignment is documented
+>    in `docs/admin/README.md`; the new subsection is there, linked from the
+>    cascade paragraph and from the website.
+> 10. **Records: two amendments and one new entry.** The entries that describe
+>     the cascade as unstoppable are **T-16** and **T-87** ("cannot be revoked
+>     on one child alone"); both gain the flag. T-227 is about *scope*
+>     inheritance, which the flag does not change, and is left alone. The flag
+>     brings its own hazards — read on one path and not another, stored where
+>     ignored, a deny's reach narrowed silently — so it gets **T-285** on the
+>     RBAC engine, High, Mitigated on arrival; `threatTop` 284 → 285.
+>     `gen-threat-model.mjs` parses it (276 threats in the JSON, still nine
+>     short of the documents — PR A's flagged reconciliation, not this one).
+> 11. **The admin console does not offer the flag.** Its assignment types are
+>     hand-written (`frontend/src/services/roles.ts`), not generated, so nothing
+>     breaks and the new response field is ignored; the dialogs gain no control.
+>     Recorded in the admin guide and the CHANGELOG as API-only for now.
+
 **The proposal, kept, with two refinements.** The user's DF-021 asks for a
 `non_inheritable` flag on a grant plus a write-time rejection of a
 non-inheritable grant with no resource. Both are right. The refinements:

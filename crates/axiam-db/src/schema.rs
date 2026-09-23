@@ -367,6 +367,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "client_id_metadata_documents",
         sql: SCHEMA_V65,
     },
+    Migration {
+        version: 66,
+        name: "role_assignment_inherit",
+        sql: SCHEMA_V66,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3559,9 +3564,45 @@ DEFINE FIELD IF NOT EXISTS oidc_cimd_json ON TABLE security_settings
     TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v66 — a role assignment can stop at its resource (T22.11, DF-021)
+// -----------------------------------------------------------------------
+//
+// A resource-scoped assignment has always applied to its resource and every
+// descendant of it. `inherit = false` makes it apply at its resource only —
+// "here and no further" — for allows and denies alike. See
+// `claude_dev/deny-override-design.md` §2.2 rows 9–11.
+//
+// `option<bool>` rather than `bool DEFAULT true`: NONE is read as `true` by the
+// repository, so every `has_role` edge that already exists keeps the meaning it
+// was written with and no row is rewritten — the same shape v51 used for
+// `tenant_scope` on the same edge. No index: the field is read only as part of
+// an assignment already being fetched by subject, never searched across.
+const SCHEMA_V66: &str = "\
+DEFINE FIELD IF NOT EXISTS inherit ON TABLE has_role TYPE option<bool>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T22.11 — v66 adds one optional column to `has_role` and nothing else.
+    /// Optional is the whole compatibility argument: an absent flag reads as
+    /// `true`, so a backfill would be a rewrite of every assignment in every
+    /// tenant to the value it already means.
+    #[test]
+    fn v66_adds_the_inherit_column_and_backfills_nothing() {
+        assert!(
+            SCHEMA_V66.contains("inherit ON TABLE has_role TYPE option<bool>"),
+            "v66 must define the optional inherit column on has_role"
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V66.contains(forbidden),
+                "v66 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
 
     /// T21.4 — v64 adds two columns to an existing table and one new table,
     /// and the things that would make it a behaviour change rather than an
@@ -3989,9 +4030,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&65),
-            "v65 is the newest migration (T21.5 — the per-tenant client-metadata-document \
-             posture, one additive column on `security_settings`). This assertion is a \
+            Some(&66),
+            "v66 is the newest migration (T22.11 — the optional `inherit` flag on \
+             `has_role`, one additive column). This assertion is a \
              tripwire, not bookkeeping: bumping it is how a new migration is declared \
              deliberate rather than merged in by accident. It caught this phase doing \
              exactly what it is for: T21.4 (v64) and T21.5 (v65) were written on branches \

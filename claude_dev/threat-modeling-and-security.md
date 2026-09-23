@@ -22,8 +22,17 @@
 > the entry point for that pass; the beta14 plan was executed on 2026-09-13 and
 > records what it landed.**
 >
-> **The 2026-09-22 dogfooding-remediation wave (model 2.17.0).** Four threats
-> enter so far, all Mitigated on arrival. **T-284**: only the *hash* of the
+> **The 2026-09-22 dogfooding-remediation wave (model 2.17.0).** Five threats
+> enter so far, all Mitigated on arrival. **T-285**: a role assignment can now
+> stop at its resource — `inherit: false`, "here and no further" (DF-021) — and
+> a flag like that is only safe if every path reads it, if it is refused where
+> the engine would ignore it, and if changing it is a reviewed act: `false` on a
+> deny re-opens every descendant the deny covered. It is read in the one
+> function both engine paths share and in both the direct and group-inherited
+> SELECTs, refused with 400 on a tenant-wide assignment and on a global role,
+> and changeable only by unassign-and-assign, both of which flush the cache;
+> T-16 and T-87, which recorded that a parent grant could not be stopped short
+> of a child, gain the flag as a clause. **T-284**: only the *hash* of the
 > one-time bootstrap setup token is stored and the first-boot mint is a no-op
 > once a row exists, so an operator who lost it had one documented recovery —
 > wipe the volume. `axiam-server setup-token --remint` closes that cliff, and
@@ -63,7 +72,7 @@
 > [`threat-model-stride.md`](threat-model-stride.md) already carried T-272 …
 > T-280 — the nine Phase 21 entries of 2026-09-17, four of them since closed.
 > That wave reached one of the three artifacts and not the other two. The model
-> is therefore **284 threats, 271 mitigated / 13 open**, and the counts here are
+> is therefore **285 threats, 272 mitigated / 13 open**, and the counts here are
 > corrected to it. The nine entries still have to be written into the Threat
 > Dragon file itself, from the text `threat-model-stride.md` already holds; that
 > is a maintainer task and is not part of this wave, which is why `threatTop` in
@@ -550,7 +559,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 284 threats** and a
+The system is verified against a **STRIDE threat model of 285 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -573,8 +582,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 284 |
-| Mitigated / Open | 271 / 13 |
+| Threats identified | 285 |
+| Mitigated / Open | 272 / 13 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -591,7 +600,7 @@ optimistic closed one.
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 49 | 0 |
 | Federation (SAML SP & OIDC RP) | 31 | 1 |
-| Authorization engine (RBAC, hierarchy, scopes) | 26 | 0 |
+| Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 26 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
 | Deployment & platform (Kubernetes) | 27 | 5 |
@@ -871,7 +880,9 @@ redundantly rather than at one chokepoint:
   time rather than trusting the write-time guard.
 - **The authorization engine is RBAC, default-deny, with explicit deny-override.**
   A route with no declared permission is refused, not allowed. Roles cascade down a
-  resource hierarchy with bounded, cycle-safe traversal, and a grant carries
+  resource hierarchy with bounded, cycle-safe traversal — unless the assignment
+  was made with `inherit: false`, which stops it at the resource it names, for
+  allows and denies alike — and a grant carries
   `effect: "allow" | "deny"` — an explicit deny overrides every allow, at any depth
   of the hierarchy and at equal specificity, so adding a deny rule can never widen
   access and can never be undone by adding allows (asserted by an exhaustive
@@ -1442,7 +1453,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 13 of
-284. On the website this table is generated from the Threat Dragon model, so it
+285. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind

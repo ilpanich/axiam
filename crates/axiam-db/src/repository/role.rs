@@ -4,6 +4,7 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::role::{
     AssignmentScope, CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole,
+    default_inherit,
 };
 use axiam_core::repository::{PaginatedResult, Pagination, RoleRepository};
 use chrono::{DateTime, Utc};
@@ -64,6 +65,9 @@ struct RoleAssignmentRow {
     /// The tenants this assignment reaches (schema v51). `None` on every edge
     /// written before the field existed, which is what unrestricted means.
     tenant_scope: Option<Vec<String>>,
+    /// Whether the assignment reaches the resource's descendants (schema v66).
+    /// `None` on every edge written before the field existed, read as `true`.
+    inherit: Option<bool>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -106,6 +110,7 @@ impl RoleAssignmentRow {
             },
             resource_id,
             tenant_scope,
+            inherit: self.inherit.unwrap_or_else(default_inherit),
         })
     }
 }
@@ -117,6 +122,7 @@ struct RoleSubjectAssignmentRow {
     subject_id: String,
     resource_id: Option<String>,
     tenant_scope: Option<Vec<String>>,
+    inherit: Option<bool>,
 }
 
 impl RoleSubjectAssignmentRow {
@@ -131,6 +137,7 @@ impl RoleSubjectAssignmentRow {
             subject_id,
             resource_id,
             tenant_scope: parse_tenant_scope(self.tenant_scope)?,
+            inherit: self.inherit.unwrap_or_else(default_inherit),
         })
     }
 }
@@ -286,7 +293,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
                  THROW 'cross-tenant edge denied';\
              }};\
              RELATE {subject_table}:`{subject_id_str}` -> has_role -> role:`{role_id_str}` \
-             SET resource_id = $resource_id, tenant_scope = $tenant_scope;"
+             SET resource_id = $resource_id, tenant_scope = $tenant_scope, inherit = $inherit;"
         );
 
         let result = self
@@ -296,6 +303,11 @@ impl<C: Connection> SurrealRoleRepository<C> {
             .bind(("tid", tenant_id.to_string()))
             .bind(("resource_id", resource_id_str))
             .bind(("tenant_scope", tenant_scope_strs))
+            // Written only when it departs from the default, so an ordinary
+            // assignment lands exactly as it did before v66 — NONE, read back
+            // as `true` — and a pre-v66 edge and a post-v66 one are
+            // indistinguishable unless the caller asked for the difference.
+            .bind(("inherit", (!scope.inherit).then_some(false)))
             .await
             .map_err(DbError::from)?;
 
@@ -395,7 +407,7 @@ impl<C: Connection> SurrealRoleRepository<C> {
                      WHERE out = type::record('role', $role_id)\
                  )\
              ); \
-             SELECT meta::id(in.id) AS subject_id, resource_id, tenant_scope \
+             SELECT meta::id(in.id) AS subject_id, resource_id, tenant_scope, inherit \
              FROM has_role \
              WHERE out = type::record('role', $role_id) \
              AND in IN $subjects;"
@@ -761,7 +773,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                         out.created_at AS created_at, \
                         out.updated_at AS updated_at, \
                         resource_id, \
-                        tenant_scope \
+                        tenant_scope, \
+                        inherit \
                  FROM has_role \
                  WHERE in IN $subject_records \
                  AND out.tenant_id = $tenant_id; \
@@ -778,7 +791,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                         out.created_at AS created_at, \
                         out.updated_at AS updated_at, \
                         resource_id, \
-                        tenant_scope \
+                        tenant_scope, \
+                        inherit \
                  FROM has_role \
                  WHERE in IN $group_records \
                  AND out.tenant_id = $tenant_id;",
@@ -976,7 +990,8 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                         out.created_at AS created_at, \
                         out.updated_at AS updated_at, \
                         resource_id, \
-                        tenant_scope \
+                        tenant_scope, \
+                        inherit \
                  FROM has_role \
                  WHERE in = type::record('group', $group_id) \
                  AND out.tenant_id = $tenant_id;",

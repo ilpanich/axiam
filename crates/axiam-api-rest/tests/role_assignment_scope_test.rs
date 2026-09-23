@@ -784,3 +784,364 @@ async fn role_listings_are_empty_for_a_role_nobody_holds() {
         assert!(body.as_array().unwrap().is_empty(), "{uri}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// T22.11 — `inherit` on a role assignment (DF-021)
+//
+// `inherit: false` stops a resource-scoped assignment at its resource. Two
+// requests would store a flag the engine then ignores, and all three assign
+// paths refuse both with 400. Every negative has its I4 twin: a request that
+// omits the field, or sends `true`, is today's request.
+// ---------------------------------------------------------------------------
+
+/// A resource, a non-global role and a global role, plus one subject of each
+/// kind: user, group and service account.
+struct InheritFixture {
+    fx: Fixture,
+    tenant_id: Uuid,
+    resource_id: String,
+    role_id: String,
+    global_role_id: String,
+    member: Uuid,
+    group_id: String,
+    service_account_id: String,
+}
+
+async fn inherit_fixture(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    db: &Surreal<TestDb>,
+    auth: &AuthConfig,
+    org_id: Uuid,
+    tenant_id: Uuid,
+) -> InheritFixture {
+    let admin = create_user(db, tenant_id).await;
+    let member = create_user(db, tenant_id).await;
+    let fx = Fixture {
+        token: mint_token(auth, admin, tenant_id, org_id),
+    };
+    let id = |v: &Value| v["id"].as_str().unwrap().to_owned();
+    let resource_id = id(&post_json(
+        app,
+        &fx,
+        "/api/v1/resources",
+        json!({ "name": "fleet", "resource_type": "fleet" }),
+        201,
+    )
+    .await);
+    let role_id = id(&post_json(
+        app,
+        &fx,
+        "/api/v1/roles",
+        json!({ "name": "fleet-reader", "description": "d", "is_global": false }),
+        201,
+    )
+    .await);
+    let global_role_id = id(&post_json(
+        app,
+        &fx,
+        "/api/v1/roles",
+        json!({ "name": "auditor", "description": "d", "is_global": true }),
+        201,
+    )
+    .await);
+    let group_id = id(&post_json(
+        app,
+        &fx,
+        "/api/v1/groups",
+        json!({ "name": "Fleet ops", "description": "d" }),
+        201,
+    )
+    .await);
+    let service_account_id = id(&post_json(
+        app,
+        &fx,
+        "/api/v1/service-accounts",
+        json!({ "name": "fleet-bot" }),
+        201,
+    )
+    .await);
+    InheritFixture {
+        fx,
+        tenant_id,
+        resource_id,
+        role_id,
+        global_role_id,
+        member,
+        group_id,
+        service_account_id,
+    }
+}
+
+impl InheritFixture {
+    /// The three assign routes for `role_id`, each with the body naming its
+    /// subject, merged with `extra`.
+    fn assign_paths(&self, role_id: &str, extra: &Value) -> Vec<(String, Value)> {
+        let with = |mut body: Value| {
+            for (k, v) in extra.as_object().unwrap() {
+                body[k] = v.clone();
+            }
+            body
+        };
+        vec![
+            (
+                format!("/api/v1/roles/{role_id}/users"),
+                with(json!({ "user_id": self.member })),
+            ),
+            (
+                format!("/api/v1/roles/{role_id}/groups"),
+                with(json!({ "group_id": self.group_id })),
+            ),
+            (
+                format!("/api/v1/roles/{role_id}/service-accounts"),
+                with(json!({ "service_account_id": self.service_account_id })),
+            ),
+        ]
+    }
+}
+
+/// `inherit: false` with no `resource_id` is a tenant-wide assignment told to
+/// stop at a node it does not have. Refused on every path, and nothing is
+/// written.
+#[actix_rt::test]
+async fn inherit_false_without_a_resource_is_refused_on_every_assign_path() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let f = inherit_fixture(&app, &db, &auth, org_id, tenant_id).await;
+
+    for (uri, body) in f.assign_paths(&f.role_id, &json!({ "inherit": false })) {
+        let err = post_json(&app, &f.fx, &uri, body, 400).await;
+        assert!(
+            err.to_string().contains("inherit"),
+            "the refusal must name the field: {uri}"
+        );
+    }
+    for listing in ["users", "groups", "service-accounts"] {
+        let rows = get_json(
+            &app,
+            &f.fx,
+            &format!("/api/v1/roles/{}/{listing}", f.role_id),
+        )
+        .await;
+        assert!(
+            rows.as_array().unwrap().is_empty(),
+            "a refused assignment must not be written ({listing})"
+        );
+    }
+}
+
+/// `inherit: false` on a global role would be stored and then ignored — a
+/// global role applies everywhere. Refused on every path, even with a
+/// resource named.
+#[actix_rt::test]
+async fn inherit_false_on_a_global_role_is_refused_on_every_assign_path() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let f = inherit_fixture(&app, &db, &auth, org_id, tenant_id).await;
+
+    let extra = json!({ "resource_id": f.resource_id, "inherit": false });
+    for (uri, body) in f.assign_paths(&f.global_role_id, &extra) {
+        let err = post_json(&app, &f.fx, &uri, body, 400).await;
+        assert!(
+            err.to_string().contains("global"),
+            "the refusal must say why: {uri}"
+        );
+    }
+}
+
+/// The I4 twin of both refusals: without the field — and with an explicit
+/// `true` — every assignment the two tests above refuse is accepted exactly as
+/// before, and reads back as inheritable.
+#[actix_rt::test]
+async fn an_assignment_without_the_field_inherits() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let f = inherit_fixture(&app, &db, &auth, org_id, tenant_id).await;
+
+    // Tenant-wide, field omitted.
+    for (uri, body) in f.assign_paths(&f.role_id, &json!({})) {
+        post_json(&app, &f.fx, &uri, body, 204).await;
+    }
+    // A global role at a resource, `inherit: true` spelled out.
+    let extra = json!({ "resource_id": f.resource_id, "inherit": true });
+    for (uri, body) in f.assign_paths(&f.global_role_id, &extra) {
+        post_json(&app, &f.fx, &uri, body, 204).await;
+    }
+
+    for role_id in [&f.role_id, &f.global_role_id] {
+        for listing in ["users", "groups", "service-accounts"] {
+            let rows = get_json(&app, &f.fx, &format!("/api/v1/roles/{role_id}/{listing}")).await;
+            let rows = rows.as_array().unwrap();
+            assert_eq!(rows.len(), 1, "{listing}");
+            assert_eq!(rows[0]["inherit"], json!(true), "{listing}");
+        }
+    }
+    let rows = get_json(&app, &f.fx, &format!("/api/v1/users/{}/roles", f.member)).await;
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["inherit"] == json!(true)),
+        "every assignment written without the flag reads back as inheritable"
+    );
+}
+
+/// `inherit: false` at a resource, on an ordinary role, is accepted on every
+/// path and read back by every listing that shows an assignment.
+#[actix_rt::test]
+async fn a_non_inheritable_assignment_is_accepted_and_listed_on_every_path() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let f = inherit_fixture(&app, &db, &auth, org_id, tenant_id).await;
+
+    let extra = json!({ "resource_id": f.resource_id, "inherit": false });
+    for (uri, body) in f.assign_paths(&f.role_id, &extra) {
+        post_json(&app, &f.fx, &uri, body, 204).await;
+    }
+
+    for listing in ["users", "groups", "service-accounts"] {
+        let rows = get_json(
+            &app,
+            &f.fx,
+            &format!("/api/v1/roles/{}/{listing}", f.role_id),
+        )
+        .await;
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{listing}");
+        assert_eq!(rows[0]["resource_id"], json!(f.resource_id), "{listing}");
+        assert_eq!(rows[0]["inherit"], json!(false), "{listing}");
+    }
+    // Labelled by a static name, not the URI: the URI carries the service
+    // account's id, which CodeQL reads as sensitive once it reaches a message.
+    for (label, uri) in [
+        ("users", format!("/api/v1/users/{}/roles", f.member)),
+        ("groups", format!("/api/v1/groups/{}/roles", f.group_id)),
+        (
+            "service-accounts",
+            format!("/api/v1/service-accounts/{}/roles", f.service_account_id),
+        ),
+    ] {
+        let rows = get_json(&app, &f.fx, &uri).await;
+        let rows = rows.as_array().unwrap();
+        assert!(!rows.is_empty(), "{label}");
+        assert!(
+            rows.iter().all(|r| r["inherit"] == json!(false)),
+            "{label} must show the flag"
+        );
+    }
+}
+
+/// An `AuthzChecker` that allows everything and records every invalidation, so
+/// a test can see what the handlers flush.
+#[derive(Default)]
+struct RecordingAuthzChecker {
+    subjects: std::sync::Mutex<Vec<(Uuid, Uuid)>>,
+    tenants: std::sync::Mutex<Vec<Uuid>>,
+}
+
+impl AuthzChecker for RecordingAuthzChecker {
+    fn check_access<'a>(
+        &'a self,
+        _request: &'a axiam_authz::AccessRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = axiam_core::error::AxiamResult<axiam_authz::AccessDecision>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(axiam_authz::AccessDecision::Allow) })
+    }
+
+    fn invalidate_tenant<'a>(
+        &'a self,
+        tenant_id: Uuid,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = axiam_core::error::AxiamResult<()>> + Send + 'a>,
+    > {
+        self.tenants.lock().unwrap().push(tenant_id);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn invalidate_subject<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        subject_id: Uuid,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = axiam_core::error::AxiamResult<()>> + Send + 'a>,
+    > {
+        self.subjects.lock().unwrap().push((tenant_id, subject_id));
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Changing the flag is unassign-then-assign: `has_role` is `UNIQUE(in, out)`,
+/// so re-assigning with the other value is a 409, not an update. Both halves of
+/// the change flush the subject's cached decisions. The flag moves access in
+/// both directions — `false` on an allow narrows it, `false` on a deny widens it
+/// (§2.2 row 10) — and a cached allow that outlived a narrowing change would be
+/// a stale grant.
+#[actix_rt::test]
+async fn changing_the_flag_is_unassign_then_assign_and_both_invalidate() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let recorder = Arc::new(RecordingAuthzChecker::default());
+    let app = test_app!(db, auth, recorder.clone());
+    let f = inherit_fixture(&app, &db, &auth, org_id, tenant_id).await;
+    let (role_id, member) = (&f.role_id, f.member);
+    let users = format!("/api/v1/roles/{role_id}/users");
+
+    post_json(
+        &app,
+        &f.fx,
+        &users,
+        json!({ "user_id": member, "resource_id": f.resource_id }),
+        204,
+    )
+    .await;
+    post_json(
+        &app,
+        &f.fx,
+        &users,
+        json!({ "user_id": member, "resource_id": f.resource_id, "inherit": false }),
+        409,
+    )
+    .await;
+    let rows = get_json(&app, &f.fx, &users).await;
+    assert_eq!(rows[0]["inherit"], json!(true), "a 409 must change nothing");
+
+    recorder.subjects.lock().unwrap().clear();
+    let (h, v) = f.fx.bearer();
+    let req = with_csrf(test::TestRequest::delete())
+        .uri(&format!(
+            "/api/v1/roles/{role_id}/users/{member}?resource_id={}",
+            f.resource_id
+        ))
+        .insert_header((h, v))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+    post_json(
+        &app,
+        &f.fx,
+        &users,
+        json!({ "user_id": member, "resource_id": f.resource_id, "inherit": false }),
+        204,
+    )
+    .await;
+
+    let rows = get_json(&app, &f.fx, &users).await;
+    assert_eq!(rows[0]["inherit"], json!(false));
+    assert_eq!(
+        *recorder.subjects.lock().unwrap(),
+        [(f.tenant_id, member), (f.tenant_id, member)],
+        "the unassign and the assign must each flush the subject's decisions"
+    );
+}

@@ -581,6 +581,7 @@ async fn grant_scoped_to_tenants(
             AssignmentScope {
                 resource_id: None,
                 tenant_scope: Some(tenant_scope),
+                inherit: true,
             },
         )
         .await

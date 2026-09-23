@@ -9,7 +9,7 @@ Delete both once the PR is open and green.
 
 - [x] 0. Resume check-ins armed, ledger written
 - [x] 1. SAGE boot — MCP not connected, noted below
-- [ ] 2. Citations re-validated against `1cb1371`; S-3/S-4/S-7/S-9/S-10 read in code; drift noted
+- [x] 2. Citations re-validated against `1cb1371`; S-3/S-4/S-7/S-9/S-10 read in code; drift noted
 - [ ] 3. Contract amendments 1–8 of §6 C-0 (incl. §27.5 decision, §27.10 tier gap)
 - [ ] 4. Version bump to 1.50 + every gate that moves with it; drift check red only for SDK re-vendor
 - [ ] 5. Records: CHANGELOG, roadmap T22.15, EXECUTED block in §6 C-0, §13 item 1, threat model verified
@@ -29,3 +29,39 @@ Delete both once the PR is open and green.
   written as if 1.50 were free. C-0 therefore cannot reuse 1.50; next free is
   **1.51** (and C-12 would become 1.52). Asked the user; steps 2–3 proceed
   number-agnostic meanwhile.
+
+### Step 2 findings (code at `1cb1371`; agents' reports spot-checked)
+
+- §10.3 names only the RPCs (`TokenService.ValidateToken` / `IntrospectToken`),
+  not SDK operations; plan item 1's "the operation names §10.3 already uses" is
+  loose. gRPC server reads **no** acting-tenant metadata (only `authorization`,
+  `x-forwarded-for`); tenant always from the token → §5.2 helper is REST-only.
+- `/auth/device`: no body; 200 `{access_token, token_type:"Bearer", expires_in}`;
+  401 for every refusal incl. unbound, unknown, `Server`-type; 429 (60/min/IP)
+  undocumented in OpenAPI; `cnf.x5t#S256` only on native mTLS, never on the
+  trusted-proxy header path; REST mismatch 401, gRPC `Unauthenticated`.
+  `token_type` stays `"Bearer"` for a cert-bound token (gRPC ValidateToken too).
+- §6.1 says the device cert is "signed by the tenant's organization CA": since
+  S-1 a tenant principal (and every service account, S-9) issues only under its
+  tenant signing CA.
+- S-7: `CertificateType` gains `"Server"` (PascalCase, closed enum in the spec)
+  and appears in **responses** → closed-enum SDK decoders break on a list with
+  one. SAN field nullable/optional on both request DTOs; responses carry no SANs.
+  Vault sign-csr refusal is 400 and fires after the CA lookup (404 first).
+- S-9: 68 operations list `service_account` (66 management + 2 authz). Human-only
+  route with m2m token → 401 audience mismatch; m2m no role → 403
+  `authorization_denied` + `action`; exchanged user token as m2m → 401.
+- S-10: `inherit` nullable on 3 request DTOs; required `bool` on the 3
+  `Role*Assignment` listings; optional (default true) on `RoleAssignment`.
+- Registry: 162 ops (contract says 147 throughout; §27.1 table stale in users,
+  groups, roles, service_accounts, oauth2_clients, privacy), 5
+  `excluded_operations` (§27.0 table lists 2). `/admin/bootstrap`: 201/400/403/409
+  (+500); public, no 401, **no rate limiter** (server matter, not this PR).
+- SDKs: no SDK has resource `metadata` except PHP; no SDK's manifest binds a role
+  at a resource; none has `service_accounts`/`webhooks`. Flat tier (PHP, Swift, C,
+  C++) holds only resources/permissions/roles/groups; **none of the four sends the
+  resource parent** (tree comes out flat), Swift/C/C++ default type to "folder",
+  and **PHP holds role grants and group role keys but never reconciles them**
+  (docblock says it does). Only C++ has `authenticate_device()`; no SDK sends
+  `X-Axiam-Tenant`; no SDK wraps TokenService (Go's stubs are `internal/`,
+  Python/PHP generate none).

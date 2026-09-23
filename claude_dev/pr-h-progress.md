@@ -86,3 +86,8 @@ Delete both once the PR is open and green.
   T-210 amended (no new threat; gen-threat-model 279/266/13 unchanged, reverted).
 - All 21 script gates of ci.yml/docs-ci.yml exit 0 (remediation-evidence needs an
   unshallowed clone: `git fetch --unshallow origin`); website lint/tsc/build 0.
+
+### Step 7 (in progress)
+
+- PR **#497** opened and subscribed. Waiting for CI. Before merge: delete this
+  ledger in a final commit, then delete both resume triggers and arm a PR check-in.

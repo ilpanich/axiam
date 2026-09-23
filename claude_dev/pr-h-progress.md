@@ -21,3 +21,11 @@ Delete both once the PR is open and green.
 
 - Step 1: no SAGE MCP server is connected in this session (none of its tools
   exist); continued without it.
+- **Version-number collision (found at step 2, blocks step 4).** Contract
+  **1.50 already exists on main**: `d5a6811` (2026-09-18, "mark the DCR initial
+  access token Sensitive — contract 1.50") is the top Breaking Changes Log entry,
+  and all eleven SDK repositories' `main` vendor that exact `CONTRACT.md`
+  (sha256 `d877a1a05e9a…`, identical to `1cb1371`'s). The plan (§3, §6 C-0) was
+  written as if 1.50 were free. C-0 therefore cannot reuse 1.50; next free is
+  **1.51** (and C-12 would become 1.52). Asked the user; steps 2–3 proceed
+  number-agnostic meanwhile.

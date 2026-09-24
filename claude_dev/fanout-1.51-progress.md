@@ -21,7 +21,7 @@ once every port PR is merged or closed.
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | reviewed `678d310` (header on every call fixed on send-back; re-run 1238/0, 95.03 %) | [#102](https://github.com/ilpanich/axiam-java-sdk/pull/102) | green `678d310` (JaCoCo and Sigstore gates in CI) | `fa6803a` |
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | reviewed `2aef3f3` (SSO reset fixed on send-back; re-run 1241+72 on net8/net10) | [#95](https://github.com/ilpanich/axiam-csharp-sdk/pull/95) | green `2aef3f3` | `d1dc37a` |
 | 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | reviewed `2fc30ba` (README gate paragraph fixed by orchestrator; re-run 1057/0, 98.07 %) | [#68](https://github.com/ilpanich/axiam-kotlin-sdk/pull/68) | green `2fc30ba` (both legs, Kover, Sigstore) | `fbf98c5` |
-| 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | reviewed `16f5467` (scoped bindings + service accounts added on send-back; re-run 1649/5072) | [#73](https://github.com/ilpanich/axiam-php-sdk/pull/73) | green `16f5467` (PHP 8.2 and 8.5, coverage) | |
+| 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | reviewed `16f5467` (scoped bindings + service accounts added on send-back; re-run 1649/5072) | [#73](https://github.com/ilpanich/axiam-php-sdk/pull/73) | green `16f5467` (PHP 8.2 and 8.5, coverage) | `ceb7f2c` |
 | 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | running (in `mirror.gcr.io/library/swift:{6.3,5.9}-jammy`; SwiftPM resolves via the proxy) | | | |
 | 3 | C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | running | | | |
 | 3 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | running | | | |

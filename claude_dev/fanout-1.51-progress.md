@@ -84,9 +84,10 @@ When a worker is cut off, record here: the SDK, the last pushed
 commit on `feat/contract-1.51`, what the worker's last report said was left, and the
 agent id if it can still be resumed with SendMessage.
 
-**Follow-up fixes to merged ports: blocked, waiting on the user.** Found while reviewing C-5: the SSO/federation completions do not reset the §5.2 acting-tenant gate, so after a non-organization-level login followed by an SSO sign-in, `actingTenant()` still refuses on the previous principal's report (C-12 question 5's stale-principal case). Affected, merged: **Go** (`SsoComplete`, `SsoCompleteOauth2`, `SsoCompleteHandoff` in `oidc.go`), **TypeScript** (`OidcClient.ssoComplete` and the handoff completion in `src/node/oidc.ts`, which never clear `principalScope`). Python is correct (`_absorb_session_cookies` resets). C# (unmerged) was sent back for the same fix.
-- Go: a fix, two table tests over the three completions and a README/CHANGELOG note are prepared in `/home/user/axiam-go-sdk` on a local `feat/contract-1.51` restarted from `origin/main` `9013027`. Local gates passed: gofmt, vet, go test on 1.26.7 and 1.27.0, coverage 94.6 %; two mutations were caught. **Not pushed.** The push to the merged branch was refused by the session's permission classifier, so it waits for the user's decision: which branch, and whether to open a follow-up PR.
-- TypeScript: not started, for the same reason.
+**Follow-up fixes to merged ports (SSO gate reset).** The user chose a new branch, `fix/contract-1.51-sso-gate`, cut from each repository's main:
+- Go: [ilpanich/axiam-go-sdk#87](https://github.com/ilpanich/axiam-go-sdk/pull/87), `c8049b1`, CI pending.
+- TypeScript: [ilpanich/axiam-typescript-sdk#117](https://github.com/ilpanich/axiam-typescript-sdk/pull/117), `89d406a`, CI pending (reproduced red on main first).
+- Python needs no follow-up (verified). C#, Java, Kotlin, PHP, C, Swift and C++ carry the reset in their port PRs.
 
 **Usage-limit cut-off, 2026-09-24 ~13:50–14:10Z.** Three workers were stopped mid-task. They were resumed at 14:15Z; the state at the cut-off:
 - C-6 PHP: branch at `a554518` (pushed). Uncommitted work in progress on the §27.6.1 scoped binding and service accounts: `RoleBinding.php`, `BindingRebindFailed.php`, `Contract151ManifestScopedBindingsTest.php`, and edits to `ManifestApi/Builder/Validation/Kind/ApplyReport.php`.

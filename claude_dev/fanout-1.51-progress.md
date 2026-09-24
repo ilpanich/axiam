@@ -20,7 +20,7 @@ once every port PR is merged or closed.
 | 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | reviewed `6898cc5` (model tests added on send-back; re-run 0 fail) | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | green `8ba1a4b` (coverage 94.6 %, main 94.4 %) | `9013027` |
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | reviewed `678d310` (header on every call fixed on send-back; re-run 1238/0, 95.03 %) | [#102](https://github.com/ilpanich/axiam-java-sdk/pull/102) | green `678d310` (JaCoCo and Sigstore gates in CI) | `fa6803a` |
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | reviewed `2aef3f3` (SSO reset fixed on send-back; re-run 1241+72 on net8/net10) | [#95](https://github.com/ilpanich/axiam-csharp-sdk/pull/95) | green `2aef3f3` | `d1dc37a` |
-| 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | pushed `8b06813` + orchestrator README fix `2fc30ba` (gate paragraph contradicted code); re-run pending | | | |
+| 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | reviewed `2fc30ba` (README gate paragraph fixed by orchestrator; re-run 1057/0, 98.07 %) | [#68](https://github.com/ilpanich/axiam-kotlin-sdk/pull/68) | pending | |
 | 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | pushed `a554518` (1629 tests, 95.62 %, both row-17 defects fixed); sent back: declined §27.6.1 scoped binding and service_accounts on tier grounds, which §8 rule 7 requires | | | |
 | 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | not started | | | |
 | 3 | C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | running | | | |
@@ -99,4 +99,4 @@ agent id if it can still be resumed with SendMessage.
 
 - `trig_01Sw9PGBzLKLriWid2DQRbZ8` — fires 2026-09-24T15:21Z (+6 h)
 - `trig_011Mkt9C44XdJhPs46Qe9XAj` — fires 2026-09-24T19:21Z (+10 h)
-- PR check-in, hourly: paused at 13:39Z (no open port PR); re-armed when the next PR opens
+- PR check-in, hourly: re-armed 14:3xZ for #68 (the send_later id is in the session log)

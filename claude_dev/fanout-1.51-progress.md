@@ -46,6 +46,8 @@ Search for each tool was done twice (PATH lookup, then a filesystem/installer pr
 | C | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_STANDARD={11,23}` with gcc and clang; `cmake --build build -j`; `ctest --test-dir build --output-on-failure`; ASan+UBSan build + ctest; valgrind sweep; drift `python3 scripts/gen_management.py --check`; TLS / private-key grep; conan create | cmake, gcc 13, clang 18, valgrind, conan ✔; libcurl dev headers ✘ | `apt-get install -y libcurl4-openssl-dev` |
 | C++ | `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD={17,23}` gcc/clang; build; `ctest`; `./build/examples/axiam_example_reactor`; ASan+UBSan; valgrind; drift `python3 scripts/gen_management.py --check`; TLS / key grep; vcpkg/conan validation | as C, plus ninja ✔ | as C |
 
+Installed by the orchestrator at 09:30Z (apt, no worker running apt): dotnet SDK 8.0.131 and 10.0.112, OpenJDK 17.0.20 (the default `java` stays 21), `libcurl4-openssl-dev` 8.5.0, `protoc` 3.21.12. These do not survive a fresh container; re-run the apt line if the session resumes elsewhere.
+
 ## Scope additions beyond §6's table
 
 - C-6, C-9, C-10, C-11 also take §13 row 17's manifest defects: PHP never reconciles role

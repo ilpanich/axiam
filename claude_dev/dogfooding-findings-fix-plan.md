@@ -2765,7 +2765,7 @@ every piece the SDK does not ship, as the README and the per-SDK table state it.
 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | [#95](https://github.com/ilpanich/axiam-csharp-sdk/pull/95) | merged (`d1dc37a`) | `webhooks` in the manifest; §6.1 rule 7 as a typestate (the client-side branch instead) |
 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | [#73](https://github.com/ilpanich/axiam-php-sdk/pull/73) | open, CI green (`16f5467`) | `users`/`scopes` manifest entities (flat tier, §7.2); `webhooks` in the manifest |
 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | merged (`9013027`) | `webhooks` in the manifest |
-| C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | [#68](https://github.com/ilpanich/axiam-kotlin-sdk/pull/68) | open, CI green (`2fc30ba`) | no gRPC transport (so §1.1.1/§10.3 wrappers); Ktor-engine mTLS evidence wiring; `webhooks` in the manifest |
+| C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | [#68](https://github.com/ilpanich/axiam-kotlin-sdk/pull/68) | merged (`fbf98c5`) | no gRPC transport (so §1.1.1/§10.3 wrappers); Ktor-engine mTLS evidence wiring; `webhooks` in the manifest |
 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | | | not started | |
 | C-10 | C | `ilpanich/axiam-c-sdk` | | | not started | |
 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | | | not started | |

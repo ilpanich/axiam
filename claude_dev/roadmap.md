@@ -1011,7 +1011,9 @@ one row per port, with its PR, merge commit and declines.
 Artifact drift across the eleven SDKs fell from 33 at C-0 to 0. The seven C-12
 questions are answered by SDK from merged code (plan, under C-2 … C-11). That table
 also records six defects that survived review, one of them in the security path
-(TypeScript's `verifyAccessToken` skips rule 9). C-12 starts there.
+(TypeScript's `verifyAccessToken` skipped rule 9). All six were fixed and merged the
+same day: typescript-sdk#118, cplusplus-sdk#67, python-sdk#89, csharp-sdk#96 and
+php-sdk#74. C-12 starts from that table.
 
 ---
 

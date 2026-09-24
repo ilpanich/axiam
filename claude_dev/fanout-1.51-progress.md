@@ -21,7 +21,7 @@ once every port PR is merged or closed.
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | reviewed `678d310` (header on every call fixed on send-back; re-run 1238/0, 95.03 %) | [#102](https://github.com/ilpanich/axiam-java-sdk/pull/102) | green `678d310` (JaCoCo and Sigstore gates in CI) | |
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | reviewed `2aef3f3` (SSO reset fixed on send-back; re-run 1241+72 on net8/net10) | [#95](https://github.com/ilpanich/axiam-csharp-sdk/pull/95) | green `2aef3f3` | `d1dc37a` |
 | 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | running | | | |
-| 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | running | | | |
+| 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | pushed `a554518` (1629 tests, 95.62 %, both row-17 defects fixed); sent back: declined §27.6.1 scoped binding and service_accounts on tier grounds, which §8 rule 7 requires | | | |
 | 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | not started | | | |
 | 3 | C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | running | | | |
 | 3 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | not started | | | |
@@ -64,6 +64,8 @@ Installed by the orchestrator at 09:30Z (apt, no worker running apt): dotnet SDK
 | C++ | llvm profile of `tests/axiam_cpp_tests` (logic layer) | 98 % line |
 
 ## Scope additions beyond §6's table
+
+- "Flat-entity tier" (C-6, C-9, C-10, C-11) means only §7.2's exclusion (no `users`/`scopes` entities). The three §27.6.1 additions — metadata, the resource-scoped binding, `service_accounts` — are §8 rule 7 tests every port ships; Swift, C and C++ must add group → role bindings to carry the scoped shape.
 
 - C-6, C-9, C-10, C-11 also take §13 row 17's manifest defects: PHP never reconciles role
   grants or group bindings; PHP, Swift, C and C++ never send `parent_id`; Swift, C and C++

@@ -19,7 +19,7 @@ once every port PR is merged or closed.
 | 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | reviewed `0507daf` (two send-backs; re-run 1746 pass, 98.61 %) | [#88](https://github.com/ilpanich/axiam-python-sdk/pull/88) | green `0507daf` (3.10 and 3.14 legs) | `231a686` |
 | 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | reviewed `6898cc5` (model tests added on send-back; re-run 0 fail) | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | green `8ba1a4b` (coverage 94.6 %, main 94.4 %) | `9013027` |
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | pushed `cd88243`; sent back: X-Axiam-Tenant omitted on refresh/logout/self-service/WebAuthn (violates §5.2.2 rule 4 MUST), memo-across-tenants and plain-over-scoped tests missing, coverage margin 0.05 % | | | |
-| 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | pushed `cdd1a7c` (1308 tests, 96.44 %); sent back: SSO completions don't reset the §5.2 gate/memo, Q5 docs | | | |
+| 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | reviewed `2aef3f3` (SSO reset fixed on send-back; re-run 1241+72 on net8/net10) | [#95](https://github.com/ilpanich/axiam-csharp-sdk/pull/95) | pending | |
 | 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | running | | | |
 | 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | running | | | |
 | 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | not started | | | |

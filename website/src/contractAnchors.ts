@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.51";
+export const CONTRACT_VERSION = "1.52";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -181,6 +181,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "27.12": "#§2712-tenantsdelete-requires-a-fresh-audit-export-contract-133",
  "27.11": "#§2711-model-additions-contract-131",
  "27.13": "#§2713-model-and-status-changes-from-the-dogfooding-remediation-contract-151",
+ "27.14": "#§2714-cross-sdk-conformance-review-contract-152",
  "28.0": "#§280-the-division-of-labour",
  "28.1": "#§281-canonical-operation-set",
  "28.2": "#§282-the-document-and-its-validation-normative",

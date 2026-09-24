@@ -90,4 +90,4 @@ agent id if it can still be resumed with SendMessage.
 
 - `trig_01Sw9PGBzLKLriWid2DQRbZ8` — fires 2026-09-24T15:21Z (+6 h)
 - `trig_011Mkt9C44XdJhPs46Qe9XAj` — fires 2026-09-24T19:21Z (+10 h)
-- PR check-in, hourly, re-armed each time: latest `trig_01PPxwDfzDYtC2KHVGeuo4cv` (12:38Z)
+- PR check-in, hourly, re-armed each time: latest `trig_0157ErxUCi7URWX4BUPeJXD5` (13:39Z)

@@ -16,7 +16,7 @@ once every port PR is merged or closed.
 | Wave | Task | SDK | Repository | Branch | Worker | PR | CI | Merged |
 |---|---|---|---|---|---|---|---|---|
 | 1 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | reviewed (1389 pass / 1 skip re-run) | [#116](https://github.com/ilpanich/axiam-typescript-sdk/pull/116) | green `978efdb` | |
-| 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | pushed `cabc47c`; sent back: global-role refusal and plain-over-scoped Update untested | | | |
+| 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | `f918601` adds the two tests (re-run: 1740 pass, 98.57 %); sent back again: README/CHANGELOG/comments say OPAQUE and the MFA setup hold no login result, but the code gates on them (Q5); docs to follow the code, plus tests | | | |
 | 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | reviewed `6898cc5` (model tests added on send-back; re-run 0 fail) | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | green `8ba1a4b` (coverage 94.6 %, main 94.4 %) | |
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | running | | | |
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | running | | | |

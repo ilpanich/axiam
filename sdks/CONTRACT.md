@@ -519,6 +519,46 @@ Two rules follow, and both are about not inventing capability the server did not
      still defaults that segment from the constructor tenant, and an explicit argument
      still overrides it. The header and the path are read by different mechanisms, and an
      SDK MUST NOT couple them.
+
+   **What 1.51 left open (contract 1.52, C-12).** The eleven 1.51 ports read the helper
+   six ways. Each point below is the reading this revision fixes; §27.14 records who
+   diverged and where each fix landed.
+
+   - **Where the header goes.** The server reads `X-Axiam-Tenant` in one place, the
+     authentication extractor, so only an **authenticated** `/api/v1` route ever acts on
+     it. While an acting tenant is set, every request to such a route MUST carry the
+     header. Some requests have no authenticated principal yet: login, `verify_mfa`,
+     OPAQUE, the device login, the SSO completions, the WebAuthn setup pair and
+     `/oauth2/*`. On those the server reads no acting tenant, so the header is optional,
+     and sending it is harmless. Neither the header, nor `X-Tenant-ID`, nor any
+     credential goes to a host other than the client's configured base URL.
+   - **A new handle, or the same client.** The on-client form MAY return a new handle, or
+     MAY change the client in place. It is the language's choice. The README MUST say
+     which, and, for the in-place form, whether copies of the client share the change.
+     `logout` MAY also clear the acting tenant; the README says whether it does.
+   - **One gate per session.** Every handle over one session gates on the same login
+     result, so a login on any handle changes what all of them refuse. A per-handle copy
+     of the gate goes stale the moment another handle signs in.
+   - **A refusal is `AuthzError`.** The gate stands in for the server's `403`, so its
+     refusal is §2's `AuthzError`, not `AuthError` and never `NetworkError`.
+   - **Which responses set the gate.**
+     - A response that establishes a session and carries the user object records the
+       gate from it: login, `verify_mfa`, the OPAQUE finish, the MFA setup confirmation
+       and the WebAuthn setup completion. The server builds all five with one function,
+       `cookie_response_from_output` in `handlers/auth.rs`.
+     - A response that establishes a session without that object resets the gate to
+       unknown: a WebAuthn authentication, an SSO completion, the device login and
+       client-credentials adoption. So does `logout`.
+     - `refresh` keeps the principal, so it SHOULD leave the gate as it is. Resetting it
+       to unknown also conforms, at the cost of the client-side refusal until the next
+       login.
+     - A `200` that lacks a documented user object is malformed. An SDK MAY raise §2's
+       `NetworkError`, MAY treat the gate as unknown, or MAY read it as the too-old-server
+       default above, `organization_level: false`. It MUST NOT read it as `true`.
+   - **Tenant ids compare as UUIDs.** Reach (`reachable_tenant_ids`) is decided on
+     parsed UUIDs. Letter case and formatting never decide it: a string comparison
+     between an upper-case formatter and the server's lower-case output refuses every
+     tenant.
 2. **It is derived, never asserted.** The flag is resolved server-side from the caller's
    own tenant record. An SDK MUST NOT accept it as constructor input, MUST NOT infer it
    from a slug or a name, and MUST NOT send it — it is a response field in one direction
@@ -803,6 +843,38 @@ it. Rules 6–10 close that. The name is §1's.
    §27.13's S-9 note, where the account's roles authorize it exactly as a user's would. A
    route outside that set answers `401` for an audience mismatch, and an SDK MUST NOT
    turn that into a refresh attempt.
+11. **The device credential's lifecycle (contract 1.52, C-12).** Rule 6 says the token is
+    adopted "exactly as a `login` result", and the eleven 1.51 ports read that eleven
+    ways. §27.14 records the divergences. The lifecycle is:
+    - **The device POST carries nothing of a prior session**: no `Cookie` and no
+      `Authorization`. The server reads the `axiam_access` cookie before the header, so
+      either one could evaluate the call against the earlier principal. The POST carries
+      `X-Tenant-ID`, and MAY carry `X-Axiam-Tenant` (§5.2 rule 1).
+    - **A refused or malformed device login changes nothing.** The client keeps the
+      credential, the cookie jar and the acting-tenant gate it had. It MAY clear the §17
+      memo, because dropping entries is always correct (§17 rule 8). A caller who was
+      mid-session when a device login was refused still has a working session.
+    - **On success, the device token is the credential of every request the client
+      makes**: authz, management, self-service, WebAuthn, logout, and the gRPC channel
+      (rule 4). No request carries a cookie from before. An empty `Cookie` header and no
+      header both conform. A left-over `X-CSRF-Token` is harmless, because the server
+      checks it only against a cookie session.
+    - **It is held until something replaces it.** `logout` clears it. So does any later
+      call that establishes a session, and that session is used from then on: login,
+      `verify_mfa`, OPAQUE, a WebAuthn authentication, an SSO completion,
+      client-credentials adoption, or another device login. `refresh` does not clear it.
+      A device credential that outlives a later login silently runs the new session as
+      the device.
+    - **It is never refreshed, on either transport.** A REST `401` or a gRPC
+      `UNAUTHENTICATED` on the device credential is `AuthError`, with no refresh call.
+      So is a `401` on the device POST itself when the client also holds an earlier
+      session. The caller gets the server's message, not the refresh guard's.
+    - **Returning a new handle instead of adopting in place conforms.** The new handle
+      carries the acting tenant of the handle that made it, and the original client is
+      unchanged.
+    - **§27.4 rule 1's session check accepts a bearer credential.** A client holding a
+      device or client-credentials token has a session for that rule, and a management
+      call MUST NOT be refused client-side for want of a cookie.
 
 ---
 
@@ -1248,6 +1320,25 @@ stops is not a weaker guard, it is not a guard.
 `§10` verification is a **relying-party** control. The server enforces its own
 side; these rules are what stops an SDK from accepting something the server
 would never have honoured.
+
+**Every entry point is a guard (contract 1.52, C-12).** The 1.51 review found C-1's
+defect in all ten ports: the SDK's default verify call, the one with no evidence parameter
+and the one every guard reached, never read `cnf`. The same defect sat one layer down in
+TypeScript's `Verifier.verifyAccessToken`, whose own documentation named it as the guard
+entry point. These rules govern every public function that turns an access token into a
+verified identity or claims:
+
+- **An overload with no evidence parameter is still a guard.** It verifies against no
+  evidence, and so refuses a `cnf`-bound token under rule 9.
+- **A signature-only primitive is exempt** only when its name or its documentation says
+  it is not a guard.
+- **§10.3's gRPC `validate_token` and `introspect_token` are not identity entry points.**
+  They return the server's verdict together with `cnf`, and the caller applies rule 9
+  (§10.3 rule 1).
+- **A guard that cannot reach transport evidence refuses every bound token.** When the
+  framework it plugs into exposes no peer certificate and no verified DPoP proof, the
+  guard refuses them all. That conforms, but it means device tokens (§6.1 rule 9) and
+  DPoP-bound tokens never pass that guard, and the SDK's README MUST say so, per guard.
 
 | # | Claim | Rule |
 |---|---|---|
@@ -3201,9 +3292,14 @@ memo mirrors that bound rather than inventing a second staleness story.
    the SDK MUST document that it clamps. This deliberately differs from the server, whose
    equivalent setting is an unclamped `u64` — a known residual that lets an operator
    configure a multi-hour staleness window. The client has no reason to repeat it.
-3. **Key.** `(subject_id, resource_id, action, scope)`, all four, with absent `scope` and
-   absent `subject_id` each forming a distinct key from any present value. A memo that
-   ignores `scope` answers a narrower question with a broader answer.
+3. **Key.** `(subject_id, resource_id, action, scope, acting_tenant)`, all five, with an
+   absent `scope`, `subject_id` or `acting_tenant` each forming a distinct key from any
+   present value. A memo that ignores `scope` answers a narrower question with a broader
+   answer. One that ignores the acting tenant answers tenant A's question for tenant B,
+   because since contract 1.51 one session can ask the same question of two tenants
+   (§5.2 rule 1). The acting tenant joined the key in contract 1.52 (C-12), after all
+   eleven SDKs had already added it on their own. An SDK MAY also clear the memo when the
+   acting tenant changes, but the key alone is what this rule requires.
 4. **Allows and denies are cached identically.** Not "cache allows only", and not "cache
    denies only". Asymmetric caching changes the *timing* of the two outcomes and so leaks
    which one occurred to anyone who can observe latency, and it surprises every reader who
@@ -3244,8 +3340,9 @@ With an injected clock: a repeat check inside the TTL makes **no second wire cal
 returns an equal decision including its `reason_code`; the same check after the TTL makes a
 fresh call; a deny is memoized exactly as an allow is (assert the wire-call count for both,
 not just the outcome); a TTL configured above 5 s is clamped to 5 s; differing `scope`,
-`action`, `resource_id` or `subject_id` each miss rather than collide, and absent-`scope`
-does not hit a present-`scope` entry; a `NetworkError` is not memoized (the next call reaches
+`action`, `resource_id`, `subject_id` or acting tenant each miss rather than collide,
+absent-`scope` does not hit a present-`scope` entry, and no acting tenant does not hit an
+acting-tenant entry (contract 1.52); a `NetworkError` is not memoized (the next call reaches
 the wire); `logout` clears the memo; with the memo enabled and the endpoint unreachable the
 guard still denies `503 authz_unavailable` rather than serving a stale allow; and with the
 default configuration **every** repeat check reaches the wire, proving off-by-default.
@@ -7637,6 +7734,9 @@ and an SDK that has not implemented one says so in its README (§27.10 records i
   is **JSON value equality of the whole object**, with a stated `{}` equal to what the
   server returns for none. It is never a key-by-key merge. A merge would make `apply`
   unable to remove a key, and rule 6 unable to hold.
+- Equality is of JSON **values**: key order never counts, so comparing serialized strings
+  does not conform. A stated `{}` is a statement (it clears the object) and so is distinct
+  from an omitted field, which says nothing (contract 1.52, C-12).
 
 **2. Role bindings have two shapes.** Every `roles[]` entry of a `groups`, `users` or
 `service_accounts` spec is one of:
@@ -7650,6 +7750,16 @@ and an SDK that has not implemented one says so in its README (§27.10 records i
   SDK MUST NOT send `inherit: true` explicitly, so that an inheritable binding's body stays
   byte-for-byte a pre-1.51 body.
 
+Contract 1.52 (C-12) settles three points about stating these values:
+
+- A manifest MAY **state** `inherit: true`. The SDK accepts it, plans it like an omitted
+  one, and still never sends it.
+- The object shape requires `resource`. An `inherit` with no resource is refused before
+  any request, since a binding with no resource has nothing to stop inheriting at.
+- Every key resolves against **its own kind** only. A role key that names a group is a
+  dangling reference, refused before any request. It is never discovered mid-`apply`,
+  after earlier writes have landed.
+
 The rules that make the two shapes reconcilable:
 
 - **A subject holds a role at most once.** The server keys assignments on
@@ -7662,18 +7772,24 @@ The rules that make the two shapes reconcilable:
 - **A binding's natural key is `(subject, role)`, and its resource and `inherit` are
   fields.** The binding is `NoChange` when the server's assignment of that role names
   the same resource (none for the string shape) and the same `inherit`. It is `Update`
-  when either differs. There is no update endpoint, so `apply` performs an `Update` as
+  when either differs, and `plan` reports that `Update`. An SDK that finds binding drift
+  only inside `apply` has a `plan` that lies about it. There is no update endpoint, so `apply` performs an `Update` as
   **unassign, then assign**, and the subject holds no such role between the two calls.
   If the assign fails, the SDK MUST attempt to assign the previous binding again (same
-  resource, same `inherit`) and report both outcomes. This is how the admin console
+  resource, same `inherit`) and report both outcomes. **As data** (contract 1.52): the
+  report says, in a field and not only in a message, whether the restore succeeded, and
+  when it did not, carries the restore's own error. The two outcomes leave two states: the
+  subject holds the previous binding, or, when both calls failed, holds neither. This is how the admin console
   changes the flag (server T22.11b), and a manifest must not be less careful than a form.
 - **`tenant_scope` is not part of a manifest binding in 1.51**, and a stated binding is
   silent about it (rule 3). An `Update`'s re-assignment MUST carry the server binding's
   existing `tenant_scope` across unchanged. Dropping it would silently widen an
   organization-level account's reach (§5.2.3).
 - A global role (`is_global: true`) bound with `inherit: false` is refused by the server
-  with `400`. An SDK MAY check it client-side when the role is in the manifest, and in
-  any case surfaces the server's refusal as that action's failure.
+  with `400`. When the manifest declares the role global, an SDK MUST refuse the binding
+  client-side, before any request (contract 1.52; it was a MAY, and all eleven already
+  did). A role the manifest does not declare global reaches the server, and its refusal
+  is that action's failure.
 
 **3. `service_accounts[]`** — `{ key, name, description?, roles[]? }`.
 
@@ -7872,40 +7988,36 @@ Five SDKs first shipped the addition without the baseline — reading "additiona
 "instead" — and now ship both, with the direct accessors delegating to `management()` so
 the equivalence is structural rather than a promise two code paths have to keep.
 
-**The manifest, per SDK (contract 1.51).** "All eleven implement it" was true of §27 and
-read as true of §27.6. It is not. Read from each repository's `main` at the commit that
-vendors contract 1.50, the manifests come in two tiers:
+**The manifest, per SDK (contract 1.51, refilled in 1.52).** "All eleven implement it" was
+true of §27 and read as true of §27.6. It was not. This table was first read at the commit
+that vendors contract 1.50. The C-12 review (§27.14) re-read it from each repository's
+`main` after the eleven 1.51 ports merged:
 
 | Kind | Rust, TypeScript, Python, Java, Kotlin, C#, Go | PHP | Swift, C, C++ |
 |---|---|---|---|
-| resources | yes, nested under a parent | **held; the parent is not sent**, so the tree is created flat | **held; the parent is used for ordering and not sent** |
+| resources | yes, nested; `parent_id` sent | yes, nested; `parent_id` sent (fixed in C-6) | yes, nested; `parent_id` sent (fixed in C-9, C-10, C-11) |
+| `resource_type` | stated | stated | stated, or refused before any request; never a silent `"folder"` (fixed) |
 | scopes | yes | no | no |
 | permissions | yes | yes | yes |
 | roles | yes | yes | yes |
-| role → permission grants | yes | **held in the manifest, never reconciled** | no |
+| role → permission grants | yes | yes, reconciled (fixed in C-6) | no; grants only order the apply |
 | groups | yes | yes | yes |
-| group → role bindings | yes, role keys only | **held in the manifest, never reconciled** | no |
-| users, user → role bindings | yes, role keys only | no | no |
-| `resources[].metadata` (1.51) | no | **yes** | no |
-| resource-scoped binding, `inherit` (1.51) | no | no | no |
-| `service_accounts` (1.51) | no | no | no |
+| group → role bindings | yes, both shapes | yes, both shapes (C-6) | yes, both shapes (new in C-9, C-10, C-11) |
+| users, user → role bindings | yes, both shapes | no | no |
+| `resources[].metadata` (1.51) | yes | yes | yes |
+| resource-scoped binding, `inherit` (1.51) | yes | yes | yes |
+| `service_accounts`, with role bindings (1.51) | yes | yes | yes |
 | `webhooks` | no | no | no |
 
-Three of these cells are defects, not tiers, and each is assigned to that SDK's 1.51 port:
+**The three defects the 1.50 reading recorded are fixed** by the 1.51 ports.
 
-- **PHP** stores role grants and group role keys, drops them from the drift check, and
-  never grants or assigns anything. The docblock of `applyRole` says it "reconciles its
-  permission grants". A PHP `apply` of a role with grants reports success and grants
-  nothing (C-6).
-- **PHP, Swift, C and C++** never send a resource's `parent_id` on `Create`, although
-  every one of their models has the field. A nested manifest is created flat, and since
-  the parent is not compared either, rule 6's idempotence test passes over the wrong
-  tree (C-6, C-9, C-10, C-11).
-- **Swift, C and C++** send `resource_type: "folder"` when the spec gives none. That is
-  a default the contract never stated.
+- **PHP** reconciles role grants and group role bindings. Before, it stored them, dropped
+  them from the drift check and never applied them.
+- **PHP, Swift, C and C++** send a resource's parent.
+- **Swift, C and C++** no longer invent a `resource_type`.
 
 The **tier gap** is recorded as a fact rather than a defect. PHP, Swift, C and C++ have
-no `users` and no `scopes`, and Swift, C and C++ have no grants or bindings at all. The
+no `users` and no `scopes`, and Swift, C and C++ reconcile no role → permission grants. The
 dogfooding plan (§7.2) defers closing it until a consumer needs it. An SDK in that tier
 states §27 with the README note the Conformance Statement requires ("which of the two it
 has"), and that note MUST name the missing kinds rather than say "manifest supported".
@@ -8038,6 +8150,15 @@ still break a decoder that assumed the old set.
    `400 validation_error` naming the entry. `Server` is refused entirely until an
    organization administrator lists names (`certificate.server_cert_allowed_names`,
    empty by default).
+
+   **The shape of each entry is judged client-side (contract 1.52, C-12).** Rule 1 keeps
+   the names themselves from being judged, but not the shape of an entry. Each entry is
+   exactly one of the two branches. A language with a closed sum type gets this from the
+   type. A language whose type can hold neither branch or both, such as a struct of two
+   optional fields, MUST refuse such an entry before any request, with §27.4 rule 2's
+   client-side error. It MUST NOT send `{}` or both keys. An entry the SDK cannot build
+   is refused, never silently dropped from the array: a list one name shorter than the
+   caller wrote is a certificate for different names.
 2. **`CertificateType` gains `"Server"`, and it appears in responses.** A tenant that
    issues one returns it from `certificates.list` and `certificates.get`. An SDK that
    decodes `cert_type` as a closed enum fails the **whole** list on one server

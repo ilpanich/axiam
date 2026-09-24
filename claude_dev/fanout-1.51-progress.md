@@ -97,6 +97,6 @@ agent id if it can still be resumed with SendMessage.
 
 ## Resume check-ins
 
-- `trig_01Sw9PGBzLKLriWid2DQRbZ8` — fires 2026-09-24T15:21Z (+6 h)
-- `trig_011Mkt9C44XdJhPs46Qe9XAj` — fires 2026-09-24T19:21Z (+10 h)
-- PR check-in, hourly: re-armed 14:3xZ for #68 (the send_later id is in the session log)
+- `trig_011KPyuytijTBNUtrTjoU38X` — fires 2026-09-24T21:22Z (+6 h; re-armed at 15:21Z, when the first pair fired)
+- `trig_01FsrAVmHhZCMECo6vrKpzAC` — fires 2026-09-25T01:22Z (+10 h)
+- PR check-in, hourly: latest `trig_01KfxgY8XPDAKqbycRRJHamb` (16:20Z)

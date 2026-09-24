@@ -2656,6 +2656,85 @@ maintainer works in it. Scope, against contract 1.50:
 
 ### C-2 … C-11 — ten ports — Sonnet 5, effort `high`
 
+> **EXECUTED — 2026-09-24, PRs I₂ … I₁₁, against contract 1.51.** All ten ports are
+> **merged**, each from `feat/contract-1.51` in its own repository, with CI green on
+> its head. Each re-vendors `CONTRACT.md` (sha256 `0ac7fd75f83c…`), `openapi.json`,
+> `management-registry.json` and, where the SDK has gRPC, `proto/` from `56fbe44`; the
+> orchestrator compared the sha256 values itself before opening each PR. Nothing is
+> tagged or published. One line per SDK:
+>
+> - **C-2 TypeScript**: [#116](https://github.com/ilpanich/axiam-typescript-sdk/pull/116),
+>   `9102c91`. Declines: `webhooks` in the manifest, and §6.1 rule 7 as a typestate.
+>   Surprises: the rule-9 defect was in `authenticateRequest`, the entry point every
+>   guard reaches. The `SubjectAltName` defect is type-level only in TS, so only `tsc`
+>   catches it. Neither SSO completion reset the acting-tenant gate: follow-up
+>   [#117](https://github.com/ilpanich/axiam-typescript-sdk/pull/117), `f21e561`.
+> - **C-3 Python**: [#88](https://github.com/ilpanich/axiam-python-sdk/pull/88),
+>   `231a686`. Declines: `webhooks` in the manifest. Surprises: two send-backs, for
+>   missing §8 rule 7 tests and for a README that contradicted the code on question 5.
+>   A recording response that carries no user object sets `organization_level` to false.
+> - **C-4 Java**: [#102](https://github.com/ilpanich/axiam-java-sdk/pull/102),
+>   `fa6803a`. Declines: `webhooks` in the manifest. Surprises: `X-Axiam-Tenant` was
+>   first left off refresh, logout and the self-service calls, which §5.2.2 rule 4
+>   forbids. The memo and plain-over-scoped tests were missing. Both were fixed on send-back.
+> - **C-5 C#**: [#95](https://github.com/ilpanich/axiam-csharp-sdk/pull/95),
+>   `d1dc37a`. Declines: `webhooks` in the manifest, and §6.1 rule 7 as a typestate.
+>   Surprises: the SSO completions did not reset the gate (fixed on send-back). Every
+>   recording path goes through one pre-1.51 helper, `ReadLoginScopeAsync`, and a
+>   response with no user object leaves the gate unknown.
+> - **C-6 PHP**: [#73](https://github.com/ilpanich/axiam-php-sdk/pull/73),
+>   `ceb7f2c`. Declines: `users`/`scopes` manifest entities (flat tier), and `webhooks`
+>   in the manifest. Surprises: §13 row 17 was worse than recorded, because
+>   `applyRole()`/`applyGroup()` never reconciled grants or group bindings at all. The
+>   first push declined the scoped binding and service accounts "on tier grounds"; the
+>   send-back restored them, since §8 rule 7 requires them at every tier. The acting
+>   tenant mutates the client in place.
+> - **C-7 Go**: [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86), `9013027`.
+>   Declines: `webhooks` in the manifest. Surprises: CI's coverage floor (94.4 %) failed
+>   at 93.5 %, and the missing model tests were added (94.6 %). The generator is Go's
+>   own (`internal/cmd/genmanagement`), and it had both defects independently. The SSO
+>   gate reset came in follow-up
+>   [#87](https://github.com/ilpanich/axiam-go-sdk/pull/87), `d5658ea`.
+> - **C-8 Kotlin**: [#68](https://github.com/ilpanich/axiam-kotlin-sdk/pull/68),
+>   `fbf98c5`. Declines: no gRPC transport (so the §1.1.1/§10.3 wrappers), Ktor-engine
+>   mTLS evidence wiring, and `webhooks` in the manifest. Surprises: the header rides
+>   the shared request builder, so login carries it too. The README's gate paragraph was
+>   wrong and the orchestrator fixed it (`2fc30ba`). Two commits carry a different
+>   model trailer and were left as they are.
+> - **C-9 Swift**: [#66](https://github.com/ilpanich/axiam-swift-sdk/pull/66),
+>   `db24d26`. Declines: no gRPC, `users`/`scopes` in the manifest (flat tier), and
+>   `webhooks` in the manifest. Surprises: §13 row 17 as recorded (flat nested
+>   resources, and a silent `"folder"`). Group → role bindings had to be added before
+>   the scoped shape could exist. Four §8 rule 7 tests were added on send-back. Two
+>   pairs of pieces share a commit each.
+> - **C-10 C**: [#65](https://github.com/ilpanich/axiam-c-sdk/pull/65), `0b87547`.
+>   Declines: no gRPC, §6.1 rule 7 as a typestate, `users`/`scopes` and role →
+>   permission grants in the manifest (flat tier), and `webhooks` in the manifest.
+>   Surprises: the README's `authenticate_device()` claim (§1.8) is now true. The jar
+>   is snapshotted, cleared and restored around the device credential. Fixing the SSO
+>   gate exposed a pre-existing defect: no SSO completion had ever marked the client
+>   authenticated. Valgrind in CI exposed a race in a test's TLS server, which the
+>   orchestrator fixed (`7f3d5db`).
+> - **C-11 C++**: [#66](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/66),
+>   `473ccbb`. Declines: no gRPC (so the §1.1.1 wrappers and `get_user_info`), §6.1
+>   rule 7 as a compile-time gate, `users`/`scopes` and role → permission grants in the
+>   manifest (flat tier), and `webhooks` in the manifest. Surprises: `validate()`
+>   refused a stated `inherit: true`, which §27.6.1 allows (only *sending* it is
+>   forbidden). Two tests were missing. All three were fixed on send-back. The
+>   runtime-only rule 7 gate was undeclared until the orchestrator's `909b56e`.
+>
+> **Across the ten.** Every port had C-1's §10.1 rule 9 defect at its default verify
+> entry point, and each fixed it as a Breaking change. Every generator had both of C-1's
+> DTO defects. Every send-back came from review rather than from a failing suite: a
+> missing §8 rule 7 test, a contract rule applied too narrowly or too broadly, or a
+> document that disagreed with the code. The one exception is Go's coverage floor,
+> which CI caught. `scripts/check-sdk-artifact-drift.py --local-root ..` reported 33
+> problems at C-0, 30 after C-1, and **0** after the ten merged.
+>
+> **Six defects survived review.** Reading the seven C-12 questions from merged code,
+> rather than from the reports, found them: one security defect in TypeScript and three
+> contract deviations in C++ among them. They are listed under the table below, for C-12.
+
 | Task | SDK | Scope |
 |---|---|---|
 | C-2 | TypeScript | full (REST + gRPC + manifest) |
@@ -2674,6 +2753,65 @@ workflow before touching it; implement the reference's behaviour in the
 language's own shape; the tests in §8 rule 7; `declines` any piece it cannot
 implement, in §27.10 / the §5.2 table, with the reason.
 
+#### The seven C-12 questions, answered by SDK
+
+The answers come from each SDK's merged `main` (read-only, with a file:line for every
+cell), not from the ports' reports. Several reports mislabelled their own choice as
+Rust's or the reverse, and the code settles it. **Bold** marks a cell that is a defect
+against the contract or the reference, not just a different choice; each one is listed
+below the table.
+
+| Question | Rust | TypeScript | Python | Java | C# | PHP | Go | Kotlin | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **1. §10.1 rule 9 at the default entry point** | `verify` refuses; the actix guard calls `verify_with_proofs` with the peer certificate | `authenticateRequest` (every guard) refuses; **`Verifier.verifyAccessToken`, which its own doc names as the guard entry, does not** | `verify_access_token` refuses; `verify_with_proofs` takes evidence | `verifyAccessToken` refuses; the Spring filter calls `verifySenderConstrained` | `VerifyAsync` refuses; the middleware calls `VerifyWithProofsAsync` | `verify` / `verifyLocally` refuse; `verifyWithProofs` takes evidence | `VerifyAccessToken` refuses; the middleware passes `r.TLS` evidence | `verifySession` (proofs default to none) refuses | `authenticate` (`.none`) refuses | `axiam_jwt_verify_ex` refuses; `…_with_evidence` takes it | `TokenAuthenticator::authenticate` refuses; `authenticate_sender_constrained` takes it |
+| **2. §17 memo key and acting tenant** | fifth component | fifth component | fifth component | fifth component | fifth component | fifth component | fifth component | fifth component | fifth component | fifth parameter | fifth component |
+| **3. Generated DTOs**: `SubjectAltName`; absent role-side `inherit` | serde enum; `default_true` | tagged union; `roleAssignmentInherits()` | two classes; `= True` | sealed type with a serializer; `inherits()` | converter; `= true` | `toArray()`; absent means true | struct of two optional fields (tagging by convention); `Inherits()` | sealed type with a `KSerializer`; `= true` | enum with a custom `encode`; `inherits` | build function; absent means 1 | struct of two optionals (by convention); **an absent `inherit` fails the whole listing** |
+| **4. Device token beside a cookie jar** | withheld: empty `Cookie` on the login and after | withheld: jar-free agent, empty `Cookie` | jar **cleared** on adoption; **the device POST itself carries the jar** | withheld: a load-suppressed jar | a new jar-free handle, and the original's session is kept; **the device POST itself carries the jar** | jar **cleared before** the POST, so a failed device login loses the session | withheld: a no-outbound jar wrapper | withheld: a strip-cookie marker | withheld: empty `Cookie` | withheld: jar snapshotted, cleared and restored per request | withheld: `no_stored_cookies`; **sends body `{}`** |
+| **5. Who holds a login result** (record / reset / a 200 with no user object) | login, `verify_mfa` / OPAQUE, MFA setup, WebAuthn setup and authentication, the three SSO completions, device, logout / decode fails | adds OPAQUE, MFA setup, WebAuthn setup / WebAuthn auth, SSO ×3 (#117), device, logout / not handled | as TS / as TS / records `false` | as TS / as TS, **plus refresh** / records `false` | as TS / as TS, **plus refresh, and before the request**; device returns a new handle / unknown | as TS / as TS / throws, gate unchanged | as TS / as TS (SSO via #87) / records `false` | as TS / as TS / records `false` | as TS / as TS / decode fails | as TS / as TS / unknown | as TS / as TS / unknown |
+| **6. Global role with `inherit: false`** | refused client-side | refused | refused | refused | refused | refused | refused (checked only with a resource) | refused | refused (checked only with a resource) | refused | refused |
+| **7. Update of a binding is two calls** (all: unassign, assign carrying `tenant_scope`, restore on failure) | `BindingUpdateFailed { error, restore }` | `rebind-failed`, `restoreSucceeded` | **the restore outcome is only in the message string** | `StepOutcome.restored` | `RestoreSucceeded` | `BindingRebindFailed(restored, restoreError)` | two `AppliedStep`s (`StatusRestored` / `StatusRestoreFailed`) | `BINDING_UPDATE_FAILED`, `restoreSucceeded` | `BindingOutcome.restored` | `restore_attempted` / `restore_succeeded` | **the restore outcome is swallowed and not reported** |
+
+Question 6 checks only a role the manifest declares global; a global role it does
+not declare goes to the server, which answers `400`, in all eleven.
+
+**Open defects found at close, for C-12 to confirm and route.** None fails a test,
+because none has a test, which is the point of C-12.
+
+1. **TypeScript, §10.1 rule 9 (security).** `Verifier.verifyAccessToken`
+   (`src/node/jwks.ts`) never reads `cnf`. Its doc says anything guarding a route MUST
+   use it, so a guard written by the doc accepts a device token lifted off a device.
+   The shipped middleware is safe, because it goes through `authenticateRequest`.
+   This is C-1's defect one layer down, and question 1 exists for exactly this.
+2. **C++, §27.13 S-10 rule 3.** `from_json` for the three role-side assignments reads
+   `j.at("inherit")` (`src/management_models.cpp`), so a listing from a pre-1.51
+   server fails whole, as a `NetworkError`. The worker's accessor fix covered only
+   the subject-side `RoleAssignment`.
+3. **C++, §27.6.1 "report both outcomes".** `reconcile_role_bindings`
+   (`src/management_manifest.cpp`) swallows the restore's result, and `ApplyReport`
+   has no field for it.
+4. **C++, §6.1 rule 6 "no request body".** `authenticate_device()` sends `{}`
+   (`src/client.cpp`).
+5. **Python, §27.6.1 "report both outcomes", weakly.** The restore outcome reaches
+   the caller only inside `StepOutcome.message`.
+6. **Python and C#, question 4.** The device POST goes out with the prior session's
+   cookies, and in C# with a bearer read from the jar. The reference withholds them
+   on that call. The contract is silent, which is question 4's own candidate
+   amendment. PHP clears the jar before the call, so a refused device login still
+   ends the session.
+
+Not defects, but divergences the contract should settle in 1.52:
+- **Question 5, the record set.** Ten SDKs record from OPAQUE, MFA setup and WebAuthn
+  setup, whose `200` carries the user object (`crates/axiam-api-rest/src/handlers/opaque.rs`
+  uses the password builder). Only Rust resets on those paths. The spec leaves the
+  OPAQUE `200` body undocumented.
+- **Question 5, a 200 with no user object.** It is handled four ways: `false`
+  (Python, Java, Kotlin, Go), unknown (C#, C, C++), a failed decode (Rust, Swift) or
+  a throw (TS, PHP).
+- **Question 5, refresh.** Java and C# reset the gate on refresh, and C# does so
+  before the request.
+- **Question 3, `SubjectAltName` in Go and C++.** Both are structs whose tagging
+  holds only by convention; the constructors are correct.
+
 ### C-12 — cross-SDK conformance review — Opus 5
 
 §28.11's form: one row per divergence, contract **1.51**, the posture
@@ -2681,6 +2819,8 @@ tables filled from merged code, README statements checked against code
 (F-28-02's lesson). Evidence file `claude_dev/sdk-dogfooding-conformance-review.md`.
 Start from the seven open questions in C-1's EXECUTED block ("For C-12"): each is a
 place where the ports can diverge while each still reads the contract correctly.
+The table "The seven C-12 questions, answered by SDK" (under C-2 … C-11) answers them
+from merged code, and lists six open defects to confirm and route first.
 
 ---
 
@@ -2769,6 +2909,12 @@ every piece the SDK does not ship, as the README and the per-SDK table state it.
 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | [#66](https://github.com/ilpanich/axiam-swift-sdk/pull/66) | merged (`db24d26`) | no gRPC (so §1.1.1/§10.3 wrappers); `users`/`scopes` in the manifest (flat tier); `webhooks` in the manifest |
 | C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | [#65](https://github.com/ilpanich/axiam-c-sdk/pull/65) | merged (`0b87547`) | no gRPC (so §1.1.1/§10.3 wrappers); §6.1 rule 7 as a typestate; `users`/`scopes` and role → permission grants in the manifest (flat tier); `webhooks` in the manifest |
 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | [#66](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/66) | merged (`473ccbb`) | no gRPC (so §1.1.1/§10.3 wrappers and `get_user_info`); §6.1 rule 7 as a compile-time gate; `users`/`scopes` and role → permission grants in the manifest (flat tier); `webhooks` in the manifest |
+
+Two follow-ups fixed a defect the TypeScript and Go ports shipped with: neither reset the
+acting-tenant gate on an SSO/federation completion.
+[ilpanich/axiam-typescript-sdk#117](https://github.com/ilpanich/axiam-typescript-sdk/pull/117)
+(`f21e561`) and [ilpanich/axiam-go-sdk#87](https://github.com/ilpanich/axiam-go-sdk/pull/87)
+(`d5658ea`), both merged.
 
 ---
 

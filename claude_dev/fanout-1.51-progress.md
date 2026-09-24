@@ -24,7 +24,7 @@ once every port PR is merged or closed.
 | 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | reviewed `16f5467` (scoped bindings + service accounts added on send-back; re-run 1649/5072) | [#73](https://github.com/ilpanich/axiam-php-sdk/pull/73) | green `16f5467` (PHP 8.2 and 8.5, coverage) | `ceb7f2c` |
 | 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | reviewed `9606cef` (four tests added on send-back; re-run 6.3: 1188/0) | [#66](https://github.com/ilpanich/axiam-swift-sdk/pull/66) | green `9606cef` (Swift 5.9 and 6.3, coverage) | |
 | 3 | C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | reviewed `7fd9564` (SSO reset + never-set `authenticated` fixed on send-back; re-run gcc/C11 64/64) | [#65](https://github.com/ilpanich/axiam-c-sdk/pull/65) | green `7f3d5db` (after the orchestrator's valgrind-race fix; conan create passes in CI) | `0b87547` |
-| 3 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | reviewed `7b8786d` (stated `inherit: true` accepted, two tests added on send-back; re-run gcc/C++17 1285/4079) + orchestrator doc fix `909b56e` (§6.1 rule 7 runtime gate declared) | [#66](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/66) | pending | |
+| 3 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | reviewed `7b8786d` (stated `inherit: true` accepted, two tests added on send-back; re-run gcc/C++17 1285/4079) + orchestrator doc fix `909b56e` (§6.1 rule 7 runtime gate declared) | [#66](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/66) | green `909b56e` (four-leg matrix, ASan/UBSan and valgrind, coverage) | |
 
 Worker states: not started → running → pushed → reviewed (orchestrator re-ran the main
 test command) → PR open → green → merged.

@@ -971,6 +971,24 @@ figures are re-rendered at 162 operations. Numbered **1.51**, since 1.50 was alr
 taken (`d5a6811`), so C-12 becomes 1.52. Threat **T-210** amended, no new entry. The
 eleven SDK ports (C-1 … C-11) follow, one PR per SDK repository, Rust first.
 
+### T22.16 — The Rust SDK at contract 1.51, the reference port — Opus 5 ✓ LANDED
+C-1 (PR I₁,
+[axiam-rust-sdk#115](https://github.com/ilpanich/axiam-rust-sdk/pull/115)), DF-008 …
+DF-012 on the Rust side.
+
+- Re-vendors contract 1.51 from `56fbe44` and regenerates the §27 surface.
+- Adds the acting tenant (§5.2 rule 1, handle-scoped, REST-only),
+  `authenticate_device()` (§6.1 rules 6–10) and the gRPC
+  `validate_token` / `introspect_token` (§1.1.1).
+- Adds the manifest's `metadata`, two-shape role bindings and `service_accounts`
+  (§27.6.1).
+- Fixes a real §10.1 rule 9 defect: `JwksVerifier::verify`, behind every route guard
+  the SDK ships, accepted a certificate-bound token as a bearer token.
+
+The Rust suite passes 985 tests with 0 failures, and coverage is 92.08 %. The C-12
+questions and the port prompt are in the plan (C-1 EXECUTED, §12.1). The ten ports
+(C-2 … C-11) follow, and §8.1 records them.
+
 ---
 
 ---

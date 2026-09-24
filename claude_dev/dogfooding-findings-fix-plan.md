@@ -2283,6 +2283,164 @@ Rust-specific.
 
 ### C-0 — contract 1.50 (`axiam` repo, after PR G) — Opus 5
 
+> **EXECUTED — 2026-09-23, PR H, as contract 1.51** (branch `docs/contract-1.50`,
+> cut from `1cb1371`, the merge of #496; commit "docs(sdk-contract): contract 1.51 — the
+> dogfooding remediation (C-0)", plus a records commit).
+>
+> **Shipped.** Amendments 1–8 below, each written against the code on `1cb1371` rather
+> than against the S-blocks above:
+>
+> - §1 gains three rows, and a new §1.1.1 specifies `validate_token` /
+>   `introspect_token`.
+> - §5.2 rule 1 becomes a SHOULD, with a per-language table.
+> - §6.1 gains rules 6–10 for `authenticate_device()`.
+> - §27.0 lists all five registry exclusions, with `/admin/bootstrap`'s outcome table.
+> - §27.5 gains rule 5, and a new §27.6.1 carries the manifest additions.
+> - §27.10 gains the per-SDK manifest table.
+> - §10.3 gains the pointer to the new operations.
+> - A new §27.13 carries the S-4 / S-7 / S-9 / S-10 notes. Every new request field is
+>   optional, so existing SDK request types keep working unedited. §27.13 says so, and
+>   names the two response-side changes that are *not* free for a decoder.
+>
+> The Breaking Changes Log gains a 1.51 entry, and the footer names 1.51. The website's
+> `contractAnchors.ts` is regenerated, and the reference page's version table gains 1.49,
+> 1.50 and 1.51. `openapi.json`, `management-registry.json` and `proto/` are unchanged.
+> No server code changed, and no amendment needed a server or OpenAPI change.
+>
+> **Gates.**
+>
+> - Every script gate `ci.yml` and `docs-ci.yml` run exits 0: `check-doc-links.sh`, the
+>   docs-lint JSON parse, `gen-management-registry.py --check` / `--self-test`,
+>   `check-spec-digest.py`, `check-config-key-coverage.py` and the other fourteen with
+>   their self-tests. `check-remediation-evidence.py` reports 37 verified and 0 failed.
+>   It first failed 5 rows in this sandbox because the clone was shallow and the cited
+>   commits were absent, and it failed identically on a clean tree. CI checks out with
+>   `fetch-depth: 0`.
+> - Website `oxlint`, `tsc -b` and `vite build` exit 0, and all 92 internal `#§…` links
+>   in the contract resolve.
+> - `check-sdk-artifact-drift.py --local-root ..` exits 1 with **exactly 33** problems:
+>   `CONTRACT.md`, `openapi.json` and `management-registry.json` are STALE in each of
+>   the eleven repositories. `proto/`, the OPAQUE vectors and the vendored crate are OK.
+>   The last two stale files were already stale on `main`, because the SDKs vendor
+>   beta16's (`2617eae`). This is the expected red until C-1 … C-11 re-vendor, and it
+>   is the only one.
+>
+> **What the plan did not anticipate.**
+>
+> 1. **Contract 1.50 was already taken.** `d5a6811` (2026-09-18, the DCR
+>    `initial_access_token` made `Sensitive`) published 1.50, and all eleven SDKs vendor
+>    exactly that text (sha256 `d877a1a05e9a…`). The plan was written as if the number
+>    were free. On the requester's decision, C-0 ships as **1.51**, C-12 becomes
+>    **1.52**, and the branch keeps its planned name. §3 and the C-0/C-12 headings below
+>    are left as written, and this block and §13 carry the correction.
+> 2. **§10.3 names RPCs, not SDK operations.** Item 1's "the operation names §10.3
+>    already uses" is loose: §10.3 says `TokenService.ValidateToken` /
+>    `IntrospectToken`. The snake-case names are introduced by §1 and not inherited, and
+>    §1.1.1 carries seven rules for them. Two of those rules come from the code. First,
+>    the server reports `token_type: "Bearer"` for a certificate-bound token, so
+>    boundness is decided from `cnf` alone. Second, a token from another tenant is
+>    `valid: false`, not an error.
+> 3. **The acting tenant is REST-only, and a malformed value fails silently.** The gRPC
+>    interceptor reads only `authorization`, and the tenant always comes from the token,
+>    so the contract says REST-only rather than inventing a metadata key (C-1's check,
+>    answered here). The REST extractor parses `X-Axiam-Tenant` as a UUID and **drops** a
+>    value that does not parse, so the request acts on the caller's own tenant and
+>    succeeds. That is T-210's failure mode by a second path, so the helper must refuse a
+>    non-UUID client-side.
+> 4. **"Reachable only when the flag is true" cannot be applied to every caller.** A
+>    construction-time option precedes the login that reveals `organization_level`, and a
+>    service account never receives a login result at all. An organization-level service
+>    account is a supported design (S-9 note 5). So the rule is split: an SDK gates on
+>    the flag and on `reachable_tenant_ids` when it holds a login result, and otherwise
+>    the server's `403` is the answer.
+> 5. **§6.1's intro contradicted S-1.** It said device certificates are "signed by the
+>    tenant's organization CA". Since T22.1 a tenant principal issues only under its
+>    tenant signing CA, and since T22.13 a service account always does. Corrected.
+> 6. **§27.0 listed two of the registry's five exclusions.** `GET /health/jobs` and
+>    `POST /users/me/resend-verification` were missing as well as `/admin/bootstrap`, and
+>    all three are added from the registry's own reasons. Bootstrap's outcome table was
+>    read from the handler: 201 / 400 / 403 / 409, a public route with no `401`, and the
+>    gate checked before the fields. Found, not fixed: **`/admin/bootstrap` has no rate
+>    limiter** (§13 row 15).
+> 7. **Every figure in §27 was stale.** The prose said 147 operations, the §27.1 table
+>    summed to 148, and the registry holds 162. Only three operations are
+>    unauthenticated, not "the four in `platform`" plus one. It is 18 namespaces with a
+>    `list` and 17 with a `get`, not 20 and 14; 21 paginated operations, not 20; 19
+>    bare-array reads, not 13; and 34 routes with a `{org_id}`/`{tenant_id}` segment,
+>    not 31. Re-rendered from the registry, with the requester's agreement, since §27.0
+>    says a table that disagrees with the registry is the one that is wrong.
+> 8. **The manifest additions needed four rules the plan did not state**, each taken from
+>    the server.
+>    - `has_role` is `UNIQUE(in, out)`, so one subject bound to one role twice is
+>      unsatisfiable and is rejected client-side (D-3).
+>    - Assignments have no update endpoint, so a changed binding is unassign-then-assign
+>      with a restore on failure: the console's T22.11b behaviour.
+>    - That re-assignment must carry `tenant_scope` across, or it would silently widen
+>      an organization-level account.
+>    - Service-account names are **not unique**: only `client_id` is indexed. So a
+>      stated name matching two accounts fails `plan` rather than picking one.
+> 9. **§27.5: what `apply` returns for a new service account's secret.** The rule is the
+>    `create` return, once, `Sensitive`, on that action's outcome, **even when a later
+>    action fails**; `apply` never rotates to reconcile. The reason is the imperative
+>    contract. `POST /service-accounts` is the only moment the plaintext exists: `get`
+>    and `list` return `ServiceAccountResponse` with no secret field, the server keeps a
+>    hash, and `rotate_secret` invalidates the old secret rather than revealing it. So the
+>    manifest can only return it where `create` does, and dropping it would create
+>    accounts nobody can use, which the next `apply` reports as `NoChange`. The same
+>    argument explains why service accounts are in the manifest and certificates are
+>    not: an account's identity is separate from its secret, whereas a certificate *is*
+>    its key.
+> 10. **S-7 has a response-side consequence.** `"Server"` appears in `certificates.list`
+>     and `get`, so an SDK with a closed `CertificateType` enum fails the whole list on
+>     one server certificate: the `TenantKind` lesson of §27.11 rule 1, stated again.
+>     And `SetOrgSettings.server_cert_allowed_names` defaults to `[]` under `replace`
+>     semantics, so a `set_org` that omits it empties every tenant's list: the S-7b
+>     console bug, which an SDK's read-modify-write form must not reproduce.
+> 11. **S-9 is by permission, not by registry namespace.** 66 registry operations accept
+>     a service-account token, `users.list_roles` (`roles:get`) among them, and the
+>     registry does not record which. §27.13 points at `openapi.json`'s per-operation
+>     `security` as the authority and forbids client-side gating on token kind.
+> 12. **The SDK manifests are further behind than §6 says**, read from all eleven
+>     repositories' code.
+>     - Nobody has `service_accounts`, and nobody binds a role at a resource.
+>     - Only PHP has `metadata`.
+>     - In the flat tier (PHP, Swift, C, C++), none of the four sends a resource's
+>       `parent_id` on create, so trees are created flat.
+>     - Swift, C and C++ default `resource_type` to `"folder"`.
+>     - **PHP stores role grants and group role keys and never reconciles them**, while
+>       its docblock says it does.
+>
+>     All of this is in §27.10 as fact, with the three defects assigned to C-6, C-9,
+>     C-10 and C-11. Also: `TokenService` stubs are generated in five repositories, not
+>     nine, and are wrapped in none. Go's sit under `internal/`, and Python and PHP
+>     generate none.
+> 13. **The website's contract version had been stuck at 1.48.** `CONTRACT_VERSION` is
+>     derived from the footer, which 1.49 and 1.50 never updated. The footer now names
+>     all three versions, and the reference page's version table (last touched at 1.48)
+>     gains its three rows.
+>
+> **Records.**
+>
+> - **Threat model: no new entry, one amendment — verified.** The entries on the
+>   contract store and on the SDK processes were read: T-139 … T-149, T-167, T-175,
+>   T-183 … T-186, T-199, T-209 … T-211, T-235, T-265 and T-266.
+>   - **T-210** claimed that "the eleven contract-1.35 SDK fan-out PRs already implement
+>     the real header". A search of all eleven repositories finds `X-Axiam-Tenant` only
+>     in doc comments, so the sentence is corrected in `Axiam.json` and
+>     `threat-model-stride.md`. It gains the malformed-UUID path and its 1.51 mitigation.
+>     Severity, status and counts are unchanged.
+>   - The one-time `client_secret` on a manifest outcome sits under T-139's `Sensitive`
+>     mitigation, unchanged.
+>   - The certificate-bound device token is T-283's, and §6.1 rule 9 is its SDK-side
+>     statement.
+>   - `gen-threat-model.mjs` reports *"threatModel.ts: 9 diagrams, 279 threats (266
+>     mitigated, 13 open)"*, unchanged. The generated files were reverted.
+> - Roadmap **T22.15**.
+> - CHANGELOG under **Documentation**.
+> - §13 row 1 updated, and a "Found during PR H" table added.
+> - No `/oauth2/*` route changed, so the FAPI 2.0 and Basic OP results of 2026-09-11
+>   stand (§7.2). No run is claimed.
+
 Text first, before any port; the fan-out rules in §8 forbid writing an SDK
 against a draft. Amendments:
 
@@ -2582,7 +2740,7 @@ None of it is worked in PR G2.
 
 | # | Item | Owner | Next step |
 |---|---|---|---|
-| 1 | **PR H → I₁ … I₁₁ → J**: contract 1.50 (C-0), the eleven SDK ports (C-1 … C-11), the conformance review (C-12) | Executing sessions: Opus 5 for C-0, C-1, C-12; Sonnet 5 for C-2 … C-11 (§2) | Open PR H (`docs/contract-1.50`) from `main` as it stands after G2 — §6 C-0 is the brief — then C-1 (Rust) before the ten ports, per §8. `check-sdk-artifact-drift.py` stays red until the SDKs re-vendor from the C-0 commit; that is expected, not a regression |
+| 1 | **I₁ … I₁₁ → J**: the eleven SDK ports (C-1 … C-11) against **contract 1.51**, then the conformance review (C-12, now **1.52**). PR H (C-0) has landed its text: 1.51, because 1.50 was already `d5a6811`'s (C-0 EXECUTED, item 1) | Executing sessions: Opus 5 for C-1 and C-12; Sonnet 5 for C-2 … C-11 (§2) | C-1 (Rust, `ilpanich/axiam-rust-sdk`, branch `feat/contract-1.50` per §8 rule 2, or `feat/contract-1.51` if the maintainer renames it) re-vendors `CONTRACT.md`, `openapi.json`, `management-registry.json` and `proto/` from the **merged** PR H commit, then the ten ports per §8. The §27.10 manifest table assigns three defects to C-6, C-9, C-10 and C-11 on top of §6's scope. `check-sdk-artifact-drift.py` stays red (33 problems: three artefacts × eleven repositories) until they do; that is expected, not a regression |
 | 2 | **Vault `sign_csr` of a `Server` certificate.** Refused under a `vault_pki` CA today, by design (S-7 EXECUTED, item 1): Vault's `sign-verbatim` takes SANs from the CSR only, and the CSR may not carry them | Maintainer decision, then an Opus 5 session (certificate issuance) | Decide whether to add the config key the plan excluded: a Vault role with `use_csr_sans=false`, so explicit names can reach the certificate. Until then `POST /certificates` (generate) is the path under a Vault CA, and the console says so |
 | 3 | **D-7: X.509 `nameConstraints` in tenant CAs**, so the name fence holds for a relying party that never talks to AXIAM. T-288's residual | Next PKI pass; Opus 5 | A design note first: how a change to `server_cert_allowed_names` re-issues (or does not re-issue) a tenant CA, and what happens to leaves already issued under the old constraints |
 | 4 | **The intermittent `500` from CA-certificate creation during e2e fixture setup**, deferred in S-5 as "a real unknown in CA generation; gets its own change" | Unassigned; its own change | Reproduce first: loop the matrix fixture's CA creation against a local stack and capture the server log for the `500`. No fix before there is a cause |
@@ -2601,6 +2759,14 @@ None of it is worked in PR G2.
 |---|---|---|---|
 | 13 | `frontend/e2e/certificates.spec.ts`: the two older Generate-dialog tests probe once with `isVisible()` and look for labels the page does not have (`Common Name *`, `Key Type`), so they can pass only through their `else` branch and assert nothing about the dialog | Sonnet 5, test-only change | Rewrite them with auto-waiting assertions on the real labels (`Subject *`, `Key Algorithm`), as the Server tests next to them do |
 | 14 | The settings lists edited as a textarea (DCR scopes, redirect hosts, audiences; CIMD domains) re-parse on every keystroke through `parseLines`, which drops a trailing newline, so starting a second line is awkward | Sonnet 5, console-only | Keep the raw text in form state and parse on save, or move them to the row editor `serverNamesPolicy.tsx` uses |
+
+**Found during PR H, not fixed there** (C-0 is contract text only):
+
+| # | Item | Owner | Next step |
+|---|---|---|---|
+| 15 | `POST /api/v1/admin/bootstrap` has **no rate limiter** (`server.rs`, no `build_governor` / `RateLimitShared`), unlike every other unauthenticated auth resource. It is gated on a setup token or an environment variable and is final after one success (`409`), so the exposure is a pre-bootstrap deployment reachable from the network | Maintainer decision; Sonnet 5 for the change (S-2's pattern) | Decide whether the window matters. If so, wrap it like `/auth/device` (S-2) with a small per-IP limit, add a knob to the human family, and record a threat entry |
+| 16 | `/auth/device` answers **404**, not 401, when a presented certificate's tenant no longer exists: `handlers/auth.rs` looks the tenant up outside the extractor's 401 mapping. Separately, its spec entry lists 200 and 401 only. No limiter 429 is documented anywhere (S-2's choice; the one documented 429 is the resend-verification daily cap, a business rule), so the missing 429 is consistent, not a slip | Sonnet 5, server + spec | Map the missing tenant to the 401 its siblings get, with a test, and regenerate the spec. Whether limiter 429s belong in the spec at all is a maintainer decision for every route at once, not for this one |
+| 17 | The SDK manifest defects §27.10 records: PHP never reconciles role grants or group bindings (docblock says it does); PHP, Swift, C and C++ never send `parent_id`; Swift, C and C++ default `resource_type` to `"folder"` | C-6, C-9, C-10, C-11 (with the 1.51 port) | Fix in the port, each with an idempotence test over a **nested** manifest that asserts the parent on the wire |
 
 **References**
 

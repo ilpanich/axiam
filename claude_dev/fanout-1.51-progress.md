@@ -22,7 +22,7 @@ once every port PR is merged or closed.
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | reviewed `2aef3f3` (SSO reset fixed on send-back; re-run 1241+72 on net8/net10) | [#95](https://github.com/ilpanich/axiam-csharp-sdk/pull/95) | green `2aef3f3` | `d1dc37a` |
 | 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | reviewed `2fc30ba` (README gate paragraph fixed by orchestrator; re-run 1057/0, 98.07 %) | [#68](https://github.com/ilpanich/axiam-kotlin-sdk/pull/68) | pending | |
 | 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | reviewed `16f5467` (scoped bindings + service accounts added on send-back; re-run 1649/5072) | [#73](https://github.com/ilpanich/axiam-php-sdk/pull/73) | pending | |
-| 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | not started | | | |
+| 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | running (in `mirror.gcr.io/library/swift:{6.3,5.9}-jammy`; SwiftPM resolves via the proxy) | | | |
 | 3 | C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | running | | | |
 | 3 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | running | | | |
 
@@ -78,7 +78,7 @@ Wave 1 (C-2, C-3, C-7) started 09:25Z. C-2 pushed and reviewed, PR open; its bui
 
 For C-12, found in review: C-3 Python answers question 5 like C-2/C-7 (it records the scope from OPAQUE and the WebAuthn/MFA setup; WebAuthn login, SSO and the device login reset it through `_absorb_session_cookies`). Also C-2 and C-7 both differ from Rust on question 5. They read the principal's reach from OPAQUE login and the WebAuthn / MFA setup too, because those responses carry `LoginUserInfo`. Confirmed in `crates/axiam-api-rest/src/handlers/opaque.rs`: the `200` of `/auth/opaque/login/finish` uses the password path's builder, but its utoipa annotation documents no body (a spec gap).
 
-Wave 3 order changed: C-9 Swift runs last, after C-10 finishes, not beside C-6/C-10/C-11 (the cap is three workers, and Swift's toolchain is a Docker image pulled from `mirror.gcr.io`, so it starts once C-10's `build*/` trees are gone).
+Wave 3 order changed (and changed back at 14:40Z, once the cleared caches left 24 GB free): C-9 Swift runs last, after C-10 finishes, not beside C-6/C-10/C-11 (the cap is three workers, and Swift's toolchain is a Docker image pulled from `mirror.gcr.io`, so it starts once C-10's `build*/` trees are gone).
 
 When a worker is cut off, record here: the SDK, the last pushed
 commit on `feat/contract-1.51`, what the worker's last report said was left, and the

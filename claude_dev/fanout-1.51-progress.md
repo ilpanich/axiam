@@ -17,7 +17,7 @@ once every port PR is merged or closed.
 |---|---|---|---|---|---|---|---|---|
 | 1 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | reviewed (1389 pass / 1 skip re-run) | [#116](https://github.com/ilpanich/axiam-typescript-sdk/pull/116) | green `978efdb` | |
 | 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | running | | | |
-| 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | reviewed `6898cc5` (model tests added on send-back; re-run 0 fail) | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | pending | |
+| 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | reviewed `6898cc5` (model tests added on send-back; re-run 0 fail) | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | red: coverage 93.5 % < 94.4 % (`6898cc5`); worker covering | |
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | running | | | |
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | running | | | |
 | 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | not started | | | |
@@ -47,6 +47,21 @@ Search for each tool was done twice (PATH lookup, then a filesystem/installer pr
 | C++ | `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD={17,23}` gcc/clang; build; `ctest`; `./build/examples/axiam_example_reactor`; ASan+UBSan; valgrind; drift `python3 scripts/gen_management.py --check`; TLS / key grep; vcpkg/conan validation | as C, plus ninja ✔ | as C |
 
 Installed by the orchestrator at 09:30Z (apt, no worker running apt): dotnet SDK 8.0.131 and 10.0.112, OpenJDK 17.0.20 (the default `java` stays 21), `libcurl4-openssl-dev` 8.5.0, `protoc` 3.21.12. These do not survive a fresh container; re-run the apt line if the session resumes elsewhere.
+
+**Coverage floors (`.github/workflows/coverage.yml`, runs on every PR; missed in the first gate list, found when C-7 went red at 93.5 % < 94.4 %):**
+
+| SDK | Coverage command | Floor |
+|---|---|---|
+| TypeScript | `npm run coverage` | vitest `thresholds` lines/statements 95 |
+| Python | `pytest --cov=axiam_sdk --cov-report=lcov` | `fail_under = 98` (unrounded) |
+| Go | `go test ./... -coverprofile=coverage.raw.out -covermode=atomic`; drop `/examples/`, `/internal/gen/`, `/internal/cmd/`; `go tool cover -func` total | 94.4 % statements |
+| Java | `mvn -B verify` | jacoco COVEREDRATIO 0.95 |
+| C# | merged line coverage of both test projects (see workflow) | 96 % |
+| Kotlin | `./gradlew koverVerify` | 98 % line |
+| PHP | `vendor/bin/phpunit --coverage-clover coverage.xml` + the inline floor check | 95 % line |
+| Swift | `swift test --enable-code-coverage` + llvm-cov total | 92 % line |
+| C | cmake `-DAXIAM_ENABLE_COVERAGE=ON` + gcovr | 98 % line, 84 % branch |
+| C++ | llvm profile of `tests/axiam_cpp_tests` (logic layer) | 98 % line |
 
 ## Scope additions beyond §6's table
 

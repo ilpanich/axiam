@@ -96,6 +96,12 @@ agent id if it can still be resumed with SendMessage.
 - C-8 Kotlin: pushed `8b06813`, plus the orchestrator's README fix `2fc30ba`. PR not yet opened; the orchestrator's test re-run is pending.
 - Disk: the composer (11 GB), go-build, uv and pip caches were cleared at 14:13Z (45 % used afterwards).
 
+## Artifact drift (`scripts/check-sdk-artifact-drift.py --local-root ..`)
+
+- Before: 33 problems (C-0), 30 after Rust.
+- Interim, 2026-09-24 ~17:00Z, all ten open or merged: **6**. They are CONTRACT.md, openapi.json and management-registry.json in Swift and C++, whose `main` still lacks their open PRs (#66 in each repo); those PR branches byte-match 56fbe44. The eight merged ports report no problems. The sources are unchanged since 56fbe44.
+- After: to run once Swift #66 and C++ #66 merge; expected 0.
+
 ## Resume check-ins
 
 - `trig_011KPyuytijTBNUtrTjoU38X` — fires 2026-09-24T21:22Z (+6 h; re-armed at 15:21Z, when the first pair fired)

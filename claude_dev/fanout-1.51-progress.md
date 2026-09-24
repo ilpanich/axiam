@@ -16,7 +16,7 @@ once every port PR is merged or closed.
 | Wave | Task | SDK | Repository | Branch | Worker | PR | CI | Merged |
 |---|---|---|---|---|---|---|---|---|
 | 1 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | reviewed (1389 pass / 1 skip re-run) | [#116](https://github.com/ilpanich/axiam-typescript-sdk/pull/116) | green `978efdb` | |
-| 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | reviewed `0507daf` (two send-backs; re-run 1746 pass, 98.61 %) | [#88](https://github.com/ilpanich/axiam-python-sdk/pull/88) | green `0507daf` (3.10 and 3.14 legs) | |
+| 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | reviewed `0507daf` (two send-backs; re-run 1746 pass, 98.61 %) | [#88](https://github.com/ilpanich/axiam-python-sdk/pull/88) | green `0507daf` (3.10 and 3.14 legs) | `231a686` |
 | 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | reviewed `6898cc5` (model tests added on send-back; re-run 0 fail) | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | green `8ba1a4b` (coverage 94.6 %, main 94.4 %) | `9013027` |
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | running | | | |
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | running | | | |

@@ -24,7 +24,7 @@ once every port PR is merged or closed.
 | 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | reviewed `16f5467` (scoped bindings + service accounts added on send-back; re-run 1649/5072) | [#73](https://github.com/ilpanich/axiam-php-sdk/pull/73) | green `16f5467` (PHP 8.2 and 8.5, coverage) | `ceb7f2c` |
 | 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | pushed `9884130` (1183 tests on 5.9 and 6.3; 95.34 %); sent back: self-service header, plain-over-scoped Update, secret-survives-failure, apply-then-plan-converges tests missing | | | |
 | 3 | C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | reviewed `7fd9564` (SSO reset + never-set `authenticated` fixed on send-back; re-run gcc/C11 64/64) | [#65](https://github.com/ilpanich/axiam-c-sdk/pull/65) | green `7f3d5db` (after the orchestrator's valgrind-race fix; conan create passes in CI) | `0b87547` |
-| 3 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | running | | | |
+| 3 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | pushed `678fd85` (1283 cases, 98.69 %); sent back: refuses a stated `inherit: true` (§27.6.1 only forbids SENDING it), plain-over-scoped Update and all-additions convergence tests missing | | | |
 
 Worker states: not started → running → pushed → reviewed (orchestrator re-ran the main
 test command) → PR open → green → merged.

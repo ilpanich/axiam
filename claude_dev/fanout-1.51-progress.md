@@ -24,7 +24,7 @@ once every port PR is merged or closed.
 | 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | reviewed `16f5467` (scoped bindings + service accounts added on send-back; re-run 1649/5072) | [#73](https://github.com/ilpanich/axiam-php-sdk/pull/73) | green `16f5467` (PHP 8.2 and 8.5, coverage) | `ceb7f2c` |
 | 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | reviewed `9606cef` (four tests added on send-back; re-run 6.3: 1188/0) | [#66](https://github.com/ilpanich/axiam-swift-sdk/pull/66) | green `9606cef` (Swift 5.9 and 6.3, coverage) | `db24d26` |
 | 3 | C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | reviewed `7fd9564` (SSO reset + never-set `authenticated` fixed on send-back; re-run gcc/C11 64/64) | [#65](https://github.com/ilpanich/axiam-c-sdk/pull/65) | green `7f3d5db` (after the orchestrator's valgrind-race fix; conan create passes in CI) | `0b87547` |
-| 3 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | reviewed `7b8786d` (stated `inherit: true` accepted, two tests added on send-back; re-run gcc/C++17 1285/4079) + orchestrator doc fix `909b56e` (§6.1 rule 7 runtime gate declared) | [#66](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/66) | green `909b56e` (four-leg matrix, ASan/UBSan and valgrind, coverage) | |
+| 3 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | `feat/contract-1.51` | reviewed `7b8786d` (stated `inherit: true` accepted, two tests added on send-back; re-run gcc/C++17 1285/4079) + orchestrator doc fix `909b56e` (§6.1 rule 7 runtime gate declared) | [#66](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/66) | green `909b56e` (four-leg matrix, ASan/UBSan and valgrind, coverage) | `473ccbb` |
 
 Worker states: not started → running → pushed → reviewed (orchestrator re-ran the main
 test command) → PR open → green → merged.
@@ -85,7 +85,7 @@ commit on `feat/contract-1.51`, what the worker's last report said was left, and
 agent id if it can still be resumed with SendMessage.
 
 **Follow-up fixes to merged ports (SSO gate reset).** The user chose a new branch, `fix/contract-1.51-sso-gate`, cut from each repository's main:
-- Go: [ilpanich/axiam-go-sdk#87](https://github.com/ilpanich/axiam-go-sdk/pull/87), `c8049b1`, CI green (14 checks).
+- Go: [ilpanich/axiam-go-sdk#87](https://github.com/ilpanich/axiam-go-sdk/pull/87), `c8049b1`, CI green (14 checks); merged `d5658ea`.
 - TypeScript: [ilpanich/axiam-typescript-sdk#117](https://github.com/ilpanich/axiam-typescript-sdk/pull/117), `89d406a`, CI green (7 checks; reproduced red on main first).
 - Python needs no follow-up (verified). C#, Java, Kotlin, PHP, C, Swift and C++ carry the reset in their port PRs.
 
@@ -100,7 +100,7 @@ agent id if it can still be resumed with SendMessage.
 
 - Before: 33 problems (C-0), 30 after Rust.
 - Interim, 2026-09-24 ~17:00Z, all ten open or merged: **6**. They are CONTRACT.md, openapi.json and management-registry.json in Swift and C++, whose `main` still lacks their open PRs (#66 in each repo); those PR branches byte-match 56fbe44. The eight merged ports report no problems. The sources are unchanged since 56fbe44.
-- After: to run once Swift #66 and C++ #66 merge; expected 0.
+- After, 2026-09-24 17:18Z, all ten merged: **0 problems** (11 repos inspected, 0 skipped).
 
 ## Resume check-ins
 

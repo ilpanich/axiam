@@ -2764,7 +2764,7 @@ every piece the SDK does not ship, as the README and the per-SDK table state it.
 | C-4 | Java | `ilpanich/axiam-java-sdk` | | | not started | |
 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | | | not started | |
 | C-6 | PHP | `ilpanich/axiam-php-sdk` | | | not started | |
-| C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | open, CI green (`8ba1a4b`) | `webhooks` in the manifest |
+| C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | merged (`9013027`) | `webhooks` in the manifest |
 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | | | not started | |
 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | | | not started | |
 | C-10 | C | `ilpanich/axiam-c-sdk` | | | not started | |

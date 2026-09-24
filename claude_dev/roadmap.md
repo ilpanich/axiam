@@ -1015,6 +1015,35 @@ also records six defects that survived review, one of them in the security path
 same day: typescript-sdk#118, cplusplus-sdk#67, python-sdk#89, csharp-sdk#96 and
 php-sdk#74. C-12 starts from that table.
 
+### T22.18 — Cross-SDK conformance review, contract 1.52 — Opus 5 ✓ LANDED
+C-12 (PR J). The review read the eleven 1.51 ports from each SDK's merged `main`. It
+covered three things:
+- the seven open questions;
+- a code probe of each rule's edges;
+- every README and CHANGELOG sentence about 1.51, checked against the code.
+
+The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
+
+- **Contract 1.52.** It makes six clarifications and changes nothing on the wire:
+  - N1: every access-token entry point is a §10.1 rule 9 guard;
+  - N2: the acting tenant is part of the §17 memo key;
+  - N3: a `SubjectAltName`'s shape is checked client-side;
+  - N4: the device credential's lifecycle, in new §6.1 rule 11;
+  - N5: the acting-tenant helper's semantics, in §5.2 rule 1;
+  - N6: manifest bindings, in §27.6.1.
+- **The review table.** New §27.14 records 37 divergences, none open. §27.10's
+  manifest table is refilled from the merged ports.
+- **One fix PR per SDK, eleven in all.** Each is held until this PR merges, then
+  re-vendors `CONTRACT.md` from its merge commit:
+  - Rust {{PR:rust}}, TypeScript 119, Python 90, Java 103;
+  - Kotlin {{PR:kotlin}}, C# {{PR:csharp}}, PHP 75, Go 88;
+  - Swift 67, C 66, C++ 68.
+- **What every SDK had.** Each SDK had at least one defect. The ones found in several
+  SDKs:
+  - the device credential outlived a later login (nine SDKs);
+  - a device token entered the refresh guard (four);
+  - tenant IDs were compared as strings (six).
+
 ---
 
 ---

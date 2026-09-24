@@ -85,7 +85,7 @@ commit on `feat/contract-1.51`, what the worker's last report said was left, and
 agent id if it can still be resumed with SendMessage.
 
 **Follow-up fixes to merged ports (SSO gate reset).** The user chose a new branch, `fix/contract-1.51-sso-gate`, cut from each repository's main:
-- Go: [ilpanich/axiam-go-sdk#87](https://github.com/ilpanich/axiam-go-sdk/pull/87), `c8049b1`, CI pending.
+- Go: [ilpanich/axiam-go-sdk#87](https://github.com/ilpanich/axiam-go-sdk/pull/87), `c8049b1`, CI green (14 checks).
 - TypeScript: [ilpanich/axiam-typescript-sdk#117](https://github.com/ilpanich/axiam-typescript-sdk/pull/117), `89d406a`, CI pending (reproduced red on main first).
 - Python needs no follow-up (verified). C#, Java, Kotlin, PHP, C, Swift and C++ carry the reset in their port PRs.
 
@@ -100,4 +100,4 @@ agent id if it can still be resumed with SendMessage.
 
 - `trig_011KPyuytijTBNUtrTjoU38X` — fires 2026-09-24T21:22Z (+6 h; re-armed at 15:21Z, when the first pair fired)
 - `trig_01FsrAVmHhZCMECo6vrKpzAC` — fires 2026-09-25T01:22Z (+10 h)
-- PR check-in, hourly: latest `trig_01KfxgY8XPDAKqbycRRJHamb` (16:20Z)
+- PR check-in, hourly: re-armed at 16:27Z (next ~17:27Z)

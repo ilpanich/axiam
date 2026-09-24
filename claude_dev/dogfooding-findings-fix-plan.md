@@ -2492,6 +2492,142 @@ Contract **1.50**.
 
 ### C-1 — Rust SDK reference implementation — Opus 5
 
+> **EXECUTED — 2026-09-24, PR I₁, against contract 1.51**
+> ([ilpanich/axiam-rust-sdk#115](https://github.com/ilpanich/axiam-rust-sdk/pull/115),
+> branch `feat/contract-1.51`, cut from `7d27160`). §13 row 1 allowed either branch
+> name, and this one names the contract actually implemented. The PR is open, and CI
+> is green on `c853412` (all 17 checks). Nothing is tagged or published.
+>
+> **Shipped.** One commit per piece, in this order:
+>
+> - **Re-vendor** from `56fbe44`, the merge of #497. `CONTRACT.md` (sha256
+>   `0ac7fd75f83c…`), `openapi.json` and `management-registry.json` byte-match that
+>   commit, and `proto/` was already identical. The §27 surface is regenerated at 162
+>   operations. `CertificateType` already decoded openly, so §27.13 S-7 rule 2 needed a
+>   test and no change.
+> - **Acting tenant, §5.2 rule 1.** The builder form is `with_acting_tenant(Uuid)`. The
+>   on-client form is `acting_tenant(Uuid)`, which returns a new handle over the same
+>   session, plus `clear_acting_tenant()`. The value is scoped to the handle rather than
+>   shared, so two tasks acting on two tenants cannot rewrite each other's header. It is
+>   gated on a held login result, and it is REST-only.
+> - **`authenticate_device()`, §6.1 rules 6–10**, plus `examples/device_mtls_login.rs`.
+>   `examples/device_login.rs` (RFC 8628) is untouched. Rule 7 is met by its client-side
+>   branch: `AuthError` with zero wire calls.
+> - **`grpc::TokenGrpcClient::{validate_token, introspect_token}`, §1.1.1 and §10.3.**
+>   The rule-9 table moves onto `CnfClaim::verify`, so local verification and gRPC
+>   validation share one implementation.
+> - **`JwksVerifier` and `cnf`, §10.1 rule 9: a real defect, fixed.** `verify()` is the
+>   entry point `AxiamUser`, the §11 macros and the §28 guard all reach, and it accepted
+>   a certificate-bound or DPoP-bound token as a bearer token. A device token lifted off
+>   a device therefore opened every guarded route. `verify()` now refuses a bound token
+>   it has no evidence for. `verify_with_proofs` and `middleware::PeerCertificate`
+>   (recorded in `on_connect`, never from a header) accept one. The test that pinned the
+>   defect is inverted, not relaxed.
+> - **Manifest, §27.6.1 and §27.5 rule 5.**
+>   - `ResourceSpec.metadata` compares by equality of the whole object.
+>   - `RoleBinding` has two shapes. `inherit` reaches the wire only as `false`, and a
+>     role bound twice is refused before any request. An update is unassign then
+>     assign, with `tenant_scope` carried across and the previous binding restored if
+>     the assign fails.
+>   - `ServiceAccountSpec` is reconciled by name, and an ambiguous name fails `plan`.
+>     The one-time `client_secret` survives a later failure in the report, and nothing
+>     is ever rotated.
+>
+> **Tests.** Every §8 rule 7 test ships, each negative test with its I4 twin. There are
+> 49 tests in six new files, plus three added to `local_verification_set_test.rs`, and
+> the suite reports 985 passed and 0 failed. Every mutation deliberately introduced
+> (fourteen across the six feature commits, each named in its commit message) was
+> caught by the test meant to catch it.
+>
+> **Gates.** Every job of `sdk-ci-rust.yml` passes, on stable and on MSRV 1.88:
+>
+> - fmt, and clippy `-D warnings`;
+> - `cargo doc -D warnings`, the examples, the leak and TLS-lint gates, `--features
+>   grpc`, and the macros publish dry-run;
+> - the §27.8 drift check;
+> - the wasm32 check, `wasm-pack` for all three targets, and the smoke test;
+> - `buf` lint, format and breaking;
+> - `cargo audit`;
+> - coverage at 92.08 % of lines, against a floor of 90.
+>
+> CI's stable toolchain (1.98.1) then raised `clippy::result_large_err`, which the
+> local 1.94 did not, and CodeQL raised six test-only alerts. Both were fixed on the
+> branch (`fa132c2`, `c853412`).
+>
+> **What the plan did not anticipate.**
+>
+> 1. **The verifier defect was real, and breaking to fix.** The plan's "if the verifier
+>    ignores `cnf` today" was the case. A resource server that accepted device tokens
+>    through `verify()` now answers `401` until it records `PeerCertificate`. The
+>    CHANGELOG lists this under Breaking.
+> 2. **The generator had two defects the re-vendor exposed.**
+>    - `SubjectAltName` is an externally tagged `oneOf`, and the generator emitted it
+>      as an empty struct that serializes as `{}`.
+>    - A required `inherit` on the role-side listings would fail the whole listing
+>      against a pre-1.51 server.
+>
+>    Both are fixed in `tools/gen_management.py`. Every other SDK's generator is exposed
+>    to the same pair; see C-12 item 3 below.
+> 3. **A device token must not ride next to a stale cookie.** The server reads the
+>    `axiam_access` cookie before the `Authorization` header. An SDK that adopts the
+>    device token while keeping its jar would therefore run as the previous session's
+>    principal. Rust sends the token as a bearer credential with an explicit empty
+>    `Cookie` header.
+> 4. **The service-account manifest cannot rely on unique names.** The server does not
+>    enforce them, so reconciling by name must fail `plan` on more than one match
+>    rather than pick one.
+> 5. **A plain binding over a resource-scoped server assignment is now an `Update`.**
+>    Presence used to be all that was compared. §27.6.1 defines the plain shape as "no
+>    resource", so this is a behaviour change, recorded in the CHANGELOG.
+> 6. **Two pre-existing gaps were found and left alone, both outside C-1's scope.**
+>    First, `cargo build --no-default-features --features grpc` fails, because `pub mod
+>    management` is not gated on `rest`, and CI never builds that combination. Second,
+>    §27.7 lists `#[derive(AxiamSpec)]` for Rust, which has never shipped; the README
+>    declines it.
+>
+> **Declines (§8 rule 5).**
+>
+> - `webhooks` in the manifest (§7.2).
+> - §6.1 rule 7 as a typestate. It would make `AxiamClient` generic in every caller for
+>   the sake of one operation, and the rule names the client-side `AuthError` as
+>   conforming.
+> - `#[derive(AxiamSpec)]`, per item 6.
+>
+> **For C-12: questions the contract leaves open, as the reference resolved them.**
+> The ports will meet each of these, so C-12 checks them across all eleven SDKs, and
+> any that need text go into 1.52.
+>
+> 1. **§10.1 rule 9 at the default entry point.** The contract says a bound token "MUST
+>    NOT be accepted as" a bearer token, but it does not say that the SDK's *default*
+>    verify call is bound by it when that call has no transport evidence. Rust reads it
+>    as bound: the default call refuses. Every SDK whose route guard calls a plain
+>    `verify` probably has the defect Rust had, so C-12 checks each one. A 1.52 sentence
+>    naming the default entry point would stop the question recurring.
+> 2. **The §17 memo key and the acting tenant.** §17 rule 3 keys the memo on
+>    `(subject_id, resource_id, action, scope)`, but since 1.51 one session can ask the
+>    same question of two tenants. Rust adds the acting tenant to the key. Without it, a
+>    memoized answer for tenant A is returned for tenant B within the TTL. Candidate
+>    amendment: the key gains the acting tenant.
+> 3. **Generated DTOs from the 1.51 spec.** `SubjectAltName`'s externally tagged
+>    `oneOf` and the required role-side `inherit` (item 2 above) will trip other
+>    generators. C-12 checks that each SDK sends `{"dns": …}` / `{"ip": …}` rather than
+>    `{}`, and decodes a listing without `inherit` as `true` (§27.13 S-10 rule 3).
+> 4. **Device-token adoption beside a cookie jar (item 3 above).** §6.1 says to adopt
+>    the token, but does not say to withhold the jar. Candidate amendment: say so, and
+>    say why.
+> 5. **Which sessions count as "holding a login result" (§5.2 rule 1).** OPAQUE, SSO,
+>    WebAuthn and the MFA setup complete a session without a `LoginUserInfo`. Rust
+>    treats each of them as holding none: it sends the header and lets the server's
+>    `403` answer. A port that keeps an older login result across such a session would
+>    gate on the wrong principal.
+> 6. **The global role bound with `inherit: false`.** §27.6.1 says an SDK MAY refuse it.
+>    Rust refuses it before any request. C-12 records each SDK's choice, because a
+>    mixture is conforming but surprising.
+> 7. **An `Update` of a binding is two calls.** Unassign then assign is not atomic.
+>    Rust restores the previous binding when the assign fails, and reports
+>    `BindingUpdateFailed { error, restore }`. The contract does not say what a failed
+>    rebind leaves behind.
+
 Rust is the reference because the demo consumes it and because the
 maintainer works in it. Scope, against contract 1.50:
 
@@ -2543,6 +2679,8 @@ implement, in §27.10 / the §5.2 table, with the reason.
 §28.11's form: one row per divergence, contract **1.51**, the posture
 tables filled from merged code, README statements checked against code
 (F-28-02's lesson). Evidence file `claude_dev/sdk-dogfooding-conformance-review.md`.
+Start from the seven open questions in C-1's EXECUTED block ("For C-12"): each is a
+place where the ports can diverge while each still reads the contract correctly.
 
 ---
 
@@ -2612,6 +2750,25 @@ These are [`remediation-plan-2026-09-12.md`](remediation-plan-2026-09-12.md)
 
 Fan-out record: an eleven-row table, filled in as PRs open, appended to this
 document under §8.1 by the executing sessions.
+
+### 8.1 Fan-out record
+
+One row per SDK, updated as each PR opens, turns green and merges. "Declines" names
+every piece the SDK does not ship, as the README and the per-SDK table state it.
+
+| Task | SDK | Repository | Branch | PR | State | Declines |
+|---|---|---|---|---|---|---|
+| C-1 | Rust (reference) | `ilpanich/axiam-rust-sdk` | `feat/contract-1.51` | [#115](https://github.com/ilpanich/axiam-rust-sdk/pull/115) | open, CI green on `c853412` | `webhooks` in the manifest; §6.1 rule 7 as a typestate (the client-side branch instead); §27.7 `#[derive(AxiamSpec)]` |
+| C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | | | not started | |
+| C-3 | Python | `ilpanich/axiam-python-sdk` | | | not started | |
+| C-4 | Java | `ilpanich/axiam-java-sdk` | | | not started | |
+| C-5 | C# | `ilpanich/axiam-csharp-sdk` | | | not started | |
+| C-6 | PHP | `ilpanich/axiam-php-sdk` | | | not started | |
+| C-7 | Go | `ilpanich/axiam-go-sdk` | | | not started | |
+| C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | | | not started | |
+| C-9 | Swift | `ilpanich/axiam-swift-sdk` | | | not started | |
+| C-10 | C | `ilpanich/axiam-c-sdk` | | | not started | |
+| C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | | | not started | |
 
 ---
 
@@ -2727,6 +2884,56 @@ Rules that bind this session:
 
 Start by printing the task list for PR <LETTER> with the files each task
 touches, then begin with the first task.
+```
+
+### 12.1 The port prompt, C-2 … C-11
+
+The ten ports differ from the PRs above: each works in its own SDK repository and
+against a reference that already exists. One prompt, parameterised by task. `<TASK>`,
+`<SDK>` and `<REPO>` come from §8.1, and `<SCOPE>` from C-2 … C-11's table in §6.
+Sonnet 5, effort `high` (§2).
+
+```
+You are executing task <TASK> of axiam's
+claude_dev/dogfooding-findings-fix-plan.md: the <SDK> port of SDK contract 1.51, in
+ilpanich/<REPO>. Scope: <SCOPE>.
+
+Read, before touching anything:
+- in axiam: the plan's §6 (C-1, its EXECUTED block, and the C-2 … C-11 table), §8
+  (the fan-out rules) and §8.1 (the fan-out record);
+- the reference implementation, ilpanich/axiam-rust-sdk#115: its commit messages
+  carry the reasoning, and its tests carry the behaviour you must match;
+- in <REPO>: CLAUDE.md, if present; the README's conformance section; every CI
+  workflow. Record the commands CI runs; they are your gates.
+
+Rules that bind this session:
+- Boot SAGE (`sage_inception`) first if the MCP is connected; if not, say so once and
+  continue.
+- Branch `feat/contract-1.51`, cut from the repository's main. One PR. Signed commits.
+- Re-vendor CONTRACT.md, openapi.json, management-registry.json and proto/ from the
+  axiam commit C-1 used (`56fbe44`), byte for byte, and regenerate the SDK's §27
+  surface with its own generator. Check the generated SubjectAltName and the
+  role-side `inherit` against C-1's EXECUTED item 2: C-1's generator got both wrong.
+- Implement the reference's behaviour in <SDK>'s own idiom, not Rust's shape
+  transliterated. Where the reference made a choice the contract leaves open (C-1
+  EXECUTED, "For C-12"), make the same choice, or record a different one with its
+  reason.
+- Check the SDK's default token-verify entry point against §10.1 rule 9 before
+  anything else in that area. If it accepts a `cnf`-bound token without evidence, that
+  is a defect to fix, as it was in Rust, and a Breaking entry in the CHANGELOG.
+- Ship every test of §8 rule 7, each negative test with its I4 twin. Break each new
+  behaviour once on purpose, and confirm the test meant to catch it goes red.
+- `declines`, with the reason, for anything the SDK cannot ship: README and CHANGELOG,
+  never a silent omission. CHANGELOG entries go under [Unreleased].
+- Run every CI job locally, the way the workflow runs it. "The toolchain is
+  unavailable" is a claim about a search: search twice before making it.
+- Never skip, disable or quarantine a test. Never tag or publish. Never change an `alg`
+  pin, a TLS policy, or §5 rule 3.
+- When the PR is open, fill in its §8.1 row in axiam, subscribe to the PR and drive it
+  to green.
+
+Start by printing the list of what the port touches in <REPO>, file by file, then
+begin with the re-vendor.
 ```
 
 ---

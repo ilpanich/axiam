@@ -2767,7 +2767,7 @@ every piece the SDK does not ship, as the README and the per-SDK table state it.
 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | merged (`9013027`) | `webhooks` in the manifest |
 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | [#68](https://github.com/ilpanich/axiam-kotlin-sdk/pull/68) | merged (`fbf98c5`) | no gRPC transport (so §1.1.1/§10.3 wrappers); Ktor-engine mTLS evidence wiring; `webhooks` in the manifest |
 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | | | not started | |
-| C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | [#65](https://github.com/ilpanich/axiam-c-sdk/pull/65) | open, CI green (`7f3d5db`) | no gRPC (so §1.1.1/§10.3 wrappers); §6.1 rule 7 as a typestate; `users`/`scopes` and role → permission grants in the manifest (flat tier); `webhooks` in the manifest |
+| C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | [#65](https://github.com/ilpanich/axiam-c-sdk/pull/65) | merged (`0b87547`) | no gRPC (so §1.1.1/§10.3 wrappers); §6.1 rule 7 as a typestate; `users`/`scopes` and role → permission grants in the manifest (flat tier); `webhooks` in the manifest |
 | C-11 | C++ | `ilpanich/axiam-cplusplus-sdk` | | | not started | |
 
 ---

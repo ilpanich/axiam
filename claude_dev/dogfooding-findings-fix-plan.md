@@ -2761,7 +2761,7 @@ every piece the SDK does not ship, as the README and the per-SDK table state it.
 | C-1 | Rust (reference) | `ilpanich/axiam-rust-sdk` | `feat/contract-1.51` | [#115](https://github.com/ilpanich/axiam-rust-sdk/pull/115) | merged (`8e9eb90`) | `webhooks` in the manifest; §6.1 rule 7 as a typestate (the client-side branch instead); §27.7 `#[derive(AxiamSpec)]` |
 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | [#116](https://github.com/ilpanich/axiam-typescript-sdk/pull/116) | merged (`9102c91`) | `webhooks` in the manifest; §6.1 rule 7 as a typestate (the client-side branch instead) |
 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | [#88](https://github.com/ilpanich/axiam-python-sdk/pull/88) | merged (`231a686`) | `webhooks` in the manifest |
-| C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | [#102](https://github.com/ilpanich/axiam-java-sdk/pull/102) | open, CI green (`678d310`) | `webhooks` in the manifest |
+| C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | [#102](https://github.com/ilpanich/axiam-java-sdk/pull/102) | merged (`fa6803a`) | `webhooks` in the manifest |
 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | [#95](https://github.com/ilpanich/axiam-csharp-sdk/pull/95) | merged (`d1dc37a`) | `webhooks` in the manifest; §6.1 rule 7 as a typestate (the client-side branch instead) |
 | C-6 | PHP | `ilpanich/axiam-php-sdk` | | | not started | |
 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | merged (`9013027`) | `webhooks` in the manifest |

@@ -15,9 +15,9 @@ once every port PR is merged or closed.
 
 | Wave | Task | SDK | Repository | Branch | Worker | PR | CI | Merged |
 |---|---|---|---|---|---|---|---|---|
-| 1 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | not started | | | |
-| 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | not started | | | |
-| 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | not started | | | |
+| 1 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | running | | | |
+| 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | running | | | |
+| 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | running | | | |
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | not started | | | |
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | not started | | | |
 | 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | not started | | | |
@@ -55,7 +55,11 @@ Search for each tool was done twice (PATH lookup, then a filesystem/installer pr
 
 ## Half-done state
 
-_Nothing in flight yet._ When a worker is cut off, record here: the SDK, the last pushed
+Wave 1 (C-2, C-3, C-7) started 2026-09-24T09:25Z, one Sonnet worker each; nothing pushed yet.
+
+Wave 3 order changed: C-9 Swift runs last, after C-10 finishes, not beside C-6/C-10/C-11 (the cap is three workers, and Swift's toolchain is a Docker image pulled from `mirror.gcr.io`, so it starts once C-10's `build*/` trees are gone).
+
+When a worker is cut off, record here: the SDK, the last pushed
 commit on `feat/contract-1.51`, what the worker's last report said was left, and the
 agent id if it can still be resumed with SendMessage.
 

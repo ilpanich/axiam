@@ -1036,7 +1036,7 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
 - **One fix PR per SDK, eleven in all.** Each is held until this PR merges, then
   re-vendors `CONTRACT.md` from its merge commit:
   - Rust {{PR:rust}}, TypeScript 119, Python 90, Java 103;
-  - Kotlin {{PR:kotlin}}, C# {{PR:csharp}}, PHP 75, Go 88;
+  - Kotlin 69, C# {{PR:csharp}}, PHP 75, Go 88;
   - Swift 67, C 66, C++ 68.
 - **What every SDK had.** Each SDK had at least one defect. The ones found in several
   SDKs:

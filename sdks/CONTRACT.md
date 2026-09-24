@@ -8314,7 +8314,7 @@ eleven C-12 fix PRs are:
 - [`axiam-typescript-sdk#119`](https://github.com/ilpanich/axiam-typescript-sdk/pull/119)
 - [`axiam-python-sdk#90`](https://github.com/ilpanich/axiam-python-sdk/pull/90)
 - [`axiam-java-sdk#103`](https://github.com/ilpanich/axiam-java-sdk/pull/103)
-- [`axiam-kotlin-sdk#{{PR:kotlin}}`](https://github.com/ilpanich/axiam-kotlin-sdk/pull/{{PR:kotlin}})
+- [`axiam-kotlin-sdk#69`](https://github.com/ilpanich/axiam-kotlin-sdk/pull/69)
 - [`axiam-csharp-sdk#{{PR:csharp}}`](https://github.com/ilpanich/axiam-csharp-sdk/pull/{{PR:csharp}})
 - [`axiam-php-sdk#75`](https://github.com/ilpanich/axiam-php-sdk/pull/75)
 - [`axiam-go-sdk#88`](https://github.com/ilpanich/axiam-go-sdk/pull/88)
@@ -8350,7 +8350,7 @@ Two SSO resets were fixed before the 1.51 ports merged:
 | R-9 | The device POST carried the prior session: its cookies (Python, C#), a bearer read from the jar (C#, Java), a bearer or CSRF token (PHP), or a proactive refresh first (Java) | Python, C#, PHP, Java | §6.1 rule 11.1 | **contract fixed** and **SDK fixed** | §6.1 rule 11 (N4.1) · Python #89, C# #96, PHP #74, Java #103 |
 | R-10 | A refused or malformed device login changed client state. PHP cleared the jar before the POST, so a refused device login ended the session. TypeScript and Java dropped the previous device token before the POST, and Java also reset the gate. C++ adopted a `200` with no token as an empty credential | PHP, Java, TypeScript, C++ | §6.1 rule 11.2 | **contract fixed** and **SDK fixed** | N4.2 · PHP #74, Java #103, TypeScript #119, C++ #68 |
 | R-11 | After a device login, some requests did not present the device credential. In Rust, self-service, WebAuthn and logout sent no bearer, and the old cookie rode. In TypeScript and Java, gRPC sent the previous session's token | Rust, TypeScript, Java | §6.1 rule 11.3 | **contract fixed** and **SDK fixed** | N4.3 · Rust #{{PR:rust}}, TypeScript #119, Java #103 |
-| R-12 | The device credential was never released. A later `login` was shadowed by it, and in Go, C++ and PHP `logout` did not clear it either | Python, Kotlin, Go, Swift, C++, PHP, TypeScript, Rust, Java | §6.1 rule 11.4 | **contract fixed** and **SDK fixed** | N4.4 · Python #90, Kotlin #{{PR:kotlin}}, Go #88, Swift #67, C++ #68, PHP #75, TypeScript #119, Rust #{{PR:rust}}, Java #103 |
+| R-12 | The device credential was never released. A later `login` was shadowed by it, and in Go, C++ and PHP `logout` did not clear it either | Python, Kotlin, Go, Swift, C++, PHP, TypeScript, Rust, Java | §6.1 rule 11.4 | **contract fixed** and **SDK fixed** | N4.4 · Python #90, Kotlin #69, Go #88, Swift #67, C++ #68, PHP #75, TypeScript #119, Rust #{{PR:rust}}, Java #103 |
 | R-13 | A `401` on the device credential reached a refresh. PHP did this on REST and gRPC. TypeScript did it on re-authentication (the device path was missing from `SKIP_REFRESH`) and on gRPC. Java did it on gRPC, and Python on REST | PHP, TypeScript, Java, Python | §6.1 rule 11.5 | **contract fixed** and **SDK fixed** | N4.5 · PHP #75, TypeScript #119, Java #103, Python #90 |
 | R-14 | The device credential in a new handle, not the same client. The handle dropped the creating handle's acting tenant | C# | §6.1 rule 11.6 | **contract fixed** and **SDK fixed** | N4.6: the form conforms, and the tenant is carried · C# #{{PR:csharp}} |
 | R-15 | Every management call was refused client-side after a device login, because the session check read only the cookie | Python, C++ | §27.4 rule 1 | **contract fixed** and **SDK fixed** | N4.7 · Python #90, C++ #68 |

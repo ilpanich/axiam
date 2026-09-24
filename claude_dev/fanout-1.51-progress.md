@@ -86,7 +86,7 @@ agent id if it can still be resumed with SendMessage.
 
 **Follow-up fixes to merged ports (SSO gate reset).** The user chose a new branch, `fix/contract-1.51-sso-gate`, cut from each repository's main:
 - Go: [ilpanich/axiam-go-sdk#87](https://github.com/ilpanich/axiam-go-sdk/pull/87), `c8049b1`, CI green (14 checks).
-- TypeScript: [ilpanich/axiam-typescript-sdk#117](https://github.com/ilpanich/axiam-typescript-sdk/pull/117), `89d406a`, CI pending (reproduced red on main first).
+- TypeScript: [ilpanich/axiam-typescript-sdk#117](https://github.com/ilpanich/axiam-typescript-sdk/pull/117), `89d406a`, CI green (7 checks; reproduced red on main first).
 - Python needs no follow-up (verified). C#, Java, Kotlin, PHP, C, Swift and C++ carry the reset in their port PRs.
 
 **Usage-limit cut-off, 2026-09-24 ~13:50–14:10Z.** Three workers were stopped mid-task. They were resumed at 14:15Z; the state at the cut-off:

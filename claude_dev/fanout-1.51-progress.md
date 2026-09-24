@@ -15,7 +15,7 @@ once every port PR is merged or closed.
 
 | Wave | Task | SDK | Repository | Branch | Worker | PR | CI | Merged |
 |---|---|---|---|---|---|---|---|---|
-| 1 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | reviewed (1389 pass / 1 skip re-run) | [#116](https://github.com/ilpanich/axiam-typescript-sdk/pull/116) | pending | |
+| 1 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | reviewed (1389 pass / 1 skip re-run) | [#116](https://github.com/ilpanich/axiam-typescript-sdk/pull/116) | green `978efdb` | |
 | 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | running | | | |
 | 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | pushed `90a0aa9`; sent back: 1.51 model tests missing | | | |
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | running | | | |
@@ -71,3 +71,4 @@ agent id if it can still be resumed with SendMessage.
 
 - `trig_01Sw9PGBzLKLriWid2DQRbZ8` — fires 2026-09-24T15:21Z (+6 h)
 - `trig_011Mkt9C44XdJhPs46Qe9XAj` — fires 2026-09-24T19:21Z (+10 h)
+- PR check-in, hourly, re-armed each time: latest `trig_01GG4CF4bGe1H8DeouQSEbS8` (11:37Z)

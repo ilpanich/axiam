@@ -17,7 +17,7 @@ once every port PR is merged or closed.
 |---|---|---|---|---|---|---|---|---|
 | 1 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | reviewed (1389 pass / 1 skip re-run) | [#116](https://github.com/ilpanich/axiam-typescript-sdk/pull/116) | green `978efdb` | |
 | 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | running | | | |
-| 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | pushed `90a0aa9`; sent back: 1.51 model tests missing | | | |
+| 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | reviewed `6898cc5` (model tests added on send-back; re-run 0 fail) | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | pending | |
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | running | | | |
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | running | | | |
 | 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | not started | | | |

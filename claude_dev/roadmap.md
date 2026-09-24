@@ -971,7 +971,7 @@ figures are re-rendered at 162 operations. Numbered **1.51**, since 1.50 was alr
 taken (`d5a6811`), so C-12 becomes 1.52. Threat **T-210** amended, no new entry. The
 eleven SDK ports (C-1 … C-11) follow, one PR per SDK repository, Rust first.
 
-### T22.16 — The Rust SDK at contract 1.51, the reference port — Opus 5 ◐ PR OPEN
+### T22.16 — The Rust SDK at contract 1.51, the reference port — Opus 5 ✓ LANDED
 C-1 (PR I₁,
 [axiam-rust-sdk#115](https://github.com/ilpanich/axiam-rust-sdk/pull/115)), DF-008 …
 DF-012 on the Rust side.

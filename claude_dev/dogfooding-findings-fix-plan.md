@@ -2495,8 +2495,8 @@ Contract **1.50**.
 > **EXECUTED — 2026-09-24, PR I₁, against contract 1.51**
 > ([ilpanich/axiam-rust-sdk#115](https://github.com/ilpanich/axiam-rust-sdk/pull/115),
 > branch `feat/contract-1.51`, cut from `7d27160`). §13 row 1 allowed either branch
-> name, and this one names the contract actually implemented. The PR is open, and CI
-> is green on `c853412` (all 17 checks). Nothing is tagged or published.
+> name, and this one names the contract actually implemented. **Merged** as `8e9eb90`
+> on 2026-09-24, with CI green on its head `01a1ef1`. Nothing is tagged or published.
 >
 > **Shipped.** One commit per piece, in this order:
 >
@@ -2758,7 +2758,7 @@ every piece the SDK does not ship, as the README and the per-SDK table state it.
 
 | Task | SDK | Repository | Branch | PR | State | Declines |
 |---|---|---|---|---|---|---|
-| C-1 | Rust (reference) | `ilpanich/axiam-rust-sdk` | `feat/contract-1.51` | [#115](https://github.com/ilpanich/axiam-rust-sdk/pull/115) | open, CI green on `c853412` | `webhooks` in the manifest; §6.1 rule 7 as a typestate (the client-side branch instead); §27.7 `#[derive(AxiamSpec)]` |
+| C-1 | Rust (reference) | `ilpanich/axiam-rust-sdk` | `feat/contract-1.51` | [#115](https://github.com/ilpanich/axiam-rust-sdk/pull/115) | merged (`8e9eb90`) | `webhooks` in the manifest; §6.1 rule 7 as a typestate (the client-side branch instead); §27.7 `#[derive(AxiamSpec)]` |
 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | | | not started | |
 | C-3 | Python | `ilpanich/axiam-python-sdk` | | | not started | |
 | C-4 | Java | `ilpanich/axiam-java-sdk` | | | not started | |

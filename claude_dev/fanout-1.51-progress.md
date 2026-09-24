@@ -16,11 +16,11 @@ once every port PR is merged or closed.
 | Wave | Task | SDK | Repository | Branch | Worker | PR | CI | Merged |
 |---|---|---|---|---|---|---|---|---|
 | 1 | C-2 | TypeScript | `ilpanich/axiam-typescript-sdk` | `feat/contract-1.51` | reviewed (1389 pass / 1 skip re-run) | [#116](https://github.com/ilpanich/axiam-typescript-sdk/pull/116) | green `978efdb` | |
-| 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | running | | | |
+| 1 | C-3 | Python | `ilpanich/axiam-python-sdk` | `feat/contract-1.51` | pushed `cabc47c`; sent back: global-role refusal and plain-over-scoped Update untested | | | |
 | 1 | C-7 | Go | `ilpanich/axiam-go-sdk` | `feat/contract-1.51` | reviewed `6898cc5` (model tests added on send-back; re-run 0 fail) | [#86](https://github.com/ilpanich/axiam-go-sdk/pull/86) | green `8ba1a4b` (coverage 94.6 %, main 94.4 %) | |
 | 2 | C-4 | Java | `ilpanich/axiam-java-sdk` | `feat/contract-1.51` | running | | | |
 | 2 | C-5 | C# | `ilpanich/axiam-csharp-sdk` | `feat/contract-1.51` | running | | | |
-| 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | not started | | | |
+| 2 | C-8 | Kotlin | `ilpanich/axiam-kotlin-sdk` | `feat/contract-1.51` | running | | | |
 | 3 | C-6 | PHP | `ilpanich/axiam-php-sdk` | `feat/contract-1.51` | not started | | | |
 | 3 | C-9 | Swift | `ilpanich/axiam-swift-sdk` | `feat/contract-1.51` | not started | | | |
 | 3 | C-10 | C | `ilpanich/axiam-c-sdk` | `feat/contract-1.51` | not started | | | |
@@ -74,7 +74,7 @@ Installed by the orchestrator at 09:30Z (apt, no worker running apt): dotnet SDK
 
 Wave 1 (C-2, C-3, C-7) started 09:25Z. C-2 pushed and reviewed, PR open; its build output deleted. C-7 pushed `90a0aa9`, then sent back for the missing 1.51 model tests (SAN wire shape, inherit defaults, open CertificateType). C-4 and C-5 started as slots freed (~10:35Z).
 
-For C-12, found in review: C-2 and C-7 both differ from Rust on question 5. They read the principal's reach from OPAQUE login and the WebAuthn / MFA setup too, because those responses carry `LoginUserInfo`. Confirmed in `crates/axiam-api-rest/src/handlers/opaque.rs`: the `200` of `/auth/opaque/login/finish` uses the password path's builder, but its utoipa annotation documents no body (a spec gap).
+For C-12, found in review: C-3 Python answers question 5 like C-2/C-7 (it records the scope from OPAQUE and the WebAuthn/MFA setup; WebAuthn login, SSO and the device login reset it through `_absorb_session_cookies`). Also C-2 and C-7 both differ from Rust on question 5. They read the principal's reach from OPAQUE login and the WebAuthn / MFA setup too, because those responses carry `LoginUserInfo`. Confirmed in `crates/axiam-api-rest/src/handlers/opaque.rs`: the `200` of `/auth/opaque/login/finish` uses the password path's builder, but its utoipa annotation documents no body (a spec gap).
 
 Wave 3 order changed: C-9 Swift runs last, after C-10 finishes, not beside C-6/C-10/C-11 (the cap is three workers, and Swift's toolchain is a Docker image pulled from `mirror.gcr.io`, so it starts once C-10's `build*/` trees are gone).
 

@@ -989,6 +989,30 @@ The Rust suite passes 985 tests with 0 failures, and coverage is 92.08 %. The C-
 questions and the port prompt are in the plan (C-1 EXECUTED, §12.1). The ten ports
 (C-2 … C-11) follow, and §8.1 records them.
 
+### T22.17 — The ten SDK ports at contract 1.51 — Sonnet 5 ✓ LANDED
+C-2 … C-11 (PRs I₂ … I₁₁), DF-008 … DF-012 on the other ten SDKs. The plan's §8.1 has
+one row per port, with its PR, merge commit and declines.
+
+- Each port re-vendors contract 1.51 from `56fbe44`. Each adds:
+  - the acting tenant (§5.2 rule 1);
+  - `authenticate_device()` (§6.1 rules 6–10), which makes C's README claim true;
+  - the §27.6.1 manifest additions, with group → role bindings where the SDK lacked them;
+  - on the seven gRPC SDKs, `validate_token` / `introspect_token` (§1.1.1).
+- Fixes C-1's §10.1 rule 9 defect, which every port had at its default verify entry
+  point (Breaking in each CHANGELOG), and both generator defects, which every
+  generator had.
+- Fixes §13 row 17: PHP never reconciled grants or group bindings; PHP, Swift, C and
+  C++ created nested resources flat; Swift, C and C++ defaulted a resource type to
+  `"folder"`.
+- Follow-ups [axiam-typescript-sdk#117](https://github.com/ilpanich/axiam-typescript-sdk/pull/117)
+  and [axiam-go-sdk#87](https://github.com/ilpanich/axiam-go-sdk/pull/87) reset the
+  acting-tenant gate on an SSO completion.
+
+Artifact drift across the eleven SDKs fell from 33 at C-0 to 0. The seven C-12
+questions are answered by SDK from merged code (plan, under C-2 … C-11). That table
+also records six defects that survived review, one of them in the security path
+(TypeScript's `verifyAccessToken` skips rule 9). C-12 starts there.
+
 ---
 
 ---

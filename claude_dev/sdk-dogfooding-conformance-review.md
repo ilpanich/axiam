@@ -660,7 +660,7 @@ commit (§6).
 | Python | [#90](https://github.com/ilpanich/axiam-python-sdk/pull/90) | `bd9b953` | N4.7, N4.4, N5.3, N5.1, N4.5, N4.2, N5.6 | 1770 passed; coverage 98.58 % (floor 98) | 12 of 14 failed; the other two are I4 twins |
 | Java | [#103](https://github.com/ilpanich/axiam-java-sdk/pull/103) | `783c924` | N4.1, N4.3 and N4.5 on gRPC, N4.2, N4.4, N6.2 | 1244 tests; JaCoCo met (95.05 %) | 6 of 31 in the three changed test classes (4 failures, 2 errors) |
 | Kotlin | [#69](https://github.com/ilpanich/axiam-kotlin-sdk/pull/69) | `ef08f40` | N4.4 | 1062 tests; Kover 98.08 % (floor 98) | 3 of 14 in `DeviceAuthTest` failed |
-| C# | {{ROW:csharp}} |
+| C# | [#97](https://github.com/ilpanich/axiam-csharp-sdk/pull/97) | `b8ef9bc` | N4.6, N5.1, N4.4, N6.2, N6.3, N4.2, N4.5 on gRPC | 1265 passed (`Axiam.Sdk.Tests`, net8.0) | 7 of 60 in the three changed REST test classes failed. The gRPC and manifest tests use API this PR adds and cannot compile against `main` |
 | PHP | [#75](https://github.com/ilpanich/axiam-php-sdk/pull/75) | `1c9a02d` | N4.5 REST and gRPC, N6.4, N6.5, N6.6, N5.6, N4.4 | 1684 tests, 5225 assertions | 12 failures, 7 errors |
 | Go | [#88](https://github.com/ilpanich/axiam-go-sdk/pull/88) | `aa35be7` | N4.4, N5.5, N3 | `go test ./...`, 15 packages pass | all six new tests failed |
 | Swift | [#67](https://github.com/ilpanich/axiam-swift-sdk/pull/67) | `e897e0d` | N5.6, N5.4, N4.4 | 1191 tests, 0 failures (Swift 6.3 container) | `DeviceMtlsLoginTests` 2 of 7, `ActingTenantTests` 4 of 15 failed |
@@ -712,7 +712,12 @@ survive:
   read `main`.
 
 {{SELFREPORT:rust}}
-{{SELFREPORT:csharp}}
+- **C#'s first push released the device credential before the request,** so a refused
+  later login left a device handle with no credential at all. Its gRPC refresh
+  exemption was also fixed when the client was constructed. Both were sent back and
+  fixed in `fa6b010` and `b8ef9bc`, each with a test that fails on the first push. The
+  worker also found five defects its findings did not list: N4.4, N6.2, N6.3, N4.2 and
+  N4.5 on gRPC.
 
 ## 6. Follow-up: the 1.52 re-vendor
 

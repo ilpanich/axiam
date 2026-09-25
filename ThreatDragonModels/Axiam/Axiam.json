@@ -1,5 +1,5 @@
 {
-  "version": "2.16.0",
+  "version": "2.17.0",
   "summary": {
     "title": "Axiam",
     "owner": "ilpanich",
@@ -4012,7 +4012,7 @@
             },
             "size": {
               "width": 380,
-              "height": 780
+              "height": 940
             },
             "attrs": {
               "label": {
@@ -4324,6 +4324,28 @@
                   "mitigation": "2026-09-14 (616b731, ad1cb67). `ParService::peek` answers the three questions `consume` answers \u2014 is this a PAR handle at all, does an unexpired, unconsumed row exist for it, does it belong to this client \u2014 with the same refusals in the same order, and returns `()`: nothing is cached, marked or carried forward, and the authoritative single-use decision stays in `consume`, in the handler, in one statement. `PushedAuthRequestRepository::find_unconsumed` is `consume`'s `WHERE` clause with the write removed \u2014 no transaction, because there is nothing to serialise, and a read that raced a concurrent redemption is answered by that redemption failing. The endpoint runs it for an anonymous browser only after the client has been resolved and found to opt into the login hop, and only for a genuine PAR handle: a request object by value or by reference keeps the OIDC Core \u00a73.1.2.6 code `classify_request_object` owns. `response_type` is decided first, without touching the datastore, and only when no `request_uri` is present, because with PAR the pushed value is authoritative (RFC 9126 \u00a74). Both refusals are delivered exactly as the `prompt=none` arm of T-255 delivers its own: by redirect only to a `redirect_uri` this client registered, compared exactly, with the request's own `state`, and answered in place otherwise \u2014 as `error=invalid_request_uri` (OIDC Core \u00a73.1.2.6), the code a relying party can act on by pushing again, while a handle issued to a *different* client keeps `invalid_request`, because a client spending someone else's handle is not a handle that is gone, and an audit trail that cannot tell the two apart is worth less. The post-login return leg was brought to the same rule (`refuse_request_uri_to_client`: one registration read, on a refusal path only, keyed by `user.tenant_id` and never the query's). What the peek costs, stated: one indexed datastore read per anonymous authorization request that carries a `request_uri`, on a route under the per-IP rate limit, keyed by a 256-bit CSPRNG handle that cannot be guessed \u2014 so the wrong-client refusal, distinguishable by design, is not an oracle anyone can drive. Tests: `peek` is proved never to call `consume` and never to touch the client registration (doubles that panic if it does); seven handler tests walk a spent, an expired and a wrong-client handle before the hop, a live handle presented twice, a request object by reference, and a dead handle with and without a registered target; two repository tests pin `find_unconsumed` reading without spending and ignoring an expired row. Measured per module with `run-some.sh` against the OpenID Foundation suite, the three PAR modules and `oidcc-response-type-missing` moved from `REVIEW` to `PASSED`; no full plan has been re-swept, so the published receipts remain the 2026-09-11 ones. Contract 1.46 \u00a726.2 rule 3 records both forms of the refusal; no SDK changes, since rule 2's authorization URL carries no `redirect_uri` and never reaches the redirected form.",
                   "modelType": "STRIDE",
                   "number": 270
+                },
+                {
+                  "id": "83ba169e-5f11-46e6-bb57-5083f85130f1",
+                  "title": "RFC 8252's loopback port allowance widens a redirect registration by more than a port",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Elevation of privilege",
+                  "description": "T-52 is Critical because a loosely matched `redirect_uri` hands the authorization code to an attacker's origin, and until T21.2 the match was byte-for-byte everywhere, which is exactly right and unimplementable for a desktop client listening on a port the operating system chose at run time. RFC 8252 \u00a77.3 requires the port to be free; the risk is that the relaxation is written once and relaxes something else with it \u2014 a host, a path, a userinfo segment \u2014 at the one comparison standing between an authorization code and an attacker's server.",
+                  "mitigation": "The allowance is applied only when the **registered** URI is `http` on `127.0.0.1`, `[::1]` or `localhost`; every `https` registration keeps exact matching (I6), because an `https` registration means the operator wrote a TLS endpoint down and a port is part of which endpoint that is. Everything but the port must still be identical \u2014 scheme, host, path, query, fragment, **username and password** \u2014 and the three loopback hosts each match only themselves, so a registration is never widened to a host the operator did not write. The non-loopback path compares the *strings*, byte for byte, so nothing existing changed. The doubled guard is what makes the classic attack uninteresting: `http://127.0.0.1@evil.example.com/callback` fails on the host and again on the userinfo. One function serves the authorization endpoint, PAR and code redemption, so the rule cannot be applied at one and forgotten at another, and the authorization code stores the **presented** URI so the token request's comparison stays exact against what was actually used. Driven against the live endpoint at the 2026-09-17 review (V1) with seven host, path, encoding and scheme spellings, including the two the review was asked to try.",
+                  "modelType": "STRIDE",
+                  "number": 278
+                },
+                {
+                  "id": "f01d3458-1c8d-42f5-8a07-a8698c60c34a",
+                  "title": "A desktop client on an ephemeral loopback port is never told its authorization failed",
+                  "status": "Mitigated",
+                  "severity": "Low",
+                  "type": "Denial of service",
+                  "description": "T-255 established that an authorization error must be delivered where the relying party can read it. T-278's matcher answers \"is this a registered redirect URI?\" for the success path and for refusals raised after it runs; six sites in `handlers/oauth2.rs` still ask with an exact comparison, and decide whether an error may be reported by redirecting. For a client that registered `http://127.0.0.1/callback` and is listening on an ephemeral port, the answer is no, and the error is rendered into the browser instead \u2014 so the client's loopback listener waits for a callback that never arrives while the user reads an error page the client cannot see.",
+                  "mitigation": "Closed in `b8bc508` (MCP-01, #472): Fail-closed in the direction that matters: no error is ever redirected to a URI that was not registered, so this was never an open-redirect finding and the exact comparison was the safe error to make. What it cost was interoperability, on exactly the client family Phase 21 exists to serve. Confined to refusals raised *before* the matcher runs \u2014 `response_type` absent entirely, and the `request_uri` refusals \u2014 which the 2026-09-17 review established by driving both the negative and the positive case after its first, wider, framing of the finding was contradicted by the harness. **Closed** (`b8bc508`), filed as MCP-01 (#472) against T21.2a: all six sites now call `any_redirect_uri_matches`, which is where the rule already lived precisely so that it could not be applied at one endpoint and forgotten at another. Ungated, and it needs no flag: the matcher short-circuits on string equality and takes the port allowance only when the *registered* URI is `http` on a loopback host, so the answer changes for one shape of registration and no other, and nothing that was refused becomes redirectable. `mcp01_an_error_is_not_redirected_to_an_ephemeral_loopback_port` was written to be inverted and was, to `mcp01_an_error_is_redirected_to_an_ephemeral_loopback_port`; a second case pins `refuse_request_uri_to_client`, the site furthest from the first.\n\nOne thing found while closing it, recorded because it was the last inconsistency in the same story rather than a new threat: `http://[::1]/\u2026` could not be *registered* at all. `validate_redirect_uris` compared the parsed host against the bare `::1` while a URL parser returns the bracketed literal, so the matcher's tested `[::1]` arm was live code nothing could reach. Fixed in `7ab890d`, in its own commit because it is the one change in the group that makes a refused request succeed: the widening admits one host, reachable only from the machine the user is sitting at, and a routable IPv6 literal over `http` is still refused. A validator that refuses what its own error message says it allows is a defect, not a decision.",
+                  "modelType": "STRIDE",
+                  "number": 280
                 }
               ]
             }
@@ -6132,6 +6154,17 @@
                   "mitigation": "49916b4: the session travels in its own `sid` claim \u2014 the name OIDC Core \u00a72 already uses on the ID token \u2014 on the authorization-code and refresh paths, and the reader prefers `sid`, falling back to `jti`. The fallback is what makes this need no migration and no flag day: every login-issued token resolves to exactly the session it always did, and not one login path changed. The refresh path carries it too, because a rotated token that dropped `sid` would stop working at UserInfo the moment it replaced the one that had it \u2014 a session ending mid-flow fifteen minutes after sign-in. `None` for a token with no session behind it (client credentials, an RPT, a token exchange), which are not weakened by the absence since there is no session to revoke. The access token's `sid` equals the ID token's, and RFC 6749 \u00a710.5's code-replay revocation (T-250) is built on the same claim.",
                   "modelType": "STRIDE",
                   "number": 249
+                },
+                {
+                  "id": "a1cfeed8-3266-4b0f-8edf-683a3c2df921",
+                  "title": "A resource indicator names AXIAM's own token audience, so a grant mints a credential for AXIAM while claiming to mint one for somebody else",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "description": "I3 is enforced by pinning `aud` to AXIAM's two built-in audiences in `decode_access_token`, so a token minted for an MCP server is refused at AXIAM's own doors. RFC 8707 resource indicators are validated as absolute URIs without a fragment, and the parser deliberately admits any scheme, because `urn:` resources are legitimate and a loopback `http` MCP server is a resource like any other. AXIAM's audiences are spelled `axiam:user` and `axiam:m2m`, and a scheme followed by a path is all an absolute URI needs \u2014 so they parsed, carried no fragment, and were resource indicators like any other. Naming one did not defeat the audience pin; it satisfied it, and the boundary stopped being a boundary. The sharpest case is `client_credentials`, which mints `axiam:m2m` when no resource is named: naming `axiam:user` made the *same* grant mint a token carrying the user audience, from a grant with no end user in it \u2014 a shape no other path in the server can produce. `external_client_allowed_resources` is what made it more than untidy, because D3 has DCR and CIMD clients inherit that list wholesale.",
+                  "mitigation": "2026-09-17 (MCP-02, `013903d`). `axiam_oauth2::resource::normalise` reserves the whole `axiam` scheme rather than the two literals, so an audience added later is covered without anybody having to remember the rule exists. It is checked after parsing, against the scheme `url` resolved, so `AXIAM:user` cannot slip past a byte comparison on the input, and every door answers `invalid_target`: registration refuses the entry, and the token endpoint refuses the parameter even for a row that somehow holds one, because `is_allowed` normalises both sides. Fail-closed and reachable by no existing deployment \u2014 `allowed_resources` ships in the same unreleased version, so no stored row can contain one. Asserted at the parser and at both endpoints.",
+                  "modelType": "STRIDE",
+                  "number": 277
                 }
               ]
             }
@@ -6229,6 +6262,499 @@
             "data": {
               "type": "tm.Flow",
               "name": "check session, record proof jti",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "position": {
+              "x": 810,
+              "y": 460
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "/oauth2/register\n(RFC 7591,\nunauthenticated)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "02a44c35-6670-495e-900c-92c24dfaa00c",
+            "data": {
+              "type": "tm.Process",
+              "name": "/oauth2/register\n(RFC 7591,\nunauthenticated)",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "40c40af6-5164-4e2a-9c6f-0e036e354ed6",
+                  "title": "A stranger registers a client whose `redirect_uris` name a host the tenant did not mean to admit, or whose posture it did not mean to grant",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "`POST /oauth2/register` is the first endpoint in AXIAM that writes for a caller holding no credential. What a caller can write is what decides whether it is a registration endpoint or a way to mint an authorization target of one's own choosing: a `redirect_uris` entry pointing at attacker infrastructure makes every subsequent authorization a code delivered to the attacker, and a self-granted `client_credentials` or token-exchange grant would be a client acting with no user at all.",
+                  "mitigation": "Off by default: `dynamic_registration` is `disabled` and the path answers a `403` shaped like every other refusal, so the feature does not leak from the route's existence. When it is on, the request is narrowed on every axis a caller can influence. `redirect_uris` go through the same `validate_redirect_uris` the admin API uses \u2014 one answer to \"what is a usable redirect URI\" in this server \u2014 and then through the tenant's `dcr_allowed_redirect_hosts`, a glob whose grammar is deliberately tiny: a literal host, `*` as the **whole** leftmost label, or `*` alone, with the match anchored on a label boundary so `evil-example.com` cannot match a pattern meant for `example.com`, and a `*` anywhere else matching nothing at all. The loopback three are always admitted, because they are what the desktop clients this exists for actually use. `grant_types` is narrowed to `{authorization_code, refresh_token}`, so a self-registered client can never reach `client_credentials` or an exchange grant; `scope` is narrowed to `dcr_allowed_scopes`, which the settings layer refuses to let contain `address` or `phone`; the profile is forced to `standard` and `managed_by` to `dcr`, so I5 holds and `fapi.rs` refuses a FAPI posture on the row twice over; `allowed_resources` is forced to the tenant's own list rather than taken from the request (D3), so an unrelated party cannot name its own audiences; and `software_statement` is refused explicitly rather than ignored. Every registration is audited, and D4 forces the consent hop on the first authorization whatever scopes were asked for, so an end user is always shown a client an administrator did not create. Asserted end to end by `mcp_authorization_test`, whose loopback probes drive seven host spellings against the live authorization endpoint (2026-09-17 review, V1).",
+                  "modelType": "STRIDE",
+                  "number": 273
+                },
+                {
+                  "id": "eff6282d-6a90-4fc5-b1e3-0f73af4fe768",
+                  "title": "A stranger fills the tenant's registration quota and denies registration to legitimate clients until the sweeper runs",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "`dcr_max_clients` bounds the rows a tenant's self-registration can create, which is the right control for storage and is also, unavoidably, the tenant's availability budget for the feature. In `anonymous` mode an unauthenticated caller can spend all of it: the default ceiling is 20 and the default per-IP limit is 5 a minute, so about four minutes from one address fills it, and a handful of addresses removes the four minutes. The rows then sit until the sweeper reclaims them, which for a client that was never authorized is `created_at + dcr_unused_client_ttl_days` \u2014 30 days by default \u2014 because the same TTL serves both \"registered and abandoned\" and \"used once and gone quiet\", which are different clocks.",
+                  "mitigation": "Closed in `c4d9ea2` (MCP-05, #471): Bounded, not closed. `initial_access_token` mode is unaffected: a caller holding no handle is refused before the quota is consulted, which is a real reason to prefer that mode and one the operator page does not currently give. `anonymous` mode is opt-in, refused while `external_client_allowed_resources` is empty, and every attempt is rate-limited and audited, so the denial is noisy and attributable to whatever addresses it came from. **Closed** (`c4d9ea2`), filed as MCP-05 (#471) against T21.4a. The window is shortened where the exposure is: a `managed_by: dcr` row with no `last_authorized_at`, in a tenant whose effective mode is `anonymous`, is swept an hour after `created_at` rather than after `dcr_unused_client_ttl_days`. One TTL was serving two situations with nothing in common \u2014 the 30-day default is sized for \"a client somebody uses monthly\", and a registration nobody authorized is not that client, which the sweeper could already tell from `last_authorized_at: None`. The second clock does not make the flood more expensive; it turns a month of denial into an hour, at no cost to any client that completes a flow. It does not apply in `initial_access_token` or `disabled` mode, does not touch a row that has been authorized once, and is not switched off by `dcr_unused_client_ttl_days: 0`. The hour is a constant rather than a tenant setting: the fix plan recommended the field and its own cost table was wrong about the price \u2014 `OidcPolicy`'s scalars are columns on a `SCHEMAFULL` table, so a fifth DCR number is a migration v66, which the remediation's constraints excluded. The plan's \u00a74 carries the evidence and the promotion checklist; the field remains the right answer and is the maintainer's call.\n\nTwo residuals stay recorded. A **per-IP or per-subnet share** of the quota is not done: it needs a ledger per (tenant, address) that no store holds, it is defeated by a handful of source addresses, and the mode it would protect is the one the documentation now says is for tenants that accept this exposure. The condition that would change that: a deployment reporting quota exhaustion from distributed sources in `anonymous` mode *with* the second clock in place \u2014 and even then the answer is more likely `initial_access_token` than a subnet ledger. And the quota check and the write are still separated by an `await`, so concurrent registrations can overshoot the ceiling by the number in flight; the second clock makes such a burst cheap to recover from rather than cheap to cause.",
+                  "modelType": "STRIDE",
+                  "number": 272
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 810,
+              "y": 640
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "Client ID metadata\ndocument fetch"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "50084f15-5206-4550-ae51-f0ff7e0e6bc5",
+            "data": {
+              "type": "tm.Process",
+              "name": "Client ID metadata\ndocument fetch",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "bf6181ab-fc78-480e-abb9-423614fb894b",
+                  "title": "An unauthenticated `client_id` turns the authorization server into a request-forgery engine against its own network",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "A client ID metadata document is fetched because an unauthenticated request named its URL. That is the whole mechanism and it is also the whole exposure: without a guard it is a `GET` to any address the caller chooses, issued from inside the deployment's network, with the response parsed and its contents stored. SEC-094 is the reason this entry is not merely theoretical \u2014 the shared SSRF guard once failed to canonicalise IPv4-mapped IPv6, so an `AAAA` record of `::ffff:169.254.169.254` passed the address check and was then *pinned* into the connection, guaranteeing the attacker's address was the one dialled.",
+                  "mitigation": "The fetch goes through `axiam_pki::ssrf::guarded_fetch` over the existing `axiam-oauth2 \u2192 axiam-federation` edge, so it inherits the guard every other outbound fetch in AXIAM uses rather than carrying its own. Re-verified on this path at the 2026-09-17 review (V3): both IPv4-in-IPv6 embeddings are folded before classification \u2014 `::ffff:0:0/96` canonicalised to the v4 address it denotes, `::/96` rejected outright because `to_canonical` does not fold it \u2014 and **every** resolved address is classified rather than only the one dialled, so an `A`/`AAAA` pair with one bad answer is refused. Rebinding between check and connect is closed by pinning the validated address into a client built fresh per fetch, with no pooling. Redirects are never followed automatically: each hop is re-resolved, re-classified and re-issued, and the `allow_private` test seam is honoured on the first hop only, so `cimd.allow_http` cannot be turned into a redirect to a metadata endpoint. The bounds are each enforced and each tested \u2014 `https` unless the tenant opts into `http`, a 10-second timeout, a `Content-Length` gate plus a *streaming* cap at `max_metadata_bytes`, and a JSON content-type check. Ordering is the part most easily got wrong and is right here: `cimd::resolve` runs the trusted-publisher check **before** `get_or_fetch`, so an untrusted host is never contacted at all.",
+                  "modelType": "STRIDE",
+                  "number": 274
+                },
+                {
+                  "id": "755a5ee2-e241-430b-9961-d88480ad8da5",
+                  "title": "The trusted-publisher list that bounds the fetch admits a value meaning \"every host\"",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "T-274's address guard keeps the fetch out of the private network; it does nothing about the public one, and nothing else does either. `cimd.trusted_client_id_domains` is the control that stops the mechanism being a general-purpose outbound-request primitive, and T21.5 added an interlock refusing to enable CIMD while that list is empty, on exactly that reasoning. The interlock refuses the empty list and accepts `*` \u2014 which `host_glob_matches` documents as \"a tenant that wants no host restriction\" \u2014 so the posture the interlock exists to prevent is reachable by one character, and the validator's own error message names `*` as a valid entry.",
+                  "mitigation": "Closed in `0a273ec` (MCP-03, #469): Not a default: CIMD is off by default and the field ships empty, so no deployment has this posture without an operator writing it. The address guard still holds, so the residual is an outbound `GET` to public URLs a caller chooses, with AXIAM's source address and no attribution \u2014 not an internal-network primitive. **Closed** (`0a273ec`), filed as MCP-03 (#469) against T21.5. `*` is refused in `trusted_client_id_domains`, and so is a wildcard over a whole top-level domain (`*.com`), which is the same posture spelled longer; it stays admissible in `trusted_redirect_domains`, where an empty list is a working posture and the entries are not fetch targets. The argument is the one T21.5's amendment 2 made for refusing the empty list: an unrestricted trusted-publisher list is a request-forgery primitive offered to strangers **and no second control does that job**, so a control with a one-character bypass is not the control. Enforced at both settings doors by one condition, since `validate_cimd_policy` runs on the merged policy too, and the validator's entry-shape message no longer offers `*` for this field. It is a floor and not a public-suffix check: `*.github.io` still passes, because trusting shared hosting is a decision an operator may reasonably make, and what bounds it is T-275's quota. Validation runs on write, so a stored `*` survives until that row is next saved \u2014 and no released deployment can hold one, CIMD being unreleased.",
+                  "modelType": "STRIDE",
+                  "number": 276
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 810,
+              "y": 260
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "per-tenant path issuers\n(/t/{tenant_id})"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "bcb5139c-1607-43dd-badd-6256ff7b2b31",
+            "data": {
+              "type": "tm.Process",
+              "name": "per-tenant path issuers\n(/t/{tenant_id})",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "4c9a9796-7c27-4e59-8285-0668a54cb966",
+                  "title": "One key set signs every tenant, so a token minted for tenant A verifies on tenant B's path",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Elevation of privilege",
+                  "description": "RFC 8414 \u00a72 forbids a query component in an issuer, so AXIAM's `?tenant_id=` convention cannot be published as one tenant's issuer and an MCP client deriving discovery from a protected-resource document always landed on the deployment's default tenant. T21.6's opt-in `{root}/t/{tenant_id}` fixes that and introduces the risk, which T21.6's own second amendment found rather than inherited: the JWKS is shared \u2014 one key set, many issuers, which RFC 8414 permits \u2014 and the extractors must accept both the root issuer and any tenant issuer, so **the signature no longer distinguishes tenant A's token from tenant B's**. Left there, a path-shaped tenant selector would be a selector the caller and the token could disagree about, which on a multi-tenant authorization server is the whole ball game.",
+                  "mitigation": "Two checks, and the 2026-09-17 review (V2) confirmed both against live routes rather than against the functions. `enforce_issuer` refuses a token whose `iss` names a tenant its `tenant_id` claim does not, so a token can never be internally ambiguous; it is a no-op with the flag off, where `jsonwebtoken`'s pinned-issuer check is kept verbatim, so I1 holds by construction. `enforce_tenant_path_binding` refuses a principal whose tenant is not the tenant the path named, and sits in `extract_user` \u2014 the funnel **both** extractor arms pass through \u2014 so a route mounted under the scope later inherits it rather than having to remember it; it is placed after the decode because the scope middleware cannot decode a token. The refusal is the same `401` an uncredentialed request gets, so the holder of a tenant-A token is not told tenant B exists. A `tenant_id` query parameter on a tenant path is refused outright with `invalid_request`, so the two selectors can never both be present. Introspection is tenant-scoped independently \u2014 the token's `tenant_id` is compared with the request's and a mismatch answers `active: false` \u2014 so the shared key set does not make introspection a cross-tenant read either. One note for whoever widens the scope: only the OAuth2 endpoints are mounted under `/t/{tenant_id}` today, and the binding is checked against the principal's *home* tenant, which the organization-level tenant header can move afterwards; that does not meet a path selector on any route as things stand.",
+                  "modelType": "STRIDE",
+                  "number": 279
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 1075,
+              "y": 910
+            },
+            "size": {
+              "width": 170,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "externally registered\nclients (dcr, cimd)"
+              },
+              "topLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              },
+              "bottomLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "store",
+            "zIndex": 1,
+            "id": "89558645-355b-40c7-952c-081d58a6656b",
+            "data": {
+              "type": "tm.Store",
+              "name": "externally registered\nclients (dcr, cimd)",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isALog": false,
+              "isEncrypted": false,
+              "isSigned": false,
+              "storesCredentials": true,
+              "storesInventory": false,
+              "threats": [
+                {
+                  "id": "04766f0c-0767-44d7-99bd-9e7302207e44",
+                  "title": "Shadow client rows accumulate without a quota and are reclaimed by nothing",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "Both external mechanisms write client rows for parties nobody vetted, and the two are bounded differently. A `dcr` row counts against `dcr_max_clients` and is swept on a TTL. A `cimd` row counts against nothing \u2014 the quota query asks for `ManagedBy::Dcr` \u2014 and is swept by nothing, because `sweep_unused_dcr_clients` excludes `cimd` deliberately, reasoning that a shadow row is a cache of a document the client publishes and deleting it would only be re-materialised on the next request. That argument is correct about TTL semantics and does not carry to storage: a cache that is never evicted is not a cache.",
+                  "mitigation": "Closed in `0b216c6` (MCP-04, #470): The bound is the number of distinct URLs that both match `trusted_client_id_domains` and serve a valid document, which for the profile the documentation recommends \u2014 a named publisher, `*.vendor.example` \u2014 is small, and the entry would be theoretical. It stops being theoretical the moment a tenant trusts shared hosting, which is a natural thing to do because shared hosting is where a small tool publishes a JSON file; any third party who can publish under that domain then mints unbounded rows at one unauthenticated request each. It compounds with T-276, where `*` makes every domain shared hosting. **Closed** (`0b216c6`), filed as MCP-04 (#470) against T21.5, in three parts and with no migration. `dcr_max_clients` now caps `cimd` rows as a separate count against the same number \u2014 which is what the repository's own comment on `count_by_managed_by` asked for \u2014 and the count is checked **before** the fetch, so a tenant at its ceiling is not an outbound amplifier either; the refusal is audited in T21.4a's shape and carries no caller-supplied string. `dcr_unused_client_ttl_days` now sweeps `cimd` rows on their own `/health/jobs` counter and their own clock, `max(updated_at, last_authorized_at, created_at)`: no column was added because `updated_at` is *already* \"last presented\", every resolve upserting the row whether or not a fetch happened. And the in-memory document cache evicts entries past their TTL and stale window on the insert path. Eviction on last-seen is *coherent* with T21.4's cache argument rather than against it \u2014 a row deleted while its document is still published is re-materialised on the next request, which is what a cache should do; what the old argument said nothing about is storage, and a cache that is never evicted is not a cache. T-276's closure did not lower this one: `*` was the one-character path to shared hosting and is gone, but naming `*.github.io` is one settings line, is a reasonable operator decision, and is the path this entry was filed about. The accepted residual is the ordering overshoot T-272 records, which applies here identically.",
+                  "modelType": "STRIDE",
+                  "number": 275
+                }
+              ]
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "a5448b82-8370-45f9-95ee-d6a202fd9bc2",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "register (RFC 7591)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "942f79a1-21ea-5fce-a043-dedc03b9dd69"
+            },
+            "target": {
+              "cell": "02a44c35-6670-495e-900c-92c24dfaa00c"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "register (RFC 7591)",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "0cf3d510-ec6f-458d-945e-183f5b8f9f1f",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "create dcr row"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "02a44c35-6670-495e-900c-92c24dfaa00c"
+            },
+            "target": {
+              "cell": "89558645-355b-40c7-952c-081d58a6656b"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "create dcr row",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealQL",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "62fb1252-a30d-4166-9e04-d421ac131bcb",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "resolve client_id URL"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "0df1ba0d-316d-5394-91be-646cb231fc84"
+            },
+            "target": {
+              "cell": "50084f15-5206-4550-ae51-f0ff7e0e6bc5"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "resolve client_id URL",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "6fb9306e-7335-48ce-b065-6329211e21b3",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "cache cimd shadow row"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "50084f15-5206-4550-ae51-f0ff7e0e6bc5"
+            },
+            "target": {
+              "cell": "89558645-355b-40c7-952c-081d58a6656b"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "cache cimd shadow row",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealQL",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "611cd2a9-3f9e-4bd1-8bf7-b7118ed7fd1b",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "discovery at /t/{tenant_id}"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "bcb5139c-1607-43dd-badd-6256ff7b2b31"
+            },
+            "target": {
+              "cell": "0e4c6d78-5d60-5e5c-8155-001a2aa194a3"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "discovery at /t/{tenant_id}",
               "description": "",
               "isTrustBoundary": false,
               "outOfScope": false,

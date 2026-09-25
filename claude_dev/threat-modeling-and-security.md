@@ -109,10 +109,9 @@
 > T-280 — the nine Phase 21 entries of 2026-09-17, four of them since closed.
 > That wave reached one of the three artifacts and not the other two. The model
 > is therefore **288 threats, 275 mitigated / 13 open**, and the counts here are
-> corrected to it. The nine entries still have to be written into the Threat
-> Dragon file itself, from the text `threat-model-stride.md` already holds; that
-> is a maintainer task and is not part of this wave, which is why `threatTop` in
-> the model file reads 281 while the file carries 272 entries.
+> corrected to it. The nine entries entered the Threat Dragon file on
+> 2026-09-25, at model **2.17.0**, with four new elements on the OAuth2 diagram;
+> the three artifacts agree at 288 / 275 / 13.
 >
 > **The 2026-09-14 early-refusal pass (model 2.16.0).** Two threats enter, both
 > Mitigated on arrival, and six entries gain a clause, taking the model to **271
@@ -632,14 +631,14 @@ optimistic closed one.
 
 | Area | Threats | Open |
 |---|---|---|
-| System context | 32 | 2 |
+| System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
-| OAuth2 / OIDC authorization server | 49 | 0 |
+| OAuth2 / OIDC authorization server | 58 | 0 |
 | Federation (SAML SP & OIDC RP) | 31 | 1 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
-| PKI, certificates & IoT device identity | 26 | 1 |
+| PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
-| Deployment & platform (Kubernetes) | 27 | 5 |
+| Deployment & platform (Kubernetes) | 28 | 5 |
 | Client SDKs & admin-UI integration surface | 28 | 3 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
@@ -666,21 +665,21 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 66 | 3 |
+| Spoofing | 70 | 3 |
 | Tampering | 59 | 1 |
 | Repudiation | 6 | 0 |
-| Information disclosure | 65 | 6 |
-| Denial of service | 24 | 2 |
-| Elevation of privilege | 51 | 1 |
+| Information disclosure | 67 | 6 |
+| Denial of service | 28 | 2 |
+| Elevation of privilege | 58 | 1 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
-| Critical | 30 | 1 |
-| High | 126 | 8 |
-| Medium | 106 | 3 |
-| Low | 9 | 1 |
+| Critical | 32 | 1 |
+| High | 135 | 8 |
+| Medium | 111 | 3 |
+| Low | 10 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is

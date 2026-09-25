@@ -746,9 +746,9 @@ Since 1.0.0-beta13 this also covers the OpenID Connect **Basic OP** surface the 
 
 The 2026-09-14 pass, between 1.0.0-beta14 and the next release, moved two refusals to the point where the request is already known to be unusable, so nobody is asked to sign in for a request that cannot succeed and the relying party is told over the protocol rather than through a browser: a `request_uri` that is already spent, expired or another client's is refused before the login hop by a read that does not spend it, and reported as `invalid_request_uri` to a registered `redirect_uri` (T-270); and a `fapi2` client's `state` and `nonce` are bounded at push (T-271). Eight OpenID Foundation modules moved from `REVIEW` to `PASSED` per module; no full plan has been re-swept.
 
-The 2026-09-17 pass adds Phase 21's MCP authorization surfaces ([`mcp-authorization-server-plan.md`](mcp-authorization-server-plan.md)), which are the first thing in this model to put an **unauthenticated write endpoint** and an **outbound fetch whose target an unauthenticated caller chooses** on the authorization server itself, and the first to let a token be minted for an audience that is not AXIAM. Four new elements carry them: `/oauth2/register` (RFC 7591), the client ID metadata document fetch, the externally registered client rows those two mechanisms create, and the per-tenant path issuers that give an MCP client an issuer it can turn into a discovery URL. T-277 through T-279 are the three places the phase could have broken an existing guarantee and does not; T-272, T-275, T-276 and T-280 are recorded **open** from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md), which is the first entry in this model's history where a review's findings arrive already filed rather than already fixed — three of the four need a settings field or a migration to close, and the fourth is a six-call-site change in a handler its own task did not touch.
+The 2026-09-17 pass adds Phase 21's MCP authorization surfaces ([`mcp-authorization-server-plan.md`](mcp-authorization-server-plan.md)), which are the first thing in this model to put an **unauthenticated write endpoint** and an **outbound fetch whose target an unauthenticated caller chooses** on the authorization server itself, and the first to let a token be minted for an audience that is not AXIAM. Four new elements carry them: `/oauth2/register` (RFC 7591), the client ID metadata document fetch, the externally registered client rows those two mechanisms create, and the per-tenant path issuers that give an MCP client an issuer it can turn into a discovery URL. T-277 through T-279 are the three places the phase could have broken an existing guarantee and does not; T-272, T-275, T-276 and T-280 are recorded **open** from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md), which is the first entry in this model's history where a review's findings arrive already filed rather than already fixed — three of the four need a settings field or a migration to close, and the fourth is a six-call-site change in a handler its own task did not touch. All four closed within the day, in [#475](https://github.com/ilpanich/axiam/pull/475) (`b8bc508`) and [#476](https://github.com/ilpanich/axiam/pull/476) (`0a273ec`, `0b216c6`, `c4d9ea2`), which the rows record; and the nine entered `Axiam.json` on 2026-09-25, at model 2.17.0, eight days after this text.
 
-*58 threats — 5 critical, 25 high, 24 medium, 4 low; 4 open.*
+*58 threats — 5 critical, 25 high, 24 medium, 4 low; 0 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -2965,8 +2965,8 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 |---|---|---|
 | Critical | 32 | 1 |
 | High | 135 | 8 |
-| Medium | 111 | 6 |
-| Low | 10 | 2 |
+| Medium | 111 | 3 |
+| Low | 10 | 1 |
 
 **By diagram**
 
@@ -2974,7 +2974,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 |---|---|---|
 | System diagram | 33 | 2 |
 | Authentication & session management | 35 | 0 |
-| OAuth2 / OIDC authorization server | 58 | 4 |
+| OAuth2 / OIDC authorization server | 58 | 0 |
 | Federation — SAML SP & OIDC relying party | 31 | 1 |
 | Authorization engine — RBAC, hierarchy & scopes | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
@@ -3005,6 +3005,7 @@ Revisit the model when any of the following happens, and re-run the generator so
 - The SDK contract gains or relaxes a security clause (contract 1.28's WebAuthn, account-lifecycle and PAR sections and the Swift/C/C++ reactor protocol core are the 2026-08-22 examples — T-183…T-186 record them; contract 1.37 and 1.38 added the login-provider operations and the handoff-origin rule — T-218…T-225)
 - A conformance module moves from `REVIEW` to `PASSED` because the code changed, not because the evidence was re-read — the 2026-09-14 early-refusal pass is the example: a dead `request_uri` refused before the login hop and a `fapi2` client's `state` and `nonce` bounded at push entered as T-270 and T-271, and four existing entries (T-163, T-238, T-255, T-256) gained the clause that says what moved. And the reverse discipline, which the same week supplied: a fix that names a status *over REST* is not whole until every crate that renders a status carries it — T-262 was recorded Mitigated with `503` on two of three surfaces while `axiam-scim`'s own error type still answered `500`, and the entry now says so rather than absorbing the correction
 - A fix changes what a grant, a policy or a credential *means* even when no surface moves (the beta09 authorization-reach fixes T-226…T-228 and the WebAuthn user-verification policy T-229…T-230 are the examples: nothing new was exposed, but what existing data authorises changed) — and the reverse case, a fix that *weakens* a property the model records, which is written down as an open item rather than absorbed: the beta13 refresh-rotation grace window amended T-37 and opened T-254 — and was then closed by a decision rather than by a further fix, which is the other half of the same discipline
+- A wave writes its entries here — which puts them in the model only once they are in all three artifacts: this document, `ThreatDragonModels/Axiam/Axiam.json`, and [`threat-modeling-and-security.md`](threat-modeling-and-security.md). The generator's one-line summary is the check: `node website/scripts/gen-threat-model.mjs` must print the total §7 carries, on every commit that touches either this document or the JSON. The 2026-09-17 MCP entries (T-272…T-280) are the example: they lived eight days in this document alone, the dogfooding wave allocated T-281…T-288 past them, and the website would have rendered 279 threats against a text saying 288 — until they entered the JSON at 2.17.0
 
 Threat numbers are stable: add new threats with new numbers and raise `threatTop` rather than renumbering, so review comments and issues keep pointing at the right thing. Allocate them from `threatTop`, never from the last number in a section — the login-provider threats were first published as T-163…T-170, continuing §5.4's own sequence, and collided with numbers the model already held for §5.3's single-use credentials and §5.9's `cnf` threats. They were renumbered T-218…T-225 when they entered the model at 2.11.0 (they had lived only in this document until then, so nothing on the website pointed at them), and the four code comments that cite them moved with them.
 

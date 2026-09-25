@@ -1,10 +1,62 @@
 # Threat model — reconciling the Threat Dragon file with its own text (model 2.17.0)
 
+> **EXECUTED 2026-09-25, on `main`, in one commit** —
+> `docs(threat-model): the nine Phase 21 entries enter the Threat Dragon file — model 2.17.0`
+> (the commit carrying this block, so it is named by its subject rather than a
+> SHA it cannot contain). No pull request, no feature branch.
+>
+> **What the generator printed.** `node website/scripts/gen-threat-model.mjs`:
+> `threatModel.ts: 9 diagrams, 288 threats (275 mitigated, 13 open)` — exactly
+> §3's line. §3's first check passed: every number 1 … 288 present once, 13
+> `Open` (T-9, T-18, T-94, T-123, T-124, T-133, T-134, T-135, T-146, T-148,
+> T-161, T-180, T-216 — the register, unchanged), `version` 2.17.0, `threatTop`
+> 288. The summary diff moved totals only, to Appendix A's numbers; no open count
+> moved. The two generated files were read and then reverted with
+> `git checkout`; they are not in this commit.
+>
+> **The JSON.** Four elements on diagram 2, each a deep copy of the plan's
+> template cell (`7a5c9644-…` for the processes, `authorization codes
+> (single-use)` for the store) with a fresh UUID, `data.name` = `attrs.text.text`
+> = the STRIDE element string, `description` left empty (no prose),
+> `hasOpenThreats` false: `per-tenant path issuers` at (810, 260), beside the OIDC
+> discovery process it serves; `/oauth2/register` at (810, 460), beside client
+> registration; `Client ID metadata document fetch` at (810, 640) — the three in
+> the provider box's free right-hand column, inside it without resizing; and
+> `externally registered clients (dcr, cimd)` at (1075, 910), below the Data
+> tier's last row. The Data tier box grew `height` 780 → 940 to hold it, which
+> takes the diagram's rendered height from 868 to 1028; **no existing
+> `position` changed**, and the regenerated `threatModel.ts` showed no moved
+> coordinate on any other cell. T-277 was appended to the resource-endpoint
+> validation process (now 5) and T-278, T-280 to `/oauth2/authorize` (now 11).
+>
+> **Flows: five, not four.** §1.1's heading says "add four" and its list names
+> five (`register (RFC 7591)`, `create dcr row`, `resolve client_id URL`,
+> `cache cimd shadow row`, `discovery at /t/{tenant_id}`); §3's "four new flows"
+> inherits the heading. All five were added — each is a separate sentence of the
+> list and the diagram does not read without the discovery edge — copied from
+> `cfb25907-…`, threat-free; the public one carries `isPublicNetwork` true and
+> `HTTPS`, the two store writes `SurrealQL` as `register / rotate` does, the
+> other two `in-process`.
+>
+> **What the nine entries' text needed.** Nothing re-worded. Each `description`
+> is the detail block's first paragraph; each `mitigation` is the rest, the `>`
+> quoting removed and paragraphs joined by a blank line (T-219's shape), with
+> backticks and bold kept as T-219 and T-249 keep them. Markdown links were
+> reduced to their text (`#471`), because no entry in the file carries one. The
+> four closed entries begin with §1.1's prefix (for T-272, "Closed in
+> `c4d9ea2` (MCP-05, #471): ") and continue with the block verbatim, so T-272's
+> next words are the block's own "Bounded, not closed." That is the history the STRIDE text keeps (the bound
+> came first, the closure the same day) and was left as written rather than
+> edited here, per §2.
+>
+> **Threat Dragon was not opened** — this session had no desktop. The
+> generator, which is the gate CI has, read the file; the commit message says so.
+
 **Date:** 2026-09-25
 **Validated against:** `axiam` main @ `80bc7aa` (the merge of PR #500, contract 1.52)
 **Executes on:** `main`, directly, one commit — no pull request, no feature branch
 **Model:** Opus 5
-**Status: PLANNED.** It precedes
+**Status: EXECUTED 2026-09-25** (see the block above). It precedes
 [`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md),
 whose Wave 0 regenerates the website from the file this plan repairs. Run this
 first; the website plan says so in its §0.

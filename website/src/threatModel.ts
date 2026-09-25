@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.16.0",
+ "version": "2.17.0",
  "diagramCount": 9,
- "total": 271,
+ "total": 288,
  "open": 13,
- "mitigated": 258,
+ "mitigated": 275,
  "diagrams": [
   {
    "id": 0,
@@ -331,6 +331,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Both erasure statements — the Art. 17 pipeline's `anonymize_user` and the administrator's tombstone behind `DELETE /api/v1/users/{id}` (T-187) — and the export job's `profile` section write **explicit column lists**. A column none of them names survives erasure and never appears in an export. Latent rather than live: the columns it would have stranded, `phone_number` and `address`, are added by the same release, and the plan assumed user-row fields were erased \"for free\"; an erased subject would have held a telephone number and a postal address indefinitely, with the account hidden from the UI — what the tombstone's own documentation calls retention with the UI hidden, not erasure. Beside it, `user_patch_is_noop` had never been taught the two columns, so a SCIM PATCH that set or *removed* only those answered `200` with the unchanged resource and wrote nothing — an erasure that silently does not happen.",
        "mitigation": "All three paths name the columns, and the tests erase a subject who has both and read the row back rather than inspecting the SQL, so a fourth erasure path cannot pass by sharing a statement. The no-op list is destructured from `UpdateUser`, so a field added to that struct fails to compile here instead of silently becoming unwritable, and each of its seven fields is asserted on its own rather than in one lump — a lump assertion still passes with a field missing, which is precisely how this was missed the first time. The three-way distinction is asserted too: `None` means the PATCH did not mention the attribute, `Some(None)` means write NULL — the erasure a data subject asked for — and confusing the two is an erasure that does not happen; `remove` and an empty array both erase, because RFC 7644 §3.5.2.3 spells \"replace with nothing\" that way, and `phoneNumbers` and `addresses` are removable unlike `emails`, deliberately, since a provisioning client sending `remove` is a subject asking for a number or an address to stop being held. **The three hand-maintained lists are gone (R-1, 2026-09-12).** `axiam_core::personal_data::USER_COLUMNS` is one declaration with a row per `user` column, recording for each whether erasure clears it, which key the Art. 15 `profile` section shows it under, and — where either answer is “neither” — why; the two questions are separate fields because a single “is personal data” flag gets `password_hash` (erased, never exported — D-10) and `created_at` (exported, never erased) both wrong. Both erasure statements render their shared `SET` fragment from it, so a declared personal-data column is erased by both paths by construction; each keeps its own path-specific clauses, and the asymmetries between them (`email_verified_at` and `totp_last_used_step` on the tombstone, `deletion_pending` and `scheduled_purge_at` on the Art. 17 path) are recorded on the columns they belong to rather than harmonised, because harmonising them would be a behaviour change and this is a gate. Three checks close the loop: `user_schema_matches_the_declared_inventory` runs `INFO FOR TABLE user` against a live datastore after migrations and compares the field set with the inventory **in both directions** — a column added to the schema and classified nowhere fails naming itself, and so does a classification for a column that no longer exists; `the_profile_section_shows_exactly_the_declared_export_keys` does the same for the export literal, which stays hand-written because two of its entries are not column reads (`id`, and the derived `phone_number_verified`); and `every_unerased_or_unexported_column_says_why` keeps “nobody classified this” and “classified as neither” different states. The erase-then-read-back tests are untouched on purpose — reading the row back is the one assertion a fourth path sharing a bad statement cannot satisfy, and rewriting them against the new machinery would throw exactly that away. `docs/compliance/gdpr-compliance.md` §1 and §2 now describe the gate rather than warning the reader to remember."
+      },
+      {
+       "number": 287,
+       "title": "Automation holds a human administrator's credentials because no management route accepts a service-account token",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Every REST management handler took AuthenticatedUser, which refuses aud = axiam:m2m, so a service account could authenticate and then reach two routes: POST /authz/check and its batch form (DF-013). Automation that has to create resources, roles and groups, assign roles, issue and bind device certificates or register webhooks — a tenant's provisioning job, the demo's domo-bootstrap — was therefore given a person's credential instead: a password or a refresh token sitting in a CI secret or a container environment. That credential carries every role the person holds rather than the few the job needs, cannot be narrowed without narrowing the person, and is revoked only by locking the person out; its session looks interactive, and every change the job makes is audited as that person, so the trail cannot separate an administrator's act from a script's. The plumbing to do better already existed and was unused: AuthenticatedPrincipal, RBAC applied identically to both principal kinds, and role assignments on service accounts.",
+       "mitigation": "T22.13 (S-9, 2026-09-23). Decision D-5 admits a service-account token on eight permission families — resources, scopes, permissions, roles (assignments included), groups, service accounts, certificates (generate, sign-csr, bind, list, get, revoke) and webhooks — whose 66 handlers now take AuthenticatedPrincipal; every other guarded route keeps AuthenticatedUser and still answers a machine token with 401. The boundary is two constants in permissions.rs checked against PERMISSION_REGISTRY, and a sweep drives every route of ROUTE_PERMISSION_MAP, plus every other non-public /api/v1 operation in the OpenAPI document, with real service-account tokens: admitted exactly on those families, refused everywhere else, and an account with no role reaches none of them (403 authorization_denied — RBAC is default-deny). Reaching a route is not being allowed on it; each is authorized by the roles assigned to the account. Widening the surface made four latent properties of AuthenticatedPrincipal matter, and all four are closed. (1) A machine-audience token is admitted only with sub_kind = service_account, because an RFC 8693 exchange can narrow a user's token to axiam:m2m and the machine branch skips the session check — such a token would have acted as that user with no session behind it. (2) Its user branch is now AuthenticatedUser's own code, not a copy; the copy read the session id from jti where the original reads sid first, so an OAuth2-issued user token would have been refused on every converted route; a differential test compares both extractors case by case. (3) The T21.6 tenant-path binding applies to both kinds. (4) X-Axiam-Tenant is resolved for a service account through the same function as for a user, so only an organization-level account may name another tenant of its organization, within its tenant_scope; and no service account is an organization principal for issuance, so the organization CA stays human-only (S-1's gate). A certificate-bound device token is refused on the new surface without its certificate, since enforce_sender_constraint runs on every extraction path. The audit middleware records the actor type from the signed sub_kind claim, so a service account's write reads service_account rather than user, and grant.pre_assign payloads carry actor_type for four-eyes rules. The CSRF exemption for bearer-only callers (T-200) is unchanged and does not cover a request that also carries a session cookie. Residual: a service account holding roles:assign can grant itself any role of its tenant, exactly as a user with that permission can — RBAC is the control, and granting it is the operator's decision; a machine token has no session to revoke, so disabling an account stops new tokens and the last one lives out its access-token lifetime (15 minutes by default); families outside D-5 still require a person, each to be argued on its own."
       }
      ],
      "open": 0
@@ -358,6 +367,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A service account in tenant A introspects a token issued to tenant B and learns its subject, scopes and validity.",
        "mitigation": "SEC-068: the caller's tenant is taken from the interceptor-verified JWT and introspection refuses any token belonging to a different tenant."
+      },
+      {
+       "number": 286,
+       "title": "The gRPC listener cannot verify client certificates, so every call rests on a bearer token alone",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "build_grpc_rustls_server_config built the listener's rustls configuration with with_no_client_auth(), and no setting could change it; its own doc comment recorded client-certificate policy as a deployment decision deferred from T-234 (DF-005). That was defensible while the listener answered CheckAccess. It stopped being so as the surface grew: ReactorAdminService — create, update and delete of the reactors a tenant's policy decisions call out to — sits on the same listener, UserService/ValidateCredentials is a password check behind a rate limit, and gRPC skips session revocation by default (AXIAM__GRPC__STRICT_REVOCATION), so a revoked session keeps passing there until its token expires. A bearer token was all any caller needed, and a mesh that already issues client certificates had no network-level gate it could turn on. The other half is S-3's (T-283): device tokens carry cnf.x5t#S256, and the interceptor matches it against Request::peer_certs() — which was always empty, so a certificate-bound token was refused on every gRPC call. Fail-closed, but the property the binding exists for could only be had by keeping devices on REST.",
+       "mitigation": "T22.12 (S-8, 2026-09-23). Two flat variables beside the certificate pair: AXIAM__GRPC_TLS_CLIENT_AUTH (off default | optional | required) and AXIAM__GRPC_TLS_CLIENT_CA_PATH. The verifying modes install a ReloadableClientCertVerifier — the REST listener's mechanism, as a second instance, because the policy is fixed per verifier and the two listeners may be configured differently — registered with reload_trust_anchors, which re-reads each gRPC listener's own bundle so it never trusts a set its next boot would not read. Pointed at the REST bundle, flagging a CA reaches both listeners without a restart, and only then is the reload reported as applied. required is enforced by rustls in the handshake, ahead of every RPC. The verified certificate reaches the interceptor through tonic's TlsConnectInfo, which the custom accept loop already produced — confirmed against tonic 0.14.6 and end to end rather than assumed — so a device token is now accepted over gRPC with its own certificate and refused with another device's or with none. Boot is refused, not warned about, on an unknown mode, on optional_self_signed, on a verifying mode without a bundle, on a bundle under off, on an empty or unreadable bundle, and on either variable set while the listener is plaintext. A reload that finds the bundle empty or unreadable keeps the previous anchors. off keeps with_no_client_auth(); the I1 compares handshakes, not structs, across four client shapes against the pre-change configuration, including a client holding a certificate, which is neither asked for it nor has it reach the server. Residual, by design: the default is off, so a deployment that sets nothing keeps a bearer-only gRPC listener; and the certificate is proof of possession and a gate, never an identity."
       }
      ],
      "open": 0
@@ -468,7 +486,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "The authorization engine is additive-only (allow-wins, default deny). A role granted high in the resource hierarchy cannot be revoked on a single child resource — the only way to remove access to a subtree is to restructure the grant.",
-       "mitigation": "SEC-040 — closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows — asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules."
+       "mitigation": "SEC-040 — closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows — asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules. Amended 2026-09-22 (T22.11, DF-021): an assignment can also be made non-inheritable — inherit: false on the has_role edge — so a role granted high in the hierarchy can be stopped at its node instead of cascading to every child (\"here and no further\"), for allows and denies alike. Precedence is unchanged: the flag decides which assignments are applicable at a resource, never how deny-override weighs them (deny-override-design.md §2.2 rows 9–11). The flag's own hazards are T-285."
       }
      ],
      "open": 0
@@ -970,10 +988,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 31,
+   "total": 33,
    "open": 2,
    "bySeverity": {
-    "High": 15,
+    "High": 17,
     "Medium": 13,
     "Critical": 3
    }
@@ -1881,7 +1899,7 @@ export const THREAT_MODEL: ThreatModel = {
    "title": "OAuth2 / OIDC authorization server",
    "description": "Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores. Since 1.0.0-beta13 this also covers the OpenID Connect Basic OP surface the W1–W9 waves added — the per-client browser login hop and its OP session cookie, the honour lane for the authentication-request parameters, the consent-gated address and phone scopes, client_secret_basic, POST /oauth2/userinfo and tenant-scoped discovery — and the resource-endpoint token validation the OpenID Foundation conformance runs found wanting (T-237…T-259).",
    "width": 1438,
-   "height": 868,
+   "height": 1028,
    "boundaries": [
     {
      "id": "62545360-5217-533c-8fe0-9d3096b4e555",
@@ -1904,7 +1922,7 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 1034,
      "y": 64,
      "w": 380,
-     "h": 780,
+     "h": 940,
      "label": "Data tier"
     }
    ],
@@ -2095,6 +2113,24 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "`/oauth2/authorize` could not look at a pushed request while answering an anonymous browser: the handle is single-use and is spent in the handler, after a principal exists. So a browser presenting a `request_uri` that had already been used, had expired, or had been issued to a different client was sent to `/login`, the person typed a password, and the request was refused on the return leg — which the OpenID Foundation suite reports as a screenshot of a sign-in page where an error about an invalid `request_uri` was expected (`fapi2-security-profile-final-par-attempt-reuse-request_uri`, `-attempt-to-use-expired-request_uri`, `-attempt-to-use-request_uri-for-different-client`). The same shape held for a request with no `request_uri` and a missing or unsupported `response_type` (`oidcc-response-type-missing`). Refusing earlier creates its own ways to get it wrong. An early check that *consumed* the handle would spend it on a refusal path and break the case the specification requires — the same `request_uri` presented twice before the first authorization completes must still reach the sign-in page — and one that returned the pushed parameters would let a caller authorize from a handle it never consumed, which is the single-use guarantee T-163 exists for. And a refusal delivered by redirect is an open redirect unless the target was registered: the pushed copy's own `redirect_uri` is exactly what could not be read.",
        "mitigation": "2026-09-14 (616b731, ad1cb67). `ParService::peek` answers the three questions `consume` answers — is this a PAR handle at all, does an unexpired, unconsumed row exist for it, does it belong to this client — with the same refusals in the same order, and returns `()`: nothing is cached, marked or carried forward, and the authoritative single-use decision stays in `consume`, in the handler, in one statement. `PushedAuthRequestRepository::find_unconsumed` is `consume`'s `WHERE` clause with the write removed — no transaction, because there is nothing to serialise, and a read that raced a concurrent redemption is answered by that redemption failing. The endpoint runs it for an anonymous browser only after the client has been resolved and found to opt into the login hop, and only for a genuine PAR handle: a request object by value or by reference keeps the OIDC Core §3.1.2.6 code `classify_request_object` owns. `response_type` is decided first, without touching the datastore, and only when no `request_uri` is present, because with PAR the pushed value is authoritative (RFC 9126 §4). Both refusals are delivered exactly as the `prompt=none` arm of T-255 delivers its own: by redirect only to a `redirect_uri` this client registered, compared exactly, with the request's own `state`, and answered in place otherwise — as `error=invalid_request_uri` (OIDC Core §3.1.2.6), the code a relying party can act on by pushing again, while a handle issued to a *different* client keeps `invalid_request`, because a client spending someone else's handle is not a handle that is gone, and an audit trail that cannot tell the two apart is worth less. The post-login return leg was brought to the same rule (`refuse_request_uri_to_client`: one registration read, on a refusal path only, keyed by `user.tenant_id` and never the query's). What the peek costs, stated: one indexed datastore read per anonymous authorization request that carries a `request_uri`, on a route under the per-IP rate limit, keyed by a 256-bit CSPRNG handle that cannot be guessed — so the wrong-client refusal, distinguishable by design, is not an oracle anyone can drive. Tests: `peek` is proved never to call `consume` and never to touch the client registration (doubles that panic if it does); seven handler tests walk a spent, an expired and a wrong-client handle before the hop, a live handle presented twice, a request object by reference, and a dead handle with and without a registered target; two repository tests pin `find_unconsumed` reading without spending and ignoring an expired row. Measured per module with `run-some.sh` against the OpenID Foundation suite, the three PAR modules and `oidcc-response-type-missing` moved from `REVIEW` to `PASSED`; no full plan has been re-swept, so the published receipts remain the 2026-09-11 ones. Contract 1.46 §26.2 rule 3 records both forms of the refusal; no SDK changes, since rule 2's authorization URL carries no `redirect_uri` and never reaches the redirected form."
+      },
+      {
+       "number": 278,
+       "title": "RFC 8252's loopback port allowance widens a redirect registration by more than a port",
+       "type": "Elevation of privilege",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "T-52 is Critical because a loosely matched `redirect_uri` hands the authorization code to an attacker's origin, and until T21.2 the match was byte-for-byte everywhere, which is exactly right and unimplementable for a desktop client listening on a port the operating system chose at run time. RFC 8252 §7.3 requires the port to be free; the risk is that the relaxation is written once and relaxes something else with it — a host, a path, a userinfo segment — at the one comparison standing between an authorization code and an attacker's server.",
+       "mitigation": "The allowance is applied only when the **registered** URI is `http` on `127.0.0.1`, `[::1]` or `localhost`; every `https` registration keeps exact matching (I6), because an `https` registration means the operator wrote a TLS endpoint down and a port is part of which endpoint that is. Everything but the port must still be identical — scheme, host, path, query, fragment, **username and password** — and the three loopback hosts each match only themselves, so a registration is never widened to a host the operator did not write. The non-loopback path compares the *strings*, byte for byte, so nothing existing changed. The doubled guard is what makes the classic attack uninteresting: `http://127.0.0.1@evil.example.com/callback` fails on the host and again on the userinfo. One function serves the authorization endpoint, PAR and code redemption, so the rule cannot be applied at one and forgotten at another, and the authorization code stores the **presented** URI so the token request's comparison stays exact against what was actually used. Driven against the live endpoint at the 2026-09-17 review (V1) with seven host, path, encoding and scheme spellings, including the two the review was asked to try."
+      },
+      {
+       "number": 280,
+       "title": "A desktop client on an ephemeral loopback port is never told its authorization failed",
+       "type": "Denial of service",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "T-255 established that an authorization error must be delivered where the relying party can read it. T-278's matcher answers \"is this a registered redirect URI?\" for the success path and for refusals raised after it runs; six sites in `handlers/oauth2.rs` still ask with an exact comparison, and decide whether an error may be reported by redirecting. For a client that registered `http://127.0.0.1/callback` and is listening on an ephemeral port, the answer is no, and the error is rendered into the browser instead — so the client's loopback listener waits for a callback that never arrives while the user reads an error page the client cannot see.",
+       "mitigation": "Closed in `b8bc508` (MCP-01, #472): Fail-closed in the direction that matters: no error is ever redirected to a URI that was not registered, so this was never an open-redirect finding and the exact comparison was the safe error to make. What it cost was interoperability, on exactly the client family Phase 21 exists to serve. Confined to refusals raised *before* the matcher runs — `response_type` absent entirely, and the `request_uri` refusals — which the 2026-09-17 review established by driving both the negative and the positive case after its first, wider, framing of the finding was contradicted by the harness. **Closed** (`b8bc508`), filed as MCP-01 (#472) against T21.2a: all six sites now call `any_redirect_uri_matches`, which is where the rule already lived precisely so that it could not be applied at one endpoint and forgotten at another. Ungated, and it needs no flag: the matcher short-circuits on string equality and takes the port allowance only when the *registered* URI is `http` on a loopback host, so the answer changes for one shape of registration and no other, and nothing that was refused becomes redirectable. `mcp01_an_error_is_not_redirected_to_an_ephemeral_loopback_port` was written to be inverted and was, to `mcp01_an_error_is_redirected_to_an_ephemeral_loopback_port`; a second case pins `refuse_request_uri_to_client`, the site furthest from the first.\n\nOne thing found while closing it, recorded because it was the last inconsistency in the same story rather than a new threat: `http://[::1]/…` could not be *registered* at all. `validate_redirect_uris` compared the parsed host against the bare `::1` while a URL parser returns the bracketed literal, so the matcher's tested `[::1]` arm was live code nothing could reach. Fixed in `7ab890d`, in its own commit because it is the one change in the group that makes a refused request succeed: the widening admits one host, reachable only from the machine the user is sitting at, and a routable IPv6 literal over `http` is still refused. A validator that refuses what its own error message says it allows is a defect, not a decision."
       }
      ],
      "open": 0
@@ -2610,6 +2646,146 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "`check_user_aud_and_parse_jti` derived the session id from the token's `jti`. Every login path honours the contract that a user-flow token's `jti` equals the issuing `session.id`; the OAuth2 paths cannot, because a `jti` must be unique per token (RFC 7519 §4.1.7) and one session issues many, so they minted a random one. `is_session_active` then looked up a session that had never existed and refused, seconds after issuance — UserInfo did not work for any OIDC client at all. The obvious repair, dropping the session check at UserInfo, would have given up the property the check exists for: a password or MFA reset revoking in-flight OAuth2 access tokens.",
        "mitigation": "49916b4: the session travels in its own `sid` claim — the name OIDC Core §2 already uses on the ID token — on the authorization-code and refresh paths, and the reader prefers `sid`, falling back to `jti`. The fallback is what makes this need no migration and no flag day: every login-issued token resolves to exactly the session it always did, and not one login path changed. The refresh path carries it too, because a rotated token that dropped `sid` would stop working at UserInfo the moment it replaced the one that had it — a session ending mid-flow fifteen minutes after sign-in. `None` for a token with no session behind it (client credentials, an RPT, a token exchange), which are not weakened by the absence since there is no session to revoke. The access token's `sid` equals the ID token's, and RFC 6749 §10.5's code-replay revocation (T-250) is built on the same claim."
+      },
+      {
+       "number": 277,
+       "title": "A resource indicator names AXIAM's own token audience, so a grant mints a credential for AXIAM while claiming to mint one for somebody else",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "I3 is enforced by pinning `aud` to AXIAM's two built-in audiences in `decode_access_token`, so a token minted for an MCP server is refused at AXIAM's own doors. RFC 8707 resource indicators are validated as absolute URIs without a fragment, and the parser deliberately admits any scheme, because `urn:` resources are legitimate and a loopback `http` MCP server is a resource like any other. AXIAM's audiences are spelled `axiam:user` and `axiam:m2m`, and a scheme followed by a path is all an absolute URI needs — so they parsed, carried no fragment, and were resource indicators like any other. Naming one did not defeat the audience pin; it satisfied it, and the boundary stopped being a boundary. The sharpest case is `client_credentials`, which mints `axiam:m2m` when no resource is named: naming `axiam:user` made the *same* grant mint a token carrying the user audience, from a grant with no end user in it — a shape no other path in the server can produce. `external_client_allowed_resources` is what made it more than untidy, because D3 has DCR and CIMD clients inherit that list wholesale.",
+       "mitigation": "2026-09-17 (MCP-02, `013903d`). `axiam_oauth2::resource::normalise` reserves the whole `axiam` scheme rather than the two literals, so an audience added later is covered without anybody having to remember the rule exists. It is checked after parsing, against the scheme `url` resolved, so `AXIAM:user` cannot slip past a byte comparison on the input, and every door answers `invalid_target`: registration refuses the entry, and the token endpoint refuses the parameter even for a row that somehow holds one, because `is_allowed` normalises both sides. Fail-closed and reachable by no existing deployment — `allowed_resources` ships in the same unreleased version, so no stored row can contain one. Asserted at the parser and at both endpoints."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "02a44c35-6670-495e-900c-92c24dfaa00c",
+     "kind": "process",
+     "x": 814,
+     "y": 464,
+     "w": 140,
+     "h": 140,
+     "name": "/oauth2/register (RFC 7591, unauthenticated)",
+     "lines": [
+      "/oauth2/register",
+      "(RFC 7591,",
+      "unauthenticated)"
+     ],
+     "description": "",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 273,
+       "title": "A stranger registers a client whose `redirect_uris` name a host the tenant did not mean to admit, or whose posture it did not mean to grant",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`POST /oauth2/register` is the first endpoint in AXIAM that writes for a caller holding no credential. What a caller can write is what decides whether it is a registration endpoint or a way to mint an authorization target of one's own choosing: a `redirect_uris` entry pointing at attacker infrastructure makes every subsequent authorization a code delivered to the attacker, and a self-granted `client_credentials` or token-exchange grant would be a client acting with no user at all.",
+       "mitigation": "Off by default: `dynamic_registration` is `disabled` and the path answers a `403` shaped like every other refusal, so the feature does not leak from the route's existence. When it is on, the request is narrowed on every axis a caller can influence. `redirect_uris` go through the same `validate_redirect_uris` the admin API uses — one answer to \"what is a usable redirect URI\" in this server — and then through the tenant's `dcr_allowed_redirect_hosts`, a glob whose grammar is deliberately tiny: a literal host, `*` as the **whole** leftmost label, or `*` alone, with the match anchored on a label boundary so `evil-example.com` cannot match a pattern meant for `example.com`, and a `*` anywhere else matching nothing at all. The loopback three are always admitted, because they are what the desktop clients this exists for actually use. `grant_types` is narrowed to `{authorization_code, refresh_token}`, so a self-registered client can never reach `client_credentials` or an exchange grant; `scope` is narrowed to `dcr_allowed_scopes`, which the settings layer refuses to let contain `address` or `phone`; the profile is forced to `standard` and `managed_by` to `dcr`, so I5 holds and `fapi.rs` refuses a FAPI posture on the row twice over; `allowed_resources` is forced to the tenant's own list rather than taken from the request (D3), so an unrelated party cannot name its own audiences; and `software_statement` is refused explicitly rather than ignored. Every registration is audited, and D4 forces the consent hop on the first authorization whatever scopes were asked for, so an end user is always shown a client an administrator did not create. Asserted end to end by `mcp_authorization_test`, whose loopback probes drive seven host spellings against the live authorization endpoint (2026-09-17 review, V1)."
+      },
+      {
+       "number": 272,
+       "title": "A stranger fills the tenant's registration quota and denies registration to legitimate clients until the sweeper runs",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "`dcr_max_clients` bounds the rows a tenant's self-registration can create, which is the right control for storage and is also, unavoidably, the tenant's availability budget for the feature. In `anonymous` mode an unauthenticated caller can spend all of it: the default ceiling is 20 and the default per-IP limit is 5 a minute, so about four minutes from one address fills it, and a handful of addresses removes the four minutes. The rows then sit until the sweeper reclaims them, which for a client that was never authorized is `created_at + dcr_unused_client_ttl_days` — 30 days by default — because the same TTL serves both \"registered and abandoned\" and \"used once and gone quiet\", which are different clocks.",
+       "mitigation": "Closed in `c4d9ea2` (MCP-05, #471): Bounded, not closed. `initial_access_token` mode is unaffected: a caller holding no handle is refused before the quota is consulted, which is a real reason to prefer that mode and one the operator page does not currently give. `anonymous` mode is opt-in, refused while `external_client_allowed_resources` is empty, and every attempt is rate-limited and audited, so the denial is noisy and attributable to whatever addresses it came from. **Closed** (`c4d9ea2`), filed as MCP-05 (#471) against T21.4a. The window is shortened where the exposure is: a `managed_by: dcr` row with no `last_authorized_at`, in a tenant whose effective mode is `anonymous`, is swept an hour after `created_at` rather than after `dcr_unused_client_ttl_days`. One TTL was serving two situations with nothing in common — the 30-day default is sized for \"a client somebody uses monthly\", and a registration nobody authorized is not that client, which the sweeper could already tell from `last_authorized_at: None`. The second clock does not make the flood more expensive; it turns a month of denial into an hour, at no cost to any client that completes a flow. It does not apply in `initial_access_token` or `disabled` mode, does not touch a row that has been authorized once, and is not switched off by `dcr_unused_client_ttl_days: 0`. The hour is a constant rather than a tenant setting: the fix plan recommended the field and its own cost table was wrong about the price — `OidcPolicy`'s scalars are columns on a `SCHEMAFULL` table, so a fifth DCR number is a migration v66, which the remediation's constraints excluded. The plan's §4 carries the evidence and the promotion checklist; the field remains the right answer and is the maintainer's call.\n\nTwo residuals stay recorded. A **per-IP or per-subnet share** of the quota is not done: it needs a ledger per (tenant, address) that no store holds, it is defeated by a handful of source addresses, and the mode it would protect is the one the documentation now says is for tenants that accept this exposure. The condition that would change that: a deployment reporting quota exhaustion from distributed sources in `anonymous` mode *with* the second clock in place — and even then the answer is more likely `initial_access_token` than a subnet ledger. And the quota check and the write are still separated by an `await`, so concurrent registrations can overshoot the ceiling by the number in flight; the second clock makes such a burst cheap to recover from rather than cheap to cause."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "50084f15-5206-4550-ae51-f0ff7e0e6bc5",
+     "kind": "process",
+     "x": 814,
+     "y": 644,
+     "w": 140,
+     "h": 140,
+     "name": "Client ID metadata document fetch",
+     "lines": [
+      "Client ID",
+      "metadata",
+      "document",
+      "fetch"
+     ],
+     "description": "",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 274,
+       "title": "An unauthenticated `client_id` turns the authorization server into a request-forgery engine against its own network",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A client ID metadata document is fetched because an unauthenticated request named its URL. That is the whole mechanism and it is also the whole exposure: without a guard it is a `GET` to any address the caller chooses, issued from inside the deployment's network, with the response parsed and its contents stored. SEC-094 is the reason this entry is not merely theoretical — the shared SSRF guard once failed to canonicalise IPv4-mapped IPv6, so an `AAAA` record of `::ffff:169.254.169.254` passed the address check and was then *pinned* into the connection, guaranteeing the attacker's address was the one dialled.",
+       "mitigation": "The fetch goes through `axiam_pki::ssrf::guarded_fetch` over the existing `axiam-oauth2 → axiam-federation` edge, so it inherits the guard every other outbound fetch in AXIAM uses rather than carrying its own. Re-verified on this path at the 2026-09-17 review (V3): both IPv4-in-IPv6 embeddings are folded before classification — `::ffff:0:0/96` canonicalised to the v4 address it denotes, `::/96` rejected outright because `to_canonical` does not fold it — and **every** resolved address is classified rather than only the one dialled, so an `A`/`AAAA` pair with one bad answer is refused. Rebinding between check and connect is closed by pinning the validated address into a client built fresh per fetch, with no pooling. Redirects are never followed automatically: each hop is re-resolved, re-classified and re-issued, and the `allow_private` test seam is honoured on the first hop only, so `cimd.allow_http` cannot be turned into a redirect to a metadata endpoint. The bounds are each enforced and each tested — `https` unless the tenant opts into `http`, a 10-second timeout, a `Content-Length` gate plus a *streaming* cap at `max_metadata_bytes`, and a JSON content-type check. Ordering is the part most easily got wrong and is right here: `cimd::resolve` runs the trusted-publisher check **before** `get_or_fetch`, so an untrusted host is never contacted at all."
+      },
+      {
+       "number": 276,
+       "title": "The trusted-publisher list that bounds the fetch admits a value meaning \"every host\"",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "T-274's address guard keeps the fetch out of the private network; it does nothing about the public one, and nothing else does either. `cimd.trusted_client_id_domains` is the control that stops the mechanism being a general-purpose outbound-request primitive, and T21.5 added an interlock refusing to enable CIMD while that list is empty, on exactly that reasoning. The interlock refuses the empty list and accepts `*` — which `host_glob_matches` documents as \"a tenant that wants no host restriction\" — so the posture the interlock exists to prevent is reachable by one character, and the validator's own error message names `*` as a valid entry.",
+       "mitigation": "Closed in `0a273ec` (MCP-03, #469): Not a default: CIMD is off by default and the field ships empty, so no deployment has this posture without an operator writing it. The address guard still holds, so the residual is an outbound `GET` to public URLs a caller chooses, with AXIAM's source address and no attribution — not an internal-network primitive. **Closed** (`0a273ec`), filed as MCP-03 (#469) against T21.5. `*` is refused in `trusted_client_id_domains`, and so is a wildcard over a whole top-level domain (`*.com`), which is the same posture spelled longer; it stays admissible in `trusted_redirect_domains`, where an empty list is a working posture and the entries are not fetch targets. The argument is the one T21.5's amendment 2 made for refusing the empty list: an unrestricted trusted-publisher list is a request-forgery primitive offered to strangers **and no second control does that job**, so a control with a one-character bypass is not the control. Enforced at both settings doors by one condition, since `validate_cimd_policy` runs on the merged policy too, and the validator's entry-shape message no longer offers `*` for this field. It is a floor and not a public-suffix check: `*.github.io` still passes, because trusting shared hosting is a decision an operator may reasonably make, and what bounds it is T-275's quota. Validation runs on write, so a stored `*` survives until that row is next saved — and no released deployment can hold one, CIMD being unreleased."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "bcb5139c-1607-43dd-badd-6256ff7b2b31",
+     "kind": "process",
+     "x": 814,
+     "y": 264,
+     "w": 140,
+     "h": 140,
+     "name": "per-tenant path issuers (/t/{tenant_id})",
+     "lines": [
+      "per-tenant",
+      "path",
+      "issuers",
+      "(/t/{tenant_id})"
+     ],
+     "description": "",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 279,
+       "title": "One key set signs every tenant, so a token minted for tenant A verifies on tenant B's path",
+       "type": "Elevation of privilege",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "RFC 8414 §2 forbids a query component in an issuer, so AXIAM's `?tenant_id=` convention cannot be published as one tenant's issuer and an MCP client deriving discovery from a protected-resource document always landed on the deployment's default tenant. T21.6's opt-in `{root}/t/{tenant_id}` fixes that and introduces the risk, which T21.6's own second amendment found rather than inherited: the JWKS is shared — one key set, many issuers, which RFC 8414 permits — and the extractors must accept both the root issuer and any tenant issuer, so **the signature no longer distinguishes tenant A's token from tenant B's**. Left there, a path-shaped tenant selector would be a selector the caller and the token could disagree about, which on a multi-tenant authorization server is the whole ball game.",
+       "mitigation": "Two checks, and the 2026-09-17 review (V2) confirmed both against live routes rather than against the functions. `enforce_issuer` refuses a token whose `iss` names a tenant its `tenant_id` claim does not, so a token can never be internally ambiguous; it is a no-op with the flag off, where `jsonwebtoken`'s pinned-issuer check is kept verbatim, so I1 holds by construction. `enforce_tenant_path_binding` refuses a principal whose tenant is not the tenant the path named, and sits in `extract_user` — the funnel **both** extractor arms pass through — so a route mounted under the scope later inherits it rather than having to remember it; it is placed after the decode because the scope middleware cannot decode a token. The refusal is the same `401` an uncredentialed request gets, so the holder of a tenant-A token is not told tenant B exists. A `tenant_id` query parameter on a tenant path is refused outright with `invalid_request`, so the two selectors can never both be present. Introspection is tenant-scoped independently — the token's `tenant_id` is compared with the request's and a mismatch answers `active: false` — so the shared key set does not make introspection a cross-tenant read either. One note for whoever widens the scope: only the OAuth2 endpoints are mounted under `/t/{tenant_id}` today, and the binding is checked against the principal's *home* tenant, which the organization-level tenant header can move afterwards; that does not meet a path selector on any route as things stand."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "89558645-355b-40c7-952c-081d58a6656b",
+     "kind": "store",
+     "x": 1079,
+     "y": 914,
+     "w": 170,
+     "h": 80,
+     "name": "externally registered clients (dcr, cimd)",
+     "lines": [
+      "externally registered",
+      "clients (dcr, cimd)"
+     ],
+     "description": "",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 275,
+       "title": "Shadow client rows accumulate without a quota and are reclaimed by nothing",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Both external mechanisms write client rows for parties nobody vetted, and the two are bounded differently. A `dcr` row counts against `dcr_max_clients` and is swept on a TTL. A `cimd` row counts against nothing — the quota query asks for `ManagedBy::Dcr` — and is swept by nothing, because `sweep_unused_dcr_clients` excludes `cimd` deliberately, reasoning that a shadow row is a cache of a document the client publishes and deleting it would only be re-materialised on the next request. That argument is correct about TTL semantics and does not carry to storage: a cache that is never evicted is not a cache.",
+       "mitigation": "Closed in `0b216c6` (MCP-04, #470): The bound is the number of distinct URLs that both match `trusted_client_id_domains` and serve a valid document, which for the profile the documentation recommends — a named publisher, `*.vendor.example` — is small, and the entry would be theoretical. It stops being theoretical the moment a tenant trusts shared hosting, which is a natural thing to do because shared hosting is where a small tool publishes a JSON file; any third party who can publish under that domain then mints unbounded rows at one unauthenticated request each. It compounds with T-276, where `*` makes every domain shared hosting. **Closed** (`0b216c6`), filed as MCP-04 (#470) against T21.5, in three parts and with no migration. `dcr_max_clients` now caps `cimd` rows as a separate count against the same number — which is what the repository's own comment on `count_by_managed_by` asked for — and the count is checked **before** the fetch, so a tenant at its ceiling is not an outbound amplifier either; the refusal is audited in T21.4a's shape and carries no caller-supplied string. `dcr_unused_client_ttl_days` now sweeps `cimd` rows on their own `/health/jobs` counter and their own clock, `max(updated_at, last_authorized_at, created_at)`: no column was added because `updated_at` is *already* \"last presented\", every resolve upserting the row whether or not a fetch happened. And the in-memory document cache evicts entries past their TTL and stale window on the insert path. Eviction on last-seen is *coherent* with T21.4's cache argument rather than against it — a row deleted while its document is still published is re-materialised on the next request, which is what a cache should do; what the old argument said nothing about is storage, and a cache that is never evicted is not a cache. T-276's closure did not lower this one: `*` was the one-character path to shared hosting and is gone, but naming `*.github.io` is one settings line, is a reasonable operator decision, and is the path this entry was filed about. The accepted residual is the ordering overshoot T-272 records, which applies here identically."
       }
      ],
      "open": 0
@@ -2997,15 +3173,105 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "in-process",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "a5448b82-8370-45f9-95ee-d6a202fd9bc2",
+     "path": "M199,173.5 L822.1,501.4",
+     "name": "register (RFC 7591)",
+     "description": "",
+     "label": "register (RFC 7591)",
+     "labelLines": [
+      "register (RFC 7591)"
+     ],
+     "lx": 510.5,
+     "ly": 337.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "0cf3d510-ec6f-458d-945e-183f5b8f9f1f",
+     "path": "M922.8,592.2 L1137.3,914",
+     "name": "create dcr row",
+     "description": "",
+     "label": "create dcr row",
+     "labelLines": [
+      "create dcr row"
+     ],
+     "lx": 1030.1,
+     "ly": 753.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealQL",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "62fb1252-a30d-4166-9e04-d421ac131bcb",
+     "path": "M486.8,199.4 L841.2,658.6",
+     "name": "resolve client_id URL",
+     "description": "",
+     "label": "resolve client_id URL",
+     "labelLines": [
+      "resolve client_id URL"
+     ],
+     "lx": 664,
+     "ly": 429,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "6fb9306e-7335-48ce-b065-6329211e21b3",
+     "path": "M937.1,759.6 L1117.3,914",
+     "name": "cache cimd shadow row",
+     "description": "",
+     "label": "cache cimd shadow row",
+     "labelLines": [
+      "cache cimd shadow row"
+     ],
+     "lx": 1027.2,
+     "ly": 836.8,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealQL",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "611cd2a9-3f9e-4bd1-8bf7-b7118ed7fd1b",
+     "path": "M814,334 L764,334",
+     "name": "discovery at /t/{tenant_id}",
+     "description": "",
+     "label": "discovery at /t/{tenant_id}",
+     "labelLines": [
+      "discovery at /t/{tenant_id}"
+     ],
+     "lx": 789,
+     "ly": 334,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 49,
+   "total": 58,
    "open": 0,
    "bySeverity": {
-    "High": 23,
-    "Medium": 20,
-    "Low": 3,
-    "Critical": 3
+    "High": 25,
+    "Medium": 24,
+    "Low": 4,
+    "Critical": 5
    }
   },
   {
@@ -4154,7 +4420,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "The engine is allow-wins with default deny and no explicit deny. A role granted on a parent resource cascades to every child and cannot be revoked on one child alone.",
-       "mitigation": "SEC-040 — closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows — asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules."
+       "mitigation": "SEC-040 — closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows — asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules. Amended 2026-09-22 (T22.11, DF-021): an assignment can also be made non-inheritable — inherit: false on the has_role edge — so a role granted high in the hierarchy can be stopped at its node instead of cascading to every child (\"here and no further\"), for allows and denies alike. Precedence is unchanged: the flag decides which assignments are applicable at a resource, never how deny-override weighs them (deny-override-design.md §2.2 rows 9–11). The flag's own hazards are T-285."
       },
       {
        "number": 190,
@@ -4200,6 +4466,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A `Scope` belongs to exactly one resource and scope names are unique per resource — the auto-seeded name embeds the resource id precisely so two levels do not collide — so a parent's `billing` scope and a child's are always different records. Before 1.0.0-beta09 both halves of the engine compared them by id: `grant_applies` required the requested scope id to appear in the grant's `scope_ids`, so a grant written on a parent's scope matched nothing below it (reported as \"no permission grants action\", as though the permission were missing), and `resolve_scope` looked a name up only on the target resource, so asking about a scope the resource inherits was refused as malformed. Making scopes inherit down the lineage is the correct semantics, and it carries the hazard the fix has to avoid: reading \"the requested scope is not one of my scopes\" as \"therefore unconstrained\" would turn every scoped grant in the tenant into a wildcard on every other resource, and inheriting sideways would let a grant on `billing` reach `payroll` beside it. An authorization answer that depended on the order ancestors happen to be returned in would be a second, quieter defect.",
        "mitigation": "Fixed in 1.0.0-beta09. A grant naming a scope constrains the resource that scope lives on, and below it the grant is inherited whole — every scope of every descendant — until a deny says otherwise; denies inherit by the same rule, which is what makes a scoped deny on a parent a way to carve a subtree out of a broad grant. Two things deliberately do not widen, each pinned by a test: on the scope's own resource the constraint still bites (a grant on `billing` does not reach `payroll`), and a scope on an unrelated resource still grants nothing. Name resolution is nearest-first over the lineage — the resource's own scope beats an ancestor's of the same name, a nearer ancestor beats a further one — and the batch path keeps that order alongside the id set it already had, because an authorization answer that depends on row order is not an answer. `ScopeRepository::list_by_resources` reads the whole lineage in one bound-array `IN` query, the same shape as the `has_role` and `grants` reads, and `lineage_scope_lookup_is_index_satisfied` pins that `idx_scope_resource_name` serves it, so the correct semantics did not buy an unindexed scan on the hot path. The coalesced batch path mirrors all of it, and `batched_decisions_match_per_item_decisions_across_scopes` holds the two paths to the same answers."
+      },
+      {
+       "number": 285,
+       "title": "A non-inheritable role assignment reaches further, or less far, than it reads",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "DF-021 asked for a role assignment that applies at its resource and not below it. inherit: false on the has_role edge does that, and it can go wrong three ways. It can be honoured on one path and not another: the engine decides through evaluate and, for batches, evaluate_batch, and an assignment reaches a subject through two different SELECTs — direct and group-inherited — so a flag read on one of them leaves a non-inheritable allow cascading to every descendant on the other, and deny-override-design.md §5.1 records that exactly this class of regression in applicable_role_ids leaves every evaluator unit test green. It can be stored where the engine ignores it — an assignment naming no resource, or one of an is_global role — so an operator believes access stops at a node when it does not. And it moves access in both directions: false on an allow narrows, but false on a deny re-opens every descendant the deny covered, so a silent in-place toggle, or one a decision cache does not see, would widen access with nobody reviewing it.",
+       "mitigation": "T22.11 (2026-09-22). One clause in applicable_role_ids — the assignment's own resource always applies, an ancestor's only when inherit is true — shared by evaluate and evaluate_batch; the repository reads the field in both the direct and the group-inherited SELECT and in every assignment listing. Schema v66 adds it as option<bool> with no backfill, and absent reads as true, so every existing assignment and every client that does not send the field keeps its meaning. The three assign routes (user, group, service account) refuse inherit: false with 400 when no resource_id is named and when the role is global, each with an I4 twin that the same request without the field, or with true, is accepted. There is no update: has_role is UNIQUE(in, out), so changing the flag is an unassign and an assign, each of which invalidates the subject's cached decisions (the tenant's, for a group), and the grant.pre_assign four-eyes hook payload carries inherit. Property tests over every rule set of a three-node chain: adding a deny never widens access whatever its flag; false on an allow never widens; false on a deny can, with row 10 as the asserted witness. Rows 9–11 are proved end to end through both evaluate and evaluate_batch, for a group-inherited assignment, and over gRPC CheckAccess and BatchCheckAccess; the clause was broken on purpose (the inherit guard alone, then the whole ancestor term) and the new tests went red both times. Residual, documented: making a role global after assigning it non-inheritably widens that assignment to everywhere, as it widens every assignment of the role. Amended 2026-09-23 (T22.11b, S-10b): the admin console offers the flag only where the server would store and apply it (a resource chosen, a role that is not global) and changes it as the same unassign then assign, restoring the old assignment when the second call is refused and saying in so many words when even the restore fails; the console decides nothing the three assign routes do not decide again. Saving a role as global while it has non-inheritable assignments now opens a confirmation that names them and the widening; the residual stands (the server accepts the change by design), and the console no longer lets it happen unannounced."
       }
      ],
      "open": 0
@@ -4541,11 +4816,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 26,
+   "total": 27,
    "open": 0,
    "bySeverity": {
     "Critical": 6,
-    "High": 13,
+    "High": 14,
     "Medium": 7
    }
   },
@@ -4770,7 +5045,25 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "POST /api/v1/certificates/sign-csr issues an end-entity certificate over a public key supplied by the caller. Three things a naive implementation gets wrong: it signs a request whose signature it never checked, minting a certificate over somebody else's public key; it honours the extensions the request asks for, so a CSR saying CA:TRUE and keyCertSign becomes a CA that can sign anything under the tenant's trust anchor; and it records the key algorithm the caller states rather than the one the key is, so an RSA-2048 key is signed and written down as Rsa4096 (the leaf twin of T-194, and T-96 on the leaf path).",
-       "mitigation": "C-1 (2026-09-13): ca::inspect_csr parses the request once, verifies its self-signature before anything else — the only proof the sender holds the matching private key — and reports the subject, the key and the requested extensions from that single parse. The key must be Ed25519 or RSA with a measured modulus of at least 4096 bits; the label KeyAlgorithm::Rsa4096 is never taken on trust, which is what closes T-96 here. A CSR requesting subjectAltName, keyUsage or extendedKeyUsage is refused by name rather than silently stripped, and every other requested extension is discarded when rcgen's parameter set is overwritten with the shared leaf_params — the same function CertService::generate builds a generated leaf from, so the two paths cannot issue different shapes. basicConstraints needs no rule: the in-process path overwrites it and Vault ignores it outright, so a CSR asking to be a CA comes back a leaf on both. Under vault_pki custody the refusal of keyUsage and extendedKeyUsage is load-bearing rather than cosmetic: Vault's sign-verbatim discards the key_usage and ext_key_usage request parameters whenever the CSR carries those extensions and issues what the CSR asked for, so a silent strip would be a promise AXIAM keeps on one custodian and breaks on the other. Having refused them, the Vault request body states both as empty so the shape is AXIAM's decision and not a Vault default. The issuer, the tenant scope and the validity come from the same prepare_leaf_issuance the generate path uses. No private key exists on this path, so the response type has no field for one. Twenty tests in sign_csr_test.rs, three against a Vault mock in vault_pki_test.rs, four at the HTTP layer, and one in mtls_test.rs proving a CSR-signed device certificate binds and authenticates exactly like a generated one."
+       "mitigation": "C-1 (2026-09-13): ca::inspect_csr parses the request once, verifies its self-signature before anything else — the only proof the sender holds the matching private key — and reports the subject, the key and the requested extensions from that single parse. The key must be Ed25519 or RSA with a measured modulus of at least 4096 bits; the label KeyAlgorithm::Rsa4096 is never taken on trust, which is what closes T-96 here. A CSR requesting subjectAltName, keyUsage or extendedKeyUsage is refused by name rather than silently stripped, and every other requested extension is discarded when rcgen's parameter set is overwritten with the shared leaf_params — the same function CertService::generate builds a generated leaf from, so the two paths cannot issue different shapes. basicConstraints needs no rule: the in-process path overwrites it and Vault ignores it outright, so a CSR asking to be a CA comes back a leaf on both. Under vault_pki custody the refusal of keyUsage and extendedKeyUsage is load-bearing rather than cosmetic: Vault's sign-verbatim discards the key_usage and ext_key_usage request parameters whenever the CSR carries those extensions and issues what the CSR asked for, so a silent strip would be a promise AXIAM keeps on one custodian and breaks on the other. Having refused them, the Vault request body states both as empty so the shape is AXIAM's decision and not a Vault default. Amended 2026-09-23 (T22.14): the body now states the per-type usage profile rather than empty lists, on both leaf paths, and exclude_cn_from_sans; what Vault does with it was observed against Vault 1.18.3 rather than taken from its documentation — key_usage and ext_key_usage apply when the CSR requests neither, and SANs are read from the CSR only. The issuer, the tenant scope and the validity come from the same prepare_leaf_issuance the generate path uses. No private key exists on this path, so the response type has no field for one. Twenty tests in sign_csr_test.rs, three against a Vault mock in vault_pki_test.rs, four at the HTTP layer, and one in mtls_test.rs proving a CSR-signed device certificate binds and authenticates exactly like a generated one."
+      },
+      {
+       "number": 281,
+       "title": "A tenant administrator issues a leaf under another tenant's signing CA, or directly under the organization anchor",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Both leaf paths resolve the issuing CA through prepare_leaf_issuance, which fetched it with ca_repo.get_by_id(org_id, issuer_ca_id) — a query whose only scope is WHERE organization_id = $org_id — and never read ca_certificate.tenant_id, the column that records which tenant a signing CA signs for. Every CA of the organization was therefore reachable by every principal of the organization holding certificates:generate: a sibling tenant's signing CA, and the organization-level CA that is the trust anchor for the whole estate. The issued leaf was written with the caller's own tenant_id and the other tenant's issuer_ca_id, and chained to the root every relying party in the organization trusts — so a certificate minted in tenant A authenticated as a principal of tenant B against anything that verified the chain rather than the row. It is the isolation boundary the product is built on, crossed from inside by an ordinary tenant administrator, and it needed no bug in the caller: the API accepted the CA id and answered 201. This is the gap T-98 recorded as closed: its mitigation claimed issuance for a tenant was anchored at that tenant's intermediate, which tenant signing CAs made possible in 1.0.0-alpha44 and nothing made compulsory. The axiam-domo-demo dogfooding run reproduced it at runtime and rode the resulting certificate to a full MQTT session (DF-017, DF-025).",
+       "mitigation": "S-1 (2026-09-22): prepare_leaf_issuance takes the tenant being acted on and an IssuingScope resolved from the caller's own record, and matches the CA against both immediately after the lookup — ahead of the status and validity-window checks, so a refusal cannot be used to learn that a CA exists, is revoked or has expired. A tenant signing CA is usable only by a caller acting on that tenant; an organization-level CA is usable only by a principal whose own record lives in the organization's reserved scope, resolved in the REST layer by the same residence test require_organization_principal uses and never from AuthenticatedUser::organization_level, a flag that is false for exactly these calls. The refusal is NotFound, following the cross-organization precedent a_ca_in_another_organization_is_not_found. One site covers both custodians: the check precedes custodian resolution, so the Vault path is bound by it too. Nine tests — five in sign_csr_test.rs including a_foreign_ca_is_not_found_even_when_it_is_revoked, which pins the ordering, and four generate twins in cert_test.rs — plus the end-to-end twin in axiam-api-rest's certificate_test.rs next to the cross-organization one. Certificates already issued across the boundary are not revoked on upgrade; docs/pki/README.md carries the reach table and the operator's remediation path."
+      },
+      {
+       "number": 288,
+       "title": "A tenant administrator mints a certificate for a name that is not theirs",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "AXIAM could not issue a certificate a TLS server can present (DF-001): leaves carried no subjectAltName and neither leaf request had a field for one, so every listener in a deployment anchored in the organization root was signed offline. Closing that gap creates the threat: a leaf carrying subjectAltName DNS:login.example.com, signed by a tenant signing CA under the organization root, is trusted by every relying party that trusts that root — browsers, gateways, MQTT clients — so a tenant administrator holding certificates:generate could mint a server certificate for a name that is not theirs: another tenant's host, the organization's own apex, or any public name, and impersonate it to every client of the organization. The same reach existed in a quieter form before this change: a leaf carried no extendedKeyUsage, which X.509 reads as any usage, and under vault_pki custody sign-verbatim would copy whatever SANs a CSR AXIAM built carried.",
+       "mitigation": "T22.14 (S-7, 2026-09-23). A fourth certificate type, Server, is the only one that may carry SANs, and they come only from an explicit subject_alt_names request field — a CSR that requests a subjectAltName is still refused (inspect_csr), so nothing a caller's CSR says reaches the SAN list. Every SAN and the common name must be admitted by the tenant's effective server_cert_allowed_names: DNS suffixes (strictly below, on label boundaries), exact hosts and IP prefixes, case-insensitive, with trailing dots, Unicode labels, partial wildcards and IPv4-mapped IPv6 refused. The list is written in the organization baseline, is empty by default, and empty refuses every Server request. It rides the settings interlock every other override uses: a tenant may remove or narrow an entry and a widening one is a 400 at write time; when the baseline later shrinks, the effective list is the intersection, computed on every read, so a tenant never keeps a withdrawn name nor gains one it had removed. The fence runs before the issuing CA is looked up, on both leaf paths and both custodians. Under vault_pki custody the admitted names travel inside the CSR AXIAM builds, because sign-verbatim ignores alt_names and ip_sans (observed on Vault 1.18.3), and a caller-CSR Server request is refused because no channel for its names exists. Every leaf now carries a per-type profile — clientAuth for User, Service and Device, serverAuth for Server, keyEncipherment for RSA only — so a Server leaf fails the clientAuth check of the REST and gRPC client-certificate verifiers (InvalidPurposeContext), bind refuses it with 400 and device login refuses it. Tests: the matcher and interlock unit tests in axiam-core, two repository tests of the stored baseline and its shrinking, generate and sign-csr twins in cert_test.rs and sign_csr_test.rs (issued leaves parsed, the profile table for every type and key), four Vault twins, the bind and wire-level settings tests in axiam-api-rest, and a browser-shaped acceptance in axiam-server: a rustls client trusting only the organization root completes a handshake with an actix listener presenting the issued leaf, and fails for a name the leaf does not carry. Nine deliberate mutations of the fence each turned a named test red. Residual, recorded as decision D-7: the fence is AXIAM's and is not embedded in the tenant CA as X.509 nameConstraints, so a relying party trusts the chain for any name AXIAM was made to sign; a compromised AXIAM or a Vault token used outside AXIAM is not bounded by it. Embedding it would make every policy change a CA re-issuance and is deferred to the next PKI pass."
       }
      ],
      "open": 0
@@ -4838,6 +5131,24 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A `self_signed_tls_client_auth` client could never open a connection: `ReloadableClientCertVerifier` delegated to webpki, whose job is chain-building, and an RFC 8705 §2.2 certificate is self-signed by design — it chains to nothing, because the method identifies a client by the `x5t#S256` an administrator registered rather than by an issuer — so rustls sent `bad_certificate` before AXIAM saw a request (34 of 37 FAPI modules `INTERRUPTED` with no HTTP status). RFC 8705 puts two trust models under one transport: §2.1 is PKI, the identity a name a CA vouched for; §2.2 has no PKI in it, the certificate *is* the credential, and adding an issuer to the bundle cannot answer it. The hazard is in the fix: once the listener admits an unchained certificate, device and IoT authentication — whose entire model is chaining to a CA an administrator flagged as a trust anchor, the native-listener twin of B-06 — must not accept one, and a `tls_client_auth` DN match without a chain requirement makes `openssl req -subj \"/CN=<whatever was registered>\"` the entire attack.",
        "mitigation": "2d4cb59, four layers, and the third and fourth are where the safety is. (1) `ClientAuth::OptionalSelfSigned`, spelled `optional_self_signed`, a fourth policy: `off`, `optional` and `required` are byte-for-byte unchanged, every new branch is gated on `accepts_self_asserted()`, which only this variant answers true to, and the new behaviour is reachable only through a value no deployment sets today — which is what makes it non-regressive rather than merely tested. (2) The verifier tries webpki and, under the new policy only, accepts on failure, with an explicit `not_before`/`not_after` check on that branch because webpki performs the validity check as part of chain building and the path that skips chain building would silently lose it, for exactly the clients nobody else vouches for; the self-signature is deliberately not verified, since under §2.2 the identity is the SHA-256 of the DER and possession is proven by TLS 1.3's `CertificateVerify`, which rustls checks whether or not a chain was built. (3) `CertTrust::{ChainedToAnchor, SelfAsserted}` travels from the handshake to every consumer, on `VerifiedClientCert` and `PresentedCertificate` — an enum rather than a bool, **required** rather than defaulted, because a default would have handed the privileged value to any future call site that said nothing; it lives in `axiam-core` because the layering gate refuses the outward edge, and it is re-derived in the `on_connect` hook via `tls::peer_certificate_trust` because rustls's `ClientCertVerified` is an opaque token with no payload and the verifier is handed no connection handle to key a side channel on. (4) Only the one method specified to work this way may consume the weaker level: device/IoT certificate auth **refuses** `SelfAsserted` outright — rather than by falling through to the header branch, whose error text would advise setting `TRUST_FORWARDED_CLIENT_CERT`, advice that would widen a different trust boundary while chasing this one; `tls_client_auth` (§2.1) now **requires** `ChainedToAnchor`, a no-op until this commit and a real guard now that the invariant is configurable; `self_signed_tls_client_auth` (§2.2) accepts either, since the thumbprint comparison is the authentication and is no weaker for the certificate having also chained. Net effect: an unchained certificate can do exactly one thing — authenticate as a client whose exact SHA-256 an administrator registered — and every other path treats it as though the handshake had carried no certificate at all. A second listener for §2.2 was rejected: the per-client decision happens at the application layer either way, so an extra port buys only another listener to operate. The tests pin the operator-facing contract: a DN that *matches* is refused unchained with the chained case as a control on the same certificate; the §2.2 acceptance test computes the thumbprint the way an administrator does rather than reading it back off the value under test; the four documented policy strings are hard-coded; a real rustls TLS 1.3 handshake through `build_rustls_server_config` rejects the certificate under `optional` and accepts it under `optional_self_signed`; expired, not-yet-valid and non-certificate bytes are each refused."
+      },
+      {
+       "number": 282,
+       "title": "The one auth endpoint that performs a client-certificate handshake has no rate limiter",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "POST /api/v1/auth/device was registered as a bare route in axiam-api-rest's server.rs — no build_governor, no RateLimitShared — while every neighbouring auth resource carried both layers: /auth/login, the three OPAQUE routes, the six WebAuthn ceremony routes and the federation sign-in routes. The endpoint is in PUBLIC_PATHS and is CSRF-exempt, both of which it has to be, because a device holds no session and no cookie. The result is that the single endpoint whose happy path requires the server to complete a TLS handshake with a client certificate — asymmetric verification plus a full chain walk against the trust anchors, the most expensive work an unauthenticated caller can make this server do — was the one endpoint an unauthenticated caller could drive at line rate. Every other shape of the same attack was already bounded; this one was not, and nothing in the code said why, which is the signature of an omission rather than a decision.",
+       "mitigation": "S-2 (2026-09-22): AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN, default 60 per minute per IP, applied through both layers exactly as /auth/login does — build_governor for the per-process ceiling and RateLimitShared(\"device_login\") so the limit holds across replicas rather than multiplying by replica count. Per-IP unconditionally: the identity on this path is a certificate presented in the handshake and there is no OAuth2 client_id in the request to key a bucket on. The knob is in the machine family, so AXIAM__RATE_LIMIT__PROFILE scales it to 300 (gateway) and 3 000 (mesh), the same 5x and 50x token_per_min takes — which is the answer for a fleet behind one NAT, rather than raising the shipped default for everyone. Sized from the honest traffic and not from capacity: a device re-authenticates once per access-token lifetime, 900 s by default, so sixty per minute holds nine hundred devices on a single address and no deployment on the shipped posture sees a 429 it did not see before. Six tests in device_login_rate_limit_test.rs drive the real register_api_v1_routes wiring, so a regression to a bare route fails the suite; they include the per-IP isolation property, the I4 twin that login_per_min is untouched and uncharged, and the preset-multiplier check."
+      },
+      {
+       "number": 283,
+       "title": "A device's access token is a bearer credential, so stealing it is as good as stealing the key",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "POST /api/v1/auth/device authenticates a device by a TLS handshake with a client certificate — the strongest thing the device can prove — and then called issue_service_account_token, which had no cnf parameter at all and whose AccessTokenSpec::service_account never set one. The token that came back was a plain bearer credential: whoever holds it may use it. So the proof of possession bought nothing past the handshake that produced it. A token read off the device's flash, recovered from a log line, captured at a misconfigured egress proxy, or taken from a compromised Device Twin authenticated as that device for the whole of its lifetime, with no certificate and no key required. The machinery to close this already existed and was already used: AccessTokenClaims.cnf, CnfClaim with x5t#S256 per RFC 8705 §3.1, and verify_token_binding's decision table were all built for OAuth2 mTLS client credentials, which mint the claim. The device path was the one mint site that did not, which made it the weakest credential issued from the strongest authentication AXIAM performs (DF-014).",
+       "mitigation": "S-3 (2026-09-22): issue_service_account_token takes a cnf and device_auth builds one from the thumbprint of the certificate rustls verified for this connection, so the token names the key the device proved it holds. No enforcement code changed, and that is the finding rather than a shortcut: both surfaces already refuse a cnf-bearing token whose evidence does not match — axiam-api-rest's enforce_sender_constraint runs inside validate_presented_token, which every extractor reaches including the service-account one, and axiam-api-grpc's interceptor reads peer_certs() and runs the same verify_token_binding. The claim was the only missing half. The thumbprint is recorded only where rustls verified the certificate on this connection: the trusted-proxy X-Client-Certificate path mints no cnf, deliberately, because the certificate is present at login and absent from every later request there, so a bound token would be one AXIAM itself refuses on first use — an asymmetry stated in CertificateAuthenticated::certificate_thumbprint's own documentation and in docs/pki/README.md rather than left to be discovered. Tokens minted before this change carry no cnf and are accepted exactly as before, so the migration lasts one access-token lifetime. Three unit tests in axiam-auth pin the stamp, the refusal without and with a wrong certificate, the acceptance with the right one, and the I1 that an unbound token demands nothing. Amended 2026-09-23 (T22.12, S-8): with AXIAM__GRPC_TLS_CLIENT_AUTH set to optional or required the gRPC listener verifies the device's certificate and the interceptor finds it in peer_certs(), so a device token is accepted over gRPC with its own certificate and refused with another device's or with none. Under off it is refused, as before. See T-286."
       }
      ],
      "open": 0
@@ -5327,12 +5638,12 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 26,
+   "total": 30,
    "open": 1,
    "bySeverity": {
     "Critical": 7,
-    "High": 15,
-    "Medium": 4
+    "High": 18,
+    "Medium": 5
    }
   },
   {
@@ -6193,7 +6504,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "T-214 made the REST listener's certificate hot-reloadable so that an ACME renewal would never need a restart. That work covers the actix listener only: `axiam-api-grpc`'s `start_grpc_server` reads `AXIAM__GRPC_TLS_CERT_PATH` / `_KEY_PATH` once, hands the PEM to tonic's `ServerTlsConfig`, and the crate contains no reload path and no poll. A gRPC listener that is public is therefore a listener whose certificate expires at day 90 while REST keeps working — the failure mode T-214 exists to prevent, reintroduced on the other protocol, and the worst version of it because it presents as a gRPC bug. The same API limit keeps that leg TLS 1.2-negotiable where the REST listener is 1.3-only.",
-       "mitigation": "Fixed in 1.0.0-beta12 (R-1). The gRPC listener no longer asks tonic to terminate TLS. `start_grpc_server` takes the rustls configuration as a value (`GrpcTls::Plaintext | Rustls(Arc<ServerConfig>)`), binds its own `TcpListener`, completes each handshake with `tokio-rustls`, and hands tonic an already-encrypted stream through `serve_with_incoming` — the hand-rolled accept loop this threat named as the structural fix, and it closes the reload gap and the TLS-version gap in the one change, as anticipated. The configuration is built by the composition root (`axiam_server::tls::build_grpc_rustls_server_config`), not by `axiam-api-grpc`: `ReloadableCertResolver` lives in `axiam-server` at layer 8 and the gRPC crate is layer 6, and `scripts/check-crate-layering.py` fails any edge pointing the other way. That builder resolves the leaf through `shared_resolver`, which returns the **same** resolver instance when both listeners name the same certificate and key — the documented topology, where there is no second certificate — so one `SIGHUP` or one hourly poll renews both; a deployment that really does point them at different files gets a second registered leaf reloaded on the same triggers, replacing the single-slot `OnceLock` that would have silently kept only the first. The configuration pins `with_protocol_versions(&[&rustls::version::TLS13])` and advertises ALPN `h2` alone, so the leg is TLS 1.3-**exclusive** rather than merely 1.3-capable. The flat env-var names and the panic-on-unreadable behaviour moved with the read and are unchanged: a typo is still a failed boot. Terminating the handshake here introduces one new denial-of-service surface — a client that opens TCP and never speaks — bounded by 512 concurrent handshakes taken with a non-blocking `try_acquire_owned` (so the accept loop is never starved, however many half-open clients are outstanding) and a 10-second handshake timeout that releases every permit; a failed or timed-out handshake logs at `debug` and drops that connection only, never the accept loop. Five tests carry it: a resolver swapped between two real handshakes against one running listener, with the connection established before the swap still usable after it; a TLS 1.2-only client refused rather than downgraded; a real TLS connection's peer address carried through `Connected::connect_info()` into the request extension and out of `GrpcTrustedHopsKeyExtractor` as the client's IP (verified against the pinned tonic before the code was written — had it come back `None` the limiter would have failed closed for everyone); sixty-four half-open connections not stopping a well-behaved client; and plaintext mode unchanged. On the server side, one reload covering every registered leaf, the shared-resolver identity asserted by pointer, and the boot panic for each half of an unreadable pair. The certbot deploy hook's container restart (Pi runbook §14.5) is now redundant rather than required."
+       "mitigation": "Fixed in 1.0.0-beta12 (R-1). The gRPC listener no longer asks tonic to terminate TLS. `start_grpc_server` takes the rustls configuration as a value (`GrpcTls::Plaintext | Rustls(Arc<ServerConfig>)`), binds its own `TcpListener`, completes each handshake with `tokio-rustls`, and hands tonic an already-encrypted stream through `serve_with_incoming` — the hand-rolled accept loop this threat named as the structural fix, and it closes the reload gap and the TLS-version gap in the one change, as anticipated. The configuration is built by the composition root (`axiam_server::tls::build_grpc_rustls_server_config`), not by `axiam-api-grpc`: `ReloadableCertResolver` lives in `axiam-server` at layer 8 and the gRPC crate is layer 6, and `scripts/check-crate-layering.py` fails any edge pointing the other way. That builder resolves the leaf through `shared_resolver`, which returns the **same** resolver instance when both listeners name the same certificate and key — the documented topology, where there is no second certificate — so one `SIGHUP` or one hourly poll renews both; a deployment that really does point them at different files gets a second registered leaf reloaded on the same triggers, replacing the single-slot `OnceLock` that would have silently kept only the first. The configuration pins `with_protocol_versions(&[&rustls::version::TLS13])` and advertises ALPN `h2` alone, so the leg is TLS 1.3-**exclusive** rather than merely 1.3-capable. The flat env-var names and the panic-on-unreadable behaviour moved with the read and are unchanged: a typo is still a failed boot. Terminating the handshake here introduces one new denial-of-service surface — a client that opens TCP and never speaks — bounded by 512 concurrent handshakes taken with a non-blocking `try_acquire_owned` (so the accept loop is never starved, however many half-open clients are outstanding) and a 10-second handshake timeout that releases every permit; a failed or timed-out handshake logs at `debug` and drops that connection only, never the accept loop. Five tests carry it: a resolver swapped between two real handshakes against one running listener, with the connection established before the swap still usable after it; a TLS 1.2-only client refused rather than downgraded; a real TLS connection's peer address carried through `Connected::connect_info()` into the request extension and out of `GrpcTrustedHopsKeyExtractor` as the client's IP (verified against the pinned tonic before the code was written — had it come back `None` the limiter would have failed closed for everyone); sixty-four half-open connections not stopping a well-behaved client; and plaintext mode unchanged. On the server side, one reload covering every registered leaf, the shared-resolver identity asserted by pointer, and the boot panic for each half of an unreadable pair. The certbot deploy hook's container restart (Pi runbook §14.5) is now redundant rather than required. Follow-up closed 2026-09-23 (T22.12, S-8): R-1's builder recorded client-certificate policy as deferred, left at with_no_client_auth() as a deployment decision. It is now a setting, AXIAM__GRPC_TLS_CLIENT_AUTH, off by default so the handshake is unchanged unless an operator asks for more. See T-286."
       },
       {
        "number": 236,
@@ -6203,6 +6514,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The gate T-127 relies on failed in both directions at once. `npm audit` got `503` from the registry's audit endpoint, retried internally for seven minutes and exited `1` seconds after `npm ci` had reported zero vulnerabilities — a red job with no vulnerability anywhere in the tree, the kind of failure that teaches a team to re-run until green, and one that buried the line that explained it under four SARIF upload errors from producers that never ran. And four advisory suppressions had gone stale, emitting `advisory-not-detected` on every run: two for advisories already fixed upstream, two for crates no longer in the resolved feature graph at all. An ignore is keyed by advisory ID, not by version or crate, so one left behind after its crate leaves the graph silently re-suppresses that advisory if the crate ever comes back — a gate that has been quietly told what to ignore.",
        "mitigation": "Fixed in 1.0.0-beta11. The npm audit step retries with backoff and tells \"found advisories\" apart from \"could not reach the endpoint\" by the shape of the output rather than the exit code — npm exits `1` for both, but only a completed audit parses as JSON without an `error` key. A real HIGH/CRITICAL finding still fails the job; anything parseable that is not an error object counts as a real report, so an unfamiliar schema fails rather than being waved through; and a sustained outage ends in a `::warning::` that says explicitly it is not a clean bill of health. `cargo-deny` now runs with `-D advisory-not-detected`, so the next stale entry fails CI instead of scrolling past, and the two ignore-lists are allowed to differ legitimately — cargo-deny resolves the feature graph while cargo-audit reads `Cargo.lock` — under a containment check that demands an explicit `# audit-only: <ID> — <reason>` declaration and rejects one that is missing, unreasoned, contradictory or stale, with seven self-test cases. The yanked `chacha20 0.10.1` was bumped, and the four SARIF uploads are guarded on the file existing so a failed producer stops adding its own errors on top of the one that matters. `scripts/check-docker-context.py` closes the neighbouring class of the same shape — a gate that reads the worktree while the artifact is built from a filtered context, which is how the beta08 release lost both frontend image legs — by asking, for every `COPY`/`ADD` in every Dockerfile, whether at least one tracked file both exists and survives `.dockerignore`, cross-checked file by file against BuildKit's real context export. Narrowed deliberately at 1.0.0-beta13, and stated rather than folded into another change: the Trivy filesystem scan is scoped to what AXIAM ships — `crates/`, `frontend/`, `website/`, `examples/` and the root lockfile — and excludes the `benchmarks/` and `conformance/` harnesses, whose transitive CVEs (a netty CRITICAL under the Java bench) nothing in this repository can remediate and which were turning the gate red on every unrelated PR, which is how a red security check stops being read. The same wave removed 209 files of unbuilt design-system tooling that had entered the scan and the lint by accident."
+      },
+      {
+       "number": 284,
+       "title": "A re-minted bootstrap setup token is a second way to create the first administrator",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Only the SHA-256 hash of the one-time bootstrap setup token is stored, and the first-boot mint is a no-op once a token row exists, so an operator who lost the token had exactly one documented recovery: wipe the volume (DF-019). A subcommand that re-mints it removes that cliff and introduces a second credential path to POST /api/v1/admin/bootstrap, the endpoint that creates the first super-admin. Ungated, it would work on a deployment that already has administrators, and would therefore be an account takeover available to anyone who can run a command in the pod — with no authentication in front of it and nothing in the audit trail naming a principal.",
+       "mitigation": "axiam-server setup-token --remint refuses, with exit code 2 and no write at all, unless the deployment has no user row AND no redeemed setup token — that is, unless nobody has bootstrapped it. Before bootstrap there is no administrator to take over and no credential to reset, which is exactly the state an operator who lost the first-boot token is in; after it, the deployment has an authenticated way to create accounts and a password-reset flow, so re-minting is never the answer. Both gates are evaluated before the existing hash is deleted, so a refused call leaves the current token working. The token is printed to stdout only, never through tracing, so it does not reach the container log a second time; there is deliberately no --print, because the plaintext is not stored and storing it so that it could be printed would be the wrong fix. The subcommand parse is its own unit-tested function so that setup-token with the flag missing or mistyped exits 2 rather than silently starting a second server. Pinned by remint_replaces_the_previous_hash, remint_refuses_once_a_user_exists and remint_refuses_once_a_token_was_consumed, the last two asserting that the stored hash is unchanged after a refusal."
       }
      ],
      "open": 0
@@ -6635,10 +6955,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 27,
+   "total": 28,
    "open": 5,
    "bySeverity": {
-    "High": 16,
+    "High": 17,
     "Critical": 2,
     "Medium": 9
    }
@@ -7078,7 +7398,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "CONTRACT §5.2, §5.2.2 and §5.2.3 told SDKs to switch the acting tenant by sending X-Tenant-ID — a header the server has never read (the extractor’s constant is X-Axiam-Tenant) — in eighteen places. The failure mode is silence, not a 4xx: an SDK following the contract to the letter sends a header nothing looks at, the request quietly acts on the principal’s own tenant, and the caller gets a successful response describing the wrong tenant’s data. §5.2.3’s rule that naming a tenant outside reachable_tenant_ids is refused could not be true as written, because nothing was read to refuse.",
-       "mitigation": "Fixed in 1.0.0-beta06 (contract 1.36, closing #395): the three sections name X-Axiam-Tenant. §5 rule 2’s unconditional X-Tenant-ID is deliberately not renamed — folding a constructor-tenant header into the acting-tenant header would override the acting tenant on every request an organization-level principal made after switching, reintroducing the bug through its fix. It now carries a note that it exists for proxies, gateways and an SDK’s own §10 resource-server middleware, that AXIAM does not read it, and that it must not be renamed. The eleven contract-1.35 SDK fan-out PRs already implement the real header, so the correction lets them re-sync against a contract that agrees with them."
+       "mitigation": "Fixed in 1.0.0-beta06 (contract 1.36, closing #395): the three sections name X-Axiam-Tenant. §5 rule 2’s unconditional X-Tenant-ID is deliberately not renamed — folding a constructor-tenant header into the acting-tenant header would override the acting tenant on every request an organization-level principal made after switching, reintroducing the bug through its fix. It now carries a note that it exists for proxies, gateways and an SDK’s own §10 resource-server middleware, that AXIAM does not read it, and that it must not be renamed. The eleven contract-1.35 SDK fan-out PRs were expected to implement the real header, and the correction let them re-sync against a contract that agrees with the server. Amended at contract 1.51 (dogfooding remediation, DF-008): that last claim was not true of the code. Read on 2026-09-23, no SDK sends X-Axiam-Tenant from any code path; all eleven name it in doc comments only, so an organization-level principal switched tenant by hand-rolling the header. Contract 1.51 §5.2 rule 1 moves the helper from MAY to SHOULD with a fixed shape, and closes a second silent path to the same failure: the server parses the header as a UUID and silently ignores a value that does not parse, so the request acts on the caller's own tenant and succeeds. The helper MUST refuse a non-UUID client-side before any wire call, is sent only when set, and is REST-only because the gRPC server reads no tenant metadata. The server behaviour is unchanged and the status stays Mitigated; the per-SDK ports (dogfooding plan C-1 … C-11) carry the helper."
       },
       {
        "number": 235,

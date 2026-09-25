@@ -23,9 +23,9 @@ export interface ApiGroup {
 }
 
 /** The API version the document was exported from. */
-export const API_VERSION = "1.0.0-beta15";
-export const API_OPERATION_COUNT = 222;
-export const API_PATH_COUNT = 156;
+export const API_VERSION = "1.0.0-beta16";
+export const API_OPERATION_COUNT = 229;
+export const API_PATH_COUNT = 162;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -232,8 +232,26 @@ export const API_INDEX: ApiGroup[] = [
   "operations": [
    {
     "method": "GET",
+    "path": "/.well-known/oauth-authorization-server",
+    "summary": "",
+    "public": true
+   },
+   {
+    "method": "GET",
+    "path": "/.well-known/oauth-authorization-server/t/{tenant_id}",
+    "summary": "Authorization-server metadata for one tenant, at the RFC 8414 §3.1\npath-insertion form of the issuer `{root}/t/{tenant_id}`.",
+    "public": true
+   },
+   {
+    "method": "GET",
     "path": "/.well-known/openid-configuration",
     "summary": "",
+    "public": true
+   },
+   {
+    "method": "GET",
+    "path": "/.well-known/openid-configuration/t/{tenant_id}",
+    "summary": "The same tenant discovery document, at the OIDC Discovery path with the\nRFC 8414 §3.1 insertion applied.",
     "public": true
    },
    {
@@ -260,6 +278,16 @@ export const API_INDEX: ApiGroup[] = [
     "method": "DELETE",
     "path": "/api/v1/oauth2-clients/{id}",
     "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/oauth2-clients/registration-tokens",
+    "summary": "Metadata only — the handle is not stored, so it cannot be listed."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/oauth2-clients/registration-tokens",
+    "summary": "Mints the single-use credential RFC 7591 §1.2's protected registration profile requires."
    },
    {
     "method": "GET",
@@ -297,6 +325,12 @@ export const API_INDEX: ApiGroup[] = [
     "public": true
    },
    {
+    "method": "POST",
+    "path": "/oauth2/register",
+    "summary": "",
+    "public": true
+   },
+   {
     "method": "GET",
     "path": "/oauth2/revocations",
     "summary": "Mounted only where `AXIAM__AUTH__REVOCATION_FEED_ENABLED` is set; a deployment that has not opted in does not serve this path at all.",
@@ -323,6 +357,12 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/oauth2/userinfo",
     "summary": "# Why a second handler rather than a second extractor The access token may arrive in the `Authorization` header (RFC 6750 §2.1) or — on POST only — in an `access_token` form field (§2.2)."
+   },
+   {
+    "method": "GET",
+    "path": "/t/{tenant_id}/.well-known/openid-configuration",
+    "summary": "The same tenant discovery document, at the path OpenID Connect Discovery\n1.0 §4 constructs by appending `/.well-known/openid-configuration` to the\nissuer.",
+    "public": true
    }
   ]
  },

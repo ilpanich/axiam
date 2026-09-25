@@ -14,16 +14,16 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-09-15 (`main` after `1.0.0-beta14`, model
-> 2.16.0 — the 2026-09-13 MFA-and-CSR wave and the 2026-09-14 early-refusal
-> pass). The website's Security section is at `1.0.0-beta14` / model 2.14.0 and
-> is brought up by
-> [`website-security-beta15-update-plan.md`](website-security-beta15-update-plan.md),
-> the entry point for that pass; the beta14 plan was executed on 2026-09-13 and
-> records what it landed.**
+> **Status: source current as of 2026-09-25 (`main` before `1.0.0-beta17`, model
+> 2.17.0 — the Phase 21 MCP wave of `1.0.0-beta16` and the Phase 22 dogfooding
+> wave, which ships in `1.0.0-beta17`). The body sections below now carry both
+> waves; the website's Security section is brought to them by
+> [`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md),
+> executed on 2026-09-25 in the same commit as this text. The beta15 plan
+> records the pass before it.**
 >
 > **The 2026-09-22 dogfooding-remediation wave (model 2.17.0).** Eight threats
-> enter so far, all Mitigated on arrival. **T-288**: AXIAM can now issue a
+> enter, all Mitigated on arrival; the wave ships in `1.0.0-beta17`. **T-288**: AXIAM can now issue a
 > certificate a TLS *server* presents (DF-001), and a leaf naming a host under
 > the organization root is trusted by every relying party that trusts that
 > root. The new threat is therefore a tenant administrator minting one for a
@@ -102,6 +102,14 @@
 > which tenant signing CAs made possible in 1.0.0-alpha44 and nothing made
 > compulsory. The entry stays, with the correction attached, because a claim the
 > code did not keep is worth more as a record than as a deletion.
+> Three documentation claims turned out wrong in the same wave, and the body
+> states each as a correction rather than quietly replacing it: that a `Device`
+> certificate needs no bind to a service account (DF-002 — the dangerous
+> direction, since a fleet commissioned by the guide failed every login), that
+> RSA-4096 CA generation fails outside Vault custody (DF-015), and four secret
+> variable names that nothing read (DF-018 / DF-022). Contracts 1.51 and 1.52
+> carried the wave to the eleven SDKs; 1.52's cross-SDK review found at least
+> one defect in every port, and each was fixed before the re-vendor.
 >
 > **A counting correction belongs with it.** This document and
 > `ThreatDragonModels/Axiam/Axiam.json` both stood at 271 threats while
@@ -112,6 +120,45 @@
 > corrected to it. The nine entries entered the Threat Dragon file on
 > 2026-09-25, at model **2.17.0**, with four new elements on the OAuth2 diagram;
 > the three artifacts agree at 288 / 275 / 13.
+>
+> **The 2026-09-17 MCP wave (Phase 21, `1.0.0-beta16`, model 2.17.0).** Nine
+> threats, T-272 … T-280, from
+> [`mcp-authorization-server-plan.md`](mcp-authorization-server-plan.md) and the
+> T21.8 review
+> [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md). The
+> phase put on the authorization server three things nothing in the model had
+> carried: an **unauthenticated write endpoint** (RFC 7591 dynamic client
+> registration), an **outbound fetch whose target an unauthenticated caller
+> chooses** (client ID metadata documents), and a token minted for an audience
+> that is not AXIAM (RFC 8707 resource indicators). Four new elements on the
+> OAuth2 diagram carry them — `/oauth2/register`, the metadata-document fetch,
+> the externally registered client rows, and the per-tenant path issuers. T-277,
+> T-278 and T-279 are the three places the phase could have broken an existing
+> guarantee and does not, the last two Critical: a loopback redirect widened by
+> a port and by nothing else (review V1), and one key set signing every tenant
+> without a tenant-A token verifying on tenant B's path (V2). The review fixed
+> one finding in its own task — MCP-02, `013903d`, the `axiam` scheme reserved
+> so AXIAM's own audiences cannot be named as resources (T-277) — and filed
+> four, the first entries in this model's history to arrive filed rather than
+> fixed: MCP-03, MCP-04, MCP-05 and MCP-01, recorded open as T-276, T-275, T-272
+> and T-280. All four closed the same day, in
+> [#475](https://github.com/ilpanich/axiam/pull/475) and
+> [#476](https://github.com/ilpanich/axiam/pull/476) — `0a273ec` (no `*` in the
+> trusted-publisher list), `0b216c6` (metadata-document client rows bounded and
+> swept), `c4d9ea2` (a never-authorized registration reclaimed in an hour),
+> `b8bc508` (an error redirected to a desktop client's ephemeral port) — so the
+> open register never moved; MCP-06 is accepted and pinned by a test. The nine
+> reached the STRIDE document and neither the Threat Dragon file nor this one
+> until 2026-09-25 (the correction above). The OpenID Foundation suite was then
+> re-run as four full plans on 2026-09-18, against a build carrying the phase:
+> 165 modules, zero `FAILED`, 150 `PASSED`, the same ten `REVIEW` modules as on
+> 2026-09-15 with every screenshot published and matched to its condition, 3
+> `WARNING` and 2 `SKIPPED`. That sweep carries the eight modules the 2026-09-14
+> pass had moved individually, and it supersedes the 2026-09-11 receipts as the
+> latest run everywhere this document quotes one. Contracts 1.47 … 1.50 carried
+> the SDK side: `none` in discovery, §28's MCP resource-server helpers in all
+> eleven SDKs, the §28 cross-SDK review, and the initial access token as a
+> redacting type.
 >
 > **The 2026-09-14 early-refusal pass (model 2.16.0).** Two threats enter, both
 > Mitigated on arrival, and six entries gain a clause, taking the model to **271
@@ -735,15 +782,26 @@ have to be re-established — nothing is assumed across a boundary.
   against the organization's own effective threshold (org baseline, tenant
   override), with the deployment default only as a fail-safe floor when settings
   cannot be resolved.
-- **Rate limits are sized by what an operation costs, not by one global number.**
-  A password verification is thousands of times more expensive than a permission
-  check, so it gets its own much tighter ceiling — and that ceiling is deliberately
-  *not* derived from the throughput knobs, so tuning a cluster for authorization
-  volume cannot widen credential guessing as a side effect. The internet-facing
-  human endpoints (login, registration, password reset, MFA) keep strict per-IP
-  limits under every deployment profile, enforced structurally: the tuning presets
-  are prevented from touching them at all. Every request path is bounded, including
-  infrastructure endpoints like health and reflection — there is no unmetered route.
+- **Rate limits are sized by what an operation costs, not by one global
+  number.** A password verification is thousands of times more expensive than a
+  permission check, so it gets its own much tighter ceiling — and that ceiling
+  is deliberately *not* derived from the throughput knobs, so tuning a cluster
+  for authorization volume cannot widen credential guessing as a side effect.
+  The internet-facing human endpoints (login, registration, password reset, MFA)
+  keep strict per-IP limits under every deployment profile, enforced
+  structurally: the tuning presets are prevented from touching them at all.
+  Every request path is bounded, including infrastructure endpoints like health
+  and reflection — there is no unmetered route. That last sentence was not true
+  of one route until `1.0.0-beta17`: the device login, `POST
+  /api/v1/auth/device`, was registered with no limiter at all while every
+  neighbouring auth resource carried both layers — although its happy path makes
+  the server complete a TLS handshake with a client certificate, the most
+  expensive work an unauthenticated caller can ask of it. It now carries both,
+  as `/auth/login` does, under `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` — 60
+  per minute per IP by default, which holds nine hundred devices
+  re-authenticating once per token lifetime behind one address — and it sits in
+  the machine family rather than the human one, so the `gateway` and `mesh`
+  presets scale it to 300 and 3 000 for a fleet behind one NAT.
 - **MFA** is built in — TOTP today, WebAuthn/passkeys for phishing-resistant,
   origin-bound second factors. TOTP codes are single-use within their window
   (replay is rejected with an atomic compare-and-set), and the MFA challenge is
@@ -913,15 +971,28 @@ redundantly rather than at one chokepoint:
   first place, and every traversal that reads one — including group membership,
   the indirect path by which roles are inherited — re-checks the tenant at read
   time rather than trusting the write-time guard.
-- **The authorization engine is RBAC, default-deny, with explicit deny-override.**
-  A route with no declared permission is refused, not allowed. Roles cascade down a
-  resource hierarchy with bounded, cycle-safe traversal — unless the assignment
-  was made with `inherit: false`, which stops it at the resource it names, for
-  allows and denies alike — and a grant carries
-  `effect: "allow" | "deny"` — an explicit deny overrides every allow, at any depth
-  of the hierarchy and at equal specificity, so adding a deny rule can never widen
+- **The authorization engine is RBAC, default-deny, with explicit
+  deny-override.** A route with no declared permission is refused, not allowed.
+  Roles cascade down a resource hierarchy with bounded, cycle-safe traversal —
+  unless the assignment was made with `inherit: false`, which stops it at the
+  resource it names, for allows and denies alike — and a grant carries `effect:
+  "allow" | "deny"` — an explicit deny overrides every allow, at any depth of
+  the hierarchy and at equal specificity, so adding a deny rule can never widen
   access and can never be undone by adding allows (asserted by an exhaustive
-  property test).
+  property test). The `inherit` flag, new in `1.0.0-beta17`, is only safe if
+  every path reads it, so it is read in the one function the single and the
+  batch evaluation paths share and in both the direct and the group-inherited
+  queries — a flag honoured on one path would leave a non-inheritable allow
+  cascading on the other. It is refused with `400` where the engine would ignore
+  it, on a tenant-wide assignment and on a global role, and it can be changed
+  only by unassigning and assigning again, each of which flushes the subject's
+  cached decisions. That matters in one direction especially: `false` on an
+  allow narrows access, but `false` on a deny re-opens every descendant the deny
+  covered, so the admin console makes the change a confirmed act rather than a
+  toggle. An absent flag reads as `true`, so every existing assignment keeps its
+  meaning; and making a role global after assigning it non-inheritably widens
+  that assignment to everywhere, as it widens every assignment of the role — the
+  console names those assignments and asks first.
 - **The performance caches are off by default and never change an answer.** AXIAM
   offers two optional caches — one for authorization decisions, one for session
   validation. Both ship disabled, both are keyed per tenant, and both are invalidated
@@ -943,23 +1014,49 @@ redundantly rather than at one chokepoint:
   async AMQP path all evaluate the same policy. The gRPC interceptor authenticates
   the caller and derives the tenant from its verified identity, so a service account
   cannot ask about a subject outside its own tenant.
+- **Automation authenticates as itself on the management API.** Until
+  `1.0.0-beta17` no management route accepted a service-account token: a service
+  account could authenticate and then reach only the authorization checks, so
+  automation that provisions a tenant was handed a human administrator's
+  password instead — every role that person holds, revocable only by locking the
+  person out, and audited as the person. Eight permission families now admit a
+  service account: resources, scopes, permissions, roles and their assignments,
+  groups, service accounts, certificates and webhooks. Admitted is not allowed —
+  each route is authorized by the roles assigned to the account, and an account
+  with no role is refused every one of them with `403`. Every other management
+  route keeps a human audience and still refuses a machine token, each family to
+  be argued on its own; a sweep over the permission registry and the OpenAPI
+  document drives every route with real service-account tokens and pins both
+  directions. Widening the surface closed four latent gaps in the extractor that
+  would have mattered only once it carried real weight: a user's token narrowed
+  to the machine audience by token exchange was accepted as a machine, with no
+  session behind it; the user half was a copy that read the session id from the
+  wrong claim; the per-tenant path binding now applies to both kinds; and
+  `X-Axiam-Tenant` resolves for a service account through the same function as
+  for a user, while no service account counts as an organization principal for
+  issuance, so the organization CA stays human-only. The audit log now tells a
+  machine's write from a person's.
 
 ### OAuth2 & OpenID Connect
 
-AXIAM is a full OAuth2 authorization server and OIDC provider, checked against the
-RFC 6749 / 7636 / 7009 / 7662 MUST matrices and OIDC Core/Discovery conformance,
-and — since `1.0.0-beta13` — run against the OpenID Foundation's conformance
-suite itself: the OIDC Core Basic OP plan and the three FAPI 2.0 Security
-Profile (Final) variants, 165 modules with zero `FAILED` on 2026-09-11, receipts
-published green and red alike. That is a self-run against a working-tree build,
-not a certification, and the `REVIEW` and `WARNING` verdicts are published
-rather than counted as passes.
+AXIAM is a full OAuth2 authorization server and OIDC provider, checked against
+the RFC 6749 / 7636 / 7009 / 7662 MUST matrices and OIDC Core/Discovery
+conformance, and — since `1.0.0-beta13` — run against the OpenID Foundation's
+conformance suite itself: the OIDC Core Basic OP plan and the three FAPI 2.0
+Security Profile (Final) variants, 165 modules with zero `FAILED` in the latest
+full sweep of all four plans, on 2026-09-18 — 150 `PASSED`, 10 `REVIEW` with the
+screenshot each module uploaded published beside the receipts, 3 `WARNING`, 2
+`SKIPPED` — receipts published green and red alike. That is a self-run against a
+working-tree build, not a certification, and the `REVIEW` and `WARNING` verdicts
+are published rather than counted as passes.
 
 - **Authorization Code with PKCE (S256 only)** — the `plain` method is rejected;
   public clients prove possession with the verifier rather than a secret. The
   implicit grant is not offered.
 - **Exact `redirect_uri` matching** — no wildcards, no prefix matching, no
-  normalisation that could widen the match, closing the open-redirect class.
+  normalisation that could widen the match, closing the open-redirect class. The
+  one relaxation is the port of a loopback redirect, which RFC 8252 requires —
+  below.
 - **Single-use authorization codes** bound to client and redirect URI; **refresh
   rotation** that can only narrow scope, never widen it, and that revokes the
   predecessor — except on the FAPI 2.0 profile, where §5.3.2.1-9's 60-second
@@ -1076,8 +1173,8 @@ rather than counted as passes.
   packs data into `state`, and there the exposure is an authenticated client
   reflecting text into its own registered redirect under a 16 KiB body cap.
   Measured per module against the OpenID Foundation suite, eight modules moved
-  from `REVIEW` to `PASSED`; the published receipts remain the 2026-09-11 full
-  runs.
+  from `REVIEW` to `PASSED`, and the 2026-09-18 full sweep carries all eight as
+  passes.
 - **Basic client authentication is accepted, and not recommended.** The OpenID
   Foundation's Basic OP plan runs 37 of its 38 modules with
   `client_secret_basic`, so AXIAM accepts it — decoded as RFC 6749 §2.3.1
@@ -1092,9 +1189,129 @@ rather than counted as passes.
   directions. Without that split, one device certificate would silently unlock
   every endpoint built for people. It is enforced at the request-extraction
   layer rather than left to individual handlers, so a new route inherits it by
-  default, and the endpoints machines legitimately need — authorization checks —
-  accept either principal while still recording which kind it was, so a device
-  is never written into the audit trail as a person.
+  default, and the endpoints machines legitimately need — the authorization
+  checks and, since `1.0.0-beta17`, the eight management families described
+  under authorization — accept either principal while still recording which kind
+  it was, so a device is never written into the audit trail as a person.
+- **Public clients hold no secret, and a loopback redirect is widened by a port
+  and by nothing else.** Since `1.0.0-beta16` a client can be registered with no
+  credential at all (`token_endpoint_auth_method: "none"`, RFC 6749 §2.1) — the
+  shape a desktop or command-line tool, a single-page application or a mobile
+  app actually has. No secret is minted, the creation response carries no
+  `client_secret` member rather than an empty one, PKCE is what proves
+  possession, and a public client is refused the credential-bearing grants, the
+  FAPI 2.0 profile, any mTLS or `private_key_jwt` binding and token
+  introspection, and cannot be moved across the public/confidential line by an
+  update. RFC 8252 §7.3 requires a loopback redirect to accept whatever port the
+  operating system hands the client, and that is the one relaxation of exact
+  matching: it applies only when the *registered* URI is `http` on `127.0.0.1`,
+  `[::1]` or `localhost`, each of the three matches only itself, and scheme,
+  host, path, query, fragment and any userinfo must still be identical. Every
+  `https` registration keeps byte-for-byte matching, and one function serves the
+  authorization endpoint, PAR and code redemption, so the rule cannot be applied
+  at one and forgotten at another. The T21.8 security review drove seven host,
+  path, encoding and scheme spellings against the live endpoint and found no
+  widening (V1). It did find six refusal paths that still compared exactly, so
+  an error raised before the matcher was rendered as a page nobody was reading
+  instead of reaching the desktop client's ephemeral port; that was filed and
+  fixed the same day (MCP-01, `b8bc508`), and `http://[::1]/…`, which a
+  validator comparing the host without its brackets had refused at registration,
+  can now be registered.
+- **A token is addressed at the resource that will receive it.** RFC 8707
+  resource indicators work end to end since `1.0.0-beta16`: a `resource` on the
+  authorization, PAR, device and token endpoints names the service a token is
+  for, and the access token carries that URI as its `aud` — which is what lets
+  an MCP server, a partner API or one service in a mesh check that a token was
+  issued for *it*. A client may name only resources registered in its
+  `allowed_resources`, compared after normalisation and never by prefix; the
+  resource travels with the grant — onto the code, the device grant and the
+  refresh token — so a refresh re-mints the same audience and can never widen
+  it; introspection reports `aud`; and token exchange reads the same list.
+  AXIAM's own endpoints still accept only AXIAM's two audiences, so a token
+  minted for another resource server is refused there. The T21.8 review found
+  the one way through that boundary, and it was closed in the task: `axiam:user`
+  and `axiam:m2m` are well-formed absolute URIs, so they could be registered and
+  requested as resources, and `client_credentials` could thereby mint a token
+  carrying the *user* audience from a grant with no user in it. The whole
+  `axiam` scheme is now reserved, checked after parsing so a change of case
+  cannot slip past it, and every door answers `invalid_target` (MCP-02,
+  `013903d`).
+- **Clients nobody registered in advance are admitted on the tenant's terms.**
+  Dynamic client registration (RFC 7591, `POST /oauth2/register`, since
+  `1.0.0-beta16`) is the first endpoint in AXIAM that writes for a caller
+  holding no credential, so it is off by default: a tenant on `disabled` answers
+  `403` shaped like every other refusal and advertises no registration endpoint.
+  A tenant can open it in `initial_access_token` mode — the caller presents a
+  single-use token an administrator minted, single-use under concurrent
+  redemption (review V3), so the quota cannot be spent by somebody with no
+  credential — or in `anonymous` mode. Either way the request is narrowed on
+  every axis a caller can influence: redirect URIs pass the same validator the
+  admin API uses and then the tenant's host allow-list, a glob anchored on label
+  boundaries whose `*` matches only a whole leftmost label; grants are narrowed
+  to the authorization code and refresh, so a self-registered client never
+  reaches `client_credentials` or token exchange; scopes are narrowed to the
+  tenant's list, which may not include `address` or `phone`; the profile is
+  forced to `standard`; a self-registered client cannot choose its own audiences
+  but inherits the tenant's list, and `anonymous` mode is refused while that
+  list is empty; and the first authorization always goes through the consent
+  screen, so an end user always sees a client no administrator created. Every
+  client records how it came to exist (`managed_by`: `admin`, `dcr` or `cimd`).
+  Registrations are rate-limited per IP at 5 a minute — the smallest limit in
+  AXIAM — bounded per tenant, swept when unused, and audited attempt by attempt.
+  The review found the quota was also an availability budget: in `anonymous`
+  mode a stranger could fill it in about four minutes and hold it for the 30-day
+  unused-client window. That was filed and fixed the same day (MCP-05,
+  `c4d9ea2`): a registration nobody has authorized, in a tenant in `anonymous`
+  mode, is reclaimed an hour after it was created. Two residuals are stated
+  rather than closed: the quota has no per-address share, and concurrent
+  registrations can overshoot the ceiling by the number in flight — cheap to
+  recover from now, rather than cheap to cause.
+- **A client ID that is a URL is fetched only from a publisher the tenant
+  trusts.** With client ID metadata documents enabled — off by default, since
+  `1.0.0-beta16` — a `client_id` that is an `https` URL is resolved by fetching
+  the JSON document published there, so an unauthenticated request chooses the
+  fetch target, which is the whole exposure. The fetch goes through the same
+  SSRF guard as every other outbound fetch — every resolved address classified,
+  IPv4-in-IPv6 embeddings folded before classification (the canonicalisation gap
+  SEC-094 recorded, re-verified on this path by the review), the validated
+  address pinned into a client built for that one fetch, redirects re-checked
+  hop by hop, a size cap, a content-type check and a timeout — and it goes only
+  to a host on the tenant's trusted-publisher list, checked before the fetch so
+  an untrusted host is never contacted. Enabling the feature is refused while
+  that list is empty. The review found the list admitted `*`, which means the
+  same as empty; that was filed and fixed the same day (MCP-03, `0a273ec`), and
+  a wildcard over a whole top-level domain is refused with it — a floor, not a
+  public-suffix check, so trusting shared hosting stays an operator's decision.
+  It also found that the client rows a document creates were bounded by no quota
+  and swept by nothing (MCP-04, `0b216c6`): they now count against the
+  registration ceiling separately, checked before the fetch so a tenant at its
+  ceiling is not an outbound amplifier either, and are swept once nobody has
+  presented the document for the unused-client window. A client materialised
+  from a document is always consent-gated, never on the FAPI profile, holds no
+  secret, and never overwrites a registration an administrator created.
+- **A tenant can have an issuer of its own, and one key set still cannot cross
+  tenants.** An issuer may not carry a query string (RFC 8414 §2), so AXIAM's
+  `?tenant_id=` convention could not be published as one tenant's issuer, and an
+  MCP client deriving discovery from a protected-resource document always landed
+  on the deployment's default tenant. Since `1.0.0-beta16` a deployment can opt
+  into per-tenant path issuers, `{root}/t/{tenant_id}`
+  (`AXIAM__AUTH__TENANT_ISSUER_PATHS`, off by default; with it off nothing is
+  mounted and every existing document is byte-identical), with discovery served
+  at all three conventional forms — and the RFC 8414
+  `/.well-known/oauth-authorization-server` path is always served beside the
+  OIDC one. One key set signs every tenant, which RFC 8414 permits, so the
+  signature alone no longer distinguishes tenant A's token from tenant B's, and
+  two checks carry the isolation instead: a token whose `iss` names a different
+  tenant from its `tenant_id` claim is refused, and a principal whose tenant is
+  not the one the path names is refused in the extractor every route passes
+  through, with the same `401` an uncredentialed request gets, so the holder of
+  a tenant-A token is not told tenant B exists. A `tenant_id` query parameter on
+  a tenant path is refused outright, so the two selectors can never both be
+  present, and introspection is tenant-scoped independently. The review
+  confirmed both checks against live routes (V2); its one informational finding
+  — the query guard compares the raw query string where the extractor decodes it
+  — is accepted because the request is refused either way, and that refusal is
+  pinned by a test (MCP-06).
 
 ### Federation (SAML & OIDC)
 
@@ -1177,28 +1394,111 @@ against the classic federation attacks:
   them, so a silent strip would hold on one custodian and not the other), every
   other requested extension is discarded, and a CSR asking to be a CA comes back
   a leaf. The response carries no key field, because there is no key to carry.
+- **A signing CA issues only for the tenant it signs for.** Both leaf paths
+  resolved the issuing CA by organization alone and never read the `tenant_id`
+  the CA row carries, so until `1.0.0-beta17` a tenant administrator holding
+  `certificates:generate` could issue under a sibling tenant's signing CA, or
+  directly under the organization anchor, and the leaf chained to the root every
+  relying party in the organization trusts — the boundary the product is built
+  on, crossed with no bug in the caller. The first external integration,
+  `axiam-domo-demo`, rode one such certificate to a full MQTT session. The CA is
+  now matched against the tenant being acted on and against where the caller's
+  own record lives, immediately after the lookup and ahead of the status and
+  validity checks, so a CA the caller may not use answers `404` exactly as one
+  that does not exist, and a refusal cannot be used to learn that a CA exists,
+  is revoked or has expired. The organization administrator minting under its
+  own anchor is unchanged. Certificates already issued across the boundary are
+  not revoked on upgrade — revocation is an operator's act, and the PKI guide
+  carries the reach table. The model had claimed this binding since
+  `1.0.0-alpha44`, which is when tenant signing CAs made it possible; nothing
+  made it compulsory, and the entry that said so (T-98) is corrected in place
+  rather than deleted, because a claim the code did not keep is worth more as a
+  record than as a deletion.
+- **A certificate says what it is for, and a server certificate names only what
+  the tenant may name.** In `1.0.0-beta17` AXIAM issues certificates a TLS
+  *server* can present: a `Server` type, the only one that carries subject
+  alternative names, requested through an explicit `subject_alt_names` field — a
+  CSR that asks for a `subjectAltName` is still refused, so nothing a caller's
+  CSR says reaches the name list. A leaf naming a host under the organization
+  root is trusted by every relying party that trusts that root, so the new
+  threat is a tenant administrator minting one for a name that is not theirs.
+  The fence is `server_cert_allowed_names`, an organization list of DNS
+  suffixes, exact hosts and IP prefixes: empty by default, which refuses every
+  `Server` request until someone lists names; tighten-only for a tenant, through
+  the same settings interlock as every other override; and computed as the
+  intersection on every read when the organization later shrinks its list, so a
+  tenant never keeps a withdrawn name. Every SAN and the common name must be
+  admitted, on both leaf paths and both custodians, and trailing dots, Unicode
+  labels, partial wildcards and IPv4-mapped IPv6 are refused. Every leaf now
+  also carries a per-type usage profile — `clientAuth` for user, service and
+  device certificates, `serverAuth` for server ones — so a server certificate
+  fails the client-certificate verifiers, cannot be bound to a service account
+  and cannot log a device in, and a rustls client trusting only the organization
+  root accepts the issued leaf for its name and refuses it for any other. Leaves
+  issued before carry neither extension and behave as before until rotated. Two
+  limits are stated rather than implied: the fence is AXIAM's and is not yet
+  embedded in the tenant CA as X.509 `nameConstraints` (deferred, D-7), so it
+  does not bound a compromised AXIAM or a Vault token used outside it; and under
+  Vault custody a `Server` certificate is issued by `POST /certificates` only,
+  because `sign-verbatim` offers no channel for the names of a caller's CSR, so
+  that request is refused. The `subject` a caller sends is a common name: one
+  `CN=` prefix is understood and stripped, and a full distinguished name is
+  refused rather than silently reduced.
 - **CA signing keys live where you choose, and the choice is recorded per CA**:
   sealed AES-256-GCM into a separate, access-controlled table with the key held
-  outside the datastore, held in HashiCorp Vault, or generated inside Vault's PKI
-  engine and never exported at all. A deployment that configured Vault inherits it
-  for CA custody rather than silently falling back to database rows; an explicit
-  database choice beside a working Vault is called out at startup; and an existing
-  key can be moved between custodians without re-issuing anything beneath it, in a
-  copy-record-release order that can never leave the CA without its key.
-- **mTLS device authentication verifies the full chain** to the tenant/org CA after
-  the fingerprint lookup, checks the issuing CA is active and within its validity
-  window, and enforces the certificate's own validity period and live revocation
-  status on every connection — a fingerprint match alone is never enough. The
-  chain must also reach a CA an administrator has **enabled as an mTLS trust
-  anchor** — on the proxy-terminated path exactly as on the native listener,
-  where the client-CA bundle is built from the flagged anchors. The walk climbs
-  the issuing chain (a tenant signing CA is deliberately an unflagged
-  intermediate), requires every CA on the way to be active and in date, and is
-  depth-bounded, so un-flagging a CA — the documented way to stop trusting it —
-  takes effect everywhere. A certificate the listener admitted *without* a
-  chain — possible only under the opt-in policy the OAuth2 self-signed client
-  method needs — is refused here outright: device identity is chaining to a
-  flagged anchor, and nothing else.
+  outside the datastore, held in HashiCorp Vault, or generated inside Vault's
+  PKI engine and never exported at all. A deployment that configured Vault
+  inherits it for CA custody rather than silently falling back to database rows;
+  an explicit database choice beside a working Vault is called out at startup;
+  and an existing key can be moved between custodians without re-issuing
+  anything beneath it, in a copy-record-release order that can never leave the
+  CA without its key. RSA-4096 CA keys generate under every custodian: the PKI
+  guide said, until `1.0.0-beta17`, that generating one fails outside Vault
+  custody, and the code disagreed. The real cost is time — RSA-4096 key
+  generation is a probabilistic prime search, seconds on a server and tens of
+  seconds on small ARM hardware — so a client timeout sized for Ed25519 will
+  fire.
+- **mTLS device authentication verifies the full chain** to the tenant/org CA
+  after the fingerprint lookup, checks the issuing CA is active and within its
+  validity window, and enforces the certificate's own validity period and live
+  revocation status on every connection — a fingerprint match alone is never
+  enough. The chain must also reach a CA an administrator has **enabled as an
+  mTLS trust anchor** — on the proxy-terminated path exactly as on the native
+  listener, where the client-CA bundle is built from the flagged anchors. The
+  walk climbs the issuing chain (a tenant signing CA is deliberately an
+  unflagged intermediate), requires every CA on the way to be active and in
+  date, and is depth-bounded, so un-flagging a CA — the documented way to stop
+  trusting it — takes effect everywhere. A certificate the listener admitted
+  *without* a chain — possible only under the opt-in policy the OAuth2
+  self-signed client method needs — is refused here outright: device identity is
+  chaining to a flagged anchor, and nothing else. The certificate must also be
+  bound to a service account, `Device` certificates included — and the device
+  guide said, through `1.0.0-beta16`, that a `Device` certificate needed no
+  bind, which was wrong in the expensive direction: a fleet commissioned by the
+  guide failed every login with no obvious cause. It now gives the order:
+  service account, certificate, bind, login. Every refusal on the device login —
+  an unknown, untrusted, self-asserted or unbound certificate — is a `401`; the
+  unbound case had been a `403`, reached by matching the text of an error
+  message, and the bodies stay distinct.
+- **A device's token is as strong as its handshake.** A device authenticates by
+  a TLS handshake with a client certificate — the strongest thing it can prove —
+  and until `1.0.0-beta17` got back a plain bearer token, so a token read off
+  the device's flash, out of a log or at an egress proxy authenticated as that
+  device for its whole lifetime, with no key required. The machinery to close it
+  was already in use: OAuth2 mTLS clients' tokens carry the RFC 8705
+  `cnf.x5t#S256` confirmation, and the device path was the one mint site that
+  omitted it. The device token now carries the thumbprint of the certificate
+  rustls verified for the connection, and no enforcement code changed, because
+  both the REST extractors and the gRPC interceptor already refused a
+  `cnf`-bearing token whose evidence does not match. The claim is made only
+  where AXIAM itself verified the certificate: behind a proxy that forwards
+  `X-Client-Certificate` the certificate is absent from every later request, so
+  a bound token would be one AXIAM refuses on first use, and the device token
+  stays a bearer token there — the PKI guide says so and names the remedy,
+  terminating mTLS at AXIAM. Over gRPC the certificate reaches the interceptor
+  only when that listener verifies client certificates (under transport, below).
+  A token minted before the change carries no `cnf` and is accepted as before
+  until it expires.
 - **An organization CA can anchor mTLS directly.** Flagging it exports only the
   public certificate into the client-verification bundle — the signing key is never
   copied — and the bundle is rewritten as the whole flagged set on every change and
@@ -1226,10 +1526,14 @@ against the classic federation attacks:
 - The audit log is **append-only** — no UPDATE or DELETE paths — and batches are
   **OpenPGP-signed**, making tampering or selective deletion detectable rather than
   merely difficult.
-- Every state-changing and authorization action is recorded with actor, actor type,
-  IP, outcome and timestamp; **both allow and deny decisions** are captured, so
-  probing shows up in the trail. Records are structured fields, not formatted
-  strings, so log-injection cannot forge a synthetic entry.
+- Every state-changing and authorization action is recorded with actor, actor
+  type, IP, outcome and timestamp; **both allow and deny decisions** are
+  captured, so probing shows up in the trail. Records are structured fields, not
+  formatted strings, so log-injection cannot forge a synthetic entry. Actor type
+  means what it says: until `1.0.0-beta17` every authenticated entry read
+  `user`, and now that service accounts reach the management API a service
+  account's request is recorded as `service_account`, from the signed `sub_kind`
+  claim, so the trail tells a machine's write from a person's.
 - **Retention is bounded by default**: a background sweep prunes audit records
   older than 730 days through the table's only deletion path — deployment-wide,
   never reachable from any HTTP handler, so "prune old records" cannot become
@@ -1290,6 +1594,33 @@ against the classic federation attacks:
   gRPC listener terminates its own TLS rather than delegating to tonic, which is
   what lets it share the REST listener's reloadable certificate — one `SIGHUP`
   renews both — and pin TLS 1.3 exclusively, as REST has always done.
+- **The gRPC listener can verify client certificates.** Its TLS was built with
+  no client authentication and no setting could change it — a deliberate
+  deferral when the listener took over its own TLS — which was defensible while
+  it answered `CheckAccess` and stopped being so as the surface grew: reactor
+  administration sits on the same listener, and gRPC skips session revocation by
+  default, so a bearer token was all any caller needed, and a certificate-bound
+  device token was refused on every gRPC call for want of a certificate to
+  match. In `1.0.0-beta17`, `AXIAM__GRPC_TLS_CLIENT_AUTH` — `off` by default,
+  `optional` or `required` — with `AXIAM__GRPC_TLS_CLIENT_CA_PATH` installs the
+  REST listener's reloadable verifier on gRPC as a second instance fed by the
+  same reload, so flagging a CA reaches both listeners without a restart;
+  `required` is enforced in the handshake, ahead of every RPC; and seven
+  misconfigurations refuse to boot rather than warn, client authentication on a
+  plaintext listener among them. `off` is proved to be the old handshake by
+  comparing handshakes, not structs. The certificate is proof of possession and
+  a network gate, never an identity: every call still needs a token, and a
+  deployment that sets nothing keeps a bearer-only listener.
+- **The health probe verifies what it probes, and the console finds its backend
+  when it needs it.** The container healthcheck probes a TLS listener over TLS
+  in `1.0.0-beta17` — the scheme and port follow the listener, and the trust
+  anchors come from a named CA file or the server's own certificate chain — and
+  has no switch that skips verification, because a probe that accepted any
+  certificate would report healthy for anything listening on the port. The
+  console's nginx resolves its backend per request, with a 30-second cache,
+  rather than once at startup, so a console started before the server, or one
+  whose backend moved, recovers without a restart; an `https` backend is still
+  verified against its configured name.
 - **Vault is run as the production secret store it is.** Both shipped Vault
   deployments use Raft storage; the server holds a scoped, periodic token whose
   policy is one checked file — read on the startup secrets, writes confined to
@@ -1308,36 +1639,53 @@ against the classic federation attacks:
   cannot take for you.
 - **Secrets at rest** — MFA seeds, CA keys, OPAQUE OPRF seeds, federation and
   webhook and email secrets — are AES-256-GCM encrypted; passwords are
-  Argon2id-hashed and client secrets are hashed under a **server-held key**, so a
-  database disclosure alone does not yield an offline-crackable corpus.
+  Argon2id-hashed and client secrets are hashed under a **server-held key**, so
+  a database disclosure alone does not yield an offline-crackable corpus.
   Secret-bearing types carry redacting `Debug`/`toString` implementations so a
   credential never reaches a log line — including the three types the beta13
   wave added, the datastore and broker configuration (whose derived `Debug`
-  would have printed a password in every log line that renders a
-  configuration), and the test assertions static analysis caught formatting a
-  credential into a panic message, because a CI log outlives the run. A **missing
-  encryption key or pepper fails startup**; no code path substitutes an
-  all-zero, constant or unkeyed fallback, and a Vault CA bundle that parses to
-  no certificates fails startup naming the file rather than silently falling
-  back to the public trust store.
-- **Long-lived secrets come from a pluggable secret provider — HashiCorp Vault by
-  default in production.** All ten of them — the JWT signing key, the OPAQUE setup
-  and session keys, the PKI, MFA, federation and email encryption keys, the
-  password and pseudonym peppers, and the AMQP signing key — are fetched from
-  Vault rather than the container spec, so none needs to exist as an environment
-  variable or Kubernetes manifest at all. The seeder mints what is missing from a
-  CSPRNG and **never regenerates a secret that already exists** (regenerating the
-  OPAQUE setup key would mean a password reset for every user; regenerating the
-  pepper would invalidate every stored hash), and the status tooling reports
-  presence only, never values. Since 1.0.0-beta14 the datastore username and
-  password and the broker URL come through the same provider, in the same round
-  trip, so the Vault token — or the `file` provider's mount — is the only
-  credential a container spec has to carry. The environment variables stay as a
-  permanent, supported fallback (`env` is a provider kind, not a legacy path),
-  and a deployment that configured a different provider and still supplies one
-  of the three through the environment is told so at boot. The seeder carries
-  them forward and never invents them: an invented datastore password gives a
-  Vault that looks configured and a server that cannot connect.
+  would have printed a password in every log line that renders a configuration),
+  and the test assertions static analysis caught formatting a credential into a
+  panic message, because a CI log outlives the run. A **missing encryption key
+  or pepper fails startup**; no code path substitutes an all-zero, constant or
+  unkeyed fallback, and a Vault CA bundle that parses to no certificates fails
+  startup naming the file rather than silently falling back to the public trust
+  store. The one-time bootstrap setup token is stored only as a hash, so a lost
+  token cannot be read back; `axiam-server setup-token --remint` mints a fresh
+  one, printed to stdout only, and refuses with exit code 2, writing nothing, on
+  any deployment that has a user or a redeemed token — before bootstrap there is
+  no administrator to take over, and after it there is an authenticated way to
+  create accounts, so re-minting is never the answer.
+- **Long-lived secrets come from a pluggable secret provider — HashiCorp Vault
+  by default in production.** All ten of them — the JWT signing key, the OPAQUE
+  setup and session keys, the PKI, MFA, federation and email encryption keys,
+  the password and pseudonym peppers, and the AMQP signing key — are fetched
+  from Vault rather than the container spec, so none needs to exist as an
+  environment variable or Kubernetes manifest at all. The seeder mints what is
+  missing from a CSPRNG and **never regenerates a secret that already exists**
+  (regenerating the OPAQUE setup key would mean a password reset for every user;
+  regenerating the pepper would invalidate every stored hash), and the status
+  tooling reports presence only, never values. Since 1.0.0-beta14 the datastore
+  username and password and the broker URL come through the same provider, in
+  the same round trip, so the Vault token — or the `file` provider's mount — is
+  the only credential a container spec has to carry. The environment variables
+  stay as a permanent, supported fallback (`env` is a provider kind, not a
+  legacy path), and a deployment that configured a different provider and still
+  supplies one of the three through the environment is told so at boot. The
+  seeder carries them forward and never invents them: an invented datastore
+  password gives a Vault that looks configured and a server that cannot connect.
+  Under the default `env` provider every secret is read from
+  `AXIAM__AUTH__<NAME>`, and four names the documentation, a dozen error
+  messages and the repository's own development, benchmark and conformance
+  recipes gave until `1.0.0-beta17` were read by nothing:
+  `AXIAM__PKI__ENCRYPTION_KEY`, `AXIAM__EMAIL_ENCRYPTION_KEY`,
+  `AXIAM__GDPR_PSEUDONYM_PEPPER` and `AXIAM__FEDERATION_ENCRYPTION_KEY`. An
+  operator who set one left the feature that needed it off, and the fault looked
+  like the feature. Every message and document now names the variable that is
+  read; the old spellings are deliberately not accepted as aliases, since two
+  names for one secret is the same trap seen from the other side, and a
+  deployment that still sets one while the real variable is absent gets a
+  startup warning naming both.
 - **The eleven client SDKs conform to one cross-language contract.** Strict TLS
   verification is unconditional and TLS-bypass APIs are prohibited (CI greps for
   them); a plaintext `http://` base URL is refused at construction, with a
@@ -1360,7 +1708,23 @@ against the classic federation attacks:
   operations — landed in all eleven repositories on 2026-09-13, and contract
   1.46, documentation only, recording both forms a spent-`request_uri` refusal
   can take and why a conformant SDK reaches only the direct one, is vendored by
-  all eleven.
+  all eleven. Contracts 1.47 to 1.52 followed the two releases since. 1.47
+  records `none` in the discovery document as a capability an SDK observes and
+  never acts on; 1.48 adds the helpers an MCP resource server needs to publish
+  its RFC 9728 document and its `WWW-Authenticate` challenge, ported to all
+  eleven SDKs and reviewed across them in 1.49; and 1.50 makes the
+  dynamic-registration initial access token a redacting type in every SDK. 1.51
+  carries the `1.0.0-beta17` server wave into all eleven —
+  `authenticate_device()` with its certificate-bound token, the acting-tenant
+  helper promoted to a SHOULD, and gRPC token-service wrappers that read `cnf`.
+  1.52 is the cross-SDK review of those eleven ports, and it is the honest half:
+  every SDK had at least one defect against the rules it then wrote, and four
+  recurred across unrelated codebases — a device credential that outlived a
+  later login, a refresh guard that reached the device token on gRPC or on
+  re-authentication, tenant identifiers compared as strings rather than as
+  UUIDs, and a malformed `200` on the device login adopted as an empty
+  credential. Each SDK fixed its own in one pull request before re-vendoring the
+  contract, and the drift check reports all eleven at 1.52.
 - **The admin UI redacts what a gateway echoes.** An error body is not always
   written by AXIAM — a proxy or gateway can answer instead, and those echo the
   request — so the UI redacts credential-shaped keys before rendering, including
@@ -1458,24 +1822,30 @@ Resilience Act conformity assessment, and it says so plainly.
 | **ISO/IEC 27001:2022 Annex A** | Access control, secure authentication, cryptography, logging, network security, secure development | Interpretive control-family mapping; code-level themes Pass | [Annex A mapping](security-audit.md#3-iso-27001-annex-a--control-family-mapping) |
 | **EU Cyber Resilience Act (Annex I)** | Secure-by-design, no known exploitable vulnerabilities, confidentiality, data minimisation, access control, vulnerability handling, security updates | Themes Pass; SBOM deferred | [Essential-requirement mapping](security-audit.md#4-cybersecurity-act--essential-requirement-theme-mapping) |
 | **GDPR** | Data-subject export (Art. 15), erasure (Art. 17), consent (Art. 7), pseudonymisation, data minimisation | Export excludes secrets; erasure is durable and re-selectable on failure; audit actor identities are pseudonymised; OIDC scope-release consent is per client, withdrawable in one call and re-checked on every release; every personal-data column of the user record is classified in one declared inventory that both erasure statements and the export render from, and a test introspects the live schema after migrations and fails on any column the inventory does not classify | [GDPR compliance](../docs/compliance/gdpr-compliance.md) |
-| **OAuth2 / OIDC** | RFC 6749 / 7636 / 7009 / 7662 + OIDC Core/Discovery MUST matrices; the OpenID Foundation conformance suite (OIDC Core Basic OP; FAPI 2.0 Security Profile Final — mTLS, self-signed, `private_key_jwt`) | All tracked MUSTs pass; 165 suite modules, zero `FAILED` on 2026-09-11 — a self-run against a working-tree build, not a certification; `REVIEW` and `WARNING` verdicts are published, not counted as passes; since 2026-09-14 eight further modules pass when run individually (the three PAR `request_uri` refusals, `response-type-missing`, and the four long or mismatched `state` / `nonce` probes), not yet re-swept as a plan | [OAuth2 RFC matrix](../docs/compliance/oauth2-rfc-compliance.md) · [OIDC conformance](../docs/compliance/oidc-conformance.md) · [conformance receipts](../docs/conformance/README.md) · [latest run](../docs/conformance/index.md) |
+| **OAuth2 / OIDC** | RFC 6749 / 7636 / 7009 / 7662 + OIDC Core/Discovery MUST matrices; the OpenID Foundation conformance suite (OIDC Core Basic OP; FAPI 2.0 Security Profile Final — mTLS, self-signed, `private_key_jwt`) | All tracked MUSTs pass; 165 suite modules, zero `FAILED` in the full sweep of all four plans on 2026-09-18 — 150 `PASSED`, 10 `REVIEW` with each module's screenshot evidence published, 3 `WARNING`, 2 `SKIPPED` — a self-run against a working-tree build, not a certification; `REVIEW` and `WARNING` verdicts are published, not counted as passes | [OAuth2 RFC matrix](../docs/compliance/oauth2-rfc-compliance.md) · [OIDC conformance](../docs/compliance/oidc-conformance.md) · [conformance receipts](../docs/conformance/README.md) · [latest run](../docs/conformance/index.md) |
 
 Each matrix is checked in per control, with the test or source location that
 satisfies it, so a status here can be read back to the line that earns it rather
 than taken on trust.
 
-Dependency and supply-chain security is gated in CI — `cargo audit`, `cargo deny`,
-Trivy filesystem/config scans and `npm audit` at a high threshold, with Dependabot
-across the workspace's ecosystems and each SDK repository, SHA-pinned GitHub
-Actions, and signed release provenance — and the gate tells a registry outage
-apart from a clean audit and fails on a suppression that no longer matches
-anything, so it cannot quietly be told what to ignore. The gate has been
+Dependency and supply-chain security is gated in CI — `cargo audit`, `cargo
+deny`, Trivy filesystem/config scans and `npm audit` at a high threshold, with
+Dependabot across the workspace's ecosystems and each SDK repository, SHA-pinned
+GitHub Actions, and signed release provenance — and the gate tells a registry
+outage apart from a clean audit and fails on a suppression that no longer
+matches anything, so it cannot quietly be told what to ignore. The gate has been
 exercised for real: on 2026-09-14 RUSTSEC-2026-0285 — rustls 0.23.43 accepting
 TLS 1.3 handshake messages across encryption-level boundaries, CVSS 5.3 — was
 published, the scan went red the same day, and the fix was pinned to 0.23.45 and
 verified by re-running the FAPI 2.0 mTLS conformance plan against the rebuilt
-binary. The `1.0.0-beta14` release artefacts predate it and carry the
-vulnerable version; the fix ships with the next release.
+binary. The `1.0.0-beta14` release artefacts predate it and carry the vulnerable
+version; the fix ships in `1.0.0-beta15`. The same sentence has a limit the gate
+itself taught: on 2026-09-18 a lockfile update removed `rkyv` altogether and
+left an audit-only suppression matching nothing — the one kind the
+stale-suppression check does not see, because it polices `cargo deny`'s own list
+and `cargo audit` tolerates an extra ID — so it was found by reading and removed
+(`d30c1df`) before it could silently re-suppress the advisory if a dependency
+ever pulled `rkyv` back in.
 
 ---
 
@@ -1698,8 +2068,8 @@ list read as a checklist — what to do about each, grouped by who does it.
   no internal review had, and the model records it as the Critical it was
   rather than as a conformance detail.
 
-Everything in this document was last re-derived from source at `main` after
-**`1.0.0-beta14`** (model 2.16.0) on 2026-09-15; the handoff block at the top of this file says
+Everything in this document was last re-derived from source at `main` before
+**`1.0.0-beta17`** (model 2.17.0) on 2026-09-25; the handoff block at the top of this file says
 what that pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.

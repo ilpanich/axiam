@@ -53,16 +53,16 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.16.0",
+ "version": "2.17.0",
  "diagramCount": 9,
- "total": 271,
+ "total": 288,
  "open": 13,
- "mitigated": 258,
+ "mitigated": 275,
  "areas": [
   {
    "id": 0,
    "title": "System diagram",
-   "total": 31,
+   "total": 33,
    "open": 2
   },
   {
@@ -74,7 +74,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 49,
+   "total": 58,
    "open": 0
   },
   {
@@ -86,13 +86,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
-   "total": 26,
+   "total": 27,
    "open": 0
   },
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "total": 26,
+   "total": 30,
    "open": 1
   },
   {
@@ -104,7 +104,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 27,
+   "total": 28,
    "open": 5
   },
   {
@@ -117,7 +117,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 66,
+   "total": 70,
    "open": 3
   },
   {
@@ -132,39 +132,39 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 65,
+   "total": 67,
    "open": 6
   },
   {
    "name": "Denial of service",
-   "total": 24,
+   "total": 28,
    "open": 2
   },
   {
    "name": "Elevation of privilege",
-   "total": 51,
+   "total": 58,
    "open": 1
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 30,
+   "total": 32,
    "open": 1
   },
   {
    "name": "High",
-   "total": 126,
+   "total": 135,
    "open": 8
   },
   {
    "name": "Medium",
-   "total": 106,
+   "total": 111,
    "open": 3
   },
   {
    "name": "Low",
-   "total": 9,
+   "total": 10,
    "open": 1
   }
  ],

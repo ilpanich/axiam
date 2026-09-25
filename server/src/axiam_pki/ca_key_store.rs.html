@@ -815,7 +815,7 @@
 <a href=#815 id=815 data-nosnippet>815</a>            <span class="kw">if </span>!available {
 <a href=#816 id=816 data-nosnippet>816</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamError::Internal(<span class="macro">format!</span>(
 <a href=#817 id=817 data-nosnippet>817</a>                    <span class="string">"CA key custody is set to `{requested}` but that custodian is not \
-<a href=#818 id=818 data-nosnippet>818</a>                     configured: database custody needs AXIAM__PKI__ENCRYPTION_KEY, vault \
+<a href=#818 id=818 data-nosnippet>818</a>                     configured: database custody needs AXIAM__AUTH__PKI_ENCRYPTION_KEY, vault \
 <a href=#819 id=819 data-nosnippet>819</a>                     and vault_pki custody need AXIAM__PKI__VAULT_ADDR and \
 <a href=#820 id=820 data-nosnippet>820</a>                     AXIAM__PKI__VAULT_TOKEN"
 <a href=#821 id=821 data-nosnippet>821</a>                </span>)));
@@ -865,7 +865,7 @@
 <a href=#865 id=865 data-nosnippet>865</a>        <span class="kw">let </span>custody = <span class="self">self</span>.default_custody.ok_or_else(|| {
 <a href=#866 id=866 data-nosnippet>866</a>            AxiamError::Internal(
 <a href=#867 id=867 data-nosnippet>867</a>                <span class="string">"no CA key custodian is configured, so a CA signing key cannot be \
-<a href=#868 id=868 data-nosnippet>868</a>                 stored: set AXIAM__PKI__ENCRYPTION_KEY to keep it encrypted in the \
+<a href=#868 id=868 data-nosnippet>868</a>                 stored: set AXIAM__AUTH__PKI_ENCRYPTION_KEY to keep it encrypted in the \
 <a href=#869 id=869 data-nosnippet>869</a>                 database, or AXIAM__PKI__VAULT_ADDR and AXIAM__PKI__VAULT_TOKEN to \
 <a href=#870 id=870 data-nosnippet>870</a>                 keep it in Vault"
 <a href=#871 id=871 data-nosnippet>871</a>                    </span>.into(),
@@ -888,7 +888,7 @@
 <a href=#888 id=888 data-nosnippet>888</a>                .map(|s| s <span class="kw">as </span><span class="kw-2">&amp;</span><span class="kw">dyn </span>CaKeyStore)
 <a href=#889 id=889 data-nosnippet>889</a>                .ok_or_else(|| {
 <a href=#890 id=890 data-nosnippet>890</a>                    AxiamError::Internal(
-<a href=#891 id=891 data-nosnippet>891</a>                        <span class="string">"this CA's key is sealed into its row, but AXIAM__PKI__ENCRYPTION_KEY \
+<a href=#891 id=891 data-nosnippet>891</a>                        <span class="string">"this CA's key is sealed into its row, but AXIAM__AUTH__PKI_ENCRYPTION_KEY \
 <a href=#892 id=892 data-nosnippet>892</a>                         is not set — the key cannot be opened"
 <a href=#893 id=893 data-nosnippet>893</a>                            </span>.into(),
 <a href=#894 id=894 data-nosnippet>894</a>                    )

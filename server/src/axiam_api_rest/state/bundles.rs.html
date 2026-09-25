@@ -123,14 +123,14 @@
 <a href=#123 id=123 data-nosnippet>123</a>
 <a href=#124 id=124 data-nosnippet>124</a><span class="doccomment">/// Outbound mail, provider configuration and the two token-mail services.
 <a href=#125 id=125 data-nosnippet>125</a>///
-<a href=#126 id=126 data-nosnippet>126</a>/// `email_encryption_key` is `None` when `AXIAM__EMAIL_ENCRYPTION_KEY` is
+<a href=#126 id=126 data-nosnippet>126</a>/// `email_encryption_key` is `None` when `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` is
 <a href=#127 id=127 data-nosnippet>127</a>/// unset, and that absence is what makes the email-config routes fail closed. It
 <a href=#128 id=128 data-nosnippet>128</a>/// lives beside the repository it protects rather than several screens away from
 <a href=#129 id=129 data-nosnippet>129</a>/// it, so the pairing is visible at the point of use.
 <a href=#130 id=130 data-nosnippet>130</a></span><span class="attr">#[derive(Clone)]
 <a href=#131 id=131 data-nosnippet>131</a></span><span class="kw">pub struct </span>MailState&lt;C: Connection + Clone&gt; {
 <a href=#132 id=132 data-nosnippet>132</a>    <span class="kw">pub </span>mail_outbound_publisher: Arc&lt;<span class="kw">dyn </span>DynMailPublisher&gt;,
-<a href=#133 id=133 data-nosnippet>133</a>    <span class="doccomment">/// D-02: `None` when `AXIAM__EMAIL_ENCRYPTION_KEY` is unset — the six
+<a href=#133 id=133 data-nosnippet>133</a>    <span class="doccomment">/// D-02: `None` when `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` is unset — the six
 <a href=#134 id=134 data-nosnippet>134</a>    /// email-config routes fail closed rather than silently using a
 <a href=#135 id=135 data-nosnippet>135</a>    /// constant/zero key.
 <a href=#136 id=136 data-nosnippet>136</a>    </span><span class="kw">pub </span>email_config_repo: <span class="prelude-ty">Option</span>&lt;SurrealEmailConfigRepository&lt;C&gt;&gt;,

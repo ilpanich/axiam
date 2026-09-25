@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FIELD","MAX_SUBJECT_ALT_NAMES"],"enum":["AllowedName","RequestedName"],"fn":["allowed_name_covers","allowed_name_matches","check_leaf_names","intersect_allowed_names","is_name_allowed","parse_allowed_name","uncovered_allowed_names","validate_allowed_names"],"struct":["IpCidr"]};

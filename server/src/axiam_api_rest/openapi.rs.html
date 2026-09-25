@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/openapi.rs`."><title>openapi.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/</div>openapi.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! OpenAPI specification and Swagger UI configuration.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/openapi.rs`."><title>openapi.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/</div>openapi.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! OpenAPI specification and Swagger UI configuration.
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>utoipa::OpenApi;
 <a href=#4 id=4 data-nosnippet>4</a>
@@ -803,193 +803,233 @@
 <a href=#803 id=803 data-nosnippet>803</a>    doc
 <a href=#804 id=804 data-nosnippet>804</a>}
 <a href=#805 id=805 data-nosnippet>805</a>
-<a href=#806 id=806 data-nosnippet>806</a><span class="doccomment">/// Adds Bearer JWT security scheme to the OpenAPI spec.
-<a href=#807 id=807 data-nosnippet>807</a></span><span class="kw">struct </span>SecurityAddon;
-<a href=#808 id=808 data-nosnippet>808</a>
-<a href=#809 id=809 data-nosnippet>809</a><span class="kw">impl </span>utoipa::Modify <span class="kw">for </span>SecurityAddon {
-<a href=#810 id=810 data-nosnippet>810</a>    <span class="kw">fn </span>modify(<span class="kw-2">&amp;</span><span class="self">self</span>, openapi: <span class="kw-2">&amp;mut </span>utoipa::openapi::OpenApi) {
-<a href=#811 id=811 data-nosnippet>811</a>        <span class="kw">let </span>components = openapi.components.get_or_insert_with(Default::default);
-<a href=#812 id=812 data-nosnippet>812</a>        components.add_security_scheme(
-<a href=#813 id=813 data-nosnippet>813</a>            <span class="string">"bearer"</span>,
-<a href=#814 id=814 data-nosnippet>814</a>            utoipa::openapi::security::SecurityScheme::Http(
-<a href=#815 id=815 data-nosnippet>815</a>                utoipa::openapi::security::HttpBuilder::new()
-<a href=#816 id=816 data-nosnippet>816</a>                    .scheme(utoipa::openapi::security::HttpAuthScheme::Bearer)
-<a href=#817 id=817 data-nosnippet>817</a>                    .bearer_format(<span class="string">"JWT"</span>)
-<a href=#818 id=818 data-nosnippet>818</a>                    .build(),
-<a href=#819 id=819 data-nosnippet>819</a>            ),
-<a href=#820 id=820 data-nosnippet>820</a>        );
-<a href=#821 id=821 data-nosnippet>821</a>    }
-<a href=#822 id=822 data-nosnippet>822</a>}
-<a href=#823 id=823 data-nosnippet>823</a>
-<a href=#824 id=824 data-nosnippet>824</a><span class="attr">#[cfg(test)]
-<a href=#825 id=825 data-nosnippet>825</a></span><span class="kw">mod </span>spec_digest_tests {
-<a href=#826 id=826 data-nosnippet>826</a>    <span class="kw">use super</span>::{SPEC_DIGEST_KEY, api_doc};
-<a href=#827 id=827 data-nosnippet>827</a>
-<a href=#828 id=828 data-nosnippet>828</a>    <span class="doccomment">/// The digest is present, and says which algorithm produced it.
-<a href=#829 id=829 data-nosnippet>829</a>    </span><span class="attr">#[test]
-<a href=#830 id=830 data-nosnippet>830</a>    </span><span class="kw">fn </span>the_document_carries_a_digest() {
-<a href=#831 id=831 data-nosnippet>831</a>        <span class="kw">let </span>doc = api_doc();
-<a href=#832 id=832 data-nosnippet>832</a>        <span class="kw">let </span>extensions = doc
-<a href=#833 id=833 data-nosnippet>833</a>            .info
-<a href=#834 id=834 data-nosnippet>834</a>            .extensions
-<a href=#835 id=835 data-nosnippet>835</a>            .as_ref()
-<a href=#836 id=836 data-nosnippet>836</a>            .expect(<span class="string">"info carries no extensions"</span>);
-<a href=#837 id=837 data-nosnippet>837</a>        <span class="kw">let </span>value = extensions
-<a href=#838 id=838 data-nosnippet>838</a>            .get(SPEC_DIGEST_KEY)
-<a href=#839 id=839 data-nosnippet>839</a>            .and_then(|v| v.as_str())
-<a href=#840 id=840 data-nosnippet>840</a>            .expect(<span class="string">"info carries no spec digest"</span>);
-<a href=#841 id=841 data-nosnippet>841</a>
-<a href=#842 id=842 data-nosnippet>842</a>        <span class="comment">// `sha256:` + 64 hex characters. Naming the algorithm inline is what lets this
-<a href=#843 id=843 data-nosnippet>843</a>        // change one day without every consumer having to guess from the length.
-<a href=#844 id=844 data-nosnippet>844</a>        </span><span class="macro">assert!</span>(
-<a href=#845 id=845 data-nosnippet>845</a>            value.starts_with(<span class="string">"sha256:"</span>),
-<a href=#846 id=846 data-nosnippet>846</a>            <span class="string">"unexpected digest form: {value}"
-<a href=#847 id=847 data-nosnippet>847</a>        </span>);
-<a href=#848 id=848 data-nosnippet>848</a>        <span class="macro">assert_eq!</span>(value.len(), <span class="string">"sha256:"</span>.len() + <span class="number">64</span>);
-<a href=#849 id=849 data-nosnippet>849</a>        <span class="macro">assert!</span>(
-<a href=#850 id=850 data-nosnippet>850</a>            value[<span class="string">"sha256:"</span>.len()..]
-<a href=#851 id=851 data-nosnippet>851</a>                .chars()
-<a href=#852 id=852 data-nosnippet>852</a>                .all(|c| c.is_ascii_hexdigit())
-<a href=#853 id=853 data-nosnippet>853</a>        );
-<a href=#854 id=854 data-nosnippet>854</a>    }
-<a href=#855 id=855 data-nosnippet>855</a>
-<a href=#856 id=856 data-nosnippet>856</a>    <span class="doccomment">/// Two exports of the same build agree.
-<a href=#857 id=857 data-nosnippet>857</a>    ///
-<a href=#858 id=858 data-nosnippet>858</a>    /// Not a tautology: the digest is computed over a serialization of the whole document,
-<a href=#859 id=859 data-nosnippet>859</a>    /// and if any part of that serialization were order-unstable — a `HashMap` somewhere in
-<a href=#860 id=860 data-nosnippet>860</a>    /// the tree — this would flake. It is the same property the SDK OpenAPI drift gate
-<a href=#861 id=861 data-nosnippet>861</a>    /// depends on, asserted here where the failure names its cause.
-<a href=#862 id=862 data-nosnippet>862</a>    </span><span class="attr">#[test]
-<a href=#863 id=863 data-nosnippet>863</a>    </span><span class="kw">fn </span>the_digest_is_stable_across_exports() {
-<a href=#864 id=864 data-nosnippet>864</a>        <span class="kw">let </span>first = api_doc();
-<a href=#865 id=865 data-nosnippet>865</a>        <span class="kw">let </span>second = api_doc();
-<a href=#866 id=866 data-nosnippet>866</a>        <span class="macro">assert_eq!</span>(
-<a href=#867 id=867 data-nosnippet>867</a>            first.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
-<a href=#868 id=868 data-nosnippet>868</a>            second
-<a href=#869 id=869 data-nosnippet>869</a>                .info
-<a href=#870 id=870 data-nosnippet>870</a>                .extensions
-<a href=#871 id=871 data-nosnippet>871</a>                .as_ref()
-<a href=#872 id=872 data-nosnippet>872</a>                .unwrap()
-<a href=#873 id=873 data-nosnippet>873</a>                .get(SPEC_DIGEST_KEY),
-<a href=#874 id=874 data-nosnippet>874</a>        );
-<a href=#875 id=875 data-nosnippet>875</a>        <span class="macro">assert_eq!</span>(
-<a href=#876 id=876 data-nosnippet>876</a>            serde_json::to_string(<span class="kw-2">&amp;</span>first).unwrap(),
-<a href=#877 id=877 data-nosnippet>877</a>            serde_json::to_string(<span class="kw-2">&amp;</span>second).unwrap(),
-<a href=#878 id=878 data-nosnippet>878</a>        );
-<a href=#879 id=879 data-nosnippet>879</a>    }
-<a href=#880 id=880 data-nosnippet>880</a>
-<a href=#881 id=881 data-nosnippet>881</a>    <span class="doccomment">/// A document that differs by one path gets a different digest.
-<a href=#882 id=882 data-nosnippet>882</a>    ///
-<a href=#883 id=883 data-nosnippet>883</a>    /// This is the whole point of the field, and the reason `info.version` could not serve:
-<a href=#884 id=884 data-nosnippet>884</a>    /// the version is the release version and moves when a release is cut, so two builds
-<a href=#885 id=885 data-nosnippet>885</a>    /// describing genuinely different APIs can and do report the same string. `main` and a
-<a href=#886 id=886 data-nosnippet>886</a>    /// release branch both said `1.0.0-alpha44` while differing by two paths.
-<a href=#887 id=887 data-nosnippet>887</a>    </span><span class="attr">#[test]
-<a href=#888 id=888 data-nosnippet>888</a>    </span><span class="kw">fn </span>removing_a_path_changes_the_digest() {
-<a href=#889 id=889 data-nosnippet>889</a>        <span class="kw">let </span>full = api_doc();
-<a href=#890 id=890 data-nosnippet>890</a>        <span class="kw">let </span>before = full
-<a href=#891 id=891 data-nosnippet>891</a>            .info
-<a href=#892 id=892 data-nosnippet>892</a>            .extensions
-<a href=#893 id=893 data-nosnippet>893</a>            .as_ref()
-<a href=#894 id=894 data-nosnippet>894</a>            .unwrap()
-<a href=#895 id=895 data-nosnippet>895</a>            .get(SPEC_DIGEST_KEY)
-<a href=#896 id=896 data-nosnippet>896</a>            .cloned()
-<a href=#897 id=897 data-nosnippet>897</a>            .unwrap();
-<a href=#898 id=898 data-nosnippet>898</a>
-<a href=#899 id=899 data-nosnippet>899</a>        <span class="kw">let </span><span class="kw-2">mut </span>trimmed = api_doc();
-<a href=#900 id=900 data-nosnippet>900</a>        <span class="kw">let </span>victim = trimmed
-<a href=#901 id=901 data-nosnippet>901</a>            .paths
-<a href=#902 id=902 data-nosnippet>902</a>            .paths
-<a href=#903 id=903 data-nosnippet>903</a>            .keys()
-<a href=#904 id=904 data-nosnippet>904</a>            .next()
-<a href=#905 id=905 data-nosnippet>905</a>            .expect(<span class="string">"the spec has no paths"</span>)
-<a href=#906 id=906 data-nosnippet>906</a>            .clone();
-<a href=#907 id=907 data-nosnippet>907</a>        <span class="comment">// `remove`, not `shift_remove`: `preserve_path_order` is off in this build, so
-<a href=#908 id=908 data-nosnippet>908</a>        // `PathsMap` is a `BTreeMap`. That is also why the digest is stable — a BTreeMap
-<a href=#909 id=909 data-nosnippet>909</a>        // serializes in key order rather than in insertion order.
-<a href=#910 id=910 data-nosnippet>910</a>        </span>trimmed.paths.paths.remove(<span class="kw-2">&amp;</span>victim);
-<a href=#911 id=911 data-nosnippet>911</a>        <span class="kw">let </span>after = <span class="kw">super</span>::stamp_spec_digest(trimmed)
-<a href=#912 id=912 data-nosnippet>912</a>            .info
-<a href=#913 id=913 data-nosnippet>913</a>            .extensions
-<a href=#914 id=914 data-nosnippet>914</a>            .as_ref()
-<a href=#915 id=915 data-nosnippet>915</a>            .unwrap()
-<a href=#916 id=916 data-nosnippet>916</a>            .get(SPEC_DIGEST_KEY)
-<a href=#917 id=917 data-nosnippet>917</a>            .cloned()
-<a href=#918 id=918 data-nosnippet>918</a>            .unwrap();
-<a href=#919 id=919 data-nosnippet>919</a>
-<a href=#920 id=920 data-nosnippet>920</a>        <span class="macro">assert_ne!</span>(
-<a href=#921 id=921 data-nosnippet>921</a>            before, after,
-<a href=#922 id=922 data-nosnippet>922</a>            <span class="string">"dropping {victim} left the digest unchanged, so it does not distinguish content"
-<a href=#923 id=923 data-nosnippet>923</a>        </span>);
-<a href=#924 id=924 data-nosnippet>924</a>    }
-<a href=#925 id=925 data-nosnippet>925</a>
-<a href=#926 id=926 data-nosnippet>926</a>    <span class="doccomment">/// Re-stamping an already-stamped document is a no-op.
-<a href=#927 id=927 data-nosnippet>927</a>    ///
-<a href=#928 id=928 data-nosnippet>928</a>    /// The digest is computed with the field cleared, so it is a function of the content
-<a href=#929 id=929 data-nosnippet>929</a>    /// rather than of itself. Were it not, stamping twice would produce a different value
-<a href=#930 id=930 data-nosnippet>930</a>    /// the second time and the field would be unusable for comparison.
-<a href=#931 id=931 data-nosnippet>931</a>    </span><span class="attr">#[test]
-<a href=#932 id=932 data-nosnippet>932</a>    </span><span class="kw">fn </span>stamping_is_idempotent() {
-<a href=#933 id=933 data-nosnippet>933</a>        <span class="kw">let </span>once = api_doc();
-<a href=#934 id=934 data-nosnippet>934</a>        <span class="kw">let </span>expected = once
-<a href=#935 id=935 data-nosnippet>935</a>            .info
-<a href=#936 id=936 data-nosnippet>936</a>            .extensions
-<a href=#937 id=937 data-nosnippet>937</a>            .as_ref()
-<a href=#938 id=938 data-nosnippet>938</a>            .unwrap()
-<a href=#939 id=939 data-nosnippet>939</a>            .get(SPEC_DIGEST_KEY)
-<a href=#940 id=940 data-nosnippet>940</a>            .cloned()
-<a href=#941 id=941 data-nosnippet>941</a>            .unwrap();
-<a href=#942 id=942 data-nosnippet>942</a>
-<a href=#943 id=943 data-nosnippet>943</a>        <span class="kw">let </span>twice = <span class="kw">super</span>::stamp_spec_digest(once);
-<a href=#944 id=944 data-nosnippet>944</a>        <span class="macro">assert_eq!</span>(
-<a href=#945 id=945 data-nosnippet>945</a>            twice.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
-<a href=#946 id=946 data-nosnippet>946</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>expected)
-<a href=#947 id=947 data-nosnippet>947</a>        );
-<a href=#948 id=948 data-nosnippet>948</a>    }
-<a href=#949 id=949 data-nosnippet>949</a>}
-<a href=#950 id=950 data-nosnippet>950</a>
-<a href=#951 id=951 data-nosnippet>951</a><span class="attr">#[cfg(test)]
-<a href=#952 id=952 data-nosnippet>952</a></span><span class="kw">mod </span>discovery_alias_tests {
-<a href=#953 id=953 data-nosnippet>953</a>    <span class="kw">use </span><span class="kw">super</span>::api_doc;
-<a href=#954 id=954 data-nosnippet>954</a>
-<a href=#955 id=955 data-nosnippet>955</a>    <span class="doccomment">/// I9 — the RFC 8414 alias route (T21.1) is documented alongside the OIDC
-<a href=#956 id=956 data-nosnippet>956</a>    /// discovery path it mirrors, not merely routed.
-<a href=#957 id=957 data-nosnippet>957</a>    </span><span class="attr">#[test]
-<a href=#958 id=958 data-nosnippet>958</a>    </span><span class="kw">fn </span>rfc8414_alias_is_documented() {
-<a href=#959 id=959 data-nosnippet>959</a>        <span class="kw">let </span>doc = api_doc();
-<a href=#960 id=960 data-nosnippet>960</a>        <span class="macro">assert!</span>(
-<a href=#961 id=961 data-nosnippet>961</a>            doc.paths
-<a href=#962 id=962 data-nosnippet>962</a>                .paths
-<a href=#963 id=963 data-nosnippet>963</a>                .contains_key(<span class="string">"/.well-known/oauth-authorization-server"</span>),
-<a href=#964 id=964 data-nosnippet>964</a>            <span class="string">"the RFC 8414 alias must be a documented OpenAPI path"
-<a href=#965 id=965 data-nosnippet>965</a>        </span>);
-<a href=#966 id=966 data-nosnippet>966</a>    }
-<a href=#967 id=967 data-nosnippet>967</a>
-<a href=#968 id=968 data-nosnippet>968</a>    <span class="doccomment">/// The alias's documented operation is exactly the OIDC discovery one —
-<a href=#969 id=969 data-nosnippet>969</a>    /// cloned, not independently authored, so the two can never drift (I1).
-<a href=#970 id=970 data-nosnippet>970</a>    ///
-<a href=#971 id=971 data-nosnippet>971</a>    /// Compared via their JSON serialization rather than `assert_eq!` on the
-<a href=#972 id=972 data-nosnippet>972</a>    /// `PathItem`s directly: `utoipa::openapi::PathItem` implements
-<a href=#973 id=973 data-nosnippet>973</a>    /// `PartialEq` but not `Debug` in this build (`Debug` is behind utoipa's
-<a href=#974 id=974 data-nosnippet>974</a>    /// own `debug` feature, which this workspace does not enable), so a
-<a href=#975 id=975 data-nosnippet>975</a>    /// direct `assert_eq!` fails to compile.
-<a href=#976 id=976 data-nosnippet>976</a>    </span><span class="attr">#[test]
-<a href=#977 id=977 data-nosnippet>977</a>    </span><span class="kw">fn </span>rfc8414_alias_matches_oidc_discovery_operation() {
-<a href=#978 id=978 data-nosnippet>978</a>        <span class="kw">let </span>doc = api_doc();
-<a href=#979 id=979 data-nosnippet>979</a>        <span class="kw">let </span>oidc = doc
-<a href=#980 id=980 data-nosnippet>980</a>            .paths
-<a href=#981 id=981 data-nosnippet>981</a>            .paths
-<a href=#982 id=982 data-nosnippet>982</a>            .get(<span class="string">"/.well-known/openid-configuration"</span>)
-<a href=#983 id=983 data-nosnippet>983</a>            .expect(<span class="string">"OIDC discovery must be documented"</span>);
-<a href=#984 id=984 data-nosnippet>984</a>        <span class="kw">let </span>alias = doc
-<a href=#985 id=985 data-nosnippet>985</a>            .paths
-<a href=#986 id=986 data-nosnippet>986</a>            .paths
-<a href=#987 id=987 data-nosnippet>987</a>            .get(<span class="string">"/.well-known/oauth-authorization-server"</span>)
-<a href=#988 id=988 data-nosnippet>988</a>            .expect(<span class="string">"the RFC 8414 alias must be documented"</span>);
-<a href=#989 id=989 data-nosnippet>989</a>        <span class="macro">assert_eq!</span>(
-<a href=#990 id=990 data-nosnippet>990</a>            serde_json::to_value(oidc).unwrap(),
-<a href=#991 id=991 data-nosnippet>991</a>            serde_json::to_value(alias).unwrap()
-<a href=#992 id=992 data-nosnippet>992</a>        );
-<a href=#993 id=993 data-nosnippet>993</a>    }
-<a href=#994 id=994 data-nosnippet>994</a>}
+<a href=#806 id=806 data-nosnippet>806</a><span class="doccomment">/// Adds the two Bearer JWT security schemes to the OpenAPI spec.
+<a href=#807 id=807 data-nosnippet>807</a>///
+<a href=#808 id=808 data-nosnippet>808</a>/// Both are the same HTTP mechanism; they differ in who may hold the token,
+<a href=#809 id=809 data-nosnippet>809</a>/// which is the `aud` claim. An operation that admits a service account lists
+<a href=#810 id=810 data-nosnippet>810</a>/// both as alternatives, so the document says which routes a machine may call
+<a href=#811 id=811 data-nosnippet>811</a>/// rather than leaving it to the prose (S-9, D-5). `bearer` alone means a
+<a href=#812 id=812 data-nosnippet>812</a>/// person.
+<a href=#813 id=813 data-nosnippet>813</a></span><span class="kw">struct </span>SecurityAddon;
+<a href=#814 id=814 data-nosnippet>814</a>
+<a href=#815 id=815 data-nosnippet>815</a><span class="kw">impl </span>utoipa::Modify <span class="kw">for </span>SecurityAddon {
+<a href=#816 id=816 data-nosnippet>816</a>    <span class="kw">fn </span>modify(<span class="kw-2">&amp;</span><span class="self">self</span>, openapi: <span class="kw-2">&amp;mut </span>utoipa::openapi::OpenApi) {
+<a href=#817 id=817 data-nosnippet>817</a>        <span class="kw">use </span>utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+<a href=#818 id=818 data-nosnippet>818</a>
+<a href=#819 id=819 data-nosnippet>819</a>        <span class="kw">let </span>components = openapi.components.get_or_insert_with(Default::default);
+<a href=#820 id=820 data-nosnippet>820</a>        components.add_security_scheme(
+<a href=#821 id=821 data-nosnippet>821</a>            <span class="string">"bearer"</span>,
+<a href=#822 id=822 data-nosnippet>822</a>            SecurityScheme::Http(
+<a href=#823 id=823 data-nosnippet>823</a>                HttpBuilder::new()
+<a href=#824 id=824 data-nosnippet>824</a>                    .scheme(HttpAuthScheme::Bearer)
+<a href=#825 id=825 data-nosnippet>825</a>                    .bearer_format(<span class="string">"JWT"</span>)
+<a href=#826 id=826 data-nosnippet>826</a>                    .description(<span class="prelude-val">Some</span>(
+<a href=#827 id=827 data-nosnippet>827</a>                        <span class="string">"An AXIAM access token issued to a user (`aud` = `axiam:user`), \
+<a href=#828 id=828 data-nosnippet>828</a>                         from the `axiam_access` cookie or the `Authorization` header."</span>,
+<a href=#829 id=829 data-nosnippet>829</a>                    ))
+<a href=#830 id=830 data-nosnippet>830</a>                    .build(),
+<a href=#831 id=831 data-nosnippet>831</a>            ),
+<a href=#832 id=832 data-nosnippet>832</a>        );
+<a href=#833 id=833 data-nosnippet>833</a>        components.add_security_scheme(
+<a href=#834 id=834 data-nosnippet>834</a>            SERVICE_ACCOUNT_SECURITY_SCHEME,
+<a href=#835 id=835 data-nosnippet>835</a>            SecurityScheme::Http(
+<a href=#836 id=836 data-nosnippet>836</a>                HttpBuilder::new()
+<a href=#837 id=837 data-nosnippet>837</a>                    .scheme(HttpAuthScheme::Bearer)
+<a href=#838 id=838 data-nosnippet>838</a>                    .bearer_format(<span class="string">"JWT"</span>)
+<a href=#839 id=839 data-nosnippet>839</a>                    .description(<span class="prelude-val">Some</span>(
+<a href=#840 id=840 data-nosnippet>840</a>                        <span class="string">"An AXIAM access token issued to a service account \
+<a href=#841 id=841 data-nosnippet>841</a>                         (`aud` = `axiam:m2m`, `sub_kind` = `service_account`), from \
+<a href=#842 id=842 data-nosnippet>842</a>                         client credentials or the mTLS device login. Accepted only \
+<a href=#843 id=843 data-nosnippet>843</a>                         by the operations that list this scheme — the management \
+<a href=#844 id=844 data-nosnippet>844</a>                         families resources, scopes, permissions, roles, groups, \
+<a href=#845 id=845 data-nosnippet>845</a>                         service accounts, certificates and webhooks, and the \
+<a href=#846 id=846 data-nosnippet>846</a>                         authorization checks — and authorized there by the roles \
+<a href=#847 id=847 data-nosnippet>847</a>                         assigned to the account, exactly as a user is. \
+<a href=#848 id=848 data-nosnippet>848</a>                         `X-Axiam-Tenant` is honoured only for an account living in \
+<a href=#849 id=849 data-nosnippet>849</a>                         the organization scope, as for a user; a service account \
+<a href=#850 id=850 data-nosnippet>850</a>                         never issues under the organization CA. A certificate-bound token \
+<a href=#851 id=851 data-nosnippet>851</a>                         (`cnf.x5t#S256`) must be presented over mTLS with that \
+<a href=#852 id=852 data-nosnippet>852</a>                         certificate."</span>,
+<a href=#853 id=853 data-nosnippet>853</a>                    ))
+<a href=#854 id=854 data-nosnippet>854</a>                    .build(),
+<a href=#855 id=855 data-nosnippet>855</a>            ),
+<a href=#856 id=856 data-nosnippet>856</a>        );
+<a href=#857 id=857 data-nosnippet>857</a>    }
+<a href=#858 id=858 data-nosnippet>858</a>}
+<a href=#859 id=859 data-nosnippet>859</a>
+<a href=#860 id=860 data-nosnippet>860</a><span class="doccomment">/// The name of the security scheme an operation lists when it admits a
+<a href=#861 id=861 data-nosnippet>861</a>/// service-account token.
+<a href=#862 id=862 data-nosnippet>862</a></span><span class="kw">pub const </span>SERVICE_ACCOUNT_SECURITY_SCHEME: <span class="kw-2">&amp;</span>str = <span class="string">"service_account"</span>;
+<a href=#863 id=863 data-nosnippet>863</a>
+<a href=#864 id=864 data-nosnippet>864</a><span class="attr">#[cfg(test)]
+<a href=#865 id=865 data-nosnippet>865</a></span><span class="kw">mod </span>spec_digest_tests {
+<a href=#866 id=866 data-nosnippet>866</a>    <span class="kw">use super</span>::{SPEC_DIGEST_KEY, api_doc};
+<a href=#867 id=867 data-nosnippet>867</a>
+<a href=#868 id=868 data-nosnippet>868</a>    <span class="doccomment">/// The digest is present, and says which algorithm produced it.
+<a href=#869 id=869 data-nosnippet>869</a>    </span><span class="attr">#[test]
+<a href=#870 id=870 data-nosnippet>870</a>    </span><span class="kw">fn </span>the_document_carries_a_digest() {
+<a href=#871 id=871 data-nosnippet>871</a>        <span class="kw">let </span>doc = api_doc();
+<a href=#872 id=872 data-nosnippet>872</a>        <span class="kw">let </span>extensions = doc
+<a href=#873 id=873 data-nosnippet>873</a>            .info
+<a href=#874 id=874 data-nosnippet>874</a>            .extensions
+<a href=#875 id=875 data-nosnippet>875</a>            .as_ref()
+<a href=#876 id=876 data-nosnippet>876</a>            .expect(<span class="string">"info carries no extensions"</span>);
+<a href=#877 id=877 data-nosnippet>877</a>        <span class="kw">let </span>value = extensions
+<a href=#878 id=878 data-nosnippet>878</a>            .get(SPEC_DIGEST_KEY)
+<a href=#879 id=879 data-nosnippet>879</a>            .and_then(|v| v.as_str())
+<a href=#880 id=880 data-nosnippet>880</a>            .expect(<span class="string">"info carries no spec digest"</span>);
+<a href=#881 id=881 data-nosnippet>881</a>
+<a href=#882 id=882 data-nosnippet>882</a>        <span class="comment">// `sha256:` + 64 hex characters. Naming the algorithm inline is what lets this
+<a href=#883 id=883 data-nosnippet>883</a>        // change one day without every consumer having to guess from the length.
+<a href=#884 id=884 data-nosnippet>884</a>        </span><span class="macro">assert!</span>(
+<a href=#885 id=885 data-nosnippet>885</a>            value.starts_with(<span class="string">"sha256:"</span>),
+<a href=#886 id=886 data-nosnippet>886</a>            <span class="string">"unexpected digest form: {value}"
+<a href=#887 id=887 data-nosnippet>887</a>        </span>);
+<a href=#888 id=888 data-nosnippet>888</a>        <span class="macro">assert_eq!</span>(value.len(), <span class="string">"sha256:"</span>.len() + <span class="number">64</span>);
+<a href=#889 id=889 data-nosnippet>889</a>        <span class="macro">assert!</span>(
+<a href=#890 id=890 data-nosnippet>890</a>            value[<span class="string">"sha256:"</span>.len()..]
+<a href=#891 id=891 data-nosnippet>891</a>                .chars()
+<a href=#892 id=892 data-nosnippet>892</a>                .all(|c| c.is_ascii_hexdigit())
+<a href=#893 id=893 data-nosnippet>893</a>        );
+<a href=#894 id=894 data-nosnippet>894</a>    }
+<a href=#895 id=895 data-nosnippet>895</a>
+<a href=#896 id=896 data-nosnippet>896</a>    <span class="doccomment">/// Two exports of the same build agree.
+<a href=#897 id=897 data-nosnippet>897</a>    ///
+<a href=#898 id=898 data-nosnippet>898</a>    /// Not a tautology: the digest is computed over a serialization of the whole document,
+<a href=#899 id=899 data-nosnippet>899</a>    /// and if any part of that serialization were order-unstable — a `HashMap` somewhere in
+<a href=#900 id=900 data-nosnippet>900</a>    /// the tree — this would flake. It is the same property the SDK OpenAPI drift gate
+<a href=#901 id=901 data-nosnippet>901</a>    /// depends on, asserted here where the failure names its cause.
+<a href=#902 id=902 data-nosnippet>902</a>    </span><span class="attr">#[test]
+<a href=#903 id=903 data-nosnippet>903</a>    </span><span class="kw">fn </span>the_digest_is_stable_across_exports() {
+<a href=#904 id=904 data-nosnippet>904</a>        <span class="kw">let </span>first = api_doc();
+<a href=#905 id=905 data-nosnippet>905</a>        <span class="kw">let </span>second = api_doc();
+<a href=#906 id=906 data-nosnippet>906</a>        <span class="macro">assert_eq!</span>(
+<a href=#907 id=907 data-nosnippet>907</a>            first.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
+<a href=#908 id=908 data-nosnippet>908</a>            second
+<a href=#909 id=909 data-nosnippet>909</a>                .info
+<a href=#910 id=910 data-nosnippet>910</a>                .extensions
+<a href=#911 id=911 data-nosnippet>911</a>                .as_ref()
+<a href=#912 id=912 data-nosnippet>912</a>                .unwrap()
+<a href=#913 id=913 data-nosnippet>913</a>                .get(SPEC_DIGEST_KEY),
+<a href=#914 id=914 data-nosnippet>914</a>        );
+<a href=#915 id=915 data-nosnippet>915</a>        <span class="macro">assert_eq!</span>(
+<a href=#916 id=916 data-nosnippet>916</a>            serde_json::to_string(<span class="kw-2">&amp;</span>first).unwrap(),
+<a href=#917 id=917 data-nosnippet>917</a>            serde_json::to_string(<span class="kw-2">&amp;</span>second).unwrap(),
+<a href=#918 id=918 data-nosnippet>918</a>        );
+<a href=#919 id=919 data-nosnippet>919</a>    }
+<a href=#920 id=920 data-nosnippet>920</a>
+<a href=#921 id=921 data-nosnippet>921</a>    <span class="doccomment">/// A document that differs by one path gets a different digest.
+<a href=#922 id=922 data-nosnippet>922</a>    ///
+<a href=#923 id=923 data-nosnippet>923</a>    /// This is the whole point of the field, and the reason `info.version` could not serve:
+<a href=#924 id=924 data-nosnippet>924</a>    /// the version is the release version and moves when a release is cut, so two builds
+<a href=#925 id=925 data-nosnippet>925</a>    /// describing genuinely different APIs can and do report the same string. `main` and a
+<a href=#926 id=926 data-nosnippet>926</a>    /// release branch both said `1.0.0-alpha44` while differing by two paths.
+<a href=#927 id=927 data-nosnippet>927</a>    </span><span class="attr">#[test]
+<a href=#928 id=928 data-nosnippet>928</a>    </span><span class="kw">fn </span>removing_a_path_changes_the_digest() {
+<a href=#929 id=929 data-nosnippet>929</a>        <span class="kw">let </span>full = api_doc();
+<a href=#930 id=930 data-nosnippet>930</a>        <span class="kw">let </span>before = full
+<a href=#931 id=931 data-nosnippet>931</a>            .info
+<a href=#932 id=932 data-nosnippet>932</a>            .extensions
+<a href=#933 id=933 data-nosnippet>933</a>            .as_ref()
+<a href=#934 id=934 data-nosnippet>934</a>            .unwrap()
+<a href=#935 id=935 data-nosnippet>935</a>            .get(SPEC_DIGEST_KEY)
+<a href=#936 id=936 data-nosnippet>936</a>            .cloned()
+<a href=#937 id=937 data-nosnippet>937</a>            .unwrap();
+<a href=#938 id=938 data-nosnippet>938</a>
+<a href=#939 id=939 data-nosnippet>939</a>        <span class="kw">let </span><span class="kw-2">mut </span>trimmed = api_doc();
+<a href=#940 id=940 data-nosnippet>940</a>        <span class="kw">let </span>victim = trimmed
+<a href=#941 id=941 data-nosnippet>941</a>            .paths
+<a href=#942 id=942 data-nosnippet>942</a>            .paths
+<a href=#943 id=943 data-nosnippet>943</a>            .keys()
+<a href=#944 id=944 data-nosnippet>944</a>            .next()
+<a href=#945 id=945 data-nosnippet>945</a>            .expect(<span class="string">"the spec has no paths"</span>)
+<a href=#946 id=946 data-nosnippet>946</a>            .clone();
+<a href=#947 id=947 data-nosnippet>947</a>        <span class="comment">// `remove`, not `shift_remove`: `preserve_path_order` is off in this build, so
+<a href=#948 id=948 data-nosnippet>948</a>        // `PathsMap` is a `BTreeMap`. That is also why the digest is stable — a BTreeMap
+<a href=#949 id=949 data-nosnippet>949</a>        // serializes in key order rather than in insertion order.
+<a href=#950 id=950 data-nosnippet>950</a>        </span>trimmed.paths.paths.remove(<span class="kw-2">&amp;</span>victim);
+<a href=#951 id=951 data-nosnippet>951</a>        <span class="kw">let </span>after = <span class="kw">super</span>::stamp_spec_digest(trimmed)
+<a href=#952 id=952 data-nosnippet>952</a>            .info
+<a href=#953 id=953 data-nosnippet>953</a>            .extensions
+<a href=#954 id=954 data-nosnippet>954</a>            .as_ref()
+<a href=#955 id=955 data-nosnippet>955</a>            .unwrap()
+<a href=#956 id=956 data-nosnippet>956</a>            .get(SPEC_DIGEST_KEY)
+<a href=#957 id=957 data-nosnippet>957</a>            .cloned()
+<a href=#958 id=958 data-nosnippet>958</a>            .unwrap();
+<a href=#959 id=959 data-nosnippet>959</a>
+<a href=#960 id=960 data-nosnippet>960</a>        <span class="macro">assert_ne!</span>(
+<a href=#961 id=961 data-nosnippet>961</a>            before, after,
+<a href=#962 id=962 data-nosnippet>962</a>            <span class="string">"dropping {victim} left the digest unchanged, so it does not distinguish content"
+<a href=#963 id=963 data-nosnippet>963</a>        </span>);
+<a href=#964 id=964 data-nosnippet>964</a>    }
+<a href=#965 id=965 data-nosnippet>965</a>
+<a href=#966 id=966 data-nosnippet>966</a>    <span class="doccomment">/// Re-stamping an already-stamped document is a no-op.
+<a href=#967 id=967 data-nosnippet>967</a>    ///
+<a href=#968 id=968 data-nosnippet>968</a>    /// The digest is computed with the field cleared, so it is a function of the content
+<a href=#969 id=969 data-nosnippet>969</a>    /// rather than of itself. Were it not, stamping twice would produce a different value
+<a href=#970 id=970 data-nosnippet>970</a>    /// the second time and the field would be unusable for comparison.
+<a href=#971 id=971 data-nosnippet>971</a>    </span><span class="attr">#[test]
+<a href=#972 id=972 data-nosnippet>972</a>    </span><span class="kw">fn </span>stamping_is_idempotent() {
+<a href=#973 id=973 data-nosnippet>973</a>        <span class="kw">let </span>once = api_doc();
+<a href=#974 id=974 data-nosnippet>974</a>        <span class="kw">let </span>expected = once
+<a href=#975 id=975 data-nosnippet>975</a>            .info
+<a href=#976 id=976 data-nosnippet>976</a>            .extensions
+<a href=#977 id=977 data-nosnippet>977</a>            .as_ref()
+<a href=#978 id=978 data-nosnippet>978</a>            .unwrap()
+<a href=#979 id=979 data-nosnippet>979</a>            .get(SPEC_DIGEST_KEY)
+<a href=#980 id=980 data-nosnippet>980</a>            .cloned()
+<a href=#981 id=981 data-nosnippet>981</a>            .unwrap();
+<a href=#982 id=982 data-nosnippet>982</a>
+<a href=#983 id=983 data-nosnippet>983</a>        <span class="kw">let </span>twice = <span class="kw">super</span>::stamp_spec_digest(once);
+<a href=#984 id=984 data-nosnippet>984</a>        <span class="macro">assert_eq!</span>(
+<a href=#985 id=985 data-nosnippet>985</a>            twice.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
+<a href=#986 id=986 data-nosnippet>986</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>expected)
+<a href=#987 id=987 data-nosnippet>987</a>        );
+<a href=#988 id=988 data-nosnippet>988</a>    }
+<a href=#989 id=989 data-nosnippet>989</a>}
+<a href=#990 id=990 data-nosnippet>990</a>
+<a href=#991 id=991 data-nosnippet>991</a><span class="attr">#[cfg(test)]
+<a href=#992 id=992 data-nosnippet>992</a></span><span class="kw">mod </span>discovery_alias_tests {
+<a href=#993 id=993 data-nosnippet>993</a>    <span class="kw">use </span><span class="kw">super</span>::api_doc;
+<a href=#994 id=994 data-nosnippet>994</a>
+<a href=#995 id=995 data-nosnippet>995</a>    <span class="doccomment">/// I9 — the RFC 8414 alias route (T21.1) is documented alongside the OIDC
+<a href=#996 id=996 data-nosnippet>996</a>    /// discovery path it mirrors, not merely routed.
+<a href=#997 id=997 data-nosnippet>997</a>    </span><span class="attr">#[test]
+<a href=#998 id=998 data-nosnippet>998</a>    </span><span class="kw">fn </span>rfc8414_alias_is_documented() {
+<a href=#999 id=999 data-nosnippet>999</a>        <span class="kw">let </span>doc = api_doc();
+<a href=#1000 id=1000 data-nosnippet>1000</a>        <span class="macro">assert!</span>(
+<a href=#1001 id=1001 data-nosnippet>1001</a>            doc.paths
+<a href=#1002 id=1002 data-nosnippet>1002</a>                .paths
+<a href=#1003 id=1003 data-nosnippet>1003</a>                .contains_key(<span class="string">"/.well-known/oauth-authorization-server"</span>),
+<a href=#1004 id=1004 data-nosnippet>1004</a>            <span class="string">"the RFC 8414 alias must be a documented OpenAPI path"
+<a href=#1005 id=1005 data-nosnippet>1005</a>        </span>);
+<a href=#1006 id=1006 data-nosnippet>1006</a>    }
+<a href=#1007 id=1007 data-nosnippet>1007</a>
+<a href=#1008 id=1008 data-nosnippet>1008</a>    <span class="doccomment">/// The alias's documented operation is exactly the OIDC discovery one —
+<a href=#1009 id=1009 data-nosnippet>1009</a>    /// cloned, not independently authored, so the two can never drift (I1).
+<a href=#1010 id=1010 data-nosnippet>1010</a>    ///
+<a href=#1011 id=1011 data-nosnippet>1011</a>    /// Compared via their JSON serialization rather than `assert_eq!` on the
+<a href=#1012 id=1012 data-nosnippet>1012</a>    /// `PathItem`s directly: `utoipa::openapi::PathItem` implements
+<a href=#1013 id=1013 data-nosnippet>1013</a>    /// `PartialEq` but not `Debug` in this build (`Debug` is behind utoipa's
+<a href=#1014 id=1014 data-nosnippet>1014</a>    /// own `debug` feature, which this workspace does not enable), so a
+<a href=#1015 id=1015 data-nosnippet>1015</a>    /// direct `assert_eq!` fails to compile.
+<a href=#1016 id=1016 data-nosnippet>1016</a>    </span><span class="attr">#[test]
+<a href=#1017 id=1017 data-nosnippet>1017</a>    </span><span class="kw">fn </span>rfc8414_alias_matches_oidc_discovery_operation() {
+<a href=#1018 id=1018 data-nosnippet>1018</a>        <span class="kw">let </span>doc = api_doc();
+<a href=#1019 id=1019 data-nosnippet>1019</a>        <span class="kw">let </span>oidc = doc
+<a href=#1020 id=1020 data-nosnippet>1020</a>            .paths
+<a href=#1021 id=1021 data-nosnippet>1021</a>            .paths
+<a href=#1022 id=1022 data-nosnippet>1022</a>            .get(<span class="string">"/.well-known/openid-configuration"</span>)
+<a href=#1023 id=1023 data-nosnippet>1023</a>            .expect(<span class="string">"OIDC discovery must be documented"</span>);
+<a href=#1024 id=1024 data-nosnippet>1024</a>        <span class="kw">let </span>alias = doc
+<a href=#1025 id=1025 data-nosnippet>1025</a>            .paths
+<a href=#1026 id=1026 data-nosnippet>1026</a>            .paths
+<a href=#1027 id=1027 data-nosnippet>1027</a>            .get(<span class="string">"/.well-known/oauth-authorization-server"</span>)
+<a href=#1028 id=1028 data-nosnippet>1028</a>            .expect(<span class="string">"the RFC 8414 alias must be documented"</span>);
+<a href=#1029 id=1029 data-nosnippet>1029</a>        <span class="macro">assert_eq!</span>(
+<a href=#1030 id=1030 data-nosnippet>1030</a>            serde_json::to_value(oidc).unwrap(),
+<a href=#1031 id=1031 data-nosnippet>1031</a>            serde_json::to_value(alias).unwrap()
+<a href=#1032 id=1032 data-nosnippet>1032</a>        );
+<a href=#1033 id=1033 data-nosnippet>1033</a>    }
+<a href=#1034 id=1034 data-nosnippet>1034</a>}
 </code></pre></div></section></main></body></html>

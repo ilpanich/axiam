@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["SPEC_DIGEST_KEY"],"fn":["api_doc"],"struct":["ApiDoc"]};
+window.SIDEBAR_ITEMS = {"constant":["SERVICE_ACCOUNT_SECURITY_SCHEME","SPEC_DIGEST_KEY"],"fn":["api_doc"],"struct":["ApiDoc"]};

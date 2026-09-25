@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["TenantReach"],"fn":["tenant_reach_of","tenant_scope_reaches"],"struct":["AssignmentScope","CreateRole","Role","RoleAssignment","RoleSubjectAssignment","UpdateRole"],"type":["TenantScope"]};
+window.SIDEBAR_ITEMS = {"enum":["TenantReach"],"fn":["default_inherit","tenant_reach_of","tenant_scope_reaches"],"struct":["AssignmentScope","CreateRole","Role","RoleAssignment","RoleSubjectAssignment","UpdateRole"],"type":["TenantScope"]};

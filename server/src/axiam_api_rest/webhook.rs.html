@@ -58,7 +58,7 @@
 <a href=#58 id=58 data-nosnippet>58</a>    </span>SecretDecrypt(String),
 <a href=#59 id=59 data-nosnippet>59</a>    <span class="attr">#[error(<span class="string">"secret encrypt failed: {0}"</span>)]
 <a href=#60 id=60 data-nosnippet>60</a>    </span>SecretEncrypt(String),
-<a href=#61 id=61 data-nosnippet>61</a>    <span class="attr">#[error(<span class="string">"webhook encryption key is not configured (AXIAM__PKI__ENCRYPTION_KEY unset)"</span>)]
+<a href=#61 id=61 data-nosnippet>61</a>    <span class="attr">#[error(<span class="string">"webhook encryption key is not configured (AXIAM__AUTH__PKI_ENCRYPTION_KEY unset)"</span>)]
 <a href=#62 id=62 data-nosnippet>62</a>    </span>EncryptionKeyMissing,
 <a href=#63 id=63 data-nosnippet>63</a>    <span class="doccomment">/// The webhook row could not be fetched (not found, or a repository
 <a href=#64 id=64 data-nosnippet>64</a>    /// error) when `deliver_once` tried to resolve it by ID. Distinct from
@@ -123,7 +123,7 @@
 <a href=#123 id=123 data-nosnippet>123</a></span><span class="kw">pub struct </span>WebhookDeliveryService&lt;W&gt; {
 <a href=#124 id=124 data-nosnippet>124</a>    repo: W,
 <a href=#125 id=125 data-nosnippet>125</a>    <span class="doccomment">/// AES-256-GCM key used to encrypt/decrypt webhook secrets stored at
-<a href=#126 id=126 data-nosnippet>126</a>    /// rest. Corresponds to `AXIAM__PKI__ENCRYPTION_KEY` (SEC-031/SEC-059).
+<a href=#126 id=126 data-nosnippet>126</a>    /// rest. Corresponds to `AXIAM__AUTH__PKI_ENCRYPTION_KEY` (SEC-031/SEC-059).
 <a href=#127 id=127 data-nosnippet>127</a>    /// `None` when the env var is unset — the server still boots (this is
 <a href=#128 id=128 data-nosnippet>128</a>    /// an optional subsystem), but registration (`encrypt_secret`) and
 <a href=#129 id=129 data-nosnippet>129</a>    /// delivery (`deliver_once`) both refuse to operate rather than falling

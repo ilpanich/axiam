@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["ca","ca_key_store","cert","config","mds","mtls","pgp","ssrf","vault_pki"]};
+window.SIDEBAR_ITEMS = {"mod":["ca","ca_key_store","cert","config","mds","mtls","pgp","ssrf","subject","vault_pki"]};

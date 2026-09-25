@@ -92,45 +92,55 @@ pub async fn seed_permissions<C: Connection>(
         return Ok(());
     }
 
+    // Two callers can seed the same tenant at once — two racing first-run
+    // bootstrap requests do exactly that — and they UPSERT the same rows. The
+    // engine aborts the loser's write with a retryable write conflict, which
+    // must not surface as a failed seed: both statements below are keyed
+    // UPSERTs of the same values, so replaying one cannot double-apply.
     for (action, description) in registry {
         // Deterministic UUID: same tenant + action always produces same ID.
         let id = Uuid::new_v5(&tenant_id, action.as_bytes());
-        let id_str = id.to_string();
-        let tenant_str = tenant_id.to_string();
 
-        db.query(
-            "UPSERT type::record('permission', $id) SET \
-             tenant_id = $tenant_id, \
-             action = $action, \
-             description = $description, \
-             created_at = IF (SELECT created_at FROM type::record('permission', $id))[0].created_at \
-               THEN (SELECT created_at FROM type::record('permission', $id))[0].created_at \
-               ELSE time::now() END, \
-             updated_at = time::now()",
-        )
-        .bind(("id", id_str))
-        .bind(("tenant_id", tenant_str))
-        .bind(("action", action.to_string()))
-        .bind(("description", description.to_string()))
-        .await
-        .map_err(|e| DbError::Migration(format!("seed_permissions UPSERT failed: {e}")))?
-        .check()
-        .map_err(|e| DbError::Migration(format!("seed_permissions UPSERT check failed: {e}")))?;
+        crate::helpers::retry_on_write_conflict(|| async {
+            db.query(
+                "UPSERT type::record('permission', $id) SET \
+                 tenant_id = $tenant_id, \
+                 action = $action, \
+                 description = $description, \
+                 created_at = IF (SELECT created_at FROM type::record('permission', $id))[0].created_at \
+                   THEN (SELECT created_at FROM type::record('permission', $id))[0].created_at \
+                   ELSE time::now() END, \
+                 updated_at = time::now()",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("action", action.to_string()))
+            .bind(("description", description.to_string()))
+            .await
+            .map_err(|e| DbError::Migration(format!("seed_permissions UPSERT failed: {e}")))?
+            .check()
+            .map_err(|e| DbError::Migration(format!("seed_permissions UPSERT check failed: {e}")))?;
+            Ok::<(), DbError>(())
+        })
+        .await?;
     }
 
     // Persist the new hash so subsequent restarts can skip this tenant.
-    let tenant_str = tenant_id.to_string();
-    db.query(
-        "UPSERT type::record('seeder_state', $id) SET \
-         tenant_id = $tenant_id, hash = $hash, updated_at = time::now()",
-    )
-    .bind(("id", state_id))
-    .bind(("tenant_id", tenant_str))
-    .bind(("hash", registry_hash))
-    .await
-    .map_err(|e| DbError::Migration(format!("seeder_state upsert failed: {e}")))?
-    .check()
-    .map_err(|e| DbError::Migration(format!("seeder_state upsert check: {e}")))?;
+    crate::helpers::retry_on_write_conflict(|| async {
+        db.query(
+            "UPSERT type::record('seeder_state', $id) SET \
+             tenant_id = $tenant_id, hash = $hash, updated_at = time::now()",
+        )
+        .bind(("id", state_id.clone()))
+        .bind(("tenant_id", tenant_id.to_string()))
+        .bind(("hash", registry_hash.clone()))
+        .await
+        .map_err(|e| DbError::Migration(format!("seeder_state upsert failed: {e}")))?
+        .check()
+        .map_err(|e| DbError::Migration(format!("seeder_state upsert check: {e}")))?;
+        Ok::<(), DbError>(())
+    })
+    .await?;
 
     Ok(())
 }

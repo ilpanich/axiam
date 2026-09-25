@@ -274,13 +274,17 @@ jobs:
       #     upstream severity low. Drop this ID the moment actix-http ships on h2 0.4.
       #     Full reachability analysis and the interim operator mitigation: deny.toml.
       #
-      # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml DoS pair) were here until
-      # samael 0.0.22 moved to quick-xml 0.41.0, which is the patched release for
-      # both. Nothing to suppress any more, so they are gone from both lists.
+      #   RUSTSEC-2026-0194 / RUSTSEC-2026-0195 — quick-xml DoS pair. Left both lists once
+      #     samael 0.0.22 moved to the patched quick-xml 0.41.0, and came BACK by a different
+      #     road: surrealdb 3.3.0 -> surrealdb-core -> object_store 0.13.2 (aws/azure) ->
+      #     quick-xml 0.39.4. surrealdb 3.3.0 is the newest release and pins object_store
+      #     ^0.13, so there is nothing to take. The parser only reads S3/Azure bucket
+      #     responses; AXIAM talks to SurrealDB over HTTP and defines no buckets. Full note
+      #     in deny.toml. Drop both when surrealdb moves off quick-xml <0.41.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0194,RUSTSEC-2026-0195
 
       # --- cargo deny (advisories + licenses + bans + sources) ---
       # `-D advisory-not-detected` promotes cargo-deny's "this ignore matched

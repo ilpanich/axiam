@@ -1040,8 +1040,8 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
   - Swift 67, C 66, C++ 68.
 - **What every SDK had.** Each SDK had at least one defect. The ones found in several
   SDKs:
-  - the device credential outlived a later login (nine SDKs);
-  - a device token entered the refresh guard (four);
+  - the device credential outlived a later login or logout (eight SDKs);
+  - a device token entered the refresh guard (six);
   - tenant IDs were compared as strings (six).
 
 ---

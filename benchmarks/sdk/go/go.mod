@@ -28,7 +28,7 @@ require (
 	github.com/valyala/fastjson v1.6.10 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	google.golang.org/grpc v1.83.2 // indirect
+	google.golang.org/grpc v1.84.0 // indirect
 )
 
 // The tagged release (v1.0.0-alpha2) may not be published to the module proxy,

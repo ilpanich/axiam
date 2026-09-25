@@ -2841,6 +2841,65 @@ place where the ports can diverge while each still reads the contract correctly.
 The table "The seven C-12 questions, answered by SDK" (under C-2 … C-11) answers them
 from merged code, and lists six open defects to confirm and route first.
 
+> **EXECUTED — 2026-09-25, PR J, contract 1.52.** C-12 read the eleven 1.51 ports from
+> each SDK's merged `main`, and the evidence is
+> `claude_dev/sdk-dogfooding-conformance-review.md`. The review worked in three passes:
+>
+> - it answered the seven questions per SDK;
+> - it probed each rule's edges in code;
+> - it checked every README and CHANGELOG sentence about 1.51 against the code.
+>
+> **Contract 1.52** writes one answer to each question, as six rules, N1 … N6:
+>
+> - §10.1, every entry point is a guard;
+> - §17.1, the memo key;
+> - §27.13, the `SubjectAltName` shape;
+> - new §6.1 rule 11, the device credential's lifecycle;
+> - §5.2 rule 1, the acting-tenant semantics;
+> - §27.6.1, bindings.
+>
+> None changes the wire. **§27.14** records 37 divergences, none open. The six defects
+> found first were fixed before the rules were written, in:
+>
+> - [axiam-typescript-sdk#118](https://github.com/ilpanich/axiam-typescript-sdk/pull/118)
+> - [axiam-python-sdk#89](https://github.com/ilpanich/axiam-python-sdk/pull/89)
+> - [axiam-csharp-sdk#96](https://github.com/ilpanich/axiam-csharp-sdk/pull/96)
+> - [axiam-php-sdk#74](https://github.com/ilpanich/axiam-php-sdk/pull/74)
+> - [axiam-cplusplus-sdk#67](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/67)
+>
+> Every SDK had at least one defect against the new rules. There is one fix PR per SDK,
+> each on `fix/c12-conformance` and held until J merges:
+>
+> | SDK | PR | Rules fixed |
+> |---|---|---|
+> | Rust | [#116](https://github.com/ilpanich/axiam-rust-sdk/pull/116) | N4.3, §5 rule 2, N5.5, N4.5 (gRPC) |
+> | TypeScript | [#119](https://github.com/ilpanich/axiam-typescript-sdk/pull/119) | N4.5, N4.3, N6.5, N3, N4.2, N4.4, N5.6, N5.5, N6.2 |
+> | Python | [#90](https://github.com/ilpanich/axiam-python-sdk/pull/90) | N4.7, N4.4, N5.3, N5.1, N4.5, N4.2, N5.6 |
+> | Java | [#103](https://github.com/ilpanich/axiam-java-sdk/pull/103) | N4.1, N4.3, N4.5 (gRPC), N4.2, N4.4, N6.2 |
+> | Kotlin | [#69](https://github.com/ilpanich/axiam-kotlin-sdk/pull/69) | N4.4 |
+> | C# | [#97](https://github.com/ilpanich/axiam-csharp-sdk/pull/97) | N4.6, N5.1, N4.4, N6.2, N6.3, N4.2, N4.5 (gRPC) |
+> | PHP | [#75](https://github.com/ilpanich/axiam-php-sdk/pull/75) | N4.5, N6.4, N6.5, N6.6, N5.6, N4.4 |
+> | Go | [#88](https://github.com/ilpanich/axiam-go-sdk/pull/88) | N4.4, N5.5, N3 |
+> | Swift | [#67](https://github.com/ilpanich/axiam-swift-sdk/pull/67) | N5.6, N5.4, N4.4 |
+> | C | [#66](https://github.com/ilpanich/axiam-c-sdk/pull/66) | N5.4, N5.6, N3 |
+> | C++ | [#68](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/68) | N4.4, N4.2, N6.2, N3, N5.6, N4.7 |
+>
+> Every fix PR also corrects its README and CHANGELOG. For each one, the orchestrator:
+>
+> - read the diff;
+> - re-ran the suite at its head;
+> - ran the new tests against `main`'s sources, where they fail.
+>
+> Four send-backs were needed. TypeScript's first fix still compared tenant IDs as
+> strings (N5.6). Python's did too, and the orchestrator fixed that one. Kotlin's SSO
+> call site had no test. C# released the device credential before the request, and
+> fixed its gRPC exemption at construction.
+>
+> **Still to do after J merges:** one commit per fix PR. It re-vendors `CONTRACT.md` from
+> J's merge commit, moves the README conformance line to 1.52 and adds a CHANGELOG line.
+> `scripts/check-sdk-artifact-drift.py --local-root ..` must then report no drift, and
+> the fix PRs merge after that.
+
 ---
 
 ## 7. Decisions

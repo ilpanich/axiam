@@ -655,7 +655,7 @@ commit (§6).
 
 | SDK | PR | Head | Rules fixed | Suite at head (orchestrator) | Red on `main` |
 |---|---|---|---|---|---|
-| Rust | {{ROW:rust}} |
+| Rust | [#116](https://github.com/ilpanich/axiam-rust-sdk/pull/116) | `71d8182` | N4.3, §5 rule 2, N5.5, N4.5 on gRPC | 107 passed in the six changed test files | 15 failed, each a C-12 test |
 | TypeScript | [#119](https://github.com/ilpanich/axiam-typescript-sdk/pull/119) | `5e89f35` | N4.5 REST and gRPC, N4.3, N6.5, N3, N4.2, N4.4, N5.6, N5.5, N6.2 | 1432 passed, 3 skipped (Node 22) | 18 failed |
 | Python | [#90](https://github.com/ilpanich/axiam-python-sdk/pull/90) | `bd9b953` | N4.7, N4.4, N5.3, N5.1, N4.5, N4.2, N5.6 | 1770 passed; coverage 98.58 % (floor 98) | 12 of 14 failed; the other two are I4 twins |
 | Java | [#103](https://github.com/ilpanich/axiam-java-sdk/pull/103) | `783c924` | N4.1, N4.3 and N4.5 on gRPC, N4.2, N4.4, N6.2 | 1244 tests; JaCoCo met (95.05 %) | 6 of 31 in the three changed test classes (4 failures, 2 errors) |
@@ -711,7 +711,11 @@ survive:
   already stopped a refused device login from ending the session, before this review
   read `main`.
 
-{{SELFREPORT:rust}}
+- **Rust's push was refused by the session's permission check,** and the worker
+  stopped without routing around it. The user approved the push, and the orchestrator
+  made it. The worker's report named N4.4 "conforms": `absorb_session_cookies` already
+  releases the bearer on a later login. So Rust is not in R-12, and the review table
+  was corrected from the draft that listed it.
 - **C#'s first push released the device credential before the request,** so a refused
   later login left a device handle with no credential at all. Its gRPC refresh
   exemption was also fixed when the client was constructed. Both were sent back and

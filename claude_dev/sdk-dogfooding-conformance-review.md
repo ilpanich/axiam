@@ -14,9 +14,9 @@ repository's merged `main`. The review covered:
 
 **Outcome:** the contract is amended to **1.52**, a set of clarifications with no wire
 change, written as six rules N1 … N6. Thirty-seven divergences are recorded in
-`CONTRACT.md` §27.14, **none open**. One fix PR per SDK, eleven in all, is held until
-the axiam PR carrying 1.52 merges. Each one then re-vendors `CONTRACT.md` from that
-merge commit.
+`CONTRACT.md` §27.14, **none open**. There is one fix PR per SDK, eleven in all, merged as it
+passed review. After the axiam PR carrying 1.52 merges, one follow-up PR per SDK
+re-vendors `CONTRACT.md` from its merge commit.
 
 Every cell below was determined by reading the shipped source, not a PR description or
 a port's self-report. Where they disagreed, the code won and the disagreement is
@@ -650,8 +650,8 @@ Commits cite "CONTRACT 1.52 N-x (C-12)". For every PR, the orchestrator:
 - ran the new tests against `main`'s sources ("red on `main`"), to show that each one
   catches the defect it names.
 
-Every PR is held until this revision merges, then re-vendors `CONTRACT.md` from its merge
-commit (§6).
+The fix PRs are merged as they pass review. The 1.52 re-vendor follows as one PR per SDK
+(§6).
 
 | SDK | PR | Head | Rules fixed | Suite at head (orchestrator) | Red on `main` |
 |---|---|---|---|---|---|
@@ -725,14 +725,15 @@ survive:
 
 ## 6. Follow-up: the 1.52 re-vendor
 
-The eleven fix PRs are held. Once this revision merges, one commit is pushed to each PR:
+The fix PRs merge as they pass review, independently of this revision. Once it merges,
+one follow-up PR per SDK:
 
-- `CONTRACT.md` is copied byte for byte from the merge commit;
-- the README conformance line moves to 1.52;
-- a CHANGELOG line records the re-vendor.
+- copies `CONTRACT.md` byte for byte from the merge commit;
+- moves the README conformance line to 1.52;
+- adds a CHANGELOG line recording the re-vendor.
 
-`python3 scripts/check-sdk-artifact-drift.py --local-root ..` must then report no drift,
-and the PRs merge after that. `openapi.json`, `management-registry.json` and `proto/`
-are unchanged by 1.52 and are not touched.
+`python3 scripts/check-sdk-artifact-drift.py --local-root ..` must then report no drift.
+`openapi.json`, `management-registry.json` and `proto/` are unchanged by 1.52 and are
+not touched.
 
 Nothing is tagged or published.

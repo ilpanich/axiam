@@ -293,8 +293,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The new §27.14 records all thirty-seven divergences, none open. Each is resolved as
   contract fixed, SDK fixed, or forced by the language. §27.10's manifest table is
   refilled from the merged ports. There is no wire change: `openapi.json`,
-  `management-registry.json` and `proto/` are unchanged. Each SDK's C-12 fix PR
-  re-vendors `CONTRACT.md` from this change's merge commit.
+  `management-registry.json` and `proto/` are unchanged. The C-12 fix PRs merge
+  as they pass review. Each SDK then re-vendors `CONTRACT.md` from this change's merge
+  commit, in one follow-up PR.
 
 - **SDK contract 1.51 — what the Phase 22 server wave means for the eleven SDKs
   (T22.15, C-0; DF-008 … DF-012).** `sdks/CONTRACT.md` now describes what shipped.

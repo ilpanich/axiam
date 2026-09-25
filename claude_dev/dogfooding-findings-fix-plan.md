@@ -2868,7 +2868,7 @@ from merged code, and lists six open defects to confirm and route first.
 > - [axiam-cplusplus-sdk#67](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/67)
 >
 > Every SDK had at least one defect against the new rules. There is one fix PR per SDK,
-> each on `fix/c12-conformance` and held until J merges:
+> each on `fix/c12-conformance`, merged as it passed review:
 >
 > | SDK | PR | Rules fixed |
 > |---|---|---|
@@ -2895,10 +2895,10 @@ from merged code, and lists six open defects to confirm and route first.
 > call site had no test. C# released the device credential before the request, and
 > fixed its gRPC exemption at construction.
 >
-> **Still to do after J merges:** one commit per fix PR. It re-vendors `CONTRACT.md` from
-> J's merge commit, moves the README conformance line to 1.52 and adds a CHANGELOG line.
-> `scripts/check-sdk-artifact-drift.py --local-root ..` must then report no drift, and
-> the fix PRs merge after that.
+> **Still to do after J merges:** the fix PRs merge as they pass review, independently
+> of J, so the re-vendor is one follow-up PR per SDK. It copies `CONTRACT.md` from J's merge commit, moves the
+> README conformance line to 1.52 and adds a CHANGELOG line.
+> `scripts/check-sdk-artifact-drift.py --local-root ..` must then report no drift.
 
 ---
 

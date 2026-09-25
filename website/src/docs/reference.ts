@@ -317,7 +317,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       { type: "h", id: "recent", text: "What moved in contract 1.40–1.52" },
       {
         type: "p",
-        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been thirteen amendments since 1.39. Six of them changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently, and each SDK's C-12 fix PR brings that SDK to it and re-vendors the contract.`,
+        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been thirteen amendments since 1.39. Six of them changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently, and each SDK's C-12 fix PR brings that SDK to it. A follow-up PR per SDK then re-vendors the contract.`,
       },
       {
         type: "table",

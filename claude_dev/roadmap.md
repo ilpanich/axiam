@@ -1033,8 +1033,8 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
   - N6: manifest bindings, in §27.6.1.
 - **The review table.** New §27.14 records 37 divergences, none open. §27.10's
   manifest table is refilled from the merged ports.
-- **One fix PR per SDK, eleven in all.** Each is held until this PR merges, then
-  re-vendors `CONTRACT.md` from its merge commit:
+- **One fix PR per SDK, eleven in all.** They are merged as they pass review. After this
+  PR merges, one follow-up PR per SDK re-vendors `CONTRACT.md` from its merge commit:
   - Rust 116, TypeScript 119, Python 90, Java 103;
   - Kotlin 69, C# 97, PHP 75, Go 88;
   - Swift 67, C 66, C++ 68.

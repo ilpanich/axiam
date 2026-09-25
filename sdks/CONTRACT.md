@@ -3863,9 +3863,10 @@ recorded here until one exists.
   - **§27.14 (new)** — the review table, with no open row.
 
   `openapi.json`, `management-registry.json` and `proto/` are **unchanged**. **Re-sync
-  required for 1.52** in all eleven SDK repositories, `CONTRACT.md` only. Each C-12 fix
-  PR carries it from the **merged** commit that carries this entry (the 1.49 rule),
-  together with its README conformance line at 1.52.
+  required for 1.52** in all eleven SDK repositories, `CONTRACT.md` only. The C-12 fix
+  PRs are merged as they pass review, since none depends on this text. Each SDK then
+  re-vendors `CONTRACT.md` in one follow-up PR, from the **merged** commit that carries
+  this entry (the 1.49 rule), together with its README conformance line at 1.52.
 
 - **2026-09 (dogfooding remediation, contract 1.51)** — **additive; one behaviour an
   existing SDK must tolerate.** The `axiam-domo-demo` integration (findings DF-001 …
@@ -8322,8 +8323,9 @@ eleven C-12 fix PRs are:
 - [`axiam-c-sdk#66`](https://github.com/ilpanich/axiam-c-sdk/pull/66)
 - [`axiam-cplusplus-sdk#68`](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/68)
 
-The table names them by language alone. Each one also re-vendors this revision of
-`CONTRACT.md` and states conformance at 1.52. Six defects the review found first, before
+The table names them by language alone. They are merged as they pass review. Each SDK
+then re-vendors this revision of `CONTRACT.md`, and states conformance at 1.52, in one
+follow-up PR. Six defects the review found first, before
 the rules were written, were fixed earlier, in five PRs:
 
 - [`axiam-typescript-sdk#118`](https://github.com/ilpanich/axiam-typescript-sdk/pull/118)
@@ -8377,8 +8379,8 @@ Two SSO resets were fixed before the 1.51 ports merged:
 | R-36 | Public signature-only **ID-token** helpers whose names do not say "unchecked": Java `verifyForOidc`, Kotlin `verifyForIdToken`, Go `VerifyPayload`, PHP `verifyIdTokenSignature`, C++ `verify_with_reason` | Java, Kotlin, Go, PHP, C++ | §10.1 rule 9, §12 | **contract fixed** | N1 governs functions that turn an **access** token into an identity. These verify §12's ID token, which rule 9 does not govern, so they need neither an "unchecked" name nor a `cnf` check |
 | R-37 | §27.10's manifest table described the commit that vendors 1.50, not the merged 1.51 ports | — | §27.10 | **contract fixed** | §27.10 above, refilled from each `main` |
 
-**No follow-ups.** Every row is closed in this revision or in one of the PRs above. The fix
-PRs merge after this revision. Each one re-vendors this `CONTRACT.md`, and
+**No follow-ups.** Every row is closed in this revision or in one of the PRs above. Once this
+revision merges, each SDK re-vendors this `CONTRACT.md` in one follow-up PR, and
 `scripts/check-sdk-artifact-drift.py` must then report no drift.
 
 ---

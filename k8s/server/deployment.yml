@@ -43,7 +43,7 @@ spec:
           # under one manifest list. There are no moving tags — no `latest`, no
           # `1.0` — so nothing drifts under you. Set both names in an overlay
           # (`images:` in kustomization.yml); infra/rpi5-k3s/overlay does.
-          image: ghcr.io/OWNER/server:1.0.0-beta16
+          image: ghcr.io/OWNER/server:1.0.0-beta17
           ports:
             - name: http
               containerPort: 8090

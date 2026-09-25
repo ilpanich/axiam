@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-amqp"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "axiam-audit",
  "axiam-authz",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-grpc"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "axiam-amqp",
  "axiam-auth",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-api-rest"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "actix-cors",
  "actix-governor",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-audit"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "actix-web",
  "axiam-auth",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-auth"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2 0.6.0",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-authz"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "axiam-core",
  "axiam-db",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-core"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-db"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "aes-gcm 0.11.1",
  "arc-swap",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-email"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "axiam-core",
  "chrono",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-federation"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-oauth2"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "axiam-auth",
  "axiam-core",
@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-opaque"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "argon2 0.6.0",
  "getrandom 0.4.3",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-opaque-ffi"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "axiam-opaque",
  "getrandom 0.4.3",
@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-pki"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "aes-gcm 0.11.1",
  "axiam-core",
@@ -1166,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-scim"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "actix-rt",
  "actix-web",
@@ -1187,7 +1187,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-server"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "actix-http",
  "actix-rt",
@@ -1240,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "axiam-test-support"
-version = "1.0.0-beta16"
+version = "1.0.0-beta17"
 dependencies = [
  "uuid",
 ]

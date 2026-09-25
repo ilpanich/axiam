@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta17] - 2026-09-25
+
 ### Added
+
+- Ask before a role with non-inheritable assignments goes global (T22.11b, S-10b 2/2)
+
+- Non-inheritable role assignments (T22.11b, S-10b 1/2)
+
+- The Server certificate names card (T22.14b, S-7b 2/2)
+
+- Server certificates with a SAN list (T22.14b, S-7b 1/2)
+
+- Server certificates, a name fence and a leaf usage profile (T22.14, DF-001)
+
+- Service accounts on the management routes (T22.13, DF-013)
+
+- Verify client certificates on the gRPC listener (T22.12, DF-005)
+
+- A role assignment can stop at its resource — `inherit: false` (T22.11, DF-021)
+
+- `setup-token --remint`, gated on a deployment nobody has bootstrapped (T22.7, DF-019)
+
+- Bind a device's access token to the certificate that obtained it (T22.3)
 
 - **Non-inheritable role assignments in the admin console (T22.11b, S-10b).**
   Every assign dialog offers *Also applies to the resource's descendants*
@@ -25,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   apply everywhere. A confirmation, not a refusal — the server accepts the
   change, as T-285's residual records; a role with none is saved exactly as
   before.
+
 - **Server certificates in the admin console (T22.14b, S-7b).** The
   certificate dialogs — *Generate Certificate* and *Sign a CSR* — offer the
   `Server` type with a list of subject alternative names, one row per DNS name
@@ -42,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Each explains the three entry forms, that an empty list refuses every
   `Server` request, and that a tenant may only narrow; a widening is the
   server's `400`, shown as it comes.
+
 - **Server certificates, and the names they may carry (T22.14, DF-001).**
   AXIAM could not issue a certificate a TLS *server* can present: leaves
   carried no subjectAltName, and neither request body had a field to ask for
@@ -173,6 +197,220 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-pin the race probe to surrealdb 3.3.0 and record the run
+
+- Name the collect target in the PUT-membership assertion
+
+- 2026-09-25 sweep — 165 modules, 0 FAILED, with REVIEW evidence
+
+- Follow the SDK to grpc 1.84.0
+
+- Admit the surrealdb 3.3 sub-crates and suppress the quick-xml pair it brings back
+
+- Cargo update
+
+- Sweep every stamped page, move DOCS_VERIFIED_RELEASE to beta17 (wave 4)
+
+- Announce 1.0.0-beta16 and beta17, and extend phase 20 (wave 3)
+
+- Bring the Docs pages up to 1.0.0-beta17 (wave 2)
+
+- The Security section at 1.0.0-beta17 — model 2.17.0
+
+- The nine Phase 21 entries enter the Threat Dragon file — model 2.17.0
+
+- Phase 22 recorded complete; briefs for the threat-model reconciliation and the beta17 website pass
+
+- C-12 — the fix PRs merge as they pass review; the 1.52 re-vendor becomes one follow-up PR per SDK
+
+- C-12 — Rust fix PR #116, the plan's C-12 EXECUTED block, evidence file complete
+
+- C-12 — C# fix PR #97 in §27.14, T22.18 and the evidence file
+
+- C-12 — §27.14 rows updated from the Rust and C# fix reports; roadmap counts corrected
+
+- C-12 evidence file — sdk-dogfooding-conformance-review.md
+
+- C-12 — Kotlin fix PR #69 in §27.14 and T22.18
+
+- C-12 — CHANGELOG 1.52 entry and roadmap T22.18 (PR numbers pending)
+
+- §27.14 — C++ fix PR #68; C++ joins R-15 and R-27
+
+- §27.14 R-13 and R-27 corrected against the fix PRs
+
+- Contract 1.52 — §27.14 review table, log entry, footer, website
+
+- Contract 1.52 text — the C-12 clarifications
+
+- The six C-12 open defects, fixed in five SDK PRs
+
+- Remove the fan-out 1.51 resume ledger
+
+- C-2 … C-11 executed — ten SDK ports at contract 1.51; C-12 questions answered by SDK
+
+- TS #117 merged (f21e561)
+
+- Ledger, §8.1: C++ #66 merged (473ccbb), Go #87 merged; artifact drift 0
+
+- Ledger, §8.1: Swift #66 merged (db24d26)
+
+- C++ #66 green
+
+- Swift #66 green
+
+- Interim artifact drift count (6, all in the two open ports)
+
+- Ledger, §8.1: C-11 C++ opened as #66
+
+- TS #117 green
+
+- C-9 PR open (axiam-swift-sdk#66); §8.1 row; ledger
+
+- Go-sdk#87 green
+
+- SSO gate follow-ups open (go-sdk#87, typescript-sdk#117)
+
+- C-11 sent back
+
+- C-10 merged
+
+- C-9 sent back for four missing tests
+
+- Ledger — resume check-ins re-armed
+
+- C-10 CI green
+
+- C-10 valgrind race fixed (7f3d5db)
+
+- C-10 PR open (axiam-c-sdk#65); §8.1 row; ledger
+
+- C-10 sent back — SSO completions leave a stale gate
+
+- C-6 merged
+
+- C-8 merged
+
+- C-8 and C-6 CI green
+
+- C-9 Swift running
+
+- C-6 PR open (axiam-php-sdk#73); §8.1 row; ledger
+
+- C-8 PR open (axiam-kotlin-sdk#68); §8.1 row; ledger
+
+- Ledger — usage-limit cut-off state; resume
+
+- C-4 merged
+
+- C-6 sent back — §27.6.1 additions are not a tier decline
+
+- C-4 CI green
+
+- C-4 PR open (axiam-java-sdk#102); C-10 running
+
+- C-5 merged
+
+- Ledger — PR check-in re-armed
+
+- C-5 CI green
+
+- C-5 PR open (axiam-csharp-sdk#95); §8.1 row; ledger
+
+- C-4 and C-5 sent back; C-6 running
+
+- Ledger — SSO gate defect in merged Go/TS ports, follow-up blocked on user
+
+- C-2 merged — wave 1 complete
+
+- C-3 merged
+
+- C-7 merged
+
+- C-3 CI green
+
+- C-3 PR open (axiam-python-sdk#88); §8.1 row; ledger
+
+- C-3 second review finding (Q5 docs vs code)
+
+- C-3 sent back for two tests; C-8 running
+
+- C-7 CI green
+
+- C-7 coverage fixed (94.6 %)
+
+- Ledger — coverage floors per SDK; C-7 coverage red
+
+- C-7 PR open (axiam-go-sdk#86); §8.1 row; ledger
+
+- C-2 CI green
+
+- C-2 PR open (axiam-typescript-sdk#116); §8.1 row; ledger
+
+- Ledger — wave 2/3 toolchains installed
+
+- Ledger — wave 1 running
+
+- Resume ledger for C-2 … C-11
+
+- C-1 landed — axiam-rust-sdk#115 merged as 8e9eb90
+
+- C-1 executed — Rust reference at contract 1.51; fan-out record, port prompt, questions for C-12
+
+- Remove the progress ledger
+
+- Ledger — PR #497 open
+
+- 1.51 text names §2's AuthError
+
+- Ledger — steps 5 and 6
+
+- Contract 1.51 — roadmap T22.15, plan EXECUTED block, T-210 amended
+
+- Ledger — steps 3 and 4
+
+- Contract 1.51 — the dogfooding remediation (C-0)
+
+- Ledger — version 1.51, §27.1 recount in scope
+
+- Ledger — step 2 re-validation findings
+
+- Ledger — contract 1.50 is already taken on main
+
+- Ledger — step 1
+
+- Progress ledger for contract 1.50
+
+- Match the allow-list row by its exact label
+
+- §13 — what is open after PR G
+
+- Keep the allow-list out of a panic message (CodeQL rust/cleartext-logging)
+
+- Do not print a service account's creation body on failure
+
+- Serialize the last XFF-discarding test on the counter lock
+
+- Label listing asserts by name, not by a URI carrying an id (CodeQL)
+
+- The bind is required for devices, RSA-4096 generates, and the broker caveats (T22.9, DF-002/007/015/020)
+
+- Bump lapin from 4.11.0 to 4.12.0 in the minor-patch group
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump the minor-patch group in /frontend with 10 updates
+
+- Bump dtolnay/rust-toolchain
+
+- Bump docker/build-push-action from 7.3.0 to 7.4.0
+
+- Bump docker/setup-buildx-action from 4.3.0 to 4.4.1
+
+- Fix plan for the axiam-domo-demo dogfooding findings DF-001…DF-027
+
+- Added ko-fi link to README.md
+
 - **Every leaf certificate now carries a usage profile (T22.14, DF-001).** The
   profile covers both leaf paths and both custodians:
 
@@ -255,114 +493,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pins. Clients that mapped `403` on this endpoint to "bound, but not
   permitted" should map `401` and read the body.
 
-### Documentation
-
-- **SDK contract 1.52: the C-12 cross-SDK conformance review of the eleven 1.51
-  ports (T22.18).** C-12 read each SDK's merged `main` rather than the ports' reports.
-  The seven questions 1.51 left open had been answered in up to four ways each, and
-  several answers were defects. The review evidence is
-  `claude_dev/sdk-dogfooding-conformance-review.md`. `sdks/CONTRACT.md` now writes one
-  answer to each, as six rules:
-  - **N1, §10.1.** Every public entry point that turns an access token into an identity
-    is a rule 9 guard, including an overload with no evidence parameter. A guard that
-    cannot reach transport evidence must say in its README that it refuses bound
-    tokens.
-  - **N2, §17.1.** The acting tenant is the fifth component of the memo key.
-  - **N3, §27.13.** A `SubjectAltName` with neither branch or both is refused
-    client-side, never sent and never dropped.
-  - **N4, §6.1 rule 11 (new).** The device credential's lifecycle:
-    - the device POST carries no prior session;
-    - a refused device login changes nothing;
-    - on success, the credential is used for every request, gRPC included;
-    - it is held until logout or another session replaces it;
-    - it is never refreshed.
-  - **N5, §5.2 rule 1.** The acting-tenant header:
-    - it is required on authenticated routes, and never sent off-origin;
-    - there is one gate per session;
-    - a refusal is `AuthzError`;
-    - the responses that record and reset the gate are named;
-    - tenant IDs compare as UUIDs.
-  - **N6, §27.6.1.** Bindings:
-    - a global role with `inherit: false` must be refused;
-    - a stated `inherit: true` is accepted, and never sent;
-    - a failed rebind is reported as data;
-    - `plan` shows a binding Update;
-    - metadata compares as JSON values;
-    - references resolve by kind.
-
-  The new §27.14 records all thirty-seven divergences, none open. Each is resolved as
-  contract fixed, SDK fixed, or forced by the language. §27.10's manifest table is
-  refilled from the merged ports. There is no wire change: `openapi.json`,
-  `management-registry.json` and `proto/` are unchanged. The C-12 fix PRs merge
-  as they pass review. Each SDK then re-vendors `CONTRACT.md` from this change's merge
-  commit, in one follow-up PR.
-
-- **SDK contract 1.51 — what the Phase 22 server wave means for the eleven SDKs
-  (T22.15, C-0; DF-008 … DF-012).** `sdks/CONTRACT.md` now describes what shipped.
-  - **Device login.** `authenticate_device()` joins §1's locked vocabulary and is
-    specified in §6.1. It returns `{access_token, token_type, expires_in}`, is reachable
-    only with a client certificate, answers `401` for every refusal, and its token is
-    certificate-bound (`cnf.x5t#S256`).
-  - **Token RPCs.** `validate_token` / `introspect_token` wrap the gRPC `TokenService`
-    (new §1.1.1). Until now §10.3 required an SDK to read `cnf` there, while §1 allowed no
-    method that could return it.
-  - **Acting tenant.** The helper moves from MAY to SHOULD, with a fixed shape (§5.2
-    rule 1). It is REST-only, and the value is checked client-side as a UUID, because the
-    server silently ignores a malformed one.
-  - **`/admin/bootstrap`.** §27.0 lists it with its four outcomes, and no helper.
-  - **Manifest.** Resource `metadata`, a resource-scoped role binding with `inherit`, and
-    `service_accounts` (§27.6.1). `apply` returns a new account's `client_secret` exactly
-    as `create` does, even when a later action fails (§27.5 rule 5).
-  - **Per-SDK manifest table.** §27.10 records the two tiers as they are, and three
-    defects found reading the code. The PHP manifest never reconciles role grants or
-    group bindings. The PHP, Swift, C and C++ manifests never send a resource's parent.
-    Swift, C and C++ default a resource type to `"folder"`.
-  - **Model notes.** A new §27.13 records S-4, S-7, S-9 and S-10. Every new request field
-    is optional. The one thing an existing SDK must tolerate is `"Server"` in
-    `certificates.list` responses.
-  - **Counts.** §27's figures are re-rendered from the registry: 162 operations, not 147.
-
-  Numbered 1.51 because 1.50 was already taken by the `initial_access_token` fix.
-  `openapi.json`, `management-registry.json` and `proto/` are unchanged. All eleven SDKs
-  must re-vendor, and `scripts/check-sdk-artifact-drift.py` reports them stale until they
-  do. Threat **T-210** is amended: its claim that the SDKs already sent `X-Axiam-Tenant`
-  was not true of their code.
-
-- **Device certificates require the bind, and the guide said the opposite
-  (T22.9, DF-002).** `docs/pki/README.md` and the website's IoT walkthrough both
-  stated that a `Device`-type certificate needs no bind to a service account and
-  that looking for a bind endpoint was "looking for something that does not
-  exist". `DeviceAuthService::authenticate_device` resolves
-  `get_bound_service_account` and refuses with `401` when it answers `None`
-  (`crates/axiam-pki/src/mtls.rs:154-160`), so the documented path leaves a
-  commissioned fleet failing every login with no obvious cause. Both now state
-  the order — service account, certificate, bind, login — the permission
-  (`certificates:bind`), that both records must be in the caller's tenant, and
-  that the certificate must be `Active` and unexpired at bind time.
-
-- **RSA-4096 CA generation is supported, under every custodian (DF-015).** The
-  PKI guide said rcgen's `ring` backend "cannot generate RSA keys, so `POST
-  .../ca-certificates` with `Rsa4096` fails", and that Vault custody was the
-  only way to generate one. Neither is true: the key is generated by the `rsa`
-  crate and handed to rcgen as PKCS#8 (`crates/axiam-pki/src/crypto.rs:70-102`),
-  and four tests pin generation and self-signature. Replaced with the trade-off
-  that actually applies — RSA-4096 key generation is a probabilistic prime
-  search, seconds on a server and tens of seconds with a wide variance on small
-  ARM hardware, so a client timeout set for Ed25519 will fire.
-
-- **Two things to decide before putting AXIAM in front of RabbitMQ (DF-007,
-  DF-020).** A new section in the broker-TLS chapter of the deployment guide.
-  First: with broker-wide `fail_if_no_peer_cert`, AXIAM's own AMQPS client needs
-  a certificate before AXIAM exists to issue one — there is no ordering that
-  resolves it, so issue that one offline from the same root and let AXIAM issue
-  the devices' certificates afterwards. Second: AXIAM's access tokens are not
-  consumable by `rabbitmq_auth_backend_oauth2`, whose grammar reads permissions
-  out of the `scope` claim — AXIAM's `scope` is an application-defined
-  authorization-server claim, and on the device path it is omitted entirely
-  because that path cannot request scopes. The arrangement that works is
-  certificate login plus an HTTP auth backend.
-
 ### Fixed
+
+- Retry seed_permissions' UPSERTs on a write conflict
+
+- Resolve the backend per request, not once at startup (T22.10, DF-026)
+
+- The legacy-variable assertion prints neither of its fields
+
+- The healthcheck follows the listener, and can verify it (T22.8, DF-016)
+
+- `subject` is a common name, and `CN=` is understood once (T22.6, DF-023)
+
+- Name the variable the env provider actually reads (T22.5, DF-018/DF-022)
+
+- Keep the device rate-limit test's login limit off the cold-entry path
+
+- Send the CSRF cookie as a request header, not a response builder
+
+- An unbound certificate is a 401, not a 403 (T22.4)
+
+- Device_auth_test issues under a tenant signing CA and names a peer
+
+- Rate-limit the device mTLS login (T22.2)
+
+- A signing CA issues only for the tenant it signs for (T22.1)
+
+- Build with the native build system when swift-build fails
 
 - **Saving any setting in the console no longer discards a Server-name
   allow-list (T22.14b).** Between #495 and this change the console knew
@@ -381,6 +538,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Each path now carries the list it loaded. Neither widening could exceed the
   organization's own list, which is the fence T-288 describes.
+
 - **The console resolves its backend per request (T22.10, DF-026).** Its nginx
   named the backend literally in `proxy_pass`, and nginx resolves a literal host
   once, when it loads its configuration. A console started before
@@ -588,6 +746,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across the boundary are **not** revoked on upgrade: revocation is an
   operator's act. `docs/pki/README.md` has the reach table and the upgrade
   paragraph.
+
+### Documentation
+
+- **SDK contract 1.52: the C-12 cross-SDK conformance review of the eleven 1.51
+  ports (T22.18).** C-12 read each SDK's merged `main` rather than the ports' reports.
+  The seven questions 1.51 left open had been answered in up to four ways each, and
+  several answers were defects. The review evidence is
+  `claude_dev/sdk-dogfooding-conformance-review.md`. `sdks/CONTRACT.md` now writes one
+  answer to each, as six rules:
+  - **N1, §10.1.** Every public entry point that turns an access token into an identity
+    is a rule 9 guard, including an overload with no evidence parameter. A guard that
+    cannot reach transport evidence must say in its README that it refuses bound
+    tokens.
+  - **N2, §17.1.** The acting tenant is the fifth component of the memo key.
+  - **N3, §27.13.** A `SubjectAltName` with neither branch or both is refused
+    client-side, never sent and never dropped.
+  - **N4, §6.1 rule 11 (new).** The device credential's lifecycle:
+    - the device POST carries no prior session;
+    - a refused device login changes nothing;
+    - on success, the credential is used for every request, gRPC included;
+    - it is held until logout or another session replaces it;
+    - it is never refreshed.
+  - **N5, §5.2 rule 1.** The acting-tenant header:
+    - it is required on authenticated routes, and never sent off-origin;
+    - there is one gate per session;
+    - a refusal is `AuthzError`;
+    - the responses that record and reset the gate are named;
+    - tenant IDs compare as UUIDs.
+  - **N6, §27.6.1.** Bindings:
+    - a global role with `inherit: false` must be refused;
+    - a stated `inherit: true` is accepted, and never sent;
+    - a failed rebind is reported as data;
+    - `plan` shows a binding Update;
+    - metadata compares as JSON values;
+    - references resolve by kind.
+
+  The new §27.14 records all thirty-seven divergences, none open. Each is resolved as
+  contract fixed, SDK fixed, or forced by the language. §27.10's manifest table is
+  refilled from the merged ports. There is no wire change: `openapi.json`,
+  `management-registry.json` and `proto/` are unchanged. The C-12 fix PRs merge
+  as they pass review. Each SDK then re-vendors `CONTRACT.md` from this change's merge
+  commit, in one follow-up PR.
+
+- **SDK contract 1.51 — what the Phase 22 server wave means for the eleven SDKs
+  (T22.15, C-0; DF-008 … DF-012).** `sdks/CONTRACT.md` now describes what shipped.
+  - **Device login.** `authenticate_device()` joins §1's locked vocabulary and is
+    specified in §6.1. It returns `{access_token, token_type, expires_in}`, is reachable
+    only with a client certificate, answers `401` for every refusal, and its token is
+    certificate-bound (`cnf.x5t#S256`).
+  - **Token RPCs.** `validate_token` / `introspect_token` wrap the gRPC `TokenService`
+    (new §1.1.1). Until now §10.3 required an SDK to read `cnf` there, while §1 allowed no
+    method that could return it.
+  - **Acting tenant.** The helper moves from MAY to SHOULD, with a fixed shape (§5.2
+    rule 1). It is REST-only, and the value is checked client-side as a UUID, because the
+    server silently ignores a malformed one.
+  - **`/admin/bootstrap`.** §27.0 lists it with its four outcomes, and no helper.
+  - **Manifest.** Resource `metadata`, a resource-scoped role binding with `inherit`, and
+    `service_accounts` (§27.6.1). `apply` returns a new account's `client_secret` exactly
+    as `create` does, even when a later action fails (§27.5 rule 5).
+  - **Per-SDK manifest table.** §27.10 records the two tiers as they are, and three
+    defects found reading the code. The PHP manifest never reconciles role grants or
+    group bindings. The PHP, Swift, C and C++ manifests never send a resource's parent.
+    Swift, C and C++ default a resource type to `"folder"`.
+  - **Model notes.** A new §27.13 records S-4, S-7, S-9 and S-10. Every new request field
+    is optional. The one thing an existing SDK must tolerate is `"Server"` in
+    `certificates.list` responses.
+  - **Counts.** §27's figures are re-rendered from the registry: 162 operations, not 147.
+
+  Numbered 1.51 because 1.50 was already taken by the `initial_access_token` fix.
+  `openapi.json`, `management-registry.json` and `proto/` are unchanged. All eleven SDKs
+  must re-vendor, and `scripts/check-sdk-artifact-drift.py` reports them stale until they
+  do. Threat **T-210** is amended: its claim that the SDKs already sent `X-Axiam-Tenant`
+  was not true of their code.
+
+- **Device certificates require the bind, and the guide said the opposite
+  (T22.9, DF-002).** `docs/pki/README.md` and the website's IoT walkthrough both
+  stated that a `Device`-type certificate needs no bind to a service account and
+  that looking for a bind endpoint was "looking for something that does not
+  exist". `DeviceAuthService::authenticate_device` resolves
+  `get_bound_service_account` and refuses with `401` when it answers `None`
+  (`crates/axiam-pki/src/mtls.rs:154-160`), so the documented path leaves a
+  commissioned fleet failing every login with no obvious cause. Both now state
+  the order — service account, certificate, bind, login — the permission
+  (`certificates:bind`), that both records must be in the caller's tenant, and
+  that the certificate must be `Active` and unexpired at bind time.
+
+- **RSA-4096 CA generation is supported, under every custodian (DF-015).** The
+  PKI guide said rcgen's `ring` backend "cannot generate RSA keys, so `POST
+  .../ca-certificates` with `Rsa4096` fails", and that Vault custody was the
+  only way to generate one. Neither is true: the key is generated by the `rsa`
+  crate and handed to rcgen as PKCS#8 (`crates/axiam-pki/src/crypto.rs:70-102`),
+  and four tests pin generation and self-signature. Replaced with the trade-off
+  that actually applies — RSA-4096 key generation is a probabilistic prime
+  search, seconds on a server and tens of seconds with a wide variance on small
+  ARM hardware, so a client timeout set for Ed25519 will fire.
+
+- **Two things to decide before putting AXIAM in front of RabbitMQ (DF-007,
+  DF-020).** A new section in the broker-TLS chapter of the deployment guide.
+  First: with broker-wide `fail_if_no_peer_cert`, AXIAM's own AMQPS client needs
+  a certificate before AXIAM exists to issue one — there is no ordering that
+  resolves it, so issue that one offline from the same root and let AXIAM issue
+  the devices' certificates afterwards. Second: AXIAM's access tokens are not
+  consumable by `rabbitmq_auth_backend_oauth2`, whose grammar reads permissions
+  out of the `scope` claim — AXIAM's `scope` is an application-defined
+  authorization-server claim, and on the device path it is omitted entirely
+  because that path cannot request scopes. The arrangement that works is
+  certificate login plus an HTTP auth backend.
 
 ## [1.0.0-beta16] - 2026-09-19
 

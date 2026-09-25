@@ -16,7 +16,7 @@ description = "Measures whether a SurrealDB storage engine serialises concurrent
 # `scripts/check-probe-pin.sh` is the same check runnable locally.
 
 [dependencies]
-surrealdb = { version = "=3.2.4", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
+surrealdb = { version = "=3.3.0", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 

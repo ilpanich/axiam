@@ -143,7 +143,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "**Every secret is `AXIAM__AUTH__<KEY>`.** Secrets are fetched through the secret provider, which addresses them by a logical name (`pki_encryption_key`); the default `env` provider resolves that name to `AXIAM__AUTH__` plus the name uppercased. The three exceptions are the credentials that shipped under another spelling and keep it: `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL`. Nothing else has a second accepted name — a variable outside this rule is read by nothing, so the value is set, the feature stays off, and the fault looks like the feature. Releases before 1.0.0-beta16 documented four of these keys under a `AXIAM__PKI__`, `AXIAM__EMAIL_`, `AXIAM__GDPR_` or `AXIAM__FEDERATION_` spelling that was never read; the server now logs a `WARN` naming both if it finds one set.",
+        text: "**Every secret is** `AXIAM__AUTH__<KEY>`. Secrets are fetched through the secret provider, which addresses them by a logical name (`pki_encryption_key`); the default `env` provider resolves that name to `AXIAM__AUTH__` plus the name uppercased. The three exceptions are the credentials that shipped under another spelling and keep it: `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL`. Nothing else has a second accepted name — a variable outside this rule is read by nothing, so the value is set, the feature stays off, and the fault looks like the feature. Releases before 1.0.0-beta17 documented four of these keys under a `AXIAM__PKI__`, `AXIAM__EMAIL_`, `AXIAM__GDPR_` or `AXIAM__FEDERATION_` spelling that was never read; the server now logs a `WARN` naming both if it finds one set.",
       },
       {
         type: "table",
@@ -280,7 +280,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__OAUTH2_MTLS_BASE_URL",
-            "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations. Six aliases are published and the front channel is never among them. A value that cannot be parsed **fails discovery with a `500`** — deliberately unlike the default-tenant row below: an unusable alias would send a client's certificate to a host that authenticates nothing, so the document is refused rather than served without it.",
+            "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations. Six aliases are published and the front channel is never among them. A value that cannot be parsed **fails discovery with a** `500` — deliberately unlike the default-tenant row below: an unusable alias would send a client's certificate to a host that authenticates nothing, so the document is refused rather than served without it.",
             "https://mtls.iam.acme.dev",
           ],
           [
@@ -305,7 +305,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER",
-            "Compatibility switch — treat a token with no audience claim as a user token. Leave off unless you need it.",
+            "Compatibility switch — treat a token with no audience claim as a user token. Default `true` (this row used to read as if it were off); set `false` to refuse such a token with a `401`.",
             "false",
           ],
         ],
@@ -382,7 +382,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ["AXIAM__RATE_LIMIT__MFA_PER_MIN", "Max MFA enroll/confirm/verify per minute.", "5"],
           [
             "AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN",
-            "Max WebAuthn ceremony requests per minute, applied to each of the six `/auth/webauthn/*` routes independently.",
+            "Max WebAuthn ceremony requests per minute, applied to each of the eight `/auth/webauthn/*` routes independently.",
             "10",
           ],
           [
@@ -590,7 +590,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "Two rules of thumb the data supports: if your traffic is authorization-check-heavy, spend hardware on the database first (those paths gained ~90% from a second pair of DB cores), then try the decision cache and measure its logged hit rate — it is transformative on gRPC checks and marginal on REST ones; if it's token-heavy, the limits — not the hardware — are what you'll hit first, so raise TOKEN_PER_MIN from your real per-client peak and — if and only if you have edge authentication per the caveat above — switch the key mode. The genuinely internet-exposed endpoints (login, register, password-reset, MFA) stay strict per-IP in every configuration, including under the gateway and mesh profiles.",
+        text: "Two rules of thumb the data supports: if your traffic is authorization-check-heavy, spend hardware on the database first (those paths gained 75–79% from a second pair of DB cores), then try the decision cache and measure its logged hit rate — it is transformative on gRPC checks and marginal on REST ones; if it's token-heavy, the limits — not the hardware — are what you'll hit first, so raise TOKEN_PER_MIN from your real per-client peak and — if and only if you have edge authentication per the caveat above — switch the key mode. The genuinely internet-exposed endpoints (login, register, password-reset, MFA) stay strict per-IP in every configuration, including under the gateway and mesh profiles.",
       },
       { type: "h", id: "mds", text: "WebAuthn attestation metadata (FIDO MDS3)" },
       {
@@ -690,7 +690,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "**No `AXIAM__PKI__VAULT_*` pair means \"the Vault you already configured\".** A deployment that has set up Vault as its secret provider inherits it for CA custody rather than silently falling back to sealed database rows — the PKI-specific pair is an override, not the switch that turns Vault custody on. The startup line reports `vault_inherited` so an operator who never set `AXIAM__PKI__VAULT_ADDR` can see *why* their CA keys are in Vault, and so the reverse — a deployment expecting Vault and getting the database — is a line in the log rather than a discovery months later. Naming `database` explicitly beside a reachable Vault is legal and is warned about at startup: the two differ by whether one database dump is enough.",
+        text: "**No** `AXIAM__PKI__VAULT_*` **pair means \"the Vault you already configured\".** A deployment that has set up Vault as its secret provider inherits it for CA custody rather than silently falling back to sealed database rows — the PKI-specific pair is an override, not the switch that turns Vault custody on. The startup line reports `vault_inherited` so an operator who never set `AXIAM__PKI__VAULT_ADDR` can see *why* their CA keys are in Vault, and so the reverse — a deployment expecting Vault and getting the database — is a line in the log rather than a discovery months later. Naming `database` explicitly beside a reachable Vault is legal and is warned about at startup: the two differ by whether one database dump is enough.",
       },
       {
         type: "note",

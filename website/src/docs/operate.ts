@@ -50,7 +50,7 @@ export const OPERATE_PAGES: DocPage[] = [
         headers: ["Port", "Service", "Exposure"],
         rows: [
           ["8090", "REST API", "Through the Ingress, TLS-terminated."],
-          ["8081", "Admin console", "Through the Ingress, TLS-terminated."],
+          ["8080", "Admin console", "Through the Ingress, TLS-terminated."],
           [
             "50051",
             "gRPC",
@@ -107,9 +107,9 @@ export const OPERATE_PAGES: DocPage[] = [
         headers: ["Proxies in front", "Header the server sees", "Correct value"],
         rows: [
           ["0 — direct", "*(absent)* → the connection peer", "`0`"],
-          ["1 — Caddy, or ingress-nginx, → server", "`<client>`", "**`0`** (the default)"],
-          ["2 — Caddy → nginx → server", "`<client>, <caddy>`", "**`1`**"],
-          ["3 — cloud LB → ingress → mesh → server", "`<client>, <lb>, <ingress>`", "**`2`**"],
+          ["1 — Caddy, or ingress-nginx, → server", "`<client>`", "`0` (the default)"],
+          ["2 — Caddy → nginx → server", "`<client>, <caddy>`", "`1`"],
+          ["3 — cloud LB → ingress → mesh → server", "`<client>, <lb>, <ingress>`", "`2`"],
         ],
       },
       {
@@ -364,7 +364,7 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**The environment variables stay, permanently.** `env` is a supported provider kind — a single-node deployment, the dev Compose file and the E2E stack all use it deliberately — so deprecating the variables would deprecate the provider that reads them.",
-          "**One `WARN`, in one case only.** Configure a *non-`env`* provider and have a value still arrive from the environment, and the server logs one `WARN` at boot naming the variable. That is the case where you believe something untrue; under `env` there is nothing to warn about.",
+          "**One** `WARN`, **in one case only.** Configure a *non-*`env` provider and have a value still arrive from the environment, and the server logs one `WARN` at boot naming the variable. That is the case where you believe something untrue; under `env` there is nothing to warn about.",
           "**They are never minted.** `just vault-seed` mints every *key* above that is missing, and these three it only carries forward from your environment when you supply them. A 256-bit key is meaningful only to AXIAM, so inventing one for an empty slot is what seeding is for; a datastore password has to match what SurrealDB was configured with, and inventing one gives you a Vault that looks configured and a server that cannot connect. An existing value in Vault always wins over one in your shell, so re-running the seeder with a stale variable cannot silently undo a rotation.",
           "**The Vault policy needed no change.** `docker/vault/axiam-policy.hcl` already grants `read` on the KV path, and the three fields live in that same entry — the policy is path-based, not field-based. Worth stating, because *add the new secrets to the policy* is the reasonable first assumption and following it means editing a file that did not need editing.",
         ],
@@ -540,8 +540,8 @@ export const OPERATE_PAGES: DocPage[] = [
         rows: [
           ["email_verification_required", "Whether an unverified address blocks sign-in."],
           ["email_verification_grace_period_hours", "How long an unverified account keeps working before it does."],
-          ["default_cert_validity_days", "Validity applied to issued certificates when none is requested."],
-          ["max_cert_validity_days", "Ceiling on requested certificate validity."],
+          ["default_cert_validity_days", "Stored and returned by the settings API, but not read at issuance: every issuance request states its own `validity_days`."],
+          ["max_cert_validity_days", "Stored and returned by the settings API, but not read at issuance. The ceiling issuance enforces is the tenant's `max_certificate_validity_days` metadata key — 365 days when unset, never more than 825."],
           ["webauthn_user_verification", "`discouraged` | `preferred` | `required` — whether a WebAuthn ceremony must prove user *verification* and not only presence. Default `preferred`, ordered `required` > `preferred` > `discouraged` for the tighten-only rule. See [Passkeys & WebAuthn](#/docs/passkeys#uv-policy)."],
           ["opaque_mode", "`disabled` | `optional` | `required` — see [OPAQUE](#/docs/opaque)."],
           ["opaque_suite", "RFC 9807 ciphersuite. Default `ristretto255_sha512`."],
@@ -659,7 +659,7 @@ export const OPERATE_PAGES: DocPage[] = [
       { type: "h", id: "hierarchy", text: "Certificate hierarchy" },
       {
         type: "p",
-        text: "An organization holds one or more **CA certificates**. Tenants issue leaf certificates under them, with RSA-4096 or Ed25519 keys from the platform CSPRNG. Private keys are **never stored server-side** — a leaf key is returned exactly once at issuance and cannot be recovered afterwards.",
+        text: "An organization holds one or more **CA certificates**. Tenants issue leaf certificates beneath them — through the tenant's own signing CA; directly under an organization CA only a principal in the organization scope may (see [Which CA a caller may issue under](#issuing-ca)) — with RSA-4096 or Ed25519 keys from the platform CSPRNG. Private keys are **never stored server-side** — a leaf key is returned exactly once at issuance and cannot be recovered afterwards.",
       },
       {
         type: "p",
@@ -668,7 +668,7 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "the issuance chain",
-        code: "Organization CA                       (the trust anchor; may be flagged for mTLS)\n └── Tenant signing CA                (optional; CA:TRUE, path length 0, per tenant)\n      └── Leaf certificate           (user, service account or device)",
+        code: "Organization CA                       (the trust anchor; may be flagged for mTLS)\n └── Tenant signing CA                (CA:TRUE, path length 0, per tenant; optional only for an organization-scope principal)\n      └── Leaf certificate           (user, service account or device)",
       },
       {
         type: "p",
@@ -803,19 +803,19 @@ export const OPERATE_PAGES: DocPage[] = [
       { type: "h", id: "iot", text: "Enrolling an IoT device, end to end" },
       {
         type: "p",
-        text: "This is the shape AXIAM was built for on the device side: a device is issued a certificate at commissioning, presents it for mTLS, and is then authorized by the same RBAC engine as everything else. Four steps, and one of them is the one people expect to need and do not.",
+        text: "This is the shape AXIAM was built for on the device side: a device is issued a certificate at commissioning, presents it for mTLS, and is then authorized by the same RBAC engine as everything else. Five steps.",
       },
       {
         type: "steps",
         steps: [
           {
             title: "Have an organization CA",
-            body: "CA certificates are organization-scoped and are the trust root every leaf in that organization chains to. The response carries the CA's signing private key **once** — AXIAM never persists the plaintext — so store it in your secret manager before you do anything else.",
+            body: "CA certificates are organization-scoped and are the trust root every leaf in that organization chains to. Except under `vault_pki` custody, where the key never leaves Vault, the response carries the CA's signing private key **once** — AXIAM never persists the plaintext — so store it in your secret manager before you do anything else.",
             code: 'POST /api/v1/organizations/{org_id}/ca-certificates\n{\n  "subject": "Acme Corp Root CA",\n  "key_algorithm": "Ed25519",\n  "validity_days": 3650\n}',
           },
           {
             title: "Issue the device certificate",
-            body: "Leaf certificates are tenant-scoped. Set `cert_type` to `Device` — that is what makes the certificate addressable by fingerprint at authentication time. The private key comes back once and is never stored. `issuer_ca_id` is the tenant's own signing CA; naming the organization CA directly works only for a principal in the organization scope — see [Which CA a caller may issue under](#issuing-ca).",
+            body: "Leaf certificates are tenant-scoped. Set `cert_type` to `Device`. The device login finds a certificate by its fingerprint whatever its type, and refuses only a `Server` one. The private key comes back once and is never stored. `issuer_ca_id` is the tenant's own signing CA; naming the organization CA directly works only for a principal in the organization scope — see [Which CA a caller may issue under](#issuing-ca).",
             code: 'POST /api/v1/certificates\n{\n  "issuer_ca_id": "<ca-certificate-uuid>",\n  "subject": "sensor-0421.acme.dev",\n  "cert_type": "Device",\n  "key_algorithm": "Ed25519",\n  "validity_days": 365\n}',
           },
           {
@@ -950,22 +950,22 @@ export const OPERATE_PAGES: DocPage[] = [
     navLabel: "Audit logging",
     title: "Audit logging",
     intro:
-      "An append-only, cryptographically signed record of every privileged action — tamper-evident rather than merely tamper-resistant.",
+      "An append-only record of every privileged action, with OpenPGP-signed batches — tamper-evident rather than merely tamper-resistant.",
     verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "appendonly", text: "Append-only by design" },
       {
         type: "p",
-        text: "The audit log has no UPDATE and no DELETE path. Not \"they are permission-guarded\" — they do not exist. Records are chained and signed, so any attempt to alter or remove history is detectable after the fact rather than silent.",
+        text: "The `audit_log` table grants no UPDATE and no DELETE at the SurrealDB permission level, and nothing changes a record after the append except the two paths this page describes — the erasure pseudonymisation and the retention sweep. Batches of records can be signed, so an alteration or removal of a signed batch is detectable after the fact rather than silent.",
       },
       {
         type: "p",
-        text: "Ingestion runs asynchronously over AMQP so that writing an audit record never slows down the operation being audited, and never fails it. Every authentication, authorization decision and administrative mutation across every tenant flows through the same pipeline.",
+        text: "Ingestion runs asynchronously — through an in-process queue for AXIAM's own events, and over AMQP for events other services publish — so that writing an audit record never slows down the operation being audited, and never fails it. Every authentication, authorization decision and administrative mutation across every tenant flows through the same pipeline.",
       },
       { type: "h", id: "signing", text: "Cryptographic signing" },
       {
         type: "p",
-        text: "Entries are signed with OpenPGP keys managed by the PKI layer, which gives you a trail verifiable independently of AXIAM itself. Combined with the chain between records, that is what makes the log tamper-*evident*: an attacker who can write to the database still cannot rewrite history without breaking a signature or a chain link.",
+        text: "Batches of entries are signed, on request (`POST /api/v1/pgp-keys/sign-audit-batch`), with the tenant's OpenPGP key managed by the PKI layer, which gives you a record verifiable independently of AXIAM itself. That is what makes the log tamper-*evident*: an attacker who can write to the database still cannot rewrite a signed batch without breaking its signature. Records are not chained to one another, so what a signature covers is the batch it was made over.",
       },
       { type: "h", id: "reading", text: "Reading it" },
       {
@@ -1151,7 +1151,7 @@ export const OPERATE_PAGES: DocPage[] = [
           ],
           [
             "Authorization checks slow before anything else does",
-            "Database CPU. Those paths scale with it — measured ~90% from a second pair of DB cores — while token issuance does not.",
+            "Database CPU. Those paths scale with it — measured 75–79% from a second pair of DB cores — while token issuance does not.",
           ],
           [
             "`/ready` flapping",
@@ -1287,9 +1287,9 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**`AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed` exists, and is opt-in.** Under the other three values — `off`, `optional`, `required` — every byte of listener behaviour is unchanged. It admits a certificate that chains to nothing, which the OAuth2 `self_signed_tls_client_auth` client method needs, and the trust level a certificate earned travels with it: device authentication and `tls_client_auth` both refuse a self-asserted one.",
-          "**A separate mTLS host is the documented shape**, not a workaround. A TLS listener decides whether to request a client certificate during the handshake, before it has seen any HTTP, so *ask on `/oauth2/token` but not on `/oauth2/authorize`* is not something one listener can do. Run the front channel on the issuer and the back channel on an mTLS listener, and publish the second with `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` — it appears as RFC 8705 §5 `mtls_endpoint_aliases`, which every AXIAM SDK prefers on an mTLS call and never synthesises for the front channel.",
-          "**Audit what your ingress logs before registering a client for `client_secret_basic`.** AXIAM keeps the `Authorization` header out of its own logs and its SDKs never send one, but a proxy in front of it may log headers by default. See [FAPI 2.0 & mTLS](#/docs/fapi2).",
+          "`AXIAM__SERVER__TLS__CLIENT_AUTH=optional_self_signed` **exists, and is opt-in.** Under the other three values — `off`, `optional`, `required` — every byte of listener behaviour is unchanged. It admits a certificate that chains to nothing, which the OAuth2 `self_signed_tls_client_auth` client method needs, and the trust level a certificate earned travels with it: device authentication and `tls_client_auth` both refuse a self-asserted one.",
+          "**A separate mTLS host is the documented shape**, not a workaround. A TLS listener decides whether to request a client certificate during the handshake, before it has seen any HTTP, so *ask on* `/oauth2/token` *but not on* `/oauth2/authorize` is not something one listener can do. Run the front channel on the issuer and the back channel on an mTLS listener, and publish the second with `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` — it appears as RFC 8705 §5 `mtls_endpoint_aliases`, which every AXIAM SDK prefers on an mTLS call and never synthesises for the front channel.",
+          "**Audit what your ingress logs before registering a client for** `client_secret_basic`. AXIAM keeps the `Authorization` header out of its own logs and its SDKs never send one, but a proxy in front of it may log headers by default. See [FAPI 2.0 & mTLS](#/docs/fapi2).",
         ],
       },
       {
@@ -1309,7 +1309,7 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**Name the services you publish.** The edge publishes a path allowlist, so the service that verifies passwords and the reactor administration service stay unpublished unless an operator adds them.",
-          "**Set `AXIAM__GRPC__STRICT_REVOCATION=true` for a public listener.** It defaults off, and with it off a revoked session keeps passing gRPC for up to the access token's lifetime. Pay for the extra lookup with the session-validation cache.",
+          "**Set** `AXIAM__GRPC__STRICT_REVOCATION=true` **for a public listener.** It defaults off, and with it off a revoked session keeps passing gRPC for up to the access token's lifetime. Pay for the extra lookup with the session-validation cache.",
           "**Point the gRPC TLS paths at the same leaf the REST listener uses.** There is no second certificate and there must not be: the listener terminates its own TLS and shares the REST listener's reloadable resolver, so one `SIGHUP` — or the hourly poll — renews both, and it pins TLS 1.3 exclusively. A deploy hook that restarts the container for the gRPC leaf is now redundant; deleting it saves the downtime.",
           "**Buckets are per source IP**, and gRPC has no client identity at the layer that keys them. That is unchanged from the in-mesh case but newly visible behind NAT — size with `AXIAM__GRPC__GRPC_*_PER_SEC` or the `gateway` profile.",
         ],
@@ -1448,8 +1448,8 @@ export const OPERATE_PAGES: DocPage[] = [
           ],
           [
             "Audit retention decided deliberately",
-            "Set a retention policy",
-            "The log only grows. Nothing prunes it for you, and it is append-only by design.",
+            "Set `AXIAM__AUDIT_RETENTION_DAYS` to your lawful basis",
+            "The default prunes records older than 730 days whether or not that matches your obligation, and `0` lets the log grow without bound. See [Audit](#/docs/audit#retention).",
           ],
           [
             "Back-channel logout relying parties registered in advance",
@@ -1524,7 +1524,7 @@ export const OPERATE_PAGES: DocPage[] = [
           [
             "`SECRET_PROVIDER=vault requires AXIAM__AUTH__VAULT_ADDR`",
             "The vault provider is selected but not fully configured.",
-            "Set `VAULT_ADDR` and `VAULT_TOKEN`; `VAULT_MOUNT` and `VAULT_PATH` have defaults.",
+            "Set `AXIAM__AUTH__VAULT_ADDR` and `AXIAM__AUTH__VAULT_TOKEN`; `AXIAM__AUTH__VAULT_MOUNT` and `AXIAM__AUTH__VAULT_PATH` have defaults.",
           ],
           [
             "Startup aborts on the TLS listener",
@@ -1814,8 +1814,8 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**`libxml2` headers missing** — the default `saml` feature links `libxml`. Build with `--no-default-features`, which is what CI's *Build (SAML off)* job does.",
-          "**MSRV complaints from `axiam-opaque`** — it states its own floor (1.88) rather than inheriting the workspace's, because it is vendored into SDKs with lower MSRVs. That is deliberate.",
+          "`libxml2` **headers missing** — the default `saml` feature links `libxml`. Build with `--no-default-features`, which is what CI's *Build (SAML off)* job does.",
+          "**MSRV complaints from** `axiam-opaque` — it states its own floor (1.88) rather than inheriting the workspace's, because it is vendored into SDKs with lower MSRVs. That is deliberate.",
         ],
       },
       {

@@ -177,11 +177,11 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "**165 modules, zero `FAILED` — and that is not a certification.** It is a self-run against a working-tree build. The `REVIEW` and `WARNING` verdicts are published rather than counted as passes: a `REVIEW` is a screenshot-evidence module the suite cannot decide automatically and a human must judge, and the one `WARNING` per FAPI plan is a module that now runs where it used to be skipped. `conformance-run` itself exits non-zero on them. No submission has been made.",
+        text: "**165 modules, zero** `FAILED` **— and that is not a certification.** It is a self-run against a working-tree build. The `REVIEW` and `WARNING` verdicts are published rather than counted as passes: a `REVIEW` is a screenshot-evidence module the suite cannot decide automatically and a human must judge, and the one `WARNING` per FAPI plan is a module that now runs where it used to be skipped. `conformance-run` itself exits non-zero on them. No submission has been made.",
       },
       {
         type: "p",
-        text: `The table is the 2026-09-18 sweep — the latest full run of all four plans, against a build carrying the \`1.0.0-beta16\` MCP authorization surfaces. Each of the ten \`REVIEW\` modules uploaded one screenshot, and all ten are [published and matched to the condition they answer](${GH_BLOB}/docs/conformance/evidence/2026-09-18/README.md). The eight modules that passed only when run individually after 2026-09-14 are passes in this sweep. The 2026-09-11 run, the first full one, stands in the archive beside it.`,
+        text: `The table is the 2026-09-18 sweep — the latest full run of all four plans, against a build carrying the \`1.0.0-beta16\` MCP authorization surfaces. Each of the ten \`REVIEW\` modules uploaded one screenshot, and all ten are [published and matched to the condition they answer](${GH_BLOB}/docs/conformance/evidence/2026-09-18/README.md). The eight modules that passed only when run individually after 2026-09-14 are passes in this sweep. The 2026-09-11 run stands in the archive beside it.`,
       },
       {
         type: "p",
@@ -281,7 +281,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: `The last of those is generated rather than written. \`management-registry.json\` classifies the spec's operations into 24 namespaces and names the 160 that make up the administrative surface, deliberately excluding the protocol endpoints that have their own hand-written sections; each SDK ships a generator over it and a CI job that regenerates and diffs, so a new endpoint reaches all eleven by regeneration rather than by eleven people remembering. See [CONTRACT §27](${contractLink("27")}) and [Managing AXIAM from an SDK](#/docs/rest).`,
+        text: `The last of those is generated rather than written. \`management-registry.json\` classifies the spec's operations into 24 namespaces and names the 162 that make up the administrative surface, deliberately excluding the protocol endpoints that have their own hand-written sections; each SDK ships a generator over it and a CI job that regenerates and diffs, so a new endpoint reaches all eleven by regeneration rather than by eleven people remembering. See [CONTRACT §27](${contractLink("27")}) and [Managing AXIAM from an SDK](#/docs/rest).`,
       },
       { type: "h", id: "matrix", text: "What each SDK ships" },
       {

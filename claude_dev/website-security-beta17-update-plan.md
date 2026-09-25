@@ -1,11 +1,133 @@
 # Website — the beta16 + beta17 security and docs catch-up pass (model 2.17.0)
 
+> **EXECUTED 2026-09-25, on `main`, four commits, no pull request.** The
+> prerequisite was confirmed first: the reconciliation plan carries its
+> EXECUTED block (`036a10c`) and `gen-threat-model.mjs` printed `9 diagrams,
+> 288 threats (275 mitigated, 13 open)`. Then `5430072` (Waves 0 + 1, *the
+> Security section at 1.0.0-beta17 — model 2.17.0*), `cc17ff1` (Wave 2),
+> `5123d59` (Wave 3), and the commit carrying this block (Wave 4, *sweep every
+> stamped page, move DOCS_VERIFIED_RELEASE to beta17*), which names itself by
+> subject because it cannot contain its own SHA.
+>
+> **The stamps.** `SECURITY_VERIFIED_RELEASE` is `1.0.0-beta17` /
+> `2026-09-25`, moved in `5430072` together with the Security prose and the
+> regenerated files. `DOCS_VERIFIED_RELEASE` is `1.0.0-beta17`, moved in the
+> Wave 4 commit after all 29 stamped pages were re-read against `main`. **The
+> `v1.0.0-beta17` tag was pending when this was written**; per §0 the
+> maintainer tags it after this pass, on a head that carries it. Every Phase
+> 22 sentence on the site says "in `1.0.0-beta17`"; every Phase 21 sentence
+> says "in `1.0.0-beta16`".
+>
+> **Generator lines** (Wave 0, and again at §9 with no diff): `threatModel.ts:
+> 9 diagrams, 288 threats (275 mitigated, 13 open)`; `apiIndex.ts: 229
+> operations across 162 paths, 11 domains` with `API_VERSION` `1.0.0-beta16`;
+> `contractAnchors.ts: 184 sections at contract 1.52`, no diff. The summary
+> matched Appendix A row for row, the open register was byte-identical to the
+> beta15 site's, and no existing node or flow coordinate moved (the OAuth2
+> Data tier box grew).
+>
+> **For the beta17 release-prep commit — one thing it must do for the site.**
+> `API_VERSION` in `website/src/apiIndex.ts` is read off `sdks/openapi.json`,
+> which says `1.0.0-beta16` until release prep bumps it. **After bumping the
+> spec, run `npm run gen:api-index` from `website/` and commit `apiIndex.ts`
+> with it.** The beta16 release-prep commit did not, which is why the site's
+> API index said beta15 until this pass.
+>
+> **§3's explorer check**, done in a headless Chromium against the built site:
+> `#/security/diagram/2/T-273` selects `/oauth2/register (RFC 7591,
+> unauthenticated)`, `/2/T-279` the per-tenant path issuers, `/2/T-275` the
+> externally registered clients store, `/2/T-278` `/oauth2/authorize (+
+> consent)` with eleven threats; `/5/T-281`, `/5/T-288` the
+> certificate-issuance process, `/5/T-282`, `/5/T-283` mTLS device auth,
+> `/4/T-285` the RBAC engine, `/7/T-284` the deployment, `/0/T-286` the gRPC
+> API, `/0/T-287` the REST API — every one renders Mitigated. The open-only
+> filter on diagrams 1, 2 and 4 is empty, and `#/security` shows 288 / 275 /
+> 13. Two things §3 predicted differently: the certificate-issuance process
+> carries **seven** threats after the wave, not nine, and the page does not
+> render the model version `2.17.0` anywhere — only the schema major (`v2`);
+> the version lives in the generated summary. Every `#/security/diagram/…`
+> anchor in the site's sources was checked against the regenerated model: none
+> mismatched.
+>
+> **Wave 1a — where the sources overruled the plan.** (1) §1.1's row says the
+> 2026-09-18 dependency update was "the audit gate catching its own stale
+> `rkyv` suppression". `d30c1df`'s own message says the opposite — an
+> audit-only suppression is the one kind no gate polices, and it was found by
+> reading — so the Security text says that, as a limit of the
+> stale-suppression sentence rather than an exercise of it. (2) §1.2 and §5.1
+> describe what the C-12 review found in every SDK as three classes with
+> counts (eight, six, six). The review document names **four** recurring
+> defects and no such counts (counting the fix table gives nine, six, six and
+> five), so the site carries the review's four, uncounted. (3) §2 says the
+> device-bind claim was wrong "before `1.0.0-beta16`"; the fix (`9c9532e`,
+> 2026-09-22) is not an ancestor of the beta16 tag, so the site says "through
+> `1.0.0-beta16`". (4) The four same-day MCP closures landed before the beta16
+> tag and are written as fixed before that release shipped.
+>
+> **Wave 2 — beyond the table.** The `oauth2` page gained six sections before
+> the MCP block (public clients, loopback redirects, resource indicators,
+> dynamic registration, client ID metadata documents, per-tenant issuers), and
+> three claims on it were corrected in passing: "there is **one issuer**" (now
+> one *configured* issuer), `aud` as only `axiam:user`/`axiam:m2m`, and the
+> endpoint list. The four legacy secret spellings are **described, not named**
+> on the Docs pages: `scripts/check-config-key-coverage.py` exempts them as
+> read by nothing and fails a docs page that names one. They are named in the
+> Security section and the News post, which the gate does not scan and §7 asks
+> for. The `rest` page's worked example used a service-account token on
+> `/api/v1/users`, which is human-only and always was; it is replaced and the
+> correction stated. `configuration` gained the `AXIAM_HEALTHCHECK_*` table.
+>
+> **Wave 4 — the sweep changed 24 of the 29 stamped pages**; five were re-read with no change (`federation`, `organization-scope`, `deny`, `amqp`, `observability`), and `opaque` and `mfa` changed only in rendering. Besides stale counts (registry 160 → 162, permissions 115/25 → 116/26, list
+> endpoints twenty → twenty-one, the 2→4 DB-core gain ~90% → 75–79% per run 5)
+> and ~40 bold-around-code spans the renderer shows with literal asterisks, the changes a reader could have acted on: a `POST /api/v1/auth/logout-all` that
+> does not exist (`auth`); `POST /api/v1/auth/password-reset/request` for
+> `/api/v1/auth/reset` (`bootstrap`); a quickstart and a tutorial that start
+> the server with `just run`, which panics without a key (now `just
+> run-local`), and a tutorial token read from a login body that carries none;
+> a `private_key_jwt` registration example missing required fields and a
+> client-credentials example requesting a scope the path refuses
+> (`service-accounts`); `ALLOW_MISSING_AUD_AS_USER` described as off when it
+> defaults to `true` (`configuration`); `default_cert_validity_days` /
+> `max_cert_validity_days` described as applied at issuance, which never reads
+> them (`settings`); "records are chained and signed", "no UPDATE and no
+> DELETE path" and AMQP ingestion, all wrong (`audit`); the Vault variables
+> given by the Vault CLI's names rather than `AXIAM__AUTH__VAULT_*`
+> (`troubleshooting`); the pki hierarchy saying tenants issue under
+> organization CAs; the `grpc` page crediting the authz ceiling with the token
+> services; the `scim` grant body; bootstrap's "one transaction"; `concepts`
+> saying every gRPC message and OAuth2 endpoint carries `tenant_id`; and
+> "there is deliberately no `none` method" (`service-accounts`), stale since
+> beta16. The admin console's port was given as the Compose host port.
+> `2026-09-11` "the first full run" (written in Wave 2) was wrong too — full
+> receipts from 2026-09-10 exist — and is gone.
+>
+> **Left, and why.** Found in sources outside the website, not changed in this
+> pass: `docs/deployment/README.md:955` says the `AXIAM__GRPC_TLS_*` names
+> have a "single underscore after `AXIAM`" (they are flat, with the usual
+> double one; the site says so correctly); `docs/api/README.md` *Errors* gives
+> the 429 slug as `rate_limited` where the limiters emit
+> `rate_limit_exceeded`; `docs/admin/README.md:121` and
+> `docs/admin/fapi2-profile.md:631` name routes that do not exist
+> (`/auth/password-reset/request`, `/auth/logout-all`); `CONTRACT.md` §25's
+> prose says ten operations where its table has twelve. In the Security
+> section, the audit bullet's "no UPDATE or DELETE paths" reads more absolute
+> than the code (the erasure scrub and the retention sweep exist, and the next
+> bullet describes the latter) — for the next Security pass, since this one's
+> prose is committed with its stamp. On the Docs pages: the `grpc` page's p99
+> 90 ms `CheckAccess` figure rests only on a plan note; `configuration`'s
+> "42–90%" range is the run-4 figure and could not be re-derived per path;
+> `configuration`'s "every auth/OAuth2 endpoint is rate-limited" is broader
+> than `server.rs` (three email/reset routes are bare); the quickstart's SDK
+> snippets pass non-UUID resource ids and name a tenant bootstrap does not
+> create. `T-196`'s description in the model still quotes a legacy secret
+> spelling; that is the model's text and the reconciliation plan's to change.
+
 **Date:** 2026-09-25
 **Validated against:** `axiam` main @ `80bc7aa` (PR #500, contract 1.52); every SDK repository at the head that vendors contract 1.52 (`scripts/check-sdk-artifact-drift.py`: 11 repositories, 0 problems)
 **Executes on:** `main`, directly — one commit per wave, no pull request, no feature branch
 **Model:** Opus 5
 **Prerequisite:** [`threat-model-reconciliation-2026-09-25-plan.md`](threat-model-reconciliation-2026-09-25-plan.md) has been executed (its EXECUTED block exists and `gen-threat-model.mjs` prints 288). Do not start Wave 0 before it.
-**Status: PLANNED.**
+**Status: EXECUTED 2026-09-25** (see the block above).
 
 > **What this pass is, in one paragraph.** The website's Security section was
 > last re-derived at `1.0.0-beta15` on 2026-09-15. Two releases' worth of

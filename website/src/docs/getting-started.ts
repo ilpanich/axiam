@@ -146,7 +146,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "terminal",
-        code: "# clone and enter the repository\ngit clone https://github.com/ilpanich/axiam.git\ncd axiam\n\n# start dev infrastructure (SurrealDB + RabbitMQ)\njust dev-up\n\n# build and run the server\njust build\njust run",
+        code: "# clone and enter the repository\ngit clone https://github.com/ilpanich/axiam.git\ncd axiam\n\n# start dev infrastructure (SurrealDB + RabbitMQ)\njust dev-up\n\n# build and run the server\njust run-local",
       },
       {
         type: "p",
@@ -209,7 +209,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "login, then check — with a cookie jar",
-        code: "# 1. authenticate. The tokens come back as cookies, not in the body.\ncurl -sS -c jar.txt -X POST https://iam.acme.dev/api/v1/auth/login \\\n  -H 'content-type: application/json' \\\n  -d '{\"org_slug\":\"acme\",\"tenant_slug\":\"production\",\n       \"username_or_email\":\"admin@acme.dev\",\"password\":\"...\"}'\n\n# 2. state-changing calls echo the CSRF cookie in a header.\nCSRF=$(awk '/axiam_csrf/ {print $7}' jar.txt)\n\ncurl -sS -b jar.txt -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"x-csrf-token: $CSRF\" \\\n  -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"doc:1\"}'",
+        code: "# 1. authenticate. The tokens come back as cookies, not in the body.\ncurl -sS -c jar.txt -X POST https://iam.acme.dev/api/v1/auth/login \\\n  -H 'content-type: application/json' \\\n  -d '{\"org_slug\":\"acme\",\"tenant_slug\":\"production\",\n       \"username_or_email\":\"admin@acme.dev\",\"password\":\"...\"}'\n\n# 2. state-changing calls echo the CSRF cookie in a header.\nCSRF=$(awk '/axiam_csrf/ {print $7}' jar.txt)\n\ncurl -sS -b jar.txt -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"x-csrf-token: $CSRF\" \\\n  -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"'\"$RESOURCE_ID\"'\"}'",
       },
       {
         type: "note",
@@ -352,7 +352,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       { type: "h", id: "does", text: "What one call does" },
       {
         type: "p",
-        text: "Bootstrap is a single call that provisions the entire first-run state, inside one transaction. There is no partially-bootstrapped outcome: either all of the following exists afterwards, or none of it does.",
+        text: "Bootstrap is a single call that provisions the entire first-run state. The organization, its scope and the seeded permissions and roles are written first, each get-or-create or idempotent, so a retry after a transient failure reuses them; the admin user, its super-admin binding and the lock are then created in one transaction, so there is never a partially created administrator.",
       },
       {
         type: "steps",
@@ -367,7 +367,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
           },
           {
             title: "Seeds the permission registry into that scope",
-            body: "All 115 built-in permissions across 25 families — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `audit_logs:*`, `reactors:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against.",
+            body: "All 116 built-in permissions across 26 families — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `audit_logs:*`, `reactors:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against.",
           },
           {
             title: "Seeds three default roles",
@@ -433,10 +433,10 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**It refuses, with exit code `2` and no write at all, on any deployment that has been bootstrapped** — one with at least one `user` row, or one where a setup token has already been redeemed. That gate is the whole security argument: before bootstrap there is no administrator to take over, and after it there is an authenticated way to create accounts, so re-minting is never the answer. A refused call leaves the existing token working.",
+          "**It refuses**, with exit code `2` and no write at all, **on any deployment that has been bootstrapped** — one with at least one `user` row, or one where a setup token has already been redeemed. That gate is the whole security argument: before bootstrap there is no administrator to take over, and after it there is an authenticated way to create accounts, so re-minting is never the answer. A refused call leaves the existing token working.",
           "Exit `0` means a token was minted and printed; `1` means the command could not tell — bad configuration, or an unreachable datastore.",
           "There is deliberately no `--print`: the plaintext is not stored, and storing it so that it could be printed would be the wrong fix.",
-          "Bootstrapped already, and lost the admin credentials too? That is a password-reset problem, not a bootstrap one: use `POST /api/v1/auth/password-reset/request`, or restore from a backup.",
+          "Bootstrapped already, and lost the admin credentials too? That is a password-reset problem, not a bootstrap one: use `POST /api/v1/auth/reset`, or restore from a backup.",
         ],
       },
       {
@@ -521,7 +521,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "201 Created",
-        code: "{\n  \"message\": \"Bootstrap completed\",\n  \"organization_id\": \"0f8c...\",\n  \"organization_slug\": \"acme\",\n  \"tenant_id\": \"3a91...\",\n  \"tenant_slug\": \"organization\",\n  \"user_id\": \"c47b...\"\n}",
+        code: "{\n  \"message\": \"Organization and organization-level admin user created. Login via /api/v1/auth/login with no tenant.\",\n  \"organization_id\": \"0f8c...\",\n  \"organization_slug\": \"acme\",\n  \"tenant_id\": \"3a91...\",\n  \"tenant_slug\": \"organization\",\n  \"user_id\": \"c47b...\"\n}",
       },
       {
         type: "p",
@@ -632,7 +632,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "There is no default tenant and no ambient tenant context. Every SDK constructor takes one — left blank it means the organization scope, not \"whichever tenant is handy\" — every gRPC request message carries `tenant_id`, and every OAuth2 endpoint takes it as a query parameter. This is deliberate: the most common multi-tenancy bug is a query that forgot to filter, and an API that cannot express *unscoped* cannot express that bug.",
+        text: "There is no default tenant and no ambient tenant context. Every SDK constructor takes one — left blank it means the organization scope, not \"whichever tenant is handy\" — every gRPC call takes it from the caller's verified token, and every OAuth2 endpoint that needs one takes it as a query parameter — or, with the opt-in per-tenant issuers of `1.0.0-beta16`, in the path. This is deliberate: the most common multi-tenancy bug is a query that forgot to filter, and an API that cannot express *unscoped* cannot express that bug.",
       },
       {
         type: "p",
@@ -670,7 +670,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       { type: "h", id: "access", text: "Roles, permissions & resources" },
       {
         type: "p",
-        text: "A **permission** is an action on a resource, carrying an effect of either allow or deny. A **role** is a collection of permissions, assignable to users or to groups; it may carry `is_global`, and separately each assignment either names a resource or does not — one that does not is tenant-wide. **Resources** form a tree, and a role assigned on a parent cascades to its descendants. **Scopes** add sub-resource granularity where a permission needs to apply to only part of a resource.",
+        text: "A **permission** is an action, granted to a role with an effect of either allow or deny. A **role** is a collection of permissions, assignable to users or to groups; it may carry `is_global`, and separately each assignment either names a resource or does not — one that does not is tenant-wide. **Resources** form a tree, and a role assigned on a parent cascades to its descendants. **Scopes** add sub-resource granularity where a permission needs to apply to only part of a resource.",
       },
       {
         type: "p",
@@ -752,7 +752,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "terminal",
-        code: "git clone https://github.com/ilpanich/axiam.git\ncd axiam\n\njust dev-up      # SurrealDB + RabbitMQ\njust build\njust run         # REST on :8090, gRPC on :50051",
+        code: "git clone https://github.com/ilpanich/axiam.git\ncd axiam\n\njust dev-up      # SurrealDB + RabbitMQ\njust run-local   # REST on :8090, gRPC on :50051",
       },
       {
         type: "code",
@@ -779,7 +779,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "terminal",
-        code: "TOKEN=$(curl -sS -X POST localhost:8090/api/v1/auth/login \\\n  -H 'content-type: application/json' \\\n  -d '{\"org_slug\":\"acme\",\"username_or_email\":\"admin\",\"password\":\"'\"$ADMIN_PASSWORD\"'\"}' \\\n  | jq -r .access_token)\n\n# `org_id` comes back on /auth/me, so no lookup is needed.\nORG=$(curl -sS localhost:8090/api/v1/auth/me \\\n  -H \"authorization: Bearer $TOKEN\" | jq -r .user.org_id)\n\ncurl -sS -X POST \"localhost:8090/api/v1/organizations/$ORG/tenants\" \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"name\":\"Production\",\"slug\":\"production\"}'",
+        code: "curl -sS -c jar.txt -X POST localhost:8090/api/v1/auth/login \\\n  -H 'content-type: application/json' \\\n  -d '{\"org_slug\":\"acme\",\"username_or_email\":\"admin\",\"password\":\"'\"$ADMIN_PASSWORD\"'\"}'\n\n# Login returns no token in its body; the access token is the `axiam_access` cookie.\nTOKEN=$(awk '/axiam_access/ {print $7}' jar.txt)\n\n# `org_id` comes back on /auth/me, so no lookup is needed.\nORG=$(curl -sS localhost:8090/api/v1/auth/me \\\n  -H \"authorization: Bearer $TOKEN\" | jq -r .user.org_id)\n\ncurl -sS -X POST \"localhost:8090/api/v1/organizations/$ORG/tenants\" \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"name\":\"Production\",\"slug\":\"production\"}'",
       },
       {
         type: "note",
@@ -800,7 +800,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
           },
           {
             title: "Create the permission",
-            body: "A permission names an action on a resource type. This is the string your guard will ask about.",
+            body: "A permission names an action. This is the string your guard will ask about.",
             code: "POST /api/v1/permissions",
           },
           {

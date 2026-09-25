@@ -84,9 +84,9 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Two ways to authenticate.** A machine client sends `Authorization: Bearer <access_token>`, obtained from the OAuth2 token endpoint — and which routes accept a machine's token is decided per route; see [Who may call which route](#/docs/rest#who-may-call). An interactive login sets `httpOnly` cookies instead — `POST /auth/login` returns no token in its body — and state-changing requests must then echo the `axiam_csrf` cookie in an `X-CSRF-Token` header. The SDKs handle the second case for you.",
           "**CSRF applies to the credential the browser attaches by itself.** A request authenticated *only* by a bearer token needs no CSRF token: a cross-site page cannot set an `Authorization` header on a victim's behalf, so the requirement would be unsatisfiable rather than protective. A request carrying a bearer header **and** a session cookie is still checked, deliberately — that is precisely the shape where the browser supplies the cookie and an attacker supplies the header, so the exemption cannot itself become the bypass.",
           "**Tenancy is explicit.** Entity routes are tenant-scoped through the authenticated principal; OAuth2 endpoints take `tenant_id` as a query parameter. Nothing is inferred from a default.",
-          "**Every route is permission-guarded.** A caller needs an explicit grant for the action behind the route — the same 115-permission registry the admin console uses.",
+          "**Every route is permission-guarded.** A caller needs an explicit grant for the action behind the route — the same 116-permission registry the admin console uses.",
           "**Collections paginate** with `offset` and `limit`, and return the items plus a total.",
-          "**Collections search** with `?search=`, on all twenty list endpoints. Each matches its own identifying columns plus the record's id, so a UUID copied out of a log line goes in the same box as a name. It is a substring match rather than tokenised full-text search, precisely so that pasting a fragment of an id finds the row. The filter applies to the `total` as well as to the page — a total describing the unfiltered set would hand the pager page numbers the filtered set cannot fill.",
+          "**Collections search** with `?search=`, on all twenty-one list endpoints. Each matches its own identifying columns plus the record's id, so a UUID copied out of a log line goes in the same box as a name. It is a substring match rather than tokenised full-text search, precisely so that pasting a fragment of an id finds the row. The filter applies to the `total` as well as to the page — a total describing the unfiltered set would hand the pager page numbers the filtered set cannot fill.",
           "**Mutations are audited.** Every write lands in the append-only audit log with the acting principal.",
         ],
       },
@@ -151,7 +151,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "The three consent endpoints take **no `user_id`**: consent is the data subject's own (GDPR Art. 4(11)), so there is nothing for an administrator to give on somebody's behalf. `GET /api/v1/users/{user_id}/sessions` carries the `refresh_replay_verdict`, `refresh_replay_grace_accepted`, `refresh_replay_refused` and `refresh_replay_at` fields the admin UI's **Sessions** badges are drawn from — see [Authentication & sessions](#/docs/auth).",
+        text: "The three consent endpoints take **no** `user_id`: consent is the data subject's own (GDPR Art. 4(11)), so there is nothing for an administrator to give on somebody's behalf. `GET /api/v1/users/{user_id}/sessions` carries the `refresh_replay_verdict`, `refresh_replay_grace_accepted`, `refresh_replay_refused` and `refresh_replay_at` fields the admin UI's **Sessions** badges are drawn from — see [Authentication & sessions](#/docs/auth).",
       },
       { type: "h", id: "acting-tenant", text: "Acting on another tenant" },
       {
@@ -189,7 +189,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "management", text: "Managing AXIAM from an SDK" },
       {
         type: "p",
-        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **24 namespaces** and names the **160** that make up the surface, and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
+        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **24 namespaces** and names the **162** that make up the surface, and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
       },
       {
         type: "p",
@@ -199,7 +199,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**Namespaced, not flat.** Operations hang off a namespace handle — `client.service_accounts().rotate_secret(id)` — with a `client.management()` accessor beside it rather than instead of it. C is the one exception: it has no handle to hang operations on, so it gets the flat-symbol form.",
-          "**`search` is applied server-side, before `offset` and `limit`.** On all twenty paginated operations. Filtering a page client-side is forbidden by the contract, because it silently changes what pagination means: page 2 of a filtered set is not the filtered part of page 2.",
+          "`search` **is applied server-side**, before `offset` and `limit`. On all twenty-one paginated operations. Filtering a page client-side is forbidden by the contract, because it silently changes what pagination means: page 2 of a filtered set is not the filtered part of page 2.",
           "**Sparse update or full replacement is classified per operation**, not guessed. A `PUT` that replaces and a `PATCH`-shaped `PUT` that merges are different things to a caller who omits a field, and the registry records which each one is.",
           "**Declarative management is the second half.** §27.6 defines a manifest form — describe the desired state, apply it — which the SDKs expose in whatever their language calls idiomatic.",
         ],
@@ -299,7 +299,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "**Rate limits follow the family, not the service name.** `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes the authorization and token services; `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService` **and, since the beta11 remediation, the whole of `ReactorAdminService`** — which used to fall through to the authorization family's much larger ceiling. It defaults to **10/s per IP and deliberately does not move with the deployment posture**, because an administrative surface has no throughput case: reactor CRUD over gRPC above that rate needs the variable raised explicitly. See [Sizing your rate limits](https://github.com/ilpanich/axiam/blob/main/docs/deployment/rate-limit-sizing.md).",
+        text: "**Rate limits follow the family, not the service name.** `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` sizes the authorization service, and the token and userinfo services are a family of their own, by default five times that ceiling; `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` sizes `UserService` **and, since the beta11 remediation, the whole of** `ReactorAdminService` — which used to fall through to the authorization family's much larger ceiling. It defaults to **10/s per IP and deliberately does not move with the deployment posture**, because an administrative surface has no throughput case: reactor CRUD over gRPC above that rate needs the variable raised explicitly. See [Sizing your rate limits](https://github.com/ilpanich/axiam/blob/main/docs/deployment/rate-limit-sizing.md).",
       },
       { type: "h", id: "checkaccess", text: "One CheckAccess call" },
       {
@@ -654,7 +654,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           {
             title: "Create a role holding only scim:provision",
             body: "Least privilege, and specifically not the `admin` role — the default-role seeder grants admin every permission except `admin:bootstrap`, so it carries `scim:provision` along with everything else.",
-            code: 'POST /api/v1/roles\nPOST /api/v1/roles/{role_id}/permissions   { "permission": "scim:provision" }',
+            code: 'POST /api/v1/roles\nPOST /api/v1/roles/{role_id}/permissions   { "permission_id": "<id of scim:provision>" }',
           },
           {
             title: "Assign the role to that user",

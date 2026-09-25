@@ -196,7 +196,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Where checks dominate your traffic, two levers matter. **Database CPU** is the main ceiling — measured gains of roughly 90% from a second pair of database cores. The optional **decision cache** sits on top: transformative on gRPC checks, marginal on REST ones, because REST's per-request session-cookie validation is a database read the cache does not cover. Both are covered in [Configuration](#/docs/configuration).",
+        text: "Where checks dominate your traffic, two levers matter. **Database CPU** is the main ceiling — measured gains of 75–79% from a second pair of database cores. The optional **decision cache** sits on top: transformative on gRPC checks, marginal on REST ones, because REST's per-request session-cookie validation is a database read the cache does not cover. Both are covered in [Configuration](#/docs/configuration).",
       },
       {
         type: "note",
@@ -245,7 +245,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       { type: "h", id: "permissions", text: "Permissions" },
       {
         type: "p",
-        text: "A permission is an action name plus an effect. AXIAM seeds **115 built-in permissions across 25 families** into every tenant at bootstrap — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `ca_certificates:*`, `audit_logs:*`, `federation:*`, `webhooks:*`, `reactors:*`, `scim_tokens:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against, so an administrator's authority over AXIAM is expressed in the same model as an application's authority over its own resources.",
+        text: "A permission is an action name; whether a grant of it allows or denies is the `effect` on the grant that attaches it to a role. AXIAM seeds **116 built-in permissions across 26 families** into every tenant at bootstrap — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `ca_certificates:*`, `audit_logs:*`, `federation:*`, `webhooks:*`, `reactors:*`, `scim_tokens:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against, so an administrator's authority over AXIAM is expressed in the same model as an application's authority over its own resources.",
       },
       {
         type: "p",
@@ -329,11 +329,11 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       { type: "h", id: "reach", text: "How far a grant reaches" },
       {
         type: "p",
-        text: "There are two independent ways for a grant to reach everything, and it is worth being precise about which one you are using. **The assignment names no resource**: it is tenant-wide — every resource in the tenant, at every depth — which is what you get by assigning a role to a user or a group without picking a resource. **The role carries `is_global`**: it applies everywhere *however* it is assigned, including when the assignment does name a resource. An assignment that does name a resource reaches that resource and cascades to its descendants, unless a deny overrides it.",
+        text: "There are two independent ways for a grant to reach everything, and it is worth being precise about which one you are using. **The assignment names no resource**: it is tenant-wide — every resource in the tenant, at every depth — which is what you get by assigning a role to a user or a group without picking a resource. **The role carries** `is_global`: it applies everywhere *however* it is assigned, including when the assignment does name a resource. An assignment that does name a resource reaches that resource and cascades to its descendants, unless a deny overrides it.",
       },
       {
         type: "p",
-        text: `Unless the assignment says otherwise. A resource-scoped assignment made with **\`inherit: false\`** applies at the resource it names and at no descendant — *here and no further*. The flag belongs to the assignment, not to the role's grants, so it stops allows and denies alike, and it changes only which assignments reach a resource, never how deny-override weighs the ones that do. Omitting it, or sending \`true\`, is the cascading assignment every client has always made. It is refused with 400 on an assignment that names no resource, and on a role with \`is_global\`, because there it would be stored and ignored. To change it, unassign and assign again — and note which way that moves access: \`false\` on an allow narrows it, \`false\` on a deny widens it. See [the precedence table](#/docs/deny#table) and the [administrator guide](${GH_BLOB}/docs/admin/README.md#stopping-an-assignment-at-its-resource-inherit-false).`,
+        text: `Unless the assignment says otherwise. A resource-scoped assignment made with \`inherit: false\` applies at the resource it names and at no descendant — *here and no further*. The flag belongs to the assignment, not to the role's grants, so it stops allows and denies alike, and it changes only which assignments reach a resource, never how deny-override weighs the ones that do. Omitting it, or sending \`true\`, is the cascading assignment every client has always made. It is refused with 400 on an assignment that names no resource, and on a role with \`is_global\`, because there it would be stored and ignored. To change it, unassign and assign again — and note which way that moves access: \`false\` on an allow narrows it, \`false\` on a deny widens it. See [the precedence table](#/docs/deny#table) and the [administrator guide](${GH_BLOB}/docs/admin/README.md#stopping-an-assignment-at-its-resource-inherit-false).`,
       },
       {
         type: "p",

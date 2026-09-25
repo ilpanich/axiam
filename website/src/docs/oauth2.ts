@@ -78,7 +78,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "`/oauth2/userinfo` answers **`GET` and `POST`** since `1.0.0-beta13`. The token may ride the `Authorization` header on either, or — on `POST` only — an `access_token` field in an `application/x-www-form-urlencoded` body, which is RFC 6750 §2.2's form-encoded carrier. Presenting it **twice** is refused rather than resolved in the caller's favour, and the query-string carrier (RFC 6750 §2.3) is never read on either method.",
+        text: "`/oauth2/userinfo` answers `GET` and `POST` since `1.0.0-beta13`. The token may ride the `Authorization` header on either, or — on `POST` only — an `access_token` field in an `application/x-www-form-urlencoded` body, which is RFC 6750 §2.2's form-encoded carrier. Presenting it **twice** is refused rather than resolved in the caller's favour, and the query-string carrier (RFC 6750 §2.3) is never read on either method.",
       },
       { type: "h", id: "revocations", text: "The session revocation feed" },
       {
@@ -106,13 +106,14 @@ export const OAUTH2_PAGES: DocPage[] = [
       { type: "h", id: "tenant", text: "Naming the tenant" },
       {
         type: "p",
-        text: "AXIAM is multi-tenant and has no default tenant, so every OAuth2 request has to say which one it means. There are two mechanisms, and which applies depends on the endpoint:",
+        text: "AXIAM is multi-tenant and has no default tenant, so every OAuth2 request has to say which one it means. There are two mechanisms, and which applies depends on the endpoint — three when per-tenant path issuers are on:",
       },
       {
         type: "list",
         items: [
-          "**`tenant_id` as a query parameter** — required on `/oauth2/token`, `/oauth2/par` and `/oauth2/end_session`.",
-          "**Derived from `client_id`** — on `/oauth2/authorize`, because an OAuth2 client belongs to exactly one tenant.",
+          "`tenant_id` **as a query parameter** — required on `/oauth2/token`, `/oauth2/par` and `/oauth2/end_session`.",
+          "**Derived from** `client_id` — on `/oauth2/authorize`, because an OAuth2 client belongs to exactly one tenant.",
+          "**The path** `/t/{tenant_id}` — opt-in since `1.0.0-beta16` (`AXIAM__AUTH__TENANT_ISSUER_PATHS`): every OAuth2 endpoint is also served under it, and a `tenant_id` query parameter there is `invalid_request`. See [Per-tenant issuers](#/docs/oauth2#tenant-issuers).",
         ],
       },
       {
@@ -123,9 +124,9 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**An unknown tenant is answered identically to a known one**, apart from the value it echoes — the document is not an enumeration oracle.",
-          "**`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID`** names the tenant an unparameterised request describes. It states a fact in a document and is not a fallback in a handler: no endpoint's behaviour changes, and a caller that names a different tenant gets that one. A value that does not parse as a UUID is ignored and **reported once at boot**, describing the value's shape and never the value — so a deployment that set it can tell that it did not take, without the variable's contents reaching a log.",
-          "**`mtls_endpoint_aliases`** (RFC 8705 §5) appears when `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` is set, naming a separate mTLS host for the six back-channel endpoints. Absent by default; the front channel is never aliased. An unusable value fails discovery with a `500` rather than being silently dropped.",
-          "**`claims_parameter_supported: true`** — the OIDC Core §5.5 `claims` parameter is honoured for its `userinfo` member. On a client in the honour lane it also reads `claims.id_token.acr`.",
+          "`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` names the tenant an unparameterised request describes. It states a fact in a document and is not a fallback in a handler: no endpoint's behaviour changes, and a caller that names a different tenant gets that one. A value that does not parse as a UUID is ignored and **reported once at boot**, describing the value's shape and never the value — so a deployment that set it can tell that it did not take, without the variable's contents reaching a log.",
+          "`mtls_endpoint_aliases` (RFC 8705 §5) appears when `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` is set, naming a separate mTLS host for the six back-channel endpoints. Absent by default; the front channel is never aliased. An unusable value fails discovery with a `500` rather than being silently dropped.",
+          "`claims_parameter_supported: true` — the OIDC Core §5.5 `claims` parameter is honoured for its `userinfo` member. On a client in the honour lane it also reads `claims.id_token.acr`.",
         ],
       },
       {
@@ -169,7 +170,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "The `tenant_id` asymmetry between the two endpoints is the single most common integration mistake here. `/oauth2/authorize` derives the tenant from `client_id`; `/oauth2/token`, `/oauth2/par` and `/oauth2/end_session` all require it as a query parameter. An off-the-shelf OIDC client that cannot add one needs a shim or a per-tenant gateway route.",
+        text: "The `tenant_id` asymmetry between the two endpoints is the single most common integration mistake here. `/oauth2/authorize` derives the tenant from `client_id`; `/oauth2/token`, `/oauth2/par` and `/oauth2/end_session` all require it as a query parameter. An off-the-shelf OIDC client that cannot add one can be pointed at the tenant-scoped discovery document described above, or at a per-tenant path issuer, instead of needing a shim.",
       },
       { type: "h", id: "iss", text: "Checking who answered — RFC 9207" },
       {
@@ -192,7 +193,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       { type: "h", id: "tokens", text: "The tokens you get back" },
       {
         type: "p",
-        text: "Access tokens are EdDSA (Ed25519) JWTs, short-lived, and verifiable offline against the JWKS — which is the fast path for a resource server, and the one to prefer over introspecting on every request. ID tokens carry `sid`, the session identifier, which is stable across refresh; since `1.0.0-beta13` the access tokens the code and refresh grants issue carry the **same `sid`**, so a password or MFA reset revokes the tokens in flight rather than only the session behind them. Refresh tokens are opaque and single-use.",
+        text: "Access tokens are EdDSA (Ed25519) JWTs, short-lived, and verifiable offline against the JWKS — which is the fast path for a resource server, and the one to prefer over introspecting on every request. ID tokens carry `sid`, the session identifier, which is stable across refresh; since `1.0.0-beta13` the access tokens the code and refresh grants issue carry the **same** `sid`, so a password or MFA reset revokes the tokens in flight rather than only the session behind them. Refresh tokens are opaque and single-use.",
       },
       {
         type: "p",
@@ -276,7 +277,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         items: [
           "**With the switch off — the default — nothing changes.** The answer is the same `401` object it always was, byte for byte, and the `axiam_op_session` cookie is not read at all.",
           "**The cookie is a fourth cookie**, beside the three that already exist and change in no way: `HttpOnly`, `Path=/oauth2/authorize`, `SameSite=Lax` and `Secure` **unconditionally** — it is the only `SameSite=Lax` cookie AXIAM sets, so unlike the other three it does not follow the deployment's cookie-`Secure` flag. Only its SHA-256 is stored. `Lax` is the point: it travels on a top-level navigation and not inside a frame, so cross-site hidden-iframe silent renew does not work and **fails closed** — which is the same property that defeats cross-site login-status probing. Relying parties renew with a top-level `prompt=none` navigation, or with a refresh token.",
-          "**`return_to` is validated three times** — by the builder, by the deployment-origin rule, and by the SPA before it navigates. It is exactly the authorization endpoint plus a query, on the API's own origin.",
+          "`return_to` **is validated three times** — by the builder, by the deployment-origin rule, and by the SPA before it navigates. It is exactly the authorization endpoint plus a query, on the API's own origin.",
           "**A chain is bounded at two authorization requests and one sign-in page.** Every login redirect carries an `axiam_login_hop=1` marker, and a request that arrives with it is never redirected again; if it still has no principal the answer is `login_required`, naming the two candidates — a browser refusing the cookie, or a sign-in against a different tenant.",
           "**An anonymous request must name its tenant**, with the same `tenant_id` parameter `/oauth2/token` and `/oauth2/end_session` already take. It is ignored whenever a principal was resolved from an access token, and omitting it gives today's `401` — which is why adding the parameter changed nothing for any client registered today.",
         ],
@@ -308,7 +309,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one.",
           "**Request objects are rejected, not half-implemented** — `request` gives `request_not_supported` and a non-PAR `request_uri` gives `request_uri_not_supported`.",
           "**Authentication evidence is the provider's for a federated login** — `auth_time` comes from the upstream `auth_time` or `AuthnInstant`, never AXIAM's clock — and is copied, never restamped, across a refresh.",
-          "**On the `ignore` lane none of the new refusals can occur**: a value AXIAM cannot parse is dropped, exactly as it always was.",
+          "**On the** `ignore` **lane none of the new refusals can occur**: a value AXIAM cannot parse is dropped, exactly as it always was.",
         ],
       },
       {
@@ -350,10 +351,10 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**By redirect, with `state` and `iss`**, whenever the client and its `redirect_uri` are registered — which is what lets a relying party handle the failure in code rather than showing the user a server page.",
-          "**As a page, only on an explicit `Accept: text/html`**, and that page echoes nothing the request carried.",
+          "**By redirect, with** `state` **and** `iss`, whenever the client and its `redirect_uri` are registered — which is what lets a relying party handle the failure in code rather than showing the user a server page.",
+          "**As a page, only on an explicit** `Accept: text/html`, and that page echoes nothing the request carried.",
           "**Before the login hop, when the request cannot succeed at all.** A `request_uri` that is unknown, expired, already spent or issued to another client, and a missing or unsupported `response_type`, are both decided before the browser is sent to sign in — nobody types a password for a request that was dead before they started. `response_type` is decided this way only when no `request_uri` is present, because with PAR the pushed value is the authoritative one (RFC 9126 §4). Both are delivered under the rule above: redirected to a `redirect_uri` the client registered, with the request's own `state` — as `invalid_request_uri` for a dead handle (RFC 6749 §4.1.2.1, OIDC Core §3.1.2.6) — or answered in place otherwise. A handle issued to a different client keeps `invalid_request`. See [Pushed authorization](#/docs/par).",
-          "**`error_description` is ASCII** (RFC 6749 §5.2 `NQSCHAR`): a `§` is transliterated to the word rather than silently stripped, so a description is never truncated at the first non-ASCII byte. See [Error reference](#/docs/errors).",
+          "`error_description` **is ASCII** (RFC 6749 §5.2 `NQSCHAR`): a `§` is transliterated to the word rather than silently stripped, so a description is never truncated at the first non-ASCII byte. See [Error reference](#/docs/errors).",
         ],
       },
       { type: "h", id: "par", text: "Pushed authorization requests" },
@@ -396,7 +397,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**No secret is minted**, and the creation response carries **no `client_secret` member** — not an empty one, which would read as a secret that happens to be empty. The admin UI offers the method as *Public client (no secret)* and skips the one-time secret dialog.",
+          "**No secret is minted**, and the creation response carries **no** `client_secret` **member** — not an empty one, which would read as a secret that happens to be empty. The admin UI offers the method as *Public client (no secret)* and skips the one-time secret dialog.",
           "**PKCE is required at both ends** — `/oauth2/authorize` refuses a request with no `code_challenge`, and `/oauth2/token` refuses to redeem a code that carries no stored challenge.",
           "**What a public registration is refused**, with a `400` naming the contradiction: the `client_credentials` and token-exchange grants, the `fapi2` profile, and any mTLS or `private_key_jwt` credential. At request time a public client that presents a credential anyway is `invalid_client`, introspection is refused (revocation is not), and so is the UMA ticket grant.",
           "**A confidential client never becomes public by omission.** One registered for a secret that sends none is still `invalid_client`, and `token_endpoint_auth_method` cannot be moved across the public/confidential line by an update.",
@@ -424,7 +425,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         items: [
           "**The token request is still exact.** The code stores the `redirect_uri` as presented, so the redemption must repeat it: a client that authorized on port 51703 cannot redeem on 51704.",
           "**Errors reach the ephemeral port too.** A request refused before the registration is looked up — a missing `response_type`, a dead `request_uri` — is redirected to the presented URI on exactly the terms above, so a client waiting on its port reads the error instead of watching a page it cannot see. Those six refusal paths had compared the URI exactly while the success path applied the port rule; the T21.8 security review found it, and it was fixed before `1.0.0-beta16` shipped ([T-280](#/security/diagram/2/T-280), closed).",
-          "**`http://[::1]/…` can be registered.** The validator had compared the host without its brackets and so refused the IPv6 loopback it named as allowed; it is one host, reachable only from the machine the user is sitting at, and a routable IPv6 literal over `http` is still refused.",
+          "`http://[::1]/…` **can be registered.** The validator had compared the host without its brackets and so refused the IPv6 loopback it named as allowed; it is one host, reachable only from the machine the user is sitting at, and a routable IPv6 literal over `http` is still refused.",
           "`localhost` and `127.0.0.1` are **not** interchangeable, and the two clients this exists for disagree — VS Code registers `http://127.0.0.1/callback`, Claude Code `http://localhost/callback`. Register what your client actually uses.",
         ],
       },
@@ -445,8 +446,8 @@ export const OAUTH2_PAGES: DocPage[] = [
           "**A client names only what its registration lists** in `allowed_resources` — empty on every client that existed before, so such a client may name nothing. Entries are absolute URIs without a fragment, compared after RFC 3986 §6.2.2 normalisation and **never by prefix**. An unregistered or malformed value is `invalid_target`, and so is a second value: an AXIAM token carries one `aud`.",
           "**A grant's audience is decided when the grant is made.** The resource travels onto the code, the device grant and the refresh token, and each rotation copies it forward, so a refresh re-mints the same audience. Repeating it or omitting it is fine; naming a different one — or naming one at all on a grant issued without one — is `invalid_target`. A token cannot be widened by refreshing it.",
           "**A resource-bound token is not a token for AXIAM.** AXIAM's own REST endpoints answer it `401` and gRPC `UNAUTHENTICATED`. A client that needs both needs two tokens, from two authorizations.",
-          "**Introspection reports `aud`** (RFC 7662 §2.2), and describes a resource-bound token rather than calling it inactive — an introspecting resource server's whole audience check is *is this token for me*.",
-          "**The `axiam` scheme is reserved.** `axiam:user` and `axiam:m2m` are well-formed absolute URIs, so they could once be registered and requested as resources — letting `client_credentials` mint a token with the *user* audience. Registration and every grant now answer `invalid_target` for any `axiam:` value (MCP-02, closed in `1.0.0-beta16` before release).",
+          "**Introspection reports** `aud` (RFC 7662 §2.2), and describes a resource-bound token rather than calling it inactive — an introspecting resource server's whole audience check is *is this token for me*.",
+          "**The** `axiam` **scheme is reserved.** `axiam:user` and `axiam:m2m` are well-formed absolute URIs, so they could once be registered and requested as resources — letting `client_credentials` mint a token with the *user* audience. Registration and every grant now answer `invalid_target` for any `axiam:` value (MCP-02, closed in `1.0.0-beta16` before release).",
           "Sender-constraining is orthogonal: a token can carry both a `cnf` confirmation and a third-party `aud`. For a token that leaves AXIAM's estate that is the recommended posture.",
         ],
       },
@@ -525,7 +526,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         items: [
           "**The same handlers, re-based.** Every OAuth2 endpoint is served under `/t/{tenant_id}` as well as at the root, and the `iss` of everything minted there is the tenant issuer — the access token, the ID token, the RFC 9207 authorization-response parameter and the Back-Channel Logout token.",
           "**One key set signs every tenant**, which RFC 8414 permits, so the signature does not say which tenant a token is for. Two checks do: a token whose `iss` names a different tenant from its `tenant_id` claim is refused, and a token presented under `/t/{B}` that was minted for tenant A is refused with `401` — the same answer a request with no credential gets.",
-          "**A `tenant_id` query parameter on a tenant path is `invalid_request`**, agreeing or not: two tenant selectors on one request is the shape a confused-deputy bug takes.",
+          "**A** `tenant_id` **query parameter on a tenant path is** `invalid_request`, agreeing or not: two tenant selectors on one request is the shape a confused-deputy bug takes.",
           "Turn it on when **one** AXIAM fronts MCP servers for **more than one** tenant. A single-tenant deployment needs none of it: `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` makes the bare document name its one tenant.",
         ],
       },
@@ -885,7 +886,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       { type: "h", id: "conformance", text: "Conformance" },
       {
         type: "p",
-        text: "AXIAM is run against the OpenID Foundation's conformance suite — the OIDC Core Basic OP plan and the three FAPI 2.0 Security Profile (Final) variants (mTLS, self-signed, `private_key_jwt`). The latest full sweep, all four plans on 2026-09-18, was **165 modules with zero `FAILED`**: 150 `PASSED`, 10 `REVIEW`, 3 `WARNING`, 2 `SKIPPED`. That is a self-run against a working-tree build, **not a certification**, and the `REVIEW` and `WARNING` verdicts are published rather than counted as passes: the ten `REVIEW`s — four on the Basic plan, two on each FAPI plan — are screenshot-evidence modules a human must judge, and the screenshot each one uploaded is published beside the receipts and matched to its condition; there is one `WARNING` per FAPI plan; and `conformance-run` itself exits non-zero on them. The eight modules that passed only when run individually after 2026-09-14 — the three FAPI PAR `request_uri` refusals, `oidcc-response-type-missing`, and the four long or mismatched `state` / `nonce` probes — are passes in that sweep. The 2026-09-11 run, the first full one, stays in the archive.",
+        text: "AXIAM is run against the OpenID Foundation's conformance suite — the OIDC Core Basic OP plan and the three FAPI 2.0 Security Profile (Final) variants (mTLS, self-signed, `private_key_jwt`). The latest full sweep, all four plans on 2026-09-18, was **165 modules with zero `FAILED`**: 150 `PASSED`, 10 `REVIEW`, 3 `WARNING`, 2 `SKIPPED`. That is a self-run against a working-tree build, **not a certification**, and the `REVIEW` and `WARNING` verdicts are published rather than counted as passes: the ten `REVIEW`s — four on the Basic plan, two on each FAPI plan — are screenshot-evidence modules a human must judge, and the screenshot each one uploaded is published beside the receipts and matched to its condition; there is one `WARNING` per FAPI plan; and `conformance-run` itself exits non-zero on them. The eight modules that passed only when run individually after 2026-09-14 — the three FAPI PAR `request_uri` refusals, `oidcc-response-type-missing`, and the four long or mismatched `state` / `nonce` probes — are passes in that sweep. The 2026-09-11 run stays in the archive.",
       },
       {
         type: "links",

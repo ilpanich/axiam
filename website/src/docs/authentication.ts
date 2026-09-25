@@ -134,7 +134,7 @@ export const AUTHENTICATION_PAGES: DocPage[] = [
       { type: "h", id: "lifecycle", text: "Account lifecycle" },
       {
         type: "p",
-        text: "Everything above assumes an account that already exists and is already verified. These five endpoints are what gets it there and back — and six of the nine account-lifecycle operations are unauthenticated on purpose, because a user who cannot log in is the entire audience for a password reset, and a user whose address is unverified may have no session at all.",
+        text: "Everything above assumes an account that already exists and is already verified. These six endpoints are what gets it there and back — and nine of the twelve account-lifecycle operations are unauthenticated on purpose, because a user who cannot log in is the entire audience for a password reset, and a user whose address is unverified may have no session at all.",
       },
       {
         type: "api",
@@ -209,9 +209,9 @@ await client.confirmPasswordReset({
       {
         type: "list",
         items: [
-          "**`SameSite=Lax` by necessity.** A relying party's redirect is a cross-site top-level navigation, on which a `Strict` cookie does not travel. `Lax` travels there and **not** inside a frame, so cross-site hidden-iframe login-status probing fails closed.",
-          "**`Secure` unconditionally.** Unlike the other three it does not follow the deployment's cookie-`Secure` flag: it is the only cookie AXIAM sends on a cross-site navigation, and the endpoint it is scoped to must be TLS-protected anyway. Loopback development is unaffected — browsers store `Secure` cookies set from `localhost`. What it refuses is a browser login hop over plaintext to a non-loopback host, and the fix there is TLS rather than a flag.",
-          "**`HttpOnly`, and stored only as a SHA-256**, the way a refresh token is. Its `Max-Age` is the session's lifetime, because the value names the session row.",
+          "`SameSite=Lax` **by necessity.** A relying party's redirect is a cross-site top-level navigation, on which a `Strict` cookie does not travel. `Lax` travels there and **not** inside a frame, so cross-site hidden-iframe login-status probing fails closed.",
+          "`Secure` **unconditionally.** Unlike the other three it does not follow the deployment's cookie-`Secure` flag: it is the only cookie AXIAM sends on a cross-site navigation, and the endpoint it is scoped to must be TLS-protected anyway. Loopback development is unaffected — browsers store `Secure` cookies set from `localhost`. What it refuses is a browser login hop over plaintext to a non-loopback host, and the fix there is TLS rather than a flag.",
+          "`HttpOnly`**, and stored only as a SHA-256**, the way a refresh token is. Its `Max-Age` is the session's lifetime, because the value names the session row.",
           "**A browser that sends it cross-site can obtain exactly one thing**: an authorization code, for a registered client, at an exactly-matched `redirect_uri`, bound to the relying party's own PKCE and `state`. It reaches no API endpoint.",
         ],
       },
@@ -242,7 +242,7 @@ await client.confirmPasswordReset({
       },
       {
         type: "warn",
-        text: "**Alert on `refused`** — nothing a conformant client does produces one: either a client is reusing a token it should have replaced, or a token has leaked. Check the `oauth2.refresh_token_replayed` audit rows for the client id, then revoke the family with a password reset or `POST /api/v1/auth/logout-all`. A `fapi_grace_retry` on a `fapi2` client is the mechanism working — a rate to watch, not a page.",
+        text: "**Alert on** `refused` — nothing a conformant client does produces one: either a client is reusing a token it should have replaced, or a token has leaked. Check the `oauth2.refresh_token_replayed` audit rows for the client id, then revoke the family with a password reset. A `fapi_grace_retry` on a `fapi2` client is the mechanism working — a rate to watch, not a page.",
       },
       { type: "h", id: "rate", text: "Rate limiting" },
       {
@@ -321,7 +321,7 @@ await client.confirmPasswordReset({
       },
       {
         type: "warn",
-        text: "**Under `optional`, a failed OPAQUE exchange means \"try the password path\", not \"wrong password\".** An account with no registration record is the *ordinary* case during a migration, and the server deliberately makes that indistinguishable from a wrong password — it must, or the exchange becomes an enrolment oracle. So `login/start` returns a `mode` field carrying the tenant's `opaque_mode`, and a client that sees a failed `KE2` under `optional` is required to retry over `POST /api/v1/auth/login` rather than treating the exchange as final. Without that retry, enabling `optional` is indistinguishable from enabling `required` with nobody enrolled — which is to say it locks out every user of the tenant.",
+        text: "**Under** `optional`**, a failed OPAQUE exchange means \"try the password path\", not \"wrong password\".** An account with no registration record is the *ordinary* case during a migration, and the server deliberately makes that indistinguishable from a wrong password — it must, or the exchange becomes an enrolment oracle. So `login/start` returns a `mode` field carrying the tenant's `opaque_mode`, and a client that sees a failed `KE2` under `optional` is required to retry over `POST /api/v1/auth/login` rather than treating the exchange as final. Without that retry, enabling `optional` is indistinguishable from enabling `required` with nobody enrolled — which is to say it locks out every user of the tenant.",
       },
       {
         type: "note",
@@ -348,7 +348,7 @@ await client.confirmPasswordReset({
         type: "list",
         items: [
           "**Build the key-stretching function from what the server named**, never from a local default. `login/start` returns the KSF and its parameters; using anything else produces an envelope that cannot be opened.",
-          "**A failure at `finish` is indistinguishable by design.** Wrong password, unknown account, and an account with no registration record all fail identically. What to do next comes from `mode` in the `login/start` response, and nothing else: under `required`, the attempt is over and no plaintext may be sent. Under `optional`, retry over `POST /api/v1/auth/login` — an account with no record is the ordinary case there, and a client that treats the failure as final locks out every user of a tenant mid-migration.",
+          "**A failure at** `finish` **is indistinguishable by design.** Wrong password, unknown account, and an account with no registration record all fail identically. What to do next comes from `mode` in the `login/start` response, and nothing else: under `required`, the attempt is over and no plaintext may be sent. Under `optional`, retry over `POST /api/v1/auth/login` — an account with no record is the ordinary case there, and a client that treats the failure as final locks out every user of a tenant mid-migration.",
         ],
       },
       {
@@ -655,7 +655,7 @@ elif result.mfa_setup_required:
       },
       {
         type: "warn",
-        text: "**If you reset an account before `1.0.0-beta15` because a key was lost or suspected compromised, the key still worked.** The reset cleared `mfa_enabled` and the TOTP secret and left every registered WebAuthn credential in place, so the forced TOTP setup turned the flag back on and the authenticator the account was reset over came back as a live second factor. Re-check any account you reset for that reason, and remove the credential explicitly if it is still listed.",
+        text: "**If you reset an account before** `1.0.0-beta15` **because a key was lost or suspected compromised, the key still worked.** The reset cleared `mfa_enabled` and the TOTP secret and left every registered WebAuthn credential in place, so the forced TOTP setup turned the flag back on and the authenticator the account was reset over came back as a live second factor. Re-check any account you reset for that reason, and remove the credential explicitly if it is still listed.",
       },
       {
         type: "p",
@@ -891,7 +891,7 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
           [
             "unknown_aaguid",
             "`null`",
-            "What to do about a model with no metadata entry. Unset resolves to `allow` under `none` and `indirect`, and to **`deny`** under `direct_required`, so the strictest mode fails closed. A read returns `effective_unknown_aaguid` alongside your stored intent.",
+            "What to do about a model with no metadata entry. Unset resolves to `allow` under `none` and `indirect`, and to `deny` under `direct_required`, so the strictest mode fails closed. A read returns `effective_unknown_aaguid` alongside your stored intent.",
           ],
         ],
       },
@@ -945,7 +945,7 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       { type: "h", id: "limits", text: "Rate limiting" },
       {
         type: "p",
-        text: "All six ceremony routes are throttled per source IP by `AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN`, which defaults to **10** and is deliberately the same allowance `/auth/login` gives passwords. Each route carries that budget independently, so a ceremony — one `start`, one `finish` — spends one request from each rather than two from one bucket, and the number is the ceremonies-per-minute figure rather than half of it. It is not sized from throughput: an assertion is a single signature check, cheap next to Argon2id. What needed bounding is that every `start` allocates challenge state, and that the username-bound `authenticate/start` would otherwise be a credential-enumeration oracle.",
+        text: "All eight ceremony routes are throttled per source IP by `AXIAM__RATE_LIMIT__WEBAUTHN_PER_MIN`, which defaults to **10** and is deliberately the same allowance `/auth/login` gives passwords. Each route carries that budget independently, so a ceremony — one `start`, one `finish` — spends one request from each rather than two from one bucket, and the number is the ceremonies-per-minute figure rather than half of it. It is not sized from throughput: an assertion is a single signature check, cheap next to Argon2id. What needed bounding is that every `start` allocates challenge state, and that the username-bound `authenticate/start` would otherwise be a credential-enumeration oracle.",
       },
       { type: "h", id: "users", text: "How users experience it" },
       {
@@ -1201,7 +1201,7 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       },
       {
         type: "note",
-        text: "**The bind is required for IoT device certificates as well**, not only for `Service` ones. A certificate identifies a key; a service account is what AXIAM authorizes, so a certificate bound to nothing identifies nobody and its login is refused with `401`. Documentation before 1.0.0-beta16 said devices skipped this step — see [PKI & certificates](#/docs/pki) for the order and the requirements the bind enforces.",
+        text: "**The bind is required for IoT device certificates as well**, not only for `Service` ones. A certificate identifies a key; a service account is what AXIAM authorizes, so a certificate bound to nothing identifies nobody and its login is refused with `401`. Documentation through 1.0.0-beta16 said devices skipped this step — see [PKI & certificates](#/docs/pki) for the order and the requirements the bind enforces.",
       },
       {
         type: "warn",
@@ -1215,7 +1215,7 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       {
         type: "code",
         caption: "client credentials",
-        code: "curl -X POST 'https://iam.acme.dev/oauth2/token?tenant_id=<uuid>' \\\n  -d grant_type=client_credentials \\\n  -d client_id=\"$SA_CLIENT_ID\" \\\n  -d client_secret=\"$SA_CLIENT_SECRET\" \\\n  -d scope='read:orders'",
+        code: "curl -X POST 'https://iam.acme.dev/oauth2/token?tenant_id=<uuid>' \\\n  -d grant_type=client_credentials \\\n  -d client_id=\"$SA_CLIENT_ID\" \\\n  -d client_secret=\"$SA_CLIENT_SECRET\"",
       },
       { type: "h", id: "mtls", text: "Certificates instead of secrets" },
       {
@@ -1233,7 +1233,7 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       { type: "h", id: "auth-methods", text: "How a client proves who it is" },
       {
         type: "p",
-        text: "Five client-authentication methods are registrable, and the choice is recorded on the client rather than negotiated per request — the registration decides the channel, so a credential sent by the wrong route is refused or ignored rather than accepted as a second way in.",
+        text: "Six client-authentication methods are registrable, and the choice is recorded on the client rather than negotiated per request — the registration decides the channel, so a credential sent by the wrong route is refused or ignored rather than accepted as a second way in.",
       },
       {
         type: "table",
@@ -1265,21 +1265,26 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
             "The same shared secret, in an `Authorization: Basic` header rather than the body. Accepted since `1.0.0-beta13` because the OpenID Foundation's Basic OP plan runs almost every module with it — and **not recommended**: it is the header intermediaries log. Refused on a `fapi2` client, exactly as `client_secret_post` is.",
             "The secret returned once at creation. AXIAM's own SDKs never send it.",
           ],
+          [
+            "`none`",
+            "No credential at all — a public client, one that cannot keep a secret. PKCE replaces what the credential was protecting. Registrable since `1.0.0-beta16`, and refused for `client_credentials`.",
+            "Nothing: no secret is minted. See [Public clients](#/docs/oauth2#public-clients).",
+          ],
         ],
       },
       {
         type: "code",
         caption: "registering a private_key_jwt client",
-        code: 'POST /api/v1/oauth2-clients\n{\n  "client_name": "orders-batch",\n  "token_endpoint_auth_method": "private_key_jwt",\n  "jwks_uri": "https://orders.acme.dev/.well-known/jwks.json",\n  "grant_types": ["client_credentials"]\n}',
+        code: 'POST /api/v1/oauth2-clients\n{\n  "name": "orders-batch",\n  "token_endpoint_auth_method": "private_key_jwt",\n  "jwks_uri": "https://orders.acme.dev/.well-known/jwks.json",\n  "redirect_uris": [],\n  "grant_types": ["client_credentials"],\n  "scopes": ["read:orders"]\n}',
       },
       {
         type: "note",
-        text: "`private_key_jwt` is the method to reach for behind a TLS-terminating load balancer you do not control — which is exactly why FAPI 2.0 permits it alongside the mTLS methods. There is deliberately **no** `none` method: every AXIAM client is confidential, and a public-client value would let an operator register a client whose authentication is silently skipped.",
+        text: "`private_key_jwt` is the method to reach for behind a TLS-terminating load balancer you do not control — which is exactly why FAPI 2.0 permits it alongside the mTLS methods. `none` is never a fallback: a client registered for any other method that presents no credential is still `invalid_client`, and a machine client stays confidential — a public registration is refused the `client_credentials` grant.",
       },
       { type: "h", id: "audience", text: "Machine tokens are a different audience" },
       {
         type: "warn",
-        text: "A service-account token carries `aud` of **`axiam:m2m`**, where a user token carries `axiam:user`. A route guard configured to expect the user audience will reject a perfectly valid machine token with a bare `401`, and nothing in that response says why — this is the single most confusing failure on this page. If a service account authenticates cleanly and is then refused by your own middleware, check the audience your verifier expects before checking anything else.",
+        text: "A service-account token carries `aud` of `axiam:m2m`, where a user token carries `axiam:user`. A route guard configured to expect the user audience will reject a perfectly valid machine token with a bare `401`, and nothing in that response says why — this is the single most confusing failure on this page. If a service account authenticates cleanly and is then refused by your own middleware, check the audience your verifier expects before checking anything else.",
       },
       {
         type: "p",

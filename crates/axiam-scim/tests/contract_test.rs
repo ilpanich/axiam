@@ -1348,7 +1348,9 @@ async fn group_put_replaces_membership_as_a_diff() {
         .collect();
     assert_eq!(
         members,
-        [stays.to_string(), joins.to_string()].into_iter().collect(),
+        [stays.to_string(), joins.to_string()]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
         "PUT membership must be exactly the requested set"
     );
 }

@@ -1,0 +1,102 @@
+[
+  {
+    "plan": "fapi2-security-profile-final-mtls",
+    "module": "fapi2-security-profile-final-ensure-unsigned-authorization-request-without-using-par-fails",
+    "testId": "hubHxFIqq4NIObo",
+    "condition": "If the server does not return an invalid_request error back to the client, it must show an error page saying the request is invalid as it is missing the request_object - upload a screenshot of the error page.",
+    "image": "fapi2-security-profile-final-mtls__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg",
+    "md5": "dc2918eeb2cce9fb05d1907defe9f99c",
+    "bytes": 23436,
+    "images_uploaded": 1
+  },
+  {
+    "plan": "fapi2-security-profile-final-mtls",
+    "module": "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds",
+    "testId": "H2OiSzJ5MolJxvg",
+    "condition": "The login page should be shown, if not upload a screenshot of the error page.",
+    "image": "fapi2-security-profile-final-mtls__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__3bfc90363d.jpg",
+    "md5": "3bfc90363df62c9171faa8c166887ce2",
+    "bytes": 25228,
+    "images_uploaded": 1
+  },
+  {
+    "plan": "fapi2-security-profile-final-private-key-jwt",
+    "module": "fapi2-security-profile-final-ensure-unsigned-authorization-request-without-using-par-fails",
+    "testId": "c0Rb6Ejn7RpJoRQ",
+    "condition": "If the server does not return an invalid_request error back to the client, it must show an error page saying the request is invalid as it is missing the request_object - upload a screenshot of the error page.",
+    "image": "fapi2-security-profile-final-private-key-jwt__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg",
+    "md5": "dc2918eeb2cce9fb05d1907defe9f99c",
+    "bytes": 23436,
+    "images_uploaded": 1
+  },
+  {
+    "plan": "fapi2-security-profile-final-private-key-jwt",
+    "module": "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds",
+    "testId": "xHPfInpD8AbPbaU",
+    "condition": "The login page should be shown, if not upload a screenshot of the error page.",
+    "image": "fapi2-security-profile-final-private-key-jwt__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__736d1520ee.jpg",
+    "md5": "736d1520ee2926d122ffe194958f614f",
+    "bytes": 25253,
+    "images_uploaded": 1
+  },
+  {
+    "plan": "fapi2-security-profile-final-self-signed",
+    "module": "fapi2-security-profile-final-ensure-unsigned-authorization-request-without-using-par-fails",
+    "testId": "73MqxLgoSS6V38N",
+    "condition": "If the server does not return an invalid_request error back to the client, it must show an error page saying the request is invalid as it is missing the request_object - upload a screenshot of the error page.",
+    "image": "fapi2-security-profile-final-self-signed__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg",
+    "md5": "dc2918eeb2cce9fb05d1907defe9f99c",
+    "bytes": 23436,
+    "images_uploaded": 1
+  },
+  {
+    "plan": "fapi2-security-profile-final-self-signed",
+    "module": "fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds",
+    "testId": "yhcCDPi0oikE4FC",
+    "condition": "The login page should be shown, if not upload a screenshot of the error page.",
+    "image": "fapi2-security-profile-final-self-signed__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__3bfc90363d.jpg",
+    "md5": "3bfc90363df62c9171faa8c166887ce2",
+    "bytes": 25228,
+    "images_uploaded": 1
+  },
+  {
+    "plan": "oidcc-basic-static",
+    "module": "oidcc-prompt-login",
+    "testId": "c0oSGcvXhBtjj9D",
+    "condition": "The server must ask the user to login for a second time; a screenshot of this must be uploaded.",
+    "image": "oidcc-basic-static__prompt-login__d4f4ba0105.jpg",
+    "md5": "d4f4ba0105fcf36f3bb20f6d3c4e8a4c",
+    "bytes": 25464,
+    "images_uploaded": 1
+  },
+  {
+    "plan": "oidcc-basic-static",
+    "module": "oidcc-max-age-1",
+    "testId": "RSzk3w8Kxro3IYC",
+    "condition": "The server must ask the user to login for a second time; a screenshot of this must be uploaded.",
+    "image": "oidcc-basic-static__max-age-1__f77ce8cb67.jpg",
+    "md5": "f77ce8cb67d440650c18f755c519d94d",
+    "bytes": 25479,
+    "images_uploaded": 1
+  },
+  {
+    "plan": "oidcc-basic-static",
+    "module": "oidcc-ensure-registered-redirect-uri",
+    "testId": "szkbM07X3ihnZoY",
+    "condition": "Show redirect URI error page",
+    "image": "oidcc-basic-static__ensure-registered-redirect-uri__f39dea4139.jpg",
+    "md5": "f39dea4139497ef7dbe408fe2972192c",
+    "bytes": 19749,
+    "images_uploaded": 1
+  },
+  {
+    "plan": "oidcc-basic-static",
+    "module": "oidcc-ensure-request-object-with-redirect-uri",
+    "testId": "d93KQKPrWLutU8W",
+    "condition": "Show redirect URI error page",
+    "image": "oidcc-basic-static__ensure-request-object-with-redirect-uri__f39dea4139.jpg",
+    "md5": "f39dea4139497ef7dbe408fe2972192c",
+    "bytes": 19749,
+    "images_uploaded": 1
+  }
+]

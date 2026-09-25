@@ -419,7 +419,31 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "The setup token is written to the server log exactly once, at `info` level. If your log pipeline drops `info`, buffers it, or you simply scroll past it, there is no way to re-read or re-mint it. Set `AXIAM_BOOTSTRAP_ADMIN_EMAIL` and restart instead — for anything unattended, prefer that gate in the first place.",
+        text: "The setup token is written to the server log exactly once, at `info` level, and only its SHA-256 hash is stored, so it cannot be read back. If your log pipeline drops `info`, buffers it, or you simply scroll past it, mint a fresh one with `axiam-server setup-token --remint` (below) — or set `AXIAM_BOOTSTRAP_ADMIN_EMAIL` and restart. For anything unattended, prefer that gate in the first place. Earlier releases of this page said a lost token could not be re-minted at all; that stopped being true in `1.0.0-beta17`.",
+      },
+      { type: "h", id: "lost-token", text: "I lost the setup token" },
+      {
+        type: "p",
+        text: "Since `1.0.0-beta17` a deployment that has **not** been bootstrapped yet can mint a replacement. The subcommand deletes the stored hash, mints a fresh token and prints the token and nothing else to stdout — never through the log, so it does not land in the container log a second time. Run it against the same configuration the server uses.",
+      },
+      {
+        type: "code",
+        code: "axiam-server setup-token --remint\n\n# in Kubernetes\nkubectl -n axiam exec deploy/axiam-server -- axiam-server setup-token --remint",
+      },
+      {
+        type: "list",
+        items: [
+          "**It refuses, with exit code `2` and no write at all, on any deployment that has been bootstrapped** — one with at least one `user` row, or one where a setup token has already been redeemed. That gate is the whole security argument: before bootstrap there is no administrator to take over, and after it there is an authenticated way to create accounts, so re-minting is never the answer. A refused call leaves the existing token working.",
+          "Exit `0` means a token was minted and printed; `1` means the command could not tell — bad configuration, or an unreachable datastore.",
+          "There is deliberately no `--print`: the plaintext is not stored, and storing it so that it could be printed would be the wrong fix.",
+          "Bootstrapped already, and lost the admin credentials too? That is a password-reset problem, not a bootstrap one: use `POST /api/v1/auth/password-reset/request`, or restore from a backup.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          { label: "I lost the setup token", href: "https://github.com/ilpanich/axiam/blob/main/docs/admin/README.md#i-lost-the-setup-token", note: "the administration guide's section, with the gate and what to do when it refuses" },
+        ],
       },
       {
         type: "note",

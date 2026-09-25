@@ -785,6 +785,22 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         text: "The certificate is resolved per TLS handshake from a slot the server can replace while it is listening, so a renewal takes effect on the next connection with no restart and no dropped request. Certificate renewal is the reason the reload exists: rustls otherwise binds the certificate for the process's life.",
       },
       {
+        type: "p",
+        text: "The container healthcheck, `axiam-server healthcheck`, follows the listener: it probes `https` when `AXIAM__SERVER__TLS__ENABLED` is true *and* a certificate path is set, `http` otherwise, on `AXIAM__SERVER__PORT`. Since `1.0.0-beta17` it verifies a TLS listener rather than failing against it, and two variables adjust it — **note the single underscore**: both are read straight from the environment, not through the configuration layer.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          ["AXIAM_HEALTHCHECK_URL", "Probe this URL instead of the derived default `https://127.0.0.1:<port>/health`. Wins outright — use it when the certificate names a DNS host rather than covering `127.0.0.1`.", "https://iam.acme.dev:8090/health"],
+          ["AXIAM_HEALTHCHECK_CA_FILE", "PEM bundle added as trust anchors for the probe. Unset, the probe trusts the server's own `AXIAM__SERVER__TLS__CERT_PATH` chain — enough for a self-signed certificate or a `fullchain.pem`, not for a CA-issued leaf stored without its issuer.", "/etc/axiam/tls/ca.pem"],
+        ],
+      },
+      {
+        type: "note",
+        text: "There is no switch that skips verification, deliberately: a probe that accepted any certificate would report healthy for anything listening on the port. See the deployment guide's *Container healthcheck* section.",
+      },
+      {
         type: "note",
         text: "The AMQP URL is assembled from the broker's own `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` into `AXIAM__AMQP__URL` at the deployment layer. See Docker & Kubernetes for how the shipped compose file and manifests wire these together.",
       },

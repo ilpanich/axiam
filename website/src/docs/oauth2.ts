@@ -5,11 +5,13 @@ import { DOCS_VERIFIED_RELEASE } from "../version";
  * "OAuth2 & OIDC" — the authorization-server surface.
  *
  * The overview page is the one to keep honest about tenant selection: discovery
- * is deployment-wide (one issuer), and the tenant is named by the `tenant_id`
- * query parameter on the token-family endpoints or derived from `client_id` on
- * `/authorize`. An earlier revision of these docs described a per-tenant,
- * path-based discovery document; the server rejects path-based issuers, so that
- * text described something that could not work.
+ * is deployment-wide (one configured issuer), and the tenant is named by the
+ * `tenant_id` query parameter on the token-family endpoints or derived from
+ * `client_id` on `/authorize`. An earlier revision of these docs described a per-tenant,
+ * path-based discovery document; the server rejects a path-based *configured*
+ * issuer, so that text described something that could not work. The opt-in
+ * per-tenant path issuers of `1.0.0-beta16` are a different thing: derived from
+ * the root issuer as `{root}/t/{tenant_id}`, never configured.
  */
 export const OAUTH2_PAGES: DocPage[] = [
   {
@@ -30,7 +32,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           [
             "Authorization Code + PKCE",
             "Browser and mobile applications.",
-            "PKCE is the expected shape for public clients; pushed authorization requests (PAR) can be required per client.",
+            "PKCE is required for a public client, one registered with no secret at all — see *Public clients* below. Pushed authorization requests (PAR) can be required per client.",
           ],
           [
             "Client Credentials",
@@ -59,6 +61,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "api",
         endpoints: [
           { method: "GET", path: "/.well-known/openid-configuration", summary: "OIDC discovery document.", public: true },
+          { method: "GET", path: "/.well-known/oauth-authorization-server", summary: "The same document at the RFC 8414 path — an alias, not a second implementation. Always on.", public: true },
           { method: "GET", path: "/oauth2/jwks", summary: "Signing keys, cached with an ETag and Cache-Control.", public: true },
           { method: "GET", path: "/oauth2/authorize", summary: "Authorization endpoint. Tenant is derived from client_id.", public: true },
           { method: "POST", path: "/oauth2/par", summary: "Pushed authorization request (RFC 9126).", public: true },
@@ -69,6 +72,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           { method: "POST", path: "/oauth2/userinfo", summary: "The same claims, with the token in an Authorization header or (POST only) an access_token form field.", public: true },
           { method: "GET", path: "/oauth2/revocations", summary: "Hashed ids of recently revoked sessions. Optional, off by default.", public: true },
           { method: "POST", path: "/oauth2/device_authorization", summary: "Begin a device grant (RFC 8628).", public: true },
+          { method: "POST", path: "/oauth2/register", summary: "Dynamic client registration (RFC 7591). Off by default on every tenant: `403` until enabled.", public: true },
           { method: "GET", path: "/oauth2/end_session", summary: "RP-initiated logout.", public: true },
         ],
       },
@@ -113,7 +117,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "There is **one issuer**, served at `/.well-known/openid-configuration`, and `AXIAM__AUTH__OAUTH2_ISSUER_URL` must be an origin — a path-based issuer is rejected at startup. Since `1.0.0-beta13` the document can *describe* a tenant: `GET /.well-known/openid-configuration?tenant_id=<uuid>` returns the same document with the tenant carried in the endpoint URLs that need one. `issuer` is never aliased and never changes, so `iss` validation is unaffected. An off-the-shelf OIDC client that cannot add a `tenant_id` query parameter to the token endpoint can therefore be pointed at the tenant-scoped document instead of needing a shim.",
+        text: "There is **one configured issuer**, served at `/.well-known/openid-configuration` — and, since `1.0.0-beta16`, at the RFC 8414 path `/.well-known/oauth-authorization-server` too — and `AXIAM__AUTH__OAUTH2_ISSUER_URL` must be an origin — a path-based issuer is rejected at startup. The opt-in per-tenant path issuers described below are derived from that origin and never configured. Since `1.0.0-beta13` the document can *describe* a tenant: `GET /.well-known/openid-configuration?tenant_id=<uuid>` returns the same document with the tenant carried in the endpoint URLs that need one. `issuer` is never aliased and never changes, so `iss` validation is unaffected. An off-the-shelf OIDC client that cannot add a `tenant_id` query parameter to the token endpoint can therefore be pointed at the tenant-scoped document instead of needing a shim.",
       },
       {
         type: "list",
@@ -202,14 +206,14 @@ export const OAUTH2_PAGES: DocPage[] = [
         rows: [
           ["`sub`", "The subject's id.", "Always."],
           ["`tenant_id`, `org_id`", "The tenant and organization the token is scoped to.", "Always — there is no default tenant."],
-          ["`iss`", "The issuing origin.", "Always."],
+          ["`iss`", "The issuer: the root origin — or `{root}/t/{tenant_id}` for a token minted under a per-tenant path issuer.", "Always."],
           ["`iat`, `exp`", "Issued-at and expiry, as Unix timestamps.", "Always."],
           [
             "`jti`",
             "Token id. For a user flow this is the issuing session's id, which is what makes session revocation able to find it; for machine-to-machine it is a random UUID.",
             "Always.",
           ],
-          ["`aud`", "`axiam:user` or `axiam:m2m`.", "Always on a current token."],
+          ["`aud`", "`axiam:user` or `axiam:m2m` — or, when the grant named an RFC 8707 `resource`, that resource's URI, which AXIAM's own endpoints refuse.", "Always on a current token."],
           ["`scope`", "Space-separated OAuth2 scopes.", "When non-empty scopes were granted."],
           ["`sub_kind`", "Whether the subject is a user, a service account or an OAuth2 client. Informational — it does not affect validation or authorization.", "Always."],
           [
@@ -366,6 +370,8 @@ export const OAUTH2_PAGES: DocPage[] = [
           { method: "GET", path: "/api/v1/oauth2-clients/{id}", summary: "Read one." },
           { method: "PUT", path: "/api/v1/oauth2-clients/{id}", summary: "Update it." },
           { method: "DELETE", path: "/api/v1/oauth2-clients/{id}", summary: "Delete it." },
+          { method: "POST", path: "/api/v1/oauth2-clients/registration-tokens", summary: "Mint a single-use initial access token for dynamic registration. Shown once." },
+          { method: "GET", path: "/api/v1/oauth2-clients/registration-tokens", summary: "List them — metadata only; the handle is not stored." },
         ],
       },
       {
@@ -377,10 +383,162 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "note",
         text: "The SDKs ship OIDC relying-party helpers — the redirect, the PKCE verifier, the callback exchange and the token store — so integrating a web application is not a matter of hand-rolling the flow. See [Client SDKs](#/docs/sdks).",
       },
+      { type: "h", id: "public-clients", text: "Public clients" },
+      {
+        type: "p",
+        text: "Since `1.0.0-beta16` a client that cannot keep a secret — a desktop or command-line tool such as Claude Code, VS Code or the MCP Inspector, a single-page application, a mobile app — can be registered with **no credential at all**: `token_endpoint_auth_method: \"none\"` (RFC 6749 §2.1). A public registration is not a way to skip secret management; it removes a credential, and PKCE is what replaces what that credential was protecting. Anything that runs on a server you control stays a confidential client.",
+      },
+      {
+        type: "code",
+        caption: "a desktop client",
+        code: "POST /api/v1/oauth2-clients\n{\n  \"name\": \"claude-code\",\n  \"redirect_uris\": [\"http://localhost/callback\"],\n  \"grant_types\": [\"authorization_code\", \"refresh_token\"],\n  \"scopes\": [\"openid\", \"profile\"],\n  \"token_endpoint_auth_method\": \"none\"\n}",
+      },
+      {
+        type: "list",
+        items: [
+          "**No secret is minted**, and the creation response carries **no `client_secret` member** — not an empty one, which would read as a secret that happens to be empty. The admin UI offers the method as *Public client (no secret)* and skips the one-time secret dialog.",
+          "**PKCE is required at both ends** — `/oauth2/authorize` refuses a request with no `code_challenge`, and `/oauth2/token` refuses to redeem a code that carries no stored challenge.",
+          "**What a public registration is refused**, with a `400` naming the contradiction: the `client_credentials` and token-exchange grants, the `fapi2` profile, and any mTLS or `private_key_jwt` credential. At request time a public client that presents a credential anyway is `invalid_client`, introspection is refused (revocation is not), and so is the UMA ticket grant.",
+          "**A confidential client never becomes public by omission.** One registered for a secret that sends none is still `invalid_client`, and `token_endpoint_auth_method` cannot be moved across the public/confidential line by an update.",
+          "`none` is advertised last in `token_endpoint_auth_methods_supported` — a statement about the deployment, not about any client.",
+        ],
+      },
+      { type: "h", id: "loopback", text: "Loopback redirect URIs" },
+      {
+        type: "p",
+        text: "A desktop client asks the operating system for a free port at launch, so the port cannot be known when the client is registered. RFC 8252 §7.3 requires the authorization server to accept any port on a loopback redirect, and AXIAM does, for a **registered** URI whose scheme is `http` and whose host is `127.0.0.1`, `[::1]` or `localhost`. The allowance widens the port and nothing else.",
+      },
+      {
+        type: "table",
+        headers: ["Registered", "Presented", "Result"],
+        rows: [
+          ["`http://127.0.0.1/callback`", "`http://127.0.0.1:51703/callback`", "accepted"],
+          ["`http://127.0.0.1:8080/callback`", "`http://127.0.0.1:51703/callback`", "accepted"],
+          ["`http://127.0.0.1/callback`", "`http://localhost:51703/callback`", "**refused** — each loopback host matches only itself"],
+          ["`http://127.0.0.1/callback`", "`http://127.0.0.1:51703/callback/`", "**refused** — the path must be identical"],
+          ["`https://localhost/callback`", "`https://localhost:8443/callback`", "**refused** — `https` keeps exact matching"],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**The token request is still exact.** The code stores the `redirect_uri` as presented, so the redemption must repeat it: a client that authorized on port 51703 cannot redeem on 51704.",
+          "**Errors reach the ephemeral port too.** A request refused before the registration is looked up — a missing `response_type`, a dead `request_uri` — is redirected to the presented URI on exactly the terms above, so a client waiting on its port reads the error instead of watching a page it cannot see. Those six refusal paths had compared the URI exactly while the success path applied the port rule; the T21.8 security review found it, and it was fixed before `1.0.0-beta16` shipped ([T-280](#/security/diagram/2/T-280), closed).",
+          "**`http://[::1]/…` can be registered.** The validator had compared the host without its brackets and so refused the IPv6 loopback it named as allowed; it is one host, reachable only from the machine the user is sitting at, and a routable IPv6 literal over `http` is still refused.",
+          "`localhost` and `127.0.0.1` are **not** interchangeable, and the two clients this exists for disagree — VS Code registers `http://127.0.0.1/callback`, Claude Code `http://localhost/callback`. Register what your client actually uses.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          { label: "Public clients and loopback redirects", href: "https://github.com/ilpanich/axiam/blob/main/docs/admin/public-clients.md", note: "when to register one, every refusal, a worked desktop-client example" },
+        ],
+      },
+      { type: "h", id: "resource-indicators", text: "Resource indicators — a token for someone else" },
+      {
+        type: "p",
+        text: "By default an AXIAM access token is addressed at AXIAM: `aud` is `axiam:user` or `axiam:m2m`. That is the wrong answer the moment the token is going to an MCP server, a partner API or one service in a mesh. Since `1.0.0-beta16` a client can send `resource=<absolute URI>` (RFC 8707) on `/oauth2/authorize`, `/oauth2/par`, `/oauth2/device_authorization` or `/oauth2/token`, and the token it receives carries that URI as its `aud` — so the resource server can check that the token in its hand was minted for **it**. A request that sends no `resource` gets exactly the token it always got.",
+      },
+      {
+        type: "list",
+        items: [
+          "**A client names only what its registration lists** in `allowed_resources` — empty on every client that existed before, so such a client may name nothing. Entries are absolute URIs without a fragment, compared after RFC 3986 §6.2.2 normalisation and **never by prefix**. An unregistered or malformed value is `invalid_target`, and so is a second value: an AXIAM token carries one `aud`.",
+          "**A grant's audience is decided when the grant is made.** The resource travels onto the code, the device grant and the refresh token, and each rotation copies it forward, so a refresh re-mints the same audience. Repeating it or omitting it is fine; naming a different one — or naming one at all on a grant issued without one — is `invalid_target`. A token cannot be widened by refreshing it.",
+          "**A resource-bound token is not a token for AXIAM.** AXIAM's own REST endpoints answer it `401` and gRPC `UNAUTHENTICATED`. A client that needs both needs two tokens, from two authorizations.",
+          "**Introspection reports `aud`** (RFC 7662 §2.2), and describes a resource-bound token rather than calling it inactive — an introspecting resource server's whole audience check is *is this token for me*.",
+          "**The `axiam` scheme is reserved.** `axiam:user` and `axiam:m2m` are well-formed absolute URIs, so they could once be registered and requested as resources — letting `client_credentials` mint a token with the *user* audience. Registration and every grant now answer `invalid_target` for any `axiam:` value (MCP-02, closed in `1.0.0-beta16` before release).",
+          "Sender-constraining is orthogonal: a token can carry both a `cnf` confirmation and a third-party `aud`. For a token that leaves AXIAM's estate that is the recommended posture.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          { label: "Resource indicators (RFC 8707)", href: "https://github.com/ilpanich/axiam/blob/main/docs/api/resource-indicators.md", note: "the parameter on each grant, the comparison rules, the `invalid_target` table" },
+        ],
+      },
+      { type: "h", id: "dynamic-registration", text: "Dynamic client registration" },
+      {
+        type: "p",
+        text: "An MCP client handed a URL and nothing else creates its own `client_id` at `POST /oauth2/register?tenant_id=<uuid>` (RFC 7591, since `1.0.0-beta16`). It is the first endpoint in AXIAM that writes for a caller holding no credential, so it is **off by default on every tenant**: the endpoint answers `403` shaped like every other refusal, and the tenant's discovery document carries no `registration_endpoint`. The tenant policy `dynamic_registration` selects the mode.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Mode", "Who may register", "Use it when"],
+        rows: [
+          ["`disabled` (default)", "Nobody — `403` for every request.", "Always, unless you have decided otherwise."],
+          ["`initial_access_token`", "A caller presenting a single-use token an administrator minted.", "You want self-registration, but not from strangers."],
+          ["`anonymous`", "Anybody who can reach the endpoint.", "You front MCP servers for end users whose desktop clients register themselves."],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**Initial access tokens** are minted and listed at `/api/v1/oauth2-clients/registration-tokens` (`oauth2_clients:create` / `oauth2_clients:list`), single-use — also under concurrent redemption — TTL-bounded, shown once, and refused for a tenant not in that mode. Its quota cannot be spent by somebody with no credential, which is the reason to prefer this mode that matters most.",
+          "**A self-registered client cannot choose its own audiences** (D3): it inherits the tenant's `external_client_allowed_resources` verbatim, and AXIAM refuses to store a policy that enables `anonymous` registration while that list is empty — an empty list would leave a stranger's client able to obtain the `axiam:user` tokens AXIAM's own APIs accept.",
+          "**It always gets a consent screen** (D4): the first authorization per end user goes through the consent hop whatever scopes it asked for, recorded as an ordinary OIDC-scope consent the user can withdraw from the account page.",
+          "**What it may say is narrowed.** Redirect URIs pass the admin API's validator and then the tenant's `dcr_allowed_redirect_hosts` globs (the loopback hosts are always allowed); grants are limited to the authorization code and refresh; scopes to `dcr_allowed_scopes`, which may not contain `address` or `phone`; the profile is forced to `standard`; a `software_statement` is refused.",
+          "**Every client records its provenance** in `managed_by`: `admin` for one an administrator created, `dcr` for a self-registered one, `cimd` for one resolved from a metadata document. It is set by the creating code path and absent from the update API. A client that is not `admin` is never on the FAPI profile, is always consent-gated, and is the only kind the sweeper touches.",
+          "**Abuse controls**: a per-IP limit of 5 a minute (`AXIAM__RATE_LIMIT__DCR_PER_MIN`, the smallest in AXIAM), a per-tenant ceiling (`dcr_max_clients`, default 20; the next registration is `403`), a sweep of self-registered clients unused for `dcr_unused_client_ttl_days` (default 30; `0` disables it; reported at `/health/jobs` as `dcr_unused_clients`), and an audit event for every attempt, successful or not.",
+          "**A registration nobody authorized is reclaimed in an hour** in a tenant whose effective mode is `anonymous` — whatever the TTL says, and even with the TTL at `0`. In `anonymous` mode the ceiling is also an availability budget a stranger could fill in about four minutes; the T21.8 security review found it held for thirty days, and the hour closed that before release ([T-272](#/security/diagram/2/T-272)). A per-address share of the quota is not implemented — the accepted residual.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          { label: "Dynamic client registration", href: "https://github.com/ilpanich/axiam/blob/main/docs/admin/dynamic-client-registration.md", note: "every policy field, the error codes, the sweeper and its second clock, MCP Inspector translated from Keycloak's guide" },
+        ],
+      },
+      { type: "h", id: "client-id-metadata", text: "Client ID metadata documents" },
+      {
+        type: "p",
+        text: "Since `1.0.0-beta16` a tenant can accept a `client_id` that is an `https` URL, fetch the JSON document published there, and treat it as the client's registration — which lets a desktop MCP client be the same client at every deployment it talks to, with nothing created in advance. It is **off by default** (`cimd.enabled: false`): a URL-shaped `client_id` is then an unknown client, and nothing is ever fetched. A tenant that enables it advertises `client_id_metadata_document_supported` in its discovery document.",
+      },
+      {
+        type: "list",
+        items: [
+          "**You must name your audiences first.** Enabling it is refused while `external_client_allowed_resources` is empty — the same D3 interlock as anonymous registration.",
+          "**You must name your publishers first.** Enabling it is refused while `cimd.trusted_client_id_domains` is empty, because the fetch is triggered by an unauthenticated request that names the URL. The list refuses `*` and a wildcard over a whole top-level domain (`*.com`), which mean the same thing as an empty one; `*.github.io` still passes, because trusting shared hosting is an operator's decision.",
+          "**The fetch goes through AXIAM's shared SSRF guard** — resolve, canonicalise, validate, pin, no automatic redirects — with a streaming size cap, a content-type check and a timeout, and only to a host on the trusted list, checked before anything is fetched.",
+          "**What the document may not decide**: its audiences are the tenant's, its profile is forced to `standard`, its provenance to `managed_by: cimd`, consent is forced on, and it can hold no shared secret. A document published at a `client_id` an administrator already registered is ignored entirely.",
+          "**The rows it creates are bounded and swept.** They count against `dcr_max_clients` separately from self-registered clients, checked *before* the fetch so a tenant at its ceiling is not an outbound amplifier either; they are swept once nobody has presented the document for `dcr_unused_client_ttl_days` (reported as `cimd_unused_clients`), and re-materialise on the next request if the document is still published.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          { label: "Client ID metadata documents", href: "https://github.com/ilpanich/axiam/blob/main/docs/admin/client-id-metadata-documents.md", note: "the URL and document rules, every policy field, the two profiles, what it costs you" },
+        ],
+      },
+      { type: "h", id: "tenant-issuers", text: "Per-tenant issuers" },
+      {
+        type: "p",
+        text: "An issuer may not carry a query string (RFC 8414 §2), so the `?tenant_id=` form cannot be published as one tenant's issuer — and an MCP client is handed exactly one thing, the `authorization_servers` entry of the MCP server's RFC 9728 document, which is an issuer. Since `1.0.0-beta16`, `AXIAM__AUTH__TENANT_ISSUER_PATHS=true` gives each tenant a second, query-free issuer, `{root}/t/{tenant_id}`, derived from the root and never configured. With the flag unset — the default — nothing is mounted and every existing document is byte-identical.",
+      },
+      {
+        type: "code",
+        caption: "the three discovery forms, one document",
+        code: "# RFC 8414 §3.1 — insert the well-known segment after the host\ncurl -s https://iam.acme.dev/.well-known/oauth-authorization-server/t/<tenant-id>\n\n# the same insertion at the OIDC discovery path\ncurl -s https://iam.acme.dev/.well-known/openid-configuration/t/<tenant-id>\n\n# OpenID Connect Discovery 1.0 §4 — append to the issuer\ncurl -s https://iam.acme.dev/t/<tenant-id>/.well-known/openid-configuration",
+      },
+      {
+        type: "list",
+        items: [
+          "**The same handlers, re-based.** Every OAuth2 endpoint is served under `/t/{tenant_id}` as well as at the root, and the `iss` of everything minted there is the tenant issuer — the access token, the ID token, the RFC 9207 authorization-response parameter and the Back-Channel Logout token.",
+          "**One key set signs every tenant**, which RFC 8414 permits, so the signature does not say which tenant a token is for. Two checks do: a token whose `iss` names a different tenant from its `tenant_id` claim is refused, and a token presented under `/t/{B}` that was minted for tenant A is refused with `401` — the same answer a request with no credential gets.",
+          "**A `tenant_id` query parameter on a tenant path is `invalid_request`**, agreeing or not: two tenant selectors on one request is the shape a confused-deputy bug takes.",
+          "Turn it on when **one** AXIAM fronts MCP servers for **more than one** tenant. A single-tenant deployment needs none of it: `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` makes the bare document name its one tenant.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          { label: "The issuer, and per-tenant path issuers", href: "https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md", note: "the deployment guide's issuer section — the boot checks, the discovery forms, what an MCP server puts in `authorization_servers`" },
+        ],
+      },
       { type: "h", id: "mcp-servers", text: "MCP servers" },
       {
         type: "p",
-        text: "AXIAM can front a Model Context Protocol server as its OAuth 2.0 authorization server — public clients with PKCE for desktop MCP clients (Claude Code, VS Code, MCP Inspector), RFC 8707 resource indicators so a token is addressed at the MCP server rather than at AXIAM, RFC 7591 dynamic client registration and Client ID Metadata Documents for clients nobody registered in advance, and an opt-in per-tenant issuer for a deployment fronting more than one tenant's MCP servers. Publishing the RFC 9728 protected-resource document and checking `aud` is the MCP server's own job — built with the SDK's §28 resource-server helpers — not anything AXIAM the authorization server exposes.",
+        text: "AXIAM can front a Model Context Protocol server as its OAuth 2.0 authorization server — public clients with PKCE for desktop MCP clients (Claude Code, VS Code, MCP Inspector), RFC 8707 resource indicators so a token is addressed at the MCP server rather than at AXIAM, RFC 7591 dynamic client registration and Client ID Metadata Documents for clients nobody registered in advance, and an opt-in per-tenant issuer for a deployment fronting more than one tenant's MCP servers — each described in its section above. Publishing the RFC 9728 protected-resource document and checking `aud` is the MCP server's own job — built with the SDK's §28 resource-server helpers — not anything AXIAM the authorization server exposes.",
       },
       {
         type: "links",
@@ -494,7 +652,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           ["actor_token", "no", "Present ⇒ **delegation**. Absent ⇒ **impersonation**."],
           ["actor_token_type", "with actor_token", "Same value as above."],
           ["scope", "no", "Must be a subset of the subject's scopes. Defaults to all of them."],
-          ["audience / resource", "no", "Narrows who the issued token is for."],
+          ["audience / resource", "no", "Narrows who the issued token is for. Since `1.0.0-beta16` the target must be one of AXIAM's own audiences or appear in the client's `allowed_resources`; a target registered only as one of its `redirect_uris` is still accepted for a deprecation period, with a warning naming the client and the target — move it to `allowed_resources`."],
         ],
       },
       { type: "h", id: "modes", text: "Delegation vs impersonation" },
@@ -511,7 +669,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**Scopes** — the requested set must be a subset of the subject token's. Asking for more is refused, not silently trimmed.",
-          "**Audience** — an issued token can be bound to one downstream service, so a leak at that service does not yield a token usable everywhere.",
+          "**Audience** — an issued token can be bound to one downstream service, so a leak at that service does not yield a token usable everywhere. The allow-list is the same `allowed_resources` field [resource indicators](#/docs/oauth2) read — see [`docs/api/token-exchange.md`](https://github.com/ilpanich/axiam/blob/main/docs/api/token-exchange.md#audience).",
           "**Lifetime** — the issued token never outlives the subject token.",
           "**Authorization** — the subject's own grants still apply. Exchange does not confer authority; it repackages it.",
         ],
@@ -727,7 +885,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       { type: "h", id: "conformance", text: "Conformance" },
       {
         type: "p",
-        text: "AXIAM is run against the OpenID Foundation's conformance suite — the OIDC Core Basic OP plan and the three FAPI 2.0 Security Profile (Final) variants (mTLS, self-signed, `private_key_jwt`). The 2026-09-11 run was **165 modules with zero `FAILED`**. That is a self-run against a working-tree build, **not a certification**, and the `REVIEW` and `WARNING` verdicts are published rather than counted as passes: four `REVIEW`s on the Basic plan and ten on each FAPI plan are screenshot-evidence modules a human must judge, one `WARNING` per FAPI plan is a module that now runs where it used to be skipped, and `conformance-run` itself exits non-zero on them. Since 2026-09-14 eight further modules pass **when run individually** — the three FAPI PAR `request_uri` refusals, `oidcc-response-type-missing`, and the four long or mismatched `state` / `nonce` probes. That is a per-module measurement, not a sweep: no plan has been re-run as a plan, and the committed receipts are still the 2026-09-11 ones.",
+        text: "AXIAM is run against the OpenID Foundation's conformance suite — the OIDC Core Basic OP plan and the three FAPI 2.0 Security Profile (Final) variants (mTLS, self-signed, `private_key_jwt`). The latest full sweep, all four plans on 2026-09-18, was **165 modules with zero `FAILED`**: 150 `PASSED`, 10 `REVIEW`, 3 `WARNING`, 2 `SKIPPED`. That is a self-run against a working-tree build, **not a certification**, and the `REVIEW` and `WARNING` verdicts are published rather than counted as passes: the ten `REVIEW`s — four on the Basic plan, two on each FAPI plan — are screenshot-evidence modules a human must judge, and the screenshot each one uploaded is published beside the receipts and matched to its condition; there is one `WARNING` per FAPI plan; and `conformance-run` itself exits non-zero on them. The eight modules that passed only when run individually after 2026-09-14 — the three FAPI PAR `request_uri` refusals, `oidcc-response-type-missing`, and the four long or mismatched `state` / `nonce` probes — are passes in that sweep. The 2026-09-11 run, the first full one, stays in the archive.",
       },
       {
         type: "links",

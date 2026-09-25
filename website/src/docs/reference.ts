@@ -167,17 +167,21 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "table",
-        headers: ["Plan (2026-09-11)", "Modules", "PASSED", "REVIEW", "SKIPPED", "WARNING", "FAILED"],
+        headers: ["Plan (2026-09-18)", "Modules", "PASSED", "REVIEW", "SKIPPED", "WARNING", "FAILED"],
         rows: [
           ["`oidcc-basic-static`", "35", "30", "4", "1", "0", "0"],
-          ["`fapi2-security-profile-final-mtls`", "37", "26", "10", "0", "1", "0"],
-          ["`fapi2-security-profile-final-self-signed`", "37", "26", "10", "0", "1", "0"],
-          ["`fapi2-security-profile-final-private-key-jwt`", "56", "44", "10", "1", "1", "0"],
+          ["`fapi2-security-profile-final-mtls`", "37", "34", "2", "0", "1", "0"],
+          ["`fapi2-security-profile-final-self-signed`", "37", "34", "2", "0", "1", "0"],
+          ["`fapi2-security-profile-final-private-key-jwt`", "56", "52", "2", "1", "1", "0"],
         ],
       },
       {
         type: "warn",
         text: "**165 modules, zero `FAILED` — and that is not a certification.** It is a self-run against a working-tree build. The `REVIEW` and `WARNING` verdicts are published rather than counted as passes: a `REVIEW` is a screenshot-evidence module the suite cannot decide automatically and a human must judge, and the one `WARNING` per FAPI plan is a module that now runs where it used to be skipped. `conformance-run` itself exits non-zero on them. No submission has been made.",
+      },
+      {
+        type: "p",
+        text: `The table is the 2026-09-18 sweep — the latest full run of all four plans, against a build carrying the \`1.0.0-beta16\` MCP authorization surfaces. Each of the ten \`REVIEW\` modules uploaded one screenshot, and all ten are [published and matched to the condition they answer](${GH_BLOB}/docs/conformance/evidence/2026-09-18/README.md). The eight modules that passed only when run individually after 2026-09-14 are passes in this sweep. The 2026-09-11 run, the first full one, stands in the archive beside it.`,
       },
       {
         type: "p",
@@ -317,7 +321,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       { type: "h", id: "recent", text: "What moved in contract 1.40–1.52" },
       {
         type: "p",
-        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been thirteen amendments since 1.39. Six of them changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently, and each SDK's C-12 fix PR brings that SDK to it. A follow-up PR per SDK then re-vendors the contract.`,
+        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been thirteen amendments since 1.39. Six of them changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently; each SDK's C-12 fix PR brought that SDK to it, and a follow-up PR per SDK re-vendored the contract. All of them are merged, and the drift check reports every repository at 1.52.`,
       },
       {
         type: "table",
@@ -386,7 +390,7 @@ export const REFERENCE_PAGES: DocPage[] = [
           ],
           [
             "1.52",
-            `The C-12 cross-SDK review of the eleven 1.51 ports, recorded in [§27.14](${contractLink("27.14")}) with no open row. Six clarifications, no wire change. [§10.1](${contractLink("10.1")}): every public entry point that turns a token into an identity is a rule 9 guard. [§17.1](${contractLink("17.1")}): the acting tenant is part of the decision-memo key. [§27.13](${contractLink("27.13")}): a \`SubjectAltName\` with neither branch or both is refused client-side. [§6.1](${contractLink("6.1")}) rule 11 covers the device credential's lifecycle: it is used for every request, held until replaced, and never refreshed. [§5.2](${contractLink("5.2")}) says where the acting-tenant header goes, which responses set the gate, and that tenant ids compare as UUIDs. [§27.6.1](${contractLink("27.6.1")}) covers manifest bindings: stated values, rebind outcomes as data, and \`plan\` reporting an Update.`,
+            `The C-12 cross-SDK review of the eleven 1.51 ports, recorded in [§27.14](${contractLink("27.14")}) with no open row. Six clarifications, no wire change. [§10.1](${contractLink("10.1")}): every public entry point that turns a token into an identity is a rule 9 guard. [§17.1](${contractLink("17.1")}): the acting tenant is part of the decision-memo key. [§27.13](${contractLink("27.13")}): a \`SubjectAltName\` with neither branch or both is refused client-side. [§6.1](${contractLink("6.1")}) rule 11 covers the device credential's lifecycle: it is used for every request, held until replaced, and never refreshed. [§5.2](${contractLink("5.2")}) says where the acting-tenant header goes, which responses set the gate, and that tenant ids compare as UUIDs. [§27.6.1](${contractLink("27.6.1")}) covers manifest bindings: stated values, rebind outcomes as data, and \`plan\` reporting an Update. Every SDK had at least one defect against those rules, and four recurred across unrelated codebases: a device credential that outlived a later login, a refresh guard that reached the device token on gRPC or on re-authentication, tenant ids compared as strings, and a malformed \`200\` on the device login adopted as an empty credential.`,
             "**yes** — one C-12 fix PR per SDK",
           ],
         ],

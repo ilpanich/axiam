@@ -81,7 +81,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**Two ways to authenticate.** A machine client sends `Authorization: Bearer <access_token>`, obtained from the OAuth2 token endpoint. An interactive login sets `httpOnly` cookies instead — `POST /auth/login` returns no token in its body — and state-changing requests must then echo the `axiam_csrf` cookie in an `X-CSRF-Token` header. The SDKs handle the second case for you.",
+          "**Two ways to authenticate.** A machine client sends `Authorization: Bearer <access_token>`, obtained from the OAuth2 token endpoint — and which routes accept a machine's token is decided per route; see [Who may call which route](#/docs/rest#who-may-call). An interactive login sets `httpOnly` cookies instead — `POST /auth/login` returns no token in its body — and state-changing requests must then echo the `axiam_csrf` cookie in an `X-CSRF-Token` header. The SDKs handle the second case for you.",
           "**CSRF applies to the credential the browser attaches by itself.** A request authenticated *only* by a bearer token needs no CSRF token: a cross-site page cannot set an `Authorization` header on a victim's behalf, so the requirement would be unsatisfiable rather than protective. A request carrying a bearer header **and** a session cookie is still checked, deliberately — that is precisely the shape where the browser supplies the cookie and an attacker supplies the header, so the exemption cannot itself become the bypass.",
           "**Tenancy is explicit.** Entity routes are tenant-scoped through the authenticated principal; OAuth2 endpoints take `tenant_id` as a query parameter. Nothing is inferred from a default.",
           "**Every route is permission-guarded.** A caller needs an explicit grant for the action behind the route — the same 115-permission registry the admin console uses.",
@@ -89,6 +89,42 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Collections search** with `?search=`, on all twenty list endpoints. Each matches its own identifying columns plus the record's id, so a UUID copied out of a log line goes in the same box as a name. It is a substring match rather than tokenised full-text search, precisely so that pasting a fragment of an id finds the row. The filter applies to the `total` as well as to the page — a total describing the unfiltered set would hand the pager page numbers the filtered set cannot fill.",
           "**Mutations are audited.** Every write lands in the append-only audit log with the acting principal.",
         ],
+      },
+      { type: "h", id: "who-may-call", text: "Who may call which route" },
+      {
+        type: "p",
+        text: "Every guarded route takes an AXIAM access token, from the `axiam_access` cookie or an `Authorization: Bearer` header. Which **kind** of principal may hold it is the token's `aud` claim, and the OpenAPI document says it per operation, as a security scheme:",
+      },
+      {
+        type: "table",
+        headers: ["Security scheme in the spec", "Token", "Accepted on"],
+        rows: [
+          ["`bearer`", "a user's (`aud` = `axiam:user`)", "every guarded route"],
+          [
+            "`service_account`",
+            "a service account's (`aud` = `axiam:m2m`, `sub_kind` = `service_account`), from client credentials or the mTLS device login",
+            "only the operations that list it",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "An operation that lists both admits either. In `1.0.0-beta17` those are the eight **management families** — resources, scopes, permissions, roles (the assignment routes included), groups, service accounts, certificates (generate, sign-csr, bind, list, get, revoke) and webhooks — plus `POST /api/v1/authz/check` and `/api/v1/authz/check/batch`. Every other route is human-only and answers a service-account token with `401`: self-service (`/auth/me`, MFA, sessions, password change), users, organizations and tenants, settings, CA certificates, PGP keys, SCIM tokens, federation configuration, OAuth2 clients, reactors, audit logs, notification rules, email config and WebAuthn policy. Before `1.0.0-beta17` every management route took a user token only, so a service account could authenticate and then reach nothing but `/authz/check`.",
+      },
+      {
+        type: "list",
+        items: [
+          "**Admitted is not allowed.** What a service account may do on an admitted route is decided by the roles assigned to it (`POST /api/v1/roles/{role_id}/service-accounts`), exactly as for a user. An account with no role gets `403` with `\"error\": \"authorization_denied\"` and the checked `action` in the body.",
+          "**Tenant.** An account created in an ordinary tenant acts in that tenant only; `X-Axiam-Tenant` naming another is `403`. One created in the organization's reserved scope may name a tenant of its organization, within the tenants its assignments reach, as an organization administrator can.",
+          "**Certificates.** A service account issues leaves under the signing CA of the tenant it acts on, never directly under the organization CA, wherever it lives.",
+          "**Certificate-bound tokens.** A device token carries `cnf.x5t#S256` and is refused (`401`) unless presented over mTLS with that certificate.",
+          "**Audit.** Its requests are recorded with actor type `service_account`, so the log tells a machine's write from a person's.",
+          "**Revocation.** A machine token has no session. Disabling the account stops new tokens; one already issued lives out its access-token lifetime.",
+        ],
+      },
+      {
+        type: "note",
+        text: "A machine-audience token whose `sub_kind` is not `service_account` — an OAuth2 client's, or a user's token narrowed to `axiam:m2m` by token exchange — is refused on these routes with `401`, on `/authz/check` too. The full rule set is in [the API guide](https://github.com/ilpanich/axiam/blob/main/docs/api/README.md#authentication--who-may-call-which-route); creating the account and assigning its roles is on [Service accounts](#/docs/service-accounts).",
       },
       { type: "h", id: "recent", text: "Endpoints added since 1.0.0-beta12" },
       {
@@ -104,6 +140,13 @@ export const INTEGRATE_PAGES: DocPage[] = [
           { method: "POST", path: "/api/v1/certificates/sign-csr", summary: "Issue an end-entity certificate from a CSR you bring; no key is generated and none is returned.", },
           { method: "POST", path: "/api/v1/auth/webauthn/setup/register/start", summary: "Enrol a passkey or security key as the first factor during forced enrolment, from the login's setup token.", public: true },
           { method: "POST", path: "/api/v1/auth/webauthn/setup/register/finish", summary: "Complete it, and the interrupted login with it.", public: true },
+          { method: "GET", path: "/.well-known/oauth-authorization-server", summary: "In `1.0.0-beta16`: the RFC 8414 alias of the OIDC discovery document — same handler, same body, same optional `?tenant_id=`.", public: true },
+          { method: "GET", path: "/.well-known/oauth-authorization-server/t/{tenant_id}", summary: "Authorization-server metadata for one tenant, at the RFC 8414 §3.1 path-insertion form of the issuer `{root}/t/{tenant_id}`. Served with `AXIAM__AUTH__TENANT_ISSUER_PATHS=true`.", public: true },
+          { method: "GET", path: "/.well-known/openid-configuration/t/{tenant_id}", summary: "The same tenant discovery document, at the OIDC Discovery path with the RFC 8414 §3.1 insertion applied.", public: true },
+          { method: "GET", path: "/t/{tenant_id}/.well-known/openid-configuration", summary: "The same tenant discovery document, at the path OpenID Connect Discovery 1.0 §4 constructs by appending to the issuer.", public: true },
+          { method: "POST", path: "/oauth2/register", summary: "In `1.0.0-beta16`: RFC 7591 dynamic client registration. Off by default on every tenant, in which case it answers `403` and discovery carries no `registration_endpoint`.", public: true },
+          { method: "POST", path: "/api/v1/oauth2-clients/registration-tokens", summary: "Mint the single-use credential RFC 7591 §1.2's protected registration profile requires." },
+          { method: "GET", path: "/api/v1/oauth2-clients/registration-tokens", summary: "List them. Metadata only — the handle is not stored, so it cannot be listed." },
         ],
       },
       {
@@ -126,8 +169,12 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "example", text: "A worked example" },
       {
         type: "code",
-        caption: "create a user, put them in a group, check access",
-        code: "# A machine client gets a bearer token from the OAuth2 token endpoint.\n# (An interactive login sets cookies instead — see the Quickstart.)\nTOKEN=$(curl -sS -X POST 'https://iam.acme.dev/oauth2/token?tenant_id=<uuid>' \\\n  -d grant_type=client_credentials \\\n  -d client_id=\"$SA_CLIENT_ID\" -d client_secret=\"$SA_CLIENT_SECRET\" \\\n  | jq -r .access_token)\n\nUSER=$(curl -sS -X POST https://iam.acme.dev/api/v1/users \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"email\":\"dana@acme.dev\",\"username\":\"dana\"}' | jq -r .id)\n\ncurl -sS -X POST \"https://iam.acme.dev/api/v1/groups/$GROUP/members\" \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d \"{\\\"user_id\\\":\\\"$USER\\\"}\"\n\ncurl -sS -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"doc:1\"}'",
+        caption: "put a user in a group, check access",
+        code: "# A service account gets a bearer token from the OAuth2 token endpoint.\n# (An interactive login sets cookies instead — see the Quickstart.)\nTOKEN=$(curl -sS -X POST 'https://iam.acme.dev/oauth2/token?tenant_id=<uuid>' \\\n  -d grant_type=client_credentials \\\n  -d client_id=\"$SA_CLIENT_ID\" -d client_secret=\"$SA_CLIENT_SECRET\" \\\n  | jq -r .access_token)\n\n# Groups admit a service-account token; the account's roles decide.\ncurl -sS -X POST \"https://iam.acme.dev/api/v1/groups/$GROUP/members\" \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d \"{\\\"user_id\\\":\\\"$USER_ID\\\"}\"\n\ncurl -sS -X POST https://iam.acme.dev/api/v1/authz/check \\\n  -H \"authorization: Bearer $TOKEN\" -H 'content-type: application/json' \\\n  -d '{\"action\":\"read\",\"resource_id\":\"<uuid>\"}'",
+      },
+      {
+        type: "note",
+        text: "**Correction.** Earlier versions of this example created the user with the same service-account token. `/api/v1/users` is a human-only family: it answers a service-account token with `401`, and did before `1.0.0-beta17` as well, when every management route took a user token only. Create users with an administrator's session, or provision them over [SCIM](#/docs/scim).",
       },
       { type: "h", id: "index", text: "Every endpoint" },
       {
@@ -322,6 +369,59 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "p",
         text: "AXIAM's own gRPC interceptor refuses `jkt`-bound tokens, because a Tonic interceptor sees neither the HTTP method nor the URI a DPoP proof is bound to. That is the server's limitation and should not be copied: an SDK guarding a real endpoint knows both, so it can and should verify the proof.",
       },
+      { type: "h", id: "client-certs", text: "TLS and client certificates" },
+      {
+        type: "p",
+        text: "The listener terminates TLS itself when both of its certificate variables are set, with the same TLS 1.3-only posture and the same reloadable leaf as the REST listener. Since `1.0.0-beta17` it can also verify client certificates, **off by default**. Before that, its TLS configuration requested no client certificate and no setting could change it — on a listener that carries `ReactorAdminService` as well as `CheckAccess`, a bearer token was all any caller ever needed.",
+      },
+      {
+        type: "table",
+        headers: ["Key", "Purpose"],
+        rows: [
+          ["`AXIAM__GRPC_TLS_CLIENT_AUTH`", "`off` (default), `optional` or `required`."],
+          ["`AXIAM__GRPC_TLS_CLIENT_CA_PATH`", "PEM bundle client certificates are verified against. Required unless `CLIENT_AUTH` is `off`."],
+        ],
+      },
+      {
+        type: "table",
+        headers: ["Mode", "What the listener does"],
+        rows: [
+          ["`off`", "The listener as it has always been: no client certificate is requested, and one a client holds is never sent."],
+          ["`optional`", "Asks for a certificate and verifies any that is presented. A client that presents none is still served on its token alone."],
+          ["`required`", "Refuses the TLS handshake unless the client presents a certificate that chains to the bundle. No RPC runs before that check, so this is a network-level gate on the whole listener, `ReactorAdminService` included."],
+        ],
+      },
+      {
+        type: "p",
+        text: "A verified certificate reaches the auth interceptor. The certificate is proof of possession and a gate; it is **not** an identity. Every call still needs a bearer token, and the token decides who the caller is.",
+      },
+      {
+        type: "p",
+        text: "**Boot is refused, not warned about**, when:",
+      },
+      {
+        type: "list",
+        items: [
+          "`CLIENT_AUTH` is not one of the three words — including `optional_self_signed`, which exists for RFC 8705 self-signed OAuth2 clients, whose token endpoint is not served on this listener;",
+          "`CLIENT_AUTH` is `optional` or `required` but `CLIENT_CA_PATH` is unset;",
+          "`CLIENT_CA_PATH` is set but `CLIENT_AUTH` is `off`;",
+          "the bundle is unreadable, unparsable or empty;",
+          "either client-auth variable is set while the listener is **plaintext** (neither certificate variable set, or only one of them). A listener with no handshake cannot ask for a certificate, and serving cleartext on a port its operator believes is mutually authenticated is the worst outcome available.",
+        ],
+      },
+      {
+        type: "p",
+        text: "**One anchor set, one reload.** Point `AXIAM__GRPC_TLS_CLIENT_CA_PATH` at the bundle the REST listener uses — `AXIAM__SERVER__TLS__CLIENT_CA_BUNDLE_PATH`, or `client-ca-bundle.pem` beside `AXIAM__SERVER__TLS__CERT_PATH` — and flagging or unflagging a CA as an mTLS trust anchor in the admin console reloads **both** listeners without a restart. The gRPC listener has its own verifier, because its policy can differ from REST's (REST `optional` for browsers, gRPC `required` for the mesh), and on each reload it re-reads its own bundle. A reload that finds that file unreadable or empty logs an error and **keeps the previous anchors**; it never falls back to asking for nothing.",
+      },
+      {
+        type: "note",
+        text: "The names are **flat** — `AXIAM__GRPC_TLS_…`, with no further double underscore after `GRPC`, like the certificate variables; the nested spelling is not read. The keys are listed under [Configuration](#/docs/configuration#connectivity), and the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#the-grpc-listener-tls-and-client-certificates) has the full reasoning.",
+      },
+      { type: "h", id: "device-tokens", text: "Certificate-bound device tokens over gRPC" },
+      {
+        type: "p",
+        text: "In `1.0.0-beta17` the token `POST /api/v1/auth/device` returns carries an RFC 8705 `cnf.x5t#S256` claim over the certificate rustls verified when the device logged in, so it is not a bearer credential. (Behind a proxy that forwards the certificate in `X-Client-Certificate` the claim is deliberately not made.) Over gRPC the check reads the certificate rustls verified for **this** connection. With client authentication on, a device that presents the same certificate it logged in with is accepted over gRPC as it is over REST; with another device's certificate, or with none, its token is refused. Under the default, `off`, a certificate-bound token has no evidence to match and is **refused** — the fail-closed direction. A token minted before this change carries no `cnf` and is accepted exactly as it always was. See [PKI & certificates](#/docs/pki) for the login itself.",
+      },
       { type: "h", id: "publishing", text: "Publishing gRPC outside the mesh" },
       {
         type: "p",
@@ -452,6 +552,27 @@ export const INTEGRATE_PAGES: DocPage[] = [
       {
         type: "note",
         text: "TLS and the HMAC are not alternatives. TLS gives confidentiality but terminates at the broker, which then re-sends; the HMAC gives authenticity and replay protection end-to-end **across** that hop. Production needs both, and an SDK offering either as a substitute for the other is not conformant.",
+      },
+      { type: "h", id: "rabbitmq", text: "Two things to decide before you put AXIAM in front of RabbitMQ" },
+      {
+        type: "p",
+        text: "**A broker that demands a client certificate needs one AXIAM cannot issue yet.** Requiring a client certificate from every AMQPS connection — broker-wide `fail_if_no_peer_cert` — is the right posture, and it includes AXIAM's own client. That client connects during startup — before the REST API is listening, before an organization CA exists, and certainly before anything has called `POST /api/v1/certificates`. There is no ordering that lets AXIAM issue the certificate it needs in order to start.",
+      },
+      {
+        type: "p",
+        text: "So issue that one **offline, from the same root**: generate AXIAM's broker client certificate with the same CA (or an offline intermediate under it) that signs the rest of the fleet, mount it, and point `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` / `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` at it. Once AXIAM is up it can issue the *devices'* certificates from its own CA, and they chain to the same root the broker already trusts — the arrangement that makes one trust store serve both. `scripts/gen-broker-tls.sh` is the shape of this for a development stack; production wants your own CA and your own key custody. The alternative — bootstrapping against a broker that does not require peer certificates and tightening it afterwards — leaves a window in which it does not require them, and an operator who forgets step two.",
+      },
+      {
+        type: "p",
+        text: "**AXIAM's access tokens are not consumable by RabbitMQ's OAuth 2.0 backend.** `rabbitmq_auth_backend_oauth2` reads a JWT's `scope` claim and turns entries such as `rabbitmq.configure:%2f/*` into broker permissions. AXIAM's `scope` is an OAuth2 authorization-server claim describing scopes a client requested and was granted against AXIAM's own resources — an application-defined vocabulary the plugin's grammar has no bearing on. On the device path it is not merely different but absent: `POST /api/v1/auth/device` has no way to request a scope and a service account registers none, so the claim is omitted entirely, and a token with no `scope` grants no RabbitMQ permission.",
+      },
+      {
+        type: "p",
+        text: "The arrangement that works is **certificate login plus an HTTP auth backend**: `rabbitmq_auth_mechanism_ssl` takes the identity from the client certificate the device already presents, and `rabbitmq_auth_backend_http` asks a small endpoint of yours — free to call AXIAM's authorization API — for the vhost, resource and topic decisions. That keeps one identity per device, issued by AXIAM, and puts the permission model where RabbitMQ can express it.",
+      },
+      {
+        type: "note",
+        text: "Both are from the [deployment guide's broker chapter](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#two-things-to-decide-before-you-put-axiam-in-front-of-rabbitmq), new in `1.0.0-beta17`. Mapping AXIAM roles onto the plugin's `scope` grammar would mean minting a second, RabbitMQ-shaped token; that is not what these variables configure and is not covered there.",
       },
       { type: "h", id: "spec", text: "The specification" },
       {
@@ -1388,6 +1509,23 @@ try await reactorServe(config: config, transport: yourTransport, handler: router
           "**A contended `PATCH` is not auto-retried.** Contract §16.2 makes only side-effect-free operations eligible for automatic retry; the caller owns that decision.",
           "**Over gRPC the same condition is `UNAVAILABLE` (14)**, which lands in `NetworkError` exactly as the REST `503` does — and stays distinct from `RESOURCE_EXHAUSTED` (8), because *the server is busy* and *you sent too much* are different instructions.",
         ],
+      },
+      { type: "h", id: "device-login", text: "Device login — `POST /api/v1/auth/device`" },
+      {
+        type: "table",
+        headers: ["Status", "Type", "When"],
+        rows: [
+          ["401", "AuthError", "Every certificate refusal: unknown, untrusted, self-asserted, and — since `1.0.0-beta17` — bound to no service account. The bodies are distinct messages; read the body to tell them apart."],
+          ["429", "NetworkError", "Over `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` (default 60 per IP, machine family). Body `rate_limit_exceeded`, with `Retry-After`."],
+        ],
+      },
+      {
+        type: "p",
+        text: "**Correction.** The `403` on this route is gone. Before `1.0.0-beta17` a certificate bound to no principal answered `403`, and reached that status by matching the text of an error message raised in a lower crate. A `403` asserts an identity and then refuses what it may do; a certificate bound to no principal identifies nobody, which is what its three sibling refusals already said with `401`. Nothing is newly disclosed — the bodies were always distinct, and a test pins them. A client that mapped `403` on this endpoint to *bound, but not permitted* should map `401` and read the body.",
+      },
+      {
+        type: "note",
+        text: "The route carried no rate limiter at all before `1.0.0-beta17`. It is public and CSRF-exempt, as it has to be — a device has no session and no cookie — and a device re-authenticates once per access-token lifetime, so the default holds nine hundred devices on one address; `AXIAM__RATE_LIMIT__PROFILE` scales it for a fleet behind a single NAT. See [Configuration](#/docs/configuration#rate-limit).",
       },
       { type: "h", id: "rules", text: "Rules that prevent bad retries" },
       {

@@ -128,6 +128,48 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "warn",
         text: "`AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` is **off** by default and should stay off unless a proxy you operate performs the mTLS handshake itself and overwrites `X-Client-Certificate` on every request. A certificate is public data and the header path cannot prove possession of the private key, so wherever anything else can reach the listener, a copy of an enrolled device's certificate authenticates as that device. Native mTLS — a certificate rustls verified on the connection — is unaffected and always wins.",
       },
+      { type: "h", id: "healthcheck", text: "The container healthcheck, against a TLS listener" },
+      {
+        type: "p",
+        text: "The production image is distroless and has no shell, so `docker-compose.prod.yml` probes it with the binary's own subcommand, `axiam-server healthcheck`: it requests `/health` and exits `0` on a 2xx, `1` otherwise. In `1.0.0-beta17` it can probe a TLS listener. **The scheme follows the listener** — `https` when `AXIAM__SERVER__TLS__ENABLED` is true *and* a certificate path is set, `http` otherwise — on `AXIAM__SERVER__PORT` (default `8090`). Both conditions, not the path alone, because the prod Compose file sets `AXIAM__SERVER__TLS__CERT_PATH` unconditionally and gates the listener on `ENABLED`. A proxy-terminated deployment needs no configuration at all, and a plaintext deployment on the default port probes exactly what it probed before.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning"],
+        rows: [
+          ["AXIAM_HEALTHCHECK_URL", "Probe this URL instead of the derived default. Wins outright."],
+          ["AXIAM_HEALTHCHECK_CA_FILE", "PEM bundle whose certificates are added as trust anchors for the probe."],
+        ],
+      },
+      {
+        type: "note",
+        text: "**Note the single underscore.** Both are read with `std::env::var` rather than through the configuration layer, so they are `AXIAM_HEALTHCHECK_*`, not `AXIAM__HEALTHCHECK__*`.",
+      },
+      {
+        type: "list",
+        items: [
+          "**With no CA file, an https self-probe trusts the server's own certificate chain** — the `AXIAM__SERVER__TLS__CERT_PATH` file — because a process verifying the certificate it is itself serving gains no trust it does not already have. A self-signed server certificate works as its own anchor, and so does a `fullchain.pem` that holds the issuer. A file holding a CA-issued leaf **alone** does not, because the issuer is then anchored nowhere: set `AXIAM_HEALTHCHECK_CA_FILE` to the issuing CA.",
+          "**The certificate has to cover the address probed.** The derived default is `https://127.0.0.1:<port>/health`, so the certificate needs an IP SAN for `127.0.0.1`. If it carries a DNS name instead, point the probe at that name with `AXIAM_HEALTHCHECK_URL` and make the name resolve inside the container.",
+          "**There is no switch that skips verification, deliberately.** A probe that accepted any certificate would report healthy for anything listening on the port, which is worse than no probe. If the probe cannot verify the listener it is not healthy, and the reason goes to stderr, where `docker inspect` and `kubectl describe` surface it.",
+        ],
+      },
+      {
+        type: "note",
+        text: "The Kubernetes manifests do not use this subcommand: `k8s/server/deployment.yml` uses `httpGet` probes with `scheme: HTTPS`, which the kubelet performs from outside the container without verifying the certificate.",
+      },
+      { type: "h", id: "console-backend", text: "The console resolves its backend per request" },
+      {
+        type: "p",
+        text: "In `1.0.0-beta17` the console's nginx looks up the host in `AXIAM_BACKEND_ORIGIN` when a request needs it, not once at startup, and reuses an answer for at most 30 seconds. So the console starts whether or not `axiam-server` exists yet — `/api`, `/oauth2/` and `/.well-known` answer `502` until it does, then `200`, with no restart — and a backend recreated on a new address is picked up within the same 30 seconds. Through `1.0.0-beta16` a console started ahead of its backend exited at once with `host not found in upstream`, and one whose backend was recreated answered `502` until it was restarted too.",
+      },
+      {
+        type: "p",
+        text: "The DNS server nginx asks is `AXIAM_BACKEND_RESOLVER`. Left unset — which is right on Docker and on Kubernetes — an entrypoint hook, `docker/console-backend-resolver.envsh`, reads it from the `nameserver` lines of the container's `/etc/resolv.conf`: Docker's embedded DNS at `127.0.0.11`, the cluster DNS Service on Kubernetes. Set it when neither is what you want, for example a node-local DNS cache.",
+      },
+      {
+        type: "warn",
+        text: "**The host must resolve exactly as written**, because nginx's resolver does not apply `resolv.conf`'s `search` domains. A bare service name such as `axiam-server` works under Compose; on Kubernetes, write the fully qualified Service name — `http://axiam-server.axiam.svc.cluster.local:8090` — or every proxied request answers `502` and the error log records `could not be resolved`. The origin is `scheme://host:port` and nothing else: no path and no trailing slash. An `https` origin is still verified against `AXIAM_BACKEND_SNI`, never against whatever address the lookup returned.",
+      },
       { type: "h", id: "sizing-guides", text: "Sizing, measured" },
       {
         type: "p",
@@ -294,6 +336,14 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "note",
         text: "AXIAM's actual requirement is small: a KV v2 secret whose fields carry those names. It does not care who runs Vault, whether it is HA, or how it is unsealed. If your organization already runs one, point `AXIAM__AUTH__VAULT_ADDR` at it, apply the shipped policy, and skip the rest.",
+      },
+      {
+        type: "p",
+        text: "**Under the env provider, every secret has one spelling:** `AXIAM__AUTH__<KEY>`. The provider addresses a secret by its field name above and, under the default `env` provider, resolves that name to `AXIAM__AUTH__` plus the name uppercased — so the CA encryption key is `AXIAM__AUTH__PKI_ENCRYPTION_KEY`. There are exactly three exceptions, the credentials that already shipped under another spelling and keep it: `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL`.",
+      },
+      {
+        type: "warn",
+        text: "**Earlier documentation named four secret variables that are read by nothing**: the PKI, email and federation encryption keys and the GDPR pseudonym pepper, each spelled without the `AUTH` segment — the PKI key with `PKI` as a section of its own — never reached the server. The effect was silent — the key was set, the feature that needed it stayed off, and the fault looked like the feature. The variables read are `AXIAM__AUTH__PKI_ENCRYPTION_KEY`, `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY`, `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` and `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY`, and the legacy spellings are **not** accepted as aliases. Since `1.0.0-beta17` a deployment that still sets a legacy spelling gets a `WARN` at startup naming both spellings — only when the variable AXIAM does read is absent, so a migration that sets both is silent.",
       },
       { type: "h", id: "credentials", text: "The datastore and broker credentials" },
       {
@@ -514,6 +564,66 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "warn",
         text: "`opaque_mode: required` is the one setting that can lock every user out of a tenant. Nobody can be enrolled retroactively, so it is only safe once every user already has a registration record. Run `optional` until enrolment is complete.",
       },
+      { type: "h", id: "client-registration", text: "Dynamic client registration & client ID metadata documents" },
+      {
+        type: "p",
+        text: "In `1.0.0-beta16` the tenant's OIDC policy gained two families, both **off by default on every tenant** and both resolved through the same organization-baseline-plus-tenant-override chain as everything above. The first governs RFC 7591 dynamic client registration at `POST /oauth2/register`:",
+      },
+      {
+        type: "table",
+        headers: ["Field", "Meaning"],
+        rows: [
+          [
+            "dynamic_registration",
+            "`disabled` (default) | `initial_access_token` | `anonymous` — who may register a client: nobody, a caller presenting a single-use token an administrator minted, or anybody who can reach the endpoint. Tighten-only: a tenant may move `anonymous` → `initial_access_token` → `disabled`, never the other way.",
+          ],
+          [
+            "dcr_allowed_scopes",
+            "The scopes a self-registered client may ask for. Default empty, which means no scopes at all. May not contain `address` or `phone`.",
+          ],
+          [
+            "dcr_allowed_redirect_hosts",
+            "Hosts a self-registered `redirect_uri` may point at, as globs. The loopback hosts are always allowed.",
+          ],
+          [
+            "external_client_allowed_resources",
+            "The audiences (RFC 8707 `resource`) a self-registered client may address. It inherits this list verbatim and cannot choose its own, so a policy combining `anonymous` with an empty list is refused.",
+          ],
+          [
+            "dcr_max_clients",
+            "How many self-registered clients the tenant may hold. Default `20`; a tenant's value must be no larger than its organization's.",
+          ],
+          [
+            "dcr_unused_client_ttl_days",
+            "How long a self-registered client survives without being used. Default `30`; `0` disables the sweep. A tenant's window must be no longer than its organization's, and `0` counts as the longest of all.",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "The three lists are not ordered against the baseline: they name *this* tenant's MCP servers and callback hosts, and a tenant override replaces the organization's list whole rather than adding to it.",
+      },
+      {
+        type: "p",
+        text: "The second family is `cimd` — whether a `client_id` that is an HTTPS URL is resolved by fetching the metadata document it names. It is one posture of nine fields, stored, inherited and overridden **whole**: a tenant either accepts its organization's CIMD policy or states its own in full. `cimd.enabled` (default `false`) and `cimd.allow_http` are the two a tenant may not turn on when its organization has them off, and the organization's Settings tab is the only console surface that can turn either on.",
+      },
+      {
+        type: "warn",
+        text: "`cimd.trusted_client_id_domains` decides whose server AXIAM will make an outbound request to on an unauthenticated caller's word. Enabling CIMD with it empty is refused, and it **never** accepts `*` — nor a wildcard over a whole top-level domain (`*.com`, `*.io`), which is the same posture spelled longer. `*` stays valid in `cimd.trusted_redirect_domains`, which bounds where a document may point a browser and is not a fetch target.",
+      },
+      { type: "h", id: "server-cert-names", text: "Server certificate names" },
+      {
+        type: "p",
+        text: "In `1.0.0-beta17` the certificate family gained `server_cert_allowed_names`, written in the organization baseline (`PUT /api/v1/organizations/{org_id}/settings`) and read back as `certificate.server_cert_allowed_names`. It fences the names a `Server` certificate may carry — DNS suffixes (`.lakeside.internal`, strictly below), exact hosts and IP prefixes — and it is **empty by default, and empty refuses every Server request**. See [Server certificates](#/docs/pki#server-certificates) for what the certificate is and how names match.",
+      },
+      {
+        type: "p",
+        text: "**A tenant may only narrow it.** A tenant override (`PUT /api/v1/settings`, same field) may remove an entry or narrow one — `.plant.lakeside.internal` under `.lakeside.internal`, `10.1.0.0/16` under `10.0.0.0/8` — and an entry no organization entry covers is refused with `400`. If the organization later shrinks its list, each tenant's effective list is the **intersection** of the two, computed on every read: a tenant never keeps a name the organization withdrew, and never gains one it had removed.",
+      },
+      {
+        type: "note",
+        text: "In the admin console the list is edited in three places: the organization's **Settings** tab (the baseline), a tenant's own **Settings** page (shown as the effective list the server reads back), and the tenant detail page's **Security Overrides** panel. In that panel the two states that look alike are not: *Override Server certificate names* unchecked means \"follow the organization\", and checked with no entries means \"this tenant issues none\".",
+      },
       {
         type: "links",
         links: [
@@ -521,6 +631,16 @@ export const OPERATE_PAGES: DocPage[] = [
             label: "Email delivery",
             href: "https://github.com/ilpanich/axiam/blob/main/docs/admin/email-delivery.md",
             note: "How a mail configuration is resolved, how to test one before relying on it, and what each provider requires of the sender address.",
+          },
+          {
+            label: "Dynamic client registration",
+            href: `${GH_BLOB}/docs/admin/dynamic-client-registration.md`,
+            note: "The three modes, every policy field and its ordering, the D3 audience interlock, and the ceiling, rate limit and sweeper that bound it.",
+          },
+          {
+            label: "Client ID metadata documents",
+            href: `${GH_BLOB}/docs/admin/client-id-metadata-documents.md`,
+            note: "The nine `cimd` fields, the two interlocks that must be answered before it can be enabled, and the URL and document rules.",
           },
         ],
       },
@@ -589,6 +709,30 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "note",
         text: "Every CA operation, and creating or deleting a tenant, requires an **organization-level principal** — a caller whose own record lives in the organization's reserved scope. Holding `ca_certificates:manage` from a tenant role is not enough, and those actions are no longer seeded into an ordinary tenant's roles. A tenant's *signing* CA is the deliberate middle case: organization-level, but allowed to an organization account whose reach covers that tenant. See [Organization-level principals](#/docs/organization-scope).",
       },
+      { type: "h", id: "issuing-ca", text: "Which CA a caller may issue under" },
+      {
+        type: "p",
+        text: "A signing CA row carries the tenant it signs for, and in `1.0.0-beta17` both leaf paths — `POST /api/v1/certificates` and `POST /api/v1/certificates/sign-csr` — read it. A tenant's signing CA issues for that tenant only. An `issuer_ca_id` outside the caller's reach answers `404`, not `403`: a CA you may not use is a CA you cannot see, and the refusal is made before the CA's own status and validity window are read, so it cannot be used to learn that some other tenant's CA exists, is revoked, or has expired.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Issuing CA", "Ordinary tenant principal", "Principal in the organization scope"],
+        rows: [
+          ["The signing CA of the tenant being acted on", "issues", "issues"],
+          ["Another tenant's signing CA", "**404**", "**404**"],
+          ["An organization-level CA (the trust anchor)", "**404**", "issues"],
+          ["A CA of another organization", "**404**", "**404**"],
+        ],
+      },
+      {
+        type: "p",
+        text: "\"The tenant being acted on\" is the caller's own tenant, or whichever tenant it named in `X-Axiam-Tenant` and was allowed to act on — so an organization administrator issuing under a particular tenant's signing CA names that tenant on the request, as for every other tenant-scoped call.",
+      },
+      {
+        type: "warn",
+        text: "**Upgrading.** Before `1.0.0-beta17` the issuing CA was scoped to the organization only: any principal holding `certificates:generate` could name any CA of the organization, including a sibling tenant's signing CA and the organization anchor above it. A deployment whose tenants were issuing leaves directly under the organization CA needs a signing CA per tenant (`POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas`) before its tenant administrators can issue again. Certificates already issued across the boundary are **not** revoked on upgrade — revocation is an operator's act. Find them by comparing each tenant's certificates' `issuer_ca_id` against that tenant's signing CAs, revoke what should not exist, and re-issue it under the right CA.",
+      },
       { type: "h", id: "custody", text: "Where a CA signing key lives" },
       {
         type: "p",
@@ -601,6 +745,10 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "An existing key can be moved between custodians with `migrate-custody` **without re-issuing anything beneath it**. The migration copies the key to the new custodian, records the change, and only then releases it from the old one — an order that can never leave a CA without its key, in either direction.",
+      },
+      {
+        type: "note",
+        text: "**RSA-4096 CA generation works under every custodian.** The PKI guide used to say that `POST .../ca-certificates` with `Rsa4096` fails and that Vault custody was the only way to generate one; neither was true, and the guide was corrected in `1.0.0-beta17`. The key is generated by the `rsa` crate and handed to rcgen as PKCS#8, and four tests pin generation and self-signature. The real trade-off is **time**: RSA-4096 key generation is a probabilistic prime search — seconds on a server CPU, tens of seconds with a wide variance on small ARM hardware — so a client timeout set for Ed25519 will fire. Under `vault_pki` custody Vault makes the key, so the prime search happens on the Vault host instead. Ed25519 is instantaneous and the right default; choose RSA-4096 when something in the fleet cannot verify Ed25519.",
       },
       { type: "h", id: "mtls", text: "mTLS for devices and services" },
       {
@@ -667,7 +815,7 @@ export const OPERATE_PAGES: DocPage[] = [
           },
           {
             title: "Issue the device certificate",
-            body: "Leaf certificates are tenant-scoped. Set `cert_type` to `Device` — that is what makes the certificate addressable by fingerprint at authentication time. The private key comes back once and is never stored.",
+            body: "Leaf certificates are tenant-scoped. Set `cert_type` to `Device` — that is what makes the certificate addressable by fingerprint at authentication time. The private key comes back once and is never stored. `issuer_ca_id` is the tenant's own signing CA; naming the organization CA directly works only for a principal in the organization scope — see [Which CA a caller may issue under](#issuing-ca).",
             code: 'POST /api/v1/certificates\n{\n  "issuer_ca_id": "<ca-certificate-uuid>",\n  "subject": "sensor-0421.acme.dev",\n  "cert_type": "Device",\n  "key_algorithm": "Ed25519",\n  "validity_days": 365\n}',
           },
           {
@@ -680,17 +828,21 @@ export const OPERATE_PAGES: DocPage[] = [
           },
           {
             title: "Let it connect over mTLS",
-            body: "The device presents its client certificate on the TLS handshake. AXIAM verifies the chain, requires it to reach a CA flagged as an mTLS trust anchor, and resolves the service account the certificate was bound to in step 3.",
+            body: "The device presents its client certificate on the TLS handshake. AXIAM verifies the chain, requires it to reach a CA flagged as an mTLS trust anchor, and resolves the service account the certificate was bound to in step 3. `POST /api/v1/auth/device` then answers with an access token bound to that certificate — see [below](#device-token).",
           },
         ],
       },
       {
         type: "note",
-        text: "**`subject` is a common name, not a distinguished name.** Every AXIAM certificate has exactly one DN component, so `subject` carries that name directly — `Acme Corp Root CA`, `sensor-0421.acme.dev`. A single `CN=` prefix is understood and stripped, once, so a request written from an older example still produces the certificate it meant; anything else containing `=` is refused with `400`. The stored `subject` is the normalised value, so the row and the certificate always agree.",
+        text: "**Every certificate refusal at the device login is a 401.** `POST /api/v1/auth/device` answers it for unknown, untrusted, self-asserted and unbound certificates alike. The unbound case answered `403` until `1.0.0-beta17`; clients that mapped `403` on this endpoint to \"bound, but not permitted\" should map `401` and read the body. The route is also rate-limited per IP since `1.0.0-beta17` — it had no limiter before — by `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN`, default `60`. That sits in the machine family, so `AXIAM__RATE_LIMIT__PROFILE` scales it to 300 (`gateway`) and 3 000 (`mesh`); a device re-authenticates once per access-token lifetime, so sixty a minute holds nine hundred devices on one address.",
+      },
+      {
+        type: "note",
+        text: "`subject` **is a common name, not a distinguished name.** Every AXIAM certificate has exactly one DN component, so `subject` carries that name directly — `Acme Corp Root CA`, `sensor-0421.acme.dev`. A single `CN=` prefix is understood and stripped, once, so a request written from an older example still produces the certificate it meant; anything else containing `=` is refused with `400`. The stored `subject` is the normalised value, so the row and the certificate always agree.",
       },
       {
         type: "warn",
-        text: "**A device certificate must be bound, exactly like a service one.** Releases before 1.0.0-beta16 documented the opposite here — that a `Device` certificate needs no bind and that looking for a bind endpoint was looking for something that does not exist. It was wrong, and wrong in the expensive direction: the fleet is commissioned, the certificates verify, and every device is refused. `authenticate_device` resolves the bound service account and answers `401` when there is none.",
+        text: "**A device certificate must be bound, exactly like a service one.** This page, through `1.0.0-beta16`, documented the opposite — that a `Device` certificate needs no bind and that looking for a bind endpoint was looking for something that does not exist. It was wrong, and wrong in the expensive direction: the fleet is commissioned, the certificates verify, and every device is refused. `authenticate_device` resolves the bound service account and answers `401` when there is none.",
       },
       {
         type: "note",
@@ -700,6 +852,19 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "p",
         text: "Two limits worth knowing before you commission a fleet. A tenant can cap certificate lifetime through its `max_certificate_validity_days` setting, and a request exceeding that cap is rejected rather than silently shortened. And where a device cannot show a browser to enrol a *user*, the [device authorization grant](#/docs/device-flow) covers the human-approval half — that is a different mechanism from this one, and the two are often confused.",
       },
+      { type: "h", id: "device-token", text: "The token a device gets back is bound to its certificate" },
+      {
+        type: "p",
+        text: "In `1.0.0-beta17` the access token `POST /api/v1/auth/device` answers with carries an RFC 8705 `cnf` claim, `x5t#S256` — the base64url SHA-256 of the certificate presented at login. The token is therefore **not** a bearer credential: AXIAM refuses it, on REST and on gRPC, on any connection that does not present the same certificate again, and contract §10.1 rule 9 makes the check mandatory in all eleven SDKs — a validator that does not understand `cnf` must refuse the token, never read it as unbound. A device proves possession of its private key to obtain this token; with the claim, a token read off the device's flash or lifted from a log is worth nothing without that key.",
+      },
+      {
+        type: "list",
+        items: [
+          "**Where the claim is not made, and why.** A certificate that reached AXIAM through the `X-Client-Certificate` header — the trusted-proxy deployment `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` enables — gets a bearer device token, exactly as before. There the certificate is present at login and absent from every later request, because it never travels further than the proxy, so a bound token would be one AXIAM itself refused on first use. Moving that boundary is a deployment decision: terminate mTLS at AXIAM.",
+          "**Over gRPC**, the check reads the certificate rustls verified for the connection, and the listener asks for one only when `AXIAM__GRPC_TLS_CLIENT_AUTH` is `optional` or `required`. Under the default, `off`, a certificate-bound token presented there has no evidence to match and is refused — the fail-closed direction. See [gRPC](#/docs/grpc).",
+          "**Upgrading.** A token minted before this change carries no `cnf` and is accepted exactly as it always was, because the check is \"if `cnf` is present\". The migration lasts one access-token lifetime and costs nobody a refusal.",
+        ],
+      },
       { type: "h", id: "server-certificates", text: "Server certificates" },
       {
         type: "p",
@@ -707,11 +872,15 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "**The list is empty by default, and empty refuses every `Server` request.** A tenant may remove or narrow entries but never add or widen one; if the organization later shrinks its list, each tenant keeps only the intersection. A `Server` certificate cannot be bound to a service account and cannot log in as a device.",
+        text: "**The list is empty by default, and empty refuses every Server request.** A tenant may remove or narrow entries but never add or widen one; if the organization later shrinks its list, each tenant keeps only the intersection. A `Server` certificate cannot be bound to a service account and cannot log in as a device.",
       },
       {
         type: "p",
         text: "In the admin console, the organization's **Settings** tab holds the baseline list, a tenant's own **Settings** page shows its effective list and narrows it, and the certificate dialogs offer `Server` with one row per DNS name or IP address. The console checks only that a row is filled in; whether a name is admitted is the server's answer, shown as it comes.",
+      },
+      {
+        type: "note",
+        text: "**Under Vault PKI custody, generate a Server certificate; do not sign a CSR for one.** Under a `vault_pki` CA a `Server` leaf from `POST /api/v1/certificates` is issued normally, because AXIAM puts the admitted names in the CSR it builds itself — Vault's `sign-verbatim` reads SANs from the CSR and ignores `alt_names` and `ip_sans`. A `Server` certificate from **your own** CSR (`sign-csr`) is refused under a `vault_pki` CA by design, for the same reason: the names would have to come from the CSR, which may not carry any. Use the generate path there, or a CA whose key AXIAM holds.",
       },
       {
         type: "table",
@@ -1084,8 +1253,8 @@ export const OPERATE_PAGES: DocPage[] = [
           ],
           [
             "gRPC is loopback by default, and published only through the edge",
-            "Keep 50051 off the Ingress unless you publish it as an allowlist on 443",
-            "A port forwarded straight at the listener lets a client key its own rate-limit bucket — see [Publishing gRPC](#grpc) below. The shipped manifests keep it on the ClusterIP service only.",
+            "Keep 50051 off the Ingress unless you publish it as an allowlist on 443; since `1.0.0-beta17` the listener can also verify client certificates — `AXIAM__GRPC_TLS_CLIENT_AUTH`, `off` by default, `optional` or `required` with `AXIAM__GRPC_TLS_CLIENT_CA_PATH`",
+            "A port forwarded straight at the listener lets a client key its own rate-limit bucket — see [Publishing gRPC](#grpc) below. The shipped manifests keep it on the ClusterIP service only. Under `off`, a certificate-bound device token is refused on gRPC, because there is no certificate to match it against; `required` refuses the handshake before any RPC runs. The certificate is a gate, not an identity: every call still needs a token.",
           ],
           [
             "Health endpoints are not routed at the edge",
@@ -1203,6 +1372,11 @@ export const OPERATE_PAGES: DocPage[] = [
             "Bucket key left at ip unless the edge authenticates",
             "`AXIAM__RATE_LIMIT__KEY`",
             "`client_id` is minted by the caller, which makes it a fairness control and not an abuse control.",
+          ],
+          [
+            "The device mTLS login is sized for the fleet",
+            "`AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` — default `60` per IP; machine family, so `AXIAM__RATE_LIMIT__PROFILE` scales it",
+            "Before `1.0.0-beta17` `POST /api/v1/auth/device` had no limiter at all, although a TLS handshake bearing a client certificate is the most expensive thing an unauthenticated caller can ask of the server. A device re-authenticates once per access-token lifetime, so sixty a minute holds nine hundred devices on one address; a fleet behind a single NAT should reach for the profile, which scales it to 300 (`gateway`) or 3 000 (`mesh`).",
           ],
           [
             "Capacity sized against the right bottleneck",
@@ -1374,6 +1548,28 @@ export const OPERATE_PAGES: DocPage[] = [
           ],
         ],
       },
+      { type: "h", id: "healthcheck", text: "The container healthcheck fails against a TLS listener" },
+      {
+        type: "p",
+        text: "Since `1.0.0-beta17`, `axiam-server healthcheck` probes `https` when the server terminates TLS itself, and it verifies the certificate — there is no switch that skips verification. The reason for a failure goes to stderr, where `docker inspect` and `kubectl describe` surface it. See [the container healthcheck](#/docs/deploy#healthcheck).",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Symptom", "Cause", "Fix"],
+        rows: [
+          [
+            "The probe cannot verify the listener on the derived default",
+            "The derived default is `https://127.0.0.1:<port>/health`, and the server certificate does not cover `127.0.0.1`.",
+            "Give the certificate an IP SAN for `127.0.0.1`, or point `AXIAM_HEALTHCHECK_URL` at the DNS name it does carry and make that name resolve inside the container.",
+          ],
+          [
+            "The probe cannot build a chain to the server certificate",
+            "No `AXIAM_HEALTHCHECK_CA_FILE` is set, so the probe trusts the `AXIAM__SERVER__TLS__CERT_PATH` file — and that file holds a CA-issued leaf without its issuer.",
+            "Use a `fullchain.pem` that also holds the issuer, or set `AXIAM_HEALTHCHECK_CA_FILE` to the issuing CA.",
+          ],
+        ],
+      },
       { type: "h", id: "oauth2-symptoms", text: "OAuth2 and OIDC" },
       {
         type: "table",
@@ -1515,6 +1711,7 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "list",
         items: [
           "`AXIAM__DB__URL` takes a bare `host:port`, **not** a URL scheme. The engine resolves a scheme as a hostname and fails.",
+          "A feature that needs a secret stays off although the key is set — the mail consumer refusing to spawn, the email-config endpoints answering `500`, webhook registration failing closed: check for a legacy spelling. The PKI, email and federation encryption keys and the GDPR pseudonym pepper were once documented without their `AUTH` segment, and those spellings are read by nothing; every secret is `AXIAM__AUTH__<KEY>` (so `AXIAM__AUTH__PKI_ENCRYPTION_KEY`), with exactly three exceptions — `AXIAM__DB__USERNAME`, `AXIAM__DB__PASSWORD` and `AXIAM__AMQP__URL`. Since `1.0.0-beta17` the server logs a `WARN` at startup naming both spellings when it finds a legacy one and the variable it reads is absent. See [Secrets](#/docs/secrets).",
           "Rate limits appearing not to apply across replicas: the shared counter is write-behind, so cross-replica enforcement is eventual. Check the limiter's own log lines.",
           "Limits applying to everyone at once: `AXIAM__RATE_LIMIT__TRUSTED_HOPS` does not match the hop count, so every client looks like the proxy's IP. Too high collapses the header the same way too low does — it is proxies minus one, and one proxy means 0.",
         ],
@@ -1534,6 +1731,11 @@ export const OPERATE_PAGES: DocPage[] = [
             "`409` from bootstrap",
             "Bootstrap already completed. It is one-shot, enforced by a uniqueness invariant.",
             "Log in as the existing admin; create further tenants through the API.",
+          ],
+          [
+            "The first-boot setup token is lost",
+            "Only its SHA-256 hash is stored, so it cannot be printed back, and the first-boot mint does nothing once a token row exists.",
+            `Run \`axiam-server setup-token --remint\`: it mints a fresh token and prints it to stdout and nowhere else. It refuses with exit code \`2\` on any deployment that has a user or a redeemed setup token, and a refused call changes nothing. See [I lost the setup token](${GH_BLOB}/docs/admin/README.md#i-lost-the-setup-token).`,
           ],
           [
             "Every OPAQUE login fails after a config change",
@@ -1587,6 +1789,24 @@ export const OPERATE_PAGES: DocPage[] = [
             "A revocation seems not to take effect",
             "Almost never the decision cache — access-narrowing mutations invalidate immediately. Check group membership and inherited roles first.",
             "Trace the role model; the TTL is a backstop, not the mechanism.",
+          ],
+        ],
+      },
+      { type: "h", id: "pki-issues", text: "Certificate problems" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Symptom", "Cause", "Fix"],
+        rows: [
+          [
+            "A `Server` certificate from a CSR is refused with `400` under a `vault_pki` CA",
+            "By design. Vault's `sign-verbatim` reads SANs from the CSR, so the names would have to come from the CSR, which may not carry any.",
+            "Issue it with `POST /api/v1/certificates` — AXIAM builds that CSR itself with the admitted names — or under a CA whose key AXIAM holds.",
+          ],
+          [
+            "Issuing under a CA that worked before the upgrade answers `404`",
+            "Since `1.0.0-beta17` a signing CA issues only for the tenant it signs for, and an organization CA only for a principal in the organization scope. A CA outside the caller's reach is a `404`.",
+            "Give the tenant a signing CA of its own and issue under it. See [Which CA a caller may issue under](#/docs/pki#issuing-ca).",
           ],
         ],
       },

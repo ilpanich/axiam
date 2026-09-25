@@ -745,7 +745,7 @@ CONTRACT §28 (RFC 9728 document builder and route, `WWW-Authenticate` challenge
 
 **Commits** `8bdd062` `docs(sdk-contract): §28 cross-SDK conformance review, contract 1.49 (T21.9 T9d)` · `b1aedc8` `docs(sdk-contract): correct §28.10/§28.11 R-2's count of unrecorded posture rows`. PR #468 — all eleven ports read against §28 and against the reference; thirteen divergences recorded in §28.11 with no open row; six contract defects fixed; §28.10's posture table filled in from the merged code and moved to upstream maintenance. Evidence: [`claude_dev/sdk-mcp-helpers-conformance-review.md`](sdk-mcp-helpers-conformance-review.md). One follow-up, **F-28-01**, is open by design and blocked on Phase 21 merging: the eleven vendored `CONTRACT.md`/`openapi.json` copies are re-synced from `main` in one step afterwards, and the review explains why doing it from a phase branch is what left the eleven holding five distinct files.
 
-## Phase 22: Dogfooding remediation (`axiam-domo-demo` DF-001 … DF-027) — IN PROGRESS
+## Phase 22: Dogfooding remediation (`axiam-domo-demo` DF-001 … DF-027) — ✓ COMPLETE (2026-09-25)
 
 Fix what the `axiam-domo-demo` integration found, as re-read against `main`
 rather than as filed. Full verdict per finding, the model assignment, the
@@ -1033,8 +1033,11 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
   - N6: manifest bindings, in §27.6.1.
 - **The review table.** New §27.14 records 37 divergences, none open. §27.10's
   manifest table is refilled from the merged ports.
-- **One fix PR per SDK, eleven in all.** They are merged as they pass review. After this
-  PR merges, one follow-up PR per SDK re-vendors `CONTRACT.md` from its merge commit:
+- **One fix PR per SDK, eleven in all.** All merged. After PR #500 merged, one
+  follow-up PR per SDK re-vendored `CONTRACT.md` from its merge commit — rust #117,
+  typescript #120, python #91, java #104, kotlin #70, csharp #98, php #76, go #89,
+  swift #68, c #67, cplusplus #69 — all merged 2026-09-25; the artifact drift check
+  reports 0 problems across the eleven repositories. The fix PRs:
   - Rust 116, TypeScript 119, Python 90, Java 103;
   - Kotlin 69, C# 97, PHP 75, Go 88;
   - Swift 67, C 66, C++ 68.
@@ -1074,8 +1077,8 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
 | Phase 19 | 26 | Deferred improvements & optimizations from PR reviews (incl. PR #126; 3 resolved in-PR) |
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
-| Phase 22 | 4+ | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates) |
+| Phase 22 | 20 | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates, gRPC client auth, service accounts on management, non-inheritable assignments, contracts 1.51/1.52 and the eleven SDK ports) |
 
-**Total: 112 tasks across 22 complete phases, plus Phase 22 in progress**
+**Total: 132 tasks across 23 complete phases**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

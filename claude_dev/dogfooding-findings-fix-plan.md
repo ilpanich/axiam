@@ -3,7 +3,7 @@
 **Date:** 2026-09-21
 **Validated against:** `axiam` main @ `2fc0193` (release 1.0.0-beta16 + two chores); every SDK repository at the head that vendors contract 1.48 / the beta16 `openapi.json` (all twelve copies byte-identical, verified by hash)
 **Source of the findings:** `axiam-domo-demo` @ `420d0b6`, [`docs/dogfooding-findings.md`](https://github.com/ilpanich/axiam-domo-demo/blob/main/docs/dogfooding-findings.md) — 27 entries, DF-001 … DF-027
-**Status: PLANNED — nothing in this document is implemented.** It is a brief for later sessions; §11 carries the kick-off prompt.
+**Status: EXECUTED — every task shipped.** S-1 … S-11 with the two console follow-ups landed on `main` in PRs A … G2 (2026-09-22/23); contracts 1.51 (PR H) and 1.52 (PR #500); the eleven ports (C-1 … C-11), the eleven C-12 fix PRs and the eleven 1.52 re-vendor PRs are all merged, and `scripts/check-sdk-artifact-drift.py` reports 0 problems across 11 repositories (verified 2026-09-25). Each task's EXECUTED block says what actually shipped. What remains is the maintainer's list in §13 — of which row 6, the threat-model reconciliation, has its brief in [`threat-model-reconciliation-2026-09-25-plan.md`](threat-model-reconciliation-2026-09-25-plan.md), and the website catch-up for both waves is [`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md). §11 carried the kick-off prompt.
 
 > **How this plan was produced.** Every entry was re-read against the code on
 > `main` rather than taken at its word — most of the findings were filed
@@ -2895,10 +2895,24 @@ from merged code, and lists six open defects to confirm and route first.
 > call site had no test. C# released the device credential before the request, and
 > fixed its gRPC exemption at construction.
 >
-> **Still to do after J merges:** the fix PRs merge as they pass review, independently
-> of J, so the re-vendor is one follow-up PR per SDK. It copies `CONTRACT.md` from J's merge commit, moves the
-> README conformance line to 1.52 and adds a CHANGELOG line.
-> `scripts/check-sdk-artifact-drift.py --local-root ..` must then report no drift.
+> **Done after J merged (2026-09-25).** All eleven fix PRs above are merged. The 1.52
+> re-vendor is one PR per SDK, each copying `CONTRACT.md` from J's merge commit
+> (`80bc7aa`), moving the README conformance line to 1.52 and adding a CHANGELOG line —
+> all merged the same morning:
+> [rust #117](https://github.com/ilpanich/axiam-rust-sdk/pull/117),
+> [typescript #120](https://github.com/ilpanich/axiam-typescript-sdk/pull/120),
+> [python #91](https://github.com/ilpanich/axiam-python-sdk/pull/91),
+> [java #104](https://github.com/ilpanich/axiam-java-sdk/pull/104),
+> [kotlin #70](https://github.com/ilpanich/axiam-kotlin-sdk/pull/70),
+> [csharp #98](https://github.com/ilpanich/axiam-csharp-sdk/pull/98),
+> [php #76](https://github.com/ilpanich/axiam-php-sdk/pull/76),
+> [go #89](https://github.com/ilpanich/axiam-go-sdk/pull/89),
+> [swift #68](https://github.com/ilpanich/axiam-swift-sdk/pull/68),
+> [c #67](https://github.com/ilpanich/axiam-c-sdk/pull/67),
+> [cplusplus #69](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/69).
+> `scripts/check-sdk-artifact-drift.py` (GitHub API mode): 11 repositories inspected,
+> 0 artifact problems — every vendored `CONTRACT.md` is blob `50a4413701bb`, the one
+> `main` carries.
 
 ---
 
@@ -3171,12 +3185,12 @@ None of it is worked in PR G2.
 
 | # | Item | Owner | Next step |
 |---|---|---|---|
-| 1 | **I₁ … I₁₁ → J**: the eleven SDK ports (C-1 … C-11) against **contract 1.51**, then the conformance review (C-12, now **1.52**). PR H (C-0) has landed its text: 1.51, because 1.50 was already `d5a6811`'s (C-0 EXECUTED, item 1) | Executing sessions: Opus 5 for C-1 and C-12; Sonnet 5 for C-2 … C-11 (§2) | C-1 (Rust, `ilpanich/axiam-rust-sdk`, branch `feat/contract-1.50` per §8 rule 2, or `feat/contract-1.51` if the maintainer renames it) re-vendors `CONTRACT.md`, `openapi.json`, `management-registry.json` and `proto/` from the **merged** PR H commit, then the ten ports per §8. The §27.10 manifest table assigns three defects to C-6, C-9, C-10 and C-11 on top of §6's scope. `check-sdk-artifact-drift.py` stays red (33 problems: three artefacts × eleven repositories) until they do; that is expected, not a regression |
+| 1 | **I₁ … I₁₁ → J**: the eleven SDK ports (C-1 … C-11) against **contract 1.51**, then the conformance review (C-12, now **1.52**). PR H (C-0) has landed its text: 1.51, because 1.50 was already `d5a6811`'s (C-0 EXECUTED, item 1) | Executing sessions: Opus 5 for C-1 and C-12; Sonnet 5 for C-2 … C-11 (§2) | C-1 (Rust, `ilpanich/axiam-rust-sdk`, branch `feat/contract-1.50` per §8 rule 2, or `feat/contract-1.51` if the maintainer renames it) re-vendors `CONTRACT.md`, `openapi.json`, `management-registry.json` and `proto/` from the **merged** PR H commit, then the ten ports per §8. The §27.10 manifest table assigns three defects to C-6, C-9, C-10 and C-11 on top of §6's scope. `check-sdk-artifact-drift.py` stays red (33 problems: three artefacts × eleven repositories) until they do; that is expected, not a regression — **Done 2026-09-25**: C-1 … C-11 merged (§8.1), C-12 and contract 1.52 merged (PR #500), the eleven fix PRs and the eleven re-vendor PRs merged (C-12's EXECUTED block); the drift check reports 0 |
 | 2 | **Vault `sign_csr` of a `Server` certificate.** Refused under a `vault_pki` CA today, by design (S-7 EXECUTED, item 1): Vault's `sign-verbatim` takes SANs from the CSR only, and the CSR may not carry them | Maintainer decision, then an Opus 5 session (certificate issuance) | Decide whether to add the config key the plan excluded: a Vault role with `use_csr_sans=false`, so explicit names can reach the certificate. Until then `POST /certificates` (generate) is the path under a Vault CA, and the console says so |
 | 3 | **D-7: X.509 `nameConstraints` in tenant CAs**, so the name fence holds for a relying party that never talks to AXIAM. T-288's residual | Next PKI pass; Opus 5 | A design note first: how a change to `server_cert_allowed_names` re-issues (or does not re-issue) a tenant CA, and what happens to leaves already issued under the old constraints |
 | 4 | **The intermittent `500` from CA-certificate creation during e2e fixture setup**, deferred in S-5 as "a real unknown in CA generation; gets its own change" | Unassigned; its own change | Reproduce first: loop the matrix fixture's CA creation against a local stack and capture the server log for the `500`. No fix before there is a cause |
 | 5 | **`k8s/frontend/deployment.yml`**: `readOnlyRootFilesystem: true` with no volume at `/etc/nginx/conf.d`, so the stock `20-envsubst-on-templates.sh` cannot render and the console most likely serves the base image's `default.conf` — no SPA fallback, no security headers, no proxying. Found in S-11 by reading the entrypoint; **not observed on a cluster** | Maintainer (deployment); a Sonnet 5 session can take the change | Observe it on a cluster (`kubectl exec … cat /etc/nginx/conf.d/default.conf`) before changing anything; if confirmed, mount an `emptyDir` at `/etc/nginx/conf.d` and add a probe that fails on the stock page |
-| 6 | **Threat-model reconciliation**: `Axiam.json` is nine entries behind the STRIDE documents (flagged since PR A) | Maintainer | Write the nine missing entries into the Threat Dragon file from the text `threat-model-stride.md` already holds, then regenerate `website/src/threatModel.ts` and commit it, closing the gap `gen-threat-model.mjs` reports (279 in the JSON against 288 in the documents) |
+| 6 | **Threat-model reconciliation**: `Axiam.json` is nine entries behind the STRIDE documents (flagged since PR A) | Maintainer | Write the nine missing entries into the Threat Dragon file from the text `threat-model-stride.md` already holds, then regenerate `website/src/threatModel.ts` and commit it, closing the gap `gen-threat-model.mjs` reports (279 in the JSON against 288 in the documents) — **Brief written 2026-09-25**: [`threat-model-reconciliation-2026-09-25-plan.md`](threat-model-reconciliation-2026-09-25-plan.md), to be executed on `main` before the beta17 website pass; the generated website files are then regenerated by [`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md), not here |
 | 7 | **D-3: widen the `has_role` key to (subject, role, resource)** | Maintainer decision (§7.1) | A design document of its own, with the data migration: verify no subject holds a role both globally and at a resource, and how "one global assignment" stays unique without a partial index |
 | 8 | **D-4: mirror the management surface on gRPC** | Deferred | When taken: `ReactorAdminService` (`proto/axiam/v1/reactor.proto`) is the precedent; S-8's client-certificate verification is now in place for the listener it would ride on |
 | 9 | **D-5, second round**: whether each excluded route family should accept a service-account token — self-service, organizations/tenants, settings, CA, PGP, SCIM, federation | Maintainer, argued family by family | One decision per family, each with the argument S-9 made for the eight it admitted; the route-map sweep in `m2m_management_test.rs` is where each decision is pinned |

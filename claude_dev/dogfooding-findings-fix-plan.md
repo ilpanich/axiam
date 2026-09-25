@@ -2763,19 +2763,19 @@ below the table.
 
 | Question | Rust | TypeScript | Python | Java | C# | PHP | Go | Kotlin | Swift | C | C++ |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| **1. §10.1 rule 9 at the default entry point** | `verify` refuses; the actix guard calls `verify_with_proofs` with the peer certificate | `authenticateRequest` (every guard) refuses; **`Verifier.verifyAccessToken`, which its own doc names as the guard entry, does not** | `verify_access_token` refuses; `verify_with_proofs` takes evidence | `verifyAccessToken` refuses; the Spring filter calls `verifySenderConstrained` | `VerifyAsync` refuses; the middleware calls `VerifyWithProofsAsync` | `verify` / `verifyLocally` refuse; `verifyWithProofs` takes evidence | `VerifyAccessToken` refuses; the middleware passes `r.TLS` evidence | `verifySession` (proofs default to none) refuses | `authenticate` (`.none`) refuses | `axiam_jwt_verify_ex` refuses; `…_with_evidence` takes it | `TokenAuthenticator::authenticate` refuses; `authenticate_sender_constrained` takes it |
+| **1. §10.1 rule 9 at the default entry point** | `verify` refuses; the actix guard calls `verify_with_proofs` with the peer certificate | `authenticateRequest` (every guard) refuses; **`Verifier.verifyAccessToken`, which its own doc names as the guard entry, did not** (fixed, #118) | `verify_access_token` refuses; `verify_with_proofs` takes evidence | `verifyAccessToken` refuses; the Spring filter calls `verifySenderConstrained` | `VerifyAsync` refuses; the middleware calls `VerifyWithProofsAsync` | `verify` / `verifyLocally` refuse; `verifyWithProofs` takes evidence | `VerifyAccessToken` refuses; the middleware passes `r.TLS` evidence | `verifySession` (proofs default to none) refuses | `authenticate` (`.none`) refuses | `axiam_jwt_verify_ex` refuses; `…_with_evidence` takes it | `TokenAuthenticator::authenticate` refuses; `authenticate_sender_constrained` takes it |
 | **2. §17 memo key and acting tenant** | fifth component | fifth component | fifth component | fifth component | fifth component | fifth component | fifth component | fifth component | fifth component | fifth parameter | fifth component |
-| **3. Generated DTOs**: `SubjectAltName`; absent role-side `inherit` | serde enum; `default_true` | tagged union; `roleAssignmentInherits()` | two classes; `= True` | sealed type with a serializer; `inherits()` | converter; `= true` | `toArray()`; absent means true | struct of two optional fields (tagging by convention); `Inherits()` | sealed type with a `KSerializer`; `= true` | enum with a custom `encode`; `inherits` | build function; absent means 1 | struct of two optionals (by convention); **an absent `inherit` fails the whole listing** |
-| **4. Device token beside a cookie jar** | withheld: empty `Cookie` on the login and after | withheld: jar-free agent, empty `Cookie` | jar **cleared** on adoption; **the device POST itself carries the jar** | withheld: a load-suppressed jar | a new jar-free handle, and the original's session is kept; **the device POST itself carries the jar** | jar **cleared before** the POST, so a failed device login loses the session | withheld: a no-outbound jar wrapper | withheld: a strip-cookie marker | withheld: empty `Cookie` | withheld: jar snapshotted, cleared and restored per request | withheld: `no_stored_cookies`; **sends body `{}`** |
+| **3. Generated DTOs**: `SubjectAltName`; absent role-side `inherit` | serde enum; `default_true` | tagged union; `roleAssignmentInherits()` | two classes; `= True` | sealed type with a serializer; `inherits()` | converter; `= true` | `toArray()`; absent means true | struct of two optional fields (tagging by convention); `Inherits()` | sealed type with a `KSerializer`; `= true` | enum with a custom `encode`; `inherits` | build function; absent means 1 | struct of two optionals (by convention); **an absent `inherit` failed the whole listing** (fixed, #67) |
+| **4. Device token beside a cookie jar** | withheld: empty `Cookie` on the login and after | withheld: jar-free agent, empty `Cookie` | jar **cleared** on adoption; **the device POST itself carried the jar** (fixed, #89) | withheld: a load-suppressed jar | a new jar-free handle, and the original's session is kept; **the device POST itself carried the jar** (fixed, #96) | jar **cleared before** the POST, so a failed device login lost the session; withheld since #74 | withheld: a no-outbound jar wrapper | withheld: a strip-cookie marker | withheld: empty `Cookie` | withheld: jar snapshotted, cleared and restored per request | withheld: `no_stored_cookies`; **sent body `{}`** (fixed, #67) |
 | **5. Who holds a login result** (record / reset / a 200 with no user object) | login, `verify_mfa` / OPAQUE, MFA setup, WebAuthn setup and authentication, the three SSO completions, device, logout / decode fails | adds OPAQUE, MFA setup, WebAuthn setup / WebAuthn auth, SSO ×3 (#117), device, logout / not handled | as TS / as TS / records `false` | as TS / as TS, **plus refresh** / records `false` | as TS / as TS, **plus refresh, and before the request**; device returns a new handle / unknown | as TS / as TS / throws, gate unchanged | as TS / as TS (SSO via #87) / records `false` | as TS / as TS / records `false` | as TS / as TS / decode fails | as TS / as TS / unknown | as TS / as TS / unknown |
 | **6. Global role with `inherit: false`** | refused client-side | refused | refused | refused | refused | refused | refused (checked only with a resource) | refused | refused (checked only with a resource) | refused | refused |
-| **7. Update of a binding is two calls** (all: unassign, assign carrying `tenant_scope`, restore on failure) | `BindingUpdateFailed { error, restore }` | `rebind-failed`, `restoreSucceeded` | **the restore outcome is only in the message string** | `StepOutcome.restored` | `RestoreSucceeded` | `BindingRebindFailed(restored, restoreError)` | two `AppliedStep`s (`StatusRestored` / `StatusRestoreFailed`) | `BINDING_UPDATE_FAILED`, `restoreSucceeded` | `BindingOutcome.restored` | `restore_attempted` / `restore_succeeded` | **the restore outcome is swallowed and not reported** |
+| **7. Update of a binding is two calls** (all: unassign, assign carrying `tenant_scope`, restore on failure) | `BindingUpdateFailed { error, restore }` | `rebind-failed`, `restoreSucceeded` | **the restore outcome was only in the message string** (fixed, #89) | `StepOutcome.restored` | `RestoreSucceeded` | `BindingRebindFailed(restored, restoreError)` | two `AppliedStep`s (`StatusRestored` / `StatusRestoreFailed`) | `BINDING_UPDATE_FAILED`, `restoreSucceeded` | `BindingOutcome.restored` | `restore_attempted` / `restore_succeeded` | **the restore outcome was swallowed** (fixed, #67) |
 
 Question 6 checks only a role the manifest declares global; a global role it does
 not declare goes to the server, which answers `400`, in all eleven.
 
-**Open defects found at close, for C-12 to confirm and route.** None fails a test,
-because none has a test, which is the point of C-12.
+**Defects found at close, all since fixed.** None failed a test, because none had one;
+each fix PR shows its new test red on the old code first. The list is kept as found.
 
 1. **TypeScript, §10.1 rule 9 (security).** `Verifier.verifyAccessToken`
    (`src/node/jwks.ts`) never reads `cnf`. Its doc says anything guarding a route MUST
@@ -2799,6 +2799,25 @@ because none has a test, which is the point of C-12.
    amendment. PHP clears the jar before the call, so a refused device login still
    ends the session.
 
+**Fixed, 2026-09-24**, one PR per SDK, each merged:
+
+| Defect | SDK | PR | Merged |
+|---|---|---|---|
+| 1 | TypeScript | [axiam-typescript-sdk#118](https://github.com/ilpanich/axiam-typescript-sdk/pull/118) | `39c794f` |
+| 2, 3, 4 | C++ | [axiam-cplusplus-sdk#67](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/67) | `b650258` |
+| 5, 6 | Python | [axiam-python-sdk#89](https://github.com/ilpanich/axiam-python-sdk/pull/89) | `8156a84` |
+| 6 | C# | [axiam-csharp-sdk#96](https://github.com/ilpanich/axiam-csharp-sdk/pull/96) | `af77b52` |
+| 6 (PHP) | PHP | [axiam-php-sdk#74](https://github.com/ilpanich/axiam-php-sdk/pull/74) | `33c8095` |
+
+Three more defects surfaced while fixing these, all fixed in the same PRs:
+- **C#:** the WebAuthn setup pair sent no `X-Axiam-Tenant`, which §5.2.2 rule 4
+  forbids. It runs on the anonymous transport, which never carried the header (#96).
+- **PHP:** the device POST also carried an `Authorization: Bearer` and an
+  `X-CSRF-Token` taken from the session. The CSRF token is stored apart from the
+  cookie jar, so clearing the jar never removed it (#74).
+- **C++:** libcurl adds `Content-Type: application/x-www-form-urlencoded` to every
+  body-less non-GET request. It is now suppressed (#67).
+
 Not defects, but divergences the contract should settle in 1.52:
 - **Question 5, the record set.** Ten SDKs record from OPAQUE, MFA setup and WebAuthn
   setup, whose `200` carries the user object (`crates/axiam-api-rest/src/handlers/opaque.rs`
@@ -2821,6 +2840,65 @@ Start from the seven open questions in C-1's EXECUTED block ("For C-12"): each i
 place where the ports can diverge while each still reads the contract correctly.
 The table "The seven C-12 questions, answered by SDK" (under C-2 … C-11) answers them
 from merged code, and lists six open defects to confirm and route first.
+
+> **EXECUTED — 2026-09-25, PR J, contract 1.52.** C-12 read the eleven 1.51 ports from
+> each SDK's merged `main`, and the evidence is
+> `claude_dev/sdk-dogfooding-conformance-review.md`. The review worked in three passes:
+>
+> - it answered the seven questions per SDK;
+> - it probed each rule's edges in code;
+> - it checked every README and CHANGELOG sentence about 1.51 against the code.
+>
+> **Contract 1.52** writes one answer to each question, as six rules, N1 … N6:
+>
+> - §10.1, every entry point is a guard;
+> - §17.1, the memo key;
+> - §27.13, the `SubjectAltName` shape;
+> - new §6.1 rule 11, the device credential's lifecycle;
+> - §5.2 rule 1, the acting-tenant semantics;
+> - §27.6.1, bindings.
+>
+> None changes the wire. **§27.14** records 37 divergences, none open. The six defects
+> found first were fixed before the rules were written, in:
+>
+> - [axiam-typescript-sdk#118](https://github.com/ilpanich/axiam-typescript-sdk/pull/118)
+> - [axiam-python-sdk#89](https://github.com/ilpanich/axiam-python-sdk/pull/89)
+> - [axiam-csharp-sdk#96](https://github.com/ilpanich/axiam-csharp-sdk/pull/96)
+> - [axiam-php-sdk#74](https://github.com/ilpanich/axiam-php-sdk/pull/74)
+> - [axiam-cplusplus-sdk#67](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/67)
+>
+> Every SDK had at least one defect against the new rules. There is one fix PR per SDK,
+> each on `fix/c12-conformance`, merged as it passed review:
+>
+> | SDK | PR | Rules fixed |
+> |---|---|---|
+> | Rust | [#116](https://github.com/ilpanich/axiam-rust-sdk/pull/116) | N4.3, §5 rule 2, N5.5, N4.5 (gRPC) |
+> | TypeScript | [#119](https://github.com/ilpanich/axiam-typescript-sdk/pull/119) | N4.5, N4.3, N6.5, N3, N4.2, N4.4, N5.6, N5.5, N6.2 |
+> | Python | [#90](https://github.com/ilpanich/axiam-python-sdk/pull/90) | N4.7, N4.4, N5.3, N5.1, N4.5, N4.2, N5.6 |
+> | Java | [#103](https://github.com/ilpanich/axiam-java-sdk/pull/103) | N4.1, N4.3, N4.5 (gRPC), N4.2, N4.4, N6.2 |
+> | Kotlin | [#69](https://github.com/ilpanich/axiam-kotlin-sdk/pull/69) | N4.4 |
+> | C# | [#97](https://github.com/ilpanich/axiam-csharp-sdk/pull/97) | N4.6, N5.1, N4.4, N6.2, N6.3, N4.2, N4.5 (gRPC) |
+> | PHP | [#75](https://github.com/ilpanich/axiam-php-sdk/pull/75) | N4.5, N6.4, N6.5, N6.6, N5.6, N4.4 |
+> | Go | [#88](https://github.com/ilpanich/axiam-go-sdk/pull/88) | N4.4, N5.5, N3 |
+> | Swift | [#67](https://github.com/ilpanich/axiam-swift-sdk/pull/67) | N5.6, N5.4, N4.4 |
+> | C | [#66](https://github.com/ilpanich/axiam-c-sdk/pull/66) | N5.4, N5.6, N3 |
+> | C++ | [#68](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/68) | N4.4, N4.2, N6.2, N3, N5.6, N4.7 |
+>
+> Every fix PR also corrects its README and CHANGELOG. For each one, the orchestrator:
+>
+> - read the diff;
+> - re-ran the suite at its head;
+> - ran the new tests against `main`'s sources, where they fail.
+>
+> Four send-backs were needed. TypeScript's first fix still compared tenant IDs as
+> strings (N5.6). Python's did too, and the orchestrator fixed that one. Kotlin's SSO
+> call site had no test. C# released the device credential before the request, and
+> fixed its gRPC exemption at construction.
+>
+> **Still to do after J merges:** the fix PRs merge as they pass review, independently
+> of J, so the re-vendor is one follow-up PR per SDK. It copies `CONTRACT.md` from J's merge commit, moves the
+> README conformance line to 1.52 and adds a CHANGELOG line.
+> `scripts/check-sdk-artifact-drift.py --local-root ..` must then report no drift.
 
 ---
 

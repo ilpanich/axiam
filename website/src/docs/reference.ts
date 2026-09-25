@@ -314,10 +314,10 @@ export const REFERENCE_PAGES: DocPage[] = [
         type: "p",
         text: "A release ships the surface it derives from the spec it vendors: tagging an SDK re-vendors the contract, the OpenAPI document and the management registry, then regenerates that SDK's §27 management surface from them and stages exactly what the generator wrote. A missing generator stops the release rather than tagging a tree the SDK's own drift-check would reject.",
       },
-      { type: "h", id: "recent", text: "What moved in contract 1.40–1.51" },
+      { type: "h", id: "recent", text: "What moved in contract 1.40–1.52" },
       {
         type: "p",
-        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been twelve amendments since 1.39. Five of them changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; and 1.50, a one-field type change. The eleven vendor 1.50 together with the \`1.0.0-beta16\` OpenAPI document and management registry. **1.51 has not been re-vendored yet.** It is additive, and an SDK written against 1.50 stays conformant on everything it already does. The one thing an existing SDK must tolerate is a new certificate type in list responses.`,
+        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been thirteen amendments since 1.39. Six of them changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently, and each SDK's C-12 fix PR brings that SDK to it. A follow-up PR per SDK then re-vendors the contract.`,
       },
       {
         type: "table",
@@ -382,7 +382,12 @@ export const REFERENCE_PAGES: DocPage[] = [
           [
             "1.51",
             `The dogfooding remediation. [§6.1](${contractLink("6.1")}) specifies \`authenticate_device()\`, whose token is now bound to the device's certificate. [§5.2](${contractLink("5.2")}) makes the acting-tenant helper a SHOULD, REST only. [§1.1.1](${contractLink("1.1.1")}) adds \`validate_token\` / \`introspect_token\` over gRPC, reading \`cnf\`. [§27.6.1](${contractLink("27.6.1")}) adds resource metadata, resource-scoped role bindings with \`inherit\`, and service accounts to the manifest. [§27.13](${contractLink("27.13")}) records the new \`Server\` certificate type, \`subject_alt_names\`, \`inherit\` and which management operations a service account may call. Every new request field is optional.`,
-            "**yes, when ported** — re-sync pending",
+            "**yes** — ported in all eleven",
+          ],
+          [
+            "1.52",
+            `The C-12 cross-SDK review of the eleven 1.51 ports, recorded in [§27.14](${contractLink("27.14")}) with no open row. Six clarifications, no wire change. [§10.1](${contractLink("10.1")}): every public entry point that turns a token into an identity is a rule 9 guard. [§17.1](${contractLink("17.1")}): the acting tenant is part of the decision-memo key. [§27.13](${contractLink("27.13")}): a \`SubjectAltName\` with neither branch or both is refused client-side. [§6.1](${contractLink("6.1")}) rule 11 covers the device credential's lifecycle: it is used for every request, held until replaced, and never refreshed. [§5.2](${contractLink("5.2")}) says where the acting-tenant header goes, which responses set the gate, and that tenant ids compare as UUIDs. [§27.6.1](${contractLink("27.6.1")}) covers manifest bindings: stated values, rebind outcomes as data, and \`plan\` reporting an Update.`,
+            "**yes** — one C-12 fix PR per SDK",
           ],
         ],
       },

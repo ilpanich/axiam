@@ -257,6 +257,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **SDK contract 1.52: the C-12 cross-SDK conformance review of the eleven 1.51
+  ports (T22.18).** C-12 read each SDK's merged `main` rather than the ports' reports.
+  The seven questions 1.51 left open had been answered in up to four ways each, and
+  several answers were defects. The review evidence is
+  `claude_dev/sdk-dogfooding-conformance-review.md`. `sdks/CONTRACT.md` now writes one
+  answer to each, as six rules:
+  - **N1, §10.1.** Every public entry point that turns an access token into an identity
+    is a rule 9 guard, including an overload with no evidence parameter. A guard that
+    cannot reach transport evidence must say in its README that it refuses bound
+    tokens.
+  - **N2, §17.1.** The acting tenant is the fifth component of the memo key.
+  - **N3, §27.13.** A `SubjectAltName` with neither branch or both is refused
+    client-side, never sent and never dropped.
+  - **N4, §6.1 rule 11 (new).** The device credential's lifecycle:
+    - the device POST carries no prior session;
+    - a refused device login changes nothing;
+    - on success, the credential is used for every request, gRPC included;
+    - it is held until logout or another session replaces it;
+    - it is never refreshed.
+  - **N5, §5.2 rule 1.** The acting-tenant header:
+    - it is required on authenticated routes, and never sent off-origin;
+    - there is one gate per session;
+    - a refusal is `AuthzError`;
+    - the responses that record and reset the gate are named;
+    - tenant IDs compare as UUIDs.
+  - **N6, §27.6.1.** Bindings:
+    - a global role with `inherit: false` must be refused;
+    - a stated `inherit: true` is accepted, and never sent;
+    - a failed rebind is reported as data;
+    - `plan` shows a binding Update;
+    - metadata compares as JSON values;
+    - references resolve by kind.
+
+  The new §27.14 records all thirty-seven divergences, none open. Each is resolved as
+  contract fixed, SDK fixed, or forced by the language. §27.10's manifest table is
+  refilled from the merged ports. There is no wire change: `openapi.json`,
+  `management-registry.json` and `proto/` are unchanged. The C-12 fix PRs merge
+  as they pass review. Each SDK then re-vendors `CONTRACT.md` from this change's merge
+  commit, in one follow-up PR.
+
 - **SDK contract 1.51 — what the Phase 22 server wave means for the eleven SDKs
   (T22.15, C-0; DF-008 … DF-012).** `sdks/CONTRACT.md` now describes what shipped.
   - **Device login.** `authenticate_device()` joins §1's locked vocabulary and is

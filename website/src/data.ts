@@ -491,6 +491,131 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "mcp-surfaces-and-the-dogfooding-remediation",
+    date: "September 25, 2026",
+    dateShort: "Sep 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "An authorization server MCP clients can find, and what the first integration found",
+    excerpt:
+      "`1.0.0-beta16` made AXIAM an authorization server an MCP client can discover, register with and get a correctly addressed token from. `1.0.0-beta17` fixes what the first external integration found — a signing CA that issued for tenants it did not belong to among them.",
+    body: [
+      {
+        type: "p",
+        text: "This post covers two releases. `1.0.0-beta16`, tagged on 19 September, shipped without a post of its own; `1.0.0-beta17` follows this one. Together they add seventeen threats to the model, all of them mitigated, taking it to **288 threats, 275 mitigated and 13 open** — the open register neither gains nor loses an item.",
+      },
+      { type: "h", text: "1.0.0-beta16 — the MCP authorization surfaces" },
+      {
+        type: "p",
+        text: "A Model Context Protocol client is handed a URL and nothing else. For AXIAM to be its authorization server it has to be discoverable at the path those clients probe, accept a client that holds no secret and listens on whatever port the operating system gave it, let a client register itself or be known by a URL, and mint a token addressed at the MCP server rather than at AXIAM. `1.0.0-beta16` does all of it, and every piece is off, or unchanged, until an operator turns it on:",
+      },
+      {
+        type: "p",
+        text: "**RFC 8414 discovery** at `/.well-known/oauth-authorization-server` — the same document as the OIDC path, an alias rather than a second implementation.",
+      },
+      {
+        type: "p",
+        text: "**Public clients** (`token_endpoint_auth_method: \"none\"`), with PKCE required, and **loopback redirects on any port**, as RFC 8252 requires — widened by the port and by nothing else ([T-278](#/security/diagram/2/T-278)).",
+      },
+      {
+        type: "p",
+        text: "**RFC 8707 resource indicators**: `resource` names the service a token is for, the audience travels with the grant and cannot widen at refresh, and introspection reports `aud` ([T-277](#/security/diagram/2/T-277)).",
+      },
+      {
+        type: "p",
+        text: "**RFC 7591 dynamic client registration**, off by default, in an administrator-gated or an open mode — with the tenant, not the client, choosing a self-registered client's audiences, and a consent screen it cannot skip ([T-273](#/security/diagram/2/T-273)).",
+      },
+      {
+        type: "p",
+        text: "**Client ID metadata documents**, off by default: a `client_id` that is a URL is fetched through the SSRF guard, and only from a publisher the tenant trusts ([T-274](#/security/diagram/2/T-274)).",
+      },
+      {
+        type: "p",
+        text: "**Per-tenant path issuers**, `{root}/t/{tenant_id}`, opt-in, for one AXIAM fronting more than one tenant's MCP servers. One key set signs every tenant, so two checks keep a tenant-A token off tenant B's path ([T-279](#/security/diagram/2/T-279)).",
+      },
+      {
+        type: "p",
+        text: "**Contract 1.48's §28 helpers** — the RFC 9728 document and the `WWW-Authenticate` challenge an MCP server publishes — in all eleven SDKs, reviewed across them in 1.49.",
+      },
+      {
+        type: "p",
+        text: "The phase ended in a security review of those surfaces. It fixed one finding in its own task: AXIAM's own audiences are well-formed URIs, so they could be named as resources, and `client_credentials` could mint a token carrying the user audience — the `axiam` scheme is now reserved. It filed four more, and all four closed the same day, before the release: a stranger could hold a tenant's registration quota for thirty days, and now for an hour ([T-272](#/security/diagram/2/T-272)); client rows created from metadata documents had no quota and no sweep ([T-275](#/security/diagram/2/T-275)); the trusted-publisher list admitted `*` ([T-276](#/security/diagram/2/T-276)); and an error raised before the redirect matcher never reached a desktop client's ephemeral port ([T-280](#/security/diagram/2/T-280)).",
+      },
+      {
+        type: "p",
+        text: "The OpenID Foundation suite was then re-run as four full plans on 18 September, against a build carrying all of it: **165 modules, zero `FAILED`** — 150 `PASSED`, 10 `REVIEW` with every screenshot published and matched to its condition, 3 `WARNING` and 2 `SKIPPED`. The eight modules that had passed only when run individually are passes in the sweep. It is still a self-run against a working-tree build, and not a certification.",
+      },
+      { type: "h", text: "1.0.0-beta17 — what the first external integration found" },
+      {
+        type: "p",
+        text: "`axiam-domo-demo` is the first external integration built on AXIAM, and it filed what it found. The remediation ships in `1.0.0-beta17`, and the most serious item was an isolation failure. A signing CA issued for any tenant of its organization, because the lookup never read the tenant the CA belongs to, so a tenant administrator could mint a certificate that chained to the root every relying party in the organization trusts — and the demo rode one to a full MQTT session. A CA the caller may not use is now a `404`, checked before anything about it is disclosed ([T-281](#/security/diagram/5/T-281)). **Leaves already issued across the boundary are not revoked on upgrade**: that is an operator's decision, and the PKI guide has the reach table.",
+      },
+      {
+        type: "p",
+        text: "**Server certificates behind a name fence** — a `Server` type with explicit subject alternative names, admitted only by an organization list that is empty by default and that tenants may only narrow — and a usage profile on every leaf, so a server certificate authenticates nobody ([T-288](#/security/diagram/5/T-288)).",
+      },
+      {
+        type: "p",
+        text: "**Device tokens bound to their certificate** (`cnf.x5t#S256`), so a token lifted off a device is no longer as good as its key ([T-283](#/security/diagram/5/T-283)), and **a limiter on the device login**, the one auth route that had none ([T-282](#/security/diagram/5/T-282)).",
+      },
+      {
+        type: "p",
+        text: "**Client certificates on the gRPC listener**, off by default, sharing the REST listener's trust anchors and its reload ([T-286](#/security/diagram/0/T-286)).",
+      },
+      {
+        type: "p",
+        text: "**Service accounts on the management API**, for eight families and authorized by their own roles, so provisioning no longer needs a person's password — and the audit log tells a machine's write from a person's ([T-287](#/security/diagram/0/T-287)).",
+      },
+      {
+        type: "p",
+        text: "**`inherit: false`**, a role assignment that stops at its resource ([T-285](#/security/diagram/4/T-285)).",
+      },
+      {
+        type: "p",
+        text: "**`axiam-server setup-token --remint`** for an operator who lost the first-boot token, refused on any deployment that has been bootstrapped ([T-284](#/security/diagram/7/T-284)).",
+      },
+      {
+        type: "p",
+        text: "The SDKs follow in contract **1.51**, which carries the wave to all eleven, and **1.52**, the cross-SDK review of those ports. The review is the honest half: every SDK had at least one defect against the rules it then wrote, and four recurred across unrelated codebases — a device credential that outlived a later login, a refresh guard that reached the device token, tenant ids compared as strings, and a malformed device-login response adopted as an empty credential. Each SDK fixed its own in one pull request, and every repository now vendors 1.52.",
+      },
+      { type: "h", text: "Three corrections" },
+      {
+        type: "p",
+        text: "The documentation was wrong in three places, and each is stated as a correction rather than quietly replaced. **Device certificates must be bound to a service account** — the guide said a `Device` certificate needed no bind, so a fleet commissioned by the guide failed every login. **RSA-4096 CA generation works** under every custodian; the guide said it failed outside Vault.",
+      },
+      {
+        type: "p",
+        text: "And **four secret variables were read by nothing**: the documentation, a dozen error messages and the repository's own recipes named `AXIAM__PKI__ENCRYPTION_KEY`, `AXIAM__EMAIL_ENCRYPTION_KEY`, `AXIAM__GDPR_PSEUDONYM_PEPPER` and `AXIAM__FEDERATION_ENCRYPTION_KEY`, while the server reads every secret from `AXIAM__AUTH__<NAME>`. **If your deployment set any of those four, it was ignored** — the feature that needed it stayed off — and the startup warning now says so, naming both spellings.",
+      },
+      { type: "h", text: "Upgrading" },
+      {
+        type: "p",
+        text: "Leaves issued before `1.0.0-beta17` carry no usage profile and behave as before until they are rotated.",
+      },
+      {
+        type: "p",
+        text: "A device token minted before it carries no `cnf` and is accepted until it expires — one access-token lifetime.",
+      },
+      {
+        type: "p",
+        text: "A tenant that issued leaves directly under the organization CA needs a signing CA of its own before it can issue again.",
+      },
+      {
+        type: "p",
+        text: "Under Vault custody a `Server` certificate is issued by `POST /api/v1/certificates`; a `Server` CSR is refused there by design.",
+      },
+      {
+        type: "p",
+        text: "A client that mapped a `403` at the device login should map `401` and read the body.",
+      },
+      { type: "h", text: "The caution, unchanged" },
+      {
+        type: "p",
+        text: "AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit. Do not put it in front of production identity traffic yet.",
+      },
+    ],
+  },
+  {
     slug: "first-factors-csrs-and-refusing-earlier",
     date: "September 15, 2026",
     dateShort: "Sep 2026",
@@ -983,7 +1108,7 @@ export const PHASES: Phase[] = [
     n: 20,
     title: "Beta line — stabilisation toward 1.0",
     focus:
-      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories, the first-login enrolment residuals and end-entity certificates from a CSR, and the authorization endpoint refusing a request that cannot succeed before anyone signs in for it",
+      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories, the first-login enrolment residuals and end-entity certificates from a CSR, and the authorization endpoint refusing a request that cannot succeed before anyone signs in for it — then the MCP authorization surfaces — public clients, resource indicators, dynamic registration, client ID metadata documents and per-tenant issuers — and the remediation of what the first external integration found: a signing CA bound to its tenant, certificate-bound device tokens, server certificates behind a name fence, client certificates on gRPC, and service accounts on the management API",
     start: "Aug 26, 2026",
     end: "Ongoing",
     status: "ongoing",

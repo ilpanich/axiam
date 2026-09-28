@@ -170,7 +170,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "traci
 config = "0.15"
 
 # OpenAPI
-utoipa = { version = "5", features = ["actix_extras", "chrono", "uuid"] }
+utoipa = { version = "6", features = ["actix_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 
 # PKI / X.509 / OpenPGP

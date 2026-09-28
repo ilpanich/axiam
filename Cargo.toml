@@ -171,7 +171,7 @@ config = "0.15"
 
 # OpenAPI
 utoipa = { version = "5", features = ["actix_extras", "chrono", "uuid"] }
-utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
+utoipa-swagger-ui = { version = "10", features = ["actix-web"] }
 
 # PKI / X.509 / OpenPGP
 rcgen = "0.14"

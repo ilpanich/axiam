@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:40d6dd91d0fbcf364438c0be1ee5a7f35dfac9a78973fb83562f473c0bb9a1b3"
+    "x-axiam-spec-digest": "sha256:ec597223a13bb0ea753314f781cd5e2d3f28e90d3cf51c449a0ac35d118dd3f1"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -495,10 +495,10 @@
             "schema": {
               "oneOf": [
                 {
-                  "type": "null"
+                  "$ref": "#/components/schemas/AuditOutcome"
                 },
                 {
-                  "$ref": "#/components/schemas/AuditOutcome"
+                  "type": "null"
                 }
               ]
             }
@@ -711,10 +711,10 @@
             "schema": {
               "oneOf": [
                 {
-                  "type": "null"
+                  "$ref": "#/components/schemas/AuditOutcome"
                 },
                 {
-                  "$ref": "#/components/schemas/AuditOutcome"
+                  "type": "null"
                 }
               ]
             }
@@ -12937,11 +12937,11 @@
           "opaque": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/OpaqueEnrollment",
                 "description": "Registration record for the NEW password, built client-side.\n\nOptional so a client that predates OPAQUE keeps working under\n`opaque_mode = optional`; required (and enforced server-side) under\n`opaque_mode = required`, where omitting it would leave the account\nunable to authenticate at all."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -13166,11 +13166,11 @@
           "opaque": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/OpaqueEnrollment",
                 "description": "OPAQUE registration record for `new_password`, built client-side.\n\nWithout this, reset would be the hole in OPAQUE coverage: a tenant could\nrun `opaque_mode = required`, and every \"forgot password\" would still put a\nplaintext password on the wire and leave the account with a verifier for\na password it no longer has."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -13527,11 +13527,11 @@
           "token_exchange": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/TokenExchangeTrustRequest",
                 "description": "X4 external token-exchange trust. Omitted means disabled."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -13960,11 +13960,11 @@
           "failure_policy": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/FailurePolicy",
                 "description": "Omit to take the strictest default among `events`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14330,11 +14330,11 @@
           "opaque": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/OpaqueEnrollment",
                 "description": "OPAQUE registration record for `password`, built client-side.\n\nThe server cannot derive this — the envelope is sealed under a key only\nthe client can compute — so it has to arrive with the request or not at\nall. Required under `opaque_mode = required`, where a user created\nwithout one could never authenticate.\n\nObtained by calling `POST /api/v1/auth/opaque/register/start` first and\ncarrying its `opaque_session` through, which is the one structural\ndifference from the SRP verifier this replaces: a verifier could be\ncomputed offline from a self-chosen salt, whereas a record needs the\nserver's OPRF evaluation."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14364,11 +14364,11 @@
           "retry_policy": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RetryPolicy",
                 "description": "Optional retry policy override."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14639,11 +14639,11 @@
           "provider": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ProviderConfig",
                 "description": "Full provider replacement (no partial merge within a provider)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -15289,11 +15289,11 @@
           "cnf": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/CnfClaim",
                 "description": "RFC 8705 §3.3 `cnf` — present only when the introspected token is\ncertificate-bound (X5.1).\n\nRFC 8705 requires the authorization server to expose the confirmation\nthrough introspection, because a resource server doing token\nintrospection rather than local JWT validation has no other way to\nlearn that the token it is holding is not a bearer token. Omitting it\nwould leave every introspecting resource server treating bound tokens\nas unbound — the exact failure the binding exists to prevent."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -15794,11 +15794,11 @@
           "opaque": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/OpaquePolicy",
                 "description": "The caller's own tenant's effective OPAQUE policy.\n\nHere rather than behind an admin-only settings endpoint because every\nauthenticated user needs it for one non-administrative reason: setting a\npassword requires building a registration record client-side, and the\nclient needs to know whether to do that at all. It discloses a property\nof the caller's own tenant and nothing about any other tenant or user.\n\nOmitted (not an error) when settings cannot be resolved, so a settings\noutage degrades to \"no OPAQUE\" rather than to a failed `/me` — the same\ntreatment `tenant_slug`/`org_slug` already get."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -16770,11 +16770,11 @@
           "mtls_endpoint_aliases": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/MtlsEndpointAliases",
                 "description": "RFC 8705 §5 — the mTLS-specific endpoint URLs, when this deployment\nterminates mutual TLS somewhere other than the issuer's own host.\nAbsent (not `null`) when it does not."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18410,11 +18410,11 @@
           "opaque": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/OpaquePolicy",
                 "description": "The tenant's effective OPAQUE policy, so the client knows whether to\nrun an enrolment at all. Absent when the tenant does not use OPAQUE."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -20001,11 +20001,11 @@
           "cimd": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/CimdPolicy",
                 "description": "T21.5 — the whole CIMD posture, or nothing. Only `enabled` and\n`allow_http` are ordered against the organization's; see [`CimdPolicy`]."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -20831,11 +20831,11 @@
           "token_exchange": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/TokenExchangeTrustRequest",
                 "description": "X4 external token-exchange trust. Replaced **wholesale** when present:\na partial merge of a trust configuration is how an operator ends up\nkeeping an `accepted_audiences` entry they believed they had removed."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -20923,11 +20923,11 @@
           "authn_request_params": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/AuthnRequestParamsMode",
                 "description": "X7.1 — see [`CreateOAuth2ClientRequest::authn_request_params`]."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -20998,11 +20998,11 @@
           "profile": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ClientProfile",
                 "description": "X5.1 — see [`CreateOAuth2ClientRequest::profile`]."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -21067,10 +21067,10 @@
           "token_endpoint_auth_method": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/ClientAuthMethod"
               },
               {
-                "$ref": "#/components/schemas/ClientAuthMethod"
+                "type": "null"
               }
             ]
           }
@@ -21176,20 +21176,20 @@
           "failure_policy": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/FailurePolicy"
               },
               {
-                "$ref": "#/components/schemas/FailurePolicy"
+                "type": "null"
               }
             ]
           },
           "mode": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/ReactorMode"
               },
               {
-                "$ref": "#/components/schemas/ReactorMode"
+                "type": "null"
               }
             ]
           },
@@ -21341,10 +21341,10 @@
           "status": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/UserStatus"
               },
               {
-                "$ref": "#/components/schemas/UserStatus"
+                "type": "null"
               }
             ]
           }
@@ -21370,11 +21370,11 @@
           "status": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/TenantStatus",
                 "description": "Change the tenant's lifecycle status (e.g. suspend/reactivate)."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -21386,11 +21386,11 @@
           "address": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Address",
                 "description": "X7 G8. `Some(Some(val))` = set, `Some(None)` = clear, `None` = no change."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -21462,10 +21462,10 @@
           "status": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/UserStatus"
               },
               {
-                "$ref": "#/components/schemas/UserStatus"
+                "type": "null"
               }
             ]
           },
@@ -21499,10 +21499,10 @@
           "status": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/UserStatus"
               },
               {
-                "$ref": "#/components/schemas/UserStatus"
+                "type": "null"
               }
             ]
           },
@@ -21535,10 +21535,10 @@
           "retry_policy": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/RetryPolicy"
               },
               {
-                "$ref": "#/components/schemas/RetryPolicy"
+                "type": "null"
               }
             ]
           },
@@ -21577,11 +21577,11 @@
           "address": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Address",
                 "description": "Postal address, released under the OIDC `address` scope (X7 G8).\n\nSame posture as [`Self::phone_number`]: stored to be released under\nconsent, read by nothing else."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -21713,11 +21713,11 @@
           "address": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Address",
                 "description": "OIDC Core §5.1.1, released under the `address` scope (X7 G8)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -22018,10 +22018,10 @@
           "min_certification": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/CertificationLevel"
               },
               {
-                "$ref": "#/components/schemas/CertificationLevel"
+                "type": "null"
               }
             ]
           },
@@ -22035,11 +22035,11 @@
           "unknown_aaguid": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/UnknownAaguidAction",
                 "description": "What to do with an AAGUID MDS has no metadata for.\n\n`None` means \"use the default for this `mode`\", which is **deny under\n`direct_required` and allow otherwise** — see\n[`WebauthnAttestationPolicy::effective_unknown_aaguid`]. It is\ndeliberately an `Option` rather than a plain value with a fixed\ndefault: a single struct-level default cannot be correct for both\nmodes, and the one that is wrong is wrong in the dangerous direction.\nA tenant that opts into the strictest posture and does not mention\nthis field would otherwise admit every authenticator FIDO has no\nmetadata for — silently, with no error and nothing in the audit trail\nto suggest the policy was not doing what its name says.\n\nAn explicit `Some(_)` always wins, in both directions: an admin who\ndeliberately wants `direct_required` *and* lenient handling of\nunlisted authenticators can still say so."
+              },
+              {
+                "type": "null"
               }
             ]
           }

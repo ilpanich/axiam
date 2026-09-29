@@ -30,7 +30,7 @@
 #   export SWAGGER_UI_DOWNLOAD_URL="file://$(scripts/make-swagger-ui-placeholder.sh)"
 set -euo pipefail
 
-VERSION="${1:-5.17.14}"
+VERSION="${1:-5.32.6}"
 DEST_DIR="${2:-$HOME/.axiam-build-cache}"
 DEST="$DEST_DIR/swagger-ui-$VERSION.zip"
 

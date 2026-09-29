@@ -162,7 +162,7 @@ This applies to every orchestrator run and every spawned executor, on **every wa
   Avoid unscoped `cargo test` / `cargo build` across the whole workspace unless required
   (e.g. the end-of-phase regression gate).
 - **swagger-ui GitHub-egress workaround (required after any `target/` wipe).** `utoipa-swagger-ui`
-  downloads `swagger-ui-5.17.14.zip` from `github.com` at build time, which this environment's
+  downloads `swagger-ui-5.32.6.zip` from `github.com` at build time, which this environment's
   proxy blocks (403). Generate the placeholder zip and point the build script at it:
   ```bash
   export SWAGGER_UI_DOWNLOAD_URL="file://$(scripts/make-swagger-ui-placeholder.sh)"

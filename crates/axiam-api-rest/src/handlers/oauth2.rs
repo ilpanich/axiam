@@ -600,6 +600,44 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         None => None,
     };
 
+    // T23.1.3 — the account, re-read. A session row says who authenticated and
+    // when; it says nothing about whether that account may still act, and the
+    // cookie naming it lives as long as the session does. An administrator who
+    // locks or deactivates a user does not revoke their sessions — the refresh
+    // path re-reads the account instead (`check_user_status`) — so this is the
+    // other place a session becomes a principal, and it applies the same rule.
+    // A session whose account fails it is treated exactly as a session that no
+    // longer exists: the cookie is stale, the browser is asked to sign in, and
+    // the sign-in page is where the account's state is explained.
+    let resolved = match resolved {
+        Some(session) => match state.user_repo.get_by_id(tenant_id, session.user_id).await {
+            Ok(user) => match state.auth_service.check_session_holder(&user) {
+                Ok(()) => Some(session),
+                Err(reason) => {
+                    tracing::info!(
+                        %tenant_id,
+                        session_id = %session.id,
+                        reason = %reason,
+                        "an OP browser session names an account that may no longer \
+                         sign in; not resolving a principal from it"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    %tenant_id,
+                    session_id = %session.id,
+                    "could not read the account behind an OP browser session; \
+                     treating the request as anonymous"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
     if let Some(session) = resolved {
         return Ok(AuthorizePrincipal {
             tenant_id,

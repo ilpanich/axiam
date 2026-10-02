@@ -1333,6 +1333,32 @@ impl<
     // See that method for why the eviction belongs in the same call as the
     // flag and the session revocation rather than beside it.
 
+    /// May an existing session still act for `user`? (T23.1.3)
+    ///
+    /// The rule the refresh path applies before it rotates a session, exposed
+    /// for the one other place a long-lived session credential is accepted:
+    /// `/oauth2/authorize` resolving the `axiam_op_session` cookie. That cookie
+    /// lives as long as the session (`refresh_token_lifetime_secs`), and an
+    /// account status change — an administrator locking or deactivating the
+    /// user — does not revoke sessions; it relies on this check being made
+    /// wherever a session is turned back into a principal. Without it, a
+    /// suspended user's browser kept buying authorization codes for the rest
+    /// of the session's life.
+    ///
+    /// Same statuses, same email-verification grace period, same answer as a
+    /// sign-in would get, so the two can never disagree about who may act.
+    ///
+    /// # Errors
+    ///
+    /// The [`AuthError`] a sign-in by this user would be refused with.
+    pub fn check_session_holder(&self, user: &User) -> Result<(), AuthError> {
+        Self::check_user_status(
+            &user.status,
+            user.created_at,
+            self.config.email_verification_grace_period_hours,
+        )
+    }
+
     // -------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------

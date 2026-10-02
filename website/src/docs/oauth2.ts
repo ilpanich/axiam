@@ -270,7 +270,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         rows: [
           ["carries a valid `axiam_op_session` cookie for this tenant", "authorized as that user; the ordinary code redirect follows"],
           ["carries none", "`302` to `/login?return_to=…`, and back here afterwards"],
-          ["carries one that names no live session", "`302` to `/login?return_to=…&reauth=1`; the dead cookie is cleared"],
+          ["carries one that names no live session, or a session whose account has since been locked, deactivated or removed", "`302` to `/login?return_to=…&reauth=1`; the dead cookie is cleared. The account is re-read every time, so suspending a user ends their browser sign-on without a logout"],
         ],
       },
       {

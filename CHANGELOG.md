@@ -90,6 +90,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `browser_sso: false` whatever the request says, and the stored-mode decode
   failing closed.
 
+- **A suspended account's OP browser session no longer buys authorization
+  codes (T23.1.3).** The `axiam_op_session` cookie names a session row, and it
+  lives as long as the session does (`refresh_token_lifetime_secs`). Locking or
+  deactivating a user through `PUT /api/v1/users/{id}`, or a
+  `PendingVerification` account's grace period running out, revokes no
+  session: the refresh path re-reads the account's status instead. Until now
+  `/oauth2/authorize` was the one place a session became a principal without
+  that read. A suspended user's browser therefore kept obtaining codes, and
+  with them access, ID and refresh tokens, at every `browser_sso` relying
+  party for the rest of the session. The endpoint now re-reads the account
+  behind a resolved OP session and applies the sign-in rule (the refresh
+  path's `check_user_status`, grace period included, exposed as
+  `AuthService::check_session_holder`). An account that fails it is treated as
+  a revoked session: the browser is sent to sign in with `reauth=1`, the
+  cookie is cleared, and the return leg answers `login_required`. Nothing
+  changes for an active account or for a request carrying an access token.
+  The same independent audit of X7.3 added tests for the open-redirect
+  validator on both sides (one 56-candidate list refused by the server and by
+  the SPA), session fixation, the MFA-pending password step, cross-tenant and
+  cross-user cookie use, `POST /oauth2/authorize`, the decline path's delivery
+  rule and plan row M7's end-to-end half, and found no other defect. Amends
+  T-237 and T-238.
+
 ## [1.0.0-beta17] - 2026-09-25
 
 ### Added

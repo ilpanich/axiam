@@ -1178,6 +1178,795 @@ async fn a_token_bearing_request_is_unaffected_and_ignores_the_tenant_parameter(
 }
 
 // ---------------------------------------------------------------------------
+// T23.1.3 — the independent audit of X7.3
+// ---------------------------------------------------------------------------
+//
+// Everything below was written by an audit of the shipped hop against
+// `basic-op-gap-plan.md` §4.0 and T-237/T-238/T-255. Each test pins a property
+// the plan or the threat model states and that no test above asserted. The
+// first one failed against the tree the audit started from.
+
+/// **The defect the audit found.** An OP session outlives a change to the
+/// account it acts for, unless the account is re-read when the session is.
+///
+/// Before this, a user an administrator locked or deactivated after they had
+/// signed in kept a cookie that bought authorization codes — and with them
+/// access and refresh tokens at every `browser_sso` relying party — for the
+/// whole of the session's lifetime (`refresh_token_lifetime_secs`, thirty days
+/// here). `PUT /api/v1/users/{id}` with a non-active `status` does not revoke
+/// sessions; it relies on the refresh path re-reading `check_user_status`, and
+/// `/oauth2/authorize` was the one session-accepting path that did not.
+///
+/// The cookie now resolves to a principal only while the account would be
+/// allowed to sign in, by the same rule the refresh path applies. A browser
+/// whose account was suspended is treated exactly like one whose session was
+/// revoked: asked to sign in again (`reauth`, cookie cleared), and answered
+/// `login_required` on the return leg rather than issued a code.
+#[actix_rt::test]
+async fn an_op_session_stops_authorizing_once_its_account_is_suspended_or_removed() {
+    for status in [
+        UserStatus::Locked,
+        UserStatus::Inactive,
+        UserStatus::Deleted,
+        UserStatus::Anonymized,
+    ] {
+        let (db, org_id, tenant_id, user_id) = setup_db().await;
+        let auth = test_auth_config();
+        let app = test_app!(db, auth);
+        let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+        let client_id = create_client(&app, &jwt, plain_client(true)).await;
+        let op_cookie = sign_in(&app, org_id, tenant_id).await;
+        let cookie = format!("axiam_op_session={op_cookie}");
+
+        // Control: while the account is active the cookie authorizes, so the
+        // refusal below is about the account and nothing else.
+        let live =
+            anonymous_authorize(&app, &inline_query(&client_id, tenant_id), Some(&cookie)).await;
+        assert_eq!(live.status().as_u16(), 302, "{status:?}: control");
+        assert!(
+            location(&live).starts_with(REDIRECT_URI) && location(&live).contains("code="),
+            "{status:?}: an active account's cookie must authorize: {}",
+            location(&live)
+        );
+
+        SurrealUserRepository::new(db.clone())
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    status: Some(status.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let resp =
+            anonymous_authorize(&app, &inline_query(&client_id, tenant_id), Some(&cookie)).await;
+        assert_eq!(resp.status().as_u16(), 302, "{status:?}");
+        let loc = location(&resp);
+        assert!(
+            loc.starts_with("/login?return_to=") && !loc.contains("code="),
+            "{status:?}: a suspended account's session must not buy a code: {loc}"
+        );
+        assert!(
+            loc.contains("&reauth=1"),
+            "{status:?}: the browser believes it is signed in and is not: {loc}"
+        );
+        let removal = resp
+            .response()
+            .cookies()
+            .find(|c| c.name() == "axiam_op_session")
+            .unwrap_or_else(|| panic!("{status:?}: the cookie must be cleared"));
+        assert_eq!(removal.value(), "");
+
+        // The return leg is terminal, and still not a code.
+        let back = anonymous_authorize(
+            &app,
+            &format!("{}&axiam_login_hop=1", inline_query(&client_id, tenant_id)),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(back.status().as_u16(), 400, "{status:?}");
+        assert!(back.headers().get("Location").is_none(), "{status:?}");
+        let body: serde_json::Value = test::read_body_json(back).await;
+        assert_eq!(body["error"], "login_required", "{status:?}");
+    }
+}
+
+/// A `PendingVerification` account past its grace period is refused at sign-in,
+/// so a session minted inside the grace period must stop authorizing once the
+/// period ends — the same rule, the same reason, and the one status whose
+/// answer depends on the clock rather than on an administrator.
+#[actix_rt::test]
+async fn an_op_session_follows_the_email_verification_grace_period() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    // No grace period, so a pending account is one whose grace has ended.
+    let auth = AuthConfig {
+        email_verification_grace_period_hours: 0,
+        ..test_auth_config()
+    };
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+    let op_cookie = sign_in(&app, org_id, tenant_id).await;
+
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                status: Some(UserStatus::PendingVerification),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let resp = anonymous_authorize(
+        &app,
+        &inline_query(&client_id, tenant_id),
+        Some(&format!("axiam_op_session={op_cookie}")),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with("/login?return_to=") && loc.contains("&reauth=1"),
+        "{loc}"
+    );
+}
+
+/// A cookie is a session **in one tenant**. Presented with another tenant's
+/// `tenant_id` it names nothing — so the browser is asked to sign in, rather
+/// than issued a code in a tenant the session was never authenticated in — and
+/// it still authorizes in its own.
+///
+/// The repository read is tenant-scoped (`axiam-db`'s
+/// `the_op_browser_session_resolves_only_a_live_row_in_the_right_tenant`); this
+/// is the same property through the endpoint, where the tenant comes from a
+/// query parameter the browser controls.
+#[actix_rt::test]
+async fn an_op_cookie_minted_in_one_tenant_never_authorizes_in_another() {
+    let (db, org_id, tenant_a, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let tenant_b = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org_id,
+            kind: TenantKind::Standard,
+            name: "Other Tenant".into(),
+            slug: "other-tenant".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let client_a = create_client(
+        &app,
+        &admin_jwt(&auth, user_id, tenant_a, org_id),
+        plain_client(true),
+    )
+    .await;
+    let client_b = create_client(
+        &app,
+        &admin_jwt(&auth, user_id, tenant_b, org_id),
+        plain_client(true),
+    )
+    .await;
+
+    let cookie = format!("axiam_op_session={}", sign_in(&app, org_id, tenant_a).await);
+
+    let crossed =
+        anonymous_authorize(&app, &inline_query(&client_b, tenant_b), Some(&cookie)).await;
+    assert_eq!(crossed.status().as_u16(), 302);
+    let loc = location(&crossed);
+    assert!(
+        loc.starts_with("/login?return_to=") && !loc.contains("code="),
+        "tenant A's session must not authorize in tenant B: {loc}"
+    );
+
+    // …and tenant A's client cannot be reached by naming tenant B either: the
+    // client is loaded in the tenant the query names, and it is not there.
+    let wrong_tenant =
+        anonymous_authorize(&app, &inline_query(&client_a, tenant_b), Some(&cookie)).await;
+    assert_eq!(wrong_tenant.status().as_u16(), 401);
+
+    let home = anonymous_authorize(&app, &inline_query(&client_a, tenant_a), Some(&cookie)).await;
+    assert!(
+        location(&home).starts_with(REDIRECT_URI) && location(&home).contains("code="),
+        "the same cookie still authorizes in its own tenant: {}",
+        location(&home)
+    );
+}
+
+/// **Session fixation.** A sign-in mints a new browser-session value every
+/// time and never adopts one the browser presents.
+///
+/// The attack this pins is the classic one: a value the attacker chose is
+/// planted in the victim's browser before they sign in, and the attacker then
+/// rides the session it comes to name. That works only if authentication
+/// upgrades the presented identifier; here the presented value is never read
+/// by the login handler, so it names nothing before the sign-in and nothing
+/// after it.
+#[actix_rt::test]
+async fn a_sign_in_never_adopts_an_op_cookie_the_browser_already_holds() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+
+    let planted = "planted-by-an-attacker-0123456789abcdefghijk";
+    let login = |cookie: String| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/login")
+            .insert_header(("Cookie", cookie))
+            .set_json(serde_json::json!({
+                "tenant_id": tenant_id,
+                "org_id": org_id,
+                "username_or_email": "alice",
+                "password": PASSWORD,
+            }))
+            .to_request()
+    };
+    let minted_by = |resp: &actix_web::dev::ServiceResponse| {
+        resp.response()
+            .cookies()
+            .find(|c| c.name() == "axiam_op_session")
+            .map(|c| c.value().to_owned())
+            .expect("a browser login must set axiam_op_session")
+    };
+
+    let first = test::call_service(&app, login(format!("axiam_op_session={planted}"))).await;
+    assert_eq!(first.status().as_u16(), 200);
+    let minted = minted_by(&first);
+    assert!(
+        minted != planted,
+        "the login must mint its own value, not adopt the presented one"
+    );
+    assert_eq!(
+        minted.len(),
+        43,
+        "256 bits, base64url without padding: the value is the server's"
+    );
+
+    // The planted value names no session, after the sign-in as before it.
+    let resp = anonymous_authorize(
+        &app,
+        &inline_query(&client_id, tenant_id),
+        Some(&format!("axiam_op_session={planted}")),
+    )
+    .await;
+    assert!(
+        location(&resp).starts_with("/login?return_to="),
+        "{}",
+        location(&resp)
+    );
+
+    // Every authentication mints afresh — including one that presents the
+    // value the previous authentication minted.
+    let second = test::call_service(&app, login(format!("axiam_op_session={minted}"))).await;
+    assert_eq!(second.status().as_u16(), 200);
+    assert!(
+        minted_by(&second) != minted,
+        "a second sign-in must not reuse the first one's value"
+    );
+}
+
+/// The cookie is issued by a **completed** authentication only. A password step
+/// that still owes a second factor answers `202` with a challenge, and must set
+/// no OP session — otherwise a password alone would buy authorization codes at
+/// every `browser_sso` relying party, skipping the factor the account demands.
+#[actix_rt::test]
+async fn a_password_step_that_still_owes_a_second_factor_sets_no_op_session() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                mfa_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": tenant_id,
+            "org_id": org_id,
+            "username_or_email": "alice",
+            "password": PASSWORD,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 202, "a second factor is owed");
+    assert!(
+        resp.response()
+            .cookies()
+            .all(|c| c.name() != "axiam_op_session"),
+        "the password step alone must not establish an OP session"
+    );
+}
+
+/// When an access token and an OP cookie arrive together, the token decides who
+/// the request is for, and the cookie cannot move it to somebody else.
+///
+/// Bob's bearer token with Alice's OP cookie: the code is Bob's. The two are
+/// never merged and the cookie is not consulted at all once the token
+/// resolves, so a browser cannot be made to act for one user by carrying
+/// another's cookie.
+#[actix_rt::test]
+async fn an_access_token_wins_over_the_op_cookie_and_the_two_never_cross_users() {
+    let (db, org_id, tenant_id, alice) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, alice, tenant_id, org_id);
+    let (client_id, secret) = create_client_with_secret(&app, &jwt, plain_client(true)).await;
+
+    let users = SurrealUserRepository::new(db.clone());
+    let bob = users
+        .create(CreateUser {
+            tenant_id,
+            username: "bob".into(),
+            email: "bob@example.com".into(),
+            password: PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    users
+        .update(
+            tenant_id,
+            bob,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let alice_cookie = sign_in(&app, org_id, tenant_id).await;
+    let bob_token = admin_jwt(&auth, bob, tenant_id, org_id);
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?{}",
+            inline_query(&client_id, tenant_id)
+        ))
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .insert_header(("Cookie", format!("axiam_op_session={alice_cookie}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let code = query_param(&location(&resp), "code").expect("a code");
+
+    let sub = id_token_subject(&app, tenant_id, &client_id, &secret, &code).await;
+    assert_eq!(sub, bob.to_string(), "the token's subject decides");
+    assert_ne!(sub, alice.to_string());
+}
+
+/// `Path=/oauth2/authorize` scopes the cookie to one endpoint, and the endpoint
+/// is `GET` only. A `POST` — the form-post shape a `SameSite=Lax` cookie is
+/// *not* sent on cross-site, but which a same-site page could still produce —
+/// is not routed at all, so no state-changing request is ever answered with the
+/// OP session (G11 was declined; plan §4.9).
+#[actix_rt::test]
+async fn the_op_session_reaches_no_endpoint_but_get_authorize() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+    let cookie = format!(
+        "axiam_op_session={}",
+        sign_in(&app, org_id, tenant_id).await
+    );
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/oauth2/authorize")
+        .insert_header(("Cookie", cookie.clone()))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+        .set_payload(inline_query(&client_id, tenant_id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        matches!(resp.status().as_u16(), 404 | 405),
+        "POST /oauth2/authorize must not be routed: {}",
+        resp.status()
+    );
+    assert!(resp.headers().get("Location").is_none());
+
+    // The cookie is not an API credential either: the API answers it as it
+    // answers no credential at all.
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/me")
+        .insert_header(("Cookie", cookie))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 401);
+}
+
+/// The hop reflects nothing. The `302` carries no body at all, and the
+/// loop guard's terminal answer — the one arm of the hop rendered as a page,
+/// for a browser that asks for HTML — echoes neither the request's parameters
+/// nor a `return_to` somebody appended to them.
+#[actix_rt::test]
+async fn the_login_hop_reflects_no_request_parameter_into_a_body() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+    // `inline_query` without its `state`, which is replaced by a hostile one:
+    // a repeated parameter is a query error, not a reflection test.
+    let query = format!(
+        "response_type=code&client_id={client_id}&redirect_uri={REDIRECT_URI}&scope=openid\
+         &tenant_id={tenant_id}&state=%3Cscript%3Ealert(1)%3C%2Fscript%3E\
+         &return_to=https%3A%2F%2Fevil.example%2F"
+    );
+
+    let hop = anonymous_authorize(&app, &query, None).await;
+    assert_eq!(hop.status().as_u16(), 302);
+    let loc = location(&hop);
+    assert!(loc.starts_with("/login?return_to="), "{loc}");
+    // The appended `return_to` is carried inside the encoded authorization
+    // request, never promoted to the SPA's own parameter.
+    assert_eq!(loc.matches("return_to=").count(), 1, "{loc}");
+    assert!(test::read_body(hop).await.is_empty(), "a 302 with no body");
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/authorize?{query}&axiam_login_hop=1"))
+        .insert_header(("Accept", "text/html"))
+        .to_request();
+    let page = test::call_service(&app, req).await;
+    assert_eq!(page.status().as_u16(), 400);
+    let body = String::from_utf8(test::read_body(page).await.to_vec()).unwrap();
+    assert!(body.contains("login_required"), "{body}");
+    for echoed in ["<script", "alert(1)", "evil.example", &client_id] {
+        assert!(!body.contains(echoed), "{echoed:?} reflected into {body}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The error path delivers only to a registered redirect_uri (T-255, T-259)
+// ---------------------------------------------------------------------------
+
+/// The sign-in page's Cancel returns `access_denied` to the relying party — to
+/// a `redirect_uri` this client registered, with its `state` — and to nowhere
+/// else. An unregistered target, or a `return_to` appended to the request, is
+/// answered in place; and a live OP cookie does not turn the refusal into a
+/// grant.
+#[actix_rt::test]
+async fn a_declined_sign_in_is_reported_only_to_a_registered_redirect_uri() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+    let cookie = format!(
+        "axiam_op_session={}",
+        sign_in(&app, org_id, tenant_id).await
+    );
+
+    for cookies in [None, Some(cookie.as_str())] {
+        let resp = anonymous_authorize(
+            &app,
+            &format!(
+                "{}&axiam_login_hop=1&axiam_user_declined=1",
+                inline_query(&client_id, tenant_id)
+            ),
+            cookies,
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 302, "cookie: {cookies:?}");
+        let loc = location(&resp);
+        assert!(loc.starts_with(REDIRECT_URI), "{loc}");
+        assert!(loc.contains("error=access_denied"), "{loc}");
+        assert!(loc.contains("state=hop-state"), "{loc}");
+        assert!(!loc.contains("code="), "a refusal is never a code: {loc}");
+    }
+
+    for redirect_uri in [
+        "https%3A%2F%2Fevil.example%2Fcb",
+        // A prefix of the registered one is not the registered one.
+        "https%3A%2F%2Frp.example.com%2Fcallback%2F..%2Fevil",
+    ] {
+        let resp = anonymous_authorize(
+            &app,
+            &format!(
+                "response_type=code&client_id={client_id}&redirect_uri={redirect_uri}\
+                 &scope=openid&state=hop-state&tenant_id={tenant_id}\
+                 &return_to=https%3A%2F%2Fevil.example%2F\
+                 &axiam_login_hop=1&axiam_user_declined=1"
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 400, "{redirect_uri}");
+        assert!(
+            resp.headers().get("Location").is_none(),
+            "an unregistered target is never redirected to: {redirect_uri}"
+        );
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"], "access_denied");
+    }
+}
+
+/// Every redirectable error the anonymous path raises goes to the registered
+/// `redirect_uri` or nowhere — never to a `return_to` the request carried,
+/// which the authorization endpoint does not read at all.
+#[actix_rt::test]
+async fn an_anonymous_refusal_never_redirects_to_a_return_to_the_request_carried() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, plain_client(true)).await;
+
+    // `response_type` missing: decided before the hop (T-270), redirected to
+    // the registered URI.
+    let resp = anonymous_authorize(
+        &app,
+        &format!(
+            "client_id={client_id}&redirect_uri={REDIRECT_URI}&scope=openid&state=hop-state\
+             &tenant_id={tenant_id}&return_to=https%3A%2F%2Fevil.example%2F"
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with(REDIRECT_URI) && loc.contains("error=invalid_request"),
+        "{loc}"
+    );
+    assert!(!loc.contains("evil.example"), "{loc}");
+
+    // The same with an unregistered target: answered in place.
+    let resp = anonymous_authorize(
+        &app,
+        &format!(
+            "client_id={client_id}&redirect_uri=https%3A%2F%2Fevil.example%2Fcb&scope=openid\
+             &tenant_id={tenant_id}&return_to=https%3A%2F%2Fevil.example%2F"
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(resp.headers().get("Location").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// M7 — a `fapi2` client may hop, and the return leg skips none of FAPI's gates
+// ---------------------------------------------------------------------------
+
+/// A `fapi2` client a browser may reach. `browser_sso` is the one Basic-lane
+/// field the two-layer gate permits on `fapi2` (plan §3.1, D2).
+fn fapi_browser_client() -> serde_json::Value {
+    serde_json::json!({
+        "name": "FAPI Browser Client",
+        "redirect_uris": [REDIRECT_URI],
+        "grant_types": ["authorization_code"],
+        "scopes": ["openid"],
+        "profile": "fapi2",
+        "require_par": true,
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_san_dns": "rp.example.com",
+        "tls_client_certificate_bound_access_tokens": true,
+        "browser_sso": true,
+    })
+}
+
+/// **M7, first half.** `fapi2` + `browser_sso` + `require_par`: the return leg
+/// of a hop, carrying a live OP session and its parameters inline, is refused
+/// `ParRequired` exactly as a request that never hopped would be. A sign-in
+/// page in the middle does not make the browser a trustworthy carrier.
+#[actix_rt::test]
+async fn m7_a_fapi2_return_leg_with_inline_parameters_is_par_required() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, fapi_browser_client()).await;
+    let cookie = format!(
+        "axiam_op_session={}",
+        sign_in(&app, org_id, tenant_id).await
+    );
+
+    let resp = anonymous_authorize(
+        &app,
+        &format!(
+            "{}&code_challenge={PKCE_CHALLENGE}&code_challenge_method=S256&axiam_login_hop=1",
+            inline_query(&client_id, tenant_id)
+        ),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(
+        resp.headers().get("Location").is_none(),
+        "ParRequired is answered in place: the redirect_uri arrived by the forbidden channel"
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("must use pushed authorization requests"),
+        "{body}"
+    );
+}
+
+/// **M7, second half.** The same client's pushed request without a
+/// `code_challenge`, presented on the return leg with a live OP session, gets
+/// the FAPI 2.0 §5.3.1.2 PKCE refusal — not a code. The same handle shape
+/// *with* a challenge is the control: it is PKCE, and only PKCE, that is
+/// refused.
+#[actix_rt::test]
+async fn m7_a_fapi2_return_leg_without_pkce_gets_the_fapi_pkce_refusal() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, fapi_browser_client()).await;
+    let cookie = format!(
+        "axiam_op_session={}",
+        sign_in(&app, org_id, tenant_id).await
+    );
+
+    let without = push_handle(&db, tenant_id, &client_id, 60).await;
+    let resp = anonymous_authorize(
+        &app,
+        &format!(
+            "client_id={client_id}&request_uri={}&tenant_id={tenant_id}&axiam_login_hop=1",
+            urlencoding_encode(&without)
+        ),
+        Some(&cookie),
+    )
+    .await;
+    let loc = location(&resp);
+    assert!(!loc.contains("code="), "no PKCE, no code: {loc}");
+    assert!(
+        loc.starts_with(REDIRECT_URI) && loc.contains("error=invalid_request"),
+        "the refusal goes to the pushed, registered redirect_uri: {loc}"
+    );
+    let description = query_param(&loc, "error_description").unwrap_or_default();
+    assert!(
+        description.contains("PKCE") && description.contains("fapi2"),
+        "the FAPI PKCE refusal, by name: {description}"
+    );
+
+    let with = push_handle_with_pkce(&db, tenant_id, &client_id).await;
+    let resp = anonymous_authorize(
+        &app,
+        &format!(
+            "client_id={client_id}&request_uri={}&tenant_id={tenant_id}&axiam_login_hop=1",
+            urlencoding_encode(&with)
+        ),
+        Some(&cookie),
+    )
+    .await;
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with(REDIRECT_URI) && loc.contains("code="),
+        "control: the same pushed request with PKCE is authorized: {loc}"
+    );
+}
+
+/// A valid S256 challenge (RFC 7636 Appendix B).
+const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+/// [`push_handle`], with a PKCE challenge.
+async fn push_handle_with_pkce(db: &Surreal<TestDb>, tenant_id: Uuid, client_id: &str) -> String {
+    use axiam_core::models::oauth2_client::{CreatePushedAuthRequest, PushedAuthParams};
+    use axiam_core::repository::PushedAuthRequestRepository;
+
+    let request_uri = axiam_oauth2::par::generate_request_uri();
+    SurrealPushedAuthRequestRepository::new(db.clone())
+        .create(CreatePushedAuthRequest {
+            tenant_id,
+            client_id: client_id.to_owned(),
+            request_uri_hash: axiam_oauth2::par::hash_request_uri(&request_uri),
+            params: PushedAuthParams {
+                response_type: "code".into(),
+                redirect_uri: REDIRECT_URI.into(),
+                scope: Some("openid".into()),
+                code_challenge: Some(PKCE_CHALLENGE.into()),
+                code_challenge_method: Some("S256".into()),
+                ..Default::default()
+            },
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+        })
+        .await
+        .expect("the pushed request must store");
+    request_uri
+}
+
+/// [`create_client`], also returning the secret.
+async fn create_client_with_secret(
+    app: &impl TestApp,
+    token: &str,
+    body: serde_json::Value,
+) -> (String, String) {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(body)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 201, "client registration");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    (
+        body["client_id"].as_str().unwrap().to_owned(),
+        body["client_secret"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// Exchange `code` and return the ID token's `sub`, unverified — the signature
+/// has its own suite.
+async fn id_token_subject(
+    app: &impl TestApp,
+    tenant_id: Uuid,
+    client_id: &str,
+    client_secret: &str,
+    code: &str,
+) -> String {
+    use base64::Engine;
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+        .set_payload(format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={REDIRECT_URI}\
+             &client_id={client_id}&client_secret={client_secret}"
+        ))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "token exchange must succeed");
+    let tokens: serde_json::Value = test::read_body_json(resp).await;
+    let payload = tokens["id_token"]
+        .as_str()
+        .expect("an ID token")
+        .split('.')
+        .nth(1)
+        .expect("a JWT has three parts")
+        .to_owned();
+    let claims: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64url payload"),
+    )
+    .expect("the payload is JSON");
+    claims["sub"].as_str().expect("a subject").to_owned()
+}
+
+fn query_param(url: &str, name: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()?
+        .query_pairs()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
+}
+
+// ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 

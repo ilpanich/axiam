@@ -278,6 +278,14 @@ clear `axiam_op_session` alongside the other three cookies, and the session row
 it named is gone either way. A user who signs out through one relying party is
 not silently recognised by the next.
 
+Suspending an account ends its OP session too, without a logout. Locking or
+deactivating a user revokes no session by itself; instead, every time the cookie
+is turned back into a principal the account is re-read and held to the rule a
+sign-in would be held to (the same check the refresh path makes, including the
+email-verification grace period). A browser whose account was locked after it
+signed in is sent back to the sign-in page with `reauth=1`, the cookie is
+cleared, and the sign-in page is where the account's state is explained.
+
 Refresh-token rotation is the opposite case and is handled the other way: the
 cookie in the browser is not reissued by a refresh, so the digest is **copied**
 to the rotated session row. A signed-in user is never quietly signed out of the

@@ -1061,6 +1061,172 @@ async fn x7_2_the_id_token_carries_the_codes_snapshot_not_the_live_session() {
     );
 }
 
+/// `grant_type=refresh_token`, returning the response body.
+async fn refresh_exchange(
+    app: &impl TestApp,
+    tenant_id: Uuid,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> serde_json::Value {
+    let form = format!(
+        "grant_type=refresh_token&refresh_token={refresh_token}\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "refresh must succeed");
+    test::read_body_json(resp).await
+}
+
+/// **D-9 (T23.1.2, F-1) — the refreshed ID token keeps the original evidence
+/// after the browser session it came from has rotated away.**
+///
+/// `AuthService::refresh` *deletes* the session row it rotates, and the
+/// OAuth2 refresh token names that row's id. Before D-9 the refresh grant read
+/// its evidence from that row, so after the first browser-session rotation (the
+/// admin SPA does one every fifteen minutes) a honour-lane client's refreshed
+/// ID token lost `auth_time`, `acr` and `amr` — OIDC Core §12.2 wants the
+/// original. This consumes the row exactly as that rotation does, then
+/// refreshes twice: the evidence must still be the original's, and the
+/// snapshot must have been copied onto each successor row.
+#[actix_rt::test]
+async fn d9_a_refreshed_id_token_keeps_the_original_evidence_after_the_session_rotated_away() {
+    use axiam_core::repository::RefreshTokenRepository;
+    use axiam_db::repository::SurrealRefreshTokenRepository;
+
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, honour_client()).await;
+    let (session_id, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::minutes(20),
+        vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
+    )
+    .await;
+
+    let resp = authorize(&app, &token, &base_query(&client_id)).await;
+    let code = query_param(&location(&resp), "code").expect("a code");
+    let tokens = token_exchange(&app, tenant_id, &client_id, &secret, &code).await;
+    let original = claims_of(tokens["id_token"].as_str().unwrap());
+    assert!(original["auth_time"].is_i64(), "{original}");
+    let first_refresh = tokens["refresh_token"].as_str().expect("a refresh token");
+
+    // What `AuthService::refresh` does to the browser's session row.
+    assert!(
+        SurrealSessionRepository::new(db.clone())
+            .consume(tenant_id, session_id)
+            .await
+            .unwrap(),
+        "the session row existed and is now gone"
+    );
+
+    let refresh_repo = SurrealRefreshTokenRepository::new(db.clone());
+    let mut presented = first_refresh.to_owned();
+    for hop in 1..=2 {
+        let refreshed = refresh_exchange(&app, tenant_id, &client_id, &secret, &presented).await;
+        let reissued = claims_of(refreshed["id_token"].as_str().expect("an ID token"));
+        assert_eq!(
+            reissued["auth_time"], original["auth_time"],
+            "hop {hop}: auth_time must equal the original: {original} → {reissued}"
+        );
+        assert_eq!(reissued["acr"], original["acr"], "hop {hop}");
+        assert_eq!(reissued["amr"], original["amr"], "hop {hop}");
+
+        presented = refreshed["refresh_token"]
+            .as_str()
+            .expect("a rotated refresh token")
+            .to_owned();
+        let successor = refresh_repo
+            .get_by_token_hash(
+                tenant_id,
+                &axiam_auth::token::hash_refresh_token(&presented),
+            )
+            .await
+            .expect("the successor row");
+        assert_eq!(
+            successor.auth_time.map(|t| t.timestamp()),
+            original["auth_time"].as_i64(),
+            "hop {hop}: the snapshot is copied onto the successor verbatim"
+        );
+        assert_eq!(
+            successor.amr,
+            vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
+            "hop {hop}"
+        );
+    }
+}
+
+/// **D-9's I4 twin.** An ignore-lane client's refreshed ID token has the same
+/// claim set it always had — also after the session rotated away — although
+/// its refresh token now carries the snapshot.
+#[actix_rt::test]
+async fn d9_i4_twin_an_ignore_lane_refresh_after_rotation_is_byte_identical_in_claim_set() {
+    use axiam_core::repository::RefreshTokenRepository;
+    use axiam_db::repository::SurrealRefreshTokenRepository;
+
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, ignore_client()).await;
+    let (session_id, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::minutes(20),
+        vec![Amr::Pwd, Amr::Mfa],
+    )
+    .await;
+
+    let resp = authorize(&app, &token, &base_query(&client_id)).await;
+    let code = query_param(&location(&resp), "code").expect("a code");
+    let tokens = token_exchange(&app, tenant_id, &client_id, &secret, &code).await;
+    let refresh_token = tokens["refresh_token"].as_str().expect("a refresh token");
+    let before = claims_of(tokens["id_token"].as_str().unwrap());
+
+    // The snapshot is on the grant (the gate is at emission, not at storage)…
+    let stored = SurrealRefreshTokenRepository::new(db.clone())
+        .get_by_token_hash(
+            tenant_id,
+            &axiam_auth::token::hash_refresh_token(refresh_token),
+        )
+        .await
+        .expect("the refresh row");
+    assert!(stored.auth_time.is_some(), "the evidence was recorded");
+
+    SurrealSessionRepository::new(db.clone())
+        .consume(tenant_id, session_id)
+        .await
+        .unwrap();
+
+    // …and still nothing reaches the client.
+    let refreshed = refresh_exchange(&app, tenant_id, &client_id, &secret, refresh_token).await;
+    let after = claims_of(refreshed["id_token"].as_str().unwrap());
+    let keys = |c: &serde_json::Value| -> Vec<String> {
+        let mut k: Vec<String> = c.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys(&after), keys(&before), "{before} vs {after}");
+    for absent in ["auth_time", "acr", "amr"] {
+        assert!(after.get(absent).is_none(), "{absent} in {after}");
+    }
+}
+
 /// **T2.4's I4 twin.** A refreshed ID token for a client registered today
 /// carries none of the three claims, exactly as before.
 #[actix_rt::test]

@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Front-channel logout declined by design and recorded (T23.12.1, D-6)
 
+### Fixed
+
+- **A refreshed ID token on the honour lane no longer loses `auth_time`, `acr`
+  and `amr` once the browser session has rotated (T23.1.2, D-9).** The refresh
+  grant read its evidence from the session row the authorization code was
+  issued under, and `AuthService::refresh` deletes that row at every
+  browser-session rotation — about every fifteen minutes for the admin SPA — so
+  after the first rotation the claims vanished, where OIDC Core §12.2 wants the
+  original `auth_time`. The evidence is now snapshotted on the OAuth2 refresh
+  token (schema v68: three optional columns, no backfill, no index), written at
+  code exchange from the code's snapshot and copied verbatim at every OAuth2
+  rotation. A grant issued before the migration falls back to the old
+  live-session lookup, so nothing gets worse. Emission is unchanged: honour
+  lane only, never `fapi2` or `ignore`. Amends T-240.
+
 ### Security
 
 - **A FAPI 2.0 client's essential ACR request is refused instead of dropped,

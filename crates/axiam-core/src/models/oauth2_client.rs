@@ -1057,6 +1057,30 @@ pub struct RefreshToken {
     /// value and today's behaviour: those grants named no resource.
     #[serde(default)]
     pub resource: Option<String>,
+    /// X7.2 / D-9 — when the end user authenticated, as the authorization code
+    /// this grant descends from recorded it. Never read from a live session.
+    ///
+    /// Carried so that a refreshed ID token on the honour lane asserts the
+    /// *same* `auth_time` the code-exchanged one did (OIDC Core §12.2). The
+    /// session row the code was issued under does not outlive the browser's
+    /// first session rotation — `AuthService::refresh` deletes it — so a refresh
+    /// that went looking for it there found nothing and silently dropped the
+    /// claim. The snapshot is taken once, at code exchange, from the **code's**
+    /// snapshot, and copied verbatim at every OAuth2 rotation.
+    ///
+    /// `None` for every row written before schema v68, which is the honest
+    /// value: the refresh grant then falls back to the live-session lookup it
+    /// used before, so a pre-migration grant is no worse off than it was.
+    #[serde(default)]
+    pub auth_time: Option<DateTime<Utc>>,
+    /// X7.2 / D-9 — see [`Self::auth_time`]. Whatever the code recorded, which
+    /// is nothing for a client off the honour lane.
+    #[serde(default)]
+    pub acr: Option<String>,
+    /// X7.2 / D-9 — see [`Self::auth_time`]. Empty for a pre-v68 row, and for a
+    /// grant with no browser session behind it.
+    #[serde(default)]
+    pub amr: Vec<Amr>,
 }
 
 /// Input for creating a new refresh token.
@@ -1075,6 +1099,12 @@ pub struct CreateRefreshToken {
     pub requested_userinfo_claims: Vec<String>,
     /// T21.3 / RFC 8707 — see [`RefreshToken::resource`].
     pub resource: Option<String>,
+    /// X7.2 / D-9 — see [`RefreshToken::auth_time`].
+    pub auth_time: Option<DateTime<Utc>>,
+    /// X7.2 / D-9 — see [`RefreshToken::acr`].
+    pub acr: Option<String>,
+    /// X7.2 / D-9 — see [`RefreshToken::amr`].
+    pub amr: Vec<Amr>,
     pub expires_at: DateTime<Utc>,
 }
 

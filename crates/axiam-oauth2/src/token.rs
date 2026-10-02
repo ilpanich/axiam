@@ -557,10 +557,21 @@ impl TokenRequestContext {
 fn session_evidence_of(
     code: &axiam_core::models::oauth2_client::AuthorizationCode,
 ) -> IdTokenEvidence {
+    evidence_from_snapshot(code.auth_time, code.acr.as_deref(), &code.amr)
+}
+
+/// The claims an evidence snapshot produces — the one conversion, shared by the
+/// authorization code's snapshot and the refresh token's copy of it (D-9), so
+/// the two cannot come to mean different things in the ID token.
+fn evidence_from_snapshot(
+    auth_time: Option<chrono::DateTime<Utc>>,
+    acr: Option<&str>,
+    amr: &[axiam_core::models::session::Amr],
+) -> IdTokenEvidence {
     IdTokenEvidence {
-        auth_time: code.auth_time.map(|t| t.timestamp()),
-        acr: code.acr.clone(),
-        amr: axiam_core::models::session::Amr::encode_list(&code.amr),
+        auth_time: auth_time.map(|t| t.timestamp()),
+        acr: acr.map(str::to_owned),
+        amr: axiam_core::models::session::Amr::encode_list(amr),
     }
 }
 
@@ -682,32 +693,43 @@ where
         }
     }
 
-    /// The evidence a refreshed ID token carries (W4, plan §4.3).
+    /// The evidence a refreshed ID token carries (W4, plan §4.3; D-9).
     ///
-    /// Read from the session the original grant was minted in. Three things
-    /// are worth saying about what comes back:
+    /// Read from the **snapshot on the refresh token**, which the code exchange
+    /// wrote from the authorization code's snapshot and every OAuth2 rotation
+    /// copied forward. Two things are worth saying about what comes back:
     ///
     /// - **`auth_time` equals the original's**, which is what OIDC Core §12.2
-    ///   requires and what `OIDCCRefreshToken` compares. It holds because
-    ///   refresh rotation copies `authenticated_at` onto the session row it
-    ///   writes rather than stamping the clock (X7.2).
-    /// - **`acr` is the class the authentication achieved**, not the one the
-    ///   original authorization request selected. A refresh carries no
-    ///   authorization request, so there is no relying-party preference to
-    ///   express: where the original may have reported the weaker of two
-    ///   satisfied classes because the RP listed it first
-    ///   ([`crate::acr::report_acr`]), a refreshed token reports what the
-    ///   session proves. Both statements are true of the same authentication,
-    ///   and the one available here is the only one that can be derived
-    ///   without inventing a request.
-    /// - **A session that cannot be read yields no evidence at all**, never an
-    ///   error and never a guess. A refresh that works today must not begin to
-    ///   fail because a session row was reaped.
+    ///   requires and what `OIDCCRefreshToken` compares — by construction, not
+    ///   by the session row surviving. It used to be read from the session
+    ///   behind `stored.session_id`, and `AuthService::refresh` deletes that
+    ///   row at every browser-session rotation, so after the first one the
+    ///   claim vanished (T23.1.2, F-1).
+    /// - **`acr` and `amr` are the original's too**, verbatim: a refresh is not
+    ///   an authentication and carries no request to re-derive anything from.
+    ///
+    /// A grant issued before schema v68 has no snapshot and falls back to the
+    /// live-session lookup this method did before, which reports the class the
+    /// session proves. **A session that cannot be read yields no evidence at
+    /// all** on that path, never an error and never a guess: a refresh that
+    /// works today must not begin to fail because a session row was reaped.
     async fn session_evidence_for_refresh(
         &self,
         tenant_id: Uuid,
-        session_id: Option<Uuid>,
+        stored: &axiam_core::models::oauth2_client::RefreshToken,
     ) -> IdTokenEvidence {
+        // D-9: the snapshot the grant carries is the answer whenever there is
+        // one. It was taken from the authorization code at exchange and copied
+        // at every rotation, so it equals the original by construction and does
+        // not depend on a session row that browser-session rotation deletes.
+        if stored.auth_time.is_some() {
+            return evidence_from_snapshot(stored.auth_time, stored.acr.as_deref(), &stored.amr);
+        }
+        // A grant issued before schema v68 carries no snapshot. It falls back
+        // to the live-session lookup this method always did, so it is no worse
+        // off than it was — and no better: nothing recorded what it
+        // authenticated with, and none is invented.
+        let session_id = stored.session_id;
         let Some(session_id) = session_id else {
             return IdTokenEvidence::NONE;
         };
@@ -1962,6 +1984,16 @@ where
                     // `axiam:user` token fifteen minutes later, which is a
                     // widening performed by the server.
                     resource: resource.clone(),
+                    // X7.2 / D-9 — the authentication this grant descends from,
+                    // taken from the **code's** snapshot and not from the live
+                    // session. The session row does not survive the browser's
+                    // first session rotation, and a refreshed ID token must
+                    // still carry the original `auth_time` (OIDC Core §12.2).
+                    // Stored whatever the client's lane is — emission is gated
+                    // where the ID token is minted, as it is for the code.
+                    auth_time: auth_code.auth_time,
+                    acr: auth_code.acr.clone(),
+                    amr: auth_code.amr.clone(),
                     expires_at: refresh_expires,
                 })
                 .await
@@ -2557,6 +2589,15 @@ where
                 // bound to, so an unbounded chain of refreshes can never
                 // reach an audience the original grant did not name.
                 resource: resource.clone(),
+                // X7.2 / D-9 — and the authentication evidence, verbatim. A
+                // refresh is not an authentication: the successor attests the
+                // same event its predecessor did, however many rotations
+                // separate it from the original code. A pre-v68 predecessor
+                // carries none, so its successor carries none and keeps the
+                // live-session fallback — copied, never invented.
+                auth_time: stored.auth_time,
+                acr: stored.acr.clone(),
+                amr: stored.amr.clone(),
                 expires_at: refresh_expires,
             })
             .await
@@ -2647,8 +2688,7 @@ where
                 // and a freshly-stamped one would be a lie that grows younger
                 // with every refresh.
                 let evidence = if crate::fapi::emits_session_evidence(&client) {
-                    self.session_evidence_for_refresh(tenant_id, stored.session_id)
-                        .await
+                    self.session_evidence_for_refresh(tenant_id, &stored).await
                 } else {
                     IdTokenEvidence::NONE
                 };

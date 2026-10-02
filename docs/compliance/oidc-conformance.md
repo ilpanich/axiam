@@ -202,7 +202,7 @@ table:
 | 67 | `max_age=0` always reauthenticates — a one-second-old session does not satisfy it, and neither does the authentication the reauthentication produces, so the chain terminates in `login_required` and never in a code | Core §3.1.2.1 | Pass (see note) | `…::t2_1_max_age_zero_always_reauthenticates_and_never_yields_a_code`; `honour.rs::t2_1_…`, `::max_age_zero_is_refused_rather_than_looped_after_a_reauthentication` |
 | 68 | A session older than `max_age` reauthenticates; the token issued after the return leg carries a fresh `auth_time` (mirrors `OIDCCMaxAge1`) | Core §3.1.2.1 | Pass | `…::t2_2_an_expired_max_age_reauthenticates_and_the_second_token_is_fresh` |
 | 69 | Two requests with different, satisfied `max_age` bounds report the same `auth_time` and the same `sub`, and neither reauthenticates (mirrors `OIDCCMaxAge10000`) | Core §3.1.2.1 | Pass | `…::t2_3_a_satisfied_max_age_does_not_reauthenticate` |
-| 70 | A refreshed ID token's `auth_time` equals the original's (mirrors `OIDCCRefreshToken`) | Core §12.2 | Pass | `…::t2_4_a_refreshed_id_token_carries_the_original_auth_time` |
+| 70 | A refreshed ID token's `auth_time` equals the original's (mirrors `OIDCCRefreshToken`) | Core §12.2 | Pass | `…::t2_4_a_refreshed_id_token_carries_the_original_auth_time`; after the browser session rotated away, across two refreshes: `…::d9_a_refreshed_id_token_keeps_the_original_evidence_after_the_session_rotated_away` |
 | 71 | A malformed value (`max_age=-1`, `max_age=abc`, `prompt=teleport`) is `invalid_request` on the honour lane and **dropped**, with a code issued, on the `ignore` lane | Core §3.1.2.1 | Pass | `…::t2_7_a_malformed_value_is_invalid_request_on_the_honour_lane` and `::t2_7_i4_twin_…`; `fapi.rs::t2_7_…` |
 | 72 | A request for an authentication context class the session does not satisfy is **never** echoed into the `acr` claim: it produces a step-up, and a declined step-up produces a token saying what the session actually proved | Core §3.1.2.1, §5.5.1.1 | Pass | `…::t3_1_and_t3_3_an_acr_request_is_never_echoed_into_the_claim`; `acr.rs::the_claim_is_derived_from_evidence_the_request_cannot_reach`, `::an_unknown_requested_value_is_never_echoed` |
 | 73 | An **essential** `claims.id_token.acr` that cannot be satisfied is refused `unmet_authentication_requirements`, never with a token | Core §5.5.1.1; `unmet_authentication_requirements` 1.0 | Pass | `…::t3_2_an_unmet_essential_acr_is_refused_rather_than_downgraded` |
@@ -608,12 +608,15 @@ costs a round trip per request, which is why integrators do not adopt it.
   `invalid_request_uri` or `login_required`, never a token minted behind an
   interaction it forbade.
 
-- **A refreshed ID token reports the class the authentication achieved.** A
-  refresh carries no authorization request, so there is no relying-party
-  preference for row 74's rule to express. Where the original token may have
-  reported the weaker of two satisfied classes because the relying party listed
-  it first, the refreshed one reports what the session proves. Both are true of
-  the same authentication; `auth_time` and `amr` are identical either way.
+- **A refreshed ID token carries the original authentication evidence.** A
+  refresh carries no authorization request and is not an authentication, so
+  `auth_time`, `acr` and `amr` are the original's, verbatim. They are
+  snapshotted on the OAuth2 refresh token at code exchange (from the code's
+  snapshot, schema v68) and copied at every rotation, so they survive the
+  browser session the code was issued under being rotated away (T23.1.2, D-9).
+  A grant issued before v68 carries no snapshot and falls back to reading the
+  live session, which reports the class the session proves; with the session
+  gone it carries none.
 
 - **Cross-site hidden-iframe silent renew is not supported, and fails closed.**
   A consequence of the `SameSite=Lax` cookie in row 53, recorded in the plan's

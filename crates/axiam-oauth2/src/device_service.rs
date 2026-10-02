@@ -355,6 +355,12 @@ where
                 // and cannot acquire a different one (see
                 // `crate::resource::resolve_bound`).
                 resource: redeemed.resource.clone(),
+                // X7.2 / D-9 — no browser authentication happened here, so
+                // there is no evidence to snapshot (and a device-grant ID
+                // token has never carried any).
+                auth_time: None,
+                acr: None,
+                amr: Vec::new(),
                 expires_at: Utc::now() + Duration::seconds(self.refresh_token_lifetime_secs),
             })
             .await

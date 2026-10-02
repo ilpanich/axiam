@@ -377,6 +377,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "server_certificates",
         sql: SCHEMA_V67,
     },
+    Migration {
+        version: 68,
+        name: "refresh_token_authentication_evidence",
+        sql: SCHEMA_V68,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3613,9 +3618,67 @@ DEFINE FIELD IF NOT EXISTS cert_server_allowed_names ON TABLE security_settings 
     TYPE option<array<string>>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v68 — X7.2 / D-9: the authentication evidence survives an OAuth2
+// refresh
+// -----------------------------------------------------------------------
+//
+// Three optional columns on `oauth2_refresh_token`, no backfill, no index —
+// v55's shape on the authorization code, and v61's reasons for putting a
+// per-grant fact on the refresh token: rotation copies it forward verbatim.
+//
+// v55 snapshotted `auth_time`, `acr` and `amr` on the authorization code
+// because the session behind a code may be gone before the code is redeemed.
+// The refresh grant did not inherit the snapshot: it re-read the session the
+// code was issued under, and `AuthService::refresh` *deletes* that row on
+// every browser-session rotation (about every fifteen minutes for the admin
+// SPA). After the first rotation a refreshed ID token on the honour lane
+// carried no `auth_time` at all, where OIDC Core §12.2 wants the original.
+// These columns carry the code's snapshot onto the refresh token instead —
+// written at code exchange from the **code**, never from the live session, and
+// copied verbatim at each OAuth2 rotation.
+//
+// `option<…>` throughout, and **no `UPDATE` backfill**: nothing recorded what
+// a pre-v68 grant authenticated with, and inventing it would be a claim about
+// an authentication nobody observed. An absent `auth_time` is how the refresh
+// grant recognises such a row and falls back to the live-session lookup it
+// used before, so a grant issued before the migration is no worse off.
+//
+// **No index.** None of the three is a search key: the row is located by
+// `token_hash` and its unique index.
+const SCHEMA_V68: &str = "\
+DEFINE FIELD IF NOT EXISTS auth_time ON TABLE oauth2_refresh_token TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS acr ON TABLE oauth2_refresh_token TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS amr ON TABLE oauth2_refresh_token TYPE option<array<string>>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X7.2 / D-9 — v68 adds three optional columns to one table and rewrites
+    /// no row: an absent `auth_time` is how a pre-v68 refresh token is
+    /// recognised, so a backfill would destroy the signal.
+    #[test]
+    fn v68_adds_three_optional_columns_and_backfills_nothing() {
+        for definition in [
+            "auth_time ON TABLE oauth2_refresh_token TYPE option<datetime>",
+            "acr ON TABLE oauth2_refresh_token TYPE option<string>",
+            "amr ON TABLE oauth2_refresh_token TYPE option<array<string>>",
+        ] {
+            assert!(
+                SCHEMA_V68.contains(definition),
+                "v68 must define {definition}"
+            );
+        }
+        assert_eq!(SCHEMA_V68.matches("DEFINE FIELD").count(), 3);
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "DEFINE INDEX", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V68.contains(forbidden),
+                "v68 must not contain {forbidden}: it is additive, optional DDL only"
+            );
+        }
+    }
 
     /// T22.14 — v67 widens one assertion and adds one optional column; it
     /// rewrites no row, and the widened assertion still names the three
@@ -4081,9 +4144,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&67),
-            "v67 is the newest migration (T22.14 — `Server` in the cert_type \
-             assertion and the organization's server-name allow-list). This assertion is a \
+            Some(&68),
+            "v68 is the newest migration (X7.2 / D-9 — the authentication evidence on \
+             the OAuth2 refresh token; v67 was T22.14's `Server` certificate type). \
+             This assertion is a \
              tripwire, not bookkeeping: bumping it is how a new migration is declared \
              deliberate rather than merged in by accident. It caught this phase doing \
              exactly what it is for: T21.4 (v64) and T21.5 (v65) were written on branches \

@@ -672,6 +672,90 @@ async fn t1_5_prompt_login_reauthenticates_and_moves_auth_time_forward() {
     );
 }
 
+/// **T23.1.3 — what a forged return-leg marker buys.** `axiam_login_hop` is in
+/// a URL and is not bound to anything, so a caller can attach it to a
+/// `prompt=login` request that never went through the sign-in page. The
+/// marker selects which of two truthful answers is given (`honour` module
+/// docs); this pins the word *truthful*. The code is issued — the interaction
+/// is skipped, which only the request's own author could have asked for — and
+/// the ID token's `auth_time` is still the hour-old authentication the
+/// session really holds, so a relying party that checks it (OIDC Core
+/// §3.1.2.1, §2) sees that no reauthentication happened.
+#[actix_rt::test]
+async fn a_forged_return_leg_marker_cannot_make_an_old_session_look_reauthenticated() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, honour_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::hours(1),
+        vec![Amr::Pwd],
+    )
+    .await;
+
+    let claims = id_token_claims(
+        &app,
+        tenant_id,
+        &token,
+        &client_id,
+        &secret,
+        "&prompt=login&axiam_login_hop=1",
+    )
+    .await;
+    let auth_time = claims["auth_time"].as_i64().expect("auth_time");
+    let an_hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp();
+    assert!(
+        (auth_time - an_hour_ago).abs() <= 5,
+        "auth_time must describe the session's authentication, not the request's \
+         wish: {auth_time} vs {an_hour_ago}"
+    );
+}
+
+/// **T23.1.3 — and what it cannot buy.** `max_age` is a requirement on the
+/// session, re-measured on every leg, so a forged marker on a request whose
+/// session is too old for it turns a reauthentication into a terminal
+/// `login_required` — never into a code minted from the old session.
+#[actix_rt::test]
+async fn a_forged_return_leg_marker_cannot_satisfy_max_age_with_an_old_session() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, honour_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::hours(1),
+        vec![Amr::Pwd],
+    )
+    .await;
+
+    let resp = authorize(
+        &app,
+        &token,
+        &format!("{}&max_age=60&axiam_login_hop=1", base_query(&client_id)),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let loc = location(&resp);
+    assert!(loc.starts_with(REDIRECT_URI), "{loc}");
+    assert_eq!(
+        query_param(&loc, "error").as_deref(),
+        Some("login_required"),
+        "{loc}"
+    );
+    assert!(query_param(&loc, "code").is_none(), "{loc}");
+}
+
 /// A `prompt=login` request that has already been through the sign-in page is
 /// answered rather than sent there again. Without this the deployment loops.
 #[actix_rt::test]

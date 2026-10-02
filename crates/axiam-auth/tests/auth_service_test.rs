@@ -2201,6 +2201,49 @@ async fn x7_2_the_opaque_tail_records_pwd_and_no_second_factor() {
     assert_eq!(session.amr, vec![Amr::Pwd]);
 }
 
+/// D-10 (T23.1.2): a provider that dates its authentication in AXIAM's future
+/// is recorded as having authenticated when AXIAM verified the assertion — the
+/// stored `authenticated_at` is what `max_age` and the ID token's `auth_time`
+/// read, so it must never run ahead of the verification instant.
+#[tokio::test]
+async fn d10_a_far_future_upstream_instant_is_stored_as_the_verification_instant() {
+    use axiam_core::models::session::{Amr, AuthenticationEvidence};
+    use axiam_core::repository::SessionRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let sessions = session_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let verified_at = Utc::now();
+    let far_future = verified_at + Duration::days(365 * 70);
+    let out = svc
+        .create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::upstream(Some(far_future), verified_at, vec![Amr::Fed]),
+        )
+        .await
+        .unwrap();
+
+    let session = sessions.get_by_id(tenant_id, out.session_id).await.unwrap();
+    assert_eq!(
+        session.authenticated_at.timestamp(),
+        verified_at.timestamp(),
+        "the provider's future is not AXIAM's evidence"
+    );
+}
+
 /// The choke point records the evidence it is **given**, not a clock read and
 /// not a constant — which is the whole reason a federated login can be dated
 /// by the upstream provider — and it stores the OP browser-session credential
@@ -2232,7 +2275,7 @@ async fn x7_2_create_session_and_tokens_stores_the_evidence_given_and_only_a_dig
             org_id,
             None,
             None,
-            AuthenticationEvidence::upstream(Some(nine_hours_ago), vec![Amr::Fed]),
+            AuthenticationEvidence::upstream(Some(nine_hours_ago), Utc::now(), vec![Amr::Fed]),
         )
         .await
         .unwrap();

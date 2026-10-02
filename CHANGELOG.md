@@ -34,6 +34,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A federated login's recorded authentication instant is never later than the
+  moment AXIAM verified the assertion (T23.1.2, D-10).** X7.2 dated a federated
+  session by what the upstream provider said — OIDC `auth_time`, SAML
+  `AuthnInstant` — which is right for a provider replaying a session it
+  established hours ago, and had no upper bound for one whose clock runs ahead
+  of AXIAM's, or which asserts an instant in the future. Such a session was
+  recorded as authenticated after the assertion that produced it, so `max_age`
+  was satisfied by an authentication that had not happened yet by AXIAM's
+  clock, and the ID token's `auth_time` post-dated its own `iat`. The instant is
+  now `min(upstream, verification)`. `AuthenticationEvidence::upstream` takes
+  the verification instant as an argument rather than reading the clock, and
+  the SSO callbacks apply the same bound when they verify the assertion, before
+  it crosses the 60-second handoff hop. A past instant is kept; an instant
+  within the federation path's existing 60-second clock-skew allowance is
+  clamped silently; one further ahead is clamped and logged at `warn`, naming
+  the identity provider. No configuration was added. Amends T-240.
+
 - **A FAPI 2.0 client's essential ACR request is refused instead of dropped,
   and a request object pushed to PAR is refused instead of ignored (T23.1.1).**
   An independent audit of the X7.1 profile-confusion matrix

@@ -1729,6 +1729,51 @@ pub(crate) async fn sso_login_post_auth<C: Connection + Clone>(
         .map_err(AxiamApiError)
 }
 
+/// Bound an upstream identity provider's authentication instant by the moment
+/// AXIAM verified its assertion, and say so when the provider is well ahead of
+/// us (T23.1.2, D-10).
+///
+/// Called at every callback that has just verified an assertion, before the
+/// instant is used for anything — recorded on a session, or carried across the
+/// 60-second handoff hop on the handoff row. `idp` is the provider's display
+/// name, so the log line names the system whose clock is wrong.
+///
+/// The result is `min(upstream, verified_at)`; an absent instant stays absent
+/// and the session falls back to the verification moment, as before. An
+/// instant ahead of `verified_at` by more than the federation path's existing
+/// clock-skew allowance ([`axiam_federation::oidc::CLOCK_SKEW_LEEWAY_SECS`])
+/// is also logged at `warn`. A few seconds of skew is ordinary and clamped
+/// silently.
+pub(crate) fn verified_upstream_auth_time(
+    config: &FederationConfig,
+    upstream: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    bound_upstream_auth_time(&config.provider, config.id, upstream, Utc::now())
+}
+
+/// [`verified_upstream_auth_time`] with the verification instant supplied, so
+/// the bound and the log line are testable against fixed instants.
+fn bound_upstream_auth_time(
+    idp: &str,
+    config_id: Uuid,
+    upstream: Option<DateTime<Utc>>,
+    verified_at: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    if let Some(ahead) = AuthenticationEvidence::upstream_ahead_by(upstream, verified_at)
+        && ahead > chrono::Duration::seconds(axiam_federation::oidc::CLOCK_SKEW_LEEWAY_SECS as i64)
+    {
+        tracing::warn!(
+            idp = %idp,
+            federation_config_id = %config_id,
+            ahead_by_secs = ahead.num_seconds(),
+            allowance_secs = axiam_federation::oidc::CLOCK_SKEW_LEEWAY_SECS,
+            "identity provider asserted an authentication instant in AXIAM's future; \
+             recording the verification instant instead"
+        );
+    }
+    upstream.map(|t| t.min(verified_at))
+}
+
 /// Issue a session for a federated sign-in and return the `Set-Cookie`
 /// response.
 ///
@@ -1748,7 +1793,9 @@ pub(crate) async fn sso_login_post_auth<C: Connection + Clone>(
 /// AXIAM verified the assertion. It is never simply "now", because a provider
 /// replaying an SSO session it established this morning would otherwise have
 /// that login recorded as having happened just now, and every freshness
-/// answer downstream would inherit the overstatement.
+/// answer downstream would inherit the overstatement. Nor is it ever *later*
+/// than now: an instant the provider dates in AXIAM's future is recorded as
+/// the verification moment (T23.1.2, D-10; see [`verified_upstream_auth_time`]).
 pub(crate) async fn issue_sso_session<C: Connection + Clone>(
     state: &web::Data<AppState<C>>,
     tenant_id: Uuid,
@@ -1779,7 +1826,14 @@ pub(crate) async fn issue_sso_session<C: Connection + Clone>(
             // the honour lane's business (plan §4.4) and is deliberately not
             // done here, where it would be indistinguishable from evidence
             // AXIAM gathered itself.
-            AuthenticationEvidence::upstream(upstream_auth_time, vec![Amr::Fed]),
+            // T23.1.2, D-10 — `min(upstream, now)`: the provider's clock is not
+            // ours, and an authentication it dates in AXIAM's future is
+            // recorded as having happened when AXIAM verified it. The
+            // callbacks have already clamped (and logged) at the moment of
+            // verification; this is the same bound at the point of record, and
+            // the only one a handoff redemption — a minute after the assertion
+            // — would otherwise lack.
+            AuthenticationEvidence::upstream(upstream_auth_time, Utc::now(), vec![Amr::Fed]),
         )
         .await?;
 
@@ -2038,7 +2092,8 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 
-    let callback_upstream_auth_time = callback_result.upstream_auth_time;
+    let callback_upstream_auth_time =
+        verified_upstream_auth_time(&resolved.config, callback_result.upstream_auth_time);
     let user = callback_result.user;
 
     // SEC-095: `login.post_auth` fires here too, not only on the password
@@ -2259,7 +2314,8 @@ pub async fn saml_acs_public<C: Connection + Clone>(
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
 
-    let callback_upstream_auth_time = callback_result.upstream_auth_time;
+    let callback_upstream_auth_time =
+        verified_upstream_auth_time(&resolved.config, callback_result.upstream_auth_time);
     let user = callback_result.user;
 
     // SEC-095 — see the identical call in `oidc_callback_public`.
@@ -2273,4 +2329,101 @@ pub async fn saml_acs_public<C: Connection + Clone>(
         callback_upstream_auth_time,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In-memory `MakeWriter`, as in `config::rate_limit`'s tests: assert on
+    /// what a real subscriber would print.
+    #[derive(Clone)]
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs the bound under a capturing subscriber and returns what it logged
+    /// alongside what it returned.
+    fn bound_and_logged(
+        upstream: Option<DateTime<Utc>>,
+        verified_at: DateTime<Utc>,
+    ) -> (Option<DateTime<Utc>>, String) {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        let bounded = tracing::subscriber::with_default(subscriber, || {
+            bound_upstream_auth_time("Okta", Uuid::nil(), upstream, verified_at)
+        });
+        let out = String::from_utf8(buf.lock().unwrap().clone()).expect("utf-8");
+        (bounded, out)
+    }
+
+    /// D-10: a far-future instant is replaced by the verification instant, and
+    /// the log line names the provider.
+    #[test]
+    fn a_far_future_instant_is_bounded_and_warned_with_the_idp_named() {
+        let verified_at = Utc::now();
+        let far = verified_at + chrono::Duration::days(30);
+        let (bounded, log) = bound_and_logged(Some(far), verified_at);
+        assert_eq!(bounded, Some(verified_at));
+        assert!(log.contains("WARN"), "must warn: {log}");
+        assert!(log.contains("Okta"), "must name the IdP: {log}");
+    }
+
+    /// A past instant is kept as asserted, silently.
+    #[test]
+    fn a_past_instant_is_kept_and_not_warned() {
+        let verified_at = Utc::now();
+        let past = verified_at - chrono::Duration::hours(9);
+        let (bounded, log) = bound_and_logged(Some(past), verified_at);
+        assert_eq!(bounded, Some(past));
+        assert!(log.is_empty(), "no log expected: {log}");
+    }
+
+    /// Inside the existing skew allowance the instant is clamped with no warn;
+    /// at exactly the allowance still none; one second beyond it warns.
+    #[test]
+    fn an_instant_within_the_skew_allowance_is_clamped_without_a_warning() {
+        let verified_at = Utc::now();
+        let allowance = axiam_federation::oidc::CLOCK_SKEW_LEEWAY_SECS as i64;
+
+        for ahead in [1, allowance / 2, allowance] {
+            let upstream = verified_at + chrono::Duration::seconds(ahead);
+            let (bounded, log) = bound_and_logged(Some(upstream), verified_at);
+            assert_eq!(bounded, Some(verified_at), "{ahead}s ahead is clamped");
+            assert!(log.is_empty(), "{ahead}s ahead must not warn: {log}");
+        }
+
+        let beyond = verified_at + chrono::Duration::seconds(allowance + 1);
+        let (bounded, log) = bound_and_logged(Some(beyond), verified_at);
+        assert_eq!(bounded, Some(verified_at));
+        assert!(log.contains("WARN"), "one second past the allowance: {log}");
+    }
+
+    /// An absent instant stays absent: the session's fallback is the
+    /// verification moment, as before, and nothing is logged.
+    #[test]
+    fn an_absent_instant_stays_absent() {
+        let (bounded, log) = bound_and_logged(None, Utc::now());
+        assert_eq!(bounded, None);
+        assert!(log.is_empty(), "{log}");
+    }
 }

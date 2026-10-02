@@ -156,17 +156,48 @@ impl AuthenticationEvidence {
     }
 
     /// Evidence for an authentication that happened elsewhere, at a time the
-    /// upstream asserted.
+    /// upstream asserted — **never later than `verified_at`**, the moment
+    /// AXIAM verified the assertion (T23.1.2, D-10).
     ///
     /// `upstream` is `None` when the assertion carried no authentication
     /// instant (a plain OAuth2 provider has no ID token; a SAML IdP need not
-    /// send `AuthnInstant`); the fallback is the moment AXIAM verified the
-    /// assertion, per plan §4.3.
-    pub fn upstream(upstream: Option<DateTime<Utc>>, amr: Vec<Amr>) -> Self {
+    /// send `AuthnInstant`); the fallback is `verified_at`, per plan §4.3.
+    ///
+    /// The upstream instant is the provider's claim, and the provider's clock
+    /// is not ours. An instant in AXIAM's future would make the session look
+    /// younger than the assertion that produced it: `max_age` would be
+    /// satisfied by an authentication that has not yet happened by AXIAM's
+    /// clock, and the emitted `auth_time` would post-date its own `iat`. The
+    /// result is therefore `min(upstream, verified_at)`. An instant in the
+    /// past is kept as asserted, which is the point of taking it at all.
+    ///
+    /// `verified_at` is a parameter, not a `Utc::now()` call in here, so the
+    /// clamp is a pure function the tests drive with fixed instants.
+    pub fn upstream(
+        upstream: Option<DateTime<Utc>>,
+        verified_at: DateTime<Utc>,
+        amr: Vec<Amr>,
+    ) -> Self {
         Self {
-            authenticated_at: upstream.unwrap_or_else(Utc::now),
+            authenticated_at: upstream.map_or(verified_at, |t| t.min(verified_at)),
             amr,
         }
+    }
+
+    /// How far an upstream instant lies **ahead of** `verified_at`, or `None`
+    /// when it does not (or is absent).
+    ///
+    /// The amount [`Self::upstream`] silently removes. Callers compare it with
+    /// the federation path's clock-skew allowance to tell an IdP whose clock
+    /// runs a few seconds fast, which is ordinary, from one asserting
+    /// authentications in the future, which is worth an operator's attention.
+    pub fn upstream_ahead_by(
+        upstream: Option<DateTime<Utc>>,
+        verified_at: DateTime<Utc>,
+    ) -> Option<chrono::Duration> {
+        upstream
+            .map(|t| t - verified_at)
+            .filter(|ahead| *ahead > chrono::Duration::zero())
     }
 }
 
@@ -380,14 +411,66 @@ mod tests {
     /// the user hours ago must not have its session dated "now".
     #[test]
     fn upstream_evidence_prefers_the_upstream_instant() {
-        let long_ago = Utc::now() - chrono::Duration::hours(9);
-        let evidence = AuthenticationEvidence::upstream(Some(long_ago), vec![Amr::Fed]);
+        let verified_at = Utc::now();
+        let long_ago = verified_at - chrono::Duration::hours(9);
+        let evidence =
+            AuthenticationEvidence::upstream(Some(long_ago), verified_at, vec![Amr::Fed]);
         assert_eq!(evidence.authenticated_at, long_ago);
 
-        let none = AuthenticationEvidence::upstream(None, vec![Amr::Fed]);
-        assert!(
-            (Utc::now() - none.authenticated_at).num_seconds() < 5,
+        let none = AuthenticationEvidence::upstream(None, verified_at, vec![Amr::Fed]);
+        assert_eq!(
+            none.authenticated_at, verified_at,
             "with no upstream instant the fallback is the verification moment"
+        );
+    }
+
+    /// D-10: the evidence is never later than the moment AXIAM verified the
+    /// assertion, however far ahead the provider's clock claims to be.
+    #[test]
+    fn a_far_future_upstream_instant_records_the_verification_instant() {
+        let verified_at = Utc::now();
+        let far_future = verified_at + chrono::Duration::days(365 * 70);
+        let evidence =
+            AuthenticationEvidence::upstream(Some(far_future), verified_at, vec![Amr::Fed]);
+        assert_eq!(evidence.authenticated_at, verified_at);
+        assert_eq!(
+            AuthenticationEvidence::upstream_ahead_by(Some(far_future), verified_at),
+            Some(chrono::Duration::days(365 * 70))
+        );
+    }
+
+    /// An instant a few seconds ahead — an ordinary clock skew — is clamped too:
+    /// the guarantee is "never later", not "never later than the skew".
+    #[test]
+    fn an_upstream_instant_inside_the_skew_allowance_is_clamped() {
+        let verified_at = Utc::now();
+        let slightly_ahead = verified_at + chrono::Duration::seconds(30);
+        let evidence =
+            AuthenticationEvidence::upstream(Some(slightly_ahead), verified_at, vec![Amr::Fed]);
+        assert_eq!(evidence.authenticated_at, verified_at);
+    }
+
+    /// The boundary: exactly the verification instant is kept and is not
+    /// "ahead"; a past or absent instant reports no excess.
+    #[test]
+    fn only_an_instant_strictly_ahead_reports_an_excess() {
+        let verified_at = Utc::now();
+        let at = AuthenticationEvidence::upstream(Some(verified_at), verified_at, vec![Amr::Fed]);
+        assert_eq!(at.authenticated_at, verified_at);
+        assert_eq!(
+            AuthenticationEvidence::upstream_ahead_by(Some(verified_at), verified_at),
+            None
+        );
+        assert_eq!(
+            AuthenticationEvidence::upstream_ahead_by(
+                Some(verified_at - chrono::Duration::hours(1)),
+                verified_at
+            ),
+            None
+        );
+        assert_eq!(
+            AuthenticationEvidence::upstream_ahead_by(None, verified_at),
+            None
         );
     }
 

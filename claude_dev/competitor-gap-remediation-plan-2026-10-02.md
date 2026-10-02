@@ -122,9 +122,14 @@ the item from reappearing in every future comparison.
 
 Each item has the form: *Target · Today · Design · Acceptance · Bookkeeping ·
 Size · Model*. Size is in single-session units as the roadmap uses them
-(S ≤ 1, M 2–3, L 4–6, XL > 6). The model column follows the repository's
-convention: Opus 5 where a mistake is a CVE or a normative contract change,
-Sonnet 5 for pinned plumbing and fan-out.
+(S ≤ 1, M 2–3, L 4–6, XL > 6). The model column names the cheapest model that
+is adequate, between Claude Opus 5.5 (`claude-opus-5-5`, $4 / $20 per million
+input / output tokens) and Claude Sonnet 5.5 (`claude-sonnet-5-5`, $2 / $10):
+Opus 5.5 costs exactly twice Sonnet 5.5, so it is used only where a mistake is
+a CVE, a normative contract change or a cross-crate design decision, and
+Sonnet 5.5 everywhere a plan, a specification or an external oracle (the
+conformance suite, an existing test) pins the behaviour. §6 breaks every item
+into tasks and assigns the model per task.
 
 ### G-1 — Certification: Basic OP and FAPI 2.0 submissions — **P1**
 
@@ -175,9 +180,9 @@ mark published on the website once granted.
 matrix M1–M9), `CHANGELOG.md`. No contract change: X7.0 decision A needs no
 SDK code change.
 
-**Size.** L (X7 is nine waves, several of them small). **Model.** Opus 5 for
+**Size.** L (X7 is nine waves, several of them small). **Model.** Opus 5.5 for
 X7.1 to X7.3 (authorization-request gating and the OP cookie are
-security-bearing); Sonnet 5 for the harness, judgements and submission.
+security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 
 ### G-2 — SAML 2.0 identity provider — **P1**
 
@@ -248,8 +253,8 @@ and the SP registry; threats for assertion replay, ACS redirection, signing
 key exposure, XML external entities. Website: *Integrate* section. Design
 document: the federation chapter.
 
-**Size.** XL. **Model.** Opus 5 for assertion issuance, signing and the SP
-allow-list; Sonnet 5 for the SP CRUD, metadata import, console page and SDK
+**Size.** XL. **Model.** Opus 5.5 for assertion issuance, signing and the SP
+allow-list; Sonnet 5.5 for the SP CRUD, metadata import, console page and SDK
 fan-out.
 
 ### G-3 — LDAP / Active Directory identity source — **P1**
@@ -313,8 +318,8 @@ console page (*Directory* per tenant), website *Integrate* section, design
 document chapter, threat model elements for the directory connector and the
 sync job.
 
-**Size.** XL. **Model.** Opus 5 for the bind path, filter construction and
-trust handling; Sonnet 5 for sync, mapping, CRUD, console and docs.
+**Size.** XL. **Model.** Opus 5.5 for the bind path, filter construction and
+trust handling; Sonnet 5.5 for sync, mapping, CRUD, console and docs.
 
 ### G-4 — RFC 7592 client configuration endpoint — **P2**
 
@@ -345,7 +350,7 @@ policy is `400`; the MCP e2e harness (T21.8) exercises read and delete.
 OpenAPI; threat model entry on the management token; website *OAuth2*
 section.
 
-**Size.** S. **Model.** Opus 5 (an unauthenticated-by-user write surface on
+**Size.** S. **Model.** Opus 5.5 (an unauthenticated-by-user write surface on
 the authorization server, the same class as T-272 to T-280).
 
 ### G-5 — Shared Signals Framework transmitter — **P2**
@@ -382,8 +387,8 @@ discovery lists the supported events.
 seven full-surface SDKs. Threat model: new element and threats for receiver
 impersonation and event flooding. Website *Integrate* section.
 
-**Size.** L. **Model.** Opus 5 for SET issuance and stream authentication;
-Sonnet 5 for delivery plumbing and docs.
+**Size.** L. **Model.** Opus 5.5 for SET issuance and stream authentication;
+Sonnet 5.5 for delivery plumbing and docs.
 
 ### G-6 — Outbound SCIM provisioning — **P2**
 
@@ -411,7 +416,7 @@ backoff and a 4xx dead-letters with an admin notification; GDPR erasure
 **Bookkeeping.** Contract §31 management CRUD; OpenAPI; console page; threat
 model (credential storage for targets, over-provisioning); website.
 
-**Size.** M. **Model.** Sonnet 5, with the dispatcher shared with G-5 built
+**Size.** M. **Model.** Sonnet 5.5, with the dispatcher shared with G-5 built
 first under Opus 5.
 
 ### G-7 — CIBA — **P2**
@@ -471,7 +476,7 @@ of server plus SurrealDB is measured and published.
 **Bookkeeping.** Deployment docs, website *Operate*, `CHANGELOG`, benchmark
 analysis. No contract change.
 
-**Size.** M. **Model.** Sonnet 5, with an Opus 5 review of the audit-write
+**Size.** M. **Model.** Sonnet 5.5, with an Opus 5.5 review of the audit-write
 path (audit durability, T19.27, must not regress).
 
 ### G-9 — Verifiable credentials: design only — **P2**
@@ -572,7 +577,7 @@ G-9, G-10, G-11, G-12, G-15       independent, documentation and measurement
 | Wave | Items | Why together |
 |---|---|---|
 | W1 | G-1 (X7.1–X7.3), G-4, G-12, G-15, G-9 | The P1 that is nearly free, three small items, and the two decision documents |
-| W2 | G-1 (X7.4–X7.9, X5.3 submission), G-3 (crate, model, bind path) | Certification closes; the directory crate's security core lands under Opus 5 |
+| W2 | G-1 (X7.4–X7.9, X5.3 submission), G-3 (crate, model, bind path) | Certification closes; the directory crate's security core lands under Opus 5.5 |
 | W3 | G-2 (SP registry, signing key, SSO), G-3 (sync, mapping, console) | SAML IdP on top of the login hop; directory completes |
 | W4 | G-2 (SLO, console, contract §29), G-5 (dispatcher, SETs, streams) | SAML completes; the outbound signal spine lands |
 | W5 | G-6, G-7, G-8 | Outbound SCIM on the dispatcher; CIBA on a green FAPI baseline; the minimal profile |
@@ -588,23 +593,100 @@ accepts the plan.
 
 ---
 
-## 6. Model recommendation summary
+## 6. Model assignment per task
 
-| Item | Model | Why |
-|---|---|---|
-| G-1 X7.1–X7.3 | **Opus 5** | Authorization-request gating and the OP cookie; a profile-confusion mistake weakens FAPI clients |
-| G-1 harness, judgements, submission | Sonnet 5 | Suite-driven, pinned by the plan |
-| G-2 assertion issuance, signing, ACS allow-list | **Opus 5** | Assertion forgery or redirection is an account takeover at every SP |
-| G-2 SP CRUD, metadata import, console, SDK fan-out | Sonnet 5 | Contract-pinned plumbing |
-| G-3 bind path, filter escaping, TLS trust | **Opus 5** | Directory injection or a plaintext bind leaks every corporate password |
-| G-3 sync, mapping, CRUD, console | Sonnet 5 | Reconciliation plumbing |
-| G-4 | **Opus 5** | A new write surface authenticated by a bearer the server mints |
-| G-5 SET issuance, stream auth | **Opus 5** | Forged signals revoke sessions at relying parties |
-| G-5 delivery, G-6 | Sonnet 5 | Dispatcher reuse |
-| G-7 | **Opus 5** | A new grant with single-use redemption; the Keycloak 26.7 CVE class |
-| G-8 | Sonnet 5, Opus 5 review | Audit durability must not regress |
-| G-9, G-11 | Opus 5 / Sonnet 5 | Design judgement / spike |
-| G-10, G-12, G-13, G-15 | Sonnet 5 | Measurement and documentation |
+**Rule.** Sonnet 5.5 is the default. A task moves to Opus 5.5 only when one of
+three conditions holds: (a) a mistake in it is a vulnerability (token or
+assertion issuance, authentication paths, allow-lists, a new write surface
+reachable without a user session); (b) it writes normative text the eleven SDKs
+must implement (a `CONTRACT.md` section) or a threat-model entry; (c) it makes a
+cross-crate design decision nobody has pinned yet. Everything else, including
+most plumbing, CRUD, console pages, SDK ports, harnesses and documentation, is
+Sonnet 5.5, because the behaviour is pinned by this plan, by a specification or
+by an external oracle, and a review catches the rest at half the price.
+
+Two consequences of the pricing: Opus 5.5 at **$4 / $20** is exactly **2×**
+Sonnet 5.5 at **$2 / $10** per million tokens, and cache reads cost the same
+($0.20) on both, so the saving is on fresh tokens only. Opus 5.5 defaults to
+`medium` effort and Sonnet 5.5 to `high`; neither needs changing for this work.
+
+Task ids follow the proposed Phase 23 numbering (`T23.<item>.<step>`). The
+*oracle* column says what catches a mistake if the cheaper model makes one;
+when the oracle is weak, the model is Opus 5.5.
+
+### G-1 — Certification
+
+| Task | Scope | Model | Why this one, and what catches a mistake |
+|---|---|---|---|
+| T23.1.1 | X7.1: `authn_request_params` and `browser_sso` flags, typed parser on query and PAR carriers, `enforce_authorization_request` rules, profile-confusion matrix M1–M9 | **Opus 5.5** | A wrong gate lets a FAPI client honour `prompt`/`request` parameters it must refuse; the FAPI run only proves it did not get worse, not that the matrix is right |
+| T23.1.2 | X7.2: schema v50 (`authenticated_at`, `amr`, `browser_token_hash`), `auth_time`/`acr`/`amr` snapshot on the code | Sonnet 5.5 | Schema and copy-through plumbing pinned field by field in `basic-op-gap-plan.md`; unit tests on the snapshot |
+| T23.1.3 | X7.3: `axiam_op_session` cookie, `/login?return_to` hop with same-origin-path validation, `reauth` mode | **Opus 5.5** | Open-redirect and session-fixation surface; the suite does not test the redirect validator |
+| T23.1.4 | X7.4–X7.6: honour lane for `prompt`, `max_age`, `id_token_hint`, ACR derivation | Sonnet 5.5 | Behaviour pinned by OIDC Core §3.1.2.1 and by the Basic OP modules, which are the oracle: `oidcc-prompt-login`, `oidcc-max-age-1` fail if it is wrong |
+| T23.1.5 | X7.7 sensitive scopes, X7.8 `client_secret_basic` | Sonnet 5.5 | Decision A is taken; RFC 6749 §2.3.1 pins the parsing; existing client-auth tests extend |
+| T23.1.6 | X7.9: Basic OP harness, final runs, `docs/conformance/REVIEW-JUDGEMENTS.md` | Sonnet 5.5 | Suite-driven; a judgement is prose over a log the suite produced |
+| T23.1.7 | FAPI `WARNING`/`REVIEW` judgements, X5.3 submission package, website mark | Sonnet 5.5 | Prose and packaging; the runs are already green |
+
+### G-2 — SAML 2.0 identity provider
+
+| Task | Scope | Model | Why |
+|---|---|---|---|
+| T23.2.1 | `SamlServiceProvider` model, repository, schema migration; `CertificateType::SamlSigning` on T22.14's per-type profile; encrypted key storage via `ca_key_store.rs` | Sonnet 5.5 | Mirrors existing models and an existing certificate-type profile; schema tests and the PKI suite are the oracle |
+| T23.2.2 | `saml_idp` module: assertion builder, `NameID` policy, attribute mapping, XML signing, response envelope | **Opus 5.5** | Assertion forgery is account takeover at every SP; no external oracle until T23.2.7 |
+| T23.2.3 | SSO endpoint: `AuthnRequest` parsing (Redirect and POST bindings), `InResponseTo` single-use on the X6 arbiter, ACS allow-list, `Destination` check, `ForceAuthn`/`IsPassive` mapping onto the login hop | **Opus 5.5** | Replay and redirection surface; the trickiest integration with T23.1.3 |
+| T23.2.4 | SLO endpoint wired to session revocation and the revocation feed | Sonnet 5.5 | Revocation path exists (R-6); the test is "the session is gone" |
+| T23.2.5 | IdP metadata endpoint; SP metadata import (XXE off, as the SP side already enforces) | Sonnet 5.5 | `samael` parses; existing SP tests cover the parser hardening |
+| T23.2.6 | Admin console *SAML Service Providers* page | Sonnet 5.5 | Console pattern identical to OAuth2 clients |
+| T23.2.7 | e2e: `samael` test SP and Keycloak SAML client round trip, replay and bad-ACS refusals, feature-off 404 | Sonnet 5.5 | Writing tests against a pinned acceptance list |
+| T23.2.8 | Contract §29, threat-model elements and threats, design-document federation chapter | **Opus 5.5** | Normative text and the trust-boundary entries; S-sized, so the premium is small |
+| T23.2.9 | OpenAPI regeneration, website *Integrate* section, eleven SDK ports of §29 | Sonnet 5.5 | Contract-pinned fan-out, as every previous port |
+
+### G-3 — LDAP / Active Directory
+
+| Task | Scope | Model | Why |
+|---|---|---|---|
+| T23.3.1 | `axiam-directory` crate scaffold at layer 3, layering table and `crate-layering.md`, `missing_docs` opt-in, `DirectoryConfig` model/repo with the secret provider for `bind_secret` | Sonnet 5.5 | Scaffolding against an enforced layering check and an existing secret-provider pattern (R-5) |
+| T23.3.2 | LDAP client: `ldap3` over `rustls`, mandatory TLS with per-tenant anchors, RFC 4515 filter escaping, bounded pool, no referrals; bind-as-user path in `axiam-auth` behind the existing brute-force counters; refusal of password change, reset and OPAQUE for directory users | **Opus 5.5** | A filter-injection or a plaintext bind leaks corporate passwords; a reset path left open on a shadow account is a takeover. No oracle before T23.3.6 |
+| T23.3.3 | JIT provisioning: upsert with `source = directory`, `external_id = entryUUID \| objectGUID` | Sonnet 5.5 | Follows the SCIM inbound reconciliation pattern; repository tests |
+| T23.3.4 | Group mapping (`memberOf`, reverse `member`, nested to depth) onto AXIAM groups | Sonnet 5.5 | Pure mapping over fixtures; role inheritance untouched |
+| T23.3.5 | Sync job on the cleanup scheduler: incremental by `modifyTimestamp`/`uSNChanged`, nightly full, soft-delete | Sonnet 5.5 | Reconciliation plumbing; GDPR rule pinned (never hard delete) |
+| T23.3.6 | OpenLDAP and Samba AD containers in `docker/`; e2e covering the acceptance list, injection attempt included | Sonnet 5.5 | Tests against a pinned list; this is the oracle for T23.3.2 |
+| T23.3.7 | Threat-model elements for the connector and the sync job; contract §30 | **Opus 5.5** | Normative and trust-boundary text; S-sized |
+| T23.3.8 | CRUD routes, console *Directory* page, OpenAPI, website, design-document chapter | Sonnet 5.5 | Pattern work |
+
+### G-4 to G-15
+
+| Task | Scope | Model | Why |
+|---|---|---|---|
+| T23.4.1 | RFC 7592: management token mint and hash, `GET`/`PUT`/`DELETE /oauth2/register/{client_id}`, revalidation, token rotation, revocation on delete, rate limit; contract §28 addition; threat entry | **Opus 5.5** | A write surface authenticated by a server-minted bearer, the T-272 … T-280 class; S-sized, so cheap even on Opus |
+| T23.5.1 | Extract the webhook dispatcher (`webhook.rs` queue, retry, backoff) into a shared outbound dispatcher with no behaviour change | Sonnet 5.5 | Refactor under the existing webhook tests |
+| T23.5.2 | SSF: `SsfStream` model, SET issuance with the tenant EdDSA key, subject-identifier policy, stream management API authentication, `/.well-known/ssf-configuration` | **Opus 5.5** | A forged or misaddressed SET revokes sessions at relying parties |
+| T23.5.3 | Push (RFC 8935) and poll (RFC 8936) delivery on the shared dispatcher, event-source wiring from the revocation feed and the audit log, e2e test receiver | Sonnet 5.5 | Specification-pinned transport over a dispatcher that already retries |
+| T23.5.4 | Threat-model entries, website, optional receiver helper in the seven full-surface SDKs | Sonnet 5.5, threat entries **Opus 5.5** | Docs and fan-out; the two threat entries ride the T23.5.2 session |
+| T23.6.1 | `ScimTarget` model, repository, credential via secret provider or client credentials | Sonnet 5.5 | Mirrors webhook and federation config models |
+| T23.6.2 | Lifecycle-event to SCIM translation (`POST`, `PATCH`, `DELETE`/`active=false`), link rows, delivery on the shared dispatcher | Sonnet 5.5 | RFC 7644 pins the wire; a test SCIM server is the oracle |
+| T23.6.3 | Nightly reconciliation, dead-letter with admin notification, GDPR erasure propagation | Sonnet 5.5 | Reconciliation plumbing |
+| T23.6.4 | CRUD, console, contract §31, OpenAPI, website, threat entries | Sonnet 5.5 | Management CRUD; the threat entries are "credential at rest for a target", a known pattern |
+| T23.7.1 | CIBA: `bc-authorize`, `auth_req_id` lifecycle, grant redemption on the X6 single-use arbiter, polling back-off, rate-limit preset coverage | **Opus 5.5** | A new grant; the Keycloak 26.7 CVE class is exactly a limiter forgetting this grant |
+| T23.7.2 | User approval on the identity pages after full authentication, email notification, ping mode on the dispatcher | Sonnet 5.5 | UI and notification plumbing over existing services |
+| T23.7.3 | e2e poll and ping, contract §32, SDK initiation helper in the seven full-surface SDKs, website | Sonnet 5.5 | Fan-out |
+| T23.8.1 | `AXIAM__AMQP__ENABLED=false`: consumers and producers not started, in-process mail channel, direct audit writes, `/health` and `409` reporting, boot refusals (Reactors on, replicas above one) | Sonnet 5.5 | Configuration plumbing over existing services; the full suite with the flag off is the oracle |
+| T23.8.2 | Review of the direct audit-write path against T19.27 durability | **Opus 5.5** | Review only, a fraction of a session; audit loss is a compliance failure |
+| T23.8.3 | `docker-compose.minimal.yml`, deployment docs, website *Operate*, resting-RSS measurement and benchmark §5 row | Sonnet 5.5 | Docs and measurement |
+| T23.9.1 | `verifiable-credentials-design.md` (OID4VCI issuer, OID4VP verifier, SD-JWT VC, trust mapping, go/no-go) | **Opus 5.5** | Design judgement with nothing pinned; S-sized |
+| T23.10.1 | `benchmarks/targets/authentik/` profile in the Keycloak/Zitadel shape | Sonnet 5.5 | Pattern copy |
+| T23.10.2 | Run 6 on the G-box, `PUBLIC_BENCH_ANALYSIS.md` seventh draft, comparison rows and change logs | Sonnet 5.5 | Measurement and reporting |
+| T23.11.1 | RADIUS / EAP-TLS spike, decision record | Sonnet 5.5 | A spike |
+| T23.12.1 | Front-channel logout decision recorded in the design document and the three comparisons | Sonnet 5.5 | Prose |
+| T23.15.1 | *Identity for agents* guide and website page with §28 SDK snippets | Sonnet 5.5 | Documentation over shipped features |
+| F4 (per wave) | Security review of the wave's diff before merge, threat-model reconciliation | **Opus 5.5** | The one place where a cheaper reviewer is false economy |
+
+**Totals.** 46 tasks: 13 on Opus 5.5 (12 implementation or design tasks plus
+the per-wave F4 review), 32 on Sonnet 5.5, and one split (T23.5.4, whose two
+threat entries ride the Opus session of T23.5.2). The Opus tasks are deliberately the
+small, dense ones (S or the core of an M); the long fan-outs, harnesses and
+console pages are all Sonnet. Measured in sessions rather than tasks, roughly a
+quarter of the phase runs on Opus 5.5, so the blended cost is about **1.25×** an
+all-Sonnet run and about **0.6×** an all-Opus run.
 
 ---
 
@@ -661,3 +743,81 @@ accepts the plan.
   RADIUS (G-11 is a spike).
 - It does not edit `roadmap.md`, `design-document.md` or the three comparison
   documents; each landed item does that in its own PR.
+
+---
+
+## 10. Kickoff prompt for a fresh session
+
+The prompt below starts Phase 23 in a new Claude Code session. It is written
+for an **orchestrator** that delegates every task to an executor subagent with
+the model §6 assigns, because a Claude Code session cannot change its own model
+mid-turn but can spawn a subagent on any model. Start the orchestrator on
+Opus 5.5 (`claude --model claude-opus-5-5`, or `/model opus` once inside): it
+reads the plan once, reviews every executor's diff, and runs the F4 review, so
+it should be the stronger model even though it writes little code.
+
+```text
+Read CLAUDE.md, then claude_dev/competitor-gap-remediation-plan-2026-10-02.md in
+full. It is the plan for Phase 23 (competitor gap closure). Execute it, wave by
+wave, in the order §5 gives (W1 → W6), starting from the top of W1.
+
+You are the orchestrator. You do not write feature code yourself. For every task
+in the §6 tables you spawn one executor with the Agent tool, passing
+`model: "opus"` when §6 says Opus 5.5 and `model: "sonnet"` when it says
+Sonnet 5.5 — never the other way round, and never both. The executor prompt
+must contain: the task id and the full text of its §4 item and §6 row, the
+acceptance criteria, the bookkeeping the task owes from §7, the feature branch
+name, and the disk-hygiene rules from CLAUDE.md (narrow cargo commands,
+`cargo clean` between tasks, the swagger-ui placeholder, `protoc` and
+`--no-default-features` where the server binary is built). Executors in the same
+wave that touch disjoint crates may run in parallel with `isolation: "worktree"`;
+executors that share a crate run sequentially.
+
+Branching: one feature branch per wave, `claude/phase23-w<N>`, cut from the
+latest `main`. Each task is one or more signed commits on that branch; the
+commit message names the task id. At the end of a wave, spawn an Opus 5.5
+executor for the F4 security review of the whole wave diff against
+claude_dev/threat-model-stride.md, fix what it finds, then open one PR per
+wave to `main` with the detailed description CLAUDE.md requires and the issues
+it closes, and subscribe to its activity. Do not start the next wave's branch
+from an unmerged wave unless its tasks are independent of the unmerged work
+(§5 lists the dependencies); otherwise wait for the merge.
+
+After each executor finishes, before accepting its work: read its diff, run the
+repo's fast checks yourself (`cargo fmt --all --check`, the narrow
+`cargo clippy -p <crate> --all-targets -- -D warnings`, the crate's tests,
+`scripts/check-crate-layering.py`, `scripts/check-doc-links.sh`), confirm the
+acceptance criteria in §4 are met by tests that exist and pass, and confirm the
+§7 bookkeeping (CHANGELOG under [Unreleased], contract section, OpenAPI
+regeneration, threat-model entries in the same commit where §7 requires it). If
+anything is missing, send the executor back with the gap named; do not fix it
+yourself unless it is a one-line change. If an executor on Sonnet 5.5 reports
+that the task needed a design decision the plan does not pin, stop that task,
+take the decision yourself, write it into the plan's §8 table as a new D-row,
+and resume on the model §6 assigns.
+
+As each task lands, add an EXECUTED block at the head of its §4 item in the plan,
+in the form claude_dev/remediation-plan-2026-09-12.md uses: what shipped, which
+tests went in, what the plan did not anticipate, what the model and the docs now
+say. When a whole item (G-n) is complete, flip its row in the three
+competitor-comparison documents and add a dated change-log line there. When W1
+lands, add Phase 23 to claude_dev/roadmap.md (D-8) with T23.x entries mapping
+to §6.
+
+The §8 decisions D-1 … D-8 are accepted as recommended unless the maintainer
+has written otherwise in the plan since. SAGE MCP: call sage_inception first if
+it is connected; if it is not, say so once and continue.
+
+Report at the end of every wave: tasks landed with commits, tests run, what was
+left out and why, PR link, and what the next wave needs from the maintainer.
+```
+
+Three notes on running it. First, the Agent tool's `model` values are aliases
+to the current generation, so `opus` and `sonnet` resolve to Opus 5.5 and
+Sonnet 5.5 today and will move with the catalogue; pin the exact ids in the
+prompt only if a specific generation must be reproduced. Second, the
+orchestrator's own tokens are a small share of the phase (it reads and
+reviews, the executors write), so running it on Opus 5.5 costs little and
+buys a stronger review of every Sonnet diff. Third, the per-wave PR is the
+unit of merge and of the F4 review; a task is not done until the wave's PR is
+green and merged, as CLAUDE.md's development process requires.

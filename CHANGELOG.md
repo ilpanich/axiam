@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A FAPI 2.0 client's essential ACR request is refused instead of dropped,
+  and a request object pushed to PAR is refused instead of ignored (T23.1.1).**
+  An independent audit of the X7.1 profile-confusion matrix
+  ([`basic-op-gap-plan.md`](claude_dev/basic-op-gap-plan.md) §7) found two
+  places where a `fapi2` client's security-bearing request parameter was
+  silently discarded — the downgrade the matrix exists to prevent. Both are
+  amendments to T-239; neither changes anything for a `standard` client.
+
+  *`claims.id_token.acr` on `fapi2`.* `claims` left the refused list when its
+  `userinfo` member began to be honoured, and took the `id_token.acr` member
+  with it — but that member is read only on the honour lane, which a `fapi2`
+  client can never be on. A `fapi2` client asking for an **essential**
+  `urn:axiam:acr:mfa` therefore received a token minted from whatever the
+  session was, with no `acr` and no error, where OIDC Core §5.5.1.1 says to
+  treat the outcome as a failed authentication. `claims` is now
+  security-bearing exactly when it asks for `id_token.acr` (or cannot be read
+  well enough to rule that out), so the gate answers `invalid_request` naming
+  it, on both carriers; a `claims` asking only for `userinfo` members is
+  served as before. Plan row M3 is restored to the matrix tests.
+
+  *`request` at `/oauth2/par`.* The authorization endpoint refuses a request
+  object with `request_not_supported`, but the PAR body had no `request`
+  member, so serde dropped it and the push answered `201`. RFC 9101 §6.3 tells
+  a client the server uses only the object's parameters, so a `prompt=login`
+  or `max_age=0` inside one never reached the `fapi2` gate or the honour lane.
+  The push now answers `400 request_not_supported`, before client
+  authentication, and a blank value is still a template on both carriers.
+  `sdks/openapi.json` gains the refused member; no SDK sends it.
+
+  The audit also added tests the matrix named and did not have: the gate on
+  the pushed carrier over HTTP (every refused parameter, plus the
+  `standard`/`ignore` twin, the `userinfo`-only twin and P2), a `fapi2` row
+  edited to `honour` in the database refused at `/oauth2/authorize`, a
+  repeated parameter refused on both carriers, a strong-method client's secret
+  in an `Authorization: Basic` header refused at all five client-authenticating
+  endpoints (M9), DCR and CIMD forcing `authn_request_params: ignore` and
+  `browser_sso: false` whatever the request says, and the stored-mode decode
+  failing closed.
+
 ## [1.0.0-beta17] - 2026-09-25
 
 ### Added

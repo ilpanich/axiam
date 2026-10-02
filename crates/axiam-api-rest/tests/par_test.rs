@@ -1001,3 +1001,306 @@ async fn discovery_advertises_the_par_endpoint() {
     // demanded of none. Per-client enforcement is not discoverable.
     assert_eq!(doc["require_pushed_authorization_requests"], false);
 }
+
+// ---------------------------------------------------------------------------
+// T23.1.1 — the X7.1 gate is applied to the pushed carrier exactly as to the
+// inline one, request objects are refused on both, and a repeated parameter
+// is refused on both
+// ---------------------------------------------------------------------------
+
+/// A valid `S256` challenge, so a `fapi2` request fails for the reason a test
+/// is about rather than for missing PKCE.
+const PKCE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+fn form(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+/// GET the authorize endpoint as the seeded user; `(status, Location)`.
+macro_rules! authorize_at {
+    ($app:expr, $f:expr, $query:expr) => {{
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/authorize?{}", $query))
+            .insert_header(("Authorization", format!("Bearer {}", user_token($f))))
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let location = resp
+            .headers()
+            .get("Location")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        (resp.status().as_u16(), location)
+    }};
+}
+
+/// The query members of a redirect, as a map.
+fn query_of(location: &str) -> std::collections::HashMap<String, String> {
+    url::Url::parse(location)
+        .expect("an absolute redirect")
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect()
+}
+
+/// Turn the fixture's first client into an honest, complete `fapi2`
+/// registration — the row an operator gets through the admin API — by writing
+/// the row directly. The PAR endpoint needs client authentication this
+/// harness can only perform with a shared secret, so every push in these
+/// tests happens first, while the client is still `standard`; the pushed rows
+/// are keyed by `client_id` and outlive the change.
+async fn make_fapi2(f: &Fixture, honour: bool) {
+    use axiam_core::models::oauth2_client::{ClientAuthMethod, ClientProfile};
+    let row = SurrealOAuth2ClientRepository::new(f.db.clone())
+        .update(
+            f.tenant_id,
+            f.client_uuid,
+            UpdateOAuth2Client {
+                profile: Some(ClientProfile::Fapi2),
+                require_par: Some(true),
+                token_endpoint_auth_method: Some(ClientAuthMethod::TlsClientAuth),
+                tls_client_auth_san_dns: Some("rp.test.example".into()),
+                tls_client_certificate_bound_access_tokens: Some(true),
+                authn_request_params: Some(if honour {
+                    AuthnRequestParamsMode::Honour
+                } else {
+                    AuthnRequestParamsMode::Ignore
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        axiam_oauth2::fapi::validate_registration(&row).is_ok(),
+        !honour,
+        "fixture precondition: the honest row validates and the honour row is one \
+         only a database edit can produce"
+    );
+}
+
+/// **M1–M4 (and M3's `claims.id_token.acr`), layer 2, on the PAR carrier.**
+///
+/// A `fapi2` client is a `require_par` client, so PAR is the only carrier it
+/// has — a gate that held for the query string and not for a pushed request
+/// would hold for no `fapi2` client at all. Each security-bearing parameter is
+/// pushed, and the authorization request that redeems it is refused
+/// `invalid_request`, by redirect to the registered URI and with no code.
+///
+/// Three twins in the same test: the same pushes from a `standard`/`ignore`
+/// client are served a code as before (I4); a `fapi2` push carrying a
+/// `claims` that asks only for `userinfo` members is served a code (it is
+/// honoured, so there is nothing to refuse); and a `fapi2` push carrying
+/// nothing new is served a code (P2 at the HTTP layer).
+#[actix_web::test]
+async fn a_fapi2_client_is_refused_what_it_pushed_exactly_as_what_it_sent_inline() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let pkce = format!("&code_challenge={PKCE}&code_challenge_method=S256&scope=openid");
+
+    let refused_cases = [
+        ("prompt", "none".to_owned()),
+        ("prompt", "login".to_owned()),
+        ("max_age", "0".to_owned()),
+        ("acr_values", "urn:axiam:acr:mfa".to_owned()),
+        ("id_token_hint", "ey.header.payload".to_owned()),
+        (
+            "claims",
+            form(r#"{"id_token":{"acr":{"essential":true,"values":["urn:axiam:acr:mfa"]}}}"#),
+        ),
+    ];
+
+    // Push everything while the client is still `standard`.
+    let mut refused = Vec::new();
+    let mut twins = Vec::new();
+    for (name, value) in &refused_cases {
+        let extra = format!("{pkce}&{name}={value}");
+        let (status, body) = par!(app, f, f.client_id, f.client_secret, extra.clone());
+        assert_eq!(status, 201, "push {name}: {body}");
+        refused.push((*name, body["request_uri"].as_str().unwrap().to_owned()));
+
+        let (status, body) = par!(app, f, f.other_client_id, f.other_client_secret, extra);
+        assert_eq!(status, 201, "twin push {name}: {body}");
+        twins.push((*name, body["request_uri"].as_str().unwrap().to_owned()));
+    }
+    let userinfo_claims = format!(
+        "{pkce}&claims={}",
+        form(r#"{"userinfo":{"name":{"essential":true}}}"#)
+    );
+    let (_, body) = par!(app, f, f.client_id, f.client_secret, userinfo_claims);
+    let userinfo_only = body["request_uri"].as_str().unwrap().to_owned();
+    let (_, body) = par!(app, f, f.client_id, f.client_secret, pkce.clone());
+    let plain = body["request_uri"].as_str().unwrap().to_owned();
+
+    make_fapi2(&f, false).await;
+
+    for (name, uri) in refused {
+        let (status, location) = authorize_at!(
+            app,
+            &f,
+            format!("client_id={}&request_uri={}", f.client_id, enc(&uri))
+        );
+        assert_eq!(
+            status, 302,
+            "{name}: refused by redirect, the URI is registered"
+        );
+        let q = query_of(&location.unwrap());
+        assert_eq!(
+            q.get("error").map(String::as_str),
+            Some("invalid_request"),
+            "{name}: {q:?}"
+        );
+        assert!(
+            !q.contains_key("code"),
+            "{name}: no code may be issued: {q:?}"
+        );
+        assert!(
+            q.get("error_description").is_some_and(|d| d.contains(name)),
+            "{name}: the refusal must name the parameter: {q:?}"
+        );
+    }
+
+    for (name, uri) in twins {
+        let (status, location) = authorize_at!(
+            app,
+            &f,
+            format!("client_id={}&request_uri={}", f.other_client_id, enc(&uri))
+        );
+        assert_eq!(status, 302, "{name} (I4)");
+        assert!(
+            query_of(&location.unwrap()).contains_key("code"),
+            "{name} (I4): a standard/ignore client must still be served a code"
+        );
+    }
+
+    for (what, uri) in [
+        ("userinfo-only claims", userinfo_only),
+        ("nothing new (P2)", plain),
+    ] {
+        let (status, location) = authorize_at!(
+            app,
+            &f,
+            format!("client_id={}&request_uri={}", f.client_id, enc(&uri))
+        );
+        assert_eq!(status, 302, "{what}");
+        let q = query_of(&location.unwrap());
+        assert!(
+            q.contains_key("code"),
+            "{what}: a fapi2 client must be served a code: {q:?}"
+        );
+    }
+}
+
+/// **M1 layer 2, the defence-in-depth case, at the HTTP layer.** A `fapi2`
+/// row that says `honour` cannot have passed `validate_registration` on create
+/// or on update, so it was edited in the database. The authorization request is
+/// refused even when it carries none of the parameters the lane would act on.
+#[actix_web::test]
+async fn a_fapi2_row_edited_to_honour_in_the_database_is_refused_at_authorize() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let pkce = format!("&code_challenge={PKCE}&code_challenge_method=S256&scope=openid");
+    let (_, body) = par!(app, f, f.client_id, f.client_secret, pkce);
+    let uri = body["request_uri"].as_str().unwrap().to_owned();
+
+    make_fapi2(&f, true).await;
+
+    let (status, location) = authorize_at!(
+        app,
+        &f,
+        format!("client_id={}&request_uri={}", f.client_id, enc(&uri))
+    );
+    assert_eq!(status, 302);
+    let q = query_of(&location.unwrap());
+    assert_eq!(
+        q.get("error").map(String::as_str),
+        Some("invalid_request"),
+        "{q:?}"
+    );
+    assert!(!q.contains_key("code"), "{q:?}");
+}
+
+/// **X7 G12 on the PAR carrier.** A request object by value is refused
+/// `request_not_supported` at `/oauth2/par`, as it is at `/oauth2/authorize`.
+///
+/// Before T23.1.1 serde dropped the member and the push answered `201`, so a
+/// client that put `max_age=0` inside a request object — which RFC 9101 §6.3
+/// tells it is the only copy the server will use — had it discarded without a
+/// word, never reaching the gate that refuses it on `fapi2` or the lane that
+/// acts on it elsewhere. A blank value is a template and is not an object, as
+/// on the authorization endpoint.
+#[actix_web::test]
+async fn a_request_object_pushed_to_par_is_refused_with_request_not_supported() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    // `{"alg":"none"}` . `{"max_age":0}` . — the shape that used to vanish.
+    let (status, body) = par!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        "&request=eyJhbGciOiJub25lIn0.eyJtYXhfYWdlIjowfQ."
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"], "request_not_supported", "{body}");
+    assert!(
+        body.get("request_uri").is_none(),
+        "nothing may be minted: {body}"
+    );
+
+    // Refused before client authentication: it names a parameter, not the
+    // client, so a wrong secret gets the same answer.
+    let (status, body) = par!(
+        app,
+        f,
+        f.client_id,
+        "not-the-secret",
+        "&request=eyJhbGciOiJub25lIn0.eyJtYXhfYWdlIjowfQ."
+    );
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("request_not_supported"))
+    );
+
+    let (status, body) = par!(app, f, f.client_id, f.client_secret, "&request=");
+    assert_eq!(
+        status, 201,
+        "a blank request is a template, not an object: {body}"
+    );
+}
+
+/// A parameter that arrives twice is refused on **both** carriers, before any
+/// handler code runs, so there is no "first one wins here, last one wins
+/// there" for a gate and the code it guards to disagree about.
+#[actix_web::test]
+async fn a_repeated_authentication_parameter_is_refused_on_both_carriers() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (status, body) = par!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        "&max_age=600&max_age=0"
+    );
+    assert_eq!(status, 400, "PAR: {body}");
+    assert_eq!(body["error"], "invalid_request", "PAR: {body}");
+
+    let (status, location) = authorize_at!(
+        app,
+        &f,
+        format!(
+            "client_id={}&response_type=code&redirect_uri={}&scope=openid\
+             &prompt=login&prompt=none",
+            f.client_id,
+            enc(REDIRECT_URI)
+        )
+    );
+    assert_eq!(
+        status, 400,
+        "authorize: a repeated prompt must not be served"
+    );
+    assert!(location.is_none(), "authorize: and no code may be issued");
+}

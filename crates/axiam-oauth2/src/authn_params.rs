@@ -172,6 +172,25 @@ impl<'a> From<&'a PushedAuthParams> for RawAuthnParams<'a> {
 /// FAPI or not, because those run a consent ceremony the FAPI lane never
 /// collects. Rule 4 of `fapi::enforce_authorization_request` refuses those
 /// scopes to a `fapi2` request independently.
+///
+/// # …except for the one member that is still dropped (T23.1.1)
+///
+/// "AXIAM honours `claims`" is true of the `userinfo` member and of nothing
+/// else. The `id_token.acr` member is read only by `crate::honour`, which only
+/// runs on the honour lane, which a `fapi2` client can never be on. So a
+/// `fapi2` client that sends `claims={"id_token":{"acr":{"essential":true}}}`
+/// had its essential ACR request **dropped** — the exact silent downgrade the
+/// rationale above says the list exists to prevent, and the one OIDC Core
+/// §5.5.1.1 says to treat as a failed authentication rather than serve.
+///
+/// So `claims` is reported as security-bearing when, and only when, it asks
+/// for `id_token.acr` — or when the document cannot be read at all, because a
+/// request whose `acr` member cannot be ruled out is refused for the same
+/// reason a malformed `max_age` is: presence, not spelling, is what is
+/// refused. A well-formed `claims` that asks only for `userinfo` members is
+/// not, which is the shape the FAPI suite's
+/// `test-claims-parameter-identity-claims` module sends.
+/// See [`AuthnRequestParams::security_bearing_present`].
 const SECURITY_BEARING: [&str; 4] = ["prompt", "max_age", "acr_values", "id_token_hint"];
 
 /// The parsed bundle.
@@ -208,6 +227,10 @@ pub struct AuthnRequestParams {
     present: Vec<&'static str>,
     /// The first value that could not be understood.
     error: Option<String>,
+    /// Whether `claims` asked for `id_token.acr`, or could not be read well
+    /// enough to rule that out — the one member of `claims` that is dropped
+    /// off the honour lane. See [`SECURITY_BEARING`]'s docs.
+    claims_acr_requested: bool,
 }
 
 impl AuthnRequestParams {
@@ -280,12 +303,24 @@ impl AuthnRequestParams {
 
         if let Some(raw_claims) = present(raw.claims) {
             out.present.push("claims");
+            // Every arm but "parsed, and asked for no `id_token.acr`" leaves
+            // the ACR request either present or impossible to rule out, which
+            // is what `claims_acr_requested` records for the FAPI gate.
             match serde_json::from_str::<serde_json::Value>(raw_claims) {
                 Ok(doc) => match parse_claims_acr(&doc) {
-                    Ok(acr) => out.claims_acr = acr,
-                    Err(e) => fail(&mut out, e),
+                    Ok(acr) => {
+                        out.claims_acr_requested = acr.is_some();
+                        out.claims_acr = acr;
+                    }
+                    Err(e) => {
+                        out.claims_acr_requested = true;
+                        fail(&mut out, e);
+                    }
                 },
-                Err(e) => fail(&mut out, format!("claims is not a JSON object: {e}")),
+                Err(e) => {
+                    out.claims_acr_requested = true;
+                    fail(&mut out, format!("claims is not a JSON object: {e}"));
+                }
             }
         }
 
@@ -349,14 +384,21 @@ impl AuthnRequestParams {
         self.present.is_empty()
     }
 
-    /// The security-bearing parameters that arrived — the five that change
-    /// what a token means. See the module docs for why the other four are not
-    /// on this list.
+    /// The security-bearing parameters that arrived — the ones that change
+    /// what a token means. See the module docs for why the four cosmetic ones
+    /// are not on this list.
+    ///
+    /// `claims` is on it only when it asked for `id_token.acr`, or could not
+    /// be read well enough to rule that out; a `claims` that asks only for
+    /// `userinfo` members is honoured on every lane and is not refusable. See
+    /// [`SECURITY_BEARING`]'s docs for why.
     pub fn security_bearing_present(&self) -> Vec<&'static str> {
         self.present
             .iter()
             .copied()
-            .filter(|n| SECURITY_BEARING.contains(n))
+            .filter(|n| {
+                SECURITY_BEARING.contains(n) || (*n == "claims" && self.claims_acr_requested)
+            })
             .collect()
     }
 }
@@ -670,11 +712,74 @@ mod tests {
         });
         assert_eq!(
             p.security_bearing_present(),
-            ["prompt", "max_age", "acr_values", "id_token_hint"],
-            "`claims` is sent here and deliberately not reported: it is \
-             honoured rather than dropped, so there is no downgrade to refuse"
+            ["prompt", "max_age", "acr_values", "claims", "id_token_hint"],
+            "`claims` asking for `id_token.acr` is reported: that member is dropped \
+             off the honour lane, so it is a downgrade to refuse (T23.1.1)"
         );
         assert!(p.parse_error().is_none());
+    }
+
+    /// T23.1.1 — `claims.id_token.acr` is security-bearing in every spelling
+    /// OIDC Core §5.5.1 gives it, voluntary included: a voluntary ACR request
+    /// is the same request `acr_values` makes, and `acr_values` is refused on
+    /// `fapi2` for exactly that reason.
+    #[test]
+    fn claims_asking_for_id_token_acr_is_security_bearing() {
+        for doc in [
+            r#"{"id_token":{"acr":{"essential":true}}}"#,
+            r#"{"id_token":{"acr":{"essential":true,"values":["urn:axiam:acr:mfa"]}}}"#,
+            r#"{"id_token":{"acr":{"value":"urn:axiam:acr:mfa"}}}"#,
+            r#"{"id_token":{"acr":null}}"#,
+            // Beside a userinfo request, which does not launder it.
+            r#"{"userinfo":{"name":null},"id_token":{"acr":{"essential":true}}}"#,
+        ] {
+            let p = parse(RawAuthnParams {
+                claims: Some(doc),
+                ..Default::default()
+            });
+            assert_eq!(p.security_bearing_present(), ["claims"], "{doc}");
+        }
+    }
+
+    /// T23.1.1 — a `claims` document that cannot be read cannot be shown not
+    /// to ask for `id_token.acr`, so it counts as asking: presence, not
+    /// spelling, is what the FAPI gate refuses — the rule a malformed
+    /// `max_age` already follows.
+    #[test]
+    fn an_unreadable_claims_document_is_security_bearing() {
+        for bad in [
+            "{not json",
+            "[]",
+            r#""a string""#,
+            r#"{"id_token":{"acr":42}}"#,
+            r#"{"id_token":{"acr":{"essential":"yes"}}}"#,
+        ] {
+            let p = parse(RawAuthnParams {
+                claims: Some(bad),
+                ..Default::default()
+            });
+            assert!(p.parse_error().is_some(), "{bad:?} should be malformed");
+            assert_eq!(p.security_bearing_present(), ["claims"], "{bad:?}");
+        }
+    }
+
+    /// The other side of the line: a `claims` that asks for `userinfo` and
+    /// `id_token` members other than `acr` is honoured (or truthfully
+    /// omitted) on every lane, so it is never refusable.
+    #[test]
+    fn claims_without_an_acr_request_is_not_security_bearing() {
+        for doc in [
+            r#"{"userinfo":{"name":{"essential":true},"email":null}}"#,
+            r#"{"id_token":{"given_name":{"essential":true}}}"#,
+            "{}",
+        ] {
+            let p = parse(RawAuthnParams {
+                claims: Some(doc),
+                ..Default::default()
+            });
+            assert!(p.parse_error().is_none(), "{doc}");
+            assert!(p.security_bearing_present().is_empty(), "{doc}");
+        }
     }
 
     /// The two carriers must produce the same bundle from the same values —

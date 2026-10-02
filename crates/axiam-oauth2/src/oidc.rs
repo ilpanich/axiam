@@ -143,10 +143,11 @@ pub struct OidcDiscoveryDocument {
     /// AXIAM does accept `request_uri`, for the PAR handles RFC 9126 defines.
     /// Publishing `false` would tell a conforming client not to use PAR.
     pub request_parameter_supported: bool,
-    /// OIDC Discovery §3 — X7. `false`: of the `claims` document AXIAM reads
-    /// exactly one member, `id_token.acr`, and a partially-honoured `claims`
-    /// is worse than an unsupported one because a relying party cannot tell
-    /// which members were read.
+    /// OIDC Discovery §3 — X7. `true`: the `userinfo` member of the `claims`
+    /// document is honoured on every lane (`crate::claims_request`), and the
+    /// `id_token.acr` member on the honour lane. A `fapi2` client asking for
+    /// `id_token.acr` is refused `invalid_request` rather than having the
+    /// member dropped (`crate::fapi::enforce_authorization_request`).
     pub claims_parameter_supported: bool,
     /// OIDC Discovery §3 — X7 G3/G4. The authentication context class
     /// references AXIAM can assert.

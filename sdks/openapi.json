@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:ec597223a13bb0ea753314f781cd5e2d3f28e90d3cf51c449a0ac35d118dd3f1"
+    "x-axiam-spec-digest": "sha256:99079727494dfc1449af9c53362ed637c62f53deba681624ea042c9e72e33946"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -16709,7 +16709,7 @@
           },
           "claims_parameter_supported": {
             "type": "boolean",
-            "description": "OIDC Discovery §3 — X7. `false`: of the `claims` document AXIAM reads\nexactly one member, `id_token.acr`, and a partially-honoured `claims`\nis worse than an unsupported one because a relying party cannot tell\nwhich members were read."
+            "description": "OIDC Discovery §3 — X7. `true`: the `userinfo` member of the `claims`\ndocument is honoured on every lane (`crate::claims_request`), and the\n`id_token.acr` member on the honour lane. A `fapi2` client asking for\n`id_token.acr` is refused `invalid_request` rather than having the\nmember dropped (`crate::fapi::enforce_authorization_request`)."
           },
           "claims_supported": {
             "type": "array",
@@ -17789,7 +17789,7 @@
       },
       "PushedAuthorizationRequest": {
         "type": "object",
-        "description": "Form body accepted by `POST /oauth2/par`.\n\nThese are the ordinary authorization-request parameters, plus the client\ncredentials that make the push attributable. `request_uri` is deliberately\nabsent: RFC 9126 §2.1 forbids pushing one, because a chained push would let\nthe second request inherit the first's authentication.",
+        "description": "Form body accepted by `POST /oauth2/par`.\n\nThese are the ordinary authorization-request parameters, plus the client\ncredentials that make the push attributable. `request_uri` and `request`\nare modelled only so that they can be refused: RFC 9126 §2.1 forbids\npushing a `request_uri`, because a chained push would let the second\nrequest inherit the first's authentication, and AXIAM accepts no request\nobject on any carrier (`request_not_supported`).",
         "required": [
           "client_id",
           "response_type",
@@ -17894,6 +17894,13 @@
           },
           "redirect_uri": {
             "type": "string"
+          },
+          "request": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 9101 `request` — a request object by value. AXIAM does not accept\none on either carrier (X7 G12), and this field exists so that it can be\n**refused** here with the code the authorization endpoint already gives\nit, `request_not_supported`.\n\nLeaving it off the struct had serde drop it and the endpoint answer\n`201`, which made the two carriers disagree about the same parameter —\nand the disagreement was not cosmetic (T23.1.1). RFC 9126 §3 lets a\nclient push a request object, and RFC 9101 §6.3 tells it the server\nwill use only the object's parameters; a client that put `max_age=0`\nor `prompt=login` inside one, beside the bare required fields, had\nthose security-bearing parameters silently discarded, so they never\nreached the `fapi2` gate that refuses them or the honour lane that\nacts on them. Refusing the object is the only answer that does not\ntell the client a guarantee was applied when it was not."
           },
           "request_uri": {
             "type": [

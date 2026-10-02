@@ -2272,14 +2272,13 @@ async fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
 /// listener for. The refusal's *wire* shape is covered by the handler's
 /// existing error-response tests, which all of them reach by the same path.
 ///
-/// `claims` was a fifth case here and is deliberately no longer one. It is
-/// refused when AXIAM would *drop* it, and AXIAM now honours its `userinfo`
-/// member (OIDC Core §5.5, `axiam_oauth2::claims_request`), so there is no
-/// silent downgrade left for the refusal to prevent. The decision and its
-/// boundaries — including that a `claims` carrying `id_token.acr` is also
-/// allowed through — are stated and tested in
-/// `axiam_oauth2::fapi::tests::a_fapi2_client_may_send_claims_because_it_is_honoured`,
-/// which is where a change to it belongs.
+/// `claims` is a fifth case **only in its `id_token.acr` form** (T23.1.1). It
+/// is refused when AXIAM would *drop* it: the `userinfo` member is honoured on
+/// every lane (OIDC Core §5.5, `axiam_oauth2::claims_request`) and is not
+/// refused, but `id_token.acr` is read on the honour lane only, which a `fapi2`
+/// client is never on. The boundary is stated and tested in
+/// `axiam_oauth2::fapi::tests::a_fapi2_client_may_send_claims_for_userinfo_but_not_for_id_token_acr`;
+/// the pushed-request carrier is `par_test.rs::a_fapi2_client_is_refused_what_it_pushed_exactly_as_what_it_sent_inline`.
 #[actix_rt::test]
 async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
     use axiam_core::models::oauth2_client::{
@@ -2320,7 +2319,7 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
         last_authorized_at: None,
     };
 
-    let cases: [(&str, RawAuthnParams<'_>); 4] = [
+    let cases: [(&str, RawAuthnParams<'_>); 5] = [
         (
             "prompt",
             RawAuthnParams {
@@ -2346,6 +2345,13 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
             "id_token_hint",
             RawAuthnParams {
                 id_token_hint: Some("ey.header.payload"),
+                ..Default::default()
+            },
+        ),
+        (
+            "claims",
+            RawAuthnParams {
+                claims: Some(r#"{"id_token":{"acr":{"essential":true}}}"#),
                 ..Default::default()
             },
         ),

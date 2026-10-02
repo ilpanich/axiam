@@ -442,3 +442,61 @@ async fn omitting_the_credential_entirely_is_refused_not_accepted() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// M9 — the same secret in an `Authorization: Basic` header is not a way in
+// ---------------------------------------------------------------------------
+
+/// **Plan §7 M9, the "additionally" clause (T23.1.1 audit).** A client
+/// registered for a strong method — every `fapi2` client is one — that
+/// presents its repository-minted secret in an RFC 6749 §2.3.1 `Basic`
+/// header, with no secret in the body, is refused `invalid_client` at all five
+/// endpoints. The registered method decides which credential is read (SEC-093),
+/// and a Basic header is the credential of exactly one method,
+/// `client_secret_basic`, which `fapi::validate_registration` refuses on the
+/// FAPI profile. This is what keeps W8's new channel from being a second
+/// shared-secret door onto a strong client, ahead of any profile evaluation.
+#[actix_web::test]
+async fn a_strong_clients_secret_in_a_basic_header_is_refused_at_all_five_endpoints() {
+    use base64::Engine as _;
+
+    for method in STRONG_METHODS {
+        let f = setup(method).await;
+        let app = test_app!(f);
+        let blob = format!(
+            "{}:{}",
+            url::form_urlencoded::byte_serialize(f.strong_client_id.as_bytes()).collect::<String>(),
+            url::form_urlencoded::byte_serialize(f.strong_secret.as_bytes()).collect::<String>()
+        );
+        let header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(blob)
+        );
+
+        for (name, path, body) in bodies(f.tenant_id, &f.strong_client_id, "") {
+            // The secret travels in the header only.
+            let body = body.replace("&client_secret=", "");
+            let req = test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&path)
+                .insert_header(("content-type", "application/x-www-form-urlencoded"))
+                .insert_header(("Authorization", header.clone()))
+                .set_payload(body)
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status().as_u16();
+            let raw = test::read_body(resp).await;
+            let error = serde_json::from_slice::<Value>(&raw)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_owned));
+            assert_eq!(
+                (status, error.as_deref()),
+                (401, Some("invalid_client")),
+                "{name}/{}: a Basic header carrying the right secret must not authenticate a \
+                 client registered for a strong method. Got {}",
+                method.as_str(),
+                String::from_utf8_lossy(&raw)
+            );
+        }
+    }
+}

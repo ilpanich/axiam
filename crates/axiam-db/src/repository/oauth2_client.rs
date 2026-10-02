@@ -1048,3 +1048,36 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// X7.1 (T23.1.1 audit) — the decode is the last gate a row edited in the
+    /// database passes through before `fapi::enforce_authorization_request`
+    /// sees it. An absent value is a pre-v54 row and is the stricter lane; a
+    /// value this binary does not implement must resolve to **neither** lane,
+    /// because guessing `honour` would act on parameters nobody opted into and
+    /// guessing `ignore` would hide that the row is newer than the binary.
+    #[test]
+    fn the_authn_request_params_decode_fails_closed() {
+        assert_eq!(
+            decode_authn_request_params(None).unwrap(),
+            AuthnRequestParamsMode::Ignore
+        );
+        assert_eq!(
+            decode_authn_request_params(Some("ignore")).unwrap(),
+            AuthnRequestParamsMode::Ignore
+        );
+        assert_eq!(
+            decode_authn_request_params(Some("honour")).unwrap(),
+            AuthnRequestParamsMode::Honour
+        );
+        for unknown in ["", "honor", "per_parameter", "true"] {
+            assert!(
+                decode_authn_request_params(Some(unknown)).is_err(),
+                "{unknown:?} must not decode to a lane"
+            );
+        }
+    }
+}

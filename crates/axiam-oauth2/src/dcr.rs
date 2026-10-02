@@ -726,6 +726,33 @@ mod tests {
         assert!(!c.dpop_bound_access_tokens);
     }
 
+    /// X7.1 (T23.1.1 audit): the two Basic-OP switches are the server's to
+    /// set, and it sets both to the stricter default for every self-registered
+    /// client — however the request spells a wish for the honour lane or the
+    /// login hop. `RegistrationRequest` has no member for either, so serde
+    /// drops them; this pins that nobody adds one that is read.
+    #[test]
+    fn a_registration_cannot_opt_itself_into_the_honour_lane_or_the_login_hop() {
+        let req: RegistrationRequest = serde_json::from_value(serde_json::json!({
+            "redirect_uris": ["http://127.0.0.1:6274/oauth/callback"],
+            "token_endpoint_auth_method": "none",
+            "scope": "openid",
+            "authn_request_params": "honour",
+            "browser_sso": true,
+            "profile": "fapi2",
+        }))
+        .expect("unknown RFC 7591 members are ignored, not refused");
+        let c = validate(Uuid::new_v4(), &req, &policy(|_| {}))
+            .unwrap()
+            .create;
+        assert_eq!(
+            c.authn_request_params,
+            axiam_core::models::oauth2_client::AuthnRequestParamsMode::Ignore
+        );
+        assert!(!c.browser_sso);
+        assert_eq!(c.profile, ClientProfile::Standard);
+    }
+
     /// D3 again, stated as the property rather than as one value: whatever the
     /// request says about resources, the stored list is the tenant's. The
     /// request type has no such member, so this test is really asserting that

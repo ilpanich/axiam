@@ -56,7 +56,7 @@ would turn it into an application-portal product.
 | PAR / JAR / FAPI 2.0 | **Yes** — FAPI 2.0 conformance runs published | Not documented | [A11] |
 | DPoP | **Yes** — access tokens sender-constrained | Partial — binds ID tokens only; access tokens stay `Bearer` | [A14] |
 | RP-initiated / back-channel logout | Yes | Yes | [A15] |
-| Front-channel logout | No | Yes | [A15] |
+| Front-channel logout | No — declined by design (D-6); back-channel logout shipped | Yes | [A15] |
 | OpenID certification | Not yet (conformance suites run and published) | **OpenID Certified** for OP and logout profiles (2026.8) | [A5] |
 | SAML 2.0 | Service provider only | IdP **and** SP; WS-Federation (enterprise) | [A5][A16] |
 | SCIM 2.0 | Inbound endpoint (RFC 7643/7644) | Inbound SCIM source **and** outbound SCIM provider | [A17][A18] |
@@ -108,9 +108,10 @@ not authentik's.
 
 7. **Identity-aware reverse proxy / forward auth** and **remote-access (RAC)**
    outposts [A2]: portal features outside AXIAM's API-first scope.
-8. **Front-channel logout** [A15]: browser-iframe based and increasingly
-   unreliable under third-party-cookie restrictions; back-channel logout,
-   which AXIAM has, is the robust variant.
+8. **Front-channel logout** [A15] — **declined (recorded 2026-10-02):**
+   browser-iframe based and increasingly unreliable under third-party-cookie
+   restrictions; back-channel logout, which AXIAM has, is the robust variant.
+   See [design-document.md §4.5](design-document.md#front-channel-logout--declined-d-6-2026-10-02) and the [remediation plan G-12](competitor-gap-remediation-plan-2026-10-02.md).
 9. **Visual flow designer**: AXIAM's extension point is Reactors; a designer
    is a UX investment, not a capability gap.
 10. **Privileged-access requests and offboarding workflows** (enterprise,
@@ -159,6 +160,7 @@ unreliable. Adding it as a benchmark target is the honest way to settle that.
 | Date | Change | Sources |
 |---|---|---|
 | 2026-10-02 | Baseline written. Recent authentik changes already folded in: 2026.8 adds token exchange with on-behalf-of, DCR, OpenID certification, agent accounts (enterprise) and the Rust server; the 2026.11 draft removes multi-tenancy. | [A5][A7] |
+| 2026-10-02 | G-12 (front-channel logout) declined and recorded in the design document (D-6); row and gap list updated. Revisit only on an adopter request. | — |
 
 ## Sources
 

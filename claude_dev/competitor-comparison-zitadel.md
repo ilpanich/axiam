@@ -134,6 +134,7 @@ support, LDAP as an external IdP and the polish of a mature hosted product.
 | Date | Change | Sources |
 |---|---|---|
 | 2026-10-02 | Baseline written. Since the run-5 baseline (v4.16.2): v4.17.0 added RFC 7591/7592 dynamic client registration, "Sign in with Zitadel" and native app links for passkeys. v4.17.2 fixed token-exchange downscoping. v4.18.0 was withdrawn ("skip this release"). v4.19.2 made session-cookie signing mandatory (breaking change). Several critical and high advisories were fixed. The CIMD pull request is still open. `zitadel/nextgen` appeared as the preview of the next major version. | [Z9][Z10][Z19][Z20] |
+| 2026-10-02 | G-12 (front-channel logout) declined and recorded in the design document (D-6). This comparison has no front-channel row or gap-list entry, so none changed. Revisit only on an adopter request. | — |
 
 ## Sources
 

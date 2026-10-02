@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Front-channel logout declined by design and recorded (T23.12.1, D-6)
+
 ### Security
 
 - **A FAPI 2.0 client's essential ACR request is refused instead of dropped,

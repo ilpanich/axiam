@@ -52,7 +52,7 @@ question.
 | WebAuthn / passkeys / OTP | Yes, with a FIDO MDS attestation policy | Yes (passkeys supported, HOTP and TOTP, recovery codes) | [K13] |
 | OPAQUE (RFC 9807) | **Yes** (opt-in) | No | — |
 | RP-initiated / back-channel logout | Yes | Yes | [K3] |
-| Front-channel logout | No | Yes | [K3] |
+| Front-channel logout | No — declined by design (D-6); back-channel logout shipped | Yes | [K3] |
 | Token exchange (RFC 8693) | Internal + external-IdP, delegation (`act`), opt-in impersonation | Standard v2 supported (internal-to-internal); **delegation preview in 26.8** | [K14][K15] |
 | Dynamic client registration | Yes (RFC 7591) | Yes | [K16] |
 | Client ID Metadata Document | **Yes** | Experimental | [K3] |
@@ -99,8 +99,9 @@ question.
 
 **P3 — watch**
 
-7. **Front-channel logout** [K3]. It is fragile under third-party-cookie
-   restrictions, and back-channel logout covers the robust case.
+7. **Front-channel logout** [K3] — **declined (recorded 2026-10-02).** It is
+   fragile under third-party-cookie restrictions, and back-channel logout
+   covers the robust case. See [design-document.md §4.5](design-document.md#front-channel-logout--declined-d-6-2026-10-02) and the [remediation plan G-12](competitor-gap-remediation-plan-2026-10-02.md).
 8. **Social-provider breadth** [K17]. Generic OIDC covers most providers.
    Adding named presets is cheap when users ask for them.
 9. **Admin-console breadth and theming.** This is a maturity gap, not a
@@ -150,6 +151,7 @@ all shipped. They now appear in §2 as parity or advantage.
 | Date | Change | Sources |
 |---|---|---|
 | 2026-10-02 | Baseline written. Since the run-5 baseline (26.7.0): SCIM promoted to supported, so the Track B premise "Keycloak only via extensions" is obsolete and SCIM is now parity. Token-exchange delegation is preview, and impersonation tokens carry `act`. OID4VCI is preview and OID4VP experimental. Stateless multi-cluster is supported. Login failures are persisted by default. 26.7.1–26.7.5 shipped about 56 CVE fixes. | [K15][K20] |
+| 2026-10-02 | G-12 (front-channel logout) declined and recorded in the design document (D-6); row and gap list updated. Revisit only on an adopter request. | — |
 
 ## Sources
 

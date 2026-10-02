@@ -994,6 +994,73 @@ async fn t2_4_a_refreshed_id_token_carries_the_original_auth_time() {
     assert_eq!(reissued["sub"], original["sub"]);
 }
 
+/// **X7.2 / spec §4.3 — the token endpoint reads the code's snapshot, not the
+/// live session.**
+///
+/// The evidence is copied onto the authorization code at issuance precisely
+/// because the session behind it may change (or be replaced by refresh
+/// rotation) before the code is redeemed. This moves the live session's
+/// `authenticated_at` to now and upgrades its `amr` to multi-factor *between
+/// issuance and redemption*; the ID token must still describe the
+/// authentication that actually authorised the code — three hours old,
+/// password only, `1fa`. A token endpoint that re-read the session would turn
+/// a later, stronger login into a claim about an earlier, weaker one.
+#[actix_rt::test]
+async fn x7_2_the_id_token_carries_the_codes_snapshot_not_the_live_session() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, honour_client()).await;
+    let (session_id, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::hours(3),
+        vec![Amr::Pwd],
+    )
+    .await;
+    let snapshotted_at = SurrealSessionRepository::new(db.clone())
+        .get_by_id(tenant_id, session_id)
+        .await
+        .expect("the session")
+        .authenticated_at;
+
+    let resp = authorize(&app, &token, &base_query(&client_id)).await;
+    assert_eq!(resp.status().as_u16(), 302, "authorize must redirect");
+    let code = query_param(&location(&resp), "code").expect("a code");
+
+    // The live session moves on: a fresh, multi-factor authentication lands on
+    // the same row after the code was minted.
+    db.query(
+        "UPDATE type::record('session', $id) \
+         SET authenticated_at = $now, amr = ['pwd', 'otp', 'mfa']",
+    )
+    .bind(("id", session_id.to_string()))
+    .bind(("now", chrono::Utc::now()))
+    .await
+    .expect("update")
+    .check()
+    .expect("the live session is rewritten");
+
+    let tokens = token_exchange(&app, tenant_id, &client_id, &secret, &code).await;
+    let claims = claims_of(tokens["id_token"].as_str().expect("an ID token"));
+
+    assert_eq!(
+        claims["auth_time"],
+        serde_json::json!(snapshotted_at.timestamp()),
+        "auth_time is the authentication the code was issued under: {claims}"
+    );
+    assert_eq!(claims["amr"], serde_json::json!(["pwd"]), "{claims}");
+    assert_eq!(
+        claims["acr"],
+        serde_json::json!(ACR_1FA),
+        "the class is the snapshot's, not the live session's: {claims}"
+    );
+}
+
 /// **T2.4's I4 twin.** A refreshed ID token for a client registered today
 /// carries none of the three claims, exactly as before.
 #[actix_rt::test]

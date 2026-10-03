@@ -23,9 +23,25 @@ axiam-core = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 x509-parser = { workspace = true }
+# T23.3.2 — the LDAP client (src/client.rs, src/tls.rs). `ldap3` over rustls
+# only (workspace pin: `default-features = false`, `tls-rustls-ring`); the
+# `ClientConfig` is built here, from the tenant's anchors or `webpki-roots`.
+ldap3 = { workspace = true }
+rustls = { workspace = true, features = ["ring"] }
+rustls-pki-types = "1"
+webpki-roots = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # Generates throwaway CA and leaf certificates for the trust-anchor tests.
 rcgen = { workspace = true }
-zeroize = { workspace = true }
-uuid = { workspace = true }
+# The in-process test directory (tests/support): the server half of the LDAP
+# codec, a rustls acceptor, and the framing glue between them. Test-only; none
+# of these reaches the production graph.
+ldap3_proto = "0.8.1"
+tokio-rustls = { workspace = true }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", features = ["sink"] }

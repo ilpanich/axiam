@@ -203,6 +203,16 @@ rustls = "0.23"
 # byte-identical to the type tonic's `Connected` impl covers, or the peer
 # address the rate limiter keys on would not be there.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+# G-3 / T23.3.2 — the LDAP client in axiam-directory. `default-features = false`
+# drops `tls-native` (native-tls / OpenSSL); `tls-rustls-ring` is the same rustls
+# 0.23 / tokio-rustls 0.26 / ring stack the rest of the workspace builds, so no
+# second TLS implementation enters the graph. The directory's trust store is a
+# `rustls::ClientConfig` axiam-directory builds itself (per-tenant anchors, or
+# the `webpki-roots` bundle below), never the platform verifier.
+ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
+# The Mozilla root bundle reqwest's `rustls-tls` and lettre already resolve to
+# (webpki-roots 1.x in Cargo.lock): an empty `trust_anchors_pem` means these.
+webpki-roots = "1"
 
 # Testing
 tokio-test = "0.4"

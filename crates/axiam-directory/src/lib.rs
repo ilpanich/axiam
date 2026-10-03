@@ -36,3 +36,5 @@
 //! `scripts/check-crate-layering.py` for the gate that holds it.
 
 pub mod config;
+pub mod escape;
+pub mod tls;

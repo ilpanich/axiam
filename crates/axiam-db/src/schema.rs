@@ -402,6 +402,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "saml_identity_provider",
         sql: SCHEMA_V72,
     },
+    Migration {
+        version: 73,
+        name: "saml_pending_authn_request",
+        sql: SCHEMA_V73,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3903,9 +3908,100 @@ DEFINE INDEX IF NOT EXISTS idx_saml_idp_credential_tenant ON TABLE saml_idp_cred
     COLUMNS tenant_id;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v73 — T23.2.3 / G-2: SAML AuthnRequests held across the login hop
+// -----------------------------------------------------------------------
+//
+// Additive DDL only: one new table, nothing backfilled (no request is pending
+// before the SSO endpoint exists).
+//
+// **`saml_authn_request`** holds what the SAML SSO endpoint's first leg
+// decided — the SP, the ACS URL already resolved against its registration,
+// `RelayState`, `ForceAuthn` / `IsPassive` and the outbound instant — under the
+// SHA-256 of an opaque handle, plus the SHA-256 of the browser-binding cookie.
+// No raw handle or binding value is stored. `status` moves `pending` →
+// `consumed` exactly once (the X6 two-layer arbiter, with `consumption_id` as
+// the read-back nonce), and a consumed row is **kept** until `expires_at`:
+//
+// **`idx_saml_authn_request_replay` is UNIQUE on `(tenant_id, replay_key)`**,
+// where `replay_key` is `{sp_id}:{request_id}` (or `idp:{row id}` for an
+// IdP-initiated sign-on), so a replayed `AuthnRequest` is refused by the
+// datastore for the row's whole ten-minute life — longer than the window an
+// `IssueInstant` is accepted in, which is what bounds a replay from outside.
+// `idx_saml_authn_request_handle` is UNIQUE on the handle digest. Rows go with
+// their tenant (`SurrealTenantRepository::delete`) and are swept when expired.
+const SCHEMA_V73: &str = "\
+DEFINE TABLE IF NOT EXISTS saml_authn_request SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_authn_request TYPE string;
+DEFINE FIELD IF NOT EXISTS sp_id ON TABLE saml_authn_request TYPE string;
+DEFINE FIELD IF NOT EXISTS request_id ON TABLE saml_authn_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS replay_key ON TABLE saml_authn_request TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS acs_url ON TABLE saml_authn_request TYPE string;
+DEFINE FIELD IF NOT EXISTS relay_state ON TABLE saml_authn_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS force_authn ON TABLE saml_authn_request TYPE bool;
+DEFINE FIELD IF NOT EXISTS is_passive ON TABLE saml_authn_request TYPE bool;
+DEFINE FIELD IF NOT EXISTS handle_hash ON TABLE saml_authn_request TYPE string
+    ASSERT string::len($value) = 64;
+DEFINE FIELD IF NOT EXISTS binding_hash ON TABLE saml_authn_request TYPE string
+    ASSERT string::len($value) = 64;
+DEFINE FIELD IF NOT EXISTS status ON TABLE saml_authn_request TYPE string
+    ASSERT $value IN ['pending', 'consumed'];
+DEFINE FIELD IF NOT EXISTS consumption_id ON TABLE saml_authn_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_authn_request TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE saml_authn_request TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_saml_authn_request_replay ON TABLE saml_authn_request
+    COLUMNS tenant_id, replay_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_authn_request_handle ON TABLE saml_authn_request
+    COLUMNS handle_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_authn_request_expires ON TABLE saml_authn_request
+    COLUMNS expires_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.2.3 — v73 adds one table, additively, whose two unique indexes are
+    /// the replay guard and the handle, and which stores digests only.
+    #[test]
+    fn v73_defines_the_pending_authn_request_table_additively() {
+        assert!(SCHEMA_V73.contains("DEFINE TABLE IF NOT EXISTS saml_authn_request SCHEMAFULL"));
+        assert!(SCHEMA_V73.contains(
+            "idx_saml_authn_request_replay ON TABLE saml_authn_request
+    COLUMNS tenant_id, replay_key UNIQUE"
+        ));
+        assert!(SCHEMA_V73.contains(
+            "idx_saml_authn_request_handle ON TABLE saml_authn_request
+    COLUMNS handle_hash UNIQUE"
+        ));
+        assert!(SCHEMA_V73.contains("ASSERT $value IN ['pending', 'consumed']"));
+        // Digests only: no column could hold a raw handle or binding value.
+        for forbidden in [
+            "EXISTS handle ON",
+            "EXISTS binding ON",
+            "handle_value",
+            "binding_value",
+        ] {
+            assert!(!SCHEMA_V73.contains(forbidden), "{forbidden}");
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V73.contains(forbidden),
+                "v73 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V73
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE") && statement.contains("IF NOT EXISTS"),
+                "v73 statements must be idempotent DEFINEs"
+            );
+        }
+    }
 
     /// T23.2.1 — the SP registry table has no `sign_assertions` column, asserts
     /// its enumerations, and is unique per tenant on the entity id.

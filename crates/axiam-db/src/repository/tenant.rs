@@ -327,6 +327,10 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // private key for a tenant that no longer exists is key material
         // nobody can account for, and it goes in the same transaction.
         //
+        // And so do its pending SAML `AuthnRequest`s (T23.2.3, schema v73):
+        // short-lived, but a row naming a deleted tenant's SP and ACS URL is
+        // nothing a later tenant should be able to resume.
+        //
         // The tenant's directory configuration goes with it (T23.3.1, G-3): it
         // holds an encrypted service-account credential for the tenant's
         // directory, and a deleted tenant must not leave that ciphertext
@@ -345,6 +349,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
                  DELETE directory_config WHERE tenant_id = $id; \
                  DELETE saml_service_provider WHERE tenant_id = $id; \
                  DELETE saml_idp_credential WHERE tenant_id = $id; \
+                 DELETE saml_authn_request WHERE tenant_id = $id; \
                  DELETE type::record('tenant', $id); \
                  COMMIT TRANSACTION;",
             )

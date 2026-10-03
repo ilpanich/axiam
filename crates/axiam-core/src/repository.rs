@@ -3039,6 +3039,53 @@ pub trait SamlServiceProviderRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// SAML IdP pending AuthnRequests (tenant-scoped) (G-2, T23.2.3)
+// ---------------------------------------------------------------------------
+
+/// Storage for the SAML `AuthnRequest`s waiting for their login hop; see
+/// [`crate::models::saml_authn_request`].
+///
+/// Every method takes the `tenant_id`; a handle digest belonging to another
+/// tenant is not found, exactly as one that does not exist.
+pub trait PendingSamlRequestRepository: Send + Sync {
+    /// Store a pending request.
+    ///
+    /// [`AxiamError::ReplayDetected`] when the SP already has a row with this
+    /// request id in this tenant — a replayed `AuthnRequest` — decided by a
+    /// unique index, so two concurrent copies of one request cannot both be
+    /// stored.
+    fn create(
+        &self,
+        input: crate::models::saml_authn_request::NewPendingSamlRequest,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// The pending, unexpired request with this handle digest, or `None`. A
+    /// read: it consumes nothing.
+    fn get_pending(
+        &self,
+        tenant_id: Uuid,
+        handle_hash: &str,
+    ) -> impl Future<
+        Output = AxiamResult<Option<crate::models::saml_authn_request::PendingSamlRequest>>,
+    > + Send;
+
+    /// Consume the request with this handle digest: `Some` for exactly one
+    /// caller, `None` for every other (consumed, expired, unknown, or lost the
+    /// race). The X6 two-layer arbiter. The row is kept, marked consumed, until
+    /// it expires, so its request id keeps guarding against replay.
+    fn consume(
+        &self,
+        tenant_id: Uuid,
+        handle_hash: &str,
+    ) -> impl Future<
+        Output = AxiamResult<Option<crate::models::saml_authn_request::PendingSamlRequest>>,
+    > + Send;
+
+    /// Remove every expired row, in every tenant; returns how many.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // SAML IdP signing credential (tenant-scoped) (G-2, D-21)
 // ---------------------------------------------------------------------------
 

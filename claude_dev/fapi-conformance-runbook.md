@@ -388,8 +388,13 @@ Nothing in an agent session produces a final run, and nothing below is a result;
 it is what to do and what to compare. The submission itself (§X5.3, next section)
 is sent by the maintainer only.
 
-Items marked **(T23.1.7)** are a skeleton the task that writes the FAPI
-judgements and the submission package completes. The Basic OP items are complete.
+The FAPI items were completed by T23.1.7 together with the judgements
+(`docs/conformance/REVIEW-JUDGEMENTS.md`) and the submission package
+([`fapi-certification-submission.md`](fapi-certification-submission.md)); the Basic
+OP items are T23.1.6's. Nothing here is a run result. The 2026-09-25 baseline was
+run on a build that **predates the Phase 23 W1 gates**, so the maintainer's run is
+the first against them: a change from the baseline is a finding to read, not
+necessarily a regression.
 
 ### 1. Before the run
 
@@ -411,10 +416,12 @@ judgements and the submission package completes. The Basic OP items are complete
 - [ ] Move the previous `conformance/.run/results/*.results.json` aside before the
       sweep. `just conformance-report` renders every file in that directory under
       the new date, so a stale file would be published as part of the new run.
-- [ ] **(T23.1.7)** The AXIAM build under test, and its image digest if the run
-      is against a release image; `fapi-certification-submission.md` Steps 1–2
-      cover the release image and the CI workflow for the FAPI plans. Open: the
-      Basic lane has no image path. `serve-axiam.sh` runs `AXIAM_BIN` (default
+- [ ] The AXIAM build under test, and its image digest if the run is against a
+      release image; `fapi-certification-submission.md` Steps 1–2 cover the release
+      image. Note that `fapi-conformance.yml` cannot drive a browser, so the
+      interactive modules (both FAPI `REVIEW` modules among them) are finished on the
+      local rig above; the workflow's artifact is a smoke test unless `axiam_image`
+      is a digest. Open: the Basic lane has no image path. `serve-axiam.sh` runs `AXIAM_BIN` (default
       `target/debug/axiam-server`), and `fapi-conformance.yml` runs only the FAPI
       plans. Whether the Basic run must be against the digest-pinned release
       image, and how to serve it, is not documented anywhere in the repository.
@@ -478,8 +485,10 @@ suite's own logs. Read each skipped module's reason in its log.
   `…-ensure-unsigned-authorization-request-without-using-par-fails` (`REVIEW`),
   `…-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` (`REVIEW`)
   and `…-test-claims-parameter-identity-claims` (`WARNING`). Those three may stay
-  as they are, with a judgement in `REVIEW-JUDGEMENTS.md` **(T23.1.7)**, or
-  change; any change is to be read in the log. The three 2026-09-25 reports
+  as they are, each with its entry in `REVIEW-JUDGEMENTS.md` (T23.1.7), or change;
+  any change is to be read in the log. Baseline logs: `mtls` plan `A6nvEhaNVt4hQ`,
+  `self-signed` `9xDkyLVW61B39`, `private-key-jwt` `IKxIaLZ4ZWC1z`; the three
+  modules' log ids are in the judgements file's index. The three 2026-09-25 reports
   record the `WARNING` on **all three** variants (logs `E3LMGPfxxRnrBff`,
   `Ifh31qq9b0lDMpw`, `v440VDWfwxP7kKo`), not on `private-key-jwt` alone as the
   plan's table says. `private-key-jwt` has 56 modules against the other two's 37,
@@ -501,7 +510,11 @@ suite's own logs. Read each skipped module's reason in its log.
   that records the authorization request, URL-decode its `claims` parameter and
   look for `"acr"` and `"auth_time"` under `id_token`. If the module now fails,
   that is a finding to be judged before submission, not a harness bug. Source:
-  `claude_dev/security-review-phase23-w1-2026-10-03.md` §8 (g).
+  `claude_dev/security-review-phase23-w1-2026-10-03.md` §8 (g). Also note which
+  condition raised the warning: the claims entry in `REVIEW-JUDGEMENTS.md` cannot be
+  closed without it, and says what is open for the maintainer if the cause is the
+  `id_token` member being ignored. If the D-12 change (T23.1.4) has landed, the
+  entry's description of it is then checked against the code.
 
 ### 4. The REVIEW modules
 
@@ -527,7 +540,19 @@ suite's own logs. Read each skipped module's reason in its log.
       as `REVIEW-JUDGEMENTS.md` says. The page "redirect_uri not registered" can
       come only from the query value; if the log shows otherwise the entry must be
       rewritten before the submission relies on it.
-- [ ] **(T23.1.7)** The same for the two FAPI `REVIEW` modules and the `WARNING`.
+- [ ] `…-ensure-unsigned-authorization-request-without-using-par-fails`, each of
+      the three variants: the image must be an error page carrying `invalid_request`
+      (the 2026-09-25 one says "this client must use pushed authorization requests").
+      Read the log for the request the module sent (no `request_uri`) and for
+      whether a sign-in page came before the refusal; the judgement records both as
+      open until read.
+- [ ] `…-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds`, each of
+      the three variants: the image must be the sign-in page, with no notice. Read
+      the log for which visit it is, that the second visit completed, and that the
+      second request came within 60 seconds of the push.
+- [ ] `…-test-claims-parameter-identity-claims`: no image; the item is §3's F4 item
+      (g) above. Do not close the entry until the log's `claims` value and the
+      raising condition are written into it.
 
 ### 5. Where the results go
 
@@ -545,6 +570,10 @@ suite's own logs. Read each skipped module's reason in its log.
       that the log does not support marked open rather than smoothing it over.
 - [ ] `docs/compliance/oidc-conformance.md`: the X7.9 rows say the final runs are
       pending; update them to the run's date and result.
+- [ ] The submission package: fill every `<…>` placeholder in
+      `fapi-certification-submission.md` ("The X5.3 package") from the run, and work
+      its pre-send checklist. The website wording in it stays unpublished until the
+      mark is granted.
 - [ ] Issue #513 (G-1): the run's date, plan ids, digests and the verdicts that
       differ from the baseline.
 - [ ] The submission (§X5.3) is sent by the maintainer only. No agent sends it.
@@ -556,7 +585,9 @@ suite's own logs. Read each skipped module's reason in its log.
 When the run is green and you are ready to make it official (the checklist above
 comes first), follow
 [`fapi-certification-submission.md`](fapi-certification-submission.md) — the
-digest-pinned release run and the OIDF submission. The §X5.4 letter amendment
+digest-pinned release run and the OIDF submission, with its package (what is
+submitted, what is attached, the pre-send checklist, and the website wording for
+the mark). The §X5.4 letter amendment
 that document used to require is no longer needed: `private_key_jwt` landed, so
 the letter's scope sentence is accurate as drafted.
 

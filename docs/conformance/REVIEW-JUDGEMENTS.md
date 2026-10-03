@@ -38,9 +38,12 @@ Three rules keep the file honest.
    pin is written as open.** Those are marked *Open, for the maintainer* and
    collected at the end.
 
-**Status of this revision.** Written from the 2026-09-25 reports and evidence,
-against the tree at `claude/phase23-w2`. No entry has been confirmed against a
-final run yet; every entry's verdict below is *proposed*.
+**Status of this revision.** The Basic OP entries (T23.1.6) and the FAPI 2.0
+entries (T23.1.7) are written from the 2026-09-25 reports and evidence, against
+the tree at `claude/phase23-w2`. No entry has been confirmed against a final run
+yet; every entry's verdict below is *proposed*. The FAPI claims entry describes
+D-12 (an essential `claims.id_token.auth_time` refused on `fapi2`) as decided and
+landing in W2, because it had not landed when that entry was written.
 
 ## Index
 
@@ -50,7 +53,9 @@ final run yet; every entry's verdict below is *proposed*.
 | Basic OP | `oidcc-max-age-1` | `RSzk3w8Kxro3IYC` | [`oidcc-basic-static__max-age-1__f77ce8cb67.jpg`](evidence/2026-09-25/oidcc-basic-static__max-age-1__f77ce8cb67.jpg) | Conformant; same shape as `prompt-login` |
 | Basic OP | `oidcc-ensure-registered-redirect-uri` | `szkbM07X3ihnZoY` | [`oidcc-basic-static__ensure-registered-redirect-uri__f39dea4139.jpg`](evidence/2026-09-25/oidcc-basic-static__ensure-registered-redirect-uri__f39dea4139.jpg) | Conformant; the page is the one RFC 6749 §3.1.2.4 asks for |
 | Basic OP | `oidcc-ensure-request-object-with-redirect-uri` | `d93KQKPrWLutU8W` | [`oidcc-basic-static__ensure-request-object-with-redirect-uri__f39dea4139.jpg`](evidence/2026-09-25/oidcc-basic-static__ensure-request-object-with-redirect-uri__f39dea4139.jpg) | Conformant on the evidence, with one point the live log must confirm |
-| FAPI 2.0 | three modules | — | — | Written by T23.1.7, below |
+| FAPI 2.0 | `ensure-unsigned-authorization-request-without-using-par-fails` | `hubHxFIqq4NIObo` (`mtls`), `73MqxLgoSS6V38N` (`self-signed`), `c0Rb6Ejn7RpJoRQ` (`private-key-jwt`) | [`…__dc2918eeb2.jpg`](evidence/2026-09-25/fapi2-security-profile-final-mtls__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg), the same bytes for all three | Conformant on the evidence: an error page carrying `invalid_request`; two points the log must settle (wording; whether a sign-in came first) |
+| FAPI 2.0 | `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` | `H2OiSzJ5MolJxvg`, `yhcCDPi0oikE4FC`, `xHPfInpD8AbPbaU` | [`…__3bfc90363d.jpg`](evidence/2026-09-25/fapi2-security-profile-final-mtls__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__3bfc90363d.jpg) (`mtls`, `self-signed`), [`…__736d1520ee.jpg`](evidence/2026-09-25/fapi2-security-profile-final-private-key-jwt__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__736d1520ee.jpg) (`private-key-jwt`) | Conformant; the image is the login page, the log must show which visit it is |
+| FAPI 2.0 | `test-claims-parameter-identity-claims` (`WARNING`) | `E3LMGPfxxRnrBff`, `Ifh31qq9b0lDMpw`, `v440VDWfwxP7kKo` | none (a `WARNING` uploads nothing) | **Open.** Not the "claims not supported" deviation (discovery says `true`); the reason is in the log only |
 
 The four Basic OP modules have been `REVIEW` in every Basic OP report since
 [2026-09-10](2026-09-10-oidcc-basic-static.md) and were `WAITING` (no assertion
@@ -376,30 +381,349 @@ not claim to know their reading.
 
 ---
 
-# FAPI 2.0 — written by T23.1.7
+# FAPI 2.0 Security Profile (Final)
 
-*This section is a placeholder. T23.1.7 writes the entries; T23.1.6 wrote the
-structure above and the four Basic OP entries only.* The modules to be written up,
-with their 2026-09-25 logs (copied from the dated reports and
-[`evidence/2026-09-25/manifest.json`](evidence/2026-09-25/manifest.json)), are:
+Three plans, one per client-authentication variant, run by the same harness
+against the same clients registered `profile: fapi2`, `require_par: true`,
+`browser_sso: true` (`conformance/scripts/register-clients.sh`). The variant
+blocks are in `conformance/plans/fapi2-security-profile-final-*.json`:
+`fapi_profile: plain_fapi`, `openid: openid_connect`, and, for `mtls` and
+`self-signed`, `client_auth_type: mtls` with `sender_constrain: mtls`; for
+`private-key-jwt`, `client_auth_type: private_key_jwt` with
+`sender_constrain: dpop`. The two mTLS plans therefore name the same suite
+variant and differ in the client's credential (a CA-issued certificate against a
+self-signed one). The competitor-gap plan's "four FAPI variants" counts the Basic
+OP plan with these three; there is no fourth FAPI variant.
 
-| Module (prefix `fapi2-security-profile-final-` omitted) | Verdict | `mtls` | `self-signed` | `private-key-jwt` |
-|---|---|---|---|---|
-| `ensure-unsigned-authorization-request-without-using-par-fails` | `REVIEW` | `hubHxFIqq4NIObo` | `73MqxLgoSS6V38N` | `c0Rb6Ejn7RpJoRQ` |
-| `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` | `REVIEW` | `H2OiSzJ5MolJxvg` | `yhcCDPi0oikE4FC` | `xHPfInpD8AbPbaU` |
-| `test-claims-parameter-identity-claims` | `WARNING` | `E3LMGPfxxRnrBff` | `Ifh31qq9b0lDMpw` | `v440VDWfwxP7kKo` |
+Per-variant 2026-09-25 plan ids, from the three
+`2026-09-25-fapi2-security-profile-final-*.md` reports: `mtls` `A6nvEhaNVt4hQ`
+(37 modules), `self-signed` `9xDkyLVW61B39` (37), `private-key-jwt`
+`IKxIaLZ4ZWC1z` (56). Module names below omit the prefix
+`fapi2-security-profile-final-`. Each entry's evidence is the image the module
+uploaded, listed in [`evidence/2026-09-25/manifest.json`](evidence/2026-09-25/manifest.json).
+The FAPI plans ran on the same build as the Basic OP plan: `origin/main` at
+`8a0af1033` (1.0.0-beta16) plus a lockfile update, per
+[`evidence/2026-09-25/README.md`](evidence/2026-09-25/README.md). **That build
+predates the Phase 23 W1 gates** (T23.1.1, 2026-10-02: `git merge-base
+--is-ancestor 3b9b8f6 8a0af1033` is false), so the 2026-09-25 logs say nothing
+about them; the maintainer's run is the first against the tree these entries
+describe.
 
-The three FAPI 2.0 plans are `mtls`, `self-signed` and `private-key-jwt`; there is
-no fourth variant. The `WARNING` is recorded in all three 2026-09-25 reports, not
-only in `private-key-jwt`'s (the competitor-gap plan's §4 G-1 table attributes it
-to that variant alone; the reports are the evidence).
+---
+
+## `ensure-unsigned-authorization-request-without-using-par-fails`
+
+**Suite log.** One per variant, each verdict `REVIEW` in that variant's
+2026-09-25 report, each with one image uploaded (`images_uploaded: 1` in the
+manifest):
+
+| Variant | Suite log | Evidence |
+|---|---|---|
+| `mtls` | `hubHxFIqq4NIObo` | [`fapi2-security-profile-final-mtls__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg`](evidence/2026-09-25/fapi2-security-profile-final-mtls__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg) |
+| `self-signed` | `73MqxLgoSS6V38N` | [`fapi2-security-profile-final-self-signed__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg`](evidence/2026-09-25/fapi2-security-profile-final-self-signed__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg) |
+| `private-key-jwt` | `c0Rb6Ejn7RpJoRQ` | [`fapi2-security-profile-final-private-key-jwt__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg`](evidence/2026-09-25/fapi2-security-profile-final-private-key-jwt__ensure-unsigned-authorization-request-without-using-par-fails__dc2918eeb2.jpg) |
+
+**What the suite could not decide.** The condition, verbatim from the manifest
+(identical for the three variants):
+
+> If the server does not return an invalid_request error back to the client, it
+> must show an error page saying the request is invalid as it is missing the
+> request_object - upload a screenshot of the error page.
+
+Two answers are right: an `invalid_request` delivered to the client, or an error
+page. The suite cannot judge whether what the browser was shown is an error page
+saying the request is invalid, so it asks for the picture.
+
+**What the image shows.** Read, not classified by size or hash. The `mtls` file
+was viewed; the other two have the same MD5 (`dc2918eeb2cce9fb05d1907defe9f99c`,
+in the manifest and on disk), so they are the same bytes. It is a plain,
+unstyled page headed **"This authorization request cannot be completed"**, the
+sentence **"this client must use pushed authorization requests (RFC 9126); send
+parameters to /oauth2/par first"**, `Error code: invalid_request`, and *"Nothing
+has been shared with the application that sent you here. Return to it and start
+again."* There is no sign-in form and no variant-specific content, which is why
+three variants produce one file. The image does not show the request that
+earned it or whether a sign-in page came first (below).
+
+**What AXIAM does.**
+
+- A client registered `require_par` that reaches `/oauth2/authorize` without a
+  pushed request is refused `OAuth2Error::ParRequired`, wire code
+  `invalid_request`: `crates/axiam-oauth2/src/authorize.rs`,
+  `AuthorizeService::authorize`, step 1b, after the client lookup and **before**
+  the `redirect_uri` comparison (`error.rs`: `ParRequired` → `invalid_request`).
+  The sentence is the one in the image.
+- It is answered **in place**, never by redirecting:
+  `crates/axiam-api-rest/src/handlers/oauth2.rs`, the arm that sends
+  `InvalidClient | InvalidRedirectUri | ParRequired` to
+  `authorize_error_response` (a page for a browser that accepts HTML, `400` JSON
+  otherwise). The comment gives the reason: `redirect_uri` arrived by the very
+  channel the client forbade and had not been validated, so redirecting to it
+  would defeat the setting.
+- A `fapi2` client cannot be registered without `require_par`
+  (`fapi.rs`, `FapiRegistrationError::ParNotRequired`, "FAPI 2.0 §5.3.1.2
+  requires pushed authorization requests"), so the refusal holds for every
+  client the plan registers.
+- Pinned by `par_test.rs::a_require_par_client_cannot_authorize_directly` (`400`,
+  not `302`), `oauth2_login_hop_test.rs::t0_4_the_return_leg_still_refuses_a_require_par_client_sending_inline_parameters`
+  and `::m7_a_fapi2_return_leg_with_inline_parameters_is_par_required` (`400`, no
+  `Location`, `invalid_request`, the wording above).
+- **What those tests do not pin, from reading the code.** They drive a request
+  that already holds an OP session. For an *anonymous* browser,
+  `resolve_authorize_principal` in `handlers/oauth2.rs` has no `require_par`
+  check, and the `browser_sso` conformance clients take the login hop first, so
+  the refusal is rendered on the return leg, after a sign-in. `drive-browser.mjs`
+  can capture an error page on either path (its `visit()` records an `error`
+  shot both when no sign-in form appears and when sign-in is followed by neither
+  consent nor the suite's callback). **Which one produced the 2026-09-25 image
+  is in the module's log and is to be confirmed by the maintainer's run.** The
+  tests above cover the second leg and nothing covers the first.
+
+**Why that is conformant.** FAPI 2.0 Security Profile §5.3.1.2, as
+`fapi.rs` cites it, requires the authorization server to require pushed
+authorization requests, and an unpushed request is refused. The condition
+accepts an error page as an alternative to an `invalid_request` returned to the
+client, and the page carries the code the condition names. Not redirecting is
+RFC 6749 §4.1.2.1: an error goes to a `redirect_uri` only after it has been
+validated, and this request's has not been. The wording differs from the
+condition's ("missing the request_object"): AXIAM supports no request object on
+any carrier (`request_parameter_supported: false`, see the Basic OP entry
+`oidcc-ensure-request-object-with-redirect-uri`), and its refusal is for the
+absence of PAR. The 2026-09-25 evidence README records the same caveat ("a
+wording divergence, not a behavioural one"); whether the Foundation's reviewer
+reads it the same way is theirs to decide.
+
+**Does the existing evidence suffice?** For the condition as worded, yes: an
+error page, in a browser, carrying `invalid_request`, for all three variants. It
+cannot show, and *to be confirmed by the maintainer's run* from each variant's
+log: that the request the module sent carried no `request_uri`; that no sign-in
+was asked for first, or if it was, that the reviewer is shown that; and, for the
+final run, that the image still says `invalid_request` (T23.1.1 changed the
+`fapi2` gate after the baseline, though not this refusal).
+
+**Open, for the maintainer.** (1) The wording divergence above. (2) Whether an
+anonymous request from a `require_par` client should be refused before the login
+hop, as `response_type` and a dead `request_uri` already are, rather than after
+sign-in. It is decidable without a principal. This entry does not propose it and
+no code was changed; the 2026-09-25 verdict does not depend on it, but a reviewer
+who reads the log and sees a sign-in precede the refusal may ask.
+
+---
+
+## `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds`
+
+**Suite log.** One per variant, each verdict `REVIEW`, each with one image:
+
+| Variant | Suite log | Evidence |
+|---|---|---|
+| `mtls` | `H2OiSzJ5MolJxvg` | [`fapi2-security-profile-final-mtls__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__3bfc90363d.jpg`](evidence/2026-09-25/fapi2-security-profile-final-mtls__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__3bfc90363d.jpg) |
+| `self-signed` | `yhcCDPi0oikE4FC` | [`fapi2-security-profile-final-self-signed__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__3bfc90363d.jpg`](evidence/2026-09-25/fapi2-security-profile-final-self-signed__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__3bfc90363d.jpg) |
+| `private-key-jwt` | `xHPfInpD8AbPbaU` | [`fapi2-security-profile-final-private-key-jwt__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__736d1520ee.jpg`](evidence/2026-09-25/fapi2-security-profile-final-private-key-jwt__par-ensure-reused-request-uri-prior-to-auth-completion-succeeds__736d1520ee.jpg) |
+
+**What the suite could not decide.** The condition, verbatim from the manifest:
+
+> The login page should be shown, if not upload a screenshot of the error page.
+
+The module presents one `request_uri` twice, before any authorization has
+completed, and expects the login page both times. The suite cannot tell whether
+the page the browser reached is a login page, so it asks for the picture.
+
+**What the image shows.** Read, not classified by size or hash. The `mtls` and
+`private-key-jwt` files were viewed; the `self-signed` file has the `mtls`
+file's MD5 (`3bfc90363df62c9171faa8c166887ce2`), so it is the same bytes. Both
+viewed images show AXIAM's sign-in page at the credentials step: "Workspace:
+test-org (organization)", an empty, focused "Username or email" field, a
+password field showing only placeholder dots, `Back`, `Cancel` and `Sign in`
+buttons, and `Sign in with a passkey`. They look the same; they differ in bytes
+(`3bfc90363d` against `736d1520ee`), as two captures of a live page do. Neither
+carries the notice "Please sign in again to continue.", which is right here:
+this module does not ask for a re-authentication, and the notice is rendered only
+for `reauth=1` (see `oidcc-prompt-login`). The image does not show which of the
+module's two visits it belongs to.
+
+**What AXIAM does.**
+
+- `/oauth2/par` stores the pushed request under a handle valid for 60 seconds
+  (`par.rs`, `REQUEST_URI_LIFETIME_SECS`), keyed by its hash.
+- `/oauth2/authorize` answers an anonymous browser with the login hop. Before it
+  does, it asks `ParService::peek` (`par.rs`) about the handle. `peek` is a
+  **read**: it refuses what was already dead (unknown, expired, spent, issued to
+  another client) and spends nothing, and it returns `()` rather than the pushed
+  parameters so that nothing can authorize from it
+  (`handlers/oauth2.rs`, the block headed "The handle, before a person is asked
+  to sign in for it", whose comment names this module as the property it must
+  keep). A handle presented a second time before any authorization is still
+  unspent and unexpired, so the second visit reaches the login page too.
+- The handle is spent in `ParService::consume`, in the handler, after a principal
+  exists, by the repository's guarded `UPDATE` inside a transaction with a nonce
+  read-back, so that two racing authorizations produce one code (X6, issue #302;
+  `crates/axiam-db/src/repository/pushed_auth_request.rs` module header).
+- Pinned by `par.rs::a_live_handle_passes_and_is_not_spent` (its doc comment
+  names this module), `oauth2_login_hop_test.rs::an_unconsumed_request_uri_still_reaches_the_login_page_twice`
+  (two anonymous requests with one live handle, both `302` to
+  `/login?return_to=`, and the handle still spendable afterwards), and in the
+  database `permission_ticket_test.rs::pushed_auth_request_find_unconsumed_reads_without_spending`
+  (two reads, neither spends) with `::pushed_auth_request_consume_serialises`
+  (exactly one winner among racers). The opposite case is pinned too, so the
+  early refusal cannot swallow this one: `par.rs::a_gone_handle_is_refused_with_the_shared_sentence`
+  and `par_test.rs::a_request_uri_works_once_and_then_never_again`.
+- The module's twin `par-attempt-reuse-request_uri`, which presents a handle
+  **after** an authorization completed and requires a refusal, is `PASSED` in all
+  three 2026-09-25 reports (it is in each report's passed list).
+
+**Why that is conformant.** The single-use rule the repository cites for a
+pushed request (`par.rs`, RFC 9126 §2.2) is about redeeming it for an
+authorization. Showing a login page redeems nothing: no code is minted and no
+principal exists. AXIAM spends the handle where a code is minted and nowhere
+earlier, which is what the module's name asks for (the suite names it
+*"…succeeds"*), and what its twin asks for after completion.
+
+**Does the existing evidence suffice?** For the condition as worded, yes: the
+image is the login page, the alternative being an error page. A `REVIEW` and not
+a `FAILED` is what each report records; the reports say nothing more. *To be
+confirmed by the maintainer's run*, from each variant's log: which visit the
+image comes from; that the first visit stopped at the login page and the second
+signed in and completed (the driver is built that way, and quotes the suite's own
+refusal for signing in on the first, in `drive-browser.mjs`, `STOP_AT_LOGIN_SUFFIX`);
+and the interval between the push and the second request, which must stay inside
+the 60-second lifetime or the second request is refused as gone, which is
+AXIAM working as intended and the module failing.
+
+**Open, for the maintainer.** None specific to this module.
+
+---
+
+## `test-claims-parameter-identity-claims`
+
+**Suite log.** Verdict `WARNING`, on **all three** variants, not on
+`private-key-jwt` alone as the competitor-gap plan's §4 G-1 table has it. The
+2026-09-25 reports:
+
+| Variant | Suite log |
+|---|---|
+| `mtls` | `E3LMGPfxxRnrBff` |
+| `self-signed` | `Ifh31qq9b0lDMpw` |
+| `private-key-jwt` | `v440VDWfwxP7kKo` |
+
+The same module is `WARNING` on every variant in every FAPI report from
+2026-09-10 to 2026-09-25 (seven dates, 21 reports; the ids are in the "Modules
+that did not pass" tables of the dated reports). A `WARNING` uploads no
+evidence, so there is no image and no manifest row, and **the reports record
+nothing about why**: they carry a verdict and a log id.
+
+**What the suite could not decide.** Nothing; a `WARNING` is a decided, non-fatal
+verdict, which the report defines as "a non-fatal deviation; permitted, but worth
+understanding before submitting". What is open is the *reason*, which only the
+log holds. The module's name says it requests identity claims through the OpenID
+Connect `claims` parameter; what it requests, in which member, and which
+condition raised the warning is **to be confirmed by the maintainer's run**.
+
+**What the image shows.** There is none.
+
+**What AXIAM does with `claims`.** This is the design question (competitor-gap
+plan §4 G-1, Design item 2): is the warning the "`claims` parameter not
+supported" deviation FAPI permits? **The repository does not support that
+reading for the 2026-09-25 build.**
+
+- Discovery publishes `claims_parameter_supported: true`
+  (`crates/axiam-oauth2/src/oidc.rs`, the `claims_parameter_supported: true`
+  line; asserted on the serialised document by
+  `oidc.rs::discovery_tells_the_truth_about_request_objects_and_claims`). That is
+  also the value at the 2026-09-25 build base: `git show
+  8a0af1033:crates/axiam-oauth2/src/oidc.rs` has `true`. The evidence READMEs of
+  2026-09-18 and 2026-09-25 say the suite runs the module "although AXIAM
+  advertises `claims_parameter_supported: false`"; for 2026-09-25 that sentence
+  is wrong about the build, and the remediation plan of 2026-09-12 (§10.1)
+  already warned that the recorded cause of the warning predates the commit that
+  set the value to `true`. Several comments and one compliance row still say
+  `false` (`authn_params.rs` lines 104 and 420,
+  `docs/compliance/oidc-conformance.md` row 35); they are stale, and the code
+  and its test say `true`.
+- What is honoured: the `userinfo` member, for the claims in
+  `claims_request::RELEASABLE` (profile and email claims; never `phone_number`,
+  `phone_number_verified` or `address`, which stay behind the consent
+  ceremony). The `id_token` member is **ignored**, with one exception: its `acr`
+  member, which is read on the honour lane only
+  (`crates/axiam-oauth2/src/claims_request.rs`; `authn_params.rs`,
+  `parse_claims_acr`). A `fapi2` client is never on the honour lane.
+- On `fapi2`, `fapi.rs::enforce_authorization_request` refuses the parameters
+  AXIAM would otherwise drop, and `claims` is one of them **only** when it asks
+  for `id_token.acr` or cannot be read well enough to rule that out
+  (`authn_params.rs`, `security_bearing_present`). A `claims` that asks only for
+  `userinfo` members, or for other `id_token` members, is served, not refused.
+
+So the warning is not "the OP does not support `claims`": AXIAM advertises and
+partly honours it. What the suite objected to is in the log. One possibility the
+code makes live, offered as a hypothesis and not a finding: if the module asks
+for identity claims in the `id_token` member, AXIAM ignores that member, and the
+ID token would not carry them. The Phase 23 W1 security review (§8 item (g),
+`claude_dev/security-review-phase23-w1-2026-10-03.md`) recalls that the module
+requests `given_name`, `family_name` and similar in `id_token` and `userinfo`,
+and that the ACR-requesting conditions belong to the Brazil profile and not to
+`plain_fapi`, and says plainly that this could not be verified offline.
+
+**What changed since the baseline, and what lands next.**
+
+- **W1, T23.1.1 (`3b9b8f6`, 2026-10-02).** A `fapi2` client's
+  `claims.id_token.acr` is now refused `invalid_request`. Before, it was dropped
+  silently, which is the downgrade OIDC Core §5.5.1.1 says to treat as a failed
+  authentication. Pinned by
+  `fapi.rs::a_fapi2_client_may_send_claims_for_userinfo_but_not_for_id_token_acr`.
+  The gate's comment (`authn_params.rs`) and the T-239 amendment in
+  `claude_dev/threat-model-stride.md` say a `userinfo`-only `claims`, "the shape
+  the FAPI suite's `test-claims-parameter-identity-claims` module sends", stays
+  unrefused. **That is the author's statement of the module's shape and nothing
+  in this repository verifies it.**
+- **W2, D-12 (decided 2026-10-03, rides T23.1.4).** An **essential**
+  `claims.id_token.auth_time` is to be refused on `fapi2` exactly as
+  `id_token.acr` is, because OIDC Core §2 makes `auth_time` REQUIRED when
+  requested as essential and today it is dropped. At the time of writing it has
+  not landed on `claude/phase23-w2` (`authn_params.rs` there has no `auth_time`
+  handling at `5e3df3c`); this entry describes it as decided and landing in W2,
+  and must be re-read against the code once it does.
+- Neither change touches `claims` for `userinfo` members.
+
+**Why that is conformant.** For the part the code settles: AXIAM does not
+silently discard a request it cannot satisfy on the one lane where discarding
+would manufacture an assurance (`id_token.acr`, and with D-12 an essential
+`auth_time`), and it serves the `userinfo` member it supports. The repository
+cites no FAPI 2.0 clause that requires or forbids `claims` support for an OP,
+and it cannot say whether the Foundation's `WARNING` is a deviation a reviewer
+accepts; the runbook's own definition is that it is "a permitted deviation the
+suite wants you to notice". Whether this one is acceptable cannot be concluded
+without the log.
+
+**Does the existing evidence suffice?** No, and none exists to be sufficient:
+a verdict and three log ids. *To be confirmed by the maintainer's run* (F4
+item (g), runbook checklist §3): the one module on one variant, the saved log's
+authorization request URL-decoded for its `claims` parameter, looking for
+`"acr"` and `"auth_time"` under `id_token`, and the condition that raised the
+warning. If the module requests `acr`, a `fapi2` client's request now ends
+`invalid_request` where the baseline ended `WARNING`, and the verdict can change
+to a failure; that would be a finding to judge before the submission, not a
+harness defect. It is unknown without a run whether the module requests `acr` or
+an essential `auth_time`.
+
+**Open, for the maintainer.** If the log shows the warning comes from identity
+claims requested in the `id_token` member being ignored, clearing it would mean
+honouring the `id_token` member of `claims` on the `fapi2` lane, or on the honour
+lane only. **That is a product and security decision this entry does not take and
+no code implements.** The code argues against doing it casually: `claims_request.rs`
+records that the ID token deliberately carries no more than OIDC Core §5.4 says
+(the §5.4 work that removed `tenant_id`, `org_id` and `email` from it), and
+honouring §5.5 there "would put claims back that were deliberately taken out".
+The alternative is to publish the warning as a documented, accepted `WARNING`,
+with this entry as its account. Either way the maintainer decides, after the
+log. Until then the proposed judgement is only: **a `WARNING` on every
+variant, reason unread, not the "not supported" deviation.**
 
 ---
 
 # Open questions, collected
 
 For the maintainer. None of them blocks writing the entries above; each is
-something the repository cannot decide.
+something the repository cannot decide. Items 1 to 3 are the Basic OP entries'
+(T23.1.6); items 4 to 7 are the FAPI 2.0 entries' (T23.1.7).
 
 1. **The log-only points.** Three facts the Basic OP entries need can be read
    only from the suite logs of the final run, and are marked in the entries:
@@ -413,7 +737,32 @@ something the repository cannot decide.
    in the final run; the new report lists it.
 3. **Reviewer acceptance.** Whether the Foundation's reviewer accepts a single
    screenshot plus the log for the four modules is theirs to decide; this file
-   states AXIAM's behaviour, the code that pins it and the clause.
+   states AXIAM's behaviour, the code that pins it and the clause. The same holds
+   for the two FAPI `REVIEW` modules, including the wording divergence in
+   `ensure-unsigned-authorization-request-without-using-par-fails`.
+4. **The FAPI log-only points (T23.1.7).** Read from the final run's logs and
+   written into the entries: for the unsigned-request module, the request the
+   suite sent and whether a sign-in page preceded the refusal; for the
+   reused-`request_uri` module, which visit the image belongs to and the interval
+   between the push and the second request (60-second lifetime); for the claims
+   module, the authorization request's `claims` value and the condition that
+   raised the warning (F4 item (g)).
+5. **The claims `WARNING`: honour or accept.** If the log shows identity claims
+   requested in the `id_token` member being ignored, either the `id_token` member
+   is honoured on the `fapi2` lane (or the honour lane only), or the warning is
+   published as accepted with its entry as the account. A product and security
+   decision; nothing in the repository takes it, and no code implements it.
+6. **Refuse an unpushed request before the login hop?** A `require_par` client's
+   request with no `request_uri` is refused only after sign-in today (return
+   leg). Whether to refuse it earlier is the maintainer's; nothing here proposes
+   it.
+7. **D-12 and the stale `false`.** Re-read the claims entry once D-12 (an
+   essential `claims.id_token.auth_time` refused on `fapi2`, T23.1.4) lands. Four
+   places still say discovery publishes `claims_parameter_supported: false`
+   though the code and its test say `true`: the 2026-09-18 and 2026-09-25
+   evidence READMEs, comments in `authn_params.rs`, and row 35 of
+   `docs/compliance/oidc-conformance.md`. They are outside this task's files and
+   are not edited here.
 
 ## Sign-off
 

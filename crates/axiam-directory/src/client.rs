@@ -960,7 +960,7 @@ impl RawEntry {
         })
     }
 
-    fn text(&self, name: &str) -> Option<String> {
+    pub(crate) fn text(&self, name: &str) -> Option<String> {
         let value = self.values(name)?.first()?;
         if value.is_empty() || value.len() > ATTRIBUTE_VALUE_MAX_LEN {
             return None;
@@ -968,7 +968,10 @@ impl RawEntry {
         String::from_utf8(value.clone()).ok()
     }
 
-    fn into_identity(self, map: &UserAttributeMap) -> Result<DirectoryIdentity, Failure> {
+    pub(crate) fn into_identity(
+        self,
+        map: &UserAttributeMap,
+    ) -> Result<DirectoryIdentity, Failure> {
         if self.dn.is_empty() {
             return Err(Failure::new(
                 DirectoryAuthError::Unavailable,

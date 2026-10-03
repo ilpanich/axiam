@@ -246,6 +246,25 @@ where
             Ok(outcome)
         })
     }
+
+    /// The sync job's half (T23.3.5, D-31): an account whose entry has vanished
+    /// or been disabled is backed by **no** group, so the backed set is empty
+    /// and the directory is not asked. Same function, same rules, same decision
+    /// cache flush as [`Self::apply_for_user`].
+    fn remove_directory_memberships<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> DirectoryFuture<'a, Result<GroupMappingOutcome, DirectoryAuthError>> {
+        Box::pin(async move {
+            let applied =
+                apply_backed_groups(&self.groups, tenant_id, user_id, &BTreeSet::new()).await;
+            if applied.as_ref().map_or(true, GroupMappingOutcome::changed) {
+                self.on_change.notify(tenant_id, user_id).await;
+            }
+            applied
+        })
+    }
 }
 
 #[cfg(test)]

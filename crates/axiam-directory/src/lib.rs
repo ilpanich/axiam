@@ -54,6 +54,7 @@ pub mod escape;
 pub mod group_lookup;
 pub mod groups;
 pub mod mapper;
+pub mod sync_lookup;
 pub mod tls;
 
 pub use authenticator::{MappedGroups, RepositoryDirectoryAuthenticator};

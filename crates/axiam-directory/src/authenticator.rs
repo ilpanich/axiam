@@ -39,6 +39,7 @@ use uuid::Uuid;
 
 use crate::client::{DirectoryClient, DirectoryTarget, transport_is_encrypted};
 use crate::groups::{GroupLookup, mapped_group_ids};
+use crate::sync_lookup::DirectorySession;
 use crate::tls::client_config;
 
 /// Why the directory is being asked, which decides what is checked first and
@@ -202,6 +203,33 @@ impl<R: DirectoryConfigRepository> RepositoryDirectoryAuthenticator<R> {
         Ok(MappedGroups {
             directory_groups_resolved: resolved.len(),
             group_ids,
+        })
+    }
+
+    /// Open the tenant's directory for the sync job (G-3, T23.3.5, D-31): the
+    /// stored configuration, the **decrypted bind secret** and the shared
+    /// bounded client, as one [`DirectorySession`] that asks read-only
+    /// questions over the service-bound pooled connection.
+    ///
+    /// Fails closed exactly as every other use of the directory does: no
+    /// configuration, or a disabled one, is [`DirectoryAuthError::NotConfigured`]
+    /// and **nothing is decrypted and no socket opened**; a missing
+    /// `directory_encryption_key` is `Unavailable`; a stored row that would not
+    /// pass `config::validate` today is `Misconfigured`. The session holds the
+    /// secret only until it is dropped.
+    ///
+    /// # Errors
+    ///
+    /// The [`DirectoryAuthError`] described above.
+    pub async fn open_sync(&self, tenant_id: Uuid) -> Result<DirectorySession, DirectoryAuthError> {
+        let config = self.enabled_config(tenant_id).await?;
+        let secret = self.bind_secret(tenant_id).await?;
+        let target = self.target(&config)?;
+        Ok(DirectorySession {
+            config,
+            target,
+            secret,
+            client: Arc::clone(&self.client),
         })
     }
 

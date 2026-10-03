@@ -91,12 +91,15 @@ impl TestCa {
     }
 }
 
+/// One attribute of an entry: its name and its values.
+pub type EntryAttr = (String, Vec<Vec<u8>>);
+
 /// A directory entry the server holds.
 #[derive(Clone)]
 pub struct Entry {
     pub dn: String,
     pub password: String,
-    pub attrs: Vec<(String, Vec<Vec<u8>>)>,
+    pub attrs: Vec<EntryAttr>,
 }
 
 impl Entry {
@@ -154,6 +157,38 @@ impl Entry {
                 ),
             ],
         }
+    }
+
+    /// An Active Directory-shaped person: `sAMAccountName`, a binary
+    /// `objectGUID` (the raw bytes, as a directory sends them),
+    /// `userAccountControl` 512 (a normal, enabled account) and a `uSNChanged`.
+    pub fn ad_person(sam: &str, password: &str, object_guid: [u8; 16], usn: u64) -> Self {
+        Self {
+            dn: format!("cn={sam},cn=Users,{BASE_DN}"),
+            password: password.into(),
+            attrs: vec![
+                ("objectClass".into(), vec![b"user".to_vec()]),
+                ("sAMAccountName".into(), vec![sam.as_bytes().to_vec()]),
+                (
+                    "mail".into(),
+                    vec![format!("{sam}@example.com").into_bytes()],
+                ),
+                (
+                    "displayName".into(),
+                    vec![format!("Test {sam}").into_bytes()],
+                ),
+                ("objectGUID".into(), vec![object_guid.to_vec()]),
+                ("userAccountControl".into(), vec![b"512".to_vec()]),
+                ("uSNChanged".into(), vec![usn.to_string().into_bytes()]),
+            ],
+        }
+    }
+
+    /// This entry with `attribute` removed.
+    pub fn without(mut self, attribute: &str) -> Self {
+        self.attrs
+            .retain(|(name, _)| !name.eq_ignore_ascii_case(attribute));
+        self
     }
 
     /// This entry with `attribute` set to `values` (replacing any earlier one).
@@ -268,6 +303,9 @@ pub enum Event {
 struct Live {
     entries: Mutex<Vec<Entry>>,
     group_search_done: Mutex<Option<(LdapResultCode, Vec<String>)>>,
+    /// The attributes the rootDSE (a base-object search of the empty DN) answers
+    /// with. `None`: the server answers `noSuchObject`, as one that hides it.
+    root_dse: Mutex<Option<Vec<EntryAttr>>>,
 }
 
 pub struct TestServer {
@@ -316,6 +354,7 @@ impl TestServer {
         let live = Arc::new(Live {
             entries: Mutex::new(script.entries.clone()),
             group_search_done: Mutex::new(script.group_search_done.clone()),
+            root_dse: Mutex::new(None),
         });
         let script = Arc::new(script);
 
@@ -358,6 +397,17 @@ impl TestServer {
     /// Replace the directory's contents: what the next bind and search see.
     pub fn set_entries(&self, entries: Vec<Entry>) {
         *self.live.entries.lock().unwrap() = entries;
+    }
+
+    /// Set what the rootDSE answers (T23.3.5): `(attribute, value)` pairs, e.g.
+    /// AD's `highestCommittedUSN` and `dsServiceName`.
+    pub fn set_root_dse(&self, attrs: &[(&str, &str)]) {
+        *self.live.root_dse.lock().unwrap() = Some(
+            attrs
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), vec![value.as_bytes().to_vec()]))
+                .collect(),
+        );
     }
 
     /// Change the scripted final result of group searches (`None`: success).
@@ -631,6 +681,27 @@ impl Session {
         )
     }
 
+    fn root_dse(&self, attrs: &[String]) -> Vec<LdapOp> {
+        let Some(root) = self.live.root_dse.lock().unwrap().clone() else {
+            return vec![LdapOp::SearchResultDone(result(
+                LdapResultCode::NoSuchObject,
+                "",
+                vec![],
+            ))];
+        };
+        vec![
+            LdapOp::SearchResultEntry(LdapSearchResultEntry {
+                dn: String::new(),
+                attributes: root
+                    .into_iter()
+                    .filter(|(name, _)| attrs.iter().any(|a| a.eq_ignore_ascii_case(name)))
+                    .map(|(name, vals)| LdapPartialAttribute { atype: name, vals })
+                    .collect(),
+            }),
+            LdapOp::SearchResultDone(result(LdapResultCode::Success, "", vec![])),
+        ]
+    }
+
     fn search(&self, req: &LdapSearchRequest) -> Vec<LdapOp> {
         let (filter, attrs) = (&req.filter, &req.attrs);
         if self.bound.as_deref() != Some(SERVICE_DN) {
@@ -639,6 +710,9 @@ impl Session {
                 "search requires the service account",
                 vec![],
             ))];
+        }
+        if is_root_dse(req) {
+            return self.root_dse(attrs);
         }
         let group_search = is_group_search(req);
         let mut out = Vec::new();
@@ -714,7 +788,13 @@ impl Session {
 /// A group lookup rather than the user search: a base-object read, or a search
 /// under any base but the user base.
 fn is_group_search(req: &LdapSearchRequest) -> bool {
-    matches!(req.scope, LdapSearchScope::Base) || !req.base.eq_ignore_ascii_case(BASE_DN)
+    !is_root_dse(req)
+        && (matches!(req.scope, LdapSearchScope::Base) || !req.base.eq_ignore_ascii_case(BASE_DN))
+}
+
+/// A base-object read of the empty DN: the rootDSE.
+fn is_root_dse(req: &LdapSearchRequest) -> bool {
+    req.base.is_empty() && matches!(req.scope, LdapSearchScope::Base)
 }
 
 fn values(entry: &Entry, attr: &str) -> Vec<String> {
@@ -738,6 +818,16 @@ fn matches(filter: &LdapFilter, entry: &Entry) -> bool {
             .iter()
             .any(|v| v.eq_ignore_ascii_case(value)),
         LdapFilter::Present(attr) => !values(entry, attr).is_empty(),
+        // `(attr>=value)`: numeric when both sides are numbers (AD's USNs),
+        // otherwise by string (generalized time sorts lexicographically).
+        LdapFilter::GreaterOrEqual(attr, value) => {
+            values(entry, attr)
+                .iter()
+                .any(|v| match (v.parse::<u64>(), value.parse::<u64>()) {
+                    (Ok(have), Ok(want)) => have >= want,
+                    _ => v.as_str() >= value.as_str(),
+                })
+        }
         LdapFilter::Substring(attr, sub) => values(entry, attr).iter().any(|v| {
             let v = v.to_ascii_lowercase();
             sub.initial

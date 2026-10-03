@@ -142,6 +142,33 @@ def render(run: dict) -> str:
         )
         out.append("")
 
+    # T23.1.6. A SKIPPED module is not a problem, but it is not nothing either:
+    # the suite skips a module when the variant does not apply or when the
+    # server does not advertise what the module tests, and the second of those
+    # can hide a finding (docs/conformance/README.md, the address/phone skips of
+    # the first run). Until now the report counted them and named none, so the
+    # one SKIPPED module of the 2026-09-25 Basic plan and the one of the
+    # private_key_jwt plan are unidentifiable from anything published here — and
+    # "every module PASSED or a documented SKIPPED" cannot be checked against a
+    # list that does not exist. Named, with the log that records why.
+    skipped = [m for m in modules if verdict_of(m) == "SKIPPED"]
+    if skipped:
+        out.append("## Modules skipped")
+        out.append("")
+        out.append(
+            "A skip is acceptable only when the log says why the module does not "
+            "apply to this variant. Read the reason in the log before treating "
+            "any of these as documented."
+        )
+        out.append("")
+        out.append("| Module | Suite log |")
+        out.append("|---|---|")
+        for m in skipped:
+            test_id = m.get("testId", "")
+            link = f"`{test_id}`" if test_id else "—"
+            out.append(f"| `{m['module']}` | {link} |")
+        out.append("")
+
     if counts.get("PASSED"):
         out.append("<details><summary>Modules that passed</summary>")
         out.append("")
@@ -199,6 +226,21 @@ def main() -> int:
         index.append(f"- [`{name}`]({dest.name}) — {len(modules)} modules, {state}")
         if bad or not modules:
             exit_code = 2
+
+    # T23.1.6. `index.md` is rewritten from the runs in `--results`, so after a
+    # second dated run it would list only that run and the links to every
+    # earlier report would vanish from the front page while the files stayed on
+    # disk. "Alongside, never over" is a promise about what the reader can find,
+    # so the earlier dated reports are listed too, newest first.
+    written = {f"{stamp}{r['path'].name.replace('.results.json', '')}.md" for r in runs}
+    earlier = sorted(
+        (p.name for p in out_dir.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.md")
+         if p.name not in written),
+        reverse=True,
+    )
+    if earlier:
+        index += ["", "Earlier reports, kept alongside:", ""]
+        index += [f"- [`{name[:-3]}`]({name})" for name in earlier]
 
     # W9: `index.md`, not `README.md`.
     #

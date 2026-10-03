@@ -675,6 +675,7 @@ bootstrap-local:
 #   just conformance-run        # drive the three FAPI plans, collect results
 #   just conformance-run-basic  # drive the OIDC Core Basic plan (W9)
 #   just conformance-report     # render docs/conformance/*.md — failures first
+#   just conformance-evidence   # export the REVIEW modules' screenshots (T23.1.6)
 #   just conformance-down
 
 # Throwaway client certificates for the two client-auth variants.
@@ -843,6 +844,16 @@ conformance-run-basic:
 conformance-report:
     python3 conformance/scripts/report.py --results conformance/.run/results \
       --out docs/conformance --date "${CONFORMANCE_DATE:-}"
+
+# Export the screenshots the suite holds for REVIEW modules into
+# docs/conformance/evidence/<date>/, with a manifest. Read-only against the
+# suite; refuses a directory that already has a manifest (alongside, never over).
+conformance-evidence:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -a; . conformance/suite.env; set +a
+    python3 conformance/scripts/export-evidence.py \
+      --out "docs/conformance/evidence/${CONFORMANCE_DATE:?set CONFORMANCE_DATE=YYYY-MM-DD}"
 
 conformance-down:
     #!/usr/bin/env bash

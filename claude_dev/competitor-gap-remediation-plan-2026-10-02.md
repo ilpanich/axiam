@@ -201,7 +201,7 @@ into tasks and assigns the model per task.
 > W2's T23.1.4 and T23.1.5 are expected to be audits too, since X7.4 to X7.8
 > are in the tree; T23.1.6 and T23.1.7 (judgements, submission) are not.
 >
-> **EXECUTED (partly) — G-1, W2: T23.1.4, T23.1.6, T23.1.7, 2026-10-03.** On
+> **EXECUTED (partly) — G-1, W2: T23.1.4 – T23.1.7, 2026-10-03.** On
 > `claude/phase23-w2`. G-1 stays open: the maintainer runs both suites
 > personally before the release tag (decision of 2026-10-03), and sends the
 > submission; issue #513 closes on the grant, not on this wave.
@@ -229,6 +229,22 @@ into tasks and assigns the model per task.
 >   `extra-B-track-features.md` §X7 and `basic-op-gap-plan.md`, and every
 >   statement that discovery publishes `claims_parameter_supported: false`
 >   (it publishes `true`).
+> - **T23.1.5** (`34a5a8f`, `35a281e`, `6e01254`, `744651b`; Sonnet 5.5). An
+>   audit of X7.7 (shipped as schema **v57**, not v51) and X7.8 against RFC
+>   6749 §2.3.1, RFC 7617 and OIDC Core §5: every requirement tabulated, about
+>   thirty new pinning tests (the §2.3.1 decode edge cases end to end, two
+>   `Authorization` headers, the redaction at PAR, revocation and
+>   introspection, the strong-client refusal at the three ordinary grants,
+>   cross-tenant consent, no sensitive claim in the access token, introspection
+>   or a refreshed ID token, the OIDC Core §5.1.1 address shape, SCIM as the
+>   writer over HTTP). Two defects, each with a test that failed first: (1)
+>   **with per-client rate-limit keying configured, a `client_secret_basic`
+>   client had no per-client bucket**, because the limiter read `client_id`
+>   from the form only, so its secret could be guessed from many addresses
+>   (the default `ip` keying was never affected); the key now falls back to the
+>   id the Basic header decodes to, through the same parser the handlers use.
+>   (2) The `fapi2` client-authentication rule did not run at PAR,
+>   introspection or revocation, decided as **D-17**. Both amend T-253.
 > - **T23.1.6** (`6f1385b`, `cfb6fcf`, `f3dbea7`, `9c74955`; Sonnet 5.5).
 >   [`docs/conformance/REVIEW-JUDGEMENTS.md`](../docs/conformance/REVIEW-JUDGEMENTS.md)
 >   with the four Basic OP entries, each citing its 2026-09-25 log id and the
@@ -1055,6 +1071,7 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-14 | *Taken by the orchestrator, 2026-10-03, on T23.1.4's escalation.* On the honour lane, `max_age=0` can never yield a code: `honour::evaluate` re-authenticates when `elapsed >= max_age`, so on the return leg a session signed in a moment ago is still "too old" and the answer is `login_required`. Plan §4.3, test T2.1 and T-239's text pinned that literally ("always reauthenticate … never yields a code"), but OIDC Core §3.1.2.1 (1.0 incorporating errata set 2) says the OP re-authenticates when the elapsed time is *greater than* `max_age`, and adds that `max_age=0` is equivalent to `prompt=login`, after which a code is issued | **`max_age=0` is handled as `prompt=login`**: the outbound leg always re-authenticates (the `reauth=1` hop, as today), and the return leg, whose session the hop itself just created, is answered with a code and an ID token whose `auth_time` is the new authentication. Positive values keep `>=` (one instant stricter than the clause; harmless, and pinned by `oidcc-max-age-1`). The return-leg marker's accepted residual (F4 P23W1-08) applies unchanged, exactly as it does to `prompt=login`. Rejected: keeping it (an RP sending `max_age=0` could never sign in, which contradicts the errata note) and switching every value to strict `>` (changes the pinned `max_age=1` behaviour for no gain). Implemented in T23.1.4; amends test T2.1 and T-239's mitigation text |
 | D-15 | *Taken by the orchestrator, 2026-10-03, before T23.3.1, so the Sonnet task does not stall on it.* §4 G-3 says `bind_secret (secret provider, R-5 pattern)`, but the secret provider is deployment-wide and addressed by static logical names (`axiam_core::secrets`), while a bind secret is per tenant and set by a tenant administrator | **Encrypted at rest in the directory configuration row, exactly as the per-tenant SMTP password is** (`crates/axiam-db/src/repository/email_config.rs`): AES-256-GCM with a fresh nonce per write, the 256-bit key fetched from the secret provider under a **new logical name `directory_encryption_key`** (R-5: the key lives in the provider, never in the database or configuration file). The key is optional: without it the directory feature is unavailable and creating a configuration fails closed with a message naming the key, as OPAQUE does without its keys. The secret is write-only through every API (never returned, `Debug`-redacted, absent from audit rows), and decrypted only at bind time. Rejected: a per-tenant provider reference (`bind_secret_ref` resolved by name), because it would make a tenant administrator's configuration depend on a deployment operator's vault layout, and the admin console (T23.3.8) could not set the secret at all |
 | D-16 | *Taken in T23.1.8 (Opus 5.5), 2026-10-03, accepted by the orchestrator.* The OP cookie (`Path=/oauth2/authorize`, and since D-11 `/t/{tenant_id}/oauth2/authorize`) never reaches `/oauth2/end_session`, so a logout without an `id_token_hint` `sid` could expire the cookie but not read it, and the session row it named survived (F4 residual P23W1-10). How does such a logout end that row? | **A hop to the `/logout` sub-path of the authorization endpoint the request came through**: `end_session` answers a request with no verified hint `sid` with a `302` to `/oauth2/authorize/logout?tenant_id=…` (bare) or `/t/{tenant_id}/oauth2/authorize/logout`, which RFC 6265 §5.1.4 path-match sends the cookie to. The hop looks the digest up in the request's tenant, revokes that one row, clears every cookie and continues exactly as `end_session` (exact-match `post_logout_redirect_uri` against the identified client's allow-list, `state` echoed only on a redirect that happens; the continuation never carries the hint). GET-only, public, rate-limited with the `end_session` preset (bucket `oauth2_end_session_cookie`, both mounts), in OpenAPI, and with **no back-channel fan-out**, so logout CSRF stays exactly what `end_session` already was. Threat **T-290**. Rejected: adding `/oauth2/end_session` to the cookie path list (widens the maintainer's D-11 layout to a second endpoint, and misses cross-site form POSTs); fanning out back-channel logout from the hop (any page could log a user out of every RP); a confirmation prompt (against B5); leaving the residual. Residual: a hinted logout whose browser cookie names a *different* session leaves that row with its cookies cleared |
+| D-17 | *Taken by the orchestrator, 2026-10-03, on T23.1.5's escalation.* The request-time `fapi2` client-authentication re-check (`is_strong()`) ran at the token endpoint, token exchange and uma-ticket only; a `fapi2` row edited in the database to `client_secret_basic` or `client_secret_post` authenticated at PAR (`201`), introspection and revocation (`200`) with a correct secret | **The same rule runs at PAR, introspection and revocation**, after client authentication and before anything is pushed, revealed or revoked, through one extracted function (`fapi::enforce_client_authentication`, which `enforce_token_request` now calls first), so the endpoints cannot drift; the answer is the token endpoint's `invalid_client`. As with W1's "a `fapi2` row edited to `honour` is refused at authorize", the registration gate is not the only line. Rejected: accepting it as T-253's residual. Amends T-253 |
 
 ---
 

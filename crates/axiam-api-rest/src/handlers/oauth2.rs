@@ -415,6 +415,23 @@ fn authorize_path_of(req: &HttpRequest) -> String {
     }
 }
 
+/// The authorization request's query string as the client sent it — what a
+/// `return_to` must carry back (T23.1.8).
+///
+/// On the deployment-wide path that is `req.query_string()`. On a per-tenant
+/// path it is the query **before** `TenantPathScope` appended `tenant_id`:
+/// the browser presents the `return_to` to the tenant scope again, and that
+/// scope refuses a `tenant_id` parameter outright, so a `return_to` built from
+/// the rewritten query made every return leg on a tenant path an
+/// `invalid_request`. The path already names the tenant, which is the whole
+/// point of the path form.
+fn client_query_of(req: &HttpRequest) -> String {
+    match crate::middleware::tenant_path::binding_of(req) {
+        None => req.query_string().to_owned(),
+        Some(binding) => binding.client_query,
+    }
+}
+
 fn return_to_is_on_this_deployment<C: Connection + Clone>(
     state: &AppState<C>,
     return_to: &str,
@@ -875,7 +892,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     // issuer in its RFC 9207 `iss` — the issuer the client discovered.
     let authorize_path = authorize_path_of(http_req);
     let Some(return_to) =
-        axiam_oauth2::login_hop::build_return_to_at(&authorize_path, http_req.query_string())
+        axiam_oauth2::login_hop::build_return_to_at(&authorize_path, &client_query_of(http_req))
     else {
         // Nothing safe to come back to. Answer as if the request had been
         // anonymous with no `browser_sso` at all rather than send a browser
@@ -921,7 +938,13 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         .append_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
         .append_header(("Referrer-Policy", "no-referrer"));
     if stale {
-        builder.cookie(crate::middleware::csrf::clear_op_session_cookie());
+        // T23.1.8: the copy this request could have carried — the tenant one on
+        // a tenant path, the bare one otherwise — and only that copy. The
+        // others may hold a later sign-in into another tenant that is still
+        // good where it is scoped.
+        builder.cookie(crate::middleware::csrf::clear_presented_op_session_cookie(
+            crate::middleware::tenant_path::binding_of(http_req).map(|b| b.tenant_id),
+        ));
     }
     Err(Box::new(builder.finish()))
 }
@@ -1722,16 +1745,12 @@ pub async fn authorize<C: Connection + Clone>(
             // machinery, same validation on both sides, one more marker; see
             // `login_hop::CONSENT_HOP_MARKER` for why sharing the login one
             // would answer the consent question with the login hop's evidence.
+            // T23.1.8: the query as the client sent it — see `client_query_of`.
+            let client_query = client_query_of(&http_req);
             let built = if interaction.reason.requires_reauthentication() {
-                axiam_oauth2::login_hop::build_return_to_at(
-                    &authorize_path,
-                    http_req.query_string(),
-                )
+                axiam_oauth2::login_hop::build_return_to_at(&authorize_path, &client_query)
             } else {
-                axiam_oauth2::login_hop::build_consent_return_to_at(
-                    &authorize_path,
-                    http_req.query_string(),
-                )
+                axiam_oauth2::login_hop::build_consent_return_to_at(&authorize_path, &client_query)
             };
             let Some(return_to) = built else {
                 // Nothing safe to come back to, so there is nothing to send

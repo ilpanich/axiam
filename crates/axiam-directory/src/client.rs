@@ -24,6 +24,10 @@
 //!    the previous user's rights.
 //! 6. Return the entry's external identifier and mapped attributes.
 //!
+//! [`DirectoryClient::lookup`] (T23.3.3, linking an existing account) is steps
+//! 1–4 and 6 only: the same escaping, exactly-one rule, bounds and service
+//! connection, with no user bind because there is no password to bind with.
+//!
 //! # Bounds
 //!
 //! Every connection is opened under a per-tenant permit
@@ -261,6 +265,39 @@ impl DirectoryClient {
         if password.is_empty() {
             return Err(DirectoryAuthError::InvalidCredentials);
         }
+        self.run(target, bind_secret, login_name, Some(password))
+            .await
+    }
+
+    /// Resolve the entry `login_name` names, exactly as
+    /// [`Self::authenticate`] does, but **without binding as it** (T23.3.3:
+    /// an administrator linking an existing account holds no directory
+    /// password). Steps 1–4 only: the same escaping, the same exactly-one rule,
+    /// the same referral and deadline handling, the same service-account
+    /// connection; no user bind is attempted and no password is involved.
+    ///
+    /// # Errors
+    ///
+    /// A [`DirectoryAuthError`]; a filter that matched no single entry is
+    /// [`DirectoryAuthError::InvalidCredentials`], as for authentication.
+    pub async fn lookup(
+        &self,
+        target: &DirectoryTarget,
+        bind_secret: &str,
+        login_name: &str,
+    ) -> Result<DirectoryIdentity, DirectoryAuthError> {
+        self.run(target, bind_secret, login_name, None).await
+    }
+
+    /// The shared body of [`Self::authenticate`] and [`Self::lookup`]:
+    /// `password` is `Some` when the entry must also be bound as.
+    async fn run(
+        &self,
+        target: &DirectoryTarget,
+        bind_secret: &str,
+        login_name: &str,
+        password: Option<&str>,
+    ) -> Result<DirectoryIdentity, DirectoryAuthError> {
         if bind_secret.is_empty() {
             // The service bind would be an unauthenticated bind too.
             return Err(self.log(
@@ -315,7 +352,7 @@ impl DirectoryClient {
         target: &DirectoryTarget,
         bind_secret: &str,
         filter: &str,
-        password: &str,
+        password: Option<&str>,
     ) -> Result<DirectoryIdentity, Failure> {
         // Steps 2-4. A pooled connection that fails at the transport level is
         // retried once on a fresh one: a server that closed an idle socket is
@@ -335,8 +372,11 @@ impl DirectoryClient {
                 // service account: it may go back.
                 self.release(target, service).await;
                 let identity = entry.into_identity(&target.attributes)?;
-                // Step 5, on a connection of its own.
-                self.bind_as_user(target, &identity.dn, password).await?;
+                // Step 5, on a connection of its own — only when there is a
+                // password to check (a lookup has none).
+                if let Some(password) = password {
+                    self.bind_as_user(target, &identity.dn, password).await?;
+                }
                 Ok(identity)
             }
             Ok(None) => {

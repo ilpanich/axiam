@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::directory::{
-    DirectoryAuthError, DirectoryAuthenticator, DirectoryConfig, DirectoryIdentity,
+    DirectoryAuthError, DirectoryAuthenticator, DirectoryConfig, DirectoryFuture, DirectoryIdentity,
 };
 use axiam_core::repository::DirectoryConfigRepository;
 use rustls::ClientConfig;
@@ -39,6 +39,19 @@ use uuid::Uuid;
 
 use crate::client::{DirectoryClient, DirectoryTarget, transport_is_encrypted};
 use crate::tls::client_config;
+
+/// Why the directory is being asked, which decides what is checked first and
+/// whether a password is bound with.
+#[derive(Clone, Copy)]
+enum Purpose<'a> {
+    /// A sign-in for an account AXIAM holds.
+    SignIn(&'a str),
+    /// A sign-in for a name AXIAM holds no account for; only when the tenant
+    /// has `jit_provisioning` on.
+    Provision(&'a str),
+    /// Find the entry, bind nothing (an administrator linking an account).
+    Lookup,
+}
 
 /// The production [`DirectoryAuthenticator`]: a configuration repository and
 /// the shared [`DirectoryClient`].
@@ -67,11 +80,13 @@ impl<R: DirectoryConfigRepository> RepositoryDirectoryAuthenticator<R> {
         &self,
         tenant_id: Uuid,
         login_name: &str,
-        password: &str,
+        purpose: Purpose<'_>,
     ) -> Result<DirectoryIdentity, DirectoryAuthError> {
         // Before any lookup, as the client also does: the answer to an empty
         // password does not depend on the tenant's configuration.
-        if password.is_empty() {
+        if let Purpose::SignIn(password) | Purpose::Provision(password) = purpose
+            && password.is_empty()
+        {
             return Err(DirectoryAuthError::InvalidCredentials);
         }
         let config = match self.repo.get_by_tenant(tenant_id).await {
@@ -87,6 +102,12 @@ impl<R: DirectoryConfigRepository> RepositoryDirectoryAuthenticator<R> {
                 return Err(DirectoryAuthError::Unavailable);
             }
         };
+        // The provisioning gate (T23.3.3): a tenant that did not ask for
+        // just-in-time provisioning is answered as one with no directory,
+        // before the bind secret is even decrypted, let alone a socket opened.
+        if matches!(purpose, Purpose::Provision(_)) && !config.jit_provisioning {
+            return Err(DirectoryAuthError::NotConfigured);
+        }
         let secret = match self.repo.decrypt_bind_secret(tenant_id).await {
             Ok(secret) => secret,
             Err(AxiamError::NotFound { .. }) => return Err(DirectoryAuthError::NotConfigured),
@@ -103,9 +124,14 @@ impl<R: DirectoryConfigRepository> RepositoryDirectoryAuthenticator<R> {
             }
         };
         let target = self.target(&config)?;
-        self.client
-            .authenticate(&target, &secret, login_name, password)
-            .await
+        match purpose {
+            Purpose::SignIn(password) | Purpose::Provision(password) => {
+                self.client
+                    .authenticate(&target, &secret, login_name, password)
+                    .await
+            }
+            Purpose::Lookup => self.client.lookup(&target, &secret, login_name).await,
+        }
     }
 
     fn target(&self, config: &DirectoryConfig) -> Result<DirectoryTarget, DirectoryAuthError> {
@@ -177,6 +203,23 @@ impl<R: DirectoryConfigRepository> DirectoryAuthenticator for RepositoryDirector
                 + 'a,
         >,
     > {
-        Box::pin(self.run(tenant_id, login_name, password))
+        Box::pin(self.run(tenant_id, login_name, Purpose::SignIn(password)))
+    }
+
+    fn authenticate_for_provisioning<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        login_name: &'a str,
+        password: &'a str,
+    ) -> DirectoryFuture<'a, Result<DirectoryIdentity, DirectoryAuthError>> {
+        Box::pin(self.run(tenant_id, login_name, Purpose::Provision(password)))
+    }
+
+    fn lookup_entry<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        login_name: &'a str,
+    ) -> DirectoryFuture<'a, Result<DirectoryIdentity, DirectoryAuthError>> {
+        Box::pin(self.run(tenant_id, login_name, Purpose::Lookup))
     }
 }

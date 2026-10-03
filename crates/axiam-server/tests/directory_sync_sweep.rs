@@ -37,11 +37,11 @@ use surrealdb::engine::local::{Db, Mem};
 use tokio::sync::watch;
 use uuid::Uuid;
 
-fn key() -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
-    key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
-    key
+fn encryption_material() -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    bytes
 }
 
 struct Fixture {
@@ -55,7 +55,7 @@ async fn fixture() -> Fixture {
     db.use_ns("test").use_db("test").await.expect("use ns/db");
     run_migrations(&db).await.expect("migrations");
 
-    let config = SurrealDirectoryConfigRepository::new(db.clone(), Some(key()));
+    let config = SurrealDirectoryConfigRepository::new(db.clone(), Some(encryption_material()));
     let authenticator = Arc::new(RepositoryDirectoryAuthenticator::with_client(
         config.clone(),
         Arc::new(DirectoryClient::new(ClientLimits {

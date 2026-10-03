@@ -131,6 +131,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule and plan row M7's end-to-end half, and found no other defect. Amends
   T-237 and T-238.
 
+- **An OAuth2 grant stops minting tokens once its account is suspended (F4
+  P23W1-01).** Locking or deactivating a user through `PUT
+  /api/v1/users/{id}`, or a `PendingVerification` account outliving its grace
+  period, revokes no credential; the session refresh path and, since T23.1.3,
+  `/oauth2/authorize` re-read the account instead. The OAuth2 `refresh_token`
+  grant did not, and every rotation stamps a fresh `expires_at`, so a relying
+  party holding a suspended user's refresh token kept minting access and ID
+  tokens for as long as it kept refreshing. The `refresh_token` and
+  `authorization_code` grants now re-read the account and apply the sign-in rule
+  through one function (`axiam_auth::service::account_may_act`, which
+  `AuthService::check_session_holder` now calls too). A refused account is
+  `400 invalid_grant`; nothing is minted, rotated or revoked, so reactivating
+  the account restores the grant. Found by the Phase 23 W1 security review as
+  a sibling the T23.1.3 fix missed. Amends T-39 and T-237.
+
 ## [1.0.0-beta17] - 2026-09-25
 
 ### Added

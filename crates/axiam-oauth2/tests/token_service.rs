@@ -623,18 +623,41 @@ impl RefreshTokenRepository for MockRefreshRepo {
 #[derive(Clone)]
 struct MockUserRepo;
 
+/// F4 P23W1-01 — user ids for which [`MockUserRepo`] answers an account that
+/// may no longer sign in, or no account at all. Every other id is an `Active`
+/// account, which is what every test written before the review expects.
+const LOCKED_USER: Uuid = Uuid::from_u128(0x0f4_0001);
+const INACTIVE_USER: Uuid = Uuid::from_u128(0x0f4_0002);
+const DELETED_USER: Uuid = Uuid::from_u128(0x0f4_0003);
+const LAPSED_PENDING_USER: Uuid = Uuid::from_u128(0x0f4_0004);
+const REMOVED_USER: Uuid = Uuid::from_u128(0x0f4_0005);
+
 impl UserRepository for MockUserRepo {
     async fn create(&self, _i: CreateUser) -> AxiamResult<User> {
         unimplemented!()
     }
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<User> {
+        let status = match id {
+            LOCKED_USER => UserStatus::Locked,
+            INACTIVE_USER => UserStatus::Inactive,
+            DELETED_USER => UserStatus::Deleted,
+            LAPSED_PENDING_USER => UserStatus::PendingVerification,
+            REMOVED_USER => return Err(not_found()),
+            _ => UserStatus::Active,
+        };
+        // A pending account created long before the grace period's end.
+        let created_at = if id == LAPSED_PENDING_USER {
+            Utc::now() - chrono::Duration::days(30)
+        } else {
+            Utc::now()
+        };
         Ok(User {
             id,
             tenant_id,
             username: "alice".into(),
             email: "alice@example.com".into(),
             password_hash: "x".into(),
-            status: UserStatus::Active,
+            status,
             mfa_enabled: false,
             mfa_secret: None,
             totp_last_used_step: None,
@@ -648,7 +671,7 @@ impl UserRepository for MockUserRepo {
             phone_number_verified_at: None,
             address: None,
             metadata: serde_json::Value::Null,
-            created_at: Utc::now(),
+            created_at,
             updated_at: Utc::now(),
         })
     }
@@ -4409,5 +4432,102 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
     let claims = decode_claims(&resp.id_token.expect("an ID token"));
     for absent in ["auth_time", "acr", "amr"] {
         assert!(claims.get(absent).is_none(), "{absent} in {claims}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F4 P23W1-01 — a user-bound grant re-reads the account it acts for
+// ---------------------------------------------------------------------------
+//
+// An administrator who locks or deactivates a user revokes no credential: the
+// session refresh path and (since T23.1.3) `/oauth2/authorize` re-read the
+// account instead. The OAuth2 refresh grant did not, and each rotation stamps
+// a fresh `expires_at`, so a relying party holding a suspended user's refresh
+// token kept minting access and ID tokens for as long as it kept refreshing.
+
+/// Every account state the sign-in rule refuses, with the id the mock answers
+/// it for.
+const REFUSED_ACCOUNTS: [(&str, Uuid); 5] = [
+    ("locked", LOCKED_USER),
+    ("inactive", INACTIVE_USER),
+    ("deleted", DELETED_USER),
+    (
+        "pending verification past its grace period",
+        LAPSED_PENDING_USER,
+    ),
+    ("removed", REMOVED_USER),
+];
+
+#[tokio::test]
+async fn p23w1_01_a_refresh_grant_for_an_account_that_may_no_longer_sign_in_mints_nothing() {
+    for (label, user_id) in REFUSED_ACCOUNTS {
+        let refresh =
+            MockRefreshRepo::new().with_get(make_refresh(Some(user_id), "client-1", &["openid"]));
+        let created = refresh.created.clone();
+        let svc = build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .expect_err(label);
+        assert_eq!(err.error_code(), "invalid_grant", "{label}: {err}");
+        assert!(
+            created.lock().unwrap().is_empty(),
+            "{label}: no successor refresh token may be written"
+        );
+    }
+}
+
+/// The other side of the line: an active account, and a grant with no user
+/// behind it at all, refresh exactly as before.
+#[tokio::test]
+async fn p23w1_01_a_refresh_grant_for_an_active_account_or_no_account_still_rotates() {
+    for user_id in [Some(Uuid::new_v4()), None] {
+        let refresh =
+            MockRefreshRepo::new().with_get(make_refresh(user_id, "client-1", &["openid"]));
+        let svc = build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let resp = svc
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .unwrap();
+        assert!(resp.refresh_token.is_some(), "{user_id:?}");
+    }
+}
+
+/// The code is redeemed within a minute of issuance, but it can be issued to
+/// an access token (the bearer and `axiam_access` path at `/oauth2/authorize`
+/// does not re-read the account), and redeeming it is what turns a 15-minute
+/// credential into a long-lived refresh token. Refused there too.
+#[tokio::test]
+async fn p23w1_01_a_code_for_an_account_that_may_no_longer_sign_in_mints_nothing() {
+    for (label, user_id) in REFUSED_ACCOUNTS {
+        let mut code = make_auth_code(&["profile"], None);
+        code.user_id = user_id;
+        let refresh = MockRefreshRepo::new();
+        let created = refresh.created.clone();
+        let svc = build(
+            ClientOutcome::Found(make_client(
+                &["authorization_code", "refresh_token"],
+                &["profile"],
+            )),
+            MockCodeRepo::ok(code),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+            .await
+            .expect_err(label);
+        assert_eq!(err.error_code(), "invalid_grant", "{label}: {err}");
+        assert!(created.lock().unwrap().is_empty(), "{label}");
     }
 }

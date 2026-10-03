@@ -921,6 +921,84 @@ async fn refresh_token_grant() {
     );
 }
 
+/// **F4 P23W1-01.** Locking a user revokes no credential, so the refresh grant
+/// re-reads the account, as the session refresh path does: a suspended
+/// account's refresh token mints nothing, is not consumed by the refusal, and
+/// works again once the account is reactivated. Before the review it kept
+/// rotating — each rotation stamping a fresh `expires_at` — for as long as the
+/// relying party kept refreshing.
+#[actix_rt::test]
+async fn p23w1_01_a_suspended_accounts_refresh_token_mints_nothing_until_reactivated() {
+    use axiam_core::models::user::{UpdateUser, UserStatus};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let refresh_token = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let set_status = |status: UserStatus| {
+        let repo = SurrealUserRepository::new(db.clone());
+        async move {
+            repo.update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let refresh = |token: String| {
+        let form = format!(
+            "grant_type=refresh_token&refresh_token={token}\
+             &client_id={client_id}&client_secret={client_secret}"
+        );
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+            .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+            .set_payload(form)
+            .to_request()
+    };
+
+    for status in [UserStatus::Locked, UserStatus::Inactive] {
+        set_status(status.clone()).await;
+        let resp = test::call_service(&app, refresh(refresh_token.clone())).await;
+        assert_eq!(resp.status().as_u16(), 400, "{status:?}");
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"], "invalid_grant", "{status:?}: {body}");
+        assert!(body.get("access_token").is_none(), "{status:?}");
+    }
+
+    set_status(UserStatus::Active).await;
+    let resp = test::call_service(&app, refresh(refresh_token.clone())).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "the refusal consumed nothing: a reactivated account's grant still works"
+    );
+}
+
 /// **T-254, invariant 4.** After rotation, a `standard` client's old refresh
 /// token is gone: a second presentation is refused, and the refusal says the
 /// token was consumed.

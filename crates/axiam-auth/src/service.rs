@@ -1352,11 +1352,7 @@ impl<
     ///
     /// The [`AuthError`] a sign-in by this user would be refused with.
     pub fn check_session_holder(&self, user: &User) -> Result<(), AuthError> {
-        Self::check_user_status(
-            &user.status,
-            user.created_at,
-            self.config.email_verification_grace_period_hours,
-        )
+        account_may_act(user, self.config.email_verification_grace_period_hours)
     }
 
     // -------------------------------------------------------------------
@@ -1375,26 +1371,7 @@ impl<
         created_at: chrono::DateTime<Utc>,
         grace_period_hours: u32,
     ) -> Result<(), AuthError> {
-        match status {
-            UserStatus::Active => Ok(()),
-            UserStatus::Locked => Err(AuthError::AccountLocked),
-            UserStatus::Inactive => Err(AuthError::AccountInactive),
-            // Anonymized users cannot log in — treat as inactive.
-            UserStatus::Anonymized => Err(AuthError::AccountInactive),
-            // Administratively deleted. Deliberately the same error as
-            // `Inactive`: whether an account was suspended or removed is not
-            // something an unauthenticated caller gets to learn.
-            UserStatus::Deleted => Err(AuthError::AccountInactive),
-            UserStatus::PendingVerification => {
-                if grace_period_hours > 0 {
-                    let grace_end = created_at + Duration::hours(grace_period_hours as i64);
-                    if Utc::now() <= grace_end {
-                        return Ok(());
-                    }
-                }
-                Err(AuthError::AccountPendingVerification)
-            }
-        }
+        account_status_permits(status, created_at, grace_period_hours)
     }
 
     /// Create a session and issue access + refresh tokens.
@@ -1659,5 +1636,54 @@ impl<
             )
             .await?;
         Ok(())
+    }
+}
+
+/// May an already-issued credential still act for `user`? (F4 P23W1-01)
+///
+/// The account-status half of the sign-in rule — the statuses and the
+/// email-verification grace period [`AuthService::check_session_holder`]
+/// applies — as a free function, for the places outside `AuthService` that
+/// turn a long-lived credential back into a principal: the OAuth2
+/// `authorization_code` and `refresh_token` grants in `axiam-oauth2`. An
+/// account status change revokes no credential (only deletion, SCIM
+/// deprovisioning and a credential reset do), so every such place must ask
+/// this question itself; one function answers it everywhere, so no two of
+/// them can disagree about who may act.
+///
+/// `grace_period_hours` is `AuthConfig::email_verification_grace_period_hours`.
+///
+/// # Errors
+///
+/// The [`AuthError`] a sign-in by this user would be refused with.
+pub fn account_may_act(user: &User, grace_period_hours: u32) -> Result<(), AuthError> {
+    account_status_permits(&user.status, user.created_at, grace_period_hours)
+}
+
+/// The status rule itself; see `AuthService::check_user_status`.
+fn account_status_permits(
+    status: &UserStatus,
+    created_at: chrono::DateTime<Utc>,
+    grace_period_hours: u32,
+) -> Result<(), AuthError> {
+    match status {
+        UserStatus::Active => Ok(()),
+        UserStatus::Locked => Err(AuthError::AccountLocked),
+        UserStatus::Inactive => Err(AuthError::AccountInactive),
+        // Anonymized users cannot log in — treat as inactive.
+        UserStatus::Anonymized => Err(AuthError::AccountInactive),
+        // Administratively deleted. Deliberately the same error as
+        // `Inactive`: whether an account was suspended or removed is not
+        // something an unauthenticated caller gets to learn.
+        UserStatus::Deleted => Err(AuthError::AccountInactive),
+        UserStatus::PendingVerification => {
+            if grace_period_hours > 0 {
+                let grace_end = created_at + Duration::hours(grace_period_hours as i64);
+                if Utc::now() <= grace_end {
+                    return Ok(());
+                }
+            }
+            Err(AuthError::AccountPendingVerification)
+        }
     }
 }

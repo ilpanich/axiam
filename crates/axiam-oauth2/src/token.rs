@@ -693,6 +693,53 @@ where
         }
     }
 
+    /// Refuse a user-bound grant whose account may no longer act (F4 P23W1-01).
+    ///
+    /// Locking, deactivating or soft-deleting a user, and a `PendingVerification`
+    /// account outliving its grace period, revoke no credential: the session
+    /// refresh path and `/oauth2/authorize` (T23.1.3) re-read the account
+    /// instead. The two OAuth2 grants that mint tokens *for a user* are the
+    /// other places a long-lived credential turns back into a principal — a
+    /// refresh token stamps a fresh `expires_at` at every rotation, so without
+    /// this read a relying party holding a suspended user's grant kept minting
+    /// access and ID tokens for as long as it kept refreshing. The rule is the
+    /// sign-in rule, through the same function (`axiam_auth::service::
+    /// account_may_act`), so the three places cannot disagree.
+    ///
+    /// The refusal is `invalid_grant` whatever the reason — RFC 6749 §5.2's
+    /// "revoked" — and a removed account reads as one. Nothing is revoked:
+    /// reactivating the account restores the grant, as it restores the session.
+    /// A read that fails for any other reason is a server error, never a grant.
+    async fn ensure_account_may_act(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<(), OAuth2Error> {
+        let refused = || {
+            OAuth2Error::InvalidGrant(
+                "the account this grant was issued for can no longer sign in".into(),
+            )
+        };
+        let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
+            Ok(user) => user,
+            Err(AxiamError::NotFound { .. }) => return Err(refused()),
+            Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
+        };
+        axiam_auth::service::account_may_act(
+            &user,
+            self.auth_config.email_verification_grace_period_hours,
+        )
+        .map_err(|reason| {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                reason = %reason,
+                "refusing an OAuth2 grant: its account may no longer sign in"
+            );
+            refused()
+        })
+    }
+
     /// The evidence a refreshed ID token carries (W4, plan §4.3; D-9).
     ///
     /// Read from the **snapshot on the refresh token**, which the code exchange
@@ -1866,6 +1913,10 @@ where
             ));
         }
 
+        // F4 P23W1-01 — after the code is spent, so a refused account burns it.
+        self.ensure_account_may_act(tenant_id, auth_code.user_id)
+            .await?;
+
         // Resolve org_id from tenant
         let tenant = self
             .tenant_repo
@@ -2450,6 +2501,12 @@ where
                     "refresh token already consumed".into(),
                 ));
             }
+        }
+
+        // F4 P23W1-01 — the account behind the grant, re-read before anything
+        // is minted or rotated, exactly as the session refresh path does.
+        if let Some(user_id) = stored.user_id {
+            self.ensure_account_may_act(tenant_id, user_id).await?;
         }
 
         // Resolve org_id from tenant

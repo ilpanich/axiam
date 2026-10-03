@@ -46,6 +46,7 @@
 pub mod authenticator;
 pub mod client;
 pub mod config;
+pub mod dn;
 pub mod escape;
 pub mod tls;
 

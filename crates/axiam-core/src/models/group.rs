@@ -32,3 +32,18 @@ pub struct UpdateGroup {
     pub description: Option<String>,
     pub metadata: Option<serde_json::Value>,
 }
+
+/// How [`GroupRepository::add_directory_member`] left a (user, group) pair.
+///
+/// [`GroupRepository::add_directory_member`]: crate::repository::GroupRepository::add_directory_member
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryMembershipWrite {
+    /// No edge existed; a directory-sourced one was written.
+    Created,
+    /// A directory-sourced edge already existed; nothing was written.
+    AlreadyDirectory,
+    /// An edge an administrator made by hand already exists. It was **not**
+    /// changed and no second edge was written: the membership stays manual,
+    /// and the directory will never remove it.
+    AlreadyManual,
+}

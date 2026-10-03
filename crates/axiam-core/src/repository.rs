@@ -27,7 +27,7 @@ use crate::models::{
         AccountDeletion, Consent, CreateAccountDeletion, CreateConsent, CreateErasureProof,
         CreateExportJob, ErasureProof, ExportJob,
     },
-    group::{CreateGroup, Group, UpdateGroup},
+    group::{CreateGroup, DirectoryMembershipWrite, Group, UpdateGroup},
     mds::{MdsBlobMeta, MdsEntry},
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
@@ -1145,6 +1145,63 @@ pub trait GroupRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Group>>> + Send;
+
+    /// Add a user to a group on the directory mapping's behalf (G-3, T23.3.4,
+    /// D-30): the `member_of` edge is written with `source = directory`.
+    ///
+    /// **The mapping owns only its own edges.** When an edge for the pair
+    /// already exists, nothing is written: a manual one is reported as
+    /// [`DirectoryMembershipWrite::AlreadyManual`] and stays manual, so the
+    /// directory can never later remove it. The unique `(in, out)` index decides
+    /// a race between two writers.
+    ///
+    /// `NotFound` when the user or the group is not in `tenant_id`.
+    /// Defaulted to a refusal, like the service-account methods, so a test
+    /// double cannot silently accept a membership it never wrote.
+    fn add_directory_member(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<DirectoryMembershipWrite>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "add_directory_member is not implemented by this repository".into(),
+            ))
+        }
+    }
+
+    /// Remove a user's **directory-sourced** membership of a group (T23.3.4).
+    /// A manual edge for the same pair is left alone. Returns whether an edge
+    /// was removed. Defaulted to a refusal.
+    fn remove_directory_member(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "remove_directory_member is not implemented by this repository".into(),
+            ))
+        }
+    }
+
+    /// The groups of `tenant_id` the user holds a **directory-sourced**
+    /// membership of — the only memberships the mapping may remove. An edge
+    /// without a `source` reads as manual and is not listed. Defaulted to a
+    /// refusal.
+    fn get_user_directory_group_ids(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "get_user_directory_group_ids is not implemented by this repository".into(),
+            ))
+        }
+    }
 
     /// Add a **service account** to a group (creates a `member_of` edge from
     /// the `service_account` record).

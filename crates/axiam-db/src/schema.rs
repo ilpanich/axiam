@@ -407,6 +407,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "saml_pending_authn_request",
         sql: SCHEMA_V73,
     },
+    Migration {
+        version: 74,
+        name: "directory_group_mapping",
+        sql: SCHEMA_V74,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3958,9 +3963,117 @@ DEFINE INDEX IF NOT EXISTS idx_saml_authn_request_expires ON TABLE saml_authn_re
     COLUMNS expires_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v74 — T23.3.4 / G-3 / D-30: directory group mapping
+// -----------------------------------------------------------------------
+//
+// Additive DDL only: two new columns, nothing backfilled.
+//
+// **`directory_config.group_mappings`** is the tenant's mapping table, a list
+// of `{ directory_group_dn, group_id }` objects stored in the one row the
+// tenant's directory already has (D-30). It is **optional with an empty
+// default**, so a row written before this migration reads as *no mapping* and
+// a sign-in then maps nothing: there is no shape of stored data that grants a
+// membership by accident. At most 500 rows, a datastore rule restating the one
+// `axiam-directory::config::validate` and the repository enforce. That every
+// `group_id` is a group **of the same tenant** is not expressible here (it is
+// a lookup in another table) and is checked by the repository's write path,
+// before the row is touched.
+//
+// **`member_of.source`** marks who owns a membership edge. `'directory'` is
+// written by the directory mapping and by nothing else; **an edge without the
+// field reads as manual**, which is the answer for every edge that exists
+// today and for every edge `GroupRepository::add_member` writes. The mapping
+// removes only edges that say `'directory'`, so a membership an administrator
+// made by hand can never be taken away by the directory. The assertion admits
+// those two states and no third, so a typo cannot create an owner nobody
+// handles.
+const SCHEMA_V74: &str = "\
+DEFINE FIELD IF NOT EXISTS group_mappings ON TABLE directory_config \
+    TYPE option<array<object>> DEFAULT [] \
+    ASSERT $value = NONE OR array::len($value) <= 500;
+DEFINE FIELD IF NOT EXISTS group_mappings.* ON TABLE directory_config TYPE object;
+DEFINE FIELD IF NOT EXISTS group_mappings.*.directory_group_dn ON TABLE directory_config \
+    TYPE string ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS group_mappings.*.group_id ON TABLE directory_config \
+    TYPE string ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS source ON TABLE member_of TYPE option<string> \
+    ASSERT $value = NONE OR $value = 'directory';
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.3.4 / D-30 — v74 adds the mapping table to the directory row and the
+    /// owner marker to the membership edge, both optional so that every row and
+    /// edge written before it reads as "no mapping" and "manual".
+    #[test]
+    fn v74_adds_the_mapping_table_and_the_membership_owner_additively() {
+        // The table: optional, empty by default, capped at 500, typed members.
+        assert!(SCHEMA_V74.contains(
+            "group_mappings ON TABLE directory_config \
+    TYPE option<array<object>> DEFAULT []"
+        ));
+        assert!(SCHEMA_V74.contains("array::len($value) <= 500"));
+        assert!(
+            SCHEMA_V74.contains("group_mappings.*.directory_group_dn ON TABLE directory_config")
+        );
+        assert!(SCHEMA_V74.contains("group_mappings.*.group_id ON TABLE directory_config"));
+        // The owner marker: absent reads as manual, `directory` is the only
+        // other state the datastore will hold.
+        assert!(SCHEMA_V74.contains("source ON TABLE member_of TYPE option<string>"));
+        assert!(SCHEMA_V74.contains("ASSERT $value = NONE OR $value = 'directory'"));
+        // Nothing is backfilled and nothing older is redefined: a row written
+        // before v74 must read exactly as it did.
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V74.contains(forbidden),
+                "v74 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V74
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE FIELD IF NOT EXISTS"),
+                "v74 statements must be idempotent field definitions"
+            );
+        }
+    }
+
+    /// D-30 — v74 touches only the two tables it is about, and v72 and v73 keep
+    /// the numbers they were given: this wave's migrations are extended by
+    /// nothing older.
+    #[test]
+    fn v74_touches_only_the_directory_row_and_the_membership_edge() {
+        for statement in SCHEMA_V74
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.contains("ON TABLE directory_config")
+                    || statement.contains("ON TABLE member_of"),
+                "v74 defined something outside its two tables: {statement}"
+            );
+        }
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| m.version >= 72)
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                (72, "saml_identity_provider"),
+                (73, "saml_pending_authn_request"),
+                (74, "directory_group_mapping"),
+            ]
+        );
+    }
 
     /// T23.2.3 — v73 adds one table, additively, whose two unique indexes are
     /// the replay guard and the handle, and which stores digests only.
@@ -4667,8 +4780,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&72),
-            "v72 is the newest migration (T23.2.1 — the SAML identity provider's storage; \
+            Some(&74),
+            "v74 is the newest migration (T23.3.4 — directory group mapping: \
+             `directory_config.group_mappings` and `member_of.source`; v73 was T23.2.3's \
+             pending SAML AuthnRequests, v72 was T23.2.1 — the SAML identity provider's storage; \
              v71 was T23.3.2's directory marker `user.directory_external_id`; v70 was T23.3.1's `directory_config` table for \
              the LDAP / Active Directory identity source, v69 was T23.4.1's RFC 7592 \
              registration access token hash on `oauth2_client`, and v68 was X7.2 / D-9's \

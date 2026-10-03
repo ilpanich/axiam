@@ -2,7 +2,7 @@
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
-use axiam_core::models::group::{CreateGroup, Group, UpdateGroup};
+use axiam_core::models::group::{CreateGroup, DirectoryMembershipWrite, Group, UpdateGroup};
 use axiam_core::models::service_account::ServiceAccount;
 use axiam_core::models::user::{User, UserStatus};
 use axiam_core::repository::{GroupRepository, PaginatedResult, Pagination};
@@ -130,6 +130,18 @@ impl MemberRow {
     }
 }
 
+/// The owner marker of a `member_of` edge; absent means manual.
+#[derive(Debug, SurrealValue)]
+struct EdgeSourceRow {
+    source: Option<String>,
+}
+
+/// The group end of a `member_of` edge.
+#[derive(Debug, SurrealValue)]
+struct EdgeGroupRow {
+    group_id: String,
+}
+
 /// SurrealDB implementation of the Group repository.
 #[derive(Clone)]
 pub struct SurrealGroupRepository<C: Connection> {
@@ -140,6 +152,59 @@ impl<C: Connection> SurrealGroupRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
         Self { db }
+    }
+}
+
+impl<C: Connection> SurrealGroupRepository<C> {
+    /// Both endpoints of a user membership exist and belong to `tenant_id`.
+    /// `member_of` carries no flat tenant column, so the guard has to be on the
+    /// nodes. `NotFound` names the entity that is missing.
+    async fn ensure_user_and_group(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        group_id: Uuid,
+    ) -> AxiamResult<()> {
+        let user_id_str = user_id.to_string();
+        let group_id_str = group_id.to_string();
+        let tenant_id_str = tenant_id.to_string();
+
+        let mut check = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM user \
+                 WHERE id = type::record('user', $user_id) \
+                 AND tenant_id = $tenant_id GROUP ALL; \
+                 SELECT count() AS total FROM group \
+                 WHERE id = type::record('group', $group_id) \
+                 AND tenant_id = $tenant_id GROUP ALL;",
+            )
+            .bind(("user_id", user_id_str.clone()))
+            .bind(("group_id", group_id_str.clone()))
+            .bind(("tenant_id", tenant_id_str))
+            .await
+            .map_err(DbError::from)?;
+
+        let user_count: Vec<CountRow> = check.take(0).map_err(DbError::from)?;
+        if user_count.first().map(|r| r.total).unwrap_or(0) == 0 {
+            return Err(DbError::NotFound {
+                entity: "user".into(),
+                id: user_id_str,
+            }
+            .into());
+        }
+
+        let group_count: Vec<CountRow> = check.take(1).map_err(DbError::from)?;
+        if group_count.first().map(|r| r.total).unwrap_or(0) == 0 {
+            return Err(DbError::NotFound {
+                entity: "group".into(),
+                id: group_id_str,
+            }
+            .into());
+        }
+
+        Ok(())
     }
 }
 
@@ -379,43 +444,10 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
     async fn add_member(&self, tenant_id: Uuid, user_id: Uuid, group_id: Uuid) -> AxiamResult<()> {
         let user_id_str = user_id.to_string();
         let group_id_str = group_id.to_string();
-        let tenant_id_str = tenant_id.to_string();
 
         // Verify both user and group belong to the same tenant.
-        let mut check = self
-            .db
-            .current()
-            .query(
-                "SELECT count() AS total FROM user \
-                 WHERE id = type::record('user', $user_id) \
-                 AND tenant_id = $tenant_id GROUP ALL; \
-                 SELECT count() AS total FROM group \
-                 WHERE id = type::record('group', $group_id) \
-                 AND tenant_id = $tenant_id GROUP ALL;",
-            )
-            .bind(("user_id", user_id_str.clone()))
-            .bind(("group_id", group_id_str.clone()))
-            .bind(("tenant_id", tenant_id_str))
-            .await
-            .map_err(DbError::from)?;
-
-        let user_count: Vec<CountRow> = check.take(0).map_err(DbError::from)?;
-        if user_count.first().map(|r| r.total).unwrap_or(0) == 0 {
-            return Err(DbError::NotFound {
-                entity: "user".into(),
-                id: user_id_str,
-            }
-            .into());
-        }
-
-        let group_count: Vec<CountRow> = check.take(1).map_err(DbError::from)?;
-        if group_count.first().map(|r| r.total).unwrap_or(0) == 0 {
-            return Err(DbError::NotFound {
-                entity: "group".into(),
-                id: group_id_str,
-            }
-            .into());
-        }
+        self.ensure_user_and_group(tenant_id, user_id, group_id)
+            .await?;
 
         // Create the membership edge.
         let query = format!("RELATE user:`{user_id_str}` -> member_of -> group:`{group_id_str}`;");
@@ -560,6 +592,114 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         Ok(groups)
+    }
+
+    async fn add_directory_member(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        group_id: Uuid,
+    ) -> AxiamResult<DirectoryMembershipWrite> {
+        self.ensure_user_and_group(tenant_id, user_id, group_id)
+            .await?;
+        let user_id_str = user_id.to_string();
+        let group_id_str = group_id.to_string();
+
+        let result = self
+            .db
+            .current()
+            .query(format!(
+                "RELATE user:`{user_id_str}` -> member_of -> group:`{group_id_str}` \
+                 SET source = 'directory';"
+            ))
+            .await
+            .map_err(DbError::from)?;
+        match result.check() {
+            Ok(_) => Ok(DirectoryMembershipWrite::Created),
+            Err(e) => match classify_write_error(e.to_string(), "group_membership") {
+                // The unique `(in, out)` index decided: an edge is already
+                // there. Whose it is decides what this call reports — and it
+                // is never rewritten, so a manual edge cannot be turned into a
+                // directory one that the next sign-in would remove.
+                DbError::AlreadyExists { .. } => {
+                    let mut owner = self
+                        .db
+                        .current()
+                        .query(
+                            "SELECT source FROM member_of WHERE \
+                             in = type::record('user', $user_id) AND \
+                             out = type::record('group', $group_id)",
+                        )
+                        .bind(("user_id", user_id_str))
+                        .bind(("group_id", group_id_str))
+                        .await
+                        .map_err(DbError::from)?;
+                    let rows: Vec<EdgeSourceRow> = owner.take(0).map_err(DbError::from)?;
+                    Ok(match rows.first().and_then(|r| r.source.as_deref()) {
+                        Some("directory") => DirectoryMembershipWrite::AlreadyDirectory,
+                        _ => DirectoryMembershipWrite::AlreadyManual,
+                    })
+                }
+                other => Err(other.into()),
+            },
+        }
+    }
+
+    async fn remove_directory_member(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        group_id: Uuid,
+    ) -> AxiamResult<bool> {
+        // Same node-tenant guards as `remove_member`, plus the one that makes
+        // this the mapping's method: only an edge that says `directory` goes.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "DELETE member_of WHERE \
+                 in = type::record('user', $user_id) AND \
+                 out = type::record('group', $group_id) AND \
+                 source = 'directory' AND \
+                 in.tenant_id = $tenant_id AND out.tenant_id = $tenant_id \
+                 RETURN BEFORE",
+            )
+            .bind(("user_id", user_id.to_string()))
+            .bind(("group_id", group_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let removed: Vec<EdgeSourceRow> = result.take(0).map_err(DbError::from)?;
+        Ok(!removed.is_empty())
+    }
+
+    async fn get_user_directory_group_ids(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<Vec<Uuid>> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(out) AS group_id FROM member_of \
+                 WHERE in = type::record('user', $user_id) \
+                 AND source = 'directory' \
+                 AND in.tenant_id = $tenant_id AND out.tenant_id = $tenant_id",
+            )
+            .bind(("user_id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<EdgeGroupRow> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| {
+                Uuid::parse_str(&row.group_id)
+                    .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")).into())
+            })
+            .collect()
     }
 
     async fn add_service_account_member(

@@ -75,6 +75,7 @@ fn config_for(server: &TestServer, tenant_id: Uuid) -> DirectoryConfig {
         group_filter: None,
         group_member_attribute: "member".into(),
         group_nesting_depth: 5,
+        group_mappings: vec![],
         sync_interval_secs: 3600,
         jit_provisioning: false,
         trust_anchors_pem: vec![server.ca.pem.clone()],

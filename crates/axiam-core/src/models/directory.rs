@@ -136,6 +136,32 @@ pub struct UserAttributeMap {
     pub external_id: String,
 }
 
+/// Most rows one tenant's group-mapping table may hold (D-30).
+pub const GROUP_MAPPINGS_MAX: usize = 500;
+
+/// One row of the group-mapping table (G-3, T23.3.4, D-30): a directory group,
+/// named by its distinguished name, and the AXIAM group a member of it is put
+/// into.
+///
+/// **The table is the only way a directory group reaches an AXIAM group.**
+/// There is no match by name, no prefix or wildcard, and no AXIAM group is ever
+/// created from a directory one: a directory administrator who names a group
+/// `admins` gains nothing unless a tenant administrator mapped it here.
+///
+/// The DN is stored as the administrator typed it and compared after RFC 4514
+/// normalisation (`axiam_directory::dn`), so `CN=Staff, OU=Groups` and
+/// `cn=staff,ou=groups` are the same row. One DN may map to several AXIAM
+/// groups; the same (DN, group) pair twice is refused as redundant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GroupMapping {
+    /// The directory group's distinguished name.
+    pub directory_group_dn: String,
+    /// The AXIAM group of the same tenant a member of that directory group is
+    /// put into. Checked to exist in the tenant when the configuration is
+    /// written.
+    pub group_id: Uuid,
+}
+
 /// A tenant's directory configuration, as stored and as read back.
 ///
 /// Carries no secret: see the module documentation.
@@ -173,6 +199,10 @@ pub struct DirectoryConfig {
     pub group_member_attribute: String,
     /// How many levels of nested groups are followed, `0..=10`.
     pub group_nesting_depth: u8,
+    /// The group-mapping table (D-30): which directory groups put a user into
+    /// which AXIAM groups. Empty means no directory group maps to anything, and
+    /// a sign-in then removes every directory-sourced membership the user held.
+    pub group_mappings: Vec<GroupMapping>,
     /// Seconds between incremental sync runs.
     pub sync_interval_secs: u64,
     /// Provision an AXIAM user on first successful directory sign-in.
@@ -227,6 +257,9 @@ pub struct NewDirectoryConfig {
     pub group_member_attribute: String,
     /// See [`DirectoryConfig::group_nesting_depth`].
     pub group_nesting_depth: u8,
+    /// See [`DirectoryConfig::group_mappings`]. Every `group_id` must be a
+    /// group of `tenant_id`; the repository's write path checks it.
+    pub group_mappings: Vec<GroupMapping>,
     /// See [`DirectoryConfig::sync_interval_secs`].
     pub sync_interval_secs: u64,
     /// See [`DirectoryConfig::jit_provisioning`].
@@ -258,6 +291,7 @@ impl fmt::Debug for NewDirectoryConfig {
             .field("group_filter", &self.group_filter)
             .field("group_member_attribute", &self.group_member_attribute)
             .field("group_nesting_depth", &self.group_nesting_depth)
+            .field("group_mappings", &self.group_mappings.len())
             .field("sync_interval_secs", &self.sync_interval_secs)
             .field("jit_provisioning", &self.jit_provisioning)
             .field("trust_anchors_pem", &self.trust_anchors_pem.len())
@@ -496,6 +530,74 @@ pub trait DirectoryAuditSink: Send + Sync {
 /// What `AuthService` holds: a shared, type-erased audit sink.
 pub type SharedDirectoryAuditSink = std::sync::Arc<dyn DirectoryAuditSink>;
 
+// ---------------------------------------------------------------------------
+// Group mapping (T23.3.4, D-30)
+// ---------------------------------------------------------------------------
+
+/// What one application of the group-mapping table did to one user.
+///
+/// Identifiers and counts only — it is what the audit row is built from, and
+/// no name, DN or attribute of the person appears in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupMappingOutcome {
+    /// How many directory groups the user belongs to, nesting included. The
+    /// number the hard cap of `1 000` is measured against.
+    pub directory_groups_resolved: usize,
+    /// How many of those matched a row of the mapping table.
+    pub directory_groups_mapped: usize,
+    /// AXIAM groups the user was added to by this application.
+    pub added: Vec<Uuid>,
+    /// AXIAM groups a directory-sourced membership was removed from, because
+    /// the directory no longer backs it.
+    pub removed: Vec<Uuid>,
+    /// Mapped AXIAM groups the user was already a **manual** member of: left
+    /// exactly as they were, no second edge written (D-30).
+    pub left_manual: Vec<Uuid>,
+}
+
+impl GroupMappingOutcome {
+    /// Whether the user's memberships changed at all.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        !self.added.is_empty() || !self.removed.is_empty()
+    }
+}
+
+/// The port the sign-in path applies a directory user's group mapping through
+/// (G-3, T23.3.4, D-30).
+///
+/// Declared here for the reason [`DirectoryAuthenticator`] is: the login path
+/// is `axiam-auth` (layer 1), the LDAP lookup and the mapping live in
+/// `axiam-directory` (layer 3), and the composition root injects one into the
+/// other. The sync job (T23.3.5) calls the same implementation.
+///
+/// # Contract for implementations
+///
+/// * Ask the directory which groups `user_dn` belongs to — nested to the
+///   tenant's `group_nesting_depth`, cycle-safe, at most `1 000` groups — over
+///   the service-bound pooled connection, **never** the user's own bind.
+/// * Map them through the tenant's table and make the user's
+///   **directory-sourced** memberships equal to the result: add what is
+///   missing, remove what is no longer backed. A membership an administrator
+///   made by hand is never added, changed or removed.
+/// * **Fail closed.** A lookup that fails, times out or hits the cap is
+///   `Err(`[`DirectoryAuthError::Unavailable`]`)` and changes **nothing**: the
+///   caller refuses the sign-in rather than keep memberships the directory may
+///   have revoked.
+pub trait DirectoryGroupMapper: Send + Sync {
+    /// Apply the mapping for `user_id`, whose directory entry is `user_dn`
+    /// (the DN the directory returned from the user search).
+    fn apply_for_user<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        user_dn: &'a str,
+    ) -> DirectoryFuture<'a, Result<GroupMappingOutcome, DirectoryAuthError>>;
+}
+
+/// What `AuthService` holds: a shared, type-erased group mapper.
+pub type SharedDirectoryGroupMapper = std::sync::Arc<dyn DirectoryGroupMapper>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +648,7 @@ mod tests {
             group_filter: None,
             group_member_attribute: "member".into(),
             group_nesting_depth: 5,
+            group_mappings: vec![],
             sync_interval_secs: 3600,
             jit_provisioning: true,
             trust_anchors_pem: vec![],

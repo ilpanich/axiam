@@ -95,6 +95,7 @@ fn input(tenant_id: Uuid, secret: Option<&str>) -> NewDirectoryConfig {
         group_filter: Some("(objectClass=group)".into()),
         group_member_attribute: "memberOf".into(),
         group_nesting_depth: 4,
+        group_mappings: vec![],
         sync_interval_secs: 900,
         jit_provisioning: true,
         trust_anchors_pem: vec![

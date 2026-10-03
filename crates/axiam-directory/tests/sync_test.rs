@@ -1094,6 +1094,83 @@ async fn an_incremental_run_deactivates_an_entry_the_directory_disabled() {
     );
 }
 
+/// A timed lockout (ppolicy writes a generalized time after failed binds) is not
+/// a disable, in the full run: an outsider can trigger one by guessing passwords
+/// against the directory, and sync never re-enables.
+#[tokio::test]
+async fn a_temporary_lockout_leaves_the_account_active_in_a_full_run() {
+    let recent = (Utc::now() - Age::minutes(3))
+        .format("%Y%m%d%H%M%SZ")
+        .to_string();
+    let h = build(Setup::open_ldap(vec![
+        alice().with_values("pwdAccountLockedTime", &["20200101000000Z"]),
+        bob().with_values("pwdAccountLockedTime", &[&recent]),
+        person("carol", CAROL_UUID).with_values("pwdAccountLockedTime", &["000001010000Z"]),
+    ]))
+    .await;
+    let alice_id = h.account("alice", ALICE_UUID).await;
+    let bob_id = h.account("bob", BOB_UUID).await;
+    let carol_id = h.account("carol", CAROL_UUID).await;
+    let (alice_session, _) = h.live_session(alice_id).await;
+    let (bob_session, _) = h.live_session(bob_id).await;
+    let alice_before = h.user(alice_id).await;
+    let bob_before = h.user(bob_id).await;
+
+    let report = h.run_one().await;
+    assert_eq!(report.run, RunKind::Full);
+    assert_eq!(report.deactivated_disabled, 1, "only the permanent lock");
+
+    for (id, before, session) in [
+        (alice_id, alice_before, alice_session),
+        (bob_id, bob_before, bob_session),
+    ] {
+        let after = h.user(id).await;
+        assert_eq!(after.status, UserStatus::Active);
+        assert_eq!(after.updated_at, before.updated_at, "not even written");
+        assert!(account_may_act(&after).is_ok());
+        assert!(h.sessions.get_by_id(h.tenant_id, session).await.is_ok());
+        assert!(h.rows_for(AUDIT_ACCOUNT_DEACTIVATED, id).await.is_empty());
+    }
+    assert_eq!(h.status(carol_id).await, UserStatus::Inactive);
+}
+
+/// The same distinction in the incremental run.
+#[tokio::test]
+async fn a_temporary_lockout_leaves_the_account_active_in_an_incremental_run() {
+    let recent = (Utc::now() - Age::minutes(3))
+        .format("%Y%m%d%H%M%SZ")
+        .to_string();
+    let h = build(Setup::open_ldap(vec![
+        alice()
+            .with_values("pwdAccountLockedTime", &["20200101000000Z"])
+            .with_values("modifyTimestamp", &["20261003130000Z"]),
+        bob()
+            .with_values("pwdAccountLockedTime", &[&recent])
+            .with_values("modifyTimestamp", &["20261003130000Z"]),
+        person("carol", CAROL_UUID)
+            .with_values("pwdAccountLockedTime", &["000001010000Z"])
+            .with_values("modifyTimestamp", &["20261003130000Z"]),
+    ]))
+    .await;
+    let alice_id = h.account("alice", ALICE_UUID).await;
+    let bob_id = h.account("bob", BOB_UUID).await;
+    let carol_id = h.account("carol", CAROL_UUID).await;
+    h.resume_from("20261003120000Z", None).await;
+    let alice_before = h.user(alice_id).await;
+    let bob_before = h.user(bob_id).await;
+
+    let report = h.run_one().await;
+    assert_eq!(report.run, RunKind::Incremental);
+    assert_eq!(report.deactivated_disabled, 1, "only the permanent lock");
+    for (id, before) in [(alice_id, alice_before), (bob_id, bob_before)] {
+        let after = h.user(id).await;
+        assert_eq!(after.status, UserStatus::Active);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert!(h.rows_for(AUDIT_ACCOUNT_DEACTIVATED, id).await.is_empty());
+    }
+    assert_eq!(h.status(carol_id).await, UserStatus::Inactive);
+}
+
 /// The bound: what was read is applied (each entry is a positive statement),
 /// the watermark does not move, and the next run is a full one.
 #[tokio::test]

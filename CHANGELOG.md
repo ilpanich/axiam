@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tick, one tenant at a time, only tenants whose directory is enabled) keeps
   directory accounts in step with their directory and **cannot grant anything**.
   A vanished entry or one the directory disabled (`userAccountControl` bit `0x2`
-  on Active Directory, the presence of `pwdAccountLockedTime` on OpenLDAP) sets
+  on Active Directory; on OpenLDAP `pwdAccountLockedTime` equal to ppolicy's
+  permanent-lock value `000001010000Z` — a timed lockout after failed attempts is
+  **not** a disable, since an outsider could trigger it) sets
   the account **`Inactive`** — never `Deleted`, never a hard delete: sessions and
   OAuth2 refresh tokens are revoked through the repositories (so the validation
   cache and revocation feed see it), directory-sourced memberships are removed

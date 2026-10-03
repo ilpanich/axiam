@@ -285,9 +285,12 @@ read-only against the directory and **cannot grant anything**.
   directory mapping gave it are removed (memberships an administrator added by
   hand are kept), and from then on nothing authenticates it — passkeys and the
   browser single sign-on cookie included. *Disabled* means `userAccountControl`
-  bit `0x2` on Active Directory and the **presence** of `pwdAccountLockedTime`
-  (the `ppolicy` overlay) on OpenLDAP; note that `ppolicy` also sets it for a
-  temporary lockout after failed attempts. The row, its directory marker and its
+  bit `0x2` on Active Directory and, on OpenLDAP, `pwdAccountLockedTime` equal to
+  the `ppolicy` overlay's **permanent-lock value** `000001010000Z`. Any other
+  value — a past or future time, which is what a temporary lockout after failed
+  attempts writes — is **not** a disable: someone guessing passwords against the
+  directory could otherwise deactivate accounts permanently, because nothing
+  re-enables them. The row, its directory marker and its
   audit trail stay: sync never hard-deletes and never marks an account
   `Deleted`. Erasure under GDPR remains an explicit administrator action.
 - **Nothing re-enables.** If the directory enables an account again, or an entry

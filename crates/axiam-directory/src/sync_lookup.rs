@@ -49,6 +49,11 @@ use crate::escape::{changed_since_filter, external_id_filter, is_generalized_tim
 /// for an administratively disabled account.
 pub const UAC_ACCOUNT_DISABLED: u64 = 0x2;
 
+/// The value ppolicy writes to `pwdAccountLockedTime` for a **permanent**
+/// (administrative) lock: the generalized time `0000-01-01 00:00:00Z`. Any other
+/// value is a timed lockout.
+pub const PPOLICY_PERMANENT_LOCK: &str = "000001010000Z";
+
 /// The attribute that says a directory has disabled an account: Active
 /// Directory's `userAccountControl`, or OpenLDAP's ppolicy
 /// `pwdAccountLockedTime`.
@@ -66,9 +71,12 @@ pub const fn disabled_attribute(kind: DirectoryKind) -> &'static str {
 ///   is absent or does not parse as a number is **not** a statement that the
 ///   account is disabled — an account is never deactivated on a value that
 ///   could not be read.
-/// * OpenLDAP: `pwdAccountLockedTime` is **present**. (ppolicy writes it for an
-///   administrative lock and for a lockout after failed attempts alike; D-31
-///   takes presence.)
+/// * OpenLDAP: `pwdAccountLockedTime` equals ppolicy's **permanent-lock value**
+///   [`PPOLICY_PERMANENT_LOCK`]. Any other value — a past or a future
+///   generalized time, which is what a lockout after failed attempts writes —
+///   is **not** disabled: an outsider can trigger such a lockout by guessing
+///   passwords against the directory, and because sync never re-enables, reading
+///   it as a disable would let them deactivate accounts permanently (D-31).
 #[must_use]
 pub fn is_disabled(kind: DirectoryKind, values: Option<&Vec<Vec<u8>>>) -> bool {
     match kind {
@@ -77,9 +85,11 @@ pub fn is_disabled(kind: DirectoryKind, values: Option<&Vec<Vec<u8>>>) -> bool {
             .and_then(|raw| std::str::from_utf8(raw).ok())
             .and_then(|text| text.trim().parse::<u64>().ok())
             .is_some_and(|flags| flags & UAC_ACCOUNT_DISABLED != 0),
-        DirectoryKind::OpenLdap => {
-            values.is_some_and(|values| values.iter().any(|v| !v.is_empty()))
-        }
+        DirectoryKind::OpenLdap => values.is_some_and(|values| {
+            values
+                .iter()
+                .any(|v| v.as_slice() == PPOLICY_PERMANENT_LOCK.as_bytes())
+        }),
     }
 }
 
@@ -558,13 +568,17 @@ mod tests {
     }
 
     #[test]
-    fn open_ldap_disabled_is_the_presence_of_the_locked_time() {
+    fn open_ldap_disabled_is_only_the_permanent_lock_value() {
         let ol = DirectoryKind::OpenLdap;
         assert!(!is_disabled(ol, None));
         assert!(!is_disabled(ol, Some(&vec![])));
         assert!(!is_disabled(ol, Some(&values(""))));
         assert!(is_disabled(ol, Some(&values("000001010000Z"))));
-        assert!(is_disabled(ol, Some(&values("20261003120000Z"))));
+        // A timed lockout, past or future, is not a disable.
+        assert!(!is_disabled(ol, Some(&values("20200101000000Z"))));
+        assert!(!is_disabled(ol, Some(&values("20991231235959Z"))));
+        assert!(!is_disabled(ol, Some(&values("000001010000"))));
+        assert!(!is_disabled(ol, Some(&values("000001010001Z"))));
     }
 
     #[test]

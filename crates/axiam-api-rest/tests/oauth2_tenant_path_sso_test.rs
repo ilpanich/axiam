@@ -44,8 +44,8 @@ use axiam_core::repository::{
     OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealOrganizationRepository, SurrealPushedAuthRequestRepository, SurrealSettingsRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealOrganizationRepository, SurrealPushedAuthRequestRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -155,8 +155,16 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     (db, org.id, tenant_id, user_id)
 }
 
+/// The app, with per-tenant issuer paths on and the tenant-scope resolver the
+/// production server registers — what makes `X-Axiam-Tenant` work for an
+/// organization-level principal. No session validator: the admin tokens these
+/// tests register clients with name no session row, as in
+/// `oauth2_login_hop_test.rs`.
 macro_rules! test_app {
-    ($db:expr, $auth:expr) => {{
+    ($db:expr, $auth:expr) => {
+        test_app!($db, $auth, RateLimitConfig::default())
+    };
+    ($db:expr, $auth:expr, $limits:expr) => {{
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
@@ -165,12 +173,16 @@ macro_rules! test_app {
                     $auth.clone(),
                 )))
                 .app_data(web::Data::new(
+                    Arc::new(SurrealTenantRepository::new($db.clone()))
+                        as Arc<dyn axiam_api_rest::TenantScopeResolver>,
+                ))
+                .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
                 .configure(|cfg| {
                     register_api_v1_routes_with::<TestDb>(
                         cfg,
-                        &RateLimitConfig::default(),
+                        &$limits,
                         RouteOptions {
                             tenant_issuer_paths: true,
                             ..RouteOptions::default()
@@ -1309,4 +1321,633 @@ async fn d11_an_interaction_hop_on_the_tenant_path_returns_to_the_tenant_path() 
         400,
         "the return leg must not be refused as a second tenant selector"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 3. Clearing — logout, end_session, revocation, and P23W1-10
+// ---------------------------------------------------------------------------
+
+/// A completed sign-in: the OP value, the API cookies and the session id.
+struct SignedIn {
+    op: String,
+    access: String,
+    csrf: String,
+    session_id: Uuid,
+}
+
+async fn sign_in_full(app: &impl TestApp, org_id: Uuid, tenant_id: Uuid) -> SignedIn {
+    let resp =
+        test::call_service(app, login_request(org_id, tenant_id, "alice").to_request()).await;
+    assert_eq!(resp.status().as_u16(), 200, "login must succeed");
+    let value = |name: &str| {
+        resp.response()
+            .cookies()
+            .find(|c| c.name() == name)
+            .map(|c| c.value().to_owned())
+            .unwrap_or_else(|| panic!("the login must set {name}"))
+    };
+    let (op, access, csrf) = (
+        value("axiam_op_session"),
+        value("axiam_access"),
+        value("axiam_csrf"),
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    SignedIn {
+        op,
+        access,
+        csrf,
+        session_id: Uuid::parse_str(body["session_id"].as_str().expect("session_id")).unwrap(),
+    }
+}
+
+async fn session_is_live(db: &Surreal<TestDb>, tenant_id: Uuid, session_id: Uuid) -> bool {
+    use axiam_core::repository::SessionRepository;
+    SurrealSessionRepository::new(db.clone())
+        .get_by_id(tenant_id, session_id)
+        .await
+        .is_ok()
+}
+
+/// Assert `resp` clears **both** OP copies for `tenant_id`, each removal
+/// mirroring its setter: empty value, `Max-Age=0`, `HttpOnly`, `Secure`,
+/// `SameSite=Lax`, at the copy's own path.
+fn assert_clears_both_copies(resp: &actix_web::dev::ServiceResponse, tenant_id: Uuid, label: &str) {
+    let removals = op_cookies(resp);
+    assert_eq!(
+        op_paths(resp),
+        vec!["/oauth2/authorize".to_owned(), tenant_path(tenant_id)],
+        "{label}: one removal per copy the sign-in minted"
+    );
+    for c in &removals {
+        let path = c.path().unwrap_or_default();
+        assert_eq!(c.value(), "", "{label} {path}: an empty value");
+        assert_eq!(
+            c.max_age(),
+            Some(Duration::seconds(0)),
+            "{label} {path}: Max-Age=0"
+        );
+        assert!(c.http_only().unwrap_or(false), "{label} {path}: HttpOnly");
+        assert!(c.secure().unwrap_or(false), "{label} {path}: Secure");
+        assert_eq!(
+            c.same_site(),
+            Some(SameSite::Lax),
+            "{label} {path}: SameSite=Lax"
+        );
+    }
+    // The raw header carries the same attributes the parser saw.
+    let headers: Vec<&str> = resp
+        .headers()
+        .get_all("Set-Cookie")
+        .filter_map(|v| v.to_str().ok())
+        .filter(|h| h.starts_with("axiam_op_session="))
+        .collect();
+    for h in headers {
+        for attribute in ["HttpOnly", "Secure", "SameSite=Lax", "Max-Age=0"] {
+            assert!(h.contains(attribute), "{label}: removal lacks {attribute}");
+        }
+    }
+}
+
+/// **Logout clears both copies, and the value then names nothing.** The
+/// removal `Set-Cookie`s are asserted attribute by attribute; the tenant value
+/// presented again afterwards — as a browser that ignored the removal would —
+/// is stale on the tenant path and on the bare one.
+#[actix_rt::test]
+async fn d11_logout_clears_both_copies_and_the_tenant_value_then_resolves_to_nothing() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, plain_client(true)).await;
+    let s = sign_in_full(&app, org_id, tenant_id).await;
+
+    let live = tenant_authorize(&app, tenant_id, &tenant_query(&client_id), Some(&op(&s.op))).await;
+    assert!(is_code_for_rp(&location(&live)), "control");
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/logout")
+        .insert_header((
+            "Cookie",
+            format!("axiam_access={}; axiam_csrf={}", s.access, s.csrf),
+        ))
+        .insert_header(("X-CSRF-Token", s.csrf.clone()))
+        .to_request();
+    let out = test::call_service(&app, req).await;
+    assert_eq!(out.status().as_u16(), 204);
+    assert_clears_both_copies(&out, tenant_id, "logout");
+    assert!(
+        !session_is_live(&db, tenant_id, s.session_id).await,
+        "the row is gone"
+    );
+
+    let resp = tenant_authorize(&app, tenant_id, &tenant_query(&client_id), Some(&op(&s.op))).await;
+    let loc = location(&resp);
+    assert!(
+        is_login_hop(&loc) && loc.contains("&reauth=1"),
+        "tenant path: {loc}"
+    );
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?{}&tenant_id={tenant_id}",
+            tenant_query(&client_id)
+        ))
+        .insert_header(("Cookie", op(&s.op)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        is_login_hop(&location(&resp)),
+        "bare path: {}",
+        location(&resp)
+    );
+}
+
+/// **The defect the clearing work found.** An organization-level principal
+/// that has switched to a child tenant — the admin UI sends `X-Axiam-Tenant` on
+/// every request, logout included — logged out in the *acted-upon* tenant: the
+/// tenant-scoped `DELETE` matched no row, the answer was `204`, and the session
+/// stayed live with every OP copy naming it. Logout now revokes, and clears,
+/// in the principal's own tenant, where the session and its cookies live.
+#[actix_rt::test]
+async fn d11_logout_by_an_org_level_principal_acting_on_a_child_tenant_ends_its_session() {
+    let (db, org_id, child_tenant, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let org_tenant = SurrealTenantRepository::new(db.clone())
+        .create(axiam_core::models::tenant::CreateTenant::organization_scope(org_id))
+        .await
+        .unwrap()
+        .id;
+    let admin = create_user(&db, org_tenant, "org-admin").await;
+    let _ = admin;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/login")
+            .set_json(serde_json::json!({
+                "org_id": org_id,
+                "username_or_email": "org-admin",
+                "password": PASSWORD,
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "an organization-scope sign-in");
+    assert_eq!(
+        op_paths(&resp),
+        vec!["/oauth2/authorize".to_owned(), tenant_path(org_tenant)],
+        "the copies are minted for the session's own (organization) tenant"
+    );
+    let cookie = |name: &str| {
+        resp.response()
+            .cookies()
+            .find(|c| c.name() == name)
+            .map(|c| c.value().to_owned())
+            .unwrap()
+    };
+    let (access, csrf) = (cookie("axiam_access"), cookie("axiam_csrf"));
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let session_id = Uuid::parse_str(body["session_id"].as_str().unwrap()).unwrap();
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/logout")
+        .insert_header((
+            "Cookie",
+            format!("axiam_access={access}; axiam_csrf={csrf}"),
+        ))
+        .insert_header(("X-CSRF-Token", csrf.clone()))
+        .insert_header((
+            axiam_api_rest::ACTIVE_TENANT_HEADER,
+            child_tenant.to_string(),
+        ))
+        .to_request();
+    let out = test::call_service(&app, req).await;
+    assert_eq!(out.status().as_u16(), 204);
+    assert!(
+        !session_is_live(&db, org_tenant, session_id).await,
+        "the session must end although the request acted on a child tenant"
+    );
+    assert_clears_both_copies(&out, org_tenant, "org-level logout");
+}
+
+/// An ID token naming `session_id`, as the relying party holds it.
+fn id_token_hint(auth: &AuthConfig, user_id: Uuid, client_id: &str, session_id: Uuid) -> String {
+    axiam_auth::token::issue_id_token(
+        user_id,
+        client_id,
+        None,
+        None,
+        &["openid".to_string()],
+        auth,
+        Some(session_id),
+        &axiam_auth::token::IdTokenEvidence::NONE,
+    )
+    .unwrap()
+}
+
+/// **`end_session` with a hint, bare and per-tenant, clears both copies** —
+/// on the allow-listed redirect and on AXIAM's own page — and ends the session.
+#[actix_rt::test]
+async fn d11_end_session_on_the_bare_and_the_tenant_path_clears_both_copies() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, plain_client(true)).await;
+
+    for (label, base) in [
+        (
+            "bare",
+            format!("/oauth2/end_session?tenant_id={tenant_id}&"),
+        ),
+        ("tenant", format!("/t/{tenant_id}/oauth2/end_session?")),
+    ] {
+        for (arm, extra, expected) in [
+            (
+                "redirect",
+                format!("&post_logout_redirect_uri={POST_LOGOUT_URI}&state=st"),
+                302,
+            ),
+            ("page", String::new(), 200),
+        ] {
+            let s = sign_in_full(&app, org_id, tenant_id).await;
+            let hint = id_token_hint(&auth, user_id, &client_id, s.session_id);
+            let req = test::TestRequest::get()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&format!("{base}id_token_hint={hint}{extra}"))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let case = format!("{label} end_session, {arm}");
+            assert_eq!(resp.status().as_u16(), expected, "{case}");
+            if expected == 302 {
+                assert!(location(&resp).starts_with(POST_LOGOUT_URI), "{case}");
+            }
+            assert_clears_both_copies(&resp, tenant_id, &case);
+            assert!(
+                !session_is_live(&db, tenant_id, s.session_id).await,
+                "{case}"
+            );
+        }
+    }
+}
+
+/// **P23W1-10, closed.** `end_session` without an `id_token_hint` used to clear
+/// the OP cookie it could not read and leave the session row live. It now
+/// bounces to the `/logout` sub-path of the authorization endpoint the request
+/// came through — bare or per-tenant — which receives the copy scoped there,
+/// revokes the row it names, clears both copies and continues to the
+/// allow-listed `post_logout_redirect_uri` with the relying party's `state`.
+#[actix_rt::test]
+async fn p23w1_10_end_session_without_a_hint_revokes_the_session_the_op_cookie_names() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, plain_client(true)).await;
+    let continuation = format!(
+        "client_id={client_id}&post_logout_redirect_uri={}&state=rp-state",
+        urlencoding_encode(POST_LOGOUT_URI)
+    );
+
+    for (label, end_session, hop_path) in [
+        (
+            "bare",
+            format!("/oauth2/end_session?tenant_id={tenant_id}&{continuation}"),
+            "/oauth2/authorize/logout".to_owned(),
+        ),
+        (
+            "tenant",
+            format!("/t/{tenant_id}/oauth2/end_session?{continuation}"),
+            format!("{}/logout", tenant_path(tenant_id)),
+        ),
+    ] {
+        let s = sign_in_full(&app, org_id, tenant_id).await;
+
+        // The RP's navigation. The browser's OP copies are scoped to the
+        // authorization endpoint, so it carries none of them here.
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&end_session)
+            .to_request();
+        let bounce = test::call_service(&app, req).await;
+        assert_eq!(bounce.status().as_u16(), 302, "{label}");
+        let hop = location(&bounce);
+        let (path, query) = hop.split_once('?').expect("a continuation");
+        assert_eq!(
+            path, hop_path,
+            "{label}: the hop is under the cookie's own path"
+        );
+        assert_eq!(
+            query.split('&').any(|p| p.starts_with("tenant_id=")),
+            label == "bare",
+            "{label}: the tenant travels as a parameter only where the path does not name it"
+        );
+        assert!(
+            op_cookies(&bounce).is_empty(),
+            "{label}: the bounce clears nothing yet"
+        );
+        assert_eq!(
+            bounce
+                .headers()
+                .get("Cache-Control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        assert!(
+            session_is_live(&db, tenant_id, s.session_id).await,
+            "{label}: not yet"
+        );
+
+        // The browser follows, and RFC 6265 path-match now sends the copy.
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&hop)
+            .insert_header(("Cookie", op(&s.op)))
+            .to_request();
+        let done = test::call_service(&app, req).await;
+        assert_eq!(done.status().as_u16(), 302, "{label}");
+        let loc = location(&done);
+        assert!(loc.starts_with(POST_LOGOUT_URI), "{label}: {loc}");
+        assert_eq!(
+            query_param(&loc, "state").as_deref(),
+            Some("rp-state"),
+            "{label}"
+        );
+        assert_clears_both_copies(&done, tenant_id, label);
+        assert!(
+            !session_is_live(&db, tenant_id, s.session_id).await,
+            "{label}: the row the cookie named is revoked"
+        );
+        let after =
+            tenant_authorize(&app, tenant_id, &tenant_query(&client_id), Some(&op(&s.op))).await;
+        assert!(
+            is_login_hop(&location(&after)),
+            "{label}: the value names nothing now"
+        );
+    }
+}
+
+/// The cookie hop never crosses tenants: tenant A's copy presented at tenant
+/// B's hop names no session there (the read is keyed by the path's tenant), so
+/// A's session survives; and a hop with no cookie at all ends nothing.
+#[actix_rt::test]
+async fn p23w1_10_the_cookie_hop_never_ends_another_tenants_session() {
+    let (db, org_id, tenant_a, _alice) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let (tenant_b, _bob) = create_tenant_with_user(&db, org_id, "d11-tenant-b", "bob").await;
+    let s = sign_in_full(&app, org_id, tenant_a).await;
+
+    for (label, uri, cookie) in [
+        (
+            "A's copy at B's hop",
+            format!("/t/{tenant_b}/oauth2/authorize/logout"),
+            Some(op(&s.op)),
+        ),
+        (
+            "A's value at the bare hop naming B",
+            format!("/oauth2/authorize/logout?tenant_id={tenant_b}"),
+            Some(op(&s.op)),
+        ),
+        (
+            "no cookie at A's hop",
+            format!("/t/{tenant_a}/oauth2/authorize/logout"),
+            None,
+        ),
+    ] {
+        let mut req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&uri);
+        if let Some(cookie) = cookie {
+            req = req.insert_header(("Cookie", cookie));
+        }
+        let resp = test::call_service(&app, req.to_request()).await;
+        assert_eq!(resp.status().as_u16(), 200, "{label}: AXIAM's page");
+        assert!(
+            session_is_live(&db, tenant_a, s.session_id).await,
+            "{label}: tenant A's session must survive"
+        );
+    }
+}
+
+/// **The hop is no open redirect.** Navigated to directly, with a continuation
+/// it did not get from `end_session`: an unregistered target, a prefix of the
+/// registered one, a client from another tenant, and no client at all are all
+/// answered with AXIAM's page and no `Location` — and the RP's `state` is not
+/// reflected into it.
+#[actix_rt::test]
+async fn p23w1_10_the_cookie_hop_validates_its_continuation_as_end_session_does() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, plain_client(true)).await;
+    let (tenant_b, bob) = create_tenant_with_user(&db, org_id, "d11-tenant-b", "bob").await;
+    let (foreign_client, _) = create_client(
+        &app,
+        &admin_jwt(&auth, bob, tenant_b, org_id),
+        plain_client(true),
+    )
+    .await;
+    let hop = tenant_path(tenant_id) + "/logout";
+
+    for (label, query) in [
+        (
+            "an unregistered target",
+            format!(
+                "client_id={client_id}&post_logout_redirect_uri={}",
+                urlencoding_encode("https://evil.example/cb")
+            ),
+        ),
+        (
+            "a prefix of the registered target",
+            format!(
+                "client_id={client_id}&post_logout_redirect_uri={}",
+                urlencoding_encode(&format!("{POST_LOGOUT_URI}.evil.example"))
+            ),
+        ),
+        (
+            "another tenant's client",
+            format!(
+                "client_id={foreign_client}&post_logout_redirect_uri={}",
+                urlencoding_encode(POST_LOGOUT_URI)
+            ),
+        ),
+        (
+            "no client",
+            format!(
+                "post_logout_redirect_uri={}",
+                urlencoding_encode(POST_LOGOUT_URI)
+            ),
+        ),
+    ] {
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("{hop}?{query}&state=zzmarkerzz"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 200, "{label}");
+        assert!(
+            resp.headers().get("Location").is_none(),
+            "{label}: never redirected"
+        );
+        let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+        assert!(
+            !body.contains("zzmarkerzz"),
+            "{label}: state is not reflected"
+        );
+        assert!(
+            !body.contains("evil.example"),
+            "{label}: the target is not reflected"
+        );
+    }
+
+    // A `tenant_id` parameter on the tenant hop is refused by the scope, as on
+    // every tenant path: one tenant selector per request.
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("{hop}?tenant_id={tenant_b}"))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 400);
+}
+
+/// **The hop is GET-only, public and rate-limited** (§7 rule 6: a limiter that
+/// forgets a route is the Keycloak 26.7 lesson). `POST` is not routed; an
+/// unauthenticated `GET` is answered rather than `401`; and the
+/// `end_session` preset bounds it — here set to one request a minute, so the
+/// second is `429`, on either mount, since both draw on one allowance.
+#[actix_rt::test]
+async fn p23w1_10_the_cookie_hop_is_get_only_public_and_rate_limited() {
+    let (db, _org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    for uri in [
+        format!("/oauth2/authorize/logout?tenant_id={tenant_id}"),
+        format!("{}/logout", tenant_path(tenant_id)),
+    ] {
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&uri)
+            .to_request();
+        let status = test::call_service(&app, req).await.status().as_u16();
+        assert!(
+            matches!(status, 404 | 405),
+            "POST {uri} must not be routed: {status}"
+        );
+
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&uri)
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, req).await.status().as_u16(),
+            200,
+            "GET {uri}"
+        );
+    }
+
+    let limits = RateLimitConfig {
+        end_session_per_min: 1,
+        ..RateLimitConfig::default()
+    };
+    let limited = test_app!(db, auth, limits);
+    let call = |uri: String| {
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&uri)
+            .to_request()
+    };
+    let bare = format!("/oauth2/authorize/logout?tenant_id={tenant_id}");
+    let tenant = format!("{}/logout", tenant_path(tenant_id));
+    assert_eq!(
+        test::call_service(&limited, call(bare.clone()))
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
+    assert_eq!(
+        test::call_service(&limited, call(bare))
+            .await
+            .status()
+            .as_u16(),
+        429,
+        "the end_session preset must bound the hop"
+    );
+    // One allowance across both mounts: the shared counter is registered under
+    // one name by the bare and the tenant scope, so alternating paths buys
+    // nothing (see `server::oauth2_scope`).
+    assert_eq!(
+        test::call_service(&limited, call(tenant))
+            .await
+            .status()
+            .as_u16(),
+        429,
+        "the tenant mount draws on the same allowance"
+    );
+}
+
+/// **Server-side revocation of somebody else's session** cannot clear that
+/// browser's cookies — it is not the browser on the line. What it guarantees
+/// instead is that the copy resolves to nothing once the row is gone. Here
+/// browser 2 changes the password, which revokes every other session: browser
+/// 1's tenant copy is then stale on the tenant path, while browser 2's own
+/// still authorizes.
+#[actix_rt::test]
+async fn d11_a_revoked_sessions_tenant_cookie_resolves_to_nothing() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, plain_client(true)).await;
+    let browser_1 = sign_in_full(&app, org_id, tenant_id).await;
+    let browser_2 = sign_in_full(&app, org_id, tenant_id).await;
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/password/change")
+        .insert_header((
+            "Cookie",
+            format!(
+                "axiam_access={}; axiam_csrf={}",
+                browser_2.access, browser_2.csrf
+            ),
+        ))
+        .insert_header(("X-CSRF-Token", browser_2.csrf.clone()))
+        .set_json(serde_json::json!({
+            "current_password": PASSWORD,
+            "new_password": "TenantPathSsoPassw0rd-Rotated!",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        resp.status().is_success(),
+        "password change: {}",
+        resp.status()
+    );
+    assert!(!session_is_live(&db, tenant_id, browser_1.session_id).await);
+
+    let stale = tenant_authorize(
+        &app,
+        tenant_id,
+        &tenant_query(&client_id),
+        Some(&op(&browser_1.op)),
+    )
+    .await;
+    let loc = location(&stale);
+    assert!(is_login_hop(&loc) && loc.contains("&reauth=1"), "{loc}");
+
+    let own = tenant_authorize(
+        &app,
+        tenant_id,
+        &tenant_query(&client_id),
+        Some(&op(&browser_2.op)),
+    )
+    .await;
+    assert!(is_code_for_rp(&location(&own)), "{}", location(&own));
 }

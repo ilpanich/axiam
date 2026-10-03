@@ -238,6 +238,7 @@ use crate::handlers;
         handlers::dcr::update_registration,
         handlers::dcr::delete_registration,
         handlers::oauth2::end_session,
+        handlers::oauth2::end_session_at_cookie_path,
         handlers::device::verify,
         handlers::device::decide,
         // OIDC. `add_oauth_authorization_server_alias` (below) documents the

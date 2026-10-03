@@ -5346,25 +5346,48 @@ pub struct EndSessionQuery {
 /// # Why an unverifiable hint cannot end a session
 ///
 /// Without a verifiable `id_token_hint` there is nothing to identify but the
-/// browser's own AXIAM cookie, so the endpoint ends the cookie session if
-/// there is one and does nothing otherwise. It deliberately does **not** fall
-/// back to "end every session for the subject named in an unverified
-/// parameter": that is a denial-of-service primitive handed to anyone who
-/// knows a user id.
+/// browser's own OP-session cookie. It deliberately does **not** fall back to
+/// "end every session for the subject named in an unverified parameter": that
+/// is a denial-of-service primitive handed to anyone who knows a user id.
+///
+/// # Without a hint `sid`: the cookie, one hop away (T23.1.8, P23W1-10)
+///
+/// The browser's OP cookie is `Path=/oauth2/authorize` (and
+/// `/t/{tenant_id}/oauth2/authorize`), so it never reaches this endpoint: the
+/// handler could expire it but not read it, and the session row it named
+/// survived every logout that carried no `sid` (F4 residual P23W1-10). Such a
+/// request is therefore answered with a `302` to the `/logout` sub-path of the
+/// authorization endpoint it came through, which RFC 6265 §5.1.4 path-match
+/// *does* send the cookie to (`end_session_at_cookie_path`). That hop
+/// reads the cookie, revokes the one row it names in this tenant, clears every
+/// copy and continues exactly as this handler would have. The continuation
+/// carries only what this handler would have used — `post_logout_redirect_uri`,
+/// `state`, the effective `client_id` and (on the deployment-wide path) the
+/// tenant — and the hop validates it exactly as here, so it is no open
+/// redirect. The bounce sets no cookie: a removal on this response would be
+/// applied before the browser follows it, and the hop would find nothing.
 ///
 /// # No confirmation prompt
 ///
 /// RP-Initiated Logout 1.0 §2 permits one, and a prompt is the mitigation for
 /// logout CSRF. We take the other side deliberately: a forced logout is a
 /// nuisance, not a privilege escalation, and a prompt shown on every logout is
-/// trained away within a week.
+/// trained away within a week. The cookie hop does not move that line: a
+/// forged navigation here already cleared every cookie this browser holds, and
+/// revoking the row those cookies named changes nothing anyone but that browser
+/// can observe — which is why the hop does **not** fan out back-channel logout.
+/// Telling every relying party is reserved for a request that proves which
+/// session it means with a signed hint.
 #[utoipa::path(
     get,
     path = "/oauth2/end_session",
     tag = "oauth2",
     params(EndSessionQuery),
     responses(
-        (status = 302, description = "Session ended; redirected to an allow-listed URI"),
+        (status = 302, description = "Session ended; redirected to an allow-listed URI — \
+                                      or, with no id_token_hint sid, to \
+                                      /oauth2/authorize/logout, which can read the OP \
+                                      browser-session cookie and ends the session it names"),
         (status = 200, description = "Session ended; AXIAM's logged-out page"),
         (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
     ),
@@ -5410,22 +5433,211 @@ pub async fn end_session<C: Connection + Clone>(
     let effective_client_id = hint_client_id.or_else(|| q.client_id.clone());
 
     // 3. End the session, and notify the clients that were in it.
-    if let (Some(session_id), Some(subject_id)) = (session_id, subject_id) {
-        dispatch_backchannel_logout(
-            &state,
+    let (Some(session_id), Some(subject_id)) = (session_id, subject_id) else {
+        // T23.1.8 / P23W1-10 — no signed statement of which session: the one
+        // this browser's OP cookie names is the only candidate, and only the
+        // `/logout` sub-path of the authorization endpoint can read it.
+        return bounce_to_cookie_logout(
+            &req,
             tenant_id,
-            session_id,
-            subject_id,
-            tenant_issuer.as_deref(),
-        )
-        .await;
-        // Best-effort: a session that has already expired is not an error —
-        // the user asked to be logged out and they are.
-        let _ = state.auth_service.logout(tenant_id, session_id).await;
+            &EndSessionContinuation {
+                tenant_id: Some(tenant_id),
+                post_logout_redirect_uri: q.post_logout_redirect_uri,
+                state: q.state,
+                client_id: effective_client_id,
+            },
+        );
+    };
+    dispatch_backchannel_logout(
+        &state,
+        tenant_id,
+        session_id,
+        subject_id,
+        tenant_issuer.as_deref(),
+    )
+    .await;
+    // Best-effort: a session that has already expired is not an error — the
+    // user asked to be logged out and they are.
+    let _ = state.auth_service.logout(tenant_id, session_id).await;
+
+    // 4. Redirect against the identified client's allow-list, or render.
+    finish_logout(
+        &state,
+        tenant_id,
+        effective_client_id.as_deref(),
+        q.post_logout_redirect_uri.as_deref(),
+        q.state.as_deref(),
+    )
+    .await
+}
+
+/// What [`end_session`] hands to its cookie-reading `/logout` hop (T23.1.8).
+///
+/// Exactly the parameters `end_session` would itself have used after deciding
+/// that no signed hint named a session — and nothing else. In particular no
+/// `id_token_hint`: the hop is the cookie's arm, never a second place a signed
+/// hint is interpreted. Every field is as untrusted here as it was there, and
+/// is validated the same way.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct EndSessionContinuation {
+    /// The tenant. Required on the deployment-wide path; on a per-tenant path
+    /// it is the path segment, and `TenantPathScope` supplies it (a client
+    /// that sends it there is refused, as on every tenant path).
+    pub tenant_id: Option<Uuid>,
+    /// Honoured only on the identified client's allow-list, by exact match —
+    /// the `end_session` rule.
+    pub post_logout_redirect_uri: Option<String>,
+    /// Echoed verbatim on a redirect that actually happens. Never interpreted.
+    pub state: Option<String>,
+    /// Chooses the redirect allow-list; never identifies a session.
+    pub client_id: Option<String>,
+}
+
+/// The `302` from `end_session` to the `/logout` sub-path of the authorization
+/// endpoint the request arrived under (T23.1.8, P23W1-10).
+///
+/// Same-origin and by path, built from the typed tenant on a tenant path and
+/// from the constant otherwise — never from anything the request carried. On a
+/// tenant path the continuation carries no `tenant_id` (the scope would refuse
+/// it); on the deployment-wide path it must. No cookie is set here: see
+/// [`end_session`].
+fn bounce_to_cookie_logout(
+    req: &HttpRequest,
+    tenant_id: Uuid,
+    continuation: &EndSessionContinuation,
+) -> HttpResponse {
+    let on_tenant_path = crate::middleware::tenant_path::binding_of(req).is_some();
+    let path = format!("{}/logout", authorize_path_of(req));
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if !on_tenant_path {
+        query.append_pair("tenant_id", &tenant_id.to_string());
+    }
+    if let Some(uri) = continuation.post_logout_redirect_uri.as_deref() {
+        query.append_pair("post_logout_redirect_uri", uri);
+    }
+    if let Some(st) = continuation.state.as_deref() {
+        query.append_pair("state", st);
+    }
+    if let Some(client_id) = continuation.client_id.as_deref() {
+        query.append_pair("client_id", client_id);
+    }
+    let query = query.finish();
+    let location = if query.is_empty() {
+        path
+    } else {
+        format!("{path}?{query}")
+    };
+    HttpResponse::Found()
+        .append_header((actix_web::http::header::LOCATION, location))
+        // The URL carries the relying party's `state` and its post-logout
+        // target; it must not be cached or travel on as a referrer.
+        .append_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+        .append_header(("Referrer-Policy", "no-referrer"))
+        .finish()
+}
+
+/// `GET /oauth2/authorize/logout` (and `/t/{tenant_id}/oauth2/authorize/logout`)
+/// — the cookie-reading half of RP-Initiated Logout (T23.1.8, P23W1-10).
+///
+/// Reached by `end_session`'s `302` when no `id_token_hint` named a session.
+/// It sits *under* the authorization endpoint's path for one reason: RFC 6265
+/// §5.1.4 path-match sends the `axiam_op_session` copy scoped to that path
+/// here, and to nowhere else a logout could be handled. So this is the one
+/// place a logout without a signed hint can find out which session the browser
+/// holds.
+///
+/// What it does, in order:
+///
+/// 1. reads the cookie and looks its digest up **in the tenant the request
+///    names** — the same tenant-keyed read `/oauth2/authorize` makes, so a
+///    copy minted in tenant A names nothing here when the request names B;
+/// 2. revokes that one row, and nothing else — no back-channel fan-out (see
+///    `end_session`'s "No confirmation prompt");
+/// 3. clears every OP-cookie copy for the tenant, and the API cookies;
+/// 4. continues exactly as `end_session` would have: an allow-listed
+///    `post_logout_redirect_uri` by exact match, or AXIAM's own page.
+///
+/// GET only, as a navigation target; public (a logout must work for a session
+/// that is already gone); rate-limited with the `end_session` preset under its
+/// own bucket. Reached directly rather than through `end_session` it does
+/// nothing `end_session` does not already do for the same navigation — it
+/// clears this browser's cookies and ends the session those cookies named.
+#[utoipa::path(
+    get,
+    path = "/oauth2/authorize/logout",
+    tag = "oauth2",
+    params(EndSessionContinuation),
+    responses(
+        (status = 302, description = "The OP browser session this browser's cookie named \
+                                      is ended; redirected to an allow-listed \
+                                      post_logout_redirect_uri"),
+        (status = 200, description = "The OP browser session this browser's cookie named \
+                                      is ended; AXIAM's logged-out page"),
+        (status = 400, description = "No tenant could be determined"),
+    ),
+)]
+pub async fn end_session_at_cookie_path<C: Connection + Clone>(
+    req: HttpRequest,
+    query: web::Query<EndSessionContinuation>,
+    state: web::Data<AppState<C>>,
+) -> HttpResponse {
+    let q = query.into_inner();
+    let Some(tenant_id) = q.tenant_id else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "tenant_id is required".into(),
+        ));
+    };
+
+    if let Some(cookie) = req.cookie(crate::middleware::csrf::COOKIE_OP_SESSION) {
+        let digest = axiam_auth::token::hash_browser_session_token(cookie.value());
+        match state
+            .session_repo
+            .get_by_browser_token_hash(tenant_id, &digest)
+            .await
+        {
+            Ok(Some(session)) => {
+                // Best-effort, as in `end_session`: an already-ended session
+                // is a logout that succeeded.
+                let _ = state.auth_service.logout(tenant_id, session.id).await;
+                tracing::info!(
+                    %tenant_id,
+                    session_id = %session.id,
+                    "RP-initiated logout without an id_token_hint sid ended the session \
+                     the browser's OP cookie named"
+                );
+            }
+            Ok(None) => {}
+            // Logged without the cookie value or its digest, as at the
+            // authorization endpoint.
+            Err(e) => tracing::warn!(
+                error = %e,
+                %tenant_id,
+                "could not resolve the OP browser session at logout; clearing the \
+                 cookies regardless"
+            ),
+        }
     }
 
-    // 4. Resolve the redirect against the identified client's allow-list.
-    let allow_list = match effective_client_id.as_deref() {
+    finish_logout(
+        &state,
+        tenant_id,
+        q.client_id.as_deref(),
+        q.post_logout_redirect_uri.as_deref(),
+        q.state.as_deref(),
+    )
+    .await
+}
+
+/// The common tail of every RP-initiated logout: resolve the redirect against
+/// the identified client's allow-list, and clear every cookie either way.
+async fn finish_logout<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    tenant_id: Uuid,
+    client_id: Option<&str>,
+    post_logout_redirect_uri: Option<&str>,
+    rp_state: Option<&str>,
+) -> HttpResponse {
+    let allow_list = match client_id {
         Some(client_id) => state
             .oauth2_client_repo
             .get_by_client_id(tenant_id, client_id)
@@ -5435,12 +5647,10 @@ pub async fn end_session<C: Connection + Clone>(
         None => Vec::new(),
     };
 
-    let cookie_secure = state.auth_config.cookie_secure;
-
     match axiam_oauth2::logout::resolve_post_logout_redirect(
-        q.post_logout_redirect_uri.as_deref(),
+        post_logout_redirect_uri,
         &allow_list,
-        q.state.as_deref(),
+        rp_state,
     ) {
         axiam_oauth2::logout::LogoutOutcome::Redirect { uri, state: st } => {
             let location = match (url::Url::parse(&uri), st) {
@@ -5453,22 +5663,47 @@ pub async fn end_session<C: Connection + Clone>(
                 // error, not a user-facing one; render rather than emit a
                 // Location header we could not construct.
                 (Err(_), _) => {
-                    return logged_out_page(cookie_secure);
+                    return logged_out_page(&state.auth_config, tenant_id);
                 }
             };
-            HttpResponse::Found()
+            let mut response = HttpResponse::Found();
+            response
                 .append_header(("Location", location))
-                .append_header(("Cache-Control", "no-store"))
-                .cookie(crate::middleware::csrf::clear_access_cookie(cookie_secure))
-                .cookie(crate::middleware::csrf::clear_refresh_cookie(cookie_secure))
-                .cookie(crate::middleware::csrf::clear_csrf_cookie(cookie_secure))
-                // W3: RP-initiated logout clears the OP browser session too.
-                // Leaving it would mean a user who logged out through one
-                // relying party is still recognised, silently, by the next.
-                .cookie(crate::middleware::csrf::clear_op_session_cookie())
-                .finish()
+                .append_header(("Cache-Control", "no-store"));
+            clear_logout_cookies(&mut response, &state.auth_config, tenant_id);
+            response.finish()
         }
-        axiam_oauth2::logout::LogoutOutcome::Rendered => logged_out_page(cookie_secure),
+        axiam_oauth2::logout::LogoutOutcome::Rendered => {
+            logged_out_page(&state.auth_config, tenant_id)
+        }
+    }
+}
+
+/// Every cookie an RP-initiated logout clears: the three API cookies and every
+/// OP-session copy a sign-in into `tenant_id` mints (T23.1.8, D-11).
+///
+/// W3: RP-initiated logout clears the OP browser session too — leaving it
+/// would mean a user who logged out through one relying party is still
+/// recognised, silently, by the next. D-11: every copy, through the one list
+/// that minted them, so the per-tenant copy does not outlive the bare one.
+///
+/// The tenant is the one the logout request names. A copy minted for another
+/// tenant is left alone: it is scoped to that tenant's path, names a session
+/// there, and is that tenant's to end. That is the stated limit of a
+/// browser-side guarantee; the server-side one is that a revoked row resolves
+/// to nothing wherever its value is presented.
+fn clear_logout_cookies(
+    response: &mut actix_web::HttpResponseBuilder,
+    config: &axiam_auth::config::AuthConfig,
+    tenant_id: Uuid,
+) {
+    let cookie_secure = config.cookie_secure;
+    response
+        .cookie(crate::middleware::csrf::clear_access_cookie(cookie_secure))
+        .cookie(crate::middleware::csrf::clear_refresh_cookie(cookie_secure))
+        .cookie(crate::middleware::csrf::clear_csrf_cookie(cookie_secure));
+    for cookie in crate::middleware::csrf::clear_op_session_cookies(tenant_id, config) {
+        response.cookie(cookie);
     }
 }
 
@@ -5478,21 +5713,20 @@ pub async fn end_session<C: Connection + Clone>(
 /// rejected URI. Echoing either would put an attacker-controlled string into
 /// a page served from AXIAM's own origin.
 ///
-/// `cookie_secure` is `AuthConfig::cookie_secure` (D-18): the removal cookies
-/// must carry the same attributes as the ones they clear.
-fn logged_out_page(cookie_secure: bool) -> HttpResponse {
-    HttpResponse::Ok()
+/// The removal cookies carry the same attributes as the ones they clear
+/// (`AuthConfig::cookie_secure`, D-18, for the API cookies; every OP copy for
+/// `tenant_id`, D-11).
+fn logged_out_page(config: &axiam_auth::config::AuthConfig, tenant_id: Uuid) -> HttpResponse {
+    let mut response = HttpResponse::Ok();
+    response
         .append_header(("Cache-Control", "no-store"))
-        .content_type("text/html; charset=utf-8")
-        .cookie(crate::middleware::csrf::clear_access_cookie(cookie_secure))
-        .cookie(crate::middleware::csrf::clear_refresh_cookie(cookie_secure))
-        .cookie(crate::middleware::csrf::clear_csrf_cookie(cookie_secure))
-        .cookie(crate::middleware::csrf::clear_op_session_cookie())
-        .body(
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-             <title>Signed out</title></head><body><h1>You are signed out.</h1>\
-             </body></html>",
-        )
+        .content_type("text/html; charset=utf-8");
+    clear_logout_cookies(&mut response, config, tenant_id);
+    response.body(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <title>Signed out</title></head><body><h1>You are signed out.</h1>\
+         </body></html>",
+    )
 }
 
 /// Build and dispatch logout tokens for a session's participants.

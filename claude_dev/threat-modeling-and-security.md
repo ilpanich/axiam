@@ -22,6 +22,25 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-03 per-tenant browser sign-on entry (Phase 23 T23.1.8, model
+> 2.19.0).** One threat enters, Mitigated on arrival, and two are amended.
+> Browser sign-on now works on a per-tenant issuer path (the maintainer's D-11).
+> A sign-in mints the OP-session cookie at `/t/{tenant_id}/oauth2/authorize`
+> beside `/oauth2/authorize`, for the session's own tenant only, with the same
+> value and attributes. Every logout clears every copy (**T-237** amended), and
+> the hop's `return_to` on a tenant path no longer carries the tenant parameter
+> the path scope itself refuses (**T-238** amended). **T-290**: a logout that
+> carries no signed hint could clear the cookie but not end the session it
+> named, because the cookie never reaches `end_session` (F4 residual
+> P23W1-10). `end_session` now bounces such a logout to the `/logout` sub-path
+> of the authorization endpoint, which the cookie does reach. That hop revokes
+> the one session the cookie names in that tenant and continues exactly as
+> `end_session` would: an allow-listed target only, the same preset rate limit,
+> and no back-channel fan-out without a signed hint. Clearing also found an
+> organization-level administrator's logout revoking nothing after a tenant
+> switch; it now revokes in the administrator's own tenant. The model is
+> **290 threats, 277 mitigated / 13 open**; nothing on the open register moves.
+>
 > **The 2026-10-02 RFC 7592 entry (Phase 23 T23.4.1, model 2.18.0).** One
 > threat enters, Mitigated on arrival. **T-289**: a dynamically registered
 > client can now read, replace and delete its own registration at
@@ -659,7 +678,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 289 threats** and a
+The system is verified against a **STRIDE threat model of 290 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1329,7 +1348,11 @@ are published rather than counted as passes.
   confirmed both checks against live routes (V2); its one informational finding
   — the query guard compares the raw query string where the extractor decodes it
   — is accepted because the request is refused either way, and that refusal is
-  pinned by a test (MCP-06).
+  pinned by a test (MCP-06). Browser sign-on reaches a tenant issuer too
+  (T23.1.8, D-11). The OP-session cookie is minted at
+  `/t/{tenant_id}/oauth2/authorize` for the session's own tenant, beside the
+  deployment-wide path, and a copy presented on another tenant's path names no
+  session there.
 
 ### Federation (SAML & OIDC)
 

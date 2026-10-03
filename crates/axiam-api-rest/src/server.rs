@@ -1599,6 +1599,23 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
                     .route(web::get().to(handlers::oauth2::end_session::<C>))
                     .route(web::post().to(handlers::oauth2::end_session::<C>)),
             )
+            // T23.1.8 / P23W1-10 — the cookie-reading half of RP-initiated
+            // logout. Under the authorization endpoint's path because that is
+            // where RFC 6265 path-match sends the `axiam_op_session` copy, and
+            // nowhere else a logout is handled. `end_session` bounces here when
+            // no `id_token_hint` named a session. GET only: it is a navigation
+            // target. The `end_session` preset, under its own bucket name so a
+            // logout that takes the hop spends one unit of each rather than two
+            // of one.
+            .service(
+                web::resource("/authorize/logout")
+                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_end_session_cookie",
+                        rate_limit_cfg.end_session_per_min,
+                    ))
+                    .route(web::get().to(handlers::oauth2::end_session_at_cookie_path::<C>)),
+            )
             // T21.4 / RFC 7591 §3.1 — dynamic client registration.
             //
             // Its own bucket, per-IP, and the smallest in the file. Unlike

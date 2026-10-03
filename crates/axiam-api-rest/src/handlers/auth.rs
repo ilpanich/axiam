@@ -22,7 +22,7 @@ use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::cert_auth::CertificateAuthenticated;
 use crate::extractors::client_info::{client_ip, user_agent};
 use crate::middleware::csrf::{
-    HEADER_CSRF, access_cookie, clear_access_cookie, clear_csrf_cookie, clear_op_session_cookie,
+    HEADER_CSRF, access_cookie, clear_access_cookie, clear_csrf_cookie, clear_op_session_cookies,
     clear_refresh_cookie, csrf_cookie, generate_csrf_token, refresh_cookie,
 };
 use crate::state::AppState;
@@ -660,22 +660,36 @@ pub async fn logout<C: Connection + Clone>(
     // caller's verified JWT `jti` (`AuthenticatedUser.session_id`, D-15).
     // No client-supplied session_id — there is no IDOR surface to guard,
     // so the prior cross-session comparison is gone along with the body.
+    //
+    // T23.1.8: in the PRINCIPAL's tenant, which is where the session row lives
+    // and the tenant every OP-cookie copy was minted for. `user.tenant_id` is
+    // the tenant being acted upon, which for an organization-level principal
+    // that has switched (`X-Axiam-Tenant`, as the admin UI sends on every
+    // request) is a child tenant: the tenant-scoped DELETE then matched no row,
+    // the logout answered 204, and the session — with every OP cookie copy
+    // naming it — stayed live.
+    let session_tenant = user.principal_tenant_id;
     state
         .auth_service
-        .logout(user.tenant_id, user.session_id)
+        .logout(session_tenant, user.session_id)
         .await?;
     let cookie_secure = state.auth_config.cookie_secure;
-    Ok(HttpResponse::NoContent()
+    let mut response = HttpResponse::NoContent();
+    response
         .cookie(clear_access_cookie(cookie_secure))
         .cookie(clear_refresh_cookie(cookie_secure))
-        .cookie(clear_csrf_cookie(cookie_secure))
-        // W3: the fourth cookie. The session row is gone, so the OP cookie
-        // could not resolve to a principal anyway — but leaving a live-looking
-        // credential in the browser after an explicit logout is how a user ends
-        // up at a login page that then bounces them somewhere they did not
-        // expect, and the removal is one line.
-        .cookie(clear_op_session_cookie())
-        .finish())
+        .cookie(clear_csrf_cookie(cookie_secure));
+    // W3: the fourth cookie. The session row is gone, so the OP cookie could
+    // not resolve to a principal anyway — but leaving a live-looking credential
+    // in the browser after an explicit logout is how a user ends up at a login
+    // page that then bounces them somewhere they did not expect.
+    //
+    // T23.1.8 (D-11): every copy the sign-in minted — the bare one and the
+    // session's own tenant's — through the list that minted them.
+    for cookie in clear_op_session_cookies(session_tenant, &state.auth_config) {
+        response.cookie(cookie);
+    }
+    Ok(response.finish())
 }
 
 /// `POST /api/v1/auth/refresh`

@@ -48,6 +48,7 @@ use crate::models::{
     reactor::{CreateReactor, Reactor, UpdateReactor},
     resource::{CreateResource, Resource, UpdateResource},
     role::{AssignmentScope, CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole},
+    saml_sp::{SamlServiceProvider, SamlServiceProviderInput},
     scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
@@ -2972,6 +2973,68 @@ pub trait DirectoryConfigRepository: Send + Sync {
 
     /// Every enabled configuration across all tenants, for the sync job.
     fn list_enabled(&self) -> impl Future<Output = AxiamResult<Vec<DirectoryConfig>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SAML service-provider registry (tenant-scoped) (G-2)
+// ---------------------------------------------------------------------------
+
+/// Storage for the SAML service providers a tenant has registered.
+///
+/// Every method takes the `tenant_id` and no row of another tenant is ever
+/// visible: a `get`, `update` or `delete` for an id that belongs to a different
+/// tenant answers `NotFound`, exactly as for an id that does not exist.
+/// `(tenant_id, entity_id)` is unique in the datastore.
+///
+/// The repository does **not** validate the input. The rules (ACS allow-list,
+/// certificates, attribute mappings) live in
+/// `axiam_federation::saml_sp::validate_saml_service_provider`, which needs URL
+/// and X.509 parsing that this layer does not carry; callers run it first, as
+/// they do for the directory configuration.
+pub trait SamlServiceProviderRepository: Send + Sync {
+    /// Register a service provider. `AlreadyExists` when the tenant already
+    /// has one with this `entity_id`.
+    fn create(
+        &self,
+        tenant_id: Uuid,
+        input: SamlServiceProviderInput,
+    ) -> impl Future<Output = AxiamResult<SamlServiceProvider>> + Send;
+
+    /// One service provider by id. `NotFound` when it does not exist in this
+    /// tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<SamlServiceProvider>> + Send;
+
+    /// The tenant's service provider with this `entity_id`, or `None`. The
+    /// SSO endpoint's lookup: an `AuthnRequest` names its issuer by entity id.
+    fn get_by_entity_id(
+        &self,
+        tenant_id: Uuid,
+        entity_id: &str,
+    ) -> impl Future<Output = AxiamResult<Option<SamlServiceProvider>>> + Send;
+
+    /// Every service provider of the tenant, oldest first.
+    fn list(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<SamlServiceProvider>>> + Send;
+
+    /// Replace a service provider's configuration (a full replacement, not a
+    /// patch). `NotFound` when it does not exist in this tenant;
+    /// `AlreadyExists` when the new `entity_id` is another SP's.
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        input: SamlServiceProviderInput,
+    ) -> impl Future<Output = AxiamResult<SamlServiceProvider>> + Send;
+
+    /// Remove a service provider. `NotFound` when it does not exist in this
+    /// tenant.
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 // ---------------------------------------------------------------------------

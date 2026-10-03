@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The SAML service-provider registry (T23.2.1, G-2): model, validation,
+  repository, schema v72.** `SamlServiceProvider` in `axiam-core` — entity id
+  (unique per tenant), an ACS allow-list (`url`, `binding`, `index`,
+  `is_default`), optional SLO endpoint, `NameID` format (persistent pairwise by
+  default, email on request), `sign_responses` (default on), `encrypt_assertions`
+  (default off, D-2), optional SP signing and encryption certificates,
+  `want_authn_requests_signed`, `allow_idp_initiated` (per-SP opt-in, off by
+  default, D-3), an attribute mapping table over username, email, display,
+  given and family name, groups and roles, and an `allowed_groups` restriction.
+  There is deliberately **no `sign_assertions` field**: assertions are signed
+  always. `axiam_federation::saml_sp::validate_saml_service_provider` is the
+  write-time rule: an ACS URL is refused exactly when an OAuth2 redirect URI
+  would be (https except loopback, no fragment) and additionally when it holds a
+  `*`, duplicates and a second default are refused, certificates must be exactly
+  one parseable `CERTIFICATE` block (a private key is refused by name), and
+  encryption or signed requests without their certificate are refused. The
+  redirect rule now exists once: the admin OAuth2 client API calls the same
+  function. `SamlServiceProviderRepository` with the SurrealDB implementation
+  (`create`, `get`, `get_by_entity_id`, `list`, `update`, `delete`), tenant-scoped
+  on every verb; the table is deleted with its tenant inside the tenant-delete
+  transaction. Nothing serves SAML yet.
+
 - **`saml_idp_enabled`: the layered switch for the SAML identity provider
   (T23.2.1, G-2, D-20).** A new setting on the OIDC policy block, default
   `false`, with exactly the shape of `sensitive_scopes_enabled`: an

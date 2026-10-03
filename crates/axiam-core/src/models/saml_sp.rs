@@ -438,7 +438,10 @@ mod tests {
         assert!(input.enabled);
         assert_eq!(input.name_id_format, NameIdFormat::Persistent);
         assert!(input.sign_responses, "responses are signed by default");
-        assert!(!input.encrypt_assertions, "D-2: encryption is off by default");
+        assert!(
+            !input.encrypt_assertions,
+            "D-2: encryption is off by default"
+        );
         assert!(!input.want_authn_requests_signed);
         assert!(!input.allow_idp_initiated, "D-3: IdP-initiated is opt-in");
         assert!(input.allowed_groups.is_empty());

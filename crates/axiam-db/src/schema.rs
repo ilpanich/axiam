@@ -3812,14 +3812,80 @@ DEFINE INDEX IF NOT EXISTS idx_user_tenant_directory_external_id ON TABLE user \
 // reads as *off* and there is no shape of stored data that turns the IdP on by
 // accident.
 //
+// **`saml_service_provider`** is the tenant's registry of service providers an
+// assertion may be issued to: one SCHEMAFULL row each, tenant-scoped, with
+// `idx_saml_sp_tenant_entity` UNIQUE on `(tenant_id, entity_id)` so the
+// datastore, not the application, decides the race between two concurrent
+// registrations of the same entity id. The two structured lists — the ACS
+// allow-list and the attribute mapping table — are JSON text columns
+// (`acs_urls_json`, `attribute_mappings_json`, the pattern `oidc_cimd_json`
+// set): they are written and replaced whole and never queried by member. There
+// is no `sign_assertions` column: assertions are signed always, so the column
+// could only ever be a switch for turning that off. `slo_binding` and
+// `name_id_format` are asserted against the spellings the model writes. The
+// certificate columns hold public PEM only; the validator refuses anything but
+// one CERTIFICATE block. Rows are removed with their tenant
+// (`SurrealTenantRepository::delete`).
 const SCHEMA_V72: &str = "\
 DEFINE FIELD IF NOT EXISTS oidc_saml_idp_enabled ON TABLE security_settings
     TYPE option<bool> DEFAULT false;
+DEFINE TABLE IF NOT EXISTS saml_service_provider SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_service_provider TYPE string;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE saml_service_provider TYPE bool;
+DEFINE FIELD IF NOT EXISTS display_name ON TABLE saml_service_provider TYPE string;
+DEFINE FIELD IF NOT EXISTS entity_id ON TABLE saml_service_provider TYPE string;
+DEFINE FIELD IF NOT EXISTS acs_urls_json ON TABLE saml_service_provider TYPE string;
+DEFINE FIELD IF NOT EXISTS slo_url ON TABLE saml_service_provider TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS slo_binding ON TABLE saml_service_provider TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['http_post', 'http_redirect'];
+DEFINE FIELD IF NOT EXISTS name_id_format ON TABLE saml_service_provider TYPE string
+    ASSERT $value IN ['persistent', 'email_address'];
+DEFINE FIELD IF NOT EXISTS sign_responses ON TABLE saml_service_provider TYPE bool;
+DEFINE FIELD IF NOT EXISTS encrypt_assertions ON TABLE saml_service_provider TYPE bool;
+DEFINE FIELD IF NOT EXISTS sp_signing_cert_pem ON TABLE saml_service_provider
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS sp_encryption_cert_pem ON TABLE saml_service_provider
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS want_authn_requests_signed ON TABLE saml_service_provider
+    TYPE bool;
+DEFINE FIELD IF NOT EXISTS allow_idp_initiated ON TABLE saml_service_provider TYPE bool;
+DEFINE FIELD IF NOT EXISTS attribute_mappings_json ON TABLE saml_service_provider
+    TYPE string;
+DEFINE FIELD IF NOT EXISTS allowed_groups ON TABLE saml_service_provider
+    TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_service_provider TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE saml_service_provider TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_tenant_entity ON TABLE saml_service_provider
+    COLUMNS tenant_id, entity_id UNIQUE;
 ";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.2.1 — the SP registry table has no `sign_assertions` column, asserts
+    /// its enumerations, and is unique per tenant on the entity id.
+    #[test]
+    fn v72_defines_the_service_provider_registry() {
+        assert!(SCHEMA_V72.contains("DEFINE TABLE IF NOT EXISTS saml_service_provider SCHEMAFULL"));
+        assert!(SCHEMA_V72.contains(
+            "idx_saml_sp_tenant_entity ON TABLE saml_service_provider
+    COLUMNS tenant_id, entity_id UNIQUE"
+        ));
+        assert!(
+            !SCHEMA_V72.contains("sign_assertions"),
+            "assertions are signed always: there must be no column to turn that off"
+        );
+        for spelling in [
+            "'http_post', 'http_redirect'",
+            "'persistent', 'email_address'",
+        ] {
+            assert!(
+                SCHEMA_V72.contains(spelling),
+                "missing assertion {spelling}"
+            );
+        }
+    }
 
     /// T23.2.1 — v72 is additive DDL only and defaults the IdP switch to off.
     #[test]

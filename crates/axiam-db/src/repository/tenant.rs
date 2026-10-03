@@ -319,11 +319,15 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     }
 
     async fn delete(&self, id: Uuid) -> AxiamResult<()> {
-        // The tenant's directory configuration goes with it (T23.3.1, G-3). It
-        // is the one row this delete removes besides the tenant itself: it holds
-        // an encrypted service-account credential for the tenant's directory,
-        // and a deleted tenant must not leave that ciphertext behind. It is a
-        // single query, so the two deletes commit or roll back together.
+        // The tenant's SAML service providers go with it too (T23.2.1, G-2): a
+        // registry of where this tenant's assertions may be delivered has no
+        // meaning, and no business surviving, without the tenant.
+        //
+        // The tenant's directory configuration goes with it (T23.3.1, G-3): it
+        // holds an encrypted service-account credential for the tenant's
+        // directory, and a deleted tenant must not leave that ciphertext
+        // behind. Everything is one query, so the deletes commit or roll back
+        // together. (The broader cascade is issue #523.)
         //
         // F4 P23W2-02: and a transaction that rolled back is an error. The
         // driver reports a failed statement inside the response, not from
@@ -335,6 +339,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .query(
                 "BEGIN TRANSACTION; \
                  DELETE directory_config WHERE tenant_id = $id; \
+                 DELETE saml_service_provider WHERE tenant_id = $id; \
                  DELETE type::record('tenant', $id); \
                  COMMIT TRANSACTION;",
             )

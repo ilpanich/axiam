@@ -258,6 +258,10 @@ pub enum SamlIdpError {
     /// The SP asks for an email `NameID` and the user has no email address.
     #[error("the user has no email address for an emailAddress NameID")]
     NameIdUnavailable,
+    /// The SP asks for an email `NameID` and nothing vouches for the user's
+    /// address (D-25): it was never verified and the account is not `Active`.
+    #[error("the user's email address is not vouched for")]
+    NameIdUnverified,
     /// A persistent `NameID` is required and the deployment holds no
     /// `saml_pairwise_key`.
     #[error("the SAML pairwise-identifier key is not configured")]
@@ -292,7 +296,7 @@ impl SamlIdpError {
                 SamlStatus::RequestDenied
             }
             Self::AccountMayNotAct | Self::SessionMismatch => SamlStatus::AuthnFailed,
-            Self::NameIdUnavailable => SamlStatus::InvalidNameIdPolicy,
+            Self::NameIdUnavailable | Self::NameIdUnverified => SamlStatus::InvalidNameIdPolicy,
             Self::TenantMismatch
             | Self::PairwiseKeyMissing
             | Self::EncryptionUnsupported
@@ -705,9 +709,13 @@ impl SamlIdpIssuer {
                     req.user.id,
                 ))
             }
-            NameIdFormat::EmailAddress => user_email(req.user)
-                .map(str::to_owned)
-                .ok_or(SamlIdpError::NameIdUnavailable),
+            NameIdFormat::EmailAddress => {
+                let email = user_email(req.user).ok_or(SamlIdpError::NameIdUnavailable)?;
+                if !email_is_vouched_for(req.user) {
+                    return Err(SamlIdpError::NameIdUnverified);
+                }
+                Ok(email.to_owned())
+            }
         }
     }
 }
@@ -716,6 +724,23 @@ impl SamlIdpIssuer {
 fn user_email(user: &User) -> Option<&str> {
     let email = user.email.trim();
     (!email.is_empty()).then_some(email)
+}
+
+/// Whether something vouches for the user's address (D-25, T-313): it was
+/// verified (`email_verified_at`), or the account is `Active` — which only the
+/// verification flow, an administrator, SCIM or the directory path make it, and
+/// each of those either proved the address or wrote it.
+///
+/// What this refuses is the account T-313 is about: one still
+/// `PendingVerification` with an address nobody checked — a self-registration
+/// inside its grace period, or an account provisioned pending and never
+/// activated. Such an account keeps working at every SP whose `NameID` is the
+/// pairwise identifier; at an email-keyed SP it is answered
+/// `InvalidNameIDPolicy`, never with a weaker identifier. The `email` attribute
+/// is held to the same rule (omitted, not refused), since an SP may key
+/// accounts on it just as well.
+fn email_is_vouched_for(user: &User) -> bool {
+    user.email_verified_at.is_some() || user.status == axiam_core::models::user::UserStatus::Active
 }
 
 /// The values of one attribute source for this user, in a stable order, empty
@@ -730,7 +755,11 @@ fn attribute_values(source: AttributeSource, req: &SsoIssuance<'_>) -> Vec<Strin
     };
     match source {
         AttributeSource::Username => single(Some(req.user.username.clone())),
-        AttributeSource::Email => single(user_email(req.user).map(str::to_owned)),
+        AttributeSource::Email => single(
+            user_email(req.user)
+                .filter(|_| email_is_vouched_for(req.user))
+                .map(str::to_owned),
+        ),
         AttributeSource::DisplayName => single(profile().name),
         AttributeSource::GivenName => single(profile().given_name),
         AttributeSource::FamilyName => single(profile().family_name),
@@ -915,4 +944,120 @@ fn response_envelope(p: &EnvelopeParts<'_>) -> String {
     }
     out.push_str("</samlp:Response>");
     out
+}
+
+/// Fixtures for tests outside this crate (the SSO endpoint's HTTP tests and the
+/// e2e harness): what a service provider's SAML library does — generate a key,
+/// sign an `AuthnRequest` enveloped or over a Redirect query, deflate one.
+/// AXIAM never signs a request; nothing in a server path calls these.
+#[doc(hidden)]
+pub mod test_support {
+    use std::io::Write;
+
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use samael::crypto::{CryptoProvider, XmlSec};
+
+    /// A key pair and a self-signed certificate over it.
+    pub struct Material {
+        /// PKCS#8 DER of the private key.
+        pub pkcs8_der: Vec<u8>,
+        /// PKCS#8 PEM of the private key.
+        pub pkcs8_pem: String,
+        /// The certificate, DER.
+        pub cert_der: Vec<u8>,
+        /// The certificate, PEM.
+        pub cert_pem: String,
+    }
+
+    /// An RSA key of `bits` and a self-signed certificate for it, valid from an
+    /// hour ago for `days`.
+    ///
+    /// # Panics
+    ///
+    /// When OpenSSL fails, which a test should surface.
+    #[must_use]
+    pub fn rsa_material(bits: u32, common_name: &str, days: u32) -> Material {
+        use openssl::{asn1, bn, hash, nid, pkey, rsa, x509};
+        let pair = pkey::PKey::from_rsa(rsa::Rsa::generate(bits).expect("rsa")).expect("pkey");
+        let mut name = x509::X509NameBuilder::new().expect("name");
+        name.append_entry_by_nid(nid::Nid::COMMONNAME, common_name)
+            .expect("cn");
+        let name = name.build();
+        let mut builder = x509::X509Builder::new().expect("builder");
+        builder.set_version(2).expect("version");
+        let mut serial = bn::BigNum::new().expect("bn");
+        serial
+            .rand(127, bn::MsbOption::MAYBE_ZERO, false)
+            .expect("serial");
+        builder
+            .set_serial_number(&serial.to_asn1_integer().expect("serial"))
+            .expect("serial");
+        builder.set_subject_name(&name).expect("subject");
+        builder.set_issuer_name(&name).expect("issuer");
+        builder.set_pubkey(&pair).expect("pubkey");
+        let not_before =
+            asn1::Asn1Time::from_unix(chrono::Utc::now().timestamp() - 3600).expect("not before");
+        builder.set_not_before(&not_before).expect("not before");
+        builder
+            .set_not_after(&asn1::Asn1Time::days_from_now(days).expect("not after"))
+            .expect("not after");
+        builder
+            .sign(&pair, hash::MessageDigest::sha256())
+            .expect("sign");
+        let cert = builder.build();
+        Material {
+            pkcs8_der: pair.private_key_to_pkcs8().expect("pkcs8 der"),
+            pkcs8_pem: String::from_utf8(pair.private_key_to_pem_pkcs8().expect("pkcs8 pem"))
+                .expect("utf8"),
+            cert_der: cert.to_der().expect("der"),
+            cert_pem: String::from_utf8(cert.to_pem().expect("pem")).expect("utf8"),
+        }
+    }
+
+    /// The enveloped `ds:Signature` template for the element whose `ID` is `id`.
+    #[must_use]
+    pub fn signature_template(id: &str, cert_der: &[u8]) -> String {
+        super::sign::signature_template(id, cert_der)
+    }
+
+    /// Sign the first signature template in `document` with a PKCS#8 DER key.
+    ///
+    /// # Panics
+    ///
+    /// When xmlsec refuses.
+    #[must_use]
+    pub fn sign_document(document: &str, pkcs8_der: &[u8]) -> String {
+        let signed = <XmlSec as CryptoProvider>::sign_xml(document.as_bytes(), pkcs8_der)
+            .expect("xmlsec signing");
+        super::xml::strip_declaration(&signed).to_owned()
+    }
+
+    /// RSA-SHA256 over `octets`, base64: an HTTP-Redirect `Signature`.
+    ///
+    /// # Panics
+    ///
+    /// When OpenSSL fails.
+    #[must_use]
+    pub fn sign_octets(octets: &str, pkcs8_der: &[u8]) -> String {
+        let pair = openssl::pkey::PKey::private_key_from_pkcs8(pkcs8_der).expect("key");
+        let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &pair)
+            .expect("signer");
+        signer.update(octets.as_bytes()).expect("update");
+        STANDARD.encode(signer.sign_to_vec().expect("sign"))
+    }
+
+    /// Raw DEFLATE, then base64: an HTTP-Redirect `SAMLRequest` before URL
+    /// encoding.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice (writes to memory).
+    #[must_use]
+    pub fn deflate_base64(document: &[u8]) -> String {
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(document).expect("deflate");
+        STANDARD.encode(encoder.finish().expect("deflate"))
+    }
 }

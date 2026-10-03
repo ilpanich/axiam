@@ -236,6 +236,13 @@ pub type OidcFederationServiceT<C> = OidcFederationService<
     SurrealUserRepository<C>,
 >;
 
+/// The tenant SAML IdP signing-credential service (T23.2.1, D-21).
+pub type SamlIdpCredentialServiceT<C> = axiam_pki::saml_signing::SamlIdpCredentialService<
+    axiam_db::SurrealCaCertificateRepository<C>,
+    SurrealCertificateRepository<C>,
+    axiam_db::SurrealSamlIdpCredentialRepository<C>,
+>;
+
 #[cfg(feature = "saml")]
 pub type SamlFederationServiceT<C> = SamlFederationService<
     SurrealFederationConfigRepository<C>,
@@ -400,6 +407,12 @@ pub struct AppState<C: Connection + Clone> {
     ///
     /// See [`bundles::FederationState`].
     pub federation: bundles::FederationState<C>,
+    /// The SAML 2.0 identity provider (G-2, T23.2.3). Behind `saml`: a build
+    /// without it mounts no SAML route at all (D-20).
+    ///
+    /// See [`bundles::SamlIdpState`].
+    #[cfg(feature = "saml")]
+    pub saml_idp: bundles::SamlIdpState<C>,
 }
 
 /// Assemble the OPAQUE server keys, requiring **both** or neither.
@@ -601,6 +614,29 @@ impl<C: Connection + Clone> AppState<C> {
             Arc::clone(&crypto_semaphore),
             Arc::clone(&ca_custodians),
         );
+        #[cfg(feature = "saml")]
+        let saml_idp = bundles::SamlIdpState {
+            sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(db.clone()),
+            pending_repo: axiam_db::SurrealPendingSamlRequestRepository::new(db.clone()),
+            credential_service: axiam_pki::saml_signing::SamlIdpCredentialService::new(
+                CertService::new(
+                    ca_cert_repo.clone(),
+                    cert_repo.clone(),
+                    pki_config.clone(),
+                    Arc::clone(&crypto_semaphore),
+                    Arc::clone(&ca_custodians),
+                ),
+                Arc::clone(&ca_custodians),
+                axiam_db::SurrealSamlIdpCredentialRepository::new(db.clone()),
+            ),
+            // No pairwise key in a test harness: a persistent `NameID` is then
+            // refused (`Responder`), exactly as on a deployment without one. A
+            // test that issues one replaces this field.
+            issuer: Arc::new(axiam_federation::saml_idp::SamlIdpIssuer::new(
+                auth_config.root_issuer(),
+                None,
+            )),
+        };
         let cert_service = CertService::new(
             ca_cert_repo.clone(),
             cert_repo.clone(),
@@ -816,6 +852,8 @@ impl<C: Connection + Clone> AppState<C> {
                     reqwest::Client::new(),
                 ),
             },
+            #[cfg(feature = "saml")]
+            saml_idp,
         }
     }
 }

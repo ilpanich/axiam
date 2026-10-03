@@ -25,8 +25,9 @@ use axiam_core::repository::{
     AccountDeletionRepository, AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter,
     AuditLogRepository, ConsentRepository, ErasureProofRepository, ExportJobRepository,
     FederationLinkRepository, FederationLoginStateRepository, GroupRepository, MailPublisher,
-    Pagination, PasswordHistoryRepository, RoleRepository, SessionRepository,
-    SsoHandoffCodeRepository, TenantRepository, UserRepository, WebauthnCredentialRepository,
+    Pagination, PasswordHistoryRepository, PendingSamlRequestRepository, RoleRepository,
+    SessionRepository, SsoHandoffCodeRepository, TenantRepository, UserRepository,
+    WebauthnCredentialRepository,
 };
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
@@ -64,6 +65,10 @@ pub struct CleanupTask<C: Connection> {
     // closed the tab at the IdP) leaves a row behind, and "almost nothing"
     // accumulates without a sweep.
     sso_handoff_code_repo: Arc<SurrealSsoHandoffCodeRepository<C>>,
+    // T23.2.3: pending SAML AuthnRequests. Ten-minute rows, kept after use
+    // until they expire (they are the request-id replay guard), so the sweep
+    // is what bounds the table.
+    saml_pending_repo: Arc<axiam_db::SurrealPendingSamlRequestRepository<C>>,
     // NEW-4: AMQP nonce replay store sweep.
     amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
     // GDPR purge sweep (D-05/D-06/D-08).
@@ -558,6 +563,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         replay_repo: Arc<SurrealAssertionReplayRepository<C>>,
         state_repo: Arc<SurrealFederationLoginStateRepository<C>>,
         sso_handoff_code_repo: Arc<SurrealSsoHandoffCodeRepository<C>>,
+        saml_pending_repo: Arc<axiam_db::SurrealPendingSamlRequestRepository<C>>,
         amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
         user_repo: Arc<SurrealUserRepository<C>>,
         auth_svc: Arc<AuthSvc<C>>,
@@ -600,6 +606,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             replay_repo,
             state_repo,
             sso_handoff_code_repo,
+            saml_pending_repo,
             amqp_nonce_repo,
             user_repo,
             auth_svc,
@@ -661,6 +668,14 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         &self.job_health,
                         "sso_handoff_code",
                         self.sso_handoff_code_repo.cleanup_expired().await,
+                        tracing::Level::DEBUG,
+                    );
+
+                    // T23.2.3: expired pending SAML AuthnRequests.
+                    Self::record(
+                        &self.job_health,
+                        "saml_authn_request",
+                        self.saml_pending_repo.cleanup_expired().await,
                         tracing::Level::DEBUG,
                     );
 

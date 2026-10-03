@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.21.0",
+ "version": "2.22.0",
  "diagramCount": 9,
- "total": 316,
+ "total": 330,
  "open": 18,
- "mitigated": 298,
+ "mitigated": 312,
  "diagrams": [
   {
    "id": 0,
@@ -3313,7 +3313,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config. Since Phase 23 (G-2) it also covers AXIAM as a SAML identity provider: the assertion issuer (`axiam_federation::saml_idp`, T23.2.2), the tenant's sealed signing credential (`saml_idp_credential`, D-21) and the trust boundary to the service providers it issues to.",
+   "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config. Since Phase 23 (G-2) it also covers AXIAM as a SAML identity provider: the assertion issuer (`axiam_federation::saml_idp`, T23.2.2), the tenant's sealed signing credential (`saml_idp_credential`, D-21) and the trust boundary to the service providers it issues to. T23.2.3 adds the SSO endpoint (`/saml/v2/{tenant}/sso`, both bindings, IdP-initiated, the continue leg) and the `saml_authn_request` store that holds a request across the login hop.",
    "width": 1438,
    "height": 1068,
    "boundaries": [
@@ -3330,7 +3330,7 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 324,
      "y": 24,
      "w": 660,
-     "h": 760,
+     "h": 980,
      "label": "AXIAM federation services"
     },
     {
@@ -3338,7 +3338,7 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 1034,
      "y": 84,
      "w": 380,
-     "h": 740,
+     "h": 920,
      "label": "Data tier"
     },
     {
@@ -4116,9 +4116,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "An email NameID vouches for an address AXIAM never verified",
        "type": "Spoofing",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "An SP that keys accounts on email trusts the IdP to say who owns the address. In a tenant that allows self-registration, someone can create an account under a victim's address and, within the email-verification grace period (or as one of the accounts that stay pending for life, T-160), sign on to such an SP and land in the victim's existing account there.",
-       "mitigation": "Partly mitigated. The default `NameID` is the pairwise identifier, which no address can collide with; the email policy is a per-SP opt-in; an account with no address is refused (`NameIdUnavailable`, answered `InvalidNameIDPolicy`) rather than sent an empty `NameID`. SAML carries no `email_verified` the way OpenID Connect does, and most provisioning paths (administrator, SCIM, directory, federation) never set `email_verified_at`, so refusing every unverified address would end email `NameID`s for nearly every account. Open: the rule (refuse an unverified self-registered address, or a per-SP switch) is T23.2.3's to decide with the SSO endpoint's account checks. Test: `an_email_name_id_is_the_address_and_a_missing_address_is_a_refusal`."
+       "mitigation": "Decided in T23.2.3 (D-25): an email `NameID` is issued only for an address something vouches for — `email_verified_at` is set, or the account is `Active`, which only the verification flow, an administrator, SCIM or the directory path make it, each of which proved or wrote the address. A `PendingVerification` account with an unverified address — a self-registration inside its grace period, or an account provisioned pending and never activated — is answered `InvalidNameIDPolicy` (`NameIdUnverified`) at an email-keyed SP, never with a weaker identifier, and the `email` attribute is omitted for it, since an SP may key accounts on that just as well. Such an account still signs on wherever the `NameID` is the pairwise default. An account with no address is refused (`NameIdUnavailable`). Tests: `t_313_an_unverified_pending_address_is_never_asserted`, `an_email_name_id_is_the_address_and_a_missing_address_is_a_refusal`."
       },
       {
        "number": 314,
@@ -4148,7 +4148,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The tenant's key signs one shape of document only: a response carrying exactly one assertion (T-311). Failure responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`, `RequestDenied`, `InvalidNameIDPolicy`) carry no assertion and are never signed, which SAML Profiles §4.1.3.5 permits, and they have no status message or detail. Tests: `failure_responses_are_status_only_unsigned_and_echo_what_can_be_echoed`, `axiam_own_sp_refuses_a_failure_response`. Constraint for T23.2.4: a signed `LogoutRequest` or `LogoutResponse` is exactly such a document, so SLO signing needs its own decision rather than reusing this key by default."
       }
      ],
-     "open": 2
+     "open": 1
     },
     {
      "id": "2a2a1983-07c2-5847-a3d0-7de61be737f2",
@@ -4185,6 +4185,160 @@ export const THREAT_MODEL: ThreatModel = {
       }
      ],
      "open": 1
+    },
+    {
+     "id": "7443c8b5-68b4-5ac9-bd3d-f39cdb1d21be",
+     "kind": "process",
+     "x": 624,
+     "y": 794,
+     "w": 140,
+     "h": 140,
+     "name": "SAML SSO endpoint (/saml/v2/{tenant}/sso)",
+     "lines": [
+      "SAML SSO",
+      "endpoint",
+      "(/saml/v2/{tenant}/sso)"
+     ],
+     "description": "axiam-api-rest `handlers::saml_idp` (T23.2.3, behind `saml`): GET/POST `/saml/v2/{tenant}/sso` (HTTP-Redirect and HTTP-POST bindings), `/sso/idp-initiated` and `/sso/continue`. The first leg decodes, parses and checks the AuthnRequest (DTDs refused, signature, Destination, ACS allow-list, binding, RelayState, request-id replay) and holds it under an opaque handle bound to the browser; the second resolves the OP session through the tenant-keyed lookup, runs the login hop, and consumes the handle before calling the issuer. Answers 404 when the tenant's saml_idp_enabled is off (D-20).",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 317,
+       "title": "An AuthnRequest that does not come from the registered SP obtains an assertion for it",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Anyone can send an `AuthnRequest` naming any SP's entity id as its `Issuer`. If the SSO endpoint believed the request's own claims — its ACS URL, its binding, its requested identifier — a forged request could decide where and in what form an assertion for that SP is delivered.",
+       "mitigation": "The SP is found by `Issuer` within the tenant of the request path only, and nothing the request names is used until it has passed every check that needs no principal (D-24): for an SP that registered a signing certificate, any signature present must verify — on HTTP-Redirect over the exact query octets received (SAML Bindings §3.4.4.1), on HTTP-POST as the single enveloped signature of the root (D-23's placement rule on the receiving side), SHA-1 refused — and an SP with `want_authn_requests_signed` gets nothing unsigned. A signed request must carry `Destination`, which must be the tenant's own SSO URL. Even an unsigned request can only steer delivery to an ACS URL the SP registered (T-318), so a forged one at most signs the user in to that SP as themselves (T-322). Tests: `a_signing_sp_s_missing_bad_or_wrong_key_signature_is_refused_on_both_bindings`, `an_acs_outside_the_registry_or_a_destination_mismatch_is_refused_before_the_hop`, `saml_idp::request::tests` (placement gadgets, exact-octet verification, SHA-1)."
+      },
+      {
+       "number": 318,
+       "title": "ACS redirection: the signed assertion is posted to a URL the SP never registered",
+       "type": "Tampering",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "An `AuthnRequest` names the URL the response is posted to. Honouring an attacker's URL turns the IdP into a machine that hands a victim's signed assertion to the attacker, who presents it to the real SP as the victim.",
+       "mitigation": "The ACS URL is resolved against the SP's registration only: an `AssertionConsumerServiceURL` must equal a registered endpoint byte for byte, an index must name one, neither means the SP's default, both is malformed, and the endpoint must use HTTP-POST. Checked before the login hop, again by `SamlIdpIssuer::failure` and `issue`, and an unregistered URL is answered with an error page that posts nowhere — not even a failure response. The response's `Destination` and `Recipient` are the URL used; the auto-post page's `Content-Security-Policy` allows `form-action` to that URL's origin and nothing else. Tests: `an_acs_outside_the_registry_or_a_destination_mismatch_is_refused_before_the_hop` (unregistered, near-miss, unknown index, URL and index together), `redirect_binding_end_to_end_through_the_login_hop` (the CSP)."
+      },
+      {
+       "number": 319,
+       "title": "A replayed AuthnRequest or pending handle yields a second assertion",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A captured `AuthnRequest`, or the handle of one held across the login hop, presented again — from the same browser or another — obtains a second response answering the same request, which an SP that tracks outstanding requests poorly will accept.",
+       "mitigation": "The request `ID` is single-use per SP: the pending row is created under a unique index on `(tenant_id, sp_id:request_id)` and is kept, consumed, until it expires ten minutes later — longer than the `IssueInstant` window (five minutes back, the 60 s skew forward), so a replay from outside the window fails on freshness and one inside it on the index (schema v73). The handle is consumed on the X6 two-layer arbiter immediately before issuing, so of any number of concurrent continues one issues. Assertions live five minutes and carry `InResponseTo` (T23.2.2). Tests: `a_replayed_request_id_is_refused_before_the_hop` (both bindings), `a_handle_is_single_use_and_bound_to_the_browser_that_started_it`, `saml_authn_request_test::concurrent_consumes_yield_exactly_one_winner` (100 rounds of 8 racers on surrealkv), `a_request_id_is_single_use_per_service_provider_even_after_consumption`."
+      },
+      {
+       "number": 320,
+       "title": "XML external entities or entity expansion in an AuthnRequest",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "An `AuthnRequest` is attacker-supplied XML parsed before anything is known about its sender. A DTD can declare an external entity (a local file or an internal URL, read into a field AXIAM echoes or fetched on parse) or a nest of entities that expands to gigabytes (billion laughs).",
+       "mitigation": "Any markup declaration — `<!DOCTYPE`, `<!ENTITY`, `<!ELEMENT`, `<!ATTLIST`, `<!NOTATION` — is refused on the document's bytes before libxml sees it, so there is no entity to resolve or expand; a NUL byte (how UTF-16 would hide a `<!DOCTYPE` from that scan) and a declared encoding other than UTF-8 are refused too. libxml then runs without recovery and without network access, and the document is capped at 64 KiB. All of it happens before the SP lookup. Tests: `xxe_billion_laughs_and_a_decompression_bomb_are_refused_before_any_lookup` (both bindings), `saml_idp::request::tests::an_external_entity_request_is_refused_before_parsing`, `a_billion_laughs_request_is_refused_before_parsing`, `a_document_in_another_encoding_is_refused`."
+      },
+      {
+       "number": 321,
+       "title": "A decompression bomb, an oversized body or a request flood exhausts the SSO endpoint",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The HTTP-Redirect binding carries raw DEFLATE, which compresses a few kilobytes into gigabytes; the HTTP-POST binding is a body of the sender's choosing; and every accepted request writes a row and costs XML parsing and possibly an RSA verification.",
+       "mitigation": "Inflation stops one byte past 64 KiB, so a bomb costs at most that; the encoded value and the POST body (192 KiB, read only after the tenant check) are capped. The three SSO routes carry a per-route governor and shared buckets of their own (`saml_idp_sso`, `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`) at the browser-endpoint preset `end_session_per_min` (§7 rule 6). Pending rows expire in ten minutes and are swept. RSA-4096 signing runs off the async workers under the shared CPU gate. Tests: `the_sso_routes_are_rate_limited`, `xxe_billion_laughs_and_a_decompression_bomb_are_refused_before_any_lookup`, `saml_idp::request::tests::a_decompression_bomb_is_refused_at_the_inflated_bound`."
+      },
+      {
+       "number": 322,
+       "title": "Login CSRF or session swapping across the pending handle",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The browser leaves the SSO endpoint with an opaque handle in a URL and comes back with it after signing in. A handle that leaks (a referrer, a log, a shared link) or is planted in a victim's browser could pair one person's request with another person's session — the assertion going to the SP in the wrong browser, for the wrong user.",
+       "mitigation": "The handle is bound to the browser that started the request: the first leg sets an `HttpOnly; Secure; SameSite=Lax` cookie scoped to the tenant's SSO path, named per handle so concurrent sign-ons do not collide, and the continue leg requires the SHA-256 of its value to match the row (constant-time) before it reads a session or consumes anything. The assertion is always for the session whose OP cookie arrives, resolved through the tenant-keyed digest lookup, and is posted to the SP's registered ACS in that same browser, so neither party to a swap can receive the other's assertion. The redirects carry `Referrer-Policy: no-referrer` and `no-store`. Residual: anyone can make a victim's browser start an `AuthnRequest` of their own making and so sign the victim in to a registered SP as the victim — inherent to SAML Web Browser SSO and bounded by the SP's own `InResponseTo` tracking. Tests: `a_handle_is_single_use_and_bound_to_the_browser_that_started_it` (another browser, signed in, refused; the same browser without its binding cookie refused, nothing burned)."
+      },
+      {
+       "number": 323,
+       "title": "ForceAuthn is skipped by forging the login-hop marker",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "`ForceAuthn` asks the IdP to authenticate the user afresh. If the continue leg decided \"fresh\" from the login hop's return marker — as `/oauth2/authorize` does for `prompt=login` (P23W1-08) — anyone at an unlocked browser could append the marker and receive an assertion from the existing session.",
+       "mitigation": "Bound to the request rather than to the marker: the pending row records the instant the first leg accepted the request, and the continue leg treats a session as satisfying `ForceAuthn` only if its `authenticated_at` is strictly later. A session that is not is sent to sign in with `reauth=1`; on a return leg it is answered `AuthnFailed` with no assertion. The marker decides only whether to hop again or answer. `IsPassive` never shows the sign-in page (`NoPassive` without a session). Tests: `force_authn_requires_a_sign_in_after_the_request_and_a_forged_marker_skips_nothing`, `is_passive_never_shows_the_sign_in_page`."
+      },
+      {
+       "number": 324,
+       "title": "Unsolicited (IdP-initiated) responses are triggered for an SP or from a page that did not ask",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "An IdP-initiated response answers no request, so the SP cannot bind it to anything it started; and a trigger any web page can link to lets a third party sign a visitor in to an SP with a `RelayState` of its choosing.",
+       "mitigation": "Per-SP opt-in, off by default (D-3): `GET /saml/v2/{tenant}/sso/idp-initiated?sp=…` refuses an SP that has not set `allow_idp_initiated` — and a disabled SP, an SP asking for encryption, an unusable default ACS or an over-long `RelayState` — with an error page before the login hop (D-26). A request carrying `Sec-Fetch-Site: cross-site` is refused: the trigger is for AXIAM's own pages and bookmarks. The response carries no `InResponseTo` and goes to the SP's default registered ACS. Residual: a browser that sends no `Sec-Fetch-Site` header is not refused. Test: `idp_initiated_is_served_for_an_sp_that_opted_in_and_refused_otherwise`."
+      },
+      {
+       "number": 326,
+       "title": "The SSO routes reveal whether a tenant exists or serves SAML",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "D-20 makes the SAML IdP a per-tenant setting. An endpoint that answered a disabled tenant differently from a nonexistent one, or from a build without SAML, would enumerate tenants and their configuration.",
+       "mitigation": "Every route answers the empty `404` an unmounted path answers when the tenant does not exist, its path segment is not the canonical UUID spelling, or its effective `saml_idp_enabled` is off — decided before the body is read — and every other method and sub-path under the scope answers the same, so no `405` distinguishes a build with SAML from one without (D-20, D-27). Residual: the routes are rate-limited in a build with SAML and not in one without, so a flood tells the two builds apart (not tenants). Test: `every_sso_route_answers_an_indistinguishable_404_when_saml_is_off` (status and every header compared with an unmounted path, four tenant spellings, seven method/path pairs)."
+      },
+      {
+       "number": 327,
+       "title": "An issued assertion cannot be traced to the user, the SP and the sign-on",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Without a record, a tenant administrator cannot answer which user signed in to which SP when, or see that an SP is being refused.",
+       "mitigation": "Every assertion issued and every SAML failure response sent writes an audit row: `saml_idp.sso.issued` with the user, the SP's record id and the response id, or `saml_idp.sso.refused` with the SAML status. Refusals answered with an error page (a request that never proved it came from an SP) are logged with a fixed reason, not audited per tenant. The rows carry no `NameID`, `RelayState` or response. The `SessionIndex` in the assertion is the AXIAM session id (T23.2.2), tying it to the session record."
+      },
+      {
+       "number": 328,
+       "title": "A suspended account's OP session still obtains SAML assertions",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "An account-status change revokes no session. A locked, deactivated or deleted user whose browser still holds the OP cookie would keep signing in to every SAML SP for the session's lifetime — the defect T23.1.3 found at `/oauth2/authorize`.",
+       "mitigation": "The continue leg re-reads the account behind the resolved session and applies `account_may_act` through `AuthService::check_session_holder` — `Locked`, `Inactive`, `Anonymized` and `Deleted` refused, `PendingVerification` served (T-160, P23W1-03) — and treats a refused account as no session (`reauth`, then `AuthnFailed`); `SamlIdpIssuer::issue` applies the rule again. `allowed_groups` is read from the user's current groups. Tests: `a_suspended_account_is_not_served_and_a_pending_one_is`, `allowed_groups_decide_who_may_use_the_sp`."
+      },
+      {
+       "number": 329,
+       "title": "Script injection through the auto-post page",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The HTTP-POST binding page echoes the SP's `RelayState` verbatim and the ACS URL into a form; it is the one HTML page the API serves with values from a request in it.",
+       "mitigation": "Every value is HTML-escaped (`&`, `<`, `>`, `\"`, `'`). The page carries its own `Content-Security-Policy` — `default-src 'none'`, the one inline `submit()` under a per-response nonce, `form-action` the ACS origin only, `frame-ancestors 'none'`, `base-uri 'none'` — stricter than the global policy in every directive; the security-headers middleware writes the global policy only when a handler set none (D-27). `Cache-Control: no-store`. Tests: `post_binding_signed_end_to_end_verified_by_axiam_own_sp` (a `RelayState` of `relay&<x>` arrives escaped and round-trips), `security_headers::tests::the_global_policy_is_written_unless_the_handler_set_its_own`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "00b1c269-bd14-572b-a277-4946eed1f557",
+     "kind": "store",
+     "x": 1079,
+     "y": 834,
+     "w": 170,
+     "h": 80,
+     "name": "saml_authn_request (pending requests)",
+     "lines": [
+      "saml_authn_request",
+      "(pending requests)"
+     ],
+     "description": "Schema v73: AuthnRequests between the SSO endpoint's two legs — SP, resolved ACS URL, RelayState, ForceAuthn/IsPassive and the outbound instant — under SHA-256 digests of the handle and of the browser-binding value. Ten-minute rows, kept after consumption as the request-id replay guard; unique (tenant_id, replay_key) and handle_hash.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 330,
+       "title": "A database read yields a usable sign-on handle",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Pending rows name a user's SP, ACS URL and `RelayState` for ten minutes. If they stored the handle or the binding value, anyone who could read the table could complete another person's sign-on.",
+       "mitigation": "Only SHA-256 digests of the handle and of the binding value are stored, as `sso_handoff_code` stores its codes; a digest cannot be presented. Rows are tenant-scoped on every query, removed with their tenant in the tenant-delete transaction, and swept when expired (`saml_authn_request` on `/health/jobs`). Tests: `saml_authn_request_test` (cross-tenant read and consume refused, expiry and sweep, the tenant cascade); `v73_defines_the_pending_authn_request_table_additively` (no raw column)."
+      }
+     ],
+     "open": 0
     }
    ],
    "edges": [
@@ -4657,15 +4811,99 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "HTTPS (SAML HTTP-POST binding)",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "86f8777a-f3dc-5554-8c11-a5915843dd41",
+     "path": "M199,942.2 L624.9,874.9",
+     "name": "AuthnRequest (HTTP-Redirect / HTTP-POST, via the browser)",
+     "description": "The SP's AuthnRequest, carried by the user's browser: a DEFLATEd query parameter (Redirect, optionally signed over the query) or a form post (POST, optionally signed enveloped), with RelayState. Crosses the AXIAM ↔ SAML service provider boundary.",
+     "label": "AuthnRequest (HTTP-Redirect / HTTP-POST, via the browser)",
+     "labelLines": [
+      "AuthnRequest (HTTP-Redirect /",
+      "HTTP-POST, via the browser)"
+     ],
+     "lx": 411.9,
+     "ly": 908.5,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS (SAML bindings)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "55ea167f-3347-575f-8690-1f8ca464a0b9",
+     "path": "M167.8,384 L642.3,816.8",
+     "name": "continue leg: OP cookie + binding cookie",
+     "description": "GET /saml/v2/{tenant}/sso/continue?handle=…: a top-level navigation carrying the SameSite=Lax OP-session cookie (minted at /saml/v2/{tenant}/sso since T23.2.3) and the per-handle binding cookie; the return leg of the login hop.",
+     "label": "continue leg: OP cookie + binding cookie",
+     "labelLines": [
+      "continue leg: OP cookie + binding",
+      "cookie"
+     ],
+     "lx": 405.1,
+     "ly": 600.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 325,
+       "title": "RelayState and the pending handle are recorded in request logs",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Open",
+       "description": "The HTTP-Redirect binding carries `RelayState` (and `SAMLRequest`) in the query string, and the continue leg carries the pending handle there. The request-tracing middleware records the request target, query included, as it does for every route.",
+       "mitigation": "Partly mitigated. The SSO handlers never log `SAMLRequest`, `SAMLResponse`, `RelayState`, the handle, the binding value or the OP cookie — refusals are logged as a fixed reason, the tenant and the SP's record id — and the audit middleware records the path without the query. A logged handle is useless without the browser's binding cookie (T-322) and is single-use. Open because `tracing-actix-web`'s root span records the full request target on every route, the same exposure `/oauth2/authorize`'s `state` already has; trimming the query from the root span is a deployment-wide logging change for the F4 review to decide."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "0cb2b6b5-fab7-5f04-bac9-6abe03099111",
+     "path": "M764,865.5 L1079,872.2",
+     "name": "hold / consume pending request (X6)",
+     "description": "CREATE under the replay index on the first leg; a read on the second; the guarded UPDATE plus nonce read-back that consumes the handle exactly once before issuing.",
+     "label": "hold / consume pending request (X6)",
+     "labelLines": [
+      "hold / consume pending request (X6)"
+     ],
+     "lx": 921.5,
+     "ly": 868.8,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "371da1a7-3637-565b-8c77-5b7b69034023",
+     "path": "M734.7,807 L853.3,641",
+     "name": "checked request + resolved session",
+     "description": "The SP row, the resolved ACS URL, InResponseTo, RelayState, the session, the account (account_may_act), groups and roles, and the unsealed credential, handed to SamlIdpIssuer::issue in a blocking task.",
+     "label": "checked request + resolved session",
+     "labelLines": [
+      "checked request + resolved session"
+     ],
+     "lx": 794,
+     "ly": 724,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 57,
+   "total": 71,
    "open": 6,
    "bySeverity": {
-    "High": 23,
-    "Medium": 21,
-    "Critical": 10,
-    "Low": 3
+    "High": 28,
+    "Medium": 26,
+    "Critical": 11,
+    "Low": 6
    }
   },
   {

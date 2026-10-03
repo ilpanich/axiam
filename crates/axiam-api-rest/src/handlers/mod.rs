@@ -27,6 +27,8 @@ pub mod pgp_keys;
 pub mod reactors;
 pub mod resources;
 pub mod roles;
+#[cfg(feature = "saml")]
+pub mod saml_idp;
 pub mod scim_tokens;
 pub mod scopes;
 pub mod service_accounts;

@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SAML 2.0 identity provider: the SSO endpoint (T23.2.3, G-2, D-24 … D-27).**
+  `/saml/v2/{tenant_id}/sso` serves the Web Browser SSO profile per tenant, on
+  the HTTP-Redirect (`GET`) and HTTP-POST (`POST`) bindings, plus
+  `/sso/idp-initiated?sp=…` for a service provider that opted in (D-3) and the
+  return leg `/sso/continue`. A request is checked in full before anyone is
+  asked to sign in — DTDs refused on the bytes (no XML external entity or entity
+  expansion reaches the parser), a 64 KiB inflate cap, `IssueInstant` within
+  five minutes, the SP found by `Issuer` within the tenant, any signature
+  verified (Redirect over the exact query octets; POST as the root's one
+  enveloped signature), `Destination` = this tenant's SSO URL, the ACS URL or
+  index exactly as registered, HTTP-POST response binding, `RelayState` ≤ 80
+  bytes, a request `ID` never seen for that SP — and is then held server-side
+  (schema **v73**, `saml_authn_request`) under an opaque handle bound to the
+  browser by a cookie. The second leg signs the user in through the same login
+  hop and OP-session cookie as `/oauth2/authorize` (which a sign-in now also
+  mints at `/saml/v2/{tenant_id}/sso`), applies `account_may_act`,
+  `allowed_groups`, `IsPassive` and a `ForceAuthn` bound to the request rather
+  than to the hop marker, consumes the handle exactly once, and posts the signed
+  response from a page with its own content-security policy (`form-action` the
+  ACS origin only). The SPA's `return_to` validator accepts the SAML return leg.
+  A tenant whose `saml_idp_enabled` is off, an unknown tenant, and a build
+  without `saml` all answer the same empty `404`. Rate-limited at the
+  browser-endpoint preset under buckets of their own. Composition: the optional
+  deployment key `AXIAM__AUTH__SAML_PAIRWISE_KEY` (D-22) is now read at startup
+  (absence logged at INFO); pending requests are swept by the cleanup task
+  (`saml_authn_request` on `/health/jobs`). Threat model **2.22.0**: T-317 …
+  T-330, T-313 closed.
+
 - **SAML 2.0 identity provider: assertion issuance (T23.2.2, G-2, D-22).**
   `axiam_federation::saml_idp`, a library behind the `saml` feature that the SSO
   endpoint (T23.2.3) will call; no route serves SAML yet. `SamlIdpIssuer::issue`
@@ -262,6 +290,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **An email `NameID` is issued only for an address something vouches for
+  (T23.2.3, D-25, T-313).** The SAML IdP asserts a user's email — as the
+  `NameID` of an `emailAddress` service provider, or as an `email` attribute —
+  only when it was verified or the account is `Active`. A `PendingVerification`
+  account with an unverified address is answered `InvalidNameIDPolicy` at such
+  an SP (and the attribute is omitted); it still signs on where the `NameID` is
+  the pairwise default.
+- **A handler may set a stricter `Content-Security-Policy` of its own
+  (T23.2.3, D-27).** The security-headers middleware writes the global policy
+  only when the response carries none; the one handler that sets its own is the
+  SAML auto-post page. Every other response is unchanged.
+- **A sign-in mints a third OP-session cookie copy** at the tenant's SAML SSO
+  path (`/saml/v2/{tenant_id}/sso`), same value and attributes; logout and both
+  `end_session`s clear it with the others (T23.2.3, D-11).
 - Front-channel logout declined by design and recorded (T23.12.1, D-6)
 
 ### Fixed

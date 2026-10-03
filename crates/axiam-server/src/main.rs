@@ -184,6 +184,17 @@ struct AppConfig {
     /// Skipped by serde — populated from the secret provider at startup.
     #[serde(skip)]
     directory_encryption_key: Option<[u8; 32]>,
+    /// The SAML IdP's pairwise-identifier key (32 bytes, D-22), from the secret
+    /// provider as `saml_pairwise_key` (`AXIAM__AUTH__SAML_PAIRWISE_KEY` under
+    /// the default provider).
+    ///
+    /// **Optional, never a reason to refuse boot, and must never rotate**:
+    /// absent, a sign-on to a service provider whose `NameID` is the persistent
+    /// pairwise identifier is answered `Responder` (an `emailAddress` SP still
+    /// works); rotated or lost, every user becomes a new, unknown account at
+    /// every such SP. Skipped by serde — populated from the secret provider.
+    #[serde(skip)]
+    saml_pairwise_key: Option<[u8; 32]>,
     /// HMAC-SHA256 pepper (32 bytes) for GDPR audit pseudonymization (D-02).
     /// Loaded from `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
@@ -408,6 +419,27 @@ async fn main() -> std::io::Result<()> {
             "directory encryption key not configured: the LDAP / Active Directory \
              identity source is unavailable (set {} to enable it)",
             keys::env_var_name(keys::DIRECTORY_ENCRYPTION_KEY),
+        );
+    }
+
+    // The SAML IdP's pairwise-identifier key (G-2, D-22). Optional, like the
+    // directory key: a deployment that issues no persistent SAML `NameID` has
+    // no use for it, so its absence is INFO and never refuses boot. It must
+    // never rotate (see the field's documentation), which is why the log names
+    // the variable rather than suggesting one is generated.
+    config.saml_pairwise_key = read_key(keys::SAML_PAIRWISE_KEY);
+    if config.saml_pairwise_key.is_some() {
+        tracing::info!(
+            provider = secret_provider.describe(),
+            "SAML pairwise-identifier key loaded"
+        );
+    } else {
+        tracing::info!(
+            provider = secret_provider.describe(),
+            "SAML pairwise-identifier key not configured: SAML sign-on to a service \
+             provider using persistent NameIDs is refused (set {} to enable it; it \
+             must never change once set)",
+            keys::env_var_name(keys::SAML_PAIRWISE_KEY),
         );
     }
 
@@ -1305,6 +1337,11 @@ async fn main() -> std::io::Result<()> {
     let federation_login_state_repo =
         SurrealFederationLoginStateRepository::new(pool.handle_for_repo());
     let sso_handoff_code_repo = SurrealSsoHandoffCodeRepository::new(pool.handle_for_repo());
+    // T23.2.3 — pending SAML AuthnRequests (schema v73). Built in every build:
+    // the table exists whether or not SAML is compiled in, and the sweep below
+    // keeps it bounded either way.
+    let saml_pending_repo =
+        axiam_db::SurrealPendingSamlRequestRepository::new(pool.handle_for_repo());
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
     // B3: process-wide in-process cache for AXIAM's OWN `GET /oauth2/jwks`
@@ -1495,6 +1532,26 @@ async fn main() -> std::io::Result<()> {
         assertion_replay_repo.clone(),
         http_client.clone(),
     );
+    // T23.2.3 (G-2) — the SAML IdP: the SP registry, the pending-request store,
+    // the tenant signing-credential service (D-21: its keys are sealed through
+    // the database custodian of the same custodian set the CAs use) and the
+    // issuer, built on the deployment's root issuer and the pairwise key.
+    #[cfg(feature = "saml")]
+    let saml_idp_state = bundles::SamlIdpState {
+        sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(pool.handle_for_repo()),
+        pending_repo: saml_pending_repo.clone(),
+        credential_service: axiam_pki::saml_signing::SamlIdpCredentialService::new(
+            cert_service.clone(),
+            Arc::clone(&ca_custodians),
+            axiam_db::SurrealSamlIdpCredentialRepository::new(pool.handle_for_repo()),
+        ),
+        issuer: Arc::new(axiam_federation::saml_idp::SamlIdpIssuer::new(
+            config.auth.root_issuer(),
+            config
+                .saml_pairwise_key
+                .map(axiam_federation::saml_idp::PairwiseKey::new),
+        )),
+    };
 
     // G7: resolve the deployment rate-limit posture BEFORE validation and
     // before `config.rate_limit` / `config.grpc` are cloned into the App
@@ -2485,6 +2542,7 @@ async fn main() -> std::io::Result<()> {
     for job in [
         "saml_assertion_replay",
         "federation_login_state",
+        "saml_authn_request",
         "amqp_nonce_replay",
         "gdpr_purge",
         "gdpr_export",
@@ -2510,6 +2568,7 @@ async fn main() -> std::io::Result<()> {
         Arc::new(assertion_replay_repo.clone()),
         Arc::new(federation_login_state_repo.clone()),
         Arc::new(sso_handoff_code_repo.clone()),
+        Arc::new(saml_pending_repo.clone()),
         Arc::new(amqp_nonce_repo.clone()),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),
@@ -2705,6 +2764,8 @@ async fn main() -> std::io::Result<()> {
             #[cfg(feature = "saml")]
             saml_federation_service: saml_federation_service.clone(),
         },
+        #[cfg(feature = "saml")]
+        saml_idp: saml_idp_state,
     };
 
     // X4 — accept subject tokens from trusted external IdPs.

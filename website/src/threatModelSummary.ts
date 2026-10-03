@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.21.0",
+ "version": "2.22.0",
  "diagramCount": 9,
- "total": 316,
+ "total": 330,
  "open": 18,
- "mitigated": 298,
+ "mitigated": 312,
  "areas": [
   {
    "id": 0,
@@ -80,7 +80,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 57,
+   "total": 71,
    "open": 6
   },
   {
@@ -117,55 +117,55 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 80,
-   "open": 5
+   "total": 84,
+   "open": 4
   },
   {
    "name": "Tampering",
-   "total": 61,
+   "total": 64,
    "open": 1
   },
   {
    "name": "Repudiation",
-   "total": 6,
+   "total": 7,
    "open": 0
   },
   {
    "name": "Information disclosure",
-   "total": 75,
-   "open": 8
+   "total": 78,
+   "open": 9
   },
   {
    "name": "Denial of service",
-   "total": 32,
+   "total": 33,
    "open": 3
   },
   {
    "name": "Elevation of privilege",
-   "total": 62,
+   "total": 64,
    "open": 1
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 38,
+   "total": 39,
    "open": 2
   },
   {
    "name": "High",
-   "total": 147,
-   "open": 9
+   "total": 152,
+   "open": 8
   },
   {
    "name": "Medium",
-   "total": 120,
+   "total": 125,
    "open": 6
   },
   {
    "name": "Low",
-   "total": 11,
-   "open": 1
+   "total": 14,
+   "open": 2
   }
  ],
  "openRisks": [
@@ -270,16 +270,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Narrowed, not closed. `prod-up` now writes the read-only `axiam` policy from `docs/deployment/vault.md` §5.4 and issues a **scoped, periodic token** for the server, refusing to fall back to root if that fails; seeding keeps its own short-lived credential, because the seeding token and the serving token were never the same thing. Both the Compose stack and `k8s/vault/statefulset.yml` move from the `file` backend to **Raft**, which has a consistent backup story (`vault operator raft snapshot save`) and a migration path to three nodes that does not require a re-seed — a re-seed changes the OPAQUE setup key, i.e. a password reset for every user in every tenant. What remains **open** is auto-unseal, which cannot be closed from inside AXIAM: every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option whatever the hardware. `docs/deployment/vault.md` §5.3 and the Pi runbook §7.1 give the honest option table — GCP Cloud KMS at roughly $0.06 per key per month is the cheapest real answer — and state plainly that a deployment which configures none of them needs a human with three shares after every restart and is not production. A script that unseals from shares kept on the machine is explicitly **not** offered as an alternative: it removes the seal rather than automating it, and is strictly worse than Shamir because the shares are now in the one place an attacker already has. Two amendments since: the server's token is no longer strictly read-only — it holds `create`/`update` on the CA-key prefix, from the one policy file (T-232) — and the seeder that runs after unseal can no longer mistake a refused read for an empty Vault and mint fresh keys over the live ones (T-231). Vault itself runs unprivileged: the prod Compose stack chowns the Raft volume in a one-shot init container rather than running the process that holds every secret as root. Made **checkable** in 1.0.0-beta12 (R-7), the way H-4 made T-180's token scope checkable. `just vault-status` gains a Seal section from the unauthenticated `sys/seal-status` — so it answers even when the token is wrong and even when the Vault is sealed: it names the seal type, reads `OK` for any auto-unseal type, and for `shamir` says \"no auto-unseal; every restart needs t of n key shares, not production\" with the quorum quoted from the response. A Vault sealed at that instant gets its own line, because that is a state somebody is about to fix rather than a statement about the configured seal, and conflating the two would train an operator to ignore both; a request that fails reports `unknown`, never `OK`. `--strict` fails on an unconfirmed auto-unseal, and `just vault-status` still does not pass it so the dev stack's deliberate root-token-on-Shamir does not turn every local run red. **Status stays Open**: the control is a check, not a seal — nothing in this repository can configure auto-unseal, and R-7 does not pretend otherwise."
   },
   {
-   "number": 313,
-   "title": "An email NameID vouches for an address AXIAM never verified",
-   "category": "Spoofing",
-   "severity": "High",
-   "diagramId": 3,
-   "area": "Federation — SAML SP & OIDC relying party",
-   "element": "SAML assertion issuer (saml_idp)",
-   "residualRisk": "Partly mitigated. The default `NameID` is the pairwise identifier, which no address can collide with; the email policy is a per-SP opt-in; an account with no address is refused (`NameIdUnavailable`, answered `InvalidNameIDPolicy`) rather than sent an empty `NameID`. SAML carries no `email_verified` the way OpenID Connect does, and most provisioning paths (administrator, SCIM, directory, federation) never set `email_verified_at`, so refusing every unverified address would end email `NameID`s for nearly every account. Open: the rule (refuse an unverified self-registered address, or a per-SP switch) is T23.2.3's to decide with the SSO endpoint's account checks. Test: `an_email_name_id_is_the_address_and_a_missing_address_is_a_refusal`."
-  },
-  {
    "number": 9,
    "title": "Connection flood exhausts ingress capacity",
    "category": "Denial of service",
@@ -348,6 +338,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Federation — SAML SP & OIDC relying party",
    "element": "Attribute mapping & JIT provisioning",
    "residualRisk": "Off by default (linked_only refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit."
+  },
+  {
+   "number": 325,
+   "title": "RelayState and the pending handle are recorded in request logs",
+   "category": "Information disclosure",
+   "severity": "Low",
+   "diagramId": 3,
+   "area": "Federation — SAML SP & OIDC relying party",
+   "element": "continue leg: OP cookie + binding cookie",
+   "residualRisk": "Partly mitigated. The SSO handlers never log `SAMLRequest`, `SAMLResponse`, `RelayState`, the handle, the binding value or the OP cookie — refusals are logged as a fixed reason, the tenant and the SP's record id — and the audit middleware records the path without the query. A logged handle is useless without the browser's binding cookie (T-322) and is single-use. Open because `tracing-actix-web`'s root span records the full request target on every route, the same exposure `/oauth2/authorize`'s `state` already has; trimming the query from the root span is a deployment-wide logging change for the F4 review to decide."
   }
  ]
 };

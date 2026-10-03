@@ -1313,6 +1313,53 @@ fn an_email_name_id_is_the_address_and_a_missing_address_is_a_refusal() {
     }
 }
 
+/// **T-313, D-25.** An email `NameID` is issued only for an address something
+/// vouches for: verified, or an `Active` account. A `PendingVerification`
+/// account with an unverified address — a self-registration in its grace
+/// period — is refused at an email-keyed SP, the `email` attribute is omitted
+/// for it, and it still signs on where the `NameID` is pairwise.
+#[test]
+fn t_313_an_unverified_pending_address_is_never_asserted() {
+    let mut case = Case::new();
+    case.sp.name_id_format = NameIdFormat::EmailAddress;
+    case.user.status = UserStatus::PendingVerification;
+    case.user.email_verified_at = None;
+    let err = case
+        .issue()
+        .expect_err("an unvouched address is not asserted");
+    assert_eq!(err, SamlIdpError::NameIdUnverified);
+    assert_eq!(err.status(), SamlStatus::InvalidNameIdPolicy);
+
+    // Verified: asserted, whatever the status.
+    case.user.email_verified_at = Some(now());
+    let xml = decode(&case.issue_ok());
+    assert_eq!(one(&xml, "//*[local-name()='NameID']"), "ada@example.test");
+
+    // Pairwise: the pending account signs on, and the email attribute is not
+    // released for its unverified address.
+    case.user.email_verified_at = None;
+    case.sp.name_id_format = NameIdFormat::Persistent;
+    case.sp.attribute_mappings = vec![AttributeMapping {
+        saml_name: "mail".into(),
+        name_format: None,
+        source: AttributeSource::Email,
+    }];
+    let xml = decode(&case.issue_ok());
+    assert!(
+        xpath(&xml, "//*[local-name()='Attribute'][@Name='mail']").is_empty(),
+        "an unvouched address is not released as an attribute either"
+    );
+    case.user.status = UserStatus::Active;
+    let xml = decode(&case.issue_ok());
+    assert_eq!(
+        xpath(
+            &xml,
+            "//*[local-name()='Attribute'][@Name='mail']/*[local-name()='AttributeValue']"
+        ),
+        vec!["ada@example.test".to_owned()]
+    );
+}
+
 #[test]
 fn a_persistent_name_id_without_the_pairwise_key_is_a_refusal() {
     let case = Case::new();

@@ -195,6 +195,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "<64 hex chars>",
           ],
           [
+            "AXIAM__AUTH__SAML_PAIRWISE_KEY",
+            "Optional; must never change once set. HMAC-SHA256 key (hex) deriving the pairwise persistent SAML NameID each service provider sees. Without it, sign-on to a persistent-NameID service provider is refused; rotating or losing it gives every user a new account at every such service provider.",
+            "<64 hex chars>",
+          ],
+          [
             "AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER",
             "HMAC-SHA256 pepper (hex) pseudonymizing audit-log actor identities on GDPR erasure.",
             "<64 hex chars>",

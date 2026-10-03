@@ -22,6 +22,33 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-03 SAML identity provider SSO endpoint entry (Phase 23 T23.2.3,
+> model 2.22.0).** Fourteen threats enter, thirteen Mitigated on arrival and one
+> open, on the trust boundary T23.2.2 drew — the SAML SSO endpoint now receives a
+> service provider's `AuthnRequest` across it — and one closes. **T-317** an
+> impersonated SP: found by `Issuer` within the path's tenant, any signature
+> verified (Redirect over the exact query octets, POST as the root's one
+> enveloped signature), `Destination` checked. **T-318** ACS redirection: the
+> registered ACS URL by exact match or index, checked before the hop, an error
+> page that posts nowhere otherwise, `form-action` the ACS origin only. **T-319**
+> replay: a request `ID` is single-use per SP for longer than the `IssueInstant`
+> window, and the pending handle is consumed once on the X6 arbiter. **T-320**
+> XML external entities and entity expansion: any markup declaration refused on
+> the bytes, before parsing. **T-321** decompression bombs and floods: a hard
+> inflate cap, body caps and rate-limit buckets of their own. **T-322** login CSRF
+> and session swapping across the handle: a per-handle binding cookie the continue
+> leg requires. **T-323** `ForceAuthn` bound to the request rather than to the hop
+> marker. **T-324** unsolicited responses: IdP-initiated per SP and opt-in, never
+> from a cross-site trigger. **T-325**, Low and open: `RelayState` and the handle
+> reach the request log through the tracer's record of the query string.
+> **T-326** a tenant oracle: one indistinguishable `404` (D-20). **T-327** audit
+> rows for every assertion and failure sent. **T-328** a suspended account's
+> session: `account_may_act` re-read. **T-329** script injection on the auto-post
+> page: escaped values and a nonce policy of its own. **T-330** a database read
+> yielding a handle: digests only. **T-313** closes: an email `NameID` is issued
+> only for an address that was verified or whose account was activated (D-25).
+> The model is **330 threats, 312 mitigated / 18 open**.
+>
 > **The 2026-10-03 SAML SP signature-confusion fix (Phase 23 T23.2.2, D-23,
 > model 2.21.0).** No threat enters; one is amended. **T-67**, XML signature
 > wrapping at AXIAM's SAML service-provider side, stays Mitigated with a dated
@@ -766,7 +793,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 316 threats** and a
+The system is verified against a **STRIDE threat model of 330 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -789,8 +816,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 316 |
-| Mitigated / Open | 298 / 18 |
+| Threats identified | 330 |
+| Mitigated / Open | 312 / 18 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -806,7 +833,7 @@ optimistic closed one.
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 60 | 0 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 57 | 6 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 71 | 6 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
@@ -820,13 +847,17 @@ authentication, authorization, tokens, PKI, federation — carries **five** open
 items, and none is a defect. One is an accepted trade-off: a tenant's LDAP or
 Active Directory host is not held to the private-address refusal the IdP and
 webhook fetches apply, because corporate directories live on private networks —
-bounded by mandatory, verified TLS before anything is sent (T-300). Four entered
-with the SAML identity provider's issuer, before anything serves SAML: a leaked
-signing key outlives its retirement at service providers that pinned the
-certificate (T-306), credential rotation waits for a promote verb (T-309), a
-`SessionIndex` shared by every SP of one sign-on lets colluding SPs correlate it
-(T-312), and whether an email `NameID` may carry an address AXIAM never verified
-is the SSO endpoint's decision (T-313). The one it briefly carried, the 60-second grace a rotated
+bounded by mandatory, verified TLS before anything is sent (T-300). Three
+entered with the SAML identity provider's issuer: a leaked signing key outlives
+its retirement at service providers that pinned the certificate (T-306),
+credential rotation waits for a promote verb (T-309), and a `SessionIndex`
+shared by every SP of one sign-on lets colluding SPs correlate it (T-312); a
+fourth that entered with it — whether an email `NameID` may carry an address
+AXIAM never verified — was decided by the SSO endpoint, which asserts an
+address only when it was verified or the account activated (T-313). The SSO
+endpoint adds one Low item: a `RelayState` and the pending sign-on handle reach
+the request log through the request tracer's record of the query string, as
+`/oauth2/authorize`'s `state` already does (T-325). The one it briefly carried, the 60-second grace a rotated
 refresh token keeps, was recorded open at 1.0.0-beta13 rather than absorbed and
 then closed by a decision: the grace now applies only to the FAPI 2.0 profile
 that requires it and sender-constrains every token, and a rotated token presented
@@ -846,21 +877,21 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 80 | 5 |
-| Tampering | 61 | 1 |
-| Repudiation | 6 | 0 |
-| Information disclosure | 75 | 8 |
-| Denial of service | 32 | 3 |
-| Elevation of privilege | 62 | 1 |
+| Spoofing | 84 | 4 |
+| Tampering | 64 | 1 |
+| Repudiation | 7 | 0 |
+| Information disclosure | 78 | 9 |
+| Denial of service | 33 | 3 |
+| Elevation of privilege | 64 | 1 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
-| Critical | 38 | 2 |
-| High | 147 | 9 |
-| Medium | 120 | 6 |
-| Low | 11 | 1 |
+| Critical | 39 | 2 |
+| High | 152 | 8 |
+| Medium | 125 | 6 |
+| Low | 14 | 2 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
@@ -1477,6 +1508,22 @@ against the classic federation attacks:
   loopback, link-local and ULA addresses, **pins the validated IP for the actual
   connection** (closing the DNS-rebind window), enforces HTTPS on every hop
   including redirects, and caps the response body.
+- **AXIAM's SAML SSO endpoint decides everything it can before anyone signs
+  in.** A service provider's `AuthnRequest` (HTTP-Redirect or HTTP-POST) is
+  refused before the sign-in page — with an error page that posts nowhere — if
+  it declares a DTD (so no external entity or entity expansion ever reaches the
+  parser), inflates past 64 KiB, is stale, replays a request `ID` the SP already
+  used, comes from an SP the tenant did not register, carries a signature that
+  does not verify (over the exact query octets on Redirect; as the root's one
+  enveloped signature on POST), or names an ACS URL or index the SP did not
+  register. What it decided is held server-side under an opaque handle bound to
+  the browser by a cookie, so a copied link is useless in another browser; the
+  same login hop and OP-session cookie as OpenID Connect sign the user in, a
+  `ForceAuthn` request is satisfied only by a sign-in newer than the request,
+  and the handle is spent exactly once before the signed response is posted by a
+  page whose own content-security policy lets it submit to that ACS origin and
+  nowhere else. A tenant with the IdP switched off answers the same empty `404`
+  as a path that does not exist.
 - **AXIAM as a SAML identity provider signs one shape of document.** The
   issuer (G-2) signs every assertion with the tenant's own RSA-4096 credential —
   never an expired, retired or other tenant's one — and the response too when
@@ -2054,7 +2101,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 18 of
-316. On the website this table is generated from the Threat Dragon model, so it
+330. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -2072,7 +2119,6 @@ each.
 | T-146 — Long-lived client secret committed to a repository | High | SDK configuration (client secrets, CA bundles) · *Client SDKs & admin UI integration surface* |
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
-| T-313 — An email NameID vouches for an address AXIAM never verified | High | SAML assertion issuer (saml_idp) · *Federation — SAML SP & OIDC relying party* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
@@ -2080,6 +2126,7 @@ each.
 | T-309 — Sign-on stops when the active credential expires or is retired before a successor is in place | Medium | saml_idp_credential (sealed signing key) · *Federation — SAML SP & OIDC relying party* |
 | T-312 — Service providers link a user across SPs, or back to the AXIAM account | Medium | SAML assertion issuer (saml_idp) · *Federation — SAML SP & OIDC relying party* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
+| T-325 — RelayState and the pending handle are recorded in request logs | Low | continue leg: OP cookie + binding cookie · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,

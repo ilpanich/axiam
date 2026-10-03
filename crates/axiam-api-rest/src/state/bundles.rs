@@ -276,3 +276,25 @@ pub struct FederationState<C: Connection + Clone> {
     #[cfg(feature = "saml")]
     pub saml_federation_service: SamlFederationServiceT<C>,
 }
+
+/// The SAML 2.0 identity provider (G-2, T23.2.3): the service-provider
+/// registry, the pending `AuthnRequest`s held across the login hop, the
+/// tenant's signing credential, and the issuer.
+///
+/// Behind `saml`, like the routes that read it: the issuer is
+/// `axiam_federation::saml_idp`, which exists only in a build with
+/// `axiam-federation/saml` (see [`FederationState::saml_federation_service`]
+/// for why that gate is load-bearing).
+#[cfg(feature = "saml")]
+#[derive(Clone)]
+pub struct SamlIdpState<C: Connection + Clone> {
+    /// The tenant's registered service providers (T23.2.1).
+    pub sp_repo: axiam_db::SurrealSamlServiceProviderRepository<C>,
+    /// `AuthnRequest`s between the SSO endpoint's two legs (schema v73).
+    pub pending_repo: axiam_db::SurrealPendingSamlRequestRepository<C>,
+    /// The tenant's signing credential, unsealed per issuance (D-21).
+    pub credential_service: SamlIdpCredentialServiceT<C>,
+    /// The deployment's issuer: the root issuer every IdP entity id is built
+    /// on, and the pairwise-identifier key (D-22). One per process.
+    pub issuer: Arc<axiam_federation::saml_idp::SamlIdpIssuer>,
+}

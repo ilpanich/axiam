@@ -204,7 +204,7 @@ await client.confirmPasswordReset({
       { type: "h", id: "op-cookie", text: "A fourth cookie, for the authorization endpoint only" },
       {
         type: "p",
-        text: "Since `1.0.0-beta13` a browser sign-in also sets `axiam_op_session`, scoped to `Path=/oauth2/authorize` and read only for an OAuth2 client registered with `browser_sso`. The three API cookies — `axiam_access`, `axiam_refresh`, `axiam_csrf` — are unchanged and stay `SameSite=Strict`; that is the reason there is a fourth one rather than a relaxed existing one.",
+        text: "Since `1.0.0-beta13` a browser sign-in also sets `axiam_op_session`, scoped to `Path=/oauth2/authorize` and read only for an OAuth2 client registered with `browser_sso`. Where per-tenant issuers are on, a second copy is set at `Path=/t/{tenant_id}/oauth2/authorize` for the session's own tenant (T23.1.8). The three API cookies — `axiam_access`, `axiam_refresh`, `axiam_csrf` — are unchanged and stay `SameSite=Strict`; that is the reason there is a fourth one rather than a relaxed existing one.",
       },
       {
         type: "list",

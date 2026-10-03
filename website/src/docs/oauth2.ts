@@ -78,6 +78,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           { method: "PUT", path: "/oauth2/register/{client_id}", summary: "RFC 7592: replace the registration under the tenant's current policy; rotates the token.", public: true },
           { method: "DELETE", path: "/oauth2/register/{client_id}", summary: "RFC 7592: deregister the client and revoke its refresh tokens.", public: true },
           { method: "GET", path: "/oauth2/end_session", summary: "RP-initiated logout.", public: true },
+          { method: "GET", path: "/oauth2/authorize/logout", summary: "Where `end_session` sends a logout with no `id_token_hint` `sid`. The OP cookie reaches this path, so the session it names is ended here.", public: true },
         ],
       },
       {
@@ -284,6 +285,8 @@ export const OAUTH2_PAGES: DocPage[] = [
           "`return_to` **is validated three times** — by the builder, by the deployment-origin rule, and by the SPA before it navigates. It is exactly the authorization endpoint plus a query, on the API's own origin.",
           "**A chain is bounded at two authorization requests and one sign-in page.** Every login redirect carries an `axiam_login_hop=1` marker, and a request that arrives with it is never redirected again; if it still has no principal the answer is `login_required`, naming the two candidates — a browser refusing the cookie, or a sign-in against a different tenant.",
           "**An anonymous request must name its tenant**, with the same `tenant_id` parameter `/oauth2/token` and `/oauth2/end_session` already take. It is ignored whenever a principal was resolved from an access token, and omitting it gives today's `401` — which is why adding the parameter changed nothing for any client registered today.",
+          "**Per-tenant issuers have browser sign-on too** (T23.1.8). On a deployment serving `/t/{tenant_id}`, every sign-in also sets the cookie at `Path=/t/{tenant_id}/oauth2/authorize`, for the session's own tenant only. The value and attributes are the same; only the path differs. A relying party that discovered a tenant issuer therefore gets the same hop. The path names the tenant, so its requests carry no `tenant_id`. A copy presented on another tenant's path names no session there.",
+          "**Logging out clears every copy.** That covers the admin UI's logout and `end_session`, on either path. An `end_session` with no `id_token_hint` naming a session is redirected once more, to the `/logout` sub-path of the authorization endpoint, because only there does the browser send the cookie. That hop ends the session the cookie names, then continues to the allow-listed `post_logout_redirect_uri` exactly as `end_session` would have.",
         ],
       },
       {
@@ -534,6 +537,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           "**The same handlers, re-based.** Every OAuth2 endpoint is served under `/t/{tenant_id}` as well as at the root, and the `iss` of everything minted there is the tenant issuer — the access token, the ID token, the RFC 9207 authorization-response parameter and the Back-Channel Logout token.",
           "**One key set signs every tenant**, which RFC 8414 permits, so the signature does not say which tenant a token is for. Two checks do: a token whose `iss` names a different tenant from its `tenant_id` claim is refused, and a token presented under `/t/{B}` that was minted for tenant A is refused with `401` — the same answer a request with no credential gets.",
           "**A** `tenant_id` **query parameter on a tenant path is** `invalid_request`, agreeing or not: two tenant selectors on one request is the shape a confused-deputy bug takes.",
+          "**Browser sign-on works here too** (T23.1.8). A `browser_sso` relying party on a tenant issuer gets the login hop, because each sign-in also sets the OP-session cookie at `Path=/t/{tenant_id}/oauth2/authorize`, for the session's own tenant. See [Signing in from a relying party](#/docs/oauth2#browser-sso).",
           "Turn it on when **one** AXIAM fronts MCP servers for **more than one** tenant. A single-tenant deployment needs none of it: `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` makes the bare document name its one tenant.",
         ],
       },

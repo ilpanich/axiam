@@ -409,10 +409,11 @@ necessarily a regression.
       restart of `conformance-serve` once after the first registration, then
       `conformance-drive` in a second terminal. Check that `pgrep -a -f
       drive-browser.mjs` shows **one** driver.
-- [ ] Use the **bare issuer** (`AXIAM_ISSUER`), not a `/t/{tenant}/` one. Browser
-      SSO cannot work on a per-tenant issuer path (D-11, open: the OP cookie's
-      `Path=/oauth2/authorize` is not a prefix of `/t/{tenant}/oauth2/authorize`,
-      so the hop fails closed as `login_required`).
+- [ ] Use the **bare issuer** (`AXIAM_ISSUER`), not a `/t/{tenant}/` one: the
+      2026-09-25 baseline and the registered clients are on it, and a different
+      issuer is a different submission. (Browser SSO on a per-tenant issuer path
+      works since T23.1.8, D-11: each sign-in also sets the OP cookie at
+      `Path=/t/{tenant}/oauth2/authorize`. It is not what this run certifies.)
 - [ ] Move the previous `conformance/.run/results/*.results.json` aside before the
       sweep. `just conformance-report` renders every file in that directory under
       the new date, so a stale file would be published as part of the new run.

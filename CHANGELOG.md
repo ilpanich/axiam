@@ -66,11 +66,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `update_client_registration`, `delete_client_registration`, token
   `Sensitive`); threat T-289, model 2.18.0.
 
+- **Browser sign-on on per-tenant issuer paths (T23.1.8, D-11).** On a
+  deployment with `AXIAM__AUTH__TENANT_ISSUER_PATHS` set, every completed
+  browser sign-in now sets the `axiam_op_session` cookie twice: at
+  `Path=/oauth2/authorize`, unchanged, and at
+  `Path=/t/{tenant_id}/oauth2/authorize`, for the session's own tenant only. The
+  sign-in paths are password, OPAQUE, MFA verify, forced enrolment, both WebAuthn
+  ceremonies and the federation handoff. The two copies carry the same value and
+  the same `HttpOnly; Secure; SameSite=Lax` and `Max-Age`. A `browser_sso`
+  relying party that discovered a tenant issuer therefore gets the login hop
+  instead of a `login_required` that always failed closed. The hop resolves under
+  exactly the bare path's rules: tenant-keyed lookup, account re-read,
+  `browser_sso` gate, honour lane. A copy presented on another tenant's path names
+  no session. Every logout clears every copy: `POST /api/v1/auth/logout`,
+  `end_session` (bare and per-tenant), and a stale cookie at the path it arrived
+  on. The paths come from one list (`csrf::op_session_cookie_paths`), so W3's SAML
+  SSO path is one entry. With the setting off, nothing changes. Browser-only: no
+  contract change.
+
+- **`GET /oauth2/authorize/logout`, the cookie half of RP-initiated logout
+  (T23.1.8, closes F4 residual P23W1-10).** The OP cookie never reached
+  `/oauth2/end_session`, so a logout without an `id_token_hint` `sid` cleared the
+  cookie and left the session row live. `end_session` now answers such a request
+  with a `302` to the `/logout` sub-path of the authorization endpoint it came
+  through, on the bare path or the tenant path. The cookie reaches that sub-path.
+  It revokes the one session the cookie names in that tenant, clears every
+  cookie, and continues exactly as `end_session` would: the allow-listed
+  `post_logout_redirect_uri` by exact match, or AXIAM's page. It is GET-only,
+  public, rate-limited with the `end_session` preset in its own bucket, and in
+  OpenAPI. It sends no back-channel fan-out, which stays reserved for a signed
+  hint. A hinted `end_session` is unchanged. Threat T-290; T-237 and T-238
+  amended; model 2.19.0.
+
 ### Changed
 
 - Front-channel logout declined by design and recorded (T23.12.1, D-6)
 
 ### Fixed
+
+- **The login hop on a per-tenant issuer path came back refused (T23.1.8).** Its
+  `return_to` was built from the query after the tenant scope had appended
+  `tenant_id`. The return leg therefore carried a second tenant selector, and the
+  scope that added it refused it with `invalid_request`. The interaction hop had
+  the same defect. Both now echo the client's own query.
+
+- **An organization-level administrator's logout revoked nothing after a tenant
+  switch (T23.1.8).** `POST /api/v1/auth/logout` revoked the session in the
+  acted-upon tenant. The admin UI sends `X-Axiam-Tenant` on every request, so
+  after a switch that was a child tenant where the session does not live. The
+  answer was `204` and the session stayed live. Logout now revokes, and clears
+  the OP cookies, in the principal's own tenant.
 
 - **A refreshed ID token on the honour lane no longer loses `auth_time`, `acr`
   and `amr` once the browser session has rotated (T23.1.2, D-9).** The refresh

@@ -15,6 +15,15 @@ inconvenient run would break a promise made in a letter.
 maintained by hand, and it is where §X5.3 says to record the image digest a
 report was produced against.
 
+**`REVIEW` modules.** A module the suite ends in `REVIEW` is closed by a person
+reading its log and the image it uploaded, not by a changed verdict.
+[`REVIEW-JUDGEMENTS.md`](REVIEW-JUDGEMENTS.md) is where each one is written down —
+the log id, what the suite could not decide, what AXIAM does and why that is
+conformant — and a certification submission is that file plus a green run. The
+screenshots are under `evidence/<date>/`, with a `manifest.json` per directory.
+The judgements are updated with the new log ids after each final run, alongside
+the earlier ones, on the same rule as the reports.
+
 ## What is here
 
 The first run, 2026-09-08, against suite `release-v5.2.4`
@@ -267,6 +276,7 @@ just conformance-register-basic    # the Basic OP clients and the test user
 just conformance-run               # the FAPI plans
 just conformance-run-basic         # the OIDC Core Basic plan
 CONFORMANCE_DATE=$(date +%F) just conformance-report
+CONFORMANCE_DATE=$(date +%F) just conformance-evidence   # the REVIEW modules' screenshots
 ```
 
 ### The FAPI clients must carry `profile: "fapi2"` — and they do

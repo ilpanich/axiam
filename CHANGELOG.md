@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Basic OP `REVIEW` judgements and the maintainer's run checklist (T23.1.6, X7.9).**
+  `docs/conformance/REVIEW-JUDGEMENTS.md` records, for each of the four Basic OP
+  modules the 2026-09-25 run left in `REVIEW` (`oidcc-prompt-login`,
+  `oidcc-max-age-1`, `oidcc-ensure-registered-redirect-uri`,
+  `oidcc-ensure-request-object-with-redirect-uri`), the suite log, the module's
+  own condition, what AXIAM does and the test that pins it, the clause, and what
+  the screenshot evidence does and does not show; facts only a suite log can give
+  are marked for the maintainer's run. The FAPI 2.0 entries are left to T23.1.7.
+  `claude_dev/fapi-conformance-runbook.md` gains the checklist for the final runs,
+  which the maintainer makes personally before the release tag. The conformance
+  harness gains three small things the final run needs: `report.py` names the
+  `SKIPPED` modules (it counted them and listed none) and keeps earlier dated
+  reports linked from `index.md`, and `export-evidence.py` /
+  `just conformance-evidence` exports the REVIEW screenshots with a manifest.
+  No plan, registrar or server behaviour changed, and no final run has been made.
+
 - Verifiable-credentials design (OID4VCI issuer, OID4VP verifier, SD-JWT VC) — design only, no code (T23.9.1)
 
 - *Identity for agents* guide and website page (T23.15.1)

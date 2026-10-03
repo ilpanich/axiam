@@ -432,6 +432,31 @@ defects that had to be fixed before a single module executed, is in
 | 153 | `userinfo_endpoint`, `jwks_uri` and `issuer` stay **bare**: UserInfo resolves its tenant from the bearer token, a JWKS is deployment-wide, and an `issuer` carrying a query would stop matching the `iss` of every token AXIAM mints | OIDC Discovery §4.3 | Pass | `oidc.rs::userinfo_jwks_and_the_issuer_stay_bare` |
 | 154 | A deployment that names no default tenant serves the document it served before row 152 — no endpoint gains a query string. The setting states a fact in a document and changes no endpoint's behaviour: an unparameterised request is still refused, because the tenant is the isolation boundary | — | Pass | `oidc.rs::a_document_that_names_no_tenant_carries_no_query_string`; `AuthConfig::default_tenant_id` |
 
+## Conformance-suite execution — Basic OP, the final runs (X7.9, T23.1.6)
+
+Several notes above say that no conformance run has happened and that
+`docs/conformance/` does not exist. They were true when written (2026-09-07) and
+are not now: the suite has been run in full on 2026-09-08, 09-10, 09-11, 09-13,
+09-14, 09-15, 09-18 and 09-25, and every report is under
+[`docs/conformance/`](../conformance/README.md). What has **not** happened is the
+final run: the maintainer runs the Basic OP and FAPI 2.0 suites personally, before
+the release tag (decision of 2026-10-03). These rows say what X7.9 shipped and
+what is still pending, and none of them is a certification claim.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 170 | The Basic OP harness exists and a full sweep of it completes: `oidcc-basic-static.json` (plan `oidcc-basic-certification-test-plan`, `server_metadata=discovery`, `client_registration=static_client`), the `register-clients.sh basic` registrar (clients `standard`, `browser_sso`, `authn_request_params: honour`) and the browser driver. The 2026-09-25 sweep ran 35 modules with 0 `FAILED` | X7.9; plan W9 | Pass (harness) | `conformance/plans/oidcc-basic-static.json`; `conformance/scripts/register-clients.sh`; `docs/conformance/2026-09-25-oidcc-basic-static.md` (plan `FP0jd1UNlpYEv`) |
+| 171 | The last Basic OP sweep's shape: 30 `PASSED`, 4 `REVIEW`, 1 `SKIPPED`, no `FAILED`, `WAITING` or `INTERRUPTED`. The same shape on 2026-09-10, 09-11, 09-15, 09-18 and 09-25 (09-13 and 09-14 had a fifth `REVIEW`) | Core §3.1.2.1; RFC 6749 §3.1.2.4 | **Not yet submittable** — 4 `REVIEW` modules, 1 unnamed `SKIPPED` | the dated `*-oidcc-basic-static.md` reports |
+| 172 | The four Basic OP `REVIEW` modules — `oidcc-prompt-login`, `oidcc-max-age-1`, `oidcc-ensure-registered-redirect-uri`, `oidcc-ensure-request-object-with-redirect-uri` — each have a written judgement: the log, the module's own condition, what AXIAM does with the test that pins it, and the clause | Core §3.1.2.1; RFC 6749 §3.1.2.4, §4.1.2.1 | **Proposed** — written from the 2026-09-25 evidence, not yet confirmed against a final run | `docs/conformance/REVIEW-JUDGEMENTS.md`; `docs/conformance/evidence/2026-09-25/` |
+| 173 | The final runs of the Basic OP plan and the three FAPI 2.0 plans (`mtls`, `self-signed`, `private-key-jwt`) on a digest-pinned image, compared with the 2026-09-25 baseline | X7.9 | **Pending** — the maintainer's, before the release tag | `claude_dev/fapi-conformance-runbook.md`, "Maintainer run checklist" |
+| 174 | The report names the plan's `SKIPPED` modules, the index keeps earlier reports linked, and the REVIEW screenshots can be exported with a manifest. Exercised with fixtures and a local mock of the suite's API, **not** against a live suite | X7.9 harness | Pass (fixtures only) | `conformance/scripts/report.py`; `conformance/scripts/export-evidence.py`; `just conformance-evidence` |
+
+**Not asserted here.** That the Basic OP plan is green: it is not (row 171). That
+the four `REVIEW` modules will be accepted: that is a reviewer's decision, and row
+172 is AXIAM's account for them, not their verdict. That the FAPI 2.0 plans are
+certifiable: their two `REVIEW` modules and one `WARNING` are written up by
+T23.1.7 in the same judgements file.
+
 ## FAPI 2.0 §5.3.2.1-9 and BCP §4.14 — the refresh-rotation grace window (T-254)
 
 Between 1.0.0-beta13 and the maintainer's decision of 2026-09-12 the grace
@@ -644,3 +669,4 @@ costs a round trip per request, which is why integrators do not adopt it.
 *Rows 158–160 added: R-2 of the 2026-09-12 residual pass (the claims request across a refresh) — 2026-09-12*
 *Rows 161–164 added: R-8 of the same pass (the SDK half of contract 1.40–1.42) — 2026-09-12*
 *Rows 165–169 added: R-6 of the same pass (the session-revocation feed) — 2026-09-12*
+*Rows 170–174 added: X7.9 final-run preparation (T23.1.6) — 2026-10-03*

@@ -1,8 +1,11 @@
 # Competitor gap remediation plan — 2026-10-02
 
 > **Status: ACCEPTED — in execution as Phase 23.** W1 (G-1 X7.1–X7.3, G-4,
-> G-9, G-12, G-15) executed 2026-10-02/03 on `claude/phase23-w1`; D-9 and
-> D-10 taken during it, D-11 to D-13 open. Written against AXIAM `1.0.0-beta17` from the three
+> G-9, G-12, G-15) executed 2026-10-02/03 on `claude/phase23-w1` and merged
+> (PR #521); D-9 and D-10 taken during it. W2 (G-1 X7.4–X7.9 and the
+> submission package, T23.1.8, G-3's crate and bind path) runs on
+> `claude/phase23-w2`: D-11 taken by the maintainer on 2026-10-03 (option 1,
+> issue #516), D-12 and D-13 accepted as recommended. Written against AXIAM `1.0.0-beta17` from the three
 > comparisons in this directory:
 > [`competitor-comparison-keycloak.md`](competitor-comparison-keycloak.md)
 > (Keycloak 26.8.0),
@@ -779,7 +782,7 @@ G-9, G-10, G-11, G-12, G-15       independent, documentation and measurement
 | Wave | Items | Why together |
 |---|---|---|
 | W1 | G-1 (X7.1–X7.3), G-4, G-12, G-15, G-9 | The P1 that is nearly free, three small items, and the two decision documents |
-| W2 | G-1 (X7.4–X7.9, X5.3 submission), G-3 (crate, model, bind path) | Certification closes; the directory crate's security core lands under Opus 5.5 |
+| W2 | G-1 (X7.4–X7.9, X5.3 submission package; T23.1.8 per-tenant OP cookie, D-11), G-3 (crate, model, bind path) | Certification closes; the directory crate's security core lands under Opus 5.5; T23.1.8 must be merged before W3, because G-2's SAML SSO reuses the login hop |
 | W3 | G-2 (SP registry, signing key, SSO), G-3 (sync, mapping, console) | SAML IdP on top of the login hop; directory completes |
 | W4 | G-2 (SLO, console, contract §29), G-5 (dispatcher, SETs, streams) | SAML completes; the outbound signal spine lands |
 | W5 | G-6, G-7, G-8 | Outbound SCIM on the dispatcher; CIBA on a green FAPI baseline; the minimal profile |
@@ -836,6 +839,7 @@ when the oracle is weak, the model is Opus 5.5.
 | T23.1.5 | X7.7 sensitive scopes, X7.8 `client_secret_basic` | Sonnet 5.5 | Decision A is taken; RFC 6749 §2.3.1 pins the parsing; existing client-auth tests extend |
 | T23.1.6 | X7.9: Basic OP harness, final runs, `docs/conformance/REVIEW-JUDGEMENTS.md` | Sonnet 5.5 | Suite-driven; a judgement is prose over a log the suite produced |
 | T23.1.7 | FAPI `WARNING`/`REVIEW` judgements, X5.3 submission package, website mark | Sonnet 5.5 | Prose and packaging; the runs are already green |
+| T23.1.8 | D-11: per-tenant-prefix OP-session cookie minted at sign-in; principal resolution on `/t/{tenant_id}/oauth2/authorize` reads it; logout, `end_session` and session revocation clear every cookie the session minted (closes F4 residual P23W1-10); tests incl. the T23.1.3 audit list re-run on the tenant path, cross-tenant refusal, fixation | **Opus 5.5** | Cookie and session-fixation surface, same class as T23.1.3 |
 
 ### G-2 — SAML 2.0 identity provider
 
@@ -891,7 +895,7 @@ when the oracle is weak, the model is Opus 5.5.
 | T23.15.1 | *Identity for agents* guide and website page with §28 SDK snippets | Sonnet 5.5 | Documentation over shipped features |
 | F4 (per wave) | Security review of the wave's diff before merge, threat-model reconciliation | **Opus 5.5** | The one place where a cheaper reviewer is false economy |
 
-**Totals.** 46 tasks: 13 on Opus 5.5 (12 implementation or design tasks plus
+**Totals.** 47 tasks: 14 on Opus 5.5 (13 implementation or design tasks plus
 the per-wave F4 review), 32 on Sonnet 5.5, and one split (T23.5.4, whose two
 threat entries ride the Opus session of T23.5.2). The Opus tasks are deliberately the
 small, dense ones (S or the core of an M); the long fan-outs, harnesses and
@@ -941,9 +945,9 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-8 | Phase 23 in `roadmap.md` | **Yes**, on acceptance of this plan |
 | D-9 | *Taken by the orchestrator, 2026-10-02, on T23.1.2's escalation F-1.* Where does a refreshed honour-lane ID token get `auth_time`/`acr`/`amr` once the browser session it came from has rotated? Today `session_evidence_for_refresh` reads the session row the code was issued under, and `AuthService::refresh` deletes that row, so after one browser-session rotation the refreshed ID token carries no evidence (OIDC Core §12.2 wants the original `auth_time`) | **Snapshot it on the OAuth2 refresh token**, exactly as the authorization code already does and as R-2 did for `requested_userinfo_claims`: optional columns on `oauth2_refresh_token` (next schema version, no backfill), written at code exchange from the code's snapshot, copied verbatim across OAuth2 refresh rotation, read by the refresh grant. A pre-migration row (columns absent) falls back to today's live-session lookup, so nothing gets worse. Emission stays gated by the honour lane, unchanged. Rejected: a rotation-lineage pointer on the session (a second source of truth for the same event, and a join on every refresh) |
 | D-10 | *Taken by the orchestrator, 2026-10-02, on T23.1.2's escalation F-2.* What does AXIAM record when a federated IdP asserts an authentication instant in the future? `AuthenticationEvidence::upstream` takes it unbounded, and `honour.rs` clamps a future instant to "0 s old", so a session can stay fresh for `max_age` indefinitely and an ID token can carry a future `auth_time` | **`authenticated_at = min(upstream instant, verification instant)`**: never later than the moment AXIAM verified the assertion, so the evidence can only understate freshness (the rule the pre-v55 decode already follows). An instant later than the verification instant by more than the federation path's existing clock-skew allowance is additionally logged at `warn` with the IdP named. No new configuration |
-| D-11 | *Open, raised by T23.1.3, 2026-10-03.* Browser SSO on a T21.6 per-tenant issuer path: the `axiam_op_session` cookie is `Path=/oauth2/authorize`, which is not a prefix of `/t/{tenant_id}/oauth2/authorize`, so the browser never sends it there and the login hop always ends in `login_required` (fails closed). G-2's SAML SSO endpoint (`/saml/v2/{tenant}/sso`) reuses the hop and meets the same wall | **Decide before W3 (G-2).** Options: a second, path-scoped cookie per tenant prefix minted at sign-in; widening `Path` (which turns the browser's scoping into a code-enforced invariant; `__Host-` would need `Path=/` anyway); or a documented limitation that per-tenant issuers are API-only. The orchestrator leans to a per-prefix cookie, as the narrowest change, but it is an architectural choice about what an AXIAM issuer is |
-| D-12 | *Open, raised by T23.1.1, 2026-10-02.* An **essential** `claims.id_token.auth_time` on a `fapi2` client is dropped, while OIDC Core §2 makes `auth_time` REQUIRED when requested as essential | **Refuse it on `fapi2` exactly as `id_token.acr` now is** (`invalid_request`), for the reason T23.1.1 gave: a silently dropped essential request is a downgrade. Small; a candidate for T23.1.4 in W2 |
-| D-13 | *Open, raised by T23.9.1, 2026-10-02.* G-5 signs SETs "with the tenant's EdDSA issuer key", which does not exist: there is one deployment key (see the note under G-5's *Design*) | **Use the deployment key at the tenant's JWKS URL for G-5**, as ID tokens do today, and keep per-tenant keys a separate decision with its own key-management cost (the verifiable-credentials design needs per-tenant ES256 keys anyway, and is where that cost should be argued) |
+| D-11 | **Taken by the maintainer, 2026-10-03 — option 1** ([issue #516](https://github.com/ilpanich/axiam/issues/516)): at sign-in, mint a second, path-scoped OP-session cookie for each per-tenant issuer prefix (`Path=/t/{tenant_id}/oauth2/authorize`, later also the SAML SSO path), with the same attributes (`HttpOnly; Secure; SameSite=Lax`), lifetime and session binding as `axiam_op_session`; the bare-path cookie is unchanged. Logout, `end_session` and revocation clear every cookie a session minted, which also decides F4 residual P23W1-10. Implemented by **T23.1.8** in W2, which must merge before W3. *Raised by T23.1.3, 2026-10-03.* Browser SSO on a T21.6 per-tenant issuer path: the `axiam_op_session` cookie is `Path=/oauth2/authorize`, which is not a prefix of `/t/{tenant_id}/oauth2/authorize`, so the browser never sends it there and the login hop always ends in `login_required` (fails closed). G-2's SAML SSO endpoint (`/saml/v2/{tenant}/sso`) reuses the hop and meets the same wall | **Decide before W3 (G-2).** Options: a second, path-scoped cookie per tenant prefix minted at sign-in; widening `Path` (which turns the browser's scoping into a code-enforced invariant; `__Host-` would need `Path=/` anyway); or a documented limitation that per-tenant issuers are API-only. The orchestrator leans to a per-prefix cookie, as the narrowest change, but it is an architectural choice about what an AXIAM issuer is |
+| D-12 | **Accepted as recommended, 2026-10-03**; rides T23.1.4 in W2. *Raised by T23.1.1, 2026-10-02.* An **essential** `claims.id_token.auth_time` on a `fapi2` client is dropped, while OIDC Core §2 makes `auth_time` REQUIRED when requested as essential | **Refuse it on `fapi2` exactly as `id_token.acr` now is** (`invalid_request`), for the reason T23.1.1 gave: a silently dropped essential request is a downgrade. Small; a candidate for T23.1.4 in W2 |
+| D-13 | **Accepted as recommended, 2026-10-03**; binding on T23.5.2. *Raised by T23.9.1, 2026-10-02.* G-5 signs SETs "with the tenant's EdDSA issuer key", which does not exist: there is one deployment key (see the note under G-5's *Design*) | **Use the deployment key at the tenant's JWKS URL for G-5**, as ID tokens do today, and keep per-tenant keys a separate decision with its own key-management cost (the verifiable-credentials design needs per-tenant ES256 keys anyway, and is where that cost should be argued) |
 
 ---
 

@@ -234,6 +234,9 @@ use crate::handlers;
         // so I9 applies twice over: the path is in `PUBLIC_PATHS` and here, in
         // the same commit.
         handlers::dcr::register,
+        handlers::dcr::read_registration,
+        handlers::dcr::update_registration,
+        handlers::dcr::delete_registration,
         handlers::oauth2::end_session,
         handlers::device::verify,
         handlers::device::decide,
@@ -854,8 +857,32 @@ impl utoipa::Modify for SecurityAddon {
                     .build(),
             ),
         );
+        // T23.4.1 / RFC 7592. Not a JWT and not an AXIAM principal: an opaque
+        // 256-bit handle that authorizes management of one dynamically
+        // registered client, and nothing else. Its own scheme so that no
+        // generator mistakes it for `bearer` and offers a user's token.
+        components.add_security_scheme(
+            REGISTRATION_ACCESS_TOKEN_SECURITY_SCHEME,
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some(
+                        "The RFC 7592 registration access token `POST /oauth2/register` \
+                         returned (and each `PUT` rotates). Opaque, shown once, \
+                         **sensitive**: it authorizes reading, replacing and deleting \
+                         that one client's registration and nothing else. Accepted only \
+                         in the `Authorization` header; a user or service-account access \
+                         token is refused.",
+                    ))
+                    .build(),
+            ),
+        );
     }
 }
+
+/// The name of the security scheme the RFC 7592 client configuration
+/// operations list (T23.4.1).
+pub const REGISTRATION_ACCESS_TOKEN_SECURITY_SCHEME: &str = "registration_access_token";
 
 /// The name of the security scheme an operation lists when it admits a
 /// service-account token.

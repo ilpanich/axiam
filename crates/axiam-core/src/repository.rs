@@ -30,8 +30,9 @@ use crate::models::{
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateDeviceGrant, CreateOAuth2Client,
-        CreatePushedAuthRequest, CreateRefreshToken, CreateSessionClient, DeviceGrant, ManagedBy,
-        OAuth2Client, PushedAuthRequest, RefreshToken, SessionClient, UpdateOAuth2Client,
+        CreatePushedAuthRequest, CreateRefreshToken, CreateSessionClient,
+        DcrRegistrationReplacement, DeviceGrant, ManagedBy, OAuth2Client, PushedAuthRequest,
+        RefreshToken, SessionClient, UpdateOAuth2Client,
     },
     oauth2_registration_token::{CreateOAuth2RegistrationToken, OAuth2RegistrationToken},
     opaque::{CreateOpaqueCredential, OpaqueCredential, OpaqueServerSetup, OpaqueSuite},
@@ -1357,6 +1358,81 @@ pub trait OAuth2ClientRepository: Send + Sync {
         client_id: &str,
         at: chrono::DateTime<chrono::Utc>,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    // --- RFC 7592 client configuration (T23.4.1) -----------------------------
+    //
+    // The four methods below are the whole of the management token's storage.
+    // Each takes the token as a **digest** (the caller hashes it with
+    // `axiam_auth::token::hash_refresh_token`), and each locates its row by
+    // `(tenant_id, client_id)` **and** compares the digest in the same `WHERE`,
+    // with `managed_by = 'dcr'` beside them. So a token can only ever name the
+    // row it was minted for, in the tenant it was minted in; a client with no
+    // management token (admin, CIMD, a `dcr` row older than schema v69) matches
+    // nothing; and an unknown `client_id` and a wrong token are the same
+    // `None`, which is what lets the handler answer RFC 7592 §2.1's "MUST NOT
+    // reveal whether the client exists" with one response.
+
+    /// Create a `dcr` client and store the digest of its RFC 7592 management
+    /// token in the same statement.
+    ///
+    /// [`Self::create`] plus one column, written atomically: a client that
+    /// existed for an instant without its token would be a registration the
+    /// caller was told about and could never manage. Implementations MUST
+    /// refuse an input whose `managed_by` is not `dcr` — no other provenance
+    /// is issued a management token.
+    fn create_with_registration_access_token(
+        &self,
+        input: CreateOAuth2Client,
+        registration_access_token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<(OAuth2Client, String)>> + Send;
+
+    /// The `dcr` client this management token belongs to, or `None`.
+    ///
+    /// `None` for an unknown `client_id`, a wrong token, another tenant's
+    /// client, and a client that has no token — indistinguishably.
+    fn get_by_registration_access_token(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        registration_access_token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<OAuth2Client>>> + Send;
+
+    /// Replace a `dcr` client's metadata and rotate its management token, as
+    /// one compare-and-swap (RFC 7592 §2.2).
+    ///
+    /// The `WHERE` carries `expected_hash`, and the `SET` writes `new_hash`.
+    /// That single statement is the rotation's single-use arbiter, in the
+    /// shape `RefreshTokenRepository::revoke_rotated` uses: of two
+    /// concurrent replacements presenting one token, the first rotates it away
+    /// and the second finds no row and gets `None`. There is no read-then-write
+    /// window for the loser to slip through, and no instant at which both the
+    /// old and the new token are valid.
+    ///
+    /// Writes **only** the fields of [`DcrRegistrationReplacement`] plus the
+    /// digest and `updated_at`. `managed_by`, the tenant, the profile, the X7
+    /// flags, the secret and every other column keep their stored values.
+    fn replace_dcr_registration(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        expected_hash: &str,
+        new_hash: &str,
+        replacement: DcrRegistrationReplacement,
+    ) -> impl Future<Output = AxiamResult<Option<OAuth2Client>>> + Send;
+
+    /// Delete a `dcr` client whose management token this is, returning the
+    /// row as it was (RFC 7592 §2.3).
+    ///
+    /// Conditional on the digest in the same statement, so a token rotated
+    /// away by a concurrent `PUT` deletes nothing, and a second `DELETE` finds
+    /// no row. The management token dies with the row, and the deleted row no
+    /// longer counts against `dcr_max_clients`, which is a count of rows.
+    fn delete_by_registration_access_token(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        registration_access_token_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<OAuth2Client>>> + Send;
 }
 
 /// Storage for RFC 7591 initial access tokens (T21.4).

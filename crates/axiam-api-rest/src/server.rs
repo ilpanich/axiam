@@ -1636,6 +1636,32 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::post().to(handlers::dcr::register::<C>)),
             )
+            // T23.4.1 / RFC 7592 — the client configuration endpoint, the
+            // `registration_client_uri` a registration returns.
+            //
+            // Rate-limited by the registration limiter's **preset**
+            // (`dcr_per_min`, per IP), in a bucket of its own: `build_governor`
+            // keys per route instance, and a separate shared-counter name keeps
+            // a client managing its registration from spending the allowance
+            // that bounds anonymous registration, and the reverse. Plan §7
+            // rule 6: no new inbound surface without a limiter — the three
+            // methods share this one, so a caller alternating between them is
+            // counted once. Like `/register` it is unauthenticated to the
+            // middleware (the token is checked by the handler), and every
+            // accepted `PUT` writes, so it gets the same smallest-in-the-file
+            // posture and the same explicit body limit.
+            .service(
+                web::resource("/register/{client_id}")
+                    .app_data(web::PayloadConfig::new(16 * 1024))
+                    .wrap(build_governor(rate_limit_cfg.dcr_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_register_client",
+                        rate_limit_cfg.dcr_per_min,
+                    ))
+                    .route(web::get().to(handlers::dcr::read_registration::<C>))
+                    .route(web::put().to(handlers::dcr::update_registration::<C>))
+                    .route(web::delete().to(handlers::dcr::delete_registration::<C>)),
+            )
             .route("/jwks", web::get().to(handlers::oauth2::jwks::<C>))
             // W6 / OIDC Core §5.3: the UserInfo endpoint MUST accept both
             // methods. Same shape as `/end_session` above — one resource, two

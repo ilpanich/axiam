@@ -4,8 +4,8 @@ use axiam_auth::client_secret;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{
-    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
-    OAuth2Client, UpdateOAuth2Client,
+    AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client,
+    DcrRegistrationReplacement, ManagedBy, OAuth2Client, UpdateOAuth2Client,
 };
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -16,7 +16,10 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, paginate, search_bind, search_filter, take_first_or_not_found};
+use crate::helpers::{
+    CountRow, is_transaction_conflict, paginate, search_bind, search_filter,
+    take_first_or_not_found,
+};
 
 /// Generate a random client ID with the `oa_` prefix (32 hex chars).
 fn generate_client_id() -> String {
@@ -355,8 +358,18 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
     }
 }
 
-impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> {
-    async fn create(&self, input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+impl<C: Connection> SurrealOAuth2ClientRepository<C> {
+    /// [`OAuth2ClientRepository::create`], optionally with the digest of an
+    /// RFC 7592 management token written in the same statement (T23.4.1).
+    ///
+    /// One `CREATE` for both, so a `dcr` client never exists without the token
+    /// its registrant was given. `None` writes `NONE`, which is what every
+    /// client that is not self-registered carries.
+    async fn create_row(
+        &self,
+        input: CreateOAuth2Client,
+        registration_access_token_hash: Option<String>,
+    ) -> AxiamResult<(OAuth2Client, String)> {
         let id = new_id();
         let id_str = id.to_string();
         let tenant_id_str = input.tenant_id.to_string();
@@ -411,6 +424,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                  browser_sso = $browser_sso, \
                  allowed_resources = $allowed_resources, \
                  managed_by = $managed_by, \
+                 registration_access_token_hash = $registration_access_token_hash, \
                  last_authorized_at = NONE",
             )
             .bind(("id", id_str.clone()))
@@ -461,6 +475,10 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             // arriving at `POST /oauth2/register` cannot claim `admin`,
             // because the handler builds this value rather than echoing one.
             .bind(("managed_by", input.managed_by.as_str().to_owned()))
+            .bind((
+                "registration_access_token_hash",
+                registration_access_token_hash,
+            ))
             .await
             .map_err(DbError::from)?;
 
@@ -474,6 +492,12 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         let client = row.try_into_client(id)?;
 
         Ok((client, raw_secret))
+    }
+}
+
+impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> {
+    async fn create(&self, input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
+        self.create_row(input, None).await
     }
 
     /// T21.5 — create or refresh a CIMD shadow row. See the trait's
@@ -1047,6 +1071,227 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
             .map_err(DbError::from)?;
         Ok(())
     }
+
+    /// T23.4.1 — see the trait. `managed_by` is checked here rather than
+    /// trusted, because a management token on any other provenance would be a
+    /// self-service write path onto a row nobody registered for themselves.
+    async fn create_with_registration_access_token(
+        &self,
+        input: CreateOAuth2Client,
+        registration_access_token_hash: &str,
+    ) -> AxiamResult<(OAuth2Client, String)> {
+        if input.managed_by != ManagedBy::Dcr {
+            return Err(AxiamError::Validation {
+                message: "only a dynamically registered client is issued an RFC 7592 \
+                          registration access token"
+                    .into(),
+            });
+        }
+        if registration_access_token_hash.is_empty() {
+            return Err(AxiamError::Validation {
+                message: "a registration access token digest must not be empty".into(),
+            });
+        }
+        self.create_row(input, Some(registration_access_token_hash.to_owned()))
+            .await
+    }
+
+    /// T23.4.1 — the management token's lookup. The `(tenant_id, client_id)`
+    /// unique index locates the row and the digest is compared in the same
+    /// `WHERE`, beside `managed_by = 'dcr'`; see the trait for why the four
+    /// failures share one `None`.
+    async fn get_by_registration_access_token(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        registration_access_token_hash: &str,
+    ) -> AxiamResult<Option<OAuth2Client>> {
+        // An empty digest is not a digest. `NONE != ''` already keeps it from
+        // matching a row with no token, and this says so before the query.
+        if registration_access_token_hash.is_empty() {
+            return Ok(None);
+        }
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM oauth2_client \
+                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+                 AND managed_by = 'dcr' \
+                 AND registration_access_token_hash = $hash \
+                 LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_owned()))
+            .bind(("hash", registration_access_token_hash.to_owned()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<OAuth2ClientRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .next()
+            .map(OAuth2ClientRowWithId::try_into_client)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// T23.4.1 — replacement and rotation as one compare-and-swap, in the two
+    /// layers X6 uses for every single-use credential (see
+    /// `repository::device_grant`'s module header for the measurements).
+    ///
+    /// 1. The guarded `UPDATE` runs inside `BEGIN`/`COMMIT`, so two concurrent
+    ///    replacements on one row conflict and the deployed engine aborts the
+    ///    loser, which is answered `None`.
+    /// 2. The new digest is the per-attempt nonce: it is read back **after**
+    ///    the commit, in a query of its own, and only the caller whose digest
+    ///    survived reports success. A loser whose write the engine failed to
+    ///    abort finds the winner's digest and is answered `None` — its token
+    ///    is dead, which is exactly what it would have been had it lost
+    ///    cleanly. Outside the transaction for the reason `SCHEMA_V31` gives.
+    async fn replace_dcr_registration(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        expected_hash: &str,
+        new_hash: &str,
+        replacement: DcrRegistrationReplacement,
+    ) -> AxiamResult<Option<OAuth2Client>> {
+        if expected_hash.is_empty() || new_hash.is_empty() || expected_hash == new_hash {
+            return Ok(None);
+        }
+        let result = self
+            .db
+            .current()
+            .query(
+                "BEGIN TRANSACTION; \
+                 LET $after = (UPDATE oauth2_client SET \
+                     name = $name, \
+                     redirect_uris = $redirect_uris, \
+                     grant_types = $grant_types, \
+                     scopes = $scopes, \
+                     token_endpoint_auth_method = $token_endpoint_auth_method, \
+                     jwks = $jwks, \
+                     jwks_uri = $jwks_uri, \
+                     allowed_resources = $allowed_resources, \
+                     registration_access_token_hash = $new_hash, \
+                     updated_at = time::now() \
+                     WHERE tenant_id = $tenant_id AND client_id = $client_id \
+                     AND managed_by = 'dcr' \
+                     AND registration_access_token_hash = $expected_hash \
+                     RETURN AFTER); \
+                 SELECT meta::id(id) AS record_id, * FROM $after; \
+                 COMMIT TRANSACTION",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_owned()))
+            .bind(("expected_hash", expected_hash.to_owned()))
+            .bind(("new_hash", new_hash.to_owned()))
+            .bind(("name", replacement.name))
+            .bind(("redirect_uris", replacement.redirect_uris))
+            .bind(("grant_types", replacement.grant_types))
+            .bind(("scopes", replacement.scopes))
+            .bind((
+                "token_endpoint_auth_method",
+                replacement.token_endpoint_auth_method.as_str(),
+            ))
+            .bind(("jwks", normalise_optional(replacement.jwks)))
+            .bind(("jwks_uri", normalise_optional(replacement.jwks_uri)))
+            .bind(("allowed_resources", replacement.allowed_resources))
+            .await;
+        let mut result = match result {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+        let rows: Vec<OAuth2ClientRowWithId> = match result.take(2) {
+            Ok(rows) => rows,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        let Some(row) = rows.into_iter().next() else {
+            // Unknown client, wrong token, a token already rotated away, or a
+            // client with none. Nothing was written.
+            return Ok(None);
+        };
+
+        // Layer 2: outside, and after, the transaction above.
+        let stored = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE registration_access_token_hash FROM oauth2_client \
+                 WHERE tenant_id = $tenant_id AND client_id = $client_id LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_owned()))
+            .await;
+        let mut stored = match stored {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        let stored: Vec<Option<String>> = match stored.take(0) {
+            Ok(v) => v,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        if stored.into_iter().flatten().next().as_deref() != Some(new_hash) {
+            // Our write landed and another replacement's landed after it. That
+            // one holds the registration; this caller's new token is not the
+            // stored one and must not be handed out as though it were.
+            return Ok(None);
+        }
+
+        Ok(Some(row.try_into_client()?))
+    }
+
+    /// T23.4.1 — deletion, conditional on the digest. Inside a transaction so
+    /// that a concurrent `PUT` presenting the same token conflicts with it
+    /// rather than interleaving; `RETURN BEFORE` is what tells the caller
+    /// which client it deleted, so the handler can revoke that client's
+    /// refresh tokens by its `client_id` and audit it.
+    async fn delete_by_registration_access_token(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        registration_access_token_hash: &str,
+    ) -> AxiamResult<Option<OAuth2Client>> {
+        if registration_access_token_hash.is_empty() {
+            return Ok(None);
+        }
+        let result = self
+            .db
+            .current()
+            .query(
+                "BEGIN TRANSACTION; \
+                 LET $before = (DELETE oauth2_client \
+                     WHERE tenant_id = $tenant_id AND client_id = $client_id \
+                     AND managed_by = 'dcr' \
+                     AND registration_access_token_hash = $hash \
+                     RETURN BEFORE); \
+                 SELECT meta::id(id) AS record_id, * FROM $before; \
+                 COMMIT TRANSACTION",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_owned()))
+            .bind(("hash", registration_access_token_hash.to_owned()))
+            .await;
+        let mut result = match result {
+            Ok(r) => r,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        let rows: Vec<OAuth2ClientRowWithId> = match result.take(2) {
+            Ok(rows) => rows,
+            Err(e) if is_transaction_conflict(&e) => return Ok(None),
+            Err(e) => return Err(DbError::from(e).into()),
+        };
+        rows.into_iter()
+            .next()
+            .map(OAuth2ClientRowWithId::try_into_client)
+            .transpose()
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
@@ -1079,5 +1324,226 @@ mod tests {
                 "{unknown:?} must not decode to a lane"
             );
         }
+    }
+
+    // --- T23.4.1 / RFC 7592 -------------------------------------------------
+
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::Mem;
+
+    async fn setup_db() -> Surreal<surrealdb::engine::local::Db> {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        crate::schema::run_migrations(&db).await.unwrap();
+        db
+    }
+
+    fn public_client(tenant_id: Uuid, managed_by: ManagedBy) -> CreateOAuth2Client {
+        CreateOAuth2Client {
+            tenant_id,
+            name: "rfc7592".into(),
+            redirect_uris: vec!["http://127.0.0.1/callback".into()],
+            grant_types: vec!["authorization_code".into()],
+            scopes: vec!["openid".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
+            profile: ClientProfile::Standard,
+            token_endpoint_auth_method: ClientAuthMethod::None,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: Vec::new(),
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
+            allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+            managed_by,
+        }
+    }
+
+    fn replacement(redirect: &str) -> DcrRegistrationReplacement {
+        DcrRegistrationReplacement {
+            name: "renamed".into(),
+            redirect_uris: vec![redirect.into()],
+            grant_types: vec!["authorization_code".into(), "refresh_token".into()],
+            scopes: vec!["openid".into()],
+            token_endpoint_auth_method: ClientAuthMethod::None,
+            jwks: None,
+            jwks_uri: None,
+            allowed_resources: vec!["https://mcp.example.com/mcp".into()],
+        }
+    }
+
+    /// The digest names one row, in one tenant, under one `client_id`; and
+    /// only a `dcr` row can carry one.
+    #[tokio::test]
+    async fn a_management_token_names_exactly_its_own_row() {
+        let repo = SurrealOAuth2ClientRepository::new(setup_db().await);
+        let tenant = Uuid::new_v4();
+        let (client, _) = repo
+            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "h1")
+            .await
+            .unwrap();
+        let (other, _) = repo
+            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "h2")
+            .await
+            .unwrap();
+
+        let found = repo
+            .get_by_registration_access_token(tenant, &client.client_id, "h1")
+            .await
+            .unwrap()
+            .expect("its own token finds it");
+        assert_eq!(found.id, client.id);
+        assert_eq!(found.managed_by, ManagedBy::Dcr);
+
+        for (t, id, h) in [
+            (tenant, client.client_id.as_str(), "h2"), // another client's token
+            (tenant, other.client_id.as_str(), "h1"),  // ... the other way round
+            (Uuid::new_v4(), client.client_id.as_str(), "h1"), // another tenant
+            (tenant, "oa_unknown", "h1"),              // an unknown client
+            (tenant, client.client_id.as_str(), ""),   // no digest at all
+        ] {
+            assert!(
+                repo.get_by_registration_access_token(t, id, h)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{t} {id} {h:?} must not resolve"
+            );
+        }
+
+        for provenance in [ManagedBy::Admin, ManagedBy::Cimd] {
+            assert!(
+                repo.create_with_registration_access_token(public_client(tenant, provenance), "h3")
+                    .await
+                    .is_err(),
+                "{provenance:?} is never issued a management token"
+            );
+        }
+    }
+
+    /// A row created by the ordinary path has no token, so nothing matches it
+    /// — not even a digest of the empty string.
+    #[tokio::test]
+    async fn a_client_created_without_a_token_matches_no_digest() {
+        let repo = SurrealOAuth2ClientRepository::new(setup_db().await);
+        let tenant = Uuid::new_v4();
+        let (client, _) = repo
+            .create(public_client(tenant, ManagedBy::Dcr))
+            .await
+            .unwrap();
+        let empty = axiam_auth::token::hash_refresh_token("");
+        for digest in ["", empty.as_str(), "NONE"] {
+            assert!(
+                repo.get_by_registration_access_token(tenant, &client.client_id, digest)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    /// Replacement rotates: the old digest is dead the moment the new one is
+    /// live, the second presentation of the old one finds nothing, and the
+    /// columns a registration cannot set are untouched.
+    #[tokio::test]
+    async fn replacement_rotates_the_token_and_touches_nothing_else() {
+        let repo = SurrealOAuth2ClientRepository::new(setup_db().await);
+        let tenant = Uuid::new_v4();
+        let (client, _) = repo
+            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "old")
+            .await
+            .unwrap();
+
+        let replaced = repo
+            .replace_dcr_registration(
+                tenant,
+                &client.client_id,
+                "old",
+                "new",
+                replacement("http://127.0.0.1/other"),
+            )
+            .await
+            .unwrap()
+            .expect("the current token replaces");
+        assert_eq!(replaced.redirect_uris, vec!["http://127.0.0.1/other"]);
+        assert_eq!(replaced.name, "renamed");
+        assert_eq!(replaced.managed_by, ManagedBy::Dcr);
+        assert_eq!(replaced.profile, ClientProfile::Standard);
+        assert_eq!(
+            replaced.authn_request_params,
+            AuthnRequestParamsMode::Ignore
+        );
+        assert!(!replaced.browser_sso);
+        assert_eq!(replaced.tenant_id, tenant);
+        assert_eq!(replaced.id, client.id);
+
+        assert!(
+            repo.replace_dcr_registration(
+                tenant,
+                &client.client_id,
+                "old",
+                "newer",
+                replacement("http://127.0.0.1/third"),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "the rotated-away token replaces nothing"
+        );
+        assert!(
+            repo.get_by_registration_access_token(tenant, &client.client_id, "old")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            repo.get_by_registration_access_token(tenant, &client.client_id, "new")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Deletion is conditional on the digest, and a second one finds nothing.
+    #[tokio::test]
+    async fn deletion_needs_the_current_token_and_happens_once() {
+        let repo = SurrealOAuth2ClientRepository::new(setup_db().await);
+        let tenant = Uuid::new_v4();
+        let (client, _) = repo
+            .create_with_registration_access_token(public_client(tenant, ManagedBy::Dcr), "tok")
+            .await
+            .unwrap();
+        assert!(
+            repo.delete_by_registration_access_token(tenant, &client.client_id, "wrong")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let deleted = repo
+            .delete_by_registration_access_token(tenant, &client.client_id, "tok")
+            .await
+            .unwrap()
+            .expect("the current token deletes");
+        assert_eq!(deleted.client_id, client.client_id);
+        assert!(
+            repo.delete_by_registration_access_token(tenant, &client.client_id, "tok")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            repo.count_by_managed_by(tenant, ManagedBy::Dcr)
+                .await
+                .unwrap(),
+            0,
+            "the deleted row no longer counts against dcr_max_clients"
+        );
     }
 }

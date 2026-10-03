@@ -467,6 +467,17 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // not an AXIAM access token). Unauthenticated by the middleware's
     // definition, and rate-limited, quota-bounded and audited by the handler's.
     "/oauth2/register",
+    // T23.4.1 / RFC 7592 — `GET`/`PUT`/`DELETE /oauth2/register/{client_id}`.
+    // Public to the middleware for the reason `/oauth2/register` is: the
+    // credential is not one it understands. It is the registration access
+    // token the registration returned, checked by the handler against the
+    // digest on that client's row, and the handler — not the middleware —
+    // must produce the refusal, because RFC 6750 §3 fixes its shape (a `401`
+    // with a `WWW-Authenticate: Bearer` challenge) and RFC 7592 §2.1 fixes
+    // that an unknown client and a wrong token are answered alike.
+    // Rate-limited, audited, and a wildcard only because the `client_id`
+    // segment is variable; nothing else is mounted beneath it.
+    "/oauth2/register/*",
     // B5 / RP-Initiated Logout 1.0 §2. Necessarily public: a user whose
     // session has ALREADY expired must still be able to complete a logout,
     // and requiring a live session to end a session is a contradiction. The

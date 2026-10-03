@@ -22,6 +22,21 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-02 RFC 7592 entry (Phase 23 T23.4.1, model 2.18.0).** One
+> threat enters, Mitigated on arrival. **T-289**: a dynamically registered
+> client can now read, replace and delete its own registration at
+> `/oauth2/register/{client_id}`, authenticated by a registration access token
+> the registration returns once — a write surface on the authorization server
+> whose credential the server mints, the T-272…T-280 class. The token is 256
+> random bits, stored as a SHA-256 on the client row, accepted only in the
+> `Authorization` header and only for its own client in its own tenant; an
+> update re-validates through the registration's own rules under the tenant's
+> current policy and rotates the token as one compare-and-swap; a delete
+> revokes the client's refresh tokens and frees its quota slot; the routes
+> share the registration limiter's preset; and the token reaches no log and no
+> audit row. The model is **289 threats, 276 mitigated / 13 open**; nothing on
+> the open register moves.
+>
 > **The 2026-09-22 dogfooding-remediation wave (model 2.17.0).** Eight threats
 > enter, all Mitigated on arrival; the wave ships in `1.0.0-beta17`. **T-288**: AXIAM can now issue a
 > certificate a TLS *server* presents (DF-001), and a leaf naming a host under
@@ -641,7 +656,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 288 threats** and a
+The system is verified against a **STRIDE threat model of 289 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -664,8 +679,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 288 |
-| Mitigated / Open | 275 / 13 |
+| Threats identified | 289 |
+| Mitigated / Open | 276 / 13 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -680,7 +695,7 @@ optimistic closed one.
 |---|---|---|
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
-| OAuth2 / OIDC authorization server | 58 | 0 |
+| OAuth2 / OIDC authorization server | 59 | 0 |
 | Federation (SAML SP & OIDC RP) | 31 | 1 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
@@ -712,7 +727,7 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 70 | 3 |
+| Spoofing | 71 | 3 |
 | Tampering | 59 | 1 |
 | Repudiation | 6 | 0 |
 | Information disclosure | 67 | 6 |
@@ -724,7 +739,7 @@ the category recorded against it in the model.
 | Severity | Threats | Open |
 |---|---|---|
 | Critical | 32 | 1 |
-| High | 135 | 8 |
+| High | 136 | 8 |
 | Medium | 111 | 3 |
 | Low | 10 | 1 |
 
@@ -1858,7 +1873,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 13 of
-288. On the website this table is generated from the Threat Dragon model, so it
+289. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind

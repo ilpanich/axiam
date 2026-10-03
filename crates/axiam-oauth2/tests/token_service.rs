@@ -211,6 +211,43 @@ impl ServiceAccountRepository for MockSaRepo {
 struct MockClientRepo(ClientOutcome, UpgradeLog);
 
 impl OAuth2ClientRepository for MockClientRepo {
+    async fn create_with_registration_access_token(
+        &self,
+        _: axiam_core::models::oauth2_client::CreateOAuth2Client,
+        _: &str,
+    ) -> axiam_core::error::AxiamResult<(axiam_core::models::oauth2_client::OAuth2Client, String)>
+    {
+        unimplemented!("RFC 7592 is not exercised by this double")
+    }
+    async fn get_by_registration_access_token(
+        &self,
+        _: uuid::Uuid,
+        _: &str,
+        _: &str,
+    ) -> axiam_core::error::AxiamResult<Option<axiam_core::models::oauth2_client::OAuth2Client>>
+    {
+        unimplemented!("RFC 7592 is not exercised by this double")
+    }
+    async fn replace_dcr_registration(
+        &self,
+        _: uuid::Uuid,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: axiam_core::models::oauth2_client::DcrRegistrationReplacement,
+    ) -> axiam_core::error::AxiamResult<Option<axiam_core::models::oauth2_client::OAuth2Client>>
+    {
+        unimplemented!("RFC 7592 is not exercised by this double")
+    }
+    async fn delete_by_registration_access_token(
+        &self,
+        _: uuid::Uuid,
+        _: &str,
+        _: &str,
+    ) -> axiam_core::error::AxiamResult<Option<axiam_core::models::oauth2_client::OAuth2Client>>
+    {
+        unimplemented!("RFC 7592 is not exercised by this double")
+    }
     async fn create(&self, _i: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
         unimplemented!()
     }

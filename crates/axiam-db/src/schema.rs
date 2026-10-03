@@ -382,6 +382,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "refresh_token_authentication_evidence",
         sql: SCHEMA_V68,
     },
+    Migration {
+        version: 69,
+        name: "oauth2_client_registration_access_token",
+        sql: SCHEMA_V69,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3652,9 +3657,58 @@ DEFINE FIELD IF NOT EXISTS acr ON TABLE oauth2_refresh_token TYPE option<string>
 DEFINE FIELD IF NOT EXISTS amr ON TABLE oauth2_refresh_token TYPE option<array<string>>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v69 — T23.4.1 / RFC 7592: the client configuration endpoint's
+// management token
+// -----------------------------------------------------------------------
+//
+// One optional column on `oauth2_client`, no backfill, no index.
+//
+// **`registration_access_token_hash`** is the SHA-256 (hex) of the RFC 7592
+// registration access token `POST /oauth2/register` mints for a `dcr` client
+// — the same digest `hash_refresh_token` computes for refresh tokens and for
+// RFC 7591 initial access tokens. The plaintext is returned once, in the 201,
+// and exists nowhere else.
+//
+// `option<string>`, and **absent is the answer for every row that exists
+// today**: an administrator's client, a CIMD shadow row and a `dcr` client
+// registered before this migration were never issued a management token, and
+// inventing one at migration time would mint a credential nobody holds. Every
+// RFC 7592 route answers such a row exactly as it answers an unknown
+// `client_id` — `401 invalid_token` — so the absence is fail-closed rather
+// than a gap.
+//
+// **No index.** The row is located by the `(tenant_id, client_id)` unique
+// index v1 defines; the digest is then compared in the same `WHERE`, so the
+// lookup can never be by hash alone and a token cannot name a row in another
+// tenant or under another `client_id`.
+const SCHEMA_V69: &str = "\
+DEFINE FIELD IF NOT EXISTS registration_access_token_hash ON TABLE oauth2_client \
+    TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.4.1 — v69 adds one optional column to `oauth2_client` and rewrites no
+    /// row: an absent hash is how a client with no management token (admin,
+    /// CIMD, pre-v69 DCR) is recognised, so a backfill would mint credentials
+    /// nobody holds.
+    #[test]
+    fn v69_adds_the_registration_access_token_hash_and_backfills_nothing() {
+        assert!(SCHEMA_V69.contains(
+            "registration_access_token_hash ON TABLE oauth2_client \
+    TYPE option<string>"
+        ));
+        assert_eq!(SCHEMA_V69.matches("DEFINE FIELD").count(), 1);
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "DEFINE INDEX", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V69.contains(forbidden),
+                "v69 must not contain {forbidden}: it is additive, optional DDL only"
+            );
+        }
+    }
 
     /// X7.2 / D-9 — v68 adds three optional columns to one table and rewrites
     /// no row: an absent `auth_time` is how a pre-v68 refresh token is
@@ -4144,9 +4198,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&68),
-            "v68 is the newest migration (X7.2 / D-9 — the authentication evidence on \
-             the OAuth2 refresh token; v67 was T22.14's `Server` certificate type). \
+            Some(&69),
+            "v69 is the newest migration (T23.4.1 — the RFC 7592 registration access \
+             token hash on `oauth2_client`; v68 was X7.2 / D-9's authentication evidence \
+             on the OAuth2 refresh token). \
              This assertion is a \
              tripwire, not bookkeeping: bumping it is how a new migration is declared \
              deliberate rather than merged in by accident. It caught this phase doing \

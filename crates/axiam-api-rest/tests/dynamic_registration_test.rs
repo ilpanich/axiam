@@ -637,9 +637,21 @@ async fn an_inspector_shaped_registration_can_complete_a_pkce_resource_flow() {
     assert_eq!(registered["token_endpoint_auth_method"], "none");
     assert_eq!(registered["scope"], "openid profile");
     assert_eq!(registered["response_types"], json!(["code"]));
-    // RFC 7592 is deferred, so neither member is promised.
-    assert!(registered.get("registration_access_token").is_none());
-    assert!(registered.get("registration_client_uri").is_none());
+    // T23.4.1 / RFC 7592 §3 — the management token, once, and where to use it.
+    assert_eq!(
+        registered["registration_access_token"]
+            .as_str()
+            .map(str::len),
+        Some(43),
+        "32 bytes, base64url, no padding: {registered}"
+    );
+    assert_eq!(
+        registered["registration_client_uri"],
+        format!(
+            "{ISSUER}/oauth2/register/{client_id}?tenant_id={}",
+            f.tenant_id
+        )
+    );
 
     // D4 — the first authorization is a consent hop, not a code.
     let challenge = pkce_challenge(VERIFIER);
@@ -1297,4 +1309,805 @@ async fn i9_minting_a_registration_token_still_needs_a_credential() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
+}
+
+// ---------------------------------------------------------------------------
+// T23.4.1 — RFC 7592, the client configuration endpoint
+// ---------------------------------------------------------------------------
+
+/// A client configuration request: `GET`, `PUT` or `DELETE` on `uri`, with an
+/// optional `Authorization` header value and an optional JSON body. Returns
+/// `(status, WWW-Authenticate, body)`.
+macro_rules! manage {
+    ($app:expr, $method:ident, $uri:expr, $authz:expr) => {
+        manage!($app, $method, $uri, $authz, None::<Value>)
+    };
+    ($app:expr, $method:ident, $uri:expr, $authz:expr, $json:expr) => {{
+        let mut req = test::TestRequest::$method()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri($uri);
+        let authz: Option<String> = $authz;
+        if let Some(value) = authz {
+            req = req.insert_header(("Authorization", value));
+        }
+        let json: Option<Value> = $json;
+        if let Some(body) = json {
+            req = req.set_json(body);
+        }
+        let resp = test::call_service(&$app, req.to_request()).await;
+        let status = resp.status().as_u16();
+        let challenge = resp
+            .headers()
+            .get("WWW-Authenticate")
+            .map(|v| v.to_str().unwrap().to_owned());
+        let body = test::read_body(resp).await;
+        (
+            status,
+            challenge,
+            serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
+        )
+    }};
+}
+
+fn bearer(token: &str) -> Option<String> {
+    Some(format!("Bearer {token}"))
+}
+
+/// The path-and-query of a `registration_client_uri`, for the test client.
+fn config_path(registered: &Value) -> String {
+    registered["registration_client_uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no registration_client_uri in {registered}"))
+        .strip_prefix(ISSUER)
+        .expect("the URI is under the issuer")
+        .to_owned()
+}
+
+fn rat(registered: &Value) -> String {
+    registered["registration_access_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no registration_access_token in {registered}"))
+        .to_owned()
+}
+
+/// The body a client sends back after a read: what it was told, minus the
+/// four members RFC 7592 §2.2 says it MUST NOT send.
+fn update_from(read: &Value) -> Value {
+    let mut body = read.clone();
+    let object = body.as_object_mut().unwrap();
+    for member in [
+        "registration_access_token",
+        "registration_client_uri",
+        "client_secret_expires_at",
+        "client_id_issued_at",
+    ] {
+        object.remove(member);
+    }
+    body
+}
+
+/// **Acceptance: the round trip.** Register, read, replace the redirect URIs,
+/// read the change back, delete, and find the registration gone.
+#[actix_rt::test]
+async fn rfc7592_register_read_update_delete_round_trip() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+
+    let (status, registered) = register!(app, f, inspector_registration());
+    assert_eq!(status, 201, "{registered}");
+    let uri = config_path(&registered);
+    let token = rat(&registered);
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+
+    // Read: the registration as stored, and no secret of either kind.
+    let (status, _, read) = manage!(app, get, &uri, bearer(&token));
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["client_id"], client_id);
+    assert_eq!(read["redirect_uris"], json!([INSPECTOR_CALLBACK]));
+    assert_eq!(
+        read["registration_client_uri"],
+        registered["registration_client_uri"]
+    );
+    assert!(
+        read.get("registration_access_token").is_none(),
+        "a read never returns the token: {read}"
+    );
+    assert!(read.get("client_secret").is_none());
+
+    // Update: a full replacement with new redirect URIs.
+    let mut body = update_from(&read);
+    body["redirect_uris"] = json!(["http://127.0.0.1:7000/new-callback"]);
+    let (status, _, updated) = manage!(app, put, &uri, bearer(&token), Some(body));
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(
+        updated["redirect_uris"],
+        json!(["http://127.0.0.1:7000/new-callback"])
+    );
+    let rotated = rat(&updated);
+    assert_ne!(rotated, token, "a successful update rotates the token");
+
+    // The change reads back, under the new token.
+    let (status, _, reread) = manage!(app, get, &uri, bearer(&rotated));
+    assert_eq!(status, 200, "{reread}");
+    assert_eq!(
+        reread["redirect_uris"],
+        json!(["http://127.0.0.1:7000/new-callback"])
+    );
+
+    // Delete, then nothing is there — and the answer is the same 401 a wrong
+    // token gets, not a 404.
+    let (status, _, body) = manage!(app, delete, &uri, bearer(&rotated));
+    assert_eq!(status, 204, "{body}");
+    let (status, challenge, body) = manage!(app, get, &uri, bearer(&rotated));
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["error"], "invalid_token");
+    assert_eq!(challenge.as_deref(), Some("Bearer error=\"invalid_token\""));
+    let (status, _, _) = manage!(app, delete, &uri, bearer(&rotated));
+    assert_eq!(status, 401, "a second DELETE finds nothing to delete");
+}
+
+/// **Acceptance: rotation.** After a `PUT` the presented token is dead for
+/// every operation and the returned one works.
+#[actix_rt::test]
+async fn rfc7592_an_update_rotates_the_token_and_the_old_one_dies() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (_, registered) = register!(app, f, inspector_registration());
+    let uri = config_path(&registered);
+    let old = rat(&registered);
+
+    let (_, _, read) = manage!(app, get, &uri, bearer(&old));
+    let (status, _, updated) = manage!(app, put, &uri, bearer(&old), Some(update_from(&read)));
+    assert_eq!(status, 200, "{updated}");
+    let new = rat(&updated);
+
+    let (status, _, _) = manage!(app, get, &uri, bearer(&old));
+    assert_eq!(status, 401, "the old token cannot read");
+    let (status, _, _) = manage!(app, put, &uri, bearer(&old), Some(update_from(&read)));
+    assert_eq!(status, 401, "the old token cannot update");
+    let (status, _, _) = manage!(app, delete, &uri, bearer(&old));
+    assert_eq!(status, 401, "the old token cannot delete");
+    let (status, _, _) = manage!(app, get, &uri, bearer(&new));
+    assert_eq!(status, 200, "the new token can");
+}
+
+/// **Acceptance: racing updates.** Several `PUT`s presenting one token,
+/// submitted together: exactly one wins, and every loser gets the `401` a
+/// rotated-away token gets.
+#[actix_rt::test]
+async fn rfc7592_racing_updates_on_one_token_have_one_winner() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (_, registered) = register!(app, f, inspector_registration());
+    let uri = config_path(&registered);
+    let token = rat(&registered);
+    let (_, _, read) = manage!(app, get, &uri, bearer(&token));
+
+    let requests: Vec<_> = (0..4)
+        .map(|i| {
+            let mut body = update_from(&read);
+            body["client_name"] = json!(format!("racer-{i}"));
+            test::TestRequest::put()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&uri)
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_json(body)
+                .to_request()
+        })
+        .collect();
+    let responses =
+        futures::future::join_all(requests.into_iter().map(|r| test::call_service(&app, r))).await;
+    let statuses: Vec<u16> = responses.iter().map(|r| r.status().as_u16()).collect();
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 200).count(),
+        1,
+        "exactly one of four concurrent updates on one token may win; got {statuses:?}"
+    );
+    assert!(
+        statuses.iter().all(|s| *s == 200 || *s == 401),
+        "every loser is a 401, never a 500: {statuses:?}"
+    );
+}
+
+/// **Acceptance: who is refused.** Another client's management token, the
+/// end user's access token, a client secret, no token at all, and a token in
+/// the query string.
+#[actix_rt::test]
+async fn rfc7592_only_this_clients_management_token_is_accepted() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (_, mine) = register!(app, f, inspector_registration());
+    let (_, theirs) = register!(app, f, inspector_registration());
+    let mut confidential = inspector_registration();
+    confidential["token_endpoint_auth_method"] = json!("client_secret_basic");
+    let (status, secret_client) = register!(app, f, confidential);
+    assert_eq!(status, 201, "{secret_client}");
+    let uri = config_path(&mine);
+
+    for (label, authz) in [
+        ("another client's management token", bearer(&rat(&theirs))),
+        ("the end user's access token", bearer(&f.user_token)),
+        (
+            "a client secret presented as a bearer",
+            bearer(secret_client["client_secret"].as_str().unwrap()),
+        ),
+        (
+            "HTTP Basic client credentials",
+            Some(format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!(
+                    "{}:{}",
+                    secret_client["client_id"].as_str().unwrap(),
+                    secret_client["client_secret"].as_str().unwrap()
+                ))
+            )),
+        ),
+    ] {
+        for method in ["GET", "DELETE"] {
+            let (status, challenge, body) = if method == "GET" {
+                manage!(app, get, &uri, authz.clone())
+            } else {
+                manage!(app, delete, &uri, authz.clone())
+            };
+            assert_eq!(status, 401, "{label} ({method}): {body}");
+            assert_eq!(body["error"], "invalid_token", "{label}");
+            assert!(
+                challenge.unwrap_or_default().starts_with("Bearer"),
+                "{label}"
+            );
+        }
+    }
+
+    // No token: 401, with the bare challenge RFC 6750 §3.1 asks for.
+    let (status, challenge, _) = manage!(app, get, &uri, None);
+    assert_eq!(status, 401);
+    assert_eq!(challenge.as_deref(), Some("Bearer"));
+
+    // In the query string: refused, even beside the right header.
+    let leaked = format!("{uri}&access_token={}", rat(&mine));
+    let (status, _, body) = manage!(app, get, &leaked, None);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"], "invalid_request");
+    let (status, _, _) = manage!(app, get, &leaked, bearer(&rat(&mine)));
+    assert_eq!(
+        status, 400,
+        "a token in a URL is refused whatever else is presented"
+    );
+
+    // The registration survived every attempt above.
+    let (status, _, _) = manage!(app, get, &uri, bearer(&rat(&mine)));
+    assert_eq!(status, 200);
+}
+
+/// **Acceptance: no widening.** A `PUT` asking for a scope or a grant the
+/// tenant does not offer to self-registered clients is `400
+/// invalid_client_metadata`, and the token is not rotated by a refusal.
+#[actix_rt::test]
+async fn rfc7592_an_update_cannot_widen_beyond_the_tenants_policy() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (_, registered) = register!(app, f, inspector_registration());
+    let uri = config_path(&registered);
+    let token = rat(&registered);
+    let (_, _, read) = manage!(app, get, &uri, bearer(&token));
+
+    for (member, value) in [
+        ("scope", json!("openid profile email")),
+        (
+            "grant_types",
+            json!(["authorization_code", "client_credentials"]),
+        ),
+        (
+            "grant_types",
+            json!([
+                "authorization_code",
+                "urn:ietf:params:oauth:grant-type:token-exchange"
+            ]),
+        ),
+    ] {
+        let mut body = update_from(&read);
+        body[member] = value;
+        let (status, _, refused) = manage!(app, put, &uri, bearer(&token), Some(body));
+        assert_eq!(status, 400, "{member}: {refused}");
+        assert_eq!(refused["error"], "invalid_client_metadata", "{member}");
+    }
+
+    // A redirect outside the host glob is the RFC 7591 redirect code.
+    let mut body = update_from(&read);
+    body["redirect_uris"] = json!(["https://attacker.example.net/cb"]);
+    let (status, _, refused) = manage!(app, put, &uri, bearer(&token), Some(body));
+    assert_eq!(status, 400);
+    assert_eq!(refused["error"], "invalid_redirect_uri");
+
+    // A body naming a member the server states, or another client.
+    let mut body = update_from(&read);
+    body["registration_access_token"] = json!(token);
+    let (status, _, refused) = manage!(app, put, &uri, bearer(&token), Some(body));
+    assert_eq!(status, 400);
+    assert_eq!(refused["error"], "invalid_request");
+    let mut body = update_from(&read);
+    body["client_id"] = json!("oa_00000000000000000000000000000000");
+    let (status, _, _) = manage!(app, put, &uri, bearer(&token), Some(body));
+    assert_eq!(status, 400);
+
+    // None of the refusals rotated anything, and none changed the row.
+    let (status, _, after) = manage!(app, get, &uri, bearer(&token));
+    assert_eq!(status, 200);
+    assert_eq!(after["scope"], "openid profile");
+    assert_eq!(
+        after["grant_types"],
+        json!(["authorization_code", "refresh_token"])
+    );
+}
+
+/// A `PUT` can never move what a registration cannot set: the stored row's
+/// profile, X7 flags, provenance and audiences stay what they were, however
+/// the body asks.
+#[actix_rt::test]
+async fn rfc7592_an_update_cannot_change_what_a_registration_cannot_set() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (_, registered) = register!(app, f, inspector_registration());
+    let uri = config_path(&registered);
+    let token = rat(&registered);
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+    let (_, _, read) = manage!(app, get, &uri, bearer(&token));
+
+    let mut body = update_from(&read);
+    body["profile"] = json!("fapi2");
+    body["managed_by"] = json!("admin");
+    body["authn_request_params"] = json!("honour");
+    body["browser_sso"] = json!(true);
+    body["require_par"] = json!(true);
+    body["allowed_resources"] = json!(["https://elsewhere.example.com/mcp"]);
+    let (status, _, updated) = manage!(app, put, &uri, bearer(&token), Some(body));
+    assert_eq!(
+        status, 200,
+        "ignored members are ignored, not refused: {updated}"
+    );
+
+    let (_, list) = admin!(app, f, get, "/api/v1/oauth2-clients");
+    let stored = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["client_id"] == client_id)
+        .expect("the client is still listed")
+        .clone();
+    assert_eq!(stored["profile"], "standard", "{stored}");
+    assert_eq!(stored["authn_request_params"], "ignore", "{stored}");
+    assert_eq!(stored["browser_sso"], false, "{stored}");
+    assert_eq!(stored["require_par"], false, "{stored}");
+    assert_eq!(stored["managed_by"], "dcr", "{stored}");
+    assert_eq!(stored["allowed_resources"], json!([MCP]), "{stored}");
+}
+
+/// **Acceptance: deletion revokes.** A refresh token issued before the
+/// `DELETE` no longer refreshes after it.
+#[actix_rt::test]
+async fn rfc7592_deletion_revokes_an_issued_refresh_token() {
+    use axiam_core::repository::RefreshTokenRepository;
+
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (_, registered) = register!(app, f, inspector_registration());
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+
+    let (status, _) = admin!(
+        app,
+        f,
+        post,
+        "/api/v1/account/consents/oidc-scopes",
+        json!({ "client_id": client_id, "scopes": ["openid", "profile"] })
+    );
+    assert_eq!(status, 200);
+    let challenge = pkce_challenge(VERIFIER);
+    let (_, location) = get_authorize!(
+        app,
+        f,
+        format!(
+            "response_type=code&client_id={client_id}&redirect_uri={INSPECTOR_CALLBACK}\
+             &scope=openid+profile&code_challenge={challenge}&code_challenge_method=S256\
+             &resource={MCP}"
+        )
+    );
+    let code = param(&location.unwrap(), "code").expect("a code");
+    let (status, tokens) = post_form!(
+        app,
+        f,
+        "/oauth2/token",
+        format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={INSPECTOR_CALLBACK}\
+             &client_id={client_id}&code_verifier={VERIFIER}&resource={MCP}"
+        )
+    );
+    assert_eq!(status, 200, "{tokens}");
+    let refresh = tokens["refresh_token"]
+        .as_str()
+        .expect("the client holds the refresh_token grant")
+        .to_owned();
+
+    let (status, _, _) = manage!(
+        app,
+        delete,
+        &config_path(&registered),
+        bearer(&rat(&registered))
+    );
+    assert_eq!(status, 204);
+
+    let (status, body) = post_form!(
+        app,
+        f,
+        "/oauth2/token",
+        format!("grant_type=refresh_token&refresh_token={refresh}&client_id={client_id}")
+    );
+    assert!(
+        status == 400 || status == 401,
+        "a deregistered client's refresh token must not refresh: {status} {body}"
+    );
+    assert!(body.get("access_token").is_none(), "{body}");
+
+    // The row the refresh token names is marked revoked, not merely orphaned.
+    let stored = axiam_db::repository::SurrealRefreshTokenRepository::new(f.db.clone())
+        .get_by_token_hash(
+            f.tenant_id,
+            &axiam_auth::token::hash_refresh_token(&refresh),
+        )
+        .await;
+    if let Ok(row) = stored {
+        assert!(row.revoked, "the refresh token is revoked on delete");
+    }
+}
+
+/// Deletion releases the `dcr_max_clients` slot (#471): at a quota of one, a
+/// second registration succeeds once the first client deleted itself.
+#[actix_rt::test]
+async fn rfc7592_deletion_releases_the_registration_quota() {
+    let f = setup().await;
+    set_org_settings(
+        &f,
+        SetOrgSettings {
+            dcr_max_clients: 1,
+            ..anonymous_policy()
+        },
+    )
+    .await
+    .unwrap();
+    let app = test_app!(f);
+    let (status, first) = register!(app, f, inspector_registration());
+    assert_eq!(status, 201);
+    let (status, _) = register!(app, f, inspector_registration());
+    assert_eq!(status, 403, "the quota is full");
+    let (status, _, _) = manage!(app, delete, &config_path(&first), bearer(&rat(&first)));
+    assert_eq!(status, 204);
+    let (status, body) = register!(app, f, inspector_registration());
+    assert_eq!(
+        status, 201,
+        "the deleted client's slot is free again: {body}"
+    );
+}
+
+/// **Acceptance: who has no token.** An administrator's client, a CIMD shadow
+/// row and a `dcr` client registered before schema v69 were never issued a
+/// management token, and every route answers them as it answers an unknown
+/// client: `401 invalid_token`.
+#[actix_rt::test]
+async fn rfc7592_clients_without_a_management_token_are_refused() {
+    use axiam_core::models::oauth2_client::{
+        AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
+    };
+    use axiam_core::repository::OAuth2ClientRepository;
+
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+
+    let (status, admin_client) = admin!(
+        app,
+        f,
+        post,
+        "/api/v1/oauth2-clients",
+        json!({
+            "name": "admin-rp",
+            "redirect_uris": ["https://rp.example.com/cb"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+            "token_endpoint_auth_method": "none",
+        })
+    );
+    assert_eq!(status, 201, "{admin_client}");
+
+    let repo = axiam_db::repository::SurrealOAuth2ClientRepository::new(f.db.clone());
+    let row = |managed_by| CreateOAuth2Client {
+        tenant_id: f.tenant_id,
+        name: "no-token".into(),
+        redirect_uris: vec![INSPECTOR_CALLBACK.into()],
+        grant_types: vec!["authorization_code".into()],
+        scopes: vec!["openid".into()],
+        post_logout_redirect_uris: Vec::new(),
+        backchannel_logout_uri: None,
+        require_par: false,
+        profile: ClientProfile::Standard,
+        token_endpoint_auth_method: ClientAuthMethod::None,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        self_signed_tls_client_auth_thumbprints: Vec::new(),
+        tls_client_certificate_bound_access_tokens: false,
+        jwks: None,
+        jwks_uri: None,
+        dpop_bound_access_tokens: false,
+        dpop_require_nonce: false,
+        authn_request_params: AuthnRequestParamsMode::Ignore,
+        browser_sso: false,
+        allowed_resources: vec![MCP.into()],
+        managed_by,
+    };
+    // A `dcr` row written the way every pre-v69 registration was: no digest.
+    let (legacy_dcr, _) = repo.create(row(ManagedBy::Dcr)).await.unwrap();
+    let cimd = repo
+        .upsert_cimd_client(
+            "https://publisher.example.com/client.json",
+            row(ManagedBy::Cimd),
+        )
+        .await
+        .unwrap();
+
+    // Whatever is presented — a fresh token-shaped value, or a real token
+    // belonging to some other client — the answer is the same.
+    let (_, someone) = register!(app, f, inspector_registration());
+    // A CIMD `client_id` is a URL, so it reaches the route only
+    // percent-encoded; unencoded, its slashes miss the route altogether —
+    // the same 404 for a URL that names a shadow row as for one that names
+    // nothing, so that status says nothing about existence either.
+    let encoded_cimd: String = cimd
+        .client_id
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    let token = rat(&someone);
+    let raw_cimd = format!(
+        "/oauth2/register/{}?tenant_id={}",
+        cimd.client_id, f.tenant_id
+    );
+    let raw_unknown = format!(
+        "/oauth2/register/https://nobody.example.com/x.json?tenant_id={}",
+        f.tenant_id
+    );
+    assert_eq!(
+        manage!(app, get, &raw_cimd, bearer(&token)).0,
+        manage!(app, get, &raw_unknown, bearer(&token)).0,
+        "an unencoded URL-shaped client_id is answered the same whether or not it exists"
+    );
+    for client_id in [
+        admin_client["client_id"].as_str().unwrap(),
+        legacy_dcr.client_id.as_str(),
+        encoded_cimd.as_str(),
+    ] {
+        let uri = format!("/oauth2/register/{client_id}?tenant_id={}", f.tenant_id);
+        for token in [
+            axiam_oauth2::dcr::mint_registration_access_token().0,
+            rat(&someone),
+        ] {
+            let (status, _, body) = manage!(app, get, &uri, bearer(&token));
+            assert_eq!(status, 401, "{client_id}: {body}");
+            assert_eq!(body["error"], "invalid_token");
+            let (status, _, _) = manage!(app, delete, &uri, bearer(&token));
+            assert_eq!(status, 401, "{client_id}");
+        }
+    }
+    // And an unknown client is answered identically — no 404.
+    let uri = format!(
+        "/oauth2/register/oa_ffffffffffffffffffffffffffffffff?tenant_id={}",
+        f.tenant_id
+    );
+    let (status, _, body) = manage!(app, get, &uri, bearer(&rat(&someone)));
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["error"], "invalid_token");
+}
+
+/// **Acceptance: tenant scoping.** A token for a client in tenant A, used with
+/// tenant B selected, is `401` — and so is A's own token on A's client when B
+/// is the tenant the request resolved.
+#[actix_rt::test]
+async fn rfc7592_a_token_is_refused_under_another_tenant() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let tenant_b = SurrealTenantRepository::new(f.db.clone())
+        .create(CreateTenant {
+            organization_id: f.org_id,
+            kind: TenantKind::Standard,
+            name: "T23.4.1 Tenant B".into(),
+            slug: "tenant-t23-4-1-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let app = test_app!(f);
+    let (_, registered) = register!(app, f, inspector_registration());
+    let client_id = registered["client_id"].as_str().unwrap();
+    let token = rat(&registered);
+
+    let cross = format!("/oauth2/register/{client_id}?tenant_id={}", tenant_b.id);
+    let (status, _, body) = manage!(app, get, &cross, bearer(&token));
+    assert_eq!(status, 401, "{body}");
+    let (status, _, _) = manage!(app, delete, &cross, bearer(&token));
+    assert_eq!(status, 401);
+    let (status, _, _) = manage!(
+        app,
+        put,
+        &cross,
+        bearer(&token),
+        Some(json!({ "client_id": client_id, "redirect_uris": [INSPECTOR_CALLBACK] }))
+    );
+    assert_eq!(status, 401);
+
+    // Still alive in its own tenant.
+    let (status, _, _) = manage!(app, get, &config_path(&registered), bearer(&token));
+    assert_eq!(status, 200);
+}
+
+/// **Acceptance: rate limiting (plan §7 rule 6).** The three routes are behind
+/// the registration limiter's preset, in one bucket: on the shipped
+/// `dcr_per_min` of five, the sixth request — whichever method — is `429`.
+/// Mixed methods, so a limiter wired to one of the three would not pass.
+#[actix_rt::test]
+async fn rfc7592_the_configuration_routes_are_rate_limited() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f, RateLimitConfig::default());
+    let limit = RateLimitConfig::default().dcr_per_min;
+    assert_eq!(limit, 5);
+
+    let (status, registered) = register!(app, f, inspector_registration());
+    assert_eq!(status, 201);
+    let uri = config_path(&registered);
+    let wrong = bearer("not-the-token");
+
+    // Five refused requests, across all three methods, each spending a token
+    // from the bucket. The limit bounds attempts, not successes.
+    let mut statuses = Vec::new();
+    statuses.push(manage!(app, get, &uri, wrong.clone()).0);
+    statuses.push(manage!(app, put, &uri, wrong.clone(), Some(json!({}))).0);
+    statuses.push(manage!(app, delete, &uri, wrong.clone()).0);
+    statuses.push(manage!(app, put, &uri, wrong.clone(), Some(json!({}))).0);
+    statuses.push(manage!(app, delete, &uri, wrong.clone()).0);
+    assert!(statuses.iter().all(|s| *s == 401), "{statuses:?}");
+
+    // The sixth is refused by the limiter — even with the right token.
+    let (status, _, _) = manage!(app, get, &uri, bearer(&rat(&registered)));
+    assert_eq!(
+        status, 429,
+        "the configuration routes share one per-IP bucket"
+    );
+
+    // And the registration endpoint's own bucket was not the one spent.
+    let (status, _) = register!(app, f, inspector_registration());
+    assert_eq!(status, 201, "a separate bucket from POST /oauth2/register");
+}
+
+/// **Acceptance: redaction.** No management token — the one registration
+/// returned, nor the one an update rotated in, nor a wrong one — appears in a
+/// log line or an audit row, on the served path or the refused path; and
+/// every operation is audited.
+#[actix_rt::test]
+async fn rfc7592_the_management_token_reaches_no_log_and_no_audit_row() {
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(LogBuf(log.clone()))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (_, registered) = register!(app, f, inspector_registration());
+    let uri = config_path(&registered);
+    let first = rat(&registered);
+    let wrong = axiam_oauth2::dcr::mint_registration_access_token().0;
+
+    let (_, _, read) = manage!(app, get, &uri, bearer(&first));
+    let (_, _, _) = manage!(app, get, &uri, bearer(&wrong));
+    let (status, _, updated) = manage!(app, put, &uri, bearer(&first), Some(update_from(&read)));
+    assert_eq!(status, 200);
+    let second = rat(&updated);
+    let (status, _, _) = manage!(app, delete, &uri, bearer(&second));
+    assert_eq!(status, 204);
+
+    drop(guard);
+    let captured = String::from_utf8_lossy(&log.lock().unwrap().clone()).into_owned();
+    let (status, audit) = admin!(app, f, get, "/api/v1/audit-logs?limit=100");
+    assert_eq!(status, 200, "{audit}");
+    let audit_text = audit.to_string();
+
+    for token in [&first, &second, &wrong] {
+        let digest = axiam_auth::token::hash_refresh_token(token);
+        for (sink, text) in [("log", &captured), ("audit", &audit_text)] {
+            assert!(!text.contains(token.as_str()), "a token reached the {sink}");
+            assert!(!text.contains(&digest), "a token digest reached the {sink}");
+        }
+    }
+
+    let actions: Vec<&str> = audit["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["action"].as_str())
+        .collect();
+    for action in [
+        "oauth2.client_configuration_read",
+        "oauth2.client_configuration_refused",
+        "oauth2.client_configuration_updated",
+        "oauth2.client_configuration_deleted",
+    ] {
+        assert!(
+            actions.contains(&action),
+            "{action} missing from {actions:?}"
+        );
+    }
+}
+
+#[derive(Clone)]
+struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBuf;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// A tenant that turned registration off still lets its clients read and
+/// delete themselves, and refuses a replacement `403`, as it would refuse the
+/// registration the replacement re-decides.
+#[actix_rt::test]
+async fn rfc7592_a_tenant_that_disabled_registration_refuses_updates_but_not_reads_or_deletes() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (_, registered) = register!(app, f, inspector_registration());
+    let uri = config_path(&registered);
+    let token = rat(&registered);
+    let (_, _, read) = manage!(app, get, &uri, bearer(&token));
+
+    set_org_settings(
+        &f,
+        SetOrgSettings {
+            dynamic_registration: DynamicRegistrationMode::Disabled,
+            ..anonymous_policy()
+        },
+    )
+    .await
+    .unwrap();
+
+    let (status, _, body) = manage!(app, put, &uri, bearer(&token), Some(update_from(&read)));
+    assert_eq!(status, 403, "{body}");
+    let (status, _, _) = manage!(app, get, &uri, bearer(&token));
+    assert_eq!(status, 200, "the token was not rotated by the refusal");
+    let (status, _, _) = manage!(app, delete, &uri, bearer(&token));
+    assert_eq!(status, 204);
 }

@@ -39,8 +39,30 @@
 //! from `OidcPolicy::external_client_allowed_resources` and from nowhere else,
 //! and the settings layer refuses to enable anonymous registration while that
 //! list is empty — see `axiam_core::models::settings::validate_dcr_policy`.
+//!
+//! # RFC 7592 — what a registered client may later change (T23.4.1)
+//!
+//! A successful registration is also issued a **registration access token**:
+//! 32 CSPRNG bytes, base64url without padding, returned once beside a
+//! `registration_client_uri` of `{issuer}/oauth2/register/{client_id}`. Only
+//! its SHA-256 is stored, on the client row. Presented as
+//! `Authorization: Bearer`, it — and nothing else, not a user's token, not a
+//! service account's, not the client secret — lets the client read, replace
+//! and delete its own registration.
+//!
+//! A replacement is not a second, weaker registration. [`validate_update`]
+//! runs the request through the same [`validate`] a registration runs, against
+//! the tenant's policy **as it is now**, so a `PUT` cannot widen a scope, add a
+//! grant, leave the host glob or name an audience that a `POST` could not; the
+//! four things a request does not decide are overwritten exactly as they are
+//! at registration; and the repository type it lands in
+//! (`DcrRegistrationReplacement`) has no field for the profile, the X7 flags,
+//! the provenance or the tenant. On success the token rotates: the old one dies
+//! in the same statement that writes the new one.
 
-use axiam_core::models::oauth2_client::{ClientAuthMethod, ClientProfile, CreateOAuth2Client};
+use axiam_core::models::oauth2_client::{
+    ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
+};
 use axiam_core::models::settings::{DynamicRegistrationMode, OidcPolicy};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -165,6 +187,11 @@ pub enum DcrError {
     UnsupportedSoftwareStatement,
     /// The tenant already holds `dcr_max_clients` self-registered clients.
     ClientQuotaExhausted { limit: u32 },
+    /// An RFC 7592 §2.2 update the server cannot read as an update: a member
+    /// the client must not send, or a `client_id` that is absent or names
+    /// another client. `invalid_request`, because none of the RFC 7591
+    /// metadata codes describes it.
+    InvalidRequest(String),
 }
 
 impl DcrError {
@@ -177,6 +204,7 @@ impl DcrError {
             Self::RegistrationDisabled
             | Self::InitialAccessTokenRequired
             | Self::ClientQuotaExhausted { .. } => "invalid_request",
+            Self::InvalidRequest(_) => "invalid_request",
             Self::InvalidRedirectUri(_) => "invalid_redirect_uri",
             Self::InvalidClientMetadata(_) => "invalid_client_metadata",
             Self::UnsupportedSoftwareStatement => "invalid_software_statement",
@@ -208,7 +236,9 @@ impl DcrError {
                  `Authorization: Bearer <token>` (RFC 7591 section 1.2)"
                     .to_owned()
             }
-            Self::InvalidRedirectUri(d) | Self::InvalidClientMetadata(d) => d.clone(),
+            Self::InvalidRedirectUri(d)
+            | Self::InvalidClientMetadata(d)
+            | Self::InvalidRequest(d) => d.clone(),
             Self::UnsupportedSoftwareStatement => {
                 "software_statement is not supported by this authorization server; send the \
                  metadata directly"
@@ -521,12 +551,26 @@ pub const fn gate(mode: DynamicRegistrationMode, bearer_present: bool) -> Result
     }
 }
 
-/// An RFC 7591 §3.2.1 registration response.
+/// An RFC 7591 §3.2.1 registration response, which is also RFC 7592 §3's
+/// client information response.
 ///
-/// `registration_access_token` and `registration_client_uri` are **absent**:
-/// RFC 7592's client configuration endpoint is deferred (the plan's item 4),
-/// and RFC 7591 §3.2.1 makes both OPTIONAL. Returning them would promise an
-/// endpoint that does not exist, which a conforming client would then try.
+/// One shape for all three answers — the `201` of a registration, the `200`
+/// of a read and the `200` of a replacement — because RFC 7592 §3 defines the
+/// client information response as the RFC 7591 one plus two members, and a
+/// client that round-trips what it read must find the members it was given.
+/// What differs between the three is which of the two secrets is present:
+///
+/// | | `client_secret` | `registration_access_token` |
+/// |---|---|---|
+/// | `POST /oauth2/register` (201) | once, if issued | **once** |
+/// | `GET  …/register/{client_id}` | never | never |
+/// | `PUT  …/register/{client_id}` | never | **once** (the rotated one) |
+///
+/// A read never returns the token. Only its digest is stored, so it could not
+/// be returned if we wanted to; and the plan rotates on update only, so a read
+/// has no new one to hand out (RFC 7592 §2.1 permits rotation on read; AXIAM
+/// does not do it). The secret is never returned after the registration for
+/// the same reason: the row holds a keyed hash.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct RegistrationResponse {
     /// The issued `client_id`.
@@ -561,6 +605,213 @@ pub struct RegistrationResponse {
     pub token_endpoint_auth_method: String,
     /// The stored scopes, space-delimited (RFC 7591 §2's encoding).
     pub scope: String,
+    /// RFC 7591 §2 `jwks`, as stored, for a `private_key_jwt` client.
+    ///
+    /// Echoed so that an RFC 7592 §2.2 replacement — which is a full
+    /// replacement, and treats an omitted member as a request to delete it —
+    /// can be built from a read without silently dropping the client's keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<serde_json::Value>,
+    /// RFC 7591 §2 `jwks_uri`, as stored. Echoed for the reason `jwks` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+    /// RFC 7592 §3 `registration_client_uri`: where this client reads,
+    /// replaces and deletes its registration.
+    ///
+    /// `{issuer}/oauth2/register/{client_id}`, built from the issuer the
+    /// request arrived under (see [`registration_client_uri`]).
+    pub registration_client_uri: String,
+    /// RFC 7592 §3 `registration_access_token`. **Sensitive**: a bearer
+    /// credential for this registration. Present on the registration and on a
+    /// replacement (the rotated value), each exactly once; absent on a read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration_access_token: Option<String>,
+}
+
+/// Mint an RFC 7592 registration access token: `(plaintext, digest)`.
+///
+/// 32 bytes from the operating system's CSPRNG, base64url without padding —
+/// `axiam_auth::token::generate_refresh_token`'s generator, called afresh, so
+/// the bytes are this credential's own and shared with nothing. The digest is
+/// `hash_refresh_token`'s SHA-256, the one refresh tokens and RFC 7591 initial
+/// access tokens are stored under. 256 bits of entropy is why an unsalted,
+/// unkeyed digest is enough: there is no dictionary to precompute against.
+///
+/// No prefix, unlike the initial access token's `axiam_dcr_`: the plan fixes
+/// the encoding as the bare 43 characters, and an SDK is told to treat the
+/// value as opaque either way.
+#[must_use]
+pub fn mint_registration_access_token() -> (String, String) {
+    let raw = axiam_auth::token::generate_refresh_token();
+    let digest = axiam_auth::token::hash_refresh_token(&raw);
+    (raw, digest)
+}
+
+/// The digest a presented registration access token is looked up under.
+#[must_use]
+pub fn registration_access_token_digest(presented: &str) -> String {
+    axiam_auth::token::hash_refresh_token(presented)
+}
+
+/// RFC 7592 §3 `registration_client_uri` for a client.
+///
+/// `issuer` is the issuer the registration request arrived under:
+/// `{root}/t/{tenant_id}` on a T21.6 tenant path, whose URL needs nothing
+/// else, or `{root}`, whose URL must carry the tenant the way every other
+/// endpoint on that form does — as `?tenant_id=`, which is what
+/// `tenant_query` is for (`None` on a tenant path). RFC 7592 §3 asks for "the
+/// fully qualified URL of the client configuration endpoint", and RFC 6749 §3
+/// permits an endpoint URL a query component; a client uses the value as
+/// given rather than rebuilding it.
+///
+/// `client_id` is placed in the path as is. Only a `dcr` client is ever given
+/// this URI, and its identifier is `oa_` plus 32 hex digits, minted here —
+/// nothing a caller chose, and nothing that needs escaping.
+#[must_use]
+pub fn registration_client_uri(
+    issuer: &str,
+    client_id: &str,
+    tenant_query: Option<Uuid>,
+) -> String {
+    let base = format!(
+        "{}/oauth2/register/{client_id}",
+        issuer.trim_end_matches('/')
+    );
+    match tenant_query {
+        Some(tenant_id) => format!("{base}?tenant_id={tenant_id}"),
+        None => base,
+    }
+}
+
+/// The client information response for a stored client (RFC 7592 §3).
+///
+/// `client_secret` is `Some` only on the registration that minted it, and
+/// `registration_access_token` only on a registration or a replacement; see
+/// [`RegistrationResponse`] for the table.
+#[must_use]
+pub fn client_information(
+    client: &OAuth2Client,
+    registration_client_uri: String,
+    client_secret: Option<String>,
+    registration_access_token: Option<String>,
+) -> RegistrationResponse {
+    let is_public = client.token_endpoint_auth_method.is_public();
+    RegistrationResponse {
+        client_id: client.client_id.clone(),
+        // A public client has no secret to show — none was minted. Omitted
+        // rather than `""`, which an MCP client would read as a secret that
+        // happens to be empty.
+        client_secret: client_secret.filter(|_| !is_public),
+        client_id_issued_at: client.created_at.timestamp(),
+        // RFC 7591 §3.2.1: REQUIRED if a secret was issued, and `0` means it
+        // does not expire. Present on every answer about a confidential
+        // client, because the secret exists whether or not this response
+        // carries it.
+        client_secret_expires_at: (!is_public).then_some(0),
+        client_name: client.name.clone(),
+        redirect_uris: client.redirect_uris.clone(),
+        grant_types: client.grant_types.clone(),
+        response_types: vec!["code".to_owned()],
+        token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_owned(),
+        scope: client.scopes.join(" "),
+        // Stored as the raw document; a value that no longer parses is
+        // omitted rather than echoed as a string the client did not send.
+        jwks: client
+            .jwks
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok()),
+        jwks_uri: client.jwks_uri.clone(),
+        registration_client_uri,
+        registration_access_token,
+    }
+}
+
+/// The members RFC 7592 §2.2 says an update request MUST NOT include.
+///
+/// All four are the server's to state: two describe the configuration
+/// endpoint itself and two describe when the server issued something. A
+/// request carrying one is refused rather than ignored — §2.2 states the
+/// prohibition as a MUST NOT on the client, and a client that round-trips a
+/// read verbatim has sent the token in a request body, which is the leak the
+/// rule exists to prevent. Refusing teaches it; ignoring would let it keep
+/// doing it.
+pub const RFC7592_SERVER_MEMBERS: [&str; 4] = [
+    "registration_access_token",
+    "registration_client_uri",
+    "client_secret_expires_at",
+    "client_id_issued_at",
+];
+
+/// Validate an RFC 7592 §2.2 replacement of a stored `dcr` client.
+///
+/// Pure, like [`validate`], which it ends by calling: the replacement is held
+/// to exactly the rules a registration is, under the tenant's policy as it is
+/// **now** — so a scope the tenant has since withdrawn cannot be kept by
+/// re-sending it, and the audiences are the tenant's current list.
+///
+/// What it adds before that:
+///
+/// 1. The body is a JSON object, and none of [`RFC7592_SERVER_MEMBERS`] is in
+///    it (`invalid_request`).
+/// 2. `client_id` is present and equals the path's (`invalid_request`) —
+///    §2.2's "MUST be the same as its currently issued client identifier".
+/// 3. After validation, the authentication method is the stored one
+///    (`invalid_client_metadata`). A change of method is a change of
+///    credential — `none` to `client_secret_basic` would name a secret the
+///    row does not hold, and the reverse would leave one behind — and §2.2
+///    forbids a client choosing its own secret. Register a new client
+///    instead. Note what full replacement means here: an **omitted** method
+///    is RFC 7591 §2's default, `client_secret_basic`, so a public client must
+///    send `none` back.
+///
+/// `client_secret`, if present, must match the stored secret; that check
+/// needs the keyed hasher and is the handler's.
+pub fn validate_update(
+    tenant_id: Uuid,
+    path_client_id: &str,
+    body: &serde_json::Value,
+    stored: &OAuth2Client,
+    policy: &OidcPolicy,
+) -> Result<ValidatedRegistration, DcrError> {
+    let Some(object) = body.as_object() else {
+        return Err(DcrError::InvalidRequest(
+            "the client metadata must be a JSON object".into(),
+        ));
+    };
+    if let Some(member) = RFC7592_SERVER_MEMBERS
+        .iter()
+        .find(|m| object.contains_key(**m))
+    {
+        return Err(DcrError::InvalidRequest(format!(
+            "{member} must not be sent in an update: it is the server's to state (RFC 7592 \
+             section 2.2)"
+        )));
+    }
+    match object.get("client_id") {
+        Some(serde_json::Value::String(c)) if c == path_client_id => {}
+        _ => {
+            return Err(DcrError::InvalidRequest(
+                "client_id must be present and equal to the client being updated (RFC 7592 \
+                 section 2.2)"
+                    .into(),
+            ));
+        }
+    }
+    // A fixed message rather than serde's, which can quote the input.
+    let req: RegistrationRequest = serde_json::from_value(body.clone()).map_err(|_| {
+        DcrError::InvalidClientMetadata(
+            "the client metadata could not be read as RFC 7591 section 2 metadata".into(),
+        )
+    })?;
+    let validated = validate(tenant_id, &req, policy)?;
+    if validated.create.token_endpoint_auth_method != stored.token_endpoint_auth_method {
+        return Err(DcrError::InvalidClientMetadata(format!(
+            "token_endpoint_auth_method cannot be changed from {} through the client \
+             configuration endpoint; register a new client instead",
+            stored.token_endpoint_auth_method.as_str()
+        )));
+    }
+    Ok(validated)
 }
 
 #[cfg(test)]
@@ -921,6 +1172,7 @@ mod tests {
                 "invalid_software_statement",
                 400,
             ),
+            (DcrError::InvalidRequest("x".into()), "invalid_request", 400),
         ] {
             assert_eq!(err.error_code(), code);
             assert_eq!(err.http_status(), status);
@@ -942,5 +1194,304 @@ mod tests {
                 "axiam-core's dcr_allowed_scopes refusal must name every sensitive scope"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // RFC 7592 (T23.4.1)
+    // -----------------------------------------------------------------------
+
+    /// The row a registration of `req` would have stored.
+    fn stored(req: &RegistrationRequest) -> OAuth2Client {
+        let c = validate(Uuid::new_v4(), req, &policy(|_| {}))
+            .unwrap()
+            .create;
+        OAuth2Client {
+            id: Uuid::new_v4(),
+            tenant_id: c.tenant_id,
+            client_id: "oa_00112233445566778899aabbccddeeff".into(),
+            client_secret_hash: String::new(),
+            name: c.name,
+            redirect_uris: c.redirect_uris,
+            grant_types: c.grant_types,
+            scopes: c.scopes,
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
+            profile: c.profile,
+            token_endpoint_auth_method: c.token_endpoint_auth_method,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: Vec::new(),
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
+            authn_request_params: c.authn_request_params,
+            browser_sso: c.browser_sso,
+            allowed_resources: c.allowed_resources,
+            managed_by: c.managed_by,
+            last_authorized_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    /// What a client sends back after a read: its metadata plus its
+    /// `client_id`, with the four server-stated members stripped.
+    fn update_body(client_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "client_id": client_id,
+            "client_name": "MCP Inspector",
+            "redirect_uris": ["http://127.0.0.1:6274/oauth/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "scope": "openid profile",
+        })
+    }
+
+    #[test]
+    fn a_registration_access_token_is_32_random_bytes_base64url_and_stored_as_a_digest() {
+        let (a, digest_a) = mint_registration_access_token();
+        let (b, _) = mint_registration_access_token();
+        assert_eq!(a.len(), 43, "32 bytes, base64url, no padding: {a}");
+        assert!(
+            a.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
+            "{a}"
+        );
+        assert_ne!(a, b);
+        assert_eq!(digest_a.len(), 64);
+        assert_ne!(digest_a, a, "the digest is not the token");
+        assert_eq!(registration_access_token_digest(&a), digest_a);
+    }
+
+    #[test]
+    fn the_registration_client_uri_follows_the_issuer_the_request_used() {
+        let tenant = Uuid::new_v4();
+        assert_eq!(
+            registration_client_uri("https://a.example.com/", "oa_1", Some(tenant)),
+            format!("https://a.example.com/oauth2/register/oa_1?tenant_id={tenant}")
+        );
+        assert_eq!(
+            registration_client_uri(&format!("https://a.example.com/t/{tenant}"), "oa_1", None),
+            format!("https://a.example.com/t/{tenant}/oauth2/register/oa_1")
+        );
+    }
+
+    #[test]
+    fn an_update_that_restates_the_registration_is_accepted() {
+        let stored = stored(&inspector_request());
+        let mut body = update_body(&stored.client_id);
+        body["redirect_uris"] = serde_json::json!(["http://localhost:9000/cb"]);
+        let out = validate_update(
+            stored.tenant_id,
+            &stored.client_id,
+            &body,
+            &stored,
+            &policy(|_| {}),
+        )
+        .unwrap();
+        assert_eq!(out.create.redirect_uris, vec!["http://localhost:9000/cb"]);
+    }
+
+    #[test]
+    fn an_update_naming_a_server_stated_member_is_refused() {
+        let stored = stored(&inspector_request());
+        for member in RFC7592_SERVER_MEMBERS {
+            let mut body = update_body(&stored.client_id);
+            body[member] = serde_json::json!("x");
+            let err = validate_update(
+                stored.tenant_id,
+                &stored.client_id,
+                &body,
+                &stored,
+                &policy(|_| {}),
+            )
+            .unwrap_err();
+            assert_eq!(err.error_code(), "invalid_request", "{member}");
+            assert_eq!(err.http_status(), 400);
+        }
+    }
+
+    #[test]
+    fn an_update_must_name_its_own_client_id() {
+        let stored = stored(&inspector_request());
+        for client_id in [
+            serde_json::Value::Null,
+            serde_json::json!("oa_somebody_else"),
+            serde_json::json!(7),
+        ] {
+            let mut body = update_body(&stored.client_id);
+            body["client_id"] = client_id.clone();
+            assert!(matches!(
+                validate_update(
+                    stored.tenant_id,
+                    &stored.client_id,
+                    &body,
+                    &stored,
+                    &policy(|_| {})
+                ),
+                Err(DcrError::InvalidRequest(_))
+            ));
+        }
+        let mut body = update_body(&stored.client_id);
+        body.as_object_mut().unwrap().remove("client_id");
+        assert!(matches!(
+            validate_update(
+                stored.tenant_id,
+                &stored.client_id,
+                &body,
+                &stored,
+                &policy(|_| {})
+            ),
+            Err(DcrError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            validate_update(
+                stored.tenant_id,
+                &stored.client_id,
+                &serde_json::json!([]),
+                &stored,
+                &policy(|_| {})
+            ),
+            Err(DcrError::InvalidRequest(_))
+        ));
+    }
+
+    /// The widening refusals are `validate`'s own, reached through the update.
+    #[test]
+    fn an_update_cannot_widen_scopes_grants_hosts_or_the_auth_method() {
+        let stored = stored(&inspector_request());
+        let cases: [(&str, serde_json::Value, &str); 4] = [
+            (
+                "scope",
+                serde_json::json!("openid profile email"),
+                "invalid_client_metadata",
+            ),
+            (
+                "grant_types",
+                serde_json::json!(["authorization_code", "client_credentials"]),
+                "invalid_client_metadata",
+            ),
+            (
+                "redirect_uris",
+                serde_json::json!(["https://evil.example.net/cb"]),
+                "invalid_redirect_uri",
+            ),
+            (
+                "token_endpoint_auth_method",
+                serde_json::json!("client_secret_basic"),
+                "invalid_client_metadata",
+            ),
+        ];
+        for (member, value, code) in cases {
+            let mut body = update_body(&stored.client_id);
+            body[member] = value;
+            let err = validate_update(
+                stored.tenant_id,
+                &stored.client_id,
+                &body,
+                &stored,
+                &policy(|_| {}),
+            )
+            .unwrap_err();
+            assert_eq!(err.error_code(), code, "{member}");
+            assert_eq!(err.http_status(), 400, "{member}");
+        }
+        // Full replacement: an omitted method is RFC 7591's default, which is
+        // not what a public client holds.
+        let mut body = update_body(&stored.client_id);
+        body.as_object_mut()
+            .unwrap()
+            .remove("token_endpoint_auth_method");
+        assert!(matches!(
+            validate_update(
+                stored.tenant_id,
+                &stored.client_id,
+                &body,
+                &stored,
+                &policy(|_| {})
+            ),
+            Err(DcrError::InvalidClientMetadata(_))
+        ));
+    }
+
+    /// T23.1.1's registration pin, held for the update: however the body
+    /// spells a wish for the honour lane, the login hop, a FAPI profile, a
+    /// provenance or an audience, what comes out is the stricter default and
+    /// the tenant's list.
+    #[test]
+    fn an_update_cannot_opt_itself_into_the_honour_lane_or_the_login_hop() {
+        let stored = stored(&inspector_request());
+        let mut body = update_body(&stored.client_id);
+        for (k, v) in [
+            ("authn_request_params", serde_json::json!("honour")),
+            ("browser_sso", serde_json::json!(true)),
+            ("profile", serde_json::json!("fapi2")),
+            ("managed_by", serde_json::json!("admin")),
+            (
+                "allowed_resources",
+                serde_json::json!(["https://elsewhere.example"]),
+            ),
+            ("tenant_id", serde_json::json!(Uuid::new_v4())),
+        ] {
+            body[k] = v;
+        }
+        let c = validate_update(
+            stored.tenant_id,
+            &stored.client_id,
+            &body,
+            &stored,
+            &policy(|_| {}),
+        )
+        .unwrap()
+        .create;
+        assert_eq!(
+            c.authn_request_params,
+            axiam_core::models::oauth2_client::AuthnRequestParamsMode::Ignore
+        );
+        assert!(!c.browser_sso);
+        assert_eq!(c.profile, ClientProfile::Standard);
+        assert_eq!(
+            c.managed_by,
+            axiam_core::models::oauth2_client::ManagedBy::Dcr
+        );
+        assert_eq!(c.allowed_resources, vec!["https://mcp.example.com/mcp"]);
+        assert_eq!(c.tenant_id, stored.tenant_id);
+    }
+
+    /// A read never carries a secret; the registration and a replacement carry
+    /// the token once.
+    #[test]
+    fn the_client_information_response_carries_each_secret_only_where_it_should() {
+        let stored = stored(&inspector_request());
+        let read = serde_json::to_value(client_information(
+            &stored,
+            "https://a.example.com/oauth2/register/x".into(),
+            None,
+            None,
+        ))
+        .unwrap();
+        assert!(read.get("registration_access_token").is_none());
+        assert!(read.get("client_secret").is_none());
+        assert_eq!(
+            read["registration_client_uri"],
+            "https://a.example.com/oauth2/register/x"
+        );
+        let put = serde_json::to_value(client_information(
+            &stored,
+            "u".into(),
+            Some("never-for-a-public-client".into()),
+            Some("tok".into()),
+        ))
+        .unwrap();
+        assert_eq!(put["registration_access_token"], "tok");
+        assert!(
+            put.get("client_secret").is_none(),
+            "a public client has no secret to show"
+        );
     }
 }

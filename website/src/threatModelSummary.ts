@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.17.0",
+ "version": "2.18.0",
  "diagramCount": 9,
- "total": 288,
+ "total": 289,
  "open": 13,
- "mitigated": 275,
+ "mitigated": 276,
  "areas": [
   {
    "id": 0,
@@ -74,7 +74,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 58,
+   "total": 59,
    "open": 0
   },
   {
@@ -117,7 +117,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 70,
+   "total": 71,
    "open": 3
   },
   {
@@ -154,7 +154,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 135,
+   "total": 136,
    "open": 8
   },
   {

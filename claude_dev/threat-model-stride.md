@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 300 |
-| **Mitigated / Open** | 286 / 14 |
+| **Threats identified** | 302 |
+| **Mitigated / Open** | 288 / 14 |
 | **Owner** | ilpanich |
 
 ---
@@ -1271,9 +1271,9 @@ The OP-session cookie is scoped to the authorization endpoint — `Path=/oauth2/
 
 Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the *public* login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a `SameSite=Strict` session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config.
 
-The 2026-10-03 pass (T23.3.2, Phase 23's G-3) adds the LDAP / Active Directory identity source's network path: a new trust boundary, **AXIAM ↔ tenant directory**, around a new external entity (the tenant's directory), the *Directory sign-in* process that binds to it — `axiam-directory`'s client, `ldap3` over rustls — and the `directory_config` store holding the D-15 encrypted bind secret, with flows for the service bind and search and for the user bind. T-291…T-300 are its threats. They entered `Axiam.json` in the same commit as the network code, at model 2.20.0. T-300 is open: a tenant-chosen directory host is not held to the outbound address policy.
+The 2026-10-03 pass (T23.3.2, Phase 23's G-3) adds the LDAP / Active Directory identity source's network path: a new trust boundary, **AXIAM ↔ tenant directory**, around a new external entity (the tenant's directory), the *Directory sign-in* process that binds to it — `axiam-directory`'s client, `ldap3` over rustls — and the `directory_config` store holding the D-15 encrypted bind secret, with flows for the service bind and search and for the user bind. T-291…T-300 are its threats. They entered `Axiam.json` in the same commit as the network code, at model 2.20.0. T-301 and T-302 followed with the login integration that puts the brute-force counters and the enumeration rule in front of the directory, and T-297 gained the entry binding, all still 2.20.0. T-300 is open: a tenant-chosen directory host is not held to the outbound address policy.
 
-*41 threats — 6 critical, 17 high, 15 medium, 3 low; 2 open.*
+*43 threats — 6 critical, 17 high, 17 medium, 3 low; 2 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1318,6 +1318,8 @@ The 2026-10-03 pass (T23.3.2, Phase 23's G-3) adds the LDAP / Active Directory i
 | T-298 | directory_config (encrypted bind secret) <br/>*Store* | I | The directory bind secret is disclosed from the database, an API response, a log or a Debug line | High | Mitigated |
 | T-299 | directory_config (encrypted bind secret) <br/>*Store* | D | An absent encryption key makes directory sign-in insecure, or keeps the server from starting | Low | Mitigated |
 | T-300 | Directory sign-in (bind-as-user, bounded pool) <br/>*Process* | I | A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network | Medium | Open |
+| T-301 | Directory sign-in (bind-as-user, bounded pool) <br/>*Process* | I | Sign-in latency tells directory accounts apart from local and unknown ones | Medium | Mitigated |
+| T-302 | Directory sign-in (bind-as-user, bounded pool) <br/>*Process* | D | AXIAM is used to lock users out of the corporate directory | Medium | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1592,7 +1594,7 @@ LDAP lets a server answer "ask over there": a referral result, or search result 
 
 Directory configurations, decrypted secrets, trust stores and pooled connections are all per tenant, and one process holds them all. A lookup keyed by anything but the tenant being signed in to, or a pooled connection reused across tenants or across a configuration change, authenticates a user against the wrong directory, or searches with another tenant's bind account.
 
-> The authenticator reads the configuration and decrypts the secret for the tenant the login path resolved, on every sign-in. The pool is keyed by tenant id with a semaphore per tenant; a pooled connection carries its configuration's generation (row id and `updated_at`) and is closed rather than reused when that differs, so a new URL, bind DN, secret or trust store applies at the next sign-in. The TLS cache is keyed the same way. A connection bound as a user is never pooled, so no search runs with a previous user's rights. Tests: `one_tenant_is_never_answered_by_another_tenants_directory`, `pools_are_partitioned_by_tenant`, `the_pool_reuses_service_connections_and_never_user_bound_ones`.
+> The authenticator reads the configuration and decrypts the secret for the tenant the login path resolved, on every sign-in. The pool is keyed by tenant id with a semaphore per tenant; a pooled connection carries its configuration's generation (row id and `updated_at`) and is closed rather than reused when that differs, so a new URL, bind DN, secret or trust store applies at the next sign-in. The TLS cache is keyed the same way. A connection bound as a user is never pooled, so no search runs with a previous user's rights. Tests: `one_tenant_is_never_answered_by_another_tenants_directory`, `pools_are_partitioned_by_tenant`, `the_pool_reuses_service_connections_and_never_user_bound_ones`. **Entry binding (login path).** A successful bind is accepted only when the identifier the directory returns equals the account's `directory_external_id` (case-insensitively), so a login name that resolves to a different entry — a renamed account, a colliding `uid`, a second person given the same login name — cannot sign in as this account even with that entry's correct password; the refusal is counted. Test: `an_answer_from_another_entry_is_refused_and_counted`.
 
 **T-298 — The directory bind secret is disclosed from the database, an API response, a log or a Debug line**  
 `directory_config (encrypted bind secret)` (Store) · Information disclosure · High · Mitigated
@@ -1614,6 +1616,20 @@ The directory key is optional. A missing key must not mean a plaintext secret, a
 The directory host and port are whatever a tenant administrator saves. Pointed at an internal address, each directory sign-in makes AXIAM open a TCP connection and begin a TLS handshake there, and how long the failure takes distinguishes an open port from a closed one.
 
 > Partly mitigated. TLS is mandatory and nothing is sent before a verified handshake, so no LDAP request reaches a host that cannot present a certificate chaining to the tenant's anchors; every outcome reaches the user as the same generic failure and the reason is logged for the operator only; connecting is bounded at 5 s and pooled per tenant. Open because the directory connector does not apply the `guarded_fetch` address policy (no refusal of private, loopback or link-local addresses): directories are usually on private networks, so a blanket refusal would break the feature it serves. Tenant administrators are trusted within their own tenant (assumption 7). Follow-up for the management routes (T23.3.8): an operator-level allow-list of directory hosts.
+
+**T-301 — Sign-in latency tells directory accounts apart from local and unknown ones**  
+`Directory sign-in (bind-as-user, bounded pool)` (Process) · Information disclosure · Medium · Mitigated
+
+A directory account's password is checked by a network bind; a local one's by an Argon2id verify; an unknown name's by a dummy verify. If those take different time, or answer differently, the login endpoint tells an attacker which names exist and which are directory accounts — and whether the directory is up.
+
+> The response is the same in every case: `InvalidCredentials`, the answer an unknown name and a wrong local password already get, for a wrong directory password, an entry that is not the account's, an unreachable, misconfigured or disabled directory, a restricted account, an empty password and a deployment without an authenticator alike. The work is equalised the way SEC-026 equalises unknown names: every directory branch runs the same dummy Argon2id verify, under the same hash permit and the same `503` backpressure rule — on the bind path concurrently with the bind, holding a permit acquired before the directory is contacted, so saturation answers `503` exactly where the local path would. The residual, stated plainly: a directory sign-in costs `max(Argon2id verify, bind)`, and a bind (two TLS handshakes and three round trips) usually costs more than one verify, so a directory account answers measurably later than a local or unknown name. The login endpoint's per-IP rate limit and the per-account lockout bound how fast that can be sampled. The same shape as T-30's lockout branch, which also answers without a verify. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `there_is_no_fallback_to_a_local_hash`, `an_unknown_name_is_answered_as_today_without_the_directory` (`axiam-auth/tests/directory_account_test.rs`).
+
+**T-302 — AXIAM is used to lock users out of the corporate directory**  
+`Directory sign-in (bind-as-user, bounded pool)` (Process) · Denial of service · Medium · Mitigated
+
+Active Directory and many OpenLDAP deployments lock an account after a number of failed binds. An attacker who sprays passwords at AXIAM's login endpoint could make AXIAM perform those failed binds, locking real users out of their corporate accounts — mail, VPN, workstation — not just out of AXIAM; and the directory's own lockout may be absent altogether, leaving AXIAM's as the only brake.
+
+> AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`.
 
 </details>
 
@@ -2997,7 +3013,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-14 of 300 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
+14 of 302 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -3081,8 +3097,8 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Spoofing | 75 |
 | Tampering | 60 |
 | Repudiation | 6 |
-| Information disclosure | 70 |
-| Denial of service | 30 |
+| Information disclosure | 71 |
+| Denial of service | 31 |
 | Elevation of privilege | 59 |
 
 **By severity**
@@ -3091,7 +3107,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 |---|---|---|
 | Critical | 34 | 1 |
 | High | 141 | 8 |
-| Medium | 114 | 4 |
+| Medium | 116 | 4 |
 | Low | 11 | 1 |
 
 **By diagram**
@@ -3101,7 +3117,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | System diagram | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 60 | 0 |
-| Federation — SAML SP & OIDC relying party | 41 | 2 |
+| Federation — SAML SP & OIDC relying party | 43 | 2 |
 | Authorization engine — RBAC, hierarchy & scopes | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
@@ -3131,7 +3147,7 @@ Revisit the model when any of the following happens, and re-run the generator so
 - The SDK contract gains or relaxes a security clause (contract 1.28's WebAuthn, account-lifecycle and PAR sections and the Swift/C/C++ reactor protocol core are the 2026-08-22 examples — T-183…T-186 record them; contract 1.37 and 1.38 added the login-provider operations and the handoff-origin rule — T-218…T-225)
 - A conformance module moves from `REVIEW` to `PASSED` because the code changed, not because the evidence was re-read — the 2026-09-14 early-refusal pass is the example: a dead `request_uri` refused before the login hop and a `fapi2` client's `state` and `nonce` bounded at push entered as T-270 and T-271, and four existing entries (T-163, T-238, T-255, T-256) gained the clause that says what moved. And the reverse discipline, which the same week supplied: a fix that names a status *over REST* is not whole until every crate that renders a status carries it — T-262 was recorded Mitigated with `503` on two of three surfaces while `axiam-scim`'s own error type still answered `500`, and the entry now says so rather than absorbing the correction
 - A fix changes what a grant, a policy or a credential *means* even when no surface moves (the beta09 authorization-reach fixes T-226…T-228 and the WebAuthn user-verification policy T-229…T-230 are the examples: nothing new was exposed, but what existing data authorises changed) — and the reverse case, a fix that *weakens* a property the model records, which is written down as an open item rather than absorbed: the beta13 refresh-rotation grace window amended T-37 and opened T-254 — and was then closed by a decision rather than by a further fix, which is the other half of the same discipline
-- A wave writes its entries here — which puts them in the model only once they are in all three artifacts: this document, `ThreatDragonModels/Axiam/Axiam.json`, and [`threat-modeling-and-security.md`](threat-modeling-and-security.md). The generator's one-line summary is the check: `node website/scripts/gen-threat-model.mjs` must print the total §7 carries, on every commit that touches either this document or the JSON. The 2026-09-17 MCP entries (T-272…T-280) are the example: they lived eight days in this document alone, the dogfooding wave allocated T-281…T-288 past them, and the website would have rendered 279 threats against a text saying 288 — until they entered the JSON at 2.17.0. T-289 (RFC 7592, T23.4.1) is the counter-example: it entered all three artifacts in the commit that added its routes, at 2.18.0; so did T-291…T-300, the LDAP / Active Directory connector (T23.3.2), at 2.20.0, in the commit that added its network path
+- A wave writes its entries here — which puts them in the model only once they are in all three artifacts: this document, `ThreatDragonModels/Axiam/Axiam.json`, and [`threat-modeling-and-security.md`](threat-modeling-and-security.md). The generator's one-line summary is the check: `node website/scripts/gen-threat-model.mjs` must print the total §7 carries, on every commit that touches either this document or the JSON. The 2026-09-17 MCP entries (T-272…T-280) are the example: they lived eight days in this document alone, the dogfooding wave allocated T-281…T-288 past them, and the website would have rendered 279 threats against a text saying 288 — until they entered the JSON at 2.17.0. T-289 (RFC 7592, T23.4.1) is the counter-example: it entered all three artifacts in the commit that added its routes, at 2.18.0; so did T-291…T-300, the LDAP / Active Directory connector (T23.3.2), at 2.20.0, in the commit that added its network path, and T-301…T-303 in the commits that put the login path and the refusals around it
 
 Threat numbers are stable: add new threats with new numbers and raise `threatTop` rather than renumbering, so review comments and issues keep pointing at the right thing. Allocate them from `threatTop`, never from the last number in a section — the login-provider threats were first published as T-163…T-170, continuing §5.4's own sequence, and collided with numbers the model already held for §5.3's single-use credentials and §5.9's `cnf` threats. They were renumbered T-218…T-225 when they entered the model at 2.11.0 (they had lived only in this document until then, so nothing on the website pointed at them), and the four code comments that cite them moved with them.
 

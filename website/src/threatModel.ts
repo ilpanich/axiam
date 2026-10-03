@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
  "version": "2.20.0",
  "diagramCount": 9,
- "total": 300,
+ "total": 302,
  "open": 14,
- "mitigated": 286,
+ "mitigated": 288,
  "diagrams": [
   {
    "id": 0,
@@ -3926,7 +3926,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "Directory configurations, decrypted secrets, trust stores and pooled connections are all per tenant, and one process holds them all. A lookup keyed by anything but the tenant being signed in to, or a pooled connection reused across tenants or across a configuration change, authenticates a user against the wrong directory, or searches with another tenant's bind account.",
-       "mitigation": "The authenticator reads the configuration and decrypts the secret for the tenant the login path resolved, on every sign-in. The pool is keyed by tenant id with a semaphore per tenant; a pooled connection carries its configuration's generation (row id and `updated_at`) and is closed rather than reused when that differs, so a new URL, bind DN, secret or trust store applies at the next sign-in. The TLS cache is keyed the same way. A connection bound as a user is never pooled, so no search runs with a previous user's rights. Tests: `one_tenant_is_never_answered_by_another_tenants_directory`, `pools_are_partitioned_by_tenant`, `the_pool_reuses_service_connections_and_never_user_bound_ones`."
+       "mitigation": "The authenticator reads the configuration and decrypts the secret for the tenant the login path resolved, on every sign-in. The pool is keyed by tenant id with a semaphore per tenant; a pooled connection carries its configuration's generation (row id and `updated_at`) and is closed rather than reused when that differs, so a new URL, bind DN, secret or trust store applies at the next sign-in. The TLS cache is keyed the same way. A connection bound as a user is never pooled, so no search runs with a previous user's rights. Tests: `one_tenant_is_never_answered_by_another_tenants_directory`, `pools_are_partitioned_by_tenant`, `the_pool_reuses_service_connections_and_never_user_bound_ones`. **Entry binding (login path).** A successful bind is accepted only when the identifier the directory returns equals the account's `directory_external_id` (case-insensitively), so a login name that resolves to a different entry — a renamed account, a colliding `uid`, a second person given the same login name — cannot sign in as this account even with that entry's correct password; the refusal is counted. Test: `an_answer_from_another_entry_is_refused_and_counted`."
       },
       {
        "number": 300,
@@ -3936,6 +3936,24 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Open",
        "description": "The directory host and port are whatever a tenant administrator saves. Pointed at an internal address, each directory sign-in makes AXIAM open a TCP connection and begin a TLS handshake there, and how long the failure takes distinguishes an open port from a closed one.",
        "mitigation": "Partly mitigated. TLS is mandatory and nothing is sent before a verified handshake, so no LDAP request reaches a host that cannot present a certificate chaining to the tenant's anchors; every outcome reaches the user as the same generic failure and the reason is logged for the operator only; connecting is bounded at 5 s and pooled per tenant. Open because the directory connector does not apply the `guarded_fetch` address policy (no refusal of private, loopback or link-local addresses): directories are usually on private networks, so a blanket refusal would break the feature it serves. Tenant administrators are trusted within their own tenant (assumption 7). Follow-up for the management routes (T23.3.8): an operator-level allow-list of directory hosts."
+      },
+      {
+       "number": 301,
+       "title": "Sign-in latency tells directory accounts apart from local and unknown ones",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A directory account's password is checked by a network bind; a local one's by an Argon2id verify; an unknown name's by a dummy verify. If those take different time, or answer differently, the login endpoint tells an attacker which names exist and which are directory accounts — and whether the directory is up.",
+       "mitigation": "The response is the same in every case: `InvalidCredentials`, the answer an unknown name and a wrong local password already get, for a wrong directory password, an entry that is not the account's, an unreachable, misconfigured or disabled directory, a restricted account, an empty password and a deployment without an authenticator alike. The work is equalised the way SEC-026 equalises unknown names: every directory branch runs the same dummy Argon2id verify, under the same hash permit and the same `503` backpressure rule — on the bind path concurrently with the bind, holding a permit acquired before the directory is contacted, so saturation answers `503` exactly where the local path would. The residual, stated plainly: a directory sign-in costs `max(Argon2id verify, bind)`, and a bind (two TLS handshakes and three round trips) usually costs more than one verify, so a directory account answers measurably later than a local or unknown name. The login endpoint's per-IP rate limit and the per-account lockout bound how fast that can be sampled. The same shape as T-30's lockout branch, which also answers without a verify. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `there_is_no_fallback_to_a_local_hash`, `an_unknown_name_is_answered_as_today_without_the_directory` (`axiam-auth/tests/directory_account_test.rs`)."
+      },
+      {
+       "number": 302,
+       "title": "AXIAM is used to lock users out of the corporate directory",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Active Directory and many OpenLDAP deployments lock an account after a number of failed binds. An attacker who sprays passwords at AXIAM's login endpoint could make AXIAM perform those failed binds, locking real users out of their corporate accounts — mail, VPN, workstation — not just out of AXIAM; and the directory's own lockout may be absent altogether, leaving AXIAM's as the only brake.",
+       "mitigation": "AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`."
       }
      ],
      "open": 1
@@ -4412,11 +4430,11 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 41,
+   "total": 43,
    "open": 2,
    "bySeverity": {
     "High": 17,
-    "Medium": 15,
+    "Medium": 17,
     "Critical": 6,
     "Low": 3
    }

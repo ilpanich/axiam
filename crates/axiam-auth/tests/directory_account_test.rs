@@ -466,8 +466,10 @@ async fn a_local_account_is_unchanged() {
     );
 }
 
-/// No local account: answered exactly as an unknown user is today, and the
-/// directory is not consulted (just-in-time provisioning is T23.3.3's seam).
+/// No local account, and a directory that does not provision (this stub does
+/// not override the provisioning call, so it answers `NotConfigured`): answered
+/// exactly as an unknown user is, and the *sign-in* call is never made. The
+/// provisioning seam itself is pinned in `directory_provisioning_test.rs`.
 #[tokio::test]
 async fn an_unknown_name_is_answered_as_today_without_the_directory() {
     let h = harness().await;

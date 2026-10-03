@@ -1,7 +1,9 @@
 //! Authentication service — login, logout, token refresh, and MFA.
 
 use axiam_core::error::{AxiamError, AxiamResult};
-use axiam_core::models::directory::{DirectoryAuthError, SharedDirectoryAuthenticator};
+use axiam_core::models::directory::{
+    DirectoryAuthError, SharedDirectoryAuditSink, SharedDirectoryAuthenticator,
+};
 use axiam_core::models::password_history::CreatePasswordHistoryEntry;
 use axiam_core::models::reactor::{
     ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events, noop_reactor_gate,
@@ -26,6 +28,12 @@ use crate::crypto_gate::acquire_hash_permit;
 use crate::error::AuthError;
 use crate::token::AUD_USER;
 use crate::{password, token, totp};
+
+mod directory;
+pub use directory::{
+    AUDIT_ACCOUNT_LINKED, AUDIT_JIT_PROVISIONED, AUDIT_JIT_REFUSED, DirectoryLinkOutcome,
+    RepositoryDirectoryAuditSink,
+};
 
 // -----------------------------------------------------------------------
 // Input / output types
@@ -222,6 +230,11 @@ pub struct AuthService<
     /// composition root always attaches one; test harnesses that do not
     /// exercise directories leave it out.
     directory_authenticator: Option<SharedDirectoryAuthenticator>,
+    /// G-3 (T23.3.3) — where just-in-time provisioning, its refusals and the
+    /// linking of an account write their audit rows. Optional for the reason
+    /// the authenticator is: a harness that does not exercise directories
+    /// leaves it out, and the rows are simply not written.
+    directory_audit: Option<SharedDirectoryAuditSink>,
 }
 
 impl<
@@ -248,6 +261,7 @@ impl<
             crypto_semaphore,
             reactor_gate: noop_reactor_gate(),
             directory_authenticator: None,
+            directory_audit: None,
         }
     }
 
@@ -264,6 +278,16 @@ impl<
         authenticator: SharedDirectoryAuthenticator,
     ) -> Self {
         self.directory_authenticator = Some(authenticator);
+        self
+    }
+
+    /// Attach the audit sink for the directory path (G-3, T23.3.3):
+    /// `directory.jit_provisioned`, `directory.jit_refused` and
+    /// `directory.account_linked`. The composition root attaches one over the
+    /// append-only audit repository ([`RepositoryDirectoryAuditSink`]).
+    #[must_use]
+    pub fn with_directory_audit(mut self, sink: SharedDirectoryAuditSink) -> Self {
+        self.directory_audit = Some(sink);
         self
     }
 
@@ -375,18 +399,32 @@ impl<
     /// # The just-in-time provisioning seam (G-3, T23.3.3)
     ///
     /// This is the one place a directory account that does not exist locally
-    /// yet will be created. T23.3.3 adds, here and only here: when the tenant
-    /// has an enabled directory with `jit_provisioning`, authenticate the login
-    /// name against it (the same `directory_authenticator` call
-    /// [`Self::login_directory_account`] makes, timed against the same dummy
-    /// verify), and on success create the user, mark it with
-    /// `UserRepository::mark_directory_account` and continue with
-    /// [`Self::complete_authenticated_login`]. Until then — and afterwards, for
-    /// every tenant without a directory — the answer is exactly the unknown-user
-    /// answer below, so nothing about the directory is observable from here.
-    async fn login_unknown_user(&self, _input: &LoginInput) -> AxiamResult<LoginResult> {
-        self.equalising_dummy_verify().await?;
-        Err(AuthError::InvalidCredentials.into())
+    /// yet is created. When the tenant has an enabled directory with
+    /// `jit_provisioning`, the typed name and password are authenticated
+    /// against it — through the same `directory_authenticator` that
+    /// [`Self::login_directory_account`] uses, timed beside the same dummy
+    /// verify and under the same hash permit — and on success the account is
+    /// created `Active` and marked in one write, and the login continues
+    /// through [`Self::complete_authenticated_login`] (MFA policy as for any
+    /// user, `amr = [pwd]`). A second first login for the same entry finds the
+    /// first one's account.
+    ///
+    /// **Every other outcome is exactly the unknown-user answer**, with the
+    /// same error and the same dummy-verify cost: no directory, a tenant
+    /// without `jit_provisioning`, a disabled directory, a wrong password, an
+    /// entry not found, a directory that is down, and — D-28 — an entry that
+    /// would collide with a local account (which also writes an audit row).
+    /// A tenant without a directory observes nothing new. The one thing that
+    /// differs is the directory's own latency on a tenant that has one,
+    /// recorded in T-301.
+    async fn login_unknown_user(&self, input: &LoginInput) -> AxiamResult<LoginResult> {
+        match self
+            .authenticate_unknown_name_against_directory(input)
+            .await?
+        {
+            Some(identity) => self.provision_directory_account(input, identity).await,
+            None => Err(AuthError::InvalidCredentials.into()),
+        }
     }
 
     /// One Argon2id verify against [`password::DUMMY_HASH`], to make a branch

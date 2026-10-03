@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.19.0",
+ "version": "2.20.0",
  "diagramCount": 9,
- "total": 290,
- "open": 13,
- "mitigated": 277,
+ "total": 300,
+ "open": 14,
+ "mitigated": 286,
  "areas": [
   {
    "id": 0,
@@ -80,8 +80,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 31,
-   "open": 1
+   "total": 41,
+   "open": 2
   },
   {
    "id": 4,
@@ -117,12 +117,12 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 72,
+   "total": 75,
    "open": 3
   },
   {
    "name": "Tampering",
-   "total": 59,
+   "total": 60,
    "open": 1
   },
   {
@@ -132,39 +132,39 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 67,
-   "open": 6
+   "total": 70,
+   "open": 7
   },
   {
    "name": "Denial of service",
-   "total": 28,
+   "total": 30,
    "open": 2
   },
   {
    "name": "Elevation of privilege",
-   "total": 58,
+   "total": 59,
    "open": 1
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 32,
+   "total": 34,
    "open": 1
   },
   {
    "name": "High",
-   "total": 136,
+   "total": 141,
    "open": 8
   },
   {
    "name": "Medium",
-   "total": 112,
-   "open": 3
+   "total": 114,
+   "open": 4
   },
   {
    "name": "Low",
-   "total": 10,
+   "total": 11,
    "open": 1
   }
  ],
@@ -288,6 +288,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Deployment & platform (Kubernetes)",
    "element": "scheduled backup",
    "residualRisk": "Deployment responsibility: use an encrypted transport and server-side encryption on the backup target."
+  },
+  {
+   "number": 300,
+   "title": "A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network",
+   "category": "Information disclosure",
+   "severity": "Medium",
+   "diagramId": 3,
+   "area": "Federation — SAML SP & OIDC relying party",
+   "element": "Directory sign-in (bind-as-user, bounded pool)",
+   "residualRisk": "Partly mitigated. TLS is mandatory and nothing is sent before a verified handshake, so no LDAP request reaches a host that cannot present a certificate chaining to the tenant's anchors; every outcome reaches the user as the same generic failure and the reason is logged for the operator only; connecting is bounded at 5 s and pooled per tenant. Open because the directory connector does not apply the `guarded_fetch` address policy (no refusal of private, loopback or link-local addresses): directories are usually on private networks, so a blanket refusal would break the feature it serves. Tenant administrators are trusted within their own tenant (assumption 7). Follow-up for the management routes (T23.3.8): an operator-level allow-list of directory hosts."
   },
   {
    "number": 161,

@@ -265,6 +265,158 @@ impl fmt::Debug for NewDirectoryConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The authentication port (T23.3.2)
+// ---------------------------------------------------------------------------
+
+/// What a successful directory bind established about a user.
+///
+/// Returned by [`DirectoryAuthenticator::authenticate`] only after the
+/// directory accepted a bind **as that entry, with the presented password**.
+/// `external_id` is the entry's immutable identifier (`entryUUID`, or the AD
+/// `objectGUID` decoded to its canonical text form), which is what AXIAM keys
+/// a directory account on; the other fields are the mapped attributes, which
+/// just-in-time provisioning (T23.3.3) copies and group mapping (T23.3.4)
+/// starts from.
+///
+/// Every field but the identifier names a person, so `Debug` prints presence
+/// only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DirectoryIdentity {
+    /// The entry's immutable identifier, normalised: a lowercase hyphenated
+    /// UUID for `entryUUID` and `objectGUID`, the attribute's text otherwise.
+    pub external_id: String,
+    /// The entry's distinguished name, exactly as the directory returned it
+    /// from the user search (never constructed by AXIAM).
+    pub dn: String,
+    /// The mapped login-name attribute, when the entry carried one.
+    pub username: Option<String>,
+    /// The mapped e-mail attribute, when the entry carried one.
+    pub email: Option<String>,
+    /// The mapped display-name attribute, when the entry carried one.
+    pub display_name: Option<String>,
+}
+
+impl fmt::Debug for DirectoryIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectoryIdentity")
+            .field("external_id", &"<redacted>")
+            .field("dn", &"<redacted>")
+            .field("username", &self.username.as_ref().map(|_| "<redacted>"))
+            .field("email", &self.email.as_ref().map(|_| "<redacted>"))
+            .field(
+                "display_name",
+                &self.display_name.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// Why the directory accepted the password but refused the account.
+///
+/// Read from Active Directory's `data XXX` sub-code in the bind diagnostic
+/// (`533`, `701`, `775`, `532`, `773`, `530`/`531`), or from the LDAP result
+/// code where the directory uses one for a refusal (`unwillingToPerform`,
+/// `insufficientAccessRights`). The end user never learns which: every variant
+/// is answered with the generic sign-in failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DirectoryAccountRestriction {
+    /// The account is disabled (AD `533`, or a directory that refuses the bind
+    /// outright with `unwillingToPerform` / `insufficientAccessRights`).
+    Disabled,
+    /// The directory has locked the account (AD `775`).
+    Locked,
+    /// The account has expired (AD `701`).
+    Expired,
+    /// The password has expired (AD `532`).
+    PasswordExpired,
+    /// The password must be changed before the next sign-in (AD `773`).
+    PasswordMustChange,
+    /// Sign-in is not permitted at this time or from this workstation
+    /// (AD `530`, `531`).
+    NotPermittedNow,
+}
+
+/// Why a directory authentication did not succeed.
+///
+/// A small, closed set. It is the vocabulary between the directory client and
+/// the login path, never a response: the login path answers **every** variant
+/// with the same generic failure, so an unauthenticated caller cannot tell a
+/// wrong password from an unknown entry, a disabled account or an unreachable
+/// directory. The variants exist so the login path can decide what to **count**
+/// (only [`Self::InvalidCredentials`] moves the brute-force counter) and what
+/// to tell the **operator** in a log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum DirectoryAuthError {
+    /// The tenant has no directory configuration, or it is disabled.
+    #[error("no enabled directory is configured for this tenant")]
+    NotConfigured,
+    /// The password is wrong, the login name matched no entry or more than
+    /// one, the matched entry is not the account AXIAM holds, or the password
+    /// was empty (refused before any network I/O).
+    #[error("invalid credentials")]
+    InvalidCredentials,
+    /// The directory accepted the credentials but refuses the account.
+    #[error("the directory refused the account")]
+    AccountRestricted(DirectoryAccountRestriction),
+    /// The directory could not be reached or did not answer in time: a
+    /// connection, TLS or timeout failure, a busy server, an exhausted
+    /// connection pool, or the encryption key for the bind secret missing.
+    /// A TLS verification failure is reported here too — it is
+    /// indistinguishable from an interception attempt, and is never retried in
+    /// a weaker form.
+    #[error("the directory is unavailable")]
+    Unavailable,
+    /// The directory answered, but the configuration cannot work: the service
+    /// bind was refused, the search base does not exist, the directory sent a
+    /// referral (never followed), the entry lacks its identifier attribute, or
+    /// the stored configuration is unusable.
+    #[error("the directory configuration is unusable")]
+    Misconfigured,
+}
+
+/// The port the login path authenticates a directory account through.
+///
+/// Declared here, in layer 0, because the login path lives in `axiam-auth`
+/// (layer 1) and the LDAP client in `axiam-directory` (layer 3): the client
+/// implements this trait and the composition root injects it, so no production
+/// dependency points outward. It is object-safe (a boxed future rather than
+/// `impl Future`) because `AuthService` holds it as an optional field rather
+/// than a fifth type parameter, the same seam [`super::reactor::DynReactorGate`]
+/// is for the reactor gate.
+///
+/// # Contract for implementations
+///
+/// * Resolve the entry by the tenant's user filter with `login_name`
+///   RFC 4515-escaped, require **exactly one** match, then bind **as that
+///   entry** with `password`. Success means that bind succeeded.
+/// * Refuse an empty `password` with [`DirectoryAuthError::InvalidCredentials`]
+///   before any network I/O: an empty password is an RFC 4513 unauthenticated
+///   bind, which many servers report as success.
+/// * Never send anything over an unencrypted connection, never follow a
+///   referral, and never return a connection that is bound as the user to a
+///   pool.
+/// * Never log `password`, and never surface the directory's diagnostic text
+///   above `debug`.
+pub trait DirectoryAuthenticator: Send + Sync {
+    /// Authenticate `login_name` / `password` against `tenant_id`'s directory.
+    fn authenticate<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        login_name: &'a str,
+        password: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<DirectoryIdentity, DirectoryAuthError>>
+                + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// What `AuthService` holds: a shared, type-erased authenticator.
+pub type SharedDirectoryAuthenticator = std::sync::Arc<dyn DirectoryAuthenticator>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +477,22 @@ mod tests {
             "Debug of NewDirectoryConfig must not print the bind secret"
         );
         assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn debug_of_a_directory_identity_prints_presence_only() {
+        let identity = DirectoryIdentity {
+            external_id: "marker-external-id".into(),
+            dn: "marker-dn".into(),
+            username: Some("marker-username".into()),
+            email: Some("marker-email".into()),
+            display_name: None,
+        };
+        let rendered = format!("{identity:?}");
+        assert!(
+            !rendered.contains("marker-"),
+            "Debug of DirectoryIdentity must not print personal data"
+        );
+        assert!(rendered.contains("display_name: None"));
     }
 }

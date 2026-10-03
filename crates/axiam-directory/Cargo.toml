@@ -45,3 +45,5 @@ ldap3_proto = "0.8.1"
 tokio-rustls = { workspace = true }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = { version = "0.3", features = ["sink"] }
+tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros", "time"] }
+chrono = { workspace = true }

@@ -1023,6 +1023,7 @@ name = "axiam-directory"
 version = "1.0.0-beta17"
 dependencies = [
  "axiam-core",
+ "chrono",
  "futures-util",
  "ldap3",
  "ldap3_proto",

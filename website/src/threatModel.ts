@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.19.0",
+ "version": "2.20.0",
  "diagramCount": 9,
- "total": 290,
- "open": 13,
- "mitigated": 277,
+ "total": 300,
+ "open": 14,
+ "mitigated": 286,
  "diagrams": [
   {
    "id": 0,
@@ -3315,7 +3315,7 @@ export const THREAT_MODEL: ThreatModel = {
    "title": "Federation — SAML SP & OIDC relying party",
    "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config.",
    "width": 1438,
-   "height": 808,
+   "height": 838,
    "boundaries": [
     {
      "id": "a89fe874-1c88-526f-9ef4-378f7d6958a8",
@@ -3340,6 +3340,14 @@ export const THREAT_MODEL: ThreatModel = {
      "w": 380,
      "h": 620,
      "label": "Data tier"
+    },
+    {
+     "id": "c9b4a41a-83fd-5622-a753-c56538cb279a",
+     "x": 24,
+     "y": 624,
+     "w": 260,
+     "h": 190,
+     "label": "Tenant directory (LDAP / AD)"
     }
    ],
    "nodes": [
@@ -3828,6 +3836,145 @@ export const THREAT_MODEL: ThreatModel = {
       }
      ],
      "open": 0
+    },
+    {
+     "id": "252914d7-795a-5c03-bbf0-52017e519ff4",
+     "kind": "actor",
+     "x": 49,
+     "y": 684,
+     "w": 150,
+     "h": 80,
+     "name": "Tenant directory (LDAP / Active Directory)",
+     "lines": [
+      "Tenant directory",
+      "(LDAP / Active",
+      "Directory)"
+     ],
+     "description": "The tenant's own directory server (OpenLDAP, Active Directory). Read-only to AXIAM: a service bind to search, a bind as the user to check the password.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 293,
+       "title": "An impersonated directory collects passwords and answers binds (man in the middle)",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Whoever can answer for the directory's address (a DNS answer, an on-path network, a lookalike host) receives every password a sign-in sends, and can answer every bind with success: anyone signs in as anyone.",
+       "mitigation": "TLS verification is mandatory with per-tenant anchors. The tenant's `trust_anchors_pem` (CA certificates only, checked at save time; the organization's own CA can be one) is the whole trust store for its directory; only an empty list selects the public `webpki-roots` bundle the rest of the workspace trusts, and the two are never combined. The name verified is the URL's host, by rustls' WebPKI verifier, under the `ring` provider named explicitly. No code path disables verification. A failed handshake is `Unavailable` and is never retried in a weaker form. Tests: `a_certificate_outside_the_tenant_anchors_is_refused_before_any_bind`, `a_server_name_mismatch_is_refused_before_any_bind`, `the_public_bundle_does_not_trust_a_private_ca`. An IPv6-literal URL fails closed: `ldap3` cannot derive a server name from a bracketed host, so such a directory is unusable rather than unverified."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "54acf578-5395-5fed-addc-172837ec6c9b",
+     "kind": "process",
+     "x": 624,
+     "y": 514,
+     "w": 140,
+     "h": 140,
+     "name": "Directory sign-in (bind-as-user, bounded pool)",
+     "lines": [
+      "Directory",
+      "sign-in",
+      "(bind-as-user,",
+      "bounded",
+      "pool)"
+     ],
+     "description": "axiam-directory's LDAP client (ldap3 over rustls) and its injection into the login path through the DirectoryAuthenticator port (T23.3.2).",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 291,
+       "title": "LDAP filter injection through the login name widens the user search",
+       "type": "Tampering",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "The login name a caller types is placed into the tenant's user filter. Built by string formatting, `*)(uid=*` or `*)(|(objectClass=*` turns a lookup of one entry into a match on many, or on whichever entry the attacker steers the bind to; a distinguished name built the same way could be redirected.",
+       "mitigation": "One function puts a value into a filter: `axiam_directory::escape::user_filter_for` substitutes `escape_filter_value(login_name)` into the template's single `{username}` placeholder, which `config::validate` guarantees sits in value position. The escaping covers RFC 4515's five octets (`*`, `(`, `)`, `\\`, NUL) and every byte outside printable ASCII, so the output cannot contain filter syntax; it agrees with `ldap3::ldap_escape` on everything the RFC requires and only escapes more. Login names are capped at 256 bytes and refused before any I/O beyond it. No DN is ever constructed: the user binds as the DN the directory returned, so RFC 4514 escaping is never needed. Exactly one match is required (zero and two are the same generic failure) under a server-side size limit of 2, and the client stops reading after the second entry whatever the server's limit says. Pinned against the in-process test directory, which evaluates `(attr=*)` and substrings so a widened filter would really match: `filter_injection_reaches_the_server_as_a_literal_value` asserts the server parsed each hostile name (`*`, `)(uid=*`, `*)(|(objectClass=*`, `admin)(&`, `\\`, `al*`) as one equality assertion with the literal value, and none reached a user bind; unit tests pin the escaped form of the same list, long input and UTF-8."
+      },
+      {
+       "number": 294,
+       "title": "An empty password is accepted as an RFC 4513 unauthenticated bind",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A simple bind with a DN and an empty password is an \"unauthenticated\" bind (RFC 4513 §5.1.2), and many servers answer it with success. A client that forwards an empty password signs the named user in with no password at all; a service account with an empty secret does the same for the search.",
+       "mitigation": "Refused before any network I/O: the authenticator and the client both answer an empty password with `InvalidCredentials` without opening a connection, and the client refuses an empty stored bind secret as `Misconfigured` (validation refuses one at save time). `an_empty_password_is_refused_with_zero_packets` runs against a test server that would accept the unauthenticated bind and asserts that no connection was opened; `an_empty_password_is_refused_before_the_configuration_is_read` pins the authenticator."
+      },
+      {
+       "number": 295,
+       "title": "A slow or hostile directory pins AXIAM's tasks, sockets and memory",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The directory is an external server a tenant administrator chooses. One that accepts and never answers, stalls on every bind, or streams entries without end could hold a task and a socket per sign-in attempt, and an attacker hammering one tenant's login could exhaust AXIAM's file descriptors for every tenant.",
+       "mitigation": "A bounded pool: at most 8 connections in use per tenant (`MAX_CONNECTIONS_PER_TENANT`) and 256 across tenants, each permit acquired within 2 s or answered `Unavailable` at once, so the overflow is refused rather than queued; at most 4 idle connections per tenant, closed after 60 s idle or 300 s of age. A permit is held until its socket is actually closed, so the bound counts real sockets. Connecting (TCP, StartTLS and the handshake together) is bounded at 5 s, each operation at 5 s, and the whole authentication at 15 s; the user search reads at most two entries. Tests: `the_pool_bounds_concurrent_connections_per_tenant` (a burst against a slow server never exceeds the per-tenant bound plus the idle cap in open sockets, and the overflow fails fast), `pools_are_partitioned_by_tenant`, `a_silent_directory_times_out_at_connect`, `a_stalling_directory_times_out_per_operation`, `the_authentication_deadline_bounds_the_whole_flow`. Residual: `ldap3`'s codec has no per-message size cap, so a hostile server can make one connection buffer whatever it sends before the deadline; memory is bounded by the deadline and the pool, not by a frame limit."
+      },
+      {
+       "number": 296,
+       "title": "A referral or search reference steers the bind to an attacker's host",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "LDAP lets a server answer \"ask over there\": a referral result, or search result references beside the entries. A client that chases them sends the service bind, and possibly the user's password, to a host the configuration never named; one that counts a reference as an entry can be made to match.",
+       "mitigation": "Referrals are never followed. Search result references and intermediate responses are skipped and never counted as entries; a search or bind that ends in a `referral` result is `Misconfigured`. The tests stand up a second live server as the referred host and assert it saw no connection: `search_references_are_neither_followed_nor_matched`, `a_referral_result_is_not_followed`."
+      },
+      {
+       "number": 297,
+       "title": "One tenant's sign-in is answered by another tenant's directory or connection",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Directory configurations, decrypted secrets, trust stores and pooled connections are all per tenant, and one process holds them all. A lookup keyed by anything but the tenant being signed in to, or a pooled connection reused across tenants or across a configuration change, authenticates a user against the wrong directory, or searches with another tenant's bind account.",
+       "mitigation": "The authenticator reads the configuration and decrypts the secret for the tenant the login path resolved, on every sign-in. The pool is keyed by tenant id with a semaphore per tenant; a pooled connection carries its configuration's generation (row id and `updated_at`) and is closed rather than reused when that differs, so a new URL, bind DN, secret or trust store applies at the next sign-in. The TLS cache is keyed the same way. A connection bound as a user is never pooled, so no search runs with a previous user's rights. Tests: `one_tenant_is_never_answered_by_another_tenants_directory`, `pools_are_partitioned_by_tenant`, `the_pool_reuses_service_connections_and_never_user_bound_ones`."
+      },
+      {
+       "number": 300,
+       "title": "A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "The directory host and port are whatever a tenant administrator saves. Pointed at an internal address, each directory sign-in makes AXIAM open a TCP connection and begin a TLS handshake there, and how long the failure takes distinguishes an open port from a closed one.",
+       "mitigation": "Partly mitigated. TLS is mandatory and nothing is sent before a verified handshake, so no LDAP request reaches a host that cannot present a certificate chaining to the tenant's anchors; every outcome reaches the user as the same generic failure and the reason is logged for the operator only; connecting is bounded at 5 s and pooled per tenant. Open because the directory connector does not apply the `guarded_fetch` address policy (no refusal of private, loopback or link-local addresses): directories are usually on private networks, so a blanket refusal would break the feature it serves. Tenant administrators are trusted within their own tenant (assumption 7). Follow-up for the management routes (T23.3.8): an operator-level allow-list of directory hosts."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "5ecdb607-7d05-50ee-867f-13653e64219b",
+     "kind": "store",
+     "x": 1079,
+     "y": 604,
+     "w": 170,
+     "h": 80,
+     "name": "directory_config (encrypted bind secret)",
+     "lines": [
+      "directory_config",
+      "(encrypted bind secret)"
+     ],
+     "description": "One row per tenant (schema v70); the bind secret AES-256-GCM encrypted under directory_encryption_key (D-15).",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 298,
+       "title": "The directory bind secret is disclosed from the database, an API response, a log or a Debug line",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The bind account can read the customer's directory: every user, every group. Its secret in plaintext in the database, returned by a read, or printed in a log line is a breach of the customer's directory, not only of AXIAM.",
+       "mitigation": "Decision D-15: AES-256-GCM in the row with a fresh nonce per write, under the optional provider key `directory_encryption_key`, through the existing `axiam_auth::crypto` helpers. No read returns it; only `decrypt_bind_secret` produces the plaintext, as a `Zeroizing<String>`. `NewDirectoryConfig`'s `Debug` redacts it, and the client never logs it or carries it in an error. Residual, stated as it is for the per-tenant SMTP password: no associated data binds a ciphertext to its tenant's row, so a party able to write the database could move one tenant's ciphertext into another's row. That party already holds the data tier, which this model treats as full compromise. The bind account should hold read-only rights, and the operator note in `docs/deployment/README.md` says so."
+      },
+      {
+       "number": 299,
+       "title": "An absent encryption key makes directory sign-in insecure, or keeps the server from starting",
+       "type": "Denial of service",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "The directory key is optional. A missing key must not mean a plaintext secret, a default key, or a server that refuses to boot over a feature most deployments do not use.",
+       "mitigation": "Unavailable rather than insecure. Without the key a save is refused with an error naming it, `decrypt_bind_secret` answers `ServiceUnavailable`, and the authenticator turns that into `Unavailable` before any connection is opened. Boot logs the key's absence at INFO and continues. Test: `a_missing_encryption_key_is_unavailable_with_no_connection`."
+      }
+     ],
+     "open": 0
     }
    ],
    "edges": [
@@ -4160,15 +4307,118 @@ export const THREAT_MODEL: ThreatModel = {
       }
      ],
      "open": 0
+    },
+    {
+     "id": "f2c61652-ff60-5339-805e-609b8a94c3ff",
+     "path": "M199,375.6 L629.5,556.8",
+     "name": "directory sign-in (password)",
+     "description": "",
+     "label": "directory sign-in (POST /auth/login, HTTPS)",
+     "labelLines": [
+      "directory sign-in (POST /auth/login,",
+      "HTTPS)"
+     ],
+     "lx": 414.2,
+     "ly": 466.2,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "5459bc1e-deb2-5bec-ab7b-b862818ac7fe",
+     "path": "M626,600.7 L199,705.6",
+     "name": "service bind + user search",
+     "description": "",
+     "label": "service bind + user search (LDAPS / StartTLS)",
+     "labelLines": [
+      "service bind + user search (LDAPS /",
+      "StartTLS)"
+     ],
+     "lx": 412.5,
+     "ly": 653.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "LDAP over TLS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "1b53155b-1339-575b-b5e3-6aaf45a3c8ef",
+     "path": "M626,600.7 L199,705.6",
+     "name": "user bind (presented password)",
+     "description": "",
+     "label": "user bind with the presented password (LDAPS / StartTLS)",
+     "labelLines": [
+      "user bind with the presented",
+      "password (LDAPS / StartTLS)"
+     ],
+     "lx": 412.5,
+     "ly": 653.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "LDAP over TLS",
+     "threats": [
+      {
+       "number": 292,
+       "title": "A directory password crosses the network in the clear: a plaintext URL, or StartTLS stripped",
+       "type": "Information disclosure",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "A simple bind carries the user's corporate password, which is the password for everything else the directory gates. A plaintext `ldap://` URL, a client that carries on after a server (or an on-path attacker) refuses StartTLS, or a bind sent before the upgrade completes hands it to anyone on the path.",
+       "mitigation": "Plaintext is refused at three points: `config::validate` at save time (`ldap://` only with `start_tls`, `ldaps://` only without, every other scheme refused); the authenticator against the stored row; and `DirectoryClient::connect`, the only place a socket is opened. With StartTLS, `ldap3` sends the extended operation first and fails the connection when it is refused; AXIAM binds only after the connection call returns, which is after the handshake. `ldap3`'s `no_tls_verify` is never set. Tests: `a_refused_starttls_fails_closed_with_no_bind_in_the_clear` (the server would accept a clear-text bind, and receives none), `bind_as_user_succeeds_over_starttls_and_nothing_precedes_the_upgrade`, `a_plaintext_target_is_refused_with_zero_connections`, `a_stored_plaintext_url_is_refused_before_any_connection`. TLS 1.2 is the floor toward a directory rather than 1.3 because Active Directory on Windows Server 2019 and earlier, and many OpenLDAP builds, stop at 1.2; rustls restricts 1.2 to forward-secret AEAD suites."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "58b75628-0c13-55c4-a1ee-00739c3c753b",
+     "path": "M199,705.6 L626,600.7",
+     "name": "search entry / bind result",
+     "description": "",
+     "label": "search entry / bind result",
+     "labelLines": [
+      "search entry / bind result"
+     ],
+     "lx": 412.5,
+     "ly": 653.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "LDAP over TLS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "5b264422-f2c5-536d-9358-ba838a281afd",
+     "path": "M763.4,592.9 L1079,633.1",
+     "name": "read config + decrypt bind secret",
+     "description": "",
+     "label": "read config + decrypt bind secret",
+     "labelLines": [
+      "read config + decrypt bind secret"
+     ],
+     "lx": 921.2,
+     "ly": 613,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 31,
-   "open": 1,
+   "total": 41,
+   "open": 2,
    "bySeverity": {
-    "High": 12,
-    "Medium": 13,
-    "Critical": 4,
-    "Low": 2
+    "High": 17,
+    "Medium": 15,
+    "Critical": 6,
+    "Low": 3
    }
   },
   {

@@ -8,11 +8,19 @@
 //!
 //! # What exists today
 //!
-//! Only the configuration surface (T23.3.1): the [`config`] module validates a
-//! directory configuration before it is stored. There is no network code, no
-//! authentication path and no REST route yet; the LDAP client, the
-//! bind-as-user path, provisioning, group mapping and the sync job are later
-//! tasks of the same item.
+//! * [`config`] validates a directory configuration before it is stored
+//!   (T23.3.1).
+//! * [`escape`] is RFC 4515 filter-value escaping and the only function that
+//!   puts a login name into a filter; [`tls`] builds the verified rustls client
+//!   configuration from a tenant's anchors (T23.3.2).
+//! * [`client`] is the LDAP client — `ldap3` over rustls, mandatory TLS, a
+//!   bounded per-tenant pool, no referrals — and the bind-as-user flow;
+//!   [`authenticator`] is the
+//!   [`DirectoryAuthenticator`](axiam_core::models::directory::DirectoryAuthenticator)
+//!   the composition root injects into the login path (T23.3.2).
+//!
+//! Provisioning on first sign-in, group mapping, the sync job and the
+//! management routes are later tasks of the same item.
 //!
 //! # Boundaries that bind every later task
 //!
@@ -35,6 +43,11 @@
 //! `claude_dev/crate-layering.md` for why, and
 //! `scripts/check-crate-layering.py` for the gate that holds it.
 
+pub mod authenticator;
+pub mod client;
 pub mod config;
 pub mod escape;
 pub mod tls;
+
+pub use authenticator::RepositoryDirectoryAuthenticator;
+pub use client::{ClientLimits, DirectoryClient, DirectoryTarget};

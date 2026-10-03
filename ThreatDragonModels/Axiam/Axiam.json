@@ -1,5 +1,5 @@
 {
-  "version": "2.19.0",
+  "version": "2.20.0",
   "summary": {
     "title": "Axiam",
     "owner": "ilpanich",
@@ -4481,7 +4481,7 @@
                   "severity": "Medium",
                   "type": "Tampering",
                   "description": "`auth_time` says when the end user authenticated, and `amr` how. `session.created_at` cannot stand in for it because refresh rotation writes a new session row on every refresh, and a code's evidence cannot be looked up at redemption because by then the session it came from may be gone. A federated login dated by AXIAM's clock records a provider session established hours ago as having just happened; a refreshed ID token that restamps `auth_time` violates OIDC Core \u00a712.2; and an evidence record whose absence reads as *stronger* would upgrade every pre-migration session.",
-                  "mitigation": "Wave W2 (schema v55): `session.authenticated_at` and `session.amr` \u2014 a closed RFC 8176 enum rather than a free string, so a typo at one of the five login call sites is found by the compiler rather than by a relying party, and unknown stored values decode to nothing. The authentication event is recorded at the one choke point, `create_session_and_tokens`, whose callers pass what they actually verified: `pwd`, `pwd otp mfa`, `pwd hwk mfa`, `hwk user` (usernameless passkey, which requires user verification unconditionally) or `fed`. Federated logins are dated by the upstream provider \u2014 OIDC `auth_time`, SAML `AuthnInstant`, carried across the 60-second handoff hop on the handoff row \u2014 and fall back to the moment AXIAM verified the assertion only when the provider asserted no instant. Refresh rotation **copies** the evidence rather than restamping it; the authorization code snapshots it at issuance (a snapshot, not a join, because rotation replaces the row). Every column is optional with no backfill, and the decode path leans strict: an absent `authenticated_at` reads as `created_at`, an absent `amr` as the empty list, so a pre-migration row can be judged staler and weaker than it was, never fresher and stronger. The claims are emitted only for a client on the honour lane (`fapi::honours_authn_params`) and for nobody else \u2014 pinned for every `ignore` client and every `fapi2` row at either setting \u2014 and a refreshed ID token reports the class the session proves. `session_evidence_rotation_test` (two rotations, the event never moves); conformance rows 40\u201346. **Amended 2026-10-02 (T23.1.2, D-9).** A refreshed ID token no longer \"reports the class the session proves\": that read the session row the code was issued under, and `AuthService::refresh` deletes that row at every browser-session rotation, so after the first one an honour-lane client's refreshed token lost `auth_time`, `acr` and `amr` altogether (OIDC Core \u00a712.2 wants the original). The evidence is now snapshotted on the OAuth2 refresh token (schema v68, three optional columns, no backfill), written at code exchange from the **code's** snapshot and copied verbatim at every OAuth2 rotation, so a refreshed token attests the original authentication whatever happened to the session; a grant issued before v68 falls back to the old live-session lookup and is no worse off. Emission is gated exactly as before (honour lane only; `fapi2` and `ignore` clients receive nothing). Covered by `d9_a_refreshed_id_token_keeps_the_original_evidence_after_the_session_rotated_away` and the `d9_*` tests in `token_service`. **Amended 2026-10-02 (T23.1.2, D-10).** \"Dated by the upstream provider\" had no upper bound: an IdP whose clock ran ahead of AXIAM's, or one replaying a crafted `auth_time`/`AuthnInstant` in the future, produced a session whose `authenticated_at` post-dated the moment AXIAM verified the assertion. `max_age` would then be satisfied by an authentication that had not yet happened by AXIAM's clock, and the emitted `auth_time` would post-date its own `iat`. The recorded instant is now `min(upstream instant, verification instant)`: `AuthenticationEvidence::upstream` takes the verification instant as an explicit argument, and the SSO callbacks bound the instant at the moment the assertion is verified — before it is carried across the 60-second handoff hop — so the evidence is never later than the moment AXIAM checked the assertion. A past instant is kept as asserted; an instant within the federation path's existing clock-skew allowance (`CLOCK_SKEW_LEEWAY_SECS`, 60 s) is clamped silently; one further ahead is clamped and logged at `warn` naming the identity provider. No new configuration. Covered by `a_far_future_upstream_instant_records_the_verification_instant`, `an_upstream_instant_inside_the_skew_allowance_is_clamped` (`axiam-core`), the `bound_upstream_auth_time` tests in `handlers/federation.rs` and `d10_a_far_future_upstream_instant_is_stored_as_the_verification_instant`.",
+                  "mitigation": "Wave W2 (schema v55): `session.authenticated_at` and `session.amr` \u2014 a closed RFC 8176 enum rather than a free string, so a typo at one of the five login call sites is found by the compiler rather than by a relying party, and unknown stored values decode to nothing. The authentication event is recorded at the one choke point, `create_session_and_tokens`, whose callers pass what they actually verified: `pwd`, `pwd otp mfa`, `pwd hwk mfa`, `hwk user` (usernameless passkey, which requires user verification unconditionally) or `fed`. Federated logins are dated by the upstream provider \u2014 OIDC `auth_time`, SAML `AuthnInstant`, carried across the 60-second handoff hop on the handoff row \u2014 and fall back to the moment AXIAM verified the assertion only when the provider asserted no instant. Refresh rotation **copies** the evidence rather than restamping it; the authorization code snapshots it at issuance (a snapshot, not a join, because rotation replaces the row). Every column is optional with no backfill, and the decode path leans strict: an absent `authenticated_at` reads as `created_at`, an absent `amr` as the empty list, so a pre-migration row can be judged staler and weaker than it was, never fresher and stronger. The claims are emitted only for a client on the honour lane (`fapi::honours_authn_params`) and for nobody else \u2014 pinned for every `ignore` client and every `fapi2` row at either setting \u2014 and a refreshed ID token reports the class the session proves. `session_evidence_rotation_test` (two rotations, the event never moves); conformance rows 40\u201346. **Amended 2026-10-02 (T23.1.2, D-9).** A refreshed ID token no longer \"reports the class the session proves\": that read the session row the code was issued under, and `AuthService::refresh` deletes that row at every browser-session rotation, so after the first one an honour-lane client's refreshed token lost `auth_time`, `acr` and `amr` altogether (OIDC Core \u00a712.2 wants the original). The evidence is now snapshotted on the OAuth2 refresh token (schema v68, three optional columns, no backfill), written at code exchange from the **code's** snapshot and copied verbatim at every OAuth2 rotation, so a refreshed token attests the original authentication whatever happened to the session; a grant issued before v68 falls back to the old live-session lookup and is no worse off. Emission is gated exactly as before (honour lane only; `fapi2` and `ignore` clients receive nothing). Covered by `d9_a_refreshed_id_token_keeps_the_original_evidence_after_the_session_rotated_away` and the `d9_*` tests in `token_service`. **Amended 2026-10-02 (T23.1.2, D-10).** \"Dated by the upstream provider\" had no upper bound: an IdP whose clock ran ahead of AXIAM's, or one replaying a crafted `auth_time`/`AuthnInstant` in the future, produced a session whose `authenticated_at` post-dated the moment AXIAM verified the assertion. `max_age` would then be satisfied by an authentication that had not yet happened by AXIAM's clock, and the emitted `auth_time` would post-date its own `iat`. The recorded instant is now `min(upstream instant, verification instant)`: `AuthenticationEvidence::upstream` takes the verification instant as an explicit argument, and the SSO callbacks bound the instant at the moment the assertion is verified \u2014 before it is carried across the 60-second handoff hop \u2014 so the evidence is never later than the moment AXIAM checked the assertion. A past instant is kept as asserted; an instant within the federation path's existing clock-skew allowance (`CLOCK_SKEW_LEEWAY_SECS`, 60 s) is clamped silently; one further ahead is clamped and logged at `warn` naming the identity provider. No new configuration. Covered by `a_far_future_upstream_instant_records_the_verification_instant`, `an_upstream_instant_inside_the_skew_allowance_is_clamped` (`axiam-core`), the `bound_upstream_auth_time` tests in `handlers/federation.rs` and `d10_a_far_future_upstream_instant_is_stored_as_the_verification_instant`.",
                   "modelType": "STRIDE",
                   "number": 240
                 },
@@ -8680,6 +8680,535 @@
                   "number": 219
                 }
               ]
+            }
+          },
+          {
+            "position": {
+              "x": 20,
+              "y": 620
+            },
+            "size": {
+              "width": 260,
+              "height": 190
+            },
+            "attrs": {
+              "label": {
+                "text": "Tenant directory (LDAP / AD)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 3,
+                "strokeDasharray": "10 5"
+              }
+            },
+            "visible": true,
+            "shape": "trust-boundary-box",
+            "zIndex": -50,
+            "id": "c9b4a41a-83fd-5622-a753-c56538cb279a",
+            "data": {
+              "type": "tm.BoundaryBox",
+              "name": "Tenant directory (LDAP / AD)",
+              "description": "AXIAM \u2194 tenant directory: a customer's LDAP or Active Directory server, chosen per tenant by its administrator (G-3). Every crossing is TLS-verified against the tenant's anchors; nothing crosses before the handshake.",
+              "isTrustBoundary": true,
+              "hasOpenThreats": false,
+              "crossingFlows": [],
+              "containedElements": []
+            }
+          },
+          {
+            "position": {
+              "x": 45,
+              "y": 680
+            },
+            "size": {
+              "width": 150,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "Tenant directory\n(LDAP / Active Directory)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "actor",
+            "zIndex": 1,
+            "id": "252914d7-795a-5c03-bbf0-52017e519ff4",
+            "data": {
+              "type": "tm.Actor",
+              "name": "Tenant directory\n(LDAP / Active Directory)",
+              "description": "The tenant's own directory server (OpenLDAP, Active Directory). Read-only to AXIAM: a service bind to search, a bind as the user to check the password.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "providesAuthentication": true,
+              "threats": [
+                {
+                  "id": "8f4e23f5-9fc3-5759-8bde-eab3873fae71",
+                  "title": "An impersonated directory collects passwords and answers binds (man in the middle)",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "Whoever can answer for the directory's address (a DNS answer, an on-path network, a lookalike host) receives every password a sign-in sends, and can answer every bind with success: anyone signs in as anyone.",
+                  "mitigation": "TLS verification is mandatory with per-tenant anchors. The tenant's `trust_anchors_pem` (CA certificates only, checked at save time; the organization's own CA can be one) is the whole trust store for its directory; only an empty list selects the public `webpki-roots` bundle the rest of the workspace trusts, and the two are never combined. The name verified is the URL's host, by rustls' WebPKI verifier, under the `ring` provider named explicitly. No code path disables verification. A failed handshake is `Unavailable` and is never retried in a weaker form. Tests: `a_certificate_outside_the_tenant_anchors_is_refused_before_any_bind`, `a_server_name_mismatch_is_refused_before_any_bind`, `the_public_bundle_does_not_trust_a_private_ca`. An IPv6-literal URL fails closed: `ldap3` cannot derive a server name from a bracketed host, so such a directory is unusable rather than unverified.",
+                  "modelType": "STRIDE",
+                  "number": 293
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 620,
+              "y": 510
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "Directory sign-in\n(bind-as-user,\nbounded pool)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "54acf578-5395-5fed-addc-172837ec6c9b",
+            "data": {
+              "type": "tm.Process",
+              "name": "Directory sign-in\n(bind-as-user,\nbounded pool)",
+              "description": "axiam-directory's LDAP client (ldap3 over rustls) and its injection into the login path through the DirectoryAuthenticator port (T23.3.2).",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "dba22f87-99f8-5f52-bac7-cfc8b4c02af8",
+                  "title": "LDAP filter injection through the login name widens the user search",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Tampering",
+                  "description": "The login name a caller types is placed into the tenant's user filter. Built by string formatting, `*)(uid=*` or `*)(|(objectClass=*` turns a lookup of one entry into a match on many, or on whichever entry the attacker steers the bind to; a distinguished name built the same way could be redirected.",
+                  "mitigation": "One function puts a value into a filter: `axiam_directory::escape::user_filter_for` substitutes `escape_filter_value(login_name)` into the template's single `{username}` placeholder, which `config::validate` guarantees sits in value position. The escaping covers RFC 4515's five octets (`*`, `(`, `)`, `\\`, NUL) and every byte outside printable ASCII, so the output cannot contain filter syntax; it agrees with `ldap3::ldap_escape` on everything the RFC requires and only escapes more. Login names are capped at 256 bytes and refused before any I/O beyond it. No DN is ever constructed: the user binds as the DN the directory returned, so RFC 4514 escaping is never needed. Exactly one match is required (zero and two are the same generic failure) under a server-side size limit of 2, and the client stops reading after the second entry whatever the server's limit says. Pinned against the in-process test directory, which evaluates `(attr=*)` and substrings so a widened filter would really match: `filter_injection_reaches_the_server_as_a_literal_value` asserts the server parsed each hostile name (`*`, `)(uid=*`, `*)(|(objectClass=*`, `admin)(&`, `\\`, `al*`) as one equality assertion with the literal value, and none reached a user bind; unit tests pin the escaped form of the same list, long input and UTF-8.",
+                  "modelType": "STRIDE",
+                  "number": 291
+                },
+                {
+                  "id": "8a54a7ee-f27a-54c3-8924-f42a76e89fde",
+                  "title": "An empty password is accepted as an RFC 4513 unauthenticated bind",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "A simple bind with a DN and an empty password is an \"unauthenticated\" bind (RFC 4513 \u00a75.1.2), and many servers answer it with success. A client that forwards an empty password signs the named user in with no password at all; a service account with an empty secret does the same for the search.",
+                  "mitigation": "Refused before any network I/O: the authenticator and the client both answer an empty password with `InvalidCredentials` without opening a connection, and the client refuses an empty stored bind secret as `Misconfigured` (validation refuses one at save time). `an_empty_password_is_refused_with_zero_packets` runs against a test server that would accept the unauthenticated bind and asserts that no connection was opened; `an_empty_password_is_refused_before_the_configuration_is_read` pins the authenticator.",
+                  "modelType": "STRIDE",
+                  "number": 294
+                },
+                {
+                  "id": "74c8e4f3-b3f5-5201-877d-1ca2d51d2281",
+                  "title": "A slow or hostile directory pins AXIAM's tasks, sockets and memory",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "The directory is an external server a tenant administrator chooses. One that accepts and never answers, stalls on every bind, or streams entries without end could hold a task and a socket per sign-in attempt, and an attacker hammering one tenant's login could exhaust AXIAM's file descriptors for every tenant.",
+                  "mitigation": "A bounded pool: at most 8 connections in use per tenant (`MAX_CONNECTIONS_PER_TENANT`) and 256 across tenants, each permit acquired within 2 s or answered `Unavailable` at once, so the overflow is refused rather than queued; at most 4 idle connections per tenant, closed after 60 s idle or 300 s of age. A permit is held until its socket is actually closed, so the bound counts real sockets. Connecting (TCP, StartTLS and the handshake together) is bounded at 5 s, each operation at 5 s, and the whole authentication at 15 s; the user search reads at most two entries. Tests: `the_pool_bounds_concurrent_connections_per_tenant` (a burst against a slow server never exceeds the per-tenant bound plus the idle cap in open sockets, and the overflow fails fast), `pools_are_partitioned_by_tenant`, `a_silent_directory_times_out_at_connect`, `a_stalling_directory_times_out_per_operation`, `the_authentication_deadline_bounds_the_whole_flow`. Residual: `ldap3`'s codec has no per-message size cap, so a hostile server can make one connection buffer whatever it sends before the deadline; memory is bounded by the deadline and the pool, not by a frame limit.",
+                  "modelType": "STRIDE",
+                  "number": 295
+                },
+                {
+                  "id": "090ddd65-76f1-55f7-8e31-d6f7026e2262",
+                  "title": "A referral or search reference steers the bind to an attacker's host",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "LDAP lets a server answer \"ask over there\": a referral result, or search result references beside the entries. A client that chases them sends the service bind, and possibly the user's password, to a host the configuration never named; one that counts a reference as an entry can be made to match.",
+                  "mitigation": "Referrals are never followed. Search result references and intermediate responses are skipped and never counted as entries; a search or bind that ends in a `referral` result is `Misconfigured`. The tests stand up a second live server as the referred host and assert it saw no connection: `search_references_are_neither_followed_nor_matched`, `a_referral_result_is_not_followed`.",
+                  "modelType": "STRIDE",
+                  "number": 296
+                },
+                {
+                  "id": "76a6789c-147e-527f-93f1-602abd44e83e",
+                  "title": "One tenant's sign-in is answered by another tenant's directory or connection",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "Directory configurations, decrypted secrets, trust stores and pooled connections are all per tenant, and one process holds them all. A lookup keyed by anything but the tenant being signed in to, or a pooled connection reused across tenants or across a configuration change, authenticates a user against the wrong directory, or searches with another tenant's bind account.",
+                  "mitigation": "The authenticator reads the configuration and decrypts the secret for the tenant the login path resolved, on every sign-in. The pool is keyed by tenant id with a semaphore per tenant; a pooled connection carries its configuration's generation (row id and `updated_at`) and is closed rather than reused when that differs, so a new URL, bind DN, secret or trust store applies at the next sign-in. The TLS cache is keyed the same way. A connection bound as a user is never pooled, so no search runs with a previous user's rights. Tests: `one_tenant_is_never_answered_by_another_tenants_directory`, `pools_are_partitioned_by_tenant`, `the_pool_reuses_service_connections_and_never_user_bound_ones`.",
+                  "modelType": "STRIDE",
+                  "number": 297
+                },
+                {
+                  "id": "c7f292bb-ed1e-57e0-9550-2f918b8ae044",
+                  "title": "A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "The directory host and port are whatever a tenant administrator saves. Pointed at an internal address, each directory sign-in makes AXIAM open a TCP connection and begin a TLS handshake there, and how long the failure takes distinguishes an open port from a closed one.",
+                  "mitigation": "Partly mitigated. TLS is mandatory and nothing is sent before a verified handshake, so no LDAP request reaches a host that cannot present a certificate chaining to the tenant's anchors; every outcome reaches the user as the same generic failure and the reason is logged for the operator only; connecting is bounded at 5 s and pooled per tenant. Open because the directory connector does not apply the `guarded_fetch` address policy (no refusal of private, loopback or link-local addresses): directories are usually on private networks, so a blanket refusal would break the feature it serves. Tenant administrators are trusted within their own tenant (assumption 7). Follow-up for the management routes (T23.3.8): an operator-level allow-list of directory hosts.",
+                  "modelType": "STRIDE",
+                  "number": 300
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 1075,
+              "y": 600
+            },
+            "size": {
+              "width": 170,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "directory_config\n(encrypted bind secret)"
+              },
+              "topLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              },
+              "bottomLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "store",
+            "zIndex": 1,
+            "id": "5ecdb607-7d05-50ee-867f-13653e64219b",
+            "data": {
+              "type": "tm.Store",
+              "name": "directory_config\n(encrypted bind secret)",
+              "description": "One row per tenant (schema v70); the bind secret AES-256-GCM encrypted under directory_encryption_key (D-15).",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isALog": false,
+              "isEncrypted": true,
+              "isSigned": false,
+              "storesCredentials": true,
+              "storesInventory": false,
+              "threats": [
+                {
+                  "id": "612f2330-2134-59c3-8dda-89cc7f1f66da",
+                  "title": "The directory bind secret is disclosed from the database, an API response, a log or a Debug line",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "The bind account can read the customer's directory: every user, every group. Its secret in plaintext in the database, returned by a read, or printed in a log line is a breach of the customer's directory, not only of AXIAM.",
+                  "mitigation": "Decision D-15: AES-256-GCM in the row with a fresh nonce per write, under the optional provider key `directory_encryption_key`, through the existing `axiam_auth::crypto` helpers. No read returns it; only `decrypt_bind_secret` produces the plaintext, as a `Zeroizing<String>`. `NewDirectoryConfig`'s `Debug` redacts it, and the client never logs it or carries it in an error. Residual, stated as it is for the per-tenant SMTP password: no associated data binds a ciphertext to its tenant's row, so a party able to write the database could move one tenant's ciphertext into another's row. That party already holds the data tier, which this model treats as full compromise. The bind account should hold read-only rights, and the operator note in `docs/deployment/README.md` says so.",
+                  "modelType": "STRIDE",
+                  "number": 298
+                },
+                {
+                  "id": "8b85be1a-1364-59ea-be97-8b37e135d93f",
+                  "title": "An absent encryption key makes directory sign-in insecure, or keeps the server from starting",
+                  "status": "Mitigated",
+                  "severity": "Low",
+                  "type": "Denial of service",
+                  "description": "The directory key is optional. A missing key must not mean a plaintext secret, a default key, or a server that refuses to boot over a feature most deployments do not use.",
+                  "mitigation": "Unavailable rather than insecure. Without the key a save is refused with an error naming it, `decrypt_bind_secret` answers `ServiceUnavailable`, and the authenticator turns that into `Unavailable` before any connection is opened. Boot logs the key's absence at INFO and continues. Test: `a_missing_encryption_key_is_unavailable_with_no_connection`.",
+                  "modelType": "STRIDE",
+                  "number": 299
+                }
+              ]
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "f2c61652-ff60-5339-805e-609b8a94c3ff",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "directory sign-in (POST /auth/login, HTTPS)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "31b120a0-2b7e-5174-a1a1-d2f04c2a6038"
+            },
+            "target": {
+              "cell": "54acf578-5395-5fed-addc-172837ec6c9b"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "directory sign-in (password)",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "5459bc1e-deb2-5bec-ab7b-b862818ac7fe",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "service bind + user search (LDAPS / StartTLS)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "54acf578-5395-5fed-addc-172837ec6c9b"
+            },
+            "target": {
+              "cell": "252914d7-795a-5c03-bbf0-52017e519ff4"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "service bind + user search",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "LDAP over TLS",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "1b53155b-1339-575b-b5e3-6aaf45a3c8ef",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "user bind with the presented password (LDAPS / StartTLS)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "54acf578-5395-5fed-addc-172837ec6c9b"
+            },
+            "target": {
+              "cell": "252914d7-795a-5c03-bbf0-52017e519ff4"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "user bind (presented password)",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "LDAP over TLS",
+              "threats": [
+                {
+                  "id": "6ea57a33-2c4e-5178-b938-b10fd02f5cc0",
+                  "title": "A directory password crosses the network in the clear: a plaintext URL, or StartTLS stripped",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Information disclosure",
+                  "description": "A simple bind carries the user's corporate password, which is the password for everything else the directory gates. A plaintext `ldap://` URL, a client that carries on after a server (or an on-path attacker) refuses StartTLS, or a bind sent before the upgrade completes hands it to anyone on the path.",
+                  "mitigation": "Plaintext is refused at three points: `config::validate` at save time (`ldap://` only with `start_tls`, `ldaps://` only without, every other scheme refused); the authenticator against the stored row; and `DirectoryClient::connect`, the only place a socket is opened. With StartTLS, `ldap3` sends the extended operation first and fails the connection when it is refused; AXIAM binds only after the connection call returns, which is after the handshake. `ldap3`'s `no_tls_verify` is never set. Tests: `a_refused_starttls_fails_closed_with_no_bind_in_the_clear` (the server would accept a clear-text bind, and receives none), `bind_as_user_succeeds_over_starttls_and_nothing_precedes_the_upgrade`, `a_plaintext_target_is_refused_with_zero_connections`, `a_stored_plaintext_url_is_refused_before_any_connection`. TLS 1.2 is the floor toward a directory rather than 1.3 because Active Directory on Windows Server 2019 and earlier, and many OpenLDAP builds, stop at 1.2; rustls restricts 1.2 to forward-secret AEAD suites.",
+                  "modelType": "STRIDE",
+                  "number": 292
+                }
+              ],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "58b75628-0c13-55c4-a1ee-00739c3c753b",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "search entry / bind result"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "252914d7-795a-5c03-bbf0-52017e519ff4"
+            },
+            "target": {
+              "cell": "54acf578-5395-5fed-addc-172837ec6c9b"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "search entry / bind result",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "LDAP over TLS",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "5b264422-f2c5-536d-9358-ba838a281afd",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "read config + decrypt bind secret"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "54acf578-5395-5fed-addc-172837ec6c9b"
+            },
+            "target": {
+              "cell": "5ecdb607-7d05-50ee-867f-13653e64219b"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "read config + decrypt bind secret",
+              "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
             }
           }
         ]
@@ -15333,7 +15862,7 @@
                   "severity": "Medium",
                   "type": "Tampering",
                   "description": "CONTRACT \u00a75.2, \u00a75.2.2 and \u00a75.2.3 told SDKs to switch the acting tenant by sending X-Tenant-ID \u2014 a header the server has never read (the extractor\u2019s constant is X-Axiam-Tenant) \u2014 in eighteen places. The failure mode is silence, not a 4xx: an SDK following the contract to the letter sends a header nothing looks at, the request quietly acts on the principal\u2019s own tenant, and the caller gets a successful response describing the wrong tenant\u2019s data. \u00a75.2.3\u2019s rule that naming a tenant outside reachable_tenant_ids is refused could not be true as written, because nothing was read to refuse.",
-                  "mitigation": "Fixed in 1.0.0-beta06 (contract 1.36, closing #395): the three sections name X-Axiam-Tenant. \u00a75 rule 2\u2019s unconditional X-Tenant-ID is deliberately not renamed \u2014 folding a constructor-tenant header into the acting-tenant header would override the acting tenant on every request an organization-level principal made after switching, reintroducing the bug through its fix. It now carries a note that it exists for proxies, gateways and an SDK\u2019s own \u00a710 resource-server middleware, that AXIAM does not read it, and that it must not be renamed. The eleven contract-1.35 SDK fan-out PRs were expected to implement the real header, and the correction let them re-sync against a contract that agrees with the server. Amended at contract 1.51 (dogfooding remediation, DF-008): that last claim was not true of the code. Read on 2026-09-23, no SDK sends X-Axiam-Tenant from any code path; all eleven name it in doc comments only, so an organization-level principal switched tenant by hand-rolling the header. Contract 1.51 §5.2 rule 1 moves the helper from MAY to SHOULD with a fixed shape, and closes a second silent path to the same failure: the server parses the header as a UUID and silently ignores a value that does not parse, so the request acts on the caller's own tenant and succeeds. The helper MUST refuse a non-UUID client-side before any wire call, is sent only when set, and is REST-only because the gRPC server reads no tenant metadata. The server behaviour is unchanged and the status stays Mitigated; the per-SDK ports (dogfooding plan C-1 … C-11) carry the helper.",
+                  "mitigation": "Fixed in 1.0.0-beta06 (contract 1.36, closing #395): the three sections name X-Axiam-Tenant. \u00a75 rule 2\u2019s unconditional X-Tenant-ID is deliberately not renamed \u2014 folding a constructor-tenant header into the acting-tenant header would override the acting tenant on every request an organization-level principal made after switching, reintroducing the bug through its fix. It now carries a note that it exists for proxies, gateways and an SDK\u2019s own \u00a710 resource-server middleware, that AXIAM does not read it, and that it must not be renamed. The eleven contract-1.35 SDK fan-out PRs were expected to implement the real header, and the correction let them re-sync against a contract that agrees with the server. Amended at contract 1.51 (dogfooding remediation, DF-008): that last claim was not true of the code. Read on 2026-09-23, no SDK sends X-Axiam-Tenant from any code path; all eleven name it in doc comments only, so an organization-level principal switched tenant by hand-rolling the header. Contract 1.51 \u00a75.2 rule 1 moves the helper from MAY to SHOULD with a fixed shape, and closes a second silent path to the same failure: the server parses the header as a UUID and silently ignores a value that does not parse, so the request acts on the caller's own tenant and succeeds. The helper MUST refuse a non-UUID client-side before any wire call, is sent only when set, and is REST-only because the gRPC server reads no tenant metadata. The server behaviour is unchanged and the status stays Mitigated; the per-SDK ports (dogfooding plan C-1 \u2026 C-11) carry the helper.",
                   "modelType": "STRIDE",
                   "number": 210
                 },
@@ -16098,6 +16627,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 289
+    "threatTop": 300
   }
 }

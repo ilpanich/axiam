@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:3d9980f28ed9b52b14f02d6e5d4cbba929a2b9e8696a1650ea4ded299668b961"
+    "x-axiam-spec-digest": "sha256:abe4aa50936704320439183bdd7bcd0201667093609ab0263f8e3d60b65c5670"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -21912,6 +21912,13 @@
           "deletion_pending": {
             "type": "boolean",
             "description": "GDPR Art. 17 — set when user requests account deletion (D-08)."
+          },
+          "directory_external_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The directory marker (G-3, T23.3.2): the immutable identifier of the\nLDAP / Active Directory entry this account belongs to — `entryUUID`, or\nthe decoded `objectGUID` — or `None` for every other account.\n\n`Some` means **the tenant's directory is the only authority for this\naccount's password**: sign-in binds to the directory and never verifies\na local hash (the stored `password_hash` is an unusable random one), and\nevery local password path — change, reset, an administrator's or SCIM's\npassword write, OPAQUE registration and login — refuses the account. It\nis also what the login path matches the directory's answer against, so\na login name that resolves to a different entry is refused.\n\nWritten only by `UserRepository::mark_directory_account`, the directory\npath's own method. `CreateUser` and `UpdateUser` have no such field, so\nneither the admin user API nor SCIM — both of which write through them —\ncan set or clear it."
           },
           "email": {
             "type": "string"

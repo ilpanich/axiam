@@ -47,6 +47,9 @@ struct UserRow {
     phone_number: Option<String>,
     phone_number_verified_at: Option<DateTime<Utc>>,
     address: Option<AddressRow>,
+    /// G-3 marker (schema v71). `Option` because a row written before v71 has
+    /// no such column.
+    directory_external_id: Option<String>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -80,6 +83,10 @@ impl std::fmt::Debug for UserRow {
             )
             .field("phone_number_verified_at", &self.phone_number_verified_at)
             .field("address", &self.address.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "directory_external_id",
+                &self.directory_external_id.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish_non_exhaustive()
@@ -114,6 +121,9 @@ struct UserRowWithId {
     phone_number: Option<String>,
     phone_number_verified_at: Option<DateTime<Utc>>,
     address: Option<AddressRow>,
+    /// G-3 marker (schema v71). `Option` because a row written before v71 has
+    /// no such column.
+    directory_external_id: Option<String>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -260,6 +270,7 @@ impl UserRow {
             phone_number: self.phone_number,
             phone_number_verified_at: self.phone_number_verified_at,
             address: decode_address(self.address),
+            directory_external_id: self.directory_external_id,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -305,6 +316,7 @@ impl UserRowWithId {
             phone_number: self.phone_number,
             phone_number_verified_at: self.phone_number_verified_at,
             address: decode_address(self.address),
+            directory_external_id: self.directory_external_id,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -727,6 +739,63 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         Ok(())
     }
 
+    async fn mark_directory_account(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        external_id: &str,
+    ) -> AxiamResult<User> {
+        if external_id.trim().is_empty() {
+            return Err(
+                DbError::Migration("a directory external id must not be empty".into()).into(),
+            );
+        }
+        // An unusable password: the Argon2id hash of 32 random bytes nobody
+        // holds, so the column keeps its shape (a valid PHC string that every
+        // verifier parses) without being a hash of anything guessable. Never
+        // empty: the empty string is the erasure tombstone, and a verifier
+        // handed one errors instead of answering "no".
+        let unusable = {
+            use rand::Rng;
+            let mut bytes = [0u8; 32];
+            rand::rng().fill_bytes(&mut bytes);
+            let secret = zeroize::Zeroizing::new(hex::encode(bytes));
+            password::hash_password(&secret, self.pepper.as_deref())
+                .map_err(|e| classify_write_error(e, "user"))?
+        };
+        let id_str = user_id.to_string();
+        let result = self
+            .db
+            .current()
+            .query(
+                "BEGIN TRANSACTION; \
+                 UPDATE type::record('user', $id) SET \
+                     directory_external_id = $external_id, \
+                     password_hash = $password_hash, \
+                     updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id; \
+                 DELETE FROM opaque_credential \
+                 WHERE tenant_id = $tenant_id AND user_id = $id; \
+                 COMMIT TRANSACTION",
+            )
+            .bind(("id", id_str.clone()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("external_id", external_id.to_string()))
+            .bind(("password_hash", unusable))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        // BEGIN=0, UPDATE=1, DELETE=2.
+        let rows: Vec<UserRow> = result.take(1).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "user".into(),
+            id: id_str,
+        })?;
+        Ok(row.into_user(user_id)?)
+    }
+
     async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<bool> {
         // Atomic compare-and-set (SEC-008/SECHRD-01): the UPDATE only matches
         // when the stored step is unset (NONE, first-ever verification —
@@ -807,6 +876,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         locked_until, email_verified_at, \
                         deletion_pending, scheduled_purge_at, \
                         phone_number, phone_number_verified_at, address, \
+                        directory_external_id, \
                         metadata, created_at, updated_at \
                  FROM user \
                  WHERE tenant_id = $tenant_id AND status != 'Deleted'{search} \

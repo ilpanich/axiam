@@ -20,6 +20,9 @@ axiam-api-grpc = { workspace = true }
 axiam-amqp = { workspace = true }
 axiam-oauth2 = { workspace = true }
 axiam-federation = { workspace = true }
+# G-3 (T23.3.2): the LDAP client behind the DirectoryAuthenticator port the
+# login path is given here.
+axiam-directory = { workspace = true }
 axiam-audit = { workspace = true }
 axiam-pki = { workspace = true }
 # R3.1 (B4): SCIM 2.0 provisioning, mounted under /scim/v2.

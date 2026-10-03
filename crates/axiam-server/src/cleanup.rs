@@ -544,6 +544,7 @@ fn profile_section(user: &axiam_core::models::user::User) -> serde_json::Value {
         "phone_number": user.phone_number,
         "phone_number_verified": user.phone_number_verified_at.is_some(),
         "address": user.address,
+        "directory_external_id": user.directory_external_id,
         "metadata": user.metadata,
         "created_at": user.created_at,
         "updated_at": user.updated_at,
@@ -1471,6 +1472,7 @@ mod personal_data_export_tests {
             phone_number: None,
             phone_number_verified_at: None,
             address: None,
+            directory_external_id: None,
         }
     }
 

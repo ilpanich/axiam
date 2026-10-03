@@ -670,6 +670,7 @@ impl UserRepository for MockUserRepo {
             phone_number: None,
             phone_number_verified_at: None,
             address: None,
+            directory_external_id: None,
             metadata: serde_json::Value::Null,
             created_at,
             updated_at: Utc::now(),

@@ -1,6 +1,7 @@
 //! Authentication service — login, logout, token refresh, and MFA.
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::directory::SharedDirectoryAuthenticator;
 use axiam_core::models::password_history::CreatePasswordHistoryEntry;
 use axiam_core::models::reactor::{
     ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events, noop_reactor_gate,
@@ -211,6 +212,16 @@ pub struct AuthService<
     /// [`axiam_core::models::reactor::NoopReactorGate`] here, so there is one
     /// login path in every build rather than two that can drift.
     reactor_gate: SharedReactorGate,
+    /// G-3 (T23.3.2) — how a directory account's password is checked.
+    ///
+    /// An `Option`, unlike the reactor gate, because absence has a meaning the
+    /// login path must act on: with no authenticator, **no tenant can use a
+    /// directory**, and a directory account (one whose
+    /// [`User::directory_external_id`] is set) fails sign-in closed with the
+    /// generic failure — it is never checked against its local hash. The
+    /// composition root always attaches one; test harnesses that do not
+    /// exercise directories leave it out.
+    directory_authenticator: Option<SharedDirectoryAuthenticator>,
 }
 
 impl<
@@ -236,7 +247,24 @@ impl<
             config,
             crypto_semaphore,
             reactor_gate: noop_reactor_gate(),
+            directory_authenticator: None,
         }
+    }
+
+    /// Attach the directory authenticator (G-3, T23.3.2) — the
+    /// [`axiam_core::models::directory::DirectoryAuthenticator`] port, which
+    /// `axiam-directory` implements and the composition root injects, so this
+    /// layer-1 crate never depends on the layer-3 LDAP client.
+    ///
+    /// Builder-style for the reason [`Self::with_reactor_gate`] is: every
+    /// existing construction site keeps compiling and keeps its behaviour.
+    #[must_use]
+    pub fn with_directory_authenticator(
+        mut self,
+        authenticator: SharedDirectoryAuthenticator,
+    ) -> Self {
+        self.directory_authenticator = Some(authenticator);
+        self
     }
 
     /// Attach the reactor gate (X1).

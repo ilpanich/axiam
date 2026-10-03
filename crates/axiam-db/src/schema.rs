@@ -392,6 +392,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "directory_config",
         sql: SCHEMA_V70,
     },
+    Migration {
+        version: 71,
+        name: "user_directory_external_id",
+        sql: SCHEMA_V71,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3758,9 +3763,67 @@ DEFINE INDEX IF NOT EXISTS idx_directory_config_tenant ON TABLE directory_config
     COLUMNS tenant_id UNIQUE;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v71 — T23.3.2 / G-3: the directory marker on `user`
+// -----------------------------------------------------------------------
+//
+// One optional column and one index on `user`, no backfill.
+//
+// **`directory_external_id`** is the immutable identifier of the LDAP / Active
+// Directory entry an account belongs to (`entryUUID`, or `objectGUID` decoded
+// to its canonical text). Present, the tenant's directory is the only
+// authority for the account's password: sign-in binds to the directory and
+// every local password path refuses the account. Absent — **the answer for
+// every row that exists today** — the account is exactly what it was, which is
+// why there is nothing to backfill: no account is a directory account until the
+// directory path makes it one (`UserRepository::mark_directory_account`, the
+// column's only writer, which also replaces the password hash with an unusable
+// one and drops any OPAQUE record in the same transaction).
+//
+// **`idx_user_tenant_directory_external_id` is UNIQUE on `(tenant_id,
+// directory_external_id)`**, so one directory entry can never back two
+// accounts in a tenant — the datastore decides the race between two concurrent
+// first sign-ins (T23.3.3), and the lookup by identifier that just-in-time
+// provisioning needs is an index read. Rows without the column do not collide
+// with each other: the index admits any number of absent values (pinned by
+// `user_directory_marker_test.rs`).
+const SCHEMA_V71: &str = "\
+DEFINE FIELD IF NOT EXISTS directory_external_id ON TABLE user TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_user_tenant_directory_external_id ON TABLE user \
+    COLUMNS tenant_id, directory_external_id UNIQUE;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.3.2 — v71 adds one optional column and one unique index to `user`
+    /// and rewrites no row: an absent marker is how every existing account is
+    /// recognised as a local one.
+    #[test]
+    fn v71_adds_the_directory_marker_additively() {
+        assert!(SCHEMA_V71.contains("directory_external_id ON TABLE user TYPE option<string>"));
+        assert!(SCHEMA_V71.contains(
+            "idx_user_tenant_directory_external_id ON TABLE user \
+    COLUMNS tenant_id, directory_external_id UNIQUE"
+        ));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V71.contains(forbidden),
+                "v71 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V71
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE") && statement.contains("IF NOT EXISTS"),
+                "v71 statements must be idempotent DEFINEs"
+            );
+        }
+    }
 
     /// T23.3.1 — v70 adds one table and one unique index and touches nothing
     /// that exists: no tenant has a directory until an administrator makes one,
@@ -4310,9 +4373,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&70),
-            "v70 is the newest migration (T23.3.1 — the `directory_config` table for the \
-             LDAP / Active Directory identity source; v69 was T23.4.1's RFC 7592 \
+            Some(&71),
+            "v71 is the newest migration (T23.3.2 — the directory marker \
+             `user.directory_external_id`; v70 was T23.3.1's `directory_config` table for \
+             the LDAP / Active Directory identity source, v69 was T23.4.1's RFC 7592 \
              registration access token hash on `oauth2_client`, and v68 was X7.2 / D-9's \
              authentication evidence on the OAuth2 refresh token). \
              This assertion is a \

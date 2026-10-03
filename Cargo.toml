@@ -235,6 +235,9 @@ axiam-api-grpc = { path = "crates/axiam-api-grpc" }
 axiam-amqp = { path = "crates/axiam-amqp" }
 axiam-oauth2 = { path = "crates/axiam-oauth2" }
 axiam-federation = { path = "crates/axiam-federation", default-features = false }
+# G-3: the LDAP / Active Directory identity source. Only the composition root
+# depends on it (it injects the DirectoryAuthenticator into AuthService).
+axiam-directory = { path = "crates/axiam-directory" }
 axiam-audit = { path = "crates/axiam-audit" }
 axiam-email = { path = "crates/axiam-email" }
 axiam-pki = { path = "crates/axiam-pki" }

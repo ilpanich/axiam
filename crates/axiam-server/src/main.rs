@@ -1052,7 +1052,20 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         Arc::clone(&crypto_semaphore),
     )
-    .with_reactor_gate(Arc::clone(&reactor_gate));
+    .with_reactor_gate(Arc::clone(&reactor_gate))
+    // G-3 (T23.3.2): directory accounts authenticate through the tenant's LDAP /
+    // Active Directory server. Always attached: without
+    // `directory_encryption_key` the repository cannot decrypt a bind secret,
+    // so every directory sign-in fails closed as `Unavailable` (never a local
+    // hash), and tenants without a directory are untouched.
+    .with_directory_authenticator(Arc::new(
+        axiam_directory::RepositoryDirectoryAuthenticator::new(
+            axiam_db::SurrealDirectoryConfigRepository::new(
+                pool.handle_for_repo(),
+                config.directory_encryption_key,
+            ),
+        ),
+    ));
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());
     let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo());

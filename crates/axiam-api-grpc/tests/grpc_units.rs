@@ -513,6 +513,7 @@ fn active_user(tenant: Uuid, password_hash: String) -> User {
         phone_number: None,
         phone_number_verified_at: None,
         address: None,
+        directory_external_id: None,
         metadata: serde_json::Value::Null,
         created_at: Utc::now(),
         updated_at: Utc::now(),

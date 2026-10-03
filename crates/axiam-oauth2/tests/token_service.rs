@@ -4485,7 +4485,11 @@ async fn p23w1_01_a_refresh_grant_for_an_account_that_may_no_longer_sign_in_mint
 /// refresh exactly as before.
 #[tokio::test]
 async fn p23w1_01_a_refresh_grant_for_an_active_account_or_no_account_still_rotates() {
-    for user_id in [Some(Uuid::new_v4()), None, Some(LAPSED_PENDING_USER)] {
+    for (case, user_id) in [
+        ("an active account", Some(Uuid::new_v4())),
+        ("no account", None),
+        ("a lapsed pending account", Some(LAPSED_PENDING_USER)),
+    ] {
         let refresh =
             MockRefreshRepo::new().with_get(make_refresh(user_id, "client-1", &["openid"]));
         let svc = build(
@@ -4498,7 +4502,7 @@ async fn p23w1_01_a_refresh_grant_for_an_active_account_or_no_account_still_rota
             .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
             .await
             .unwrap();
-        assert!(resp.refresh_token.is_some(), "{user_id:?}");
+        assert!(resp.refresh_token.is_some(), "{case}");
     }
 }
 

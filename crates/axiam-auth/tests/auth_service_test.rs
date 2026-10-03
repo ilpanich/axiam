@@ -2064,7 +2064,7 @@ async fn x7_2_a_totp_second_step_records_pwd_otp_and_mfa() {
         .unwrap()
     {
         LoginResult::MfaRequired(mfa) => mfa.challenge_token,
-        other => panic!("expected MfaRequired, got {other:?}"),
+        _ => panic!("expected MfaRequired, got another login result"),
     };
     assert!(
         sessions
@@ -2138,7 +2138,7 @@ async fn x7_2_a_forced_totp_enrolment_records_the_same_evidence_as_the_totp_step
         .unwrap()
     {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another login result"),
     };
     let enrollment = svc.enroll_mfa_with_setup_token(&setup_token).await.unwrap();
     let totp = totp_from_secret(&enrollment.secret_base32, "alice@example.com");

@@ -1586,7 +1586,7 @@ async fn rfc7592_only_this_clients_management_token_is_accepted() {
     let mut confidential = inspector_registration();
     confidential["token_endpoint_auth_method"] = json!("client_secret_basic");
     let (status, secret_client) = register!(app, f, confidential);
-    assert_eq!(status, 201, "{secret_client}");
+    assert_eq!(status, 201, "the confidential registration must succeed");
     let uri = config_path(&mine);
 
     for (label, authz) in [

@@ -1070,10 +1070,10 @@ with an F4 security review of the wave's diff against
 | T23.1.1 | X7.1 gates and profile-confusion matrix M1–M9 — audited against the shipped code | Opus 5.5 | W1 | ✓ |
 | T23.1.2 | X7.2 session evidence — audited; D-9 (evidence on the refresh token), D-10 (upstream instant bounded) | Sonnet 5.5 | W1 | ✓ |
 | T23.1.3 | X7.3 OP-session cookie, `return_to` hop, `reauth` — audited | Opus 5.5 | W1 | ✓ |
-| T23.1.4 | X7.4–X7.6 honour lane (`prompt`, `max_age`, `id_token_hint`, ACR) | Sonnet 5.5 | W2 | |
+| T23.1.4 | X7.4–X7.6 honour lane (`prompt`, `max_age`, `id_token_hint`, ACR) | Sonnet 5.5 | W2 | ✓ |
 | T23.1.5 | X7.7 sensitive scopes, X7.8 `client_secret_basic` | Sonnet 5.5 | W2 | |
-| T23.1.6 | X7.9 Basic OP harness, final runs, `docs/conformance/REVIEW-JUDGEMENTS.md` | Sonnet 5.5 | W2 | |
-| T23.1.7 | FAPI `WARNING`/`REVIEW` judgements, X5.3 submission, website mark | Sonnet 5.5 | W2 | |
+| T23.1.6 | X7.9 Basic OP harness, final runs, `docs/conformance/REVIEW-JUDGEMENTS.md` | Sonnet 5.5 | W2 | ✓ |
+| T23.1.7 | FAPI `WARNING`/`REVIEW` judgements, X5.3 submission, website mark | Sonnet 5.5 | W2 | ✓ |
 | T23.1.8 | D-11: per-tenant-prefix OP-session cookie; tenant-path principal resolution; every minted cookie cleared on logout, `end_session`, revocation (P23W1-10) | Opus 5.5 | W2 | |
 | T23.2.1 | `SamlServiceProvider` model and repository, `CertificateType::SamlSigning`, encrypted key storage | Sonnet 5.5 | W3 | |
 | T23.2.2 | `saml_idp`: assertion builder, `NameID` policy, attribute mapping, signing | Opus 5.5 | W3 | |

@@ -200,6 +200,69 @@ into tasks and assigns the model per task.
 > `claims.id_token.auth_time` on `fapi2` is still dropped — open as **D-12**.
 > W2's T23.1.4 and T23.1.5 are expected to be audits too, since X7.4 to X7.8
 > are in the tree; T23.1.6 and T23.1.7 (judgements, submission) are not.
+>
+> **EXECUTED (partly) — G-1, W2: T23.1.4, T23.1.6, T23.1.7, 2026-10-03.** On
+> `claude/phase23-w2`. G-1 stays open: the maintainer runs both suites
+> personally before the release tag (decision of 2026-10-03), and sends the
+> submission; issue #513 closes on the grant, not on this wave.
+>
+> - **T23.1.4** (`1218dbe`, `9799f87`, `3da0cc0`; Sonnet 5.5). An audit, as
+>   expected: every X7.4–X7.6 requirement (`prompt` in its four values and its
+>   `none` combinations, `max_age`, `id_token_hint`, ACR derivation and the
+>   essential-unmet refusal, the cosmetic four, POST userinfo, and the ignore
+>   and `fapi2` twins of each) is tabulated against a named test. No defect in
+>   the shipped lane; the rows pinned only at unit level are now pinned over
+>   HTTP too (`id_token_hint` wrong subject, wrong client, foreign key, access
+>   token, garbage and expired-but-signed; `select_account`; an essential
+>   `claims.id_token.acr` on the ignore lane; a non-form body at POST
+>   userinfo). **D-12** shipped: an essential (or unreadable)
+>   `claims.id_token.auth_time` on `fapi2` is `invalid_request` on both
+>   carriers, a voluntary one unchanged, the honour lane still honours it;
+>   amends T-239 in all three artifacts, OpenAPI's discovery description
+>   regenerated. The audit raised one question the plan had pinned the wrong
+>   way, decided as **D-14**: `max_age=0` could never yield a code (`0 >= 0` on
+>   the return leg), against OIDC Core §3.1.2.1's errata note that it equals
+>   `prompt=login`. It now takes the `prompt=login` path and no path of its own
+>   (a unit test proves the two outcomes equal at every age, leg and session
+>   state); `prompt=none` with `max_age=0` is `login_required`; test failed
+>   first; T-239 amended again. Also corrected: the "plan only" status lines of
+>   `extra-B-track-features.md` §X7 and `basic-op-gap-plan.md`, and every
+>   statement that discovery publishes `claims_parameter_supported: false`
+>   (it publishes `true`).
+> - **T23.1.6** (`6f1385b`, `cfb6fcf`, `f3dbea7`, `9c74955`; Sonnet 5.5).
+>   [`docs/conformance/REVIEW-JUDGEMENTS.md`](../docs/conformance/REVIEW-JUDGEMENTS.md)
+>   with the four Basic OP entries, each citing its 2026-09-25 log id and the
+>   screenshot it rests on, each marked *proposed* until the maintainer's run
+>   confirms it; nothing in it is a result of a run that was not made. Harness:
+>   `report.py` now names every `SKIPPED` module (it counted them and named
+>   none, so "PASSED or documented SKIPPED" could not be checked) and keeps the
+>   earlier dated reports in `index.md`; `export-evidence.py` (and `just
+>   conformance-evidence`) scripts the evidence export the three earlier
+>   directories were made by hand. A *maintainer run checklist* in
+>   [`fapi-conformance-runbook.md`](fapi-conformance-runbook.md).
+> - **T23.1.7** (`9f5fe95`, `47b856b`, `ac87a72`, `58bacf0`, `ee3bac0`;
+>   Sonnet 5.5). The three FAPI entries over all three variants, the FAPI half
+>   of the checklist (with F4 item (g): rerun
+>   `test-claims-parameter-identity-claims` and read its request for `acr` and
+>   `auth_time`), and the X5.3 package at the end of
+>   [`fapi-certification-submission.md`](fapi-certification-submission.md):
+>   what is submitted, every run-dependent field as a placeholder, what to
+>   attach and never attach, a pre-send checklist, and the website wording for
+>   the mark, kept there and **not** in `website/src/` until the mark is
+>   granted. Nothing was sent.
+>
+> What the plan did not anticipate. The claims `WARNING` is on **all three**
+> FAPI variants, every run since 2026-09-10, not on `private_key_jwt` only;
+> and it is **not** the "claims not supported" deviation §4 *Design* item 2
+> hoped for, since discovery says `true`, so its cause is in the suite log and
+> the entry stays *open* until the maintainer's run. The plan's "four FAPI
+> variants" are three plan files; the fourth is the Basic plan. `REVIEW` is a
+> terminal verdict by the suite's design, so "every module `PASSED`" cannot be
+> met literally; the expected shape is the baseline's, each `REVIEW` closed by
+> its judgement. And a `require_par` client's unpushed request from an
+> anonymous browser goes through the login hop before it is refused (found by
+> reading the code, carried to the F4 review). Questions for the maintainer
+> are in the W2 PR.
 
 **Target.** Two certificates: OpenID Connect *Basic OP* and *FAPI 2.0 Security
 Profile (Final)*, as OpenID Provider, with the results published under

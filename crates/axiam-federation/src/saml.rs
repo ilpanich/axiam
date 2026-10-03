@@ -458,11 +458,13 @@ where
             FederationError::SamlResponseFailed(format!("Failed to parse SAML Response XML: {e}"))
         })?;
 
-        // Step 1 — XML signature verification (D-06/D-07/D-08).
+        // Step 1 — XML signature verification (D-06/D-07/D-08, D-23).
         // MUST run before any claims are trusted. Fails closed when:
         //   - idp_signing_cert_pem is None (config incomplete)
+        //   - a <ds:Signature> sits anywhere but the enveloped child of the
+        //     Response root or of its Assertion (XSW, D-23)
         //   - <ds:Signature> is absent from the document
-        //   - The digest or signature value does not verify
+        //   - the digest or signature value of ANY signature does not verify
         self.verify_signature(xml.as_bytes(), config)?;
 
         // Step 1a — Protocol binding checks (SEC-005/REQ-14 AC-5).
@@ -532,16 +534,15 @@ where
             FederationError::SamlResponseFailed("SAML Response missing Assertion".into())
         })?;
 
-        // Step 2 — XSW (XML Signature Wrapping) binding check (SECFIX-04/SEC-005).
-        // `verify_signature` above only proves SOME valid <ds:Signature> exists
-        // somewhere in the document; it never surfaces which element ID it
-        // verified. `response.assertion` is a scalar field, so a wrapped/duplicated
-        // second <Assertion> sibling would otherwise be trusted unchallenged. Bind
-        // the cryptographically verified signature to THIS consumed assertion by
-        // raw-XML introspection: exactly one <Assertion> must exist document-wide,
-        // and at least one <Signature>'s <Reference URI> must resolve to this
-        // assertion's ID. Must run AFTER verify_signature (378) and AFTER the
-        // assertion is read (above), BEFORE any of its claims are trusted.
+        // Step 2 — XSW (XML Signature Wrapping) binding check (SECFIX-04/SEC-005,
+        // D-23). `verify_signature` above proves every signature the placement
+        // rule admits verified, but not which element `response.assertion` (a
+        // scalar field) bound to. Bind THIS consumed assertion to a verified
+        // signature by raw-XML introspection: exactly one <Assertion> must exist
+        // document-wide, it must be the root's child, and its own enveloped
+        // <ds:Signature> must reference its ID. Must run AFTER verify_signature
+        // and AFTER the assertion is read (above), BEFORE any of its claims are
+        // trusted.
         bind_signature_to_assertion(xml.as_bytes(), &assertion.id)?;
 
         // Validate conditions — REQUIRED (SEC-005/REQ-14 AC-5).
@@ -705,18 +706,33 @@ where
         ))
     }
 
-    /// Verify the XML signature(s) in a SAML document against the configured
+    /// Verify the XML signature(s) in a SAML response against the configured
     /// IdP signing certificate.
     ///
-    /// Behaviour (D-06/D-07/D-08):
+    /// Behaviour (D-06/D-07/D-08, and D-23 since T23.2.2):
     /// - If `config.idp_signing_cert_pem` is `None` → `ConfigIncomplete` (fail
     ///   closed: the config is not finished).
-    /// - If no `<ds:Signature>` is present in the document → `SamlSignatureInvalid`
-    ///   (samael's `verify_signed_xml` returns an error when there is no signature).
-    /// - If the digest or signature value does not match → `SamlSignatureInvalid`.
+    /// - A `ds:Signature` is accepted in exactly two places — the enveloped
+    ///   child of the `Response` root, or of the `Assertion` that is the
+    ///   root's child — at most one per parent, each with one `Reference` to
+    ///   its parent's `ID` ([`check_signature_placement`]). A signature
+    ///   anywhere else refuses the whole document (`SamlResponseFailed`,
+    ///   XSW).
+    /// - If no signature is present → `SamlSignatureInvalid`.
+    /// - **Every** signature is verified on its own node with xmlsec
+    ///   (`reduce_xml_to_signed`, which walks each `ds:Signature` and
+    ///   verifies it individually); any one that does not verify →
+    ///   `SamlSignatureInvalid`. IDs must be unique `NCName`s.
+    ///
+    /// Before D-23 this called `verify_signed_xml`, which verifies only the
+    /// **first** `ds:Signature` in document order: a document the IdP signed
+    /// for another purpose (a logout message, an error response) placed ahead
+    /// of a forged assertion made the forged one pass.
     ///
     /// Must be called BEFORE `validate_conditions` so that a forged/unsigned
-    /// assertion is rejected before any claims are trusted.
+    /// assertion is rejected before any claims are trusted, and before
+    /// [`bind_signature_to_assertion`], which relies on every signature in the
+    /// document having verified here.
     fn verify_signature(
         &self,
         xml_bytes: &[u8],
@@ -730,11 +746,31 @@ where
         let der = crate::cert::pem_cert_to_der(pem)?;
         let cert = samael::crypto::CertificateDer::from(der);
 
-        <samael::crypto::XmlSec as samael::crypto::CryptoProvider>::verify_signed_xml(
-            xml_bytes,
-            &cert,
-            Some("ID"),
+        let xml = std::str::from_utf8(xml_bytes).map_err(|_| {
+            FederationError::SamlSignatureInvalid("SAML response is not UTF-8".into())
+        })?;
+        let doc = libxml::parser::Parser::default()
+            .parse_string(xml_bytes)
+            .map_err(|e| {
+                FederationError::SamlSignatureInvalid(format!("SAML response is not XML: {e}"))
+            })?;
+        if check_signature_placement(&doc)? == 0 {
+            return Err(FederationError::SamlSignatureInvalid(
+                "SAML response carries no signature".into(),
+            ));
+        }
+
+        // Every ds:Signature node — after the placement check, exactly the
+        // accepted ones — is verified individually against the certificate.
+        // PreDigest is the strictest reduce mode: it also refuses a document
+        // whose verified references are not one element, or one assertion
+        // inside one response.
+        <samael::crypto::XmlSec as samael::crypto::CryptoProvider>::reduce_xml_to_signed(
+            xml,
+            &[cert],
+            samael::crypto::ReduceMode::PreDigest,
         )
+        .map(|_| ())
         .map_err(|e| FederationError::SamlSignatureInvalid(e.to_string()))
     }
 
@@ -879,34 +915,119 @@ where
 // Helper functions
 // ---------------------------------------------------------------------------
 
+const XMLNS_DSIG: &str = "http://www.w3.org/2000/09/xmldsig#";
+const XMLNS_SAML_PROTOCOL: &str = "urn:oasis:names:tc:SAML:2.0:protocol";
+const XMLNS_SAML_ASSERTION: &str = "urn:oasis:names:tc:SAML:2.0:assertion";
+
+fn xsw_rejected(what: &str) -> FederationError {
+    FederationError::SamlResponseFailed(format!(
+        "{what} (possible XML Signature Wrapping (XSW) attack rejected)"
+    ))
+}
+
+fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str) -> bool {
+    node.get_name() == name
+        && node
+            .get_namespace()
+            .is_some_and(|ns| ns.get_href() == namespace)
+}
+
+/// The signature placement rule (D-23): every element named `Signature`, in
+/// any namespace, must be a `ds:Signature` that is the direct child of the
+/// `samlp:Response` root or of a `saml:Assertion` that is itself the root's
+/// child; at most one per parent; and each must carry exactly one
+/// `SignedInfo/Reference`, whose `URI` is `#` + its parent's `ID`.
+///
+/// Anything else — a signed logout message or error response embedded in
+/// `Extensions`, beside the assertion or in its `Advice`; a dummy signature at
+/// the root that names the assertion; a second signature in one parent — is an
+/// XSW shape and refuses the whole document. Returns how many signatures were
+/// accepted (zero, one or two).
+fn check_signature_placement(doc: &libxml::tree::Document) -> Result<usize, FederationError> {
+    let root = doc
+        .get_root_element()
+        .ok_or_else(|| xsw_rejected("SAML response has no root element"))?;
+    if !is_element(&root, XMLNS_SAML_PROTOCOL, "Response") {
+        return Err(xsw_rejected("the document root is not a samlp:Response"));
+    }
+    let mut context = libxml::xpath::Context::new(doc).map_err(|()| {
+        FederationError::SamlResponseFailed("XSW check: failed to create XPath context".into())
+    })?;
+    let signatures = context
+        .findnodes("//*[local-name()='Signature']", None)
+        .map_err(|()| {
+            FederationError::SamlResponseFailed("XSW check: XPath evaluation failed".into())
+        })?;
+
+    let mut parents_seen: Vec<*mut libxml::bindings::xmlNode> = Vec::new();
+    for signature in &signatures {
+        if !is_element(signature, XMLNS_DSIG, "Signature") {
+            return Err(xsw_rejected(
+                "a Signature element outside the XML-DSig namespace",
+            ));
+        }
+        let parent = signature
+            .get_parent()
+            .ok_or_else(|| xsw_rejected("a ds:Signature with no parent"))?;
+        let parent_is_root = parent.node_ptr() == root.node_ptr();
+        let parent_is_root_assertion = is_element(&parent, XMLNS_SAML_ASSERTION, "Assertion")
+            && parent
+                .get_parent()
+                .is_some_and(|grandparent| grandparent.node_ptr() == root.node_ptr());
+        if !parent_is_root && !parent_is_root_assertion {
+            return Err(xsw_rejected(
+                "a ds:Signature outside the Response root and its Assertion",
+            ));
+        }
+        if parents_seen.contains(&parent.node_ptr()) {
+            return Err(xsw_rejected("a second ds:Signature under one parent"));
+        }
+        parents_seen.push(parent.node_ptr());
+
+        let references: Vec<_> = signature
+            .get_child_elements()
+            .into_iter()
+            .filter(|c| is_element(c, XMLNS_DSIG, "SignedInfo"))
+            .flat_map(|info| info.get_child_elements())
+            .filter(|c| is_element(c, XMLNS_DSIG, "Reference"))
+            .collect();
+        let parent_id = parent.get_attribute("ID").unwrap_or_default();
+        let bound = matches!(
+            references.as_slice(),
+            [reference] if !parent_id.is_empty()
+                && reference.get_attribute("URI").as_deref() == Some(format!("#{parent_id}").as_str())
+        );
+        if !bound {
+            return Err(xsw_rejected(
+                "a ds:Signature whose Reference is not exactly its parent element",
+            ));
+        }
+    }
+    Ok(signatures.len())
+}
+
 /// Bind the cryptographically verified XML signature to the assertion actually
-/// consumed by `handle_saml_response` (SECFIX-04/SEC-005 — XML Signature
-/// Wrapping defense).
+/// consumed by `handle_saml_response` (SECFIX-04/SEC-005, tightened by D-23 —
+/// XML Signature Wrapping defense).
 ///
-/// `samael::crypto::verify_signed_xml` (called by `verify_signature` above)
-/// only proves that SOME valid `<ds:Signature>` exists somewhere in the
-/// document — it never surfaces which element ID the verified signature's
-/// `<Reference URI="#...">` pointed to. Meanwhile `samael::schema::Response`
-/// exposes `assertion` as a *scalar* `Option<Assertion>`, so an attacker can
-/// keep the original signed assertion intact somewhere in the tree (so the
-/// lone-signature check still passes) and inject a second, forged, unsigned
-/// `<Assertion>` sibling that the deserializer happens to bind to
-/// `response.assertion`.
+/// `samael::schema::Response` exposes `assertion` as a *scalar*
+/// `Option<Assertion>`, so the element whose claims are trusted is whichever
+/// one the deserializer bound; this proves, by an independent raw-XML pass
+/// (`libxml`, never regex), that it is the signed one:
 ///
-/// This performs an independent raw-XML introspection pass (via `libxml`,
-/// already resolved transitively through samael 0.0.19's `xmlsec` feature)
-/// to close that gap:
+/// 1. Exactly one `<Assertion>` element (namespace-agnostic local name) exists
+///    anywhere in the document — rejects the wrapped/duplicated payload shape
+///    outright, regardless of signature status.
+/// 2. Every signature in the document obeys [`check_signature_placement`].
+/// 3. The consumed assertion is the root's child, carries `claimed_assertion_id`,
+///    and has its **own enveloped** `ds:Signature` whose single `Reference` is
+///    `#claimed_assertion_id`.
 ///
-/// 1. Exactly one `<Assertion>` element (namespace-agnostic local name) must
-///    exist anywhere in the document — rejects the wrapped/duplicated payload
-///    shape outright, regardless of signature status.
-/// 2. At least one `<Signature>`'s `<Reference URI="#...">` must resolve to
-///    `claimed_assertion_id` — binds "the element that was cryptographically
-///    verified" to "the element whose claims are about to be trusted".
-///    Rejects on an empty, absent, or non-matching reference.
-///
-/// Never uses regex/string search on the XML (a real, namespace-aware XPath
-/// parser is required — see 23-RESEARCH.md Anti-Patterns).
+/// Before D-23, step 3 accepted *any* `Reference` anywhere naming the
+/// assertion, verified or not. It now accepts only the assertion's own
+/// signature; and since [`SamlFederationService::verify_signature`] verifies
+/// every signature the placement rule admits, the reference it reads here is
+/// one that verified. Must run AFTER `verify_signature`.
 fn bind_signature_to_assertion(
     xml_bytes: &[u8],
     claimed_assertion_id: &str,
@@ -940,25 +1061,29 @@ fn bind_signature_to_assertion(
         )));
     }
 
-    // 2. Every <Signature>'s Reference URI must resolve to the consumed
-    //    assertion's ID. Reject on empty/absent/non-matching references.
-    let references = context
-        .findnodes(
-            "//*[local-name()='Signature']//*[local-name()='Reference']/@URI",
-            None,
-        )
-        .map_err(|()| {
-            FederationError::SamlResponseFailed(
-                "XSW binding check: XPath evaluation failed (Signature/Reference)".into(),
-            )
-        })?;
+    // 2. Signatures only where D-23 allows them.
+    check_signature_placement(&doc)?;
 
+    // 3. The assertion's own enveloped signature references it.
+    let assertion = &assertions[0];
+    let root = doc.get_root_element();
+    let is_root_child = assertion
+        .get_parent()
+        .zip(root)
+        .is_some_and(|(parent, root)| parent.node_ptr() == root.node_ptr());
     let expected_reference = format!("#{claimed_assertion_id}");
-    let bound = references.iter().any(|node| {
-        let uri = node.get_content();
-        !uri.is_empty() && uri == expected_reference
-    });
-    if !bound {
+    let own_signature_binds = is_root_child
+        && assertion.get_attribute("ID").as_deref() == Some(claimed_assertion_id)
+        && assertion
+            .get_child_elements()
+            .iter()
+            .filter(|c| is_element(c, XMLNS_DSIG, "Signature"))
+            .flat_map(|sig| sig.get_child_elements())
+            .filter(|c| is_element(c, XMLNS_DSIG, "SignedInfo"))
+            .flat_map(|info| info.get_child_elements())
+            .filter(|c| is_element(c, XMLNS_DSIG, "Reference"))
+            .any(|r| r.get_attribute("URI").as_deref() == Some(expected_reference.as_str()));
+    if !own_signature_binds {
         return Err(FederationError::SamlResponseFailed(
             "no verified Signature references the consumed Assertion \
              (XML Signature Wrapping rejected)"

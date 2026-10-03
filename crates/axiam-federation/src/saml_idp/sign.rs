@@ -13,7 +13,7 @@ use axiam_core::models::saml_idp_credential::{SamlIdpCredential, SamlIdpCredenti
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
-use samael::crypto::{CertificateDer, CryptoProvider, XmlSec};
+use samael::crypto::{CertificateDer, CryptoProvider, ReduceMode, XmlSec};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -163,10 +163,9 @@ pub(super) fn sign(document: &str, key_der: &[u8]) -> Result<String, SamlIdpErro
 ///   `#response_id`; otherwise none there;
 /// * no other `ds:Signature` anywhere, and no duplicate `ID`.
 ///
-/// Signatures are checked with the same xmlsec verifier the SP side uses, one
-/// document per signature: the response as delivered (whose first signature is
-/// the response's when it is signed, the assertion's otherwise), and the
-/// assertion lifted out on its own when the response is signed too.
+/// Signatures are checked the way the SP side checks them since D-23: every
+/// `ds:Signature` in the response as delivered is verified on its own node by
+/// xmlsec (`reduce_xml_to_signed`), not just the first one.
 pub(super) fn verify_output(
     response: &str,
     cert_der: &[u8],
@@ -235,15 +234,9 @@ pub(super) fn verify_output(
     }
 
     let cert = CertificateDer::from(cert_der.to_vec());
-    let verify = |document: &str| {
-        <XmlSec as CryptoProvider>::verify_signed_xml(document.as_bytes(), &cert, Some("ID"))
-            .map_err(|_| fail("a signature does not verify"))
-    };
-    verify(response)?;
-    if response_signed {
-        verify(&doc.node_to_string(assertion))?;
-    }
-    Ok(())
+    <XmlSec as CryptoProvider>::reduce_xml_to_signed(response, &[cert], ReduceMode::PreDigest)
+        .map(|_| ())
+        .map_err(|_| fail("a signature does not verify"))
 }
 
 fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str) -> bool {

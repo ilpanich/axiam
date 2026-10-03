@@ -797,6 +797,7 @@ async fn xsw1_and_xsw2_wrapped_copies_of_a_signed_response_are_refused_by_the_sp
             .expect_err(shape);
         assert!(
             format!("{err:?}").contains("exactly 1 Assertion")
+                || format!("{err:?}").contains("(XSW)")
                 || matches!(err, crate::error::FederationError::SamlSignatureInvalid(_)),
             "{shape}: refused for the wrong reason: {err:?}"
         );
@@ -830,30 +831,25 @@ async fn assertion_level_wrapping_of_the_builder_output_is_refused_by_the_sp() {
             .expect_err(shape);
         // Two sibling assertions never reach the XSW check: samael's
         // deserializer refuses the duplicate first. A nested one parses and is
-        // refused by the one-assertion rule.
+        // refused by the signature placement rule (D-23): its signature is no
+        // longer the enveloped child of an Assertion that is the root's child.
         let text = format!("{err:?}");
         assert!(
-            text.contains("exactly 1 Assertion") || text.contains("duplicate field `Assertion`"),
+            text.contains("exactly 1 Assertion")
+                || text.contains("duplicate field `Assertion`")
+                || text.contains("(XSW)"),
             "{shape}: {err:?}"
         );
     }
 }
 
-/// **Pre-existing SP-side finding (reported by T23.2.2, not fixed here).**
-///
-/// `SamlFederationService::verify_signature` verifies only the *first*
-/// `ds:Signature` in document order (`xmlSecFindNode`), and
-/// `bind_signature_to_assertion` accepts *any* `Reference` naming the
-/// assertion, verified or not. A document the IdP's key signed that contains no
-/// assertion (a signed `LogoutRequest` or `LogoutResponse`, a signed error
-/// response — which this issuer never produces, see the module docs — or signed
-/// metadata) placed ahead of a forged assertion carrying an unverified
-/// signature that names it passes both checks.
-///
-/// Ignored so the suite stays green; un-ignore with the fix (verify every
-/// signature, and bind the assertion to a signature that *verified*).
+/// **Signature confusion (D-23).** Found by T23.2.2 in AXIAM's own SP verifier
+/// and fixed in the same task: `verify_signature` used to verify only the
+/// *first* `ds:Signature` in document order, and `bind_signature_to_assertion`
+/// accepted *any* `Reference` naming the assertion, verified or not. A document
+/// the IdP's key signed that carries no assertion, placed ahead of a forged
+/// assertion with a dummy signature naming it, passed both.
 #[tokio::test]
-#[ignore = "pre-existing SP-side finding: only the first signature is verified (T23.2.2 report)"]
 async fn a_signed_assertion_free_document_cannot_vouch_for_a_forged_assertion() {
     let forged = signature_confusion_document();
     assert!(
@@ -864,47 +860,249 @@ async fn a_signed_assertion_free_document_cannot_vouch_for_a_forged_assertion() 
     );
 }
 
-/// The probe behind the ignored test, run on every build: it documents the
-/// current behaviour so a fix is noticed (this test then fails and should be
-/// deleted together with the `#[ignore]` above).
-#[tokio::test]
-async fn sp_side_finding_probe_signature_confusion_is_currently_accepted() {
-    let forged = signature_confusion_document();
-    let accepted = sp_accepts(&forged, Some(REQUEST_ID), Some(ACS), true).await;
-    assert!(
-        accepted.is_ok(),
-        "the SP now refuses signature confusion — delete this probe and un-ignore \
-         a_signed_assertion_free_document_cannot_vouch_for_a_forged_assertion ({:?})",
-        accepted.err()
-    );
-}
-
 /// A logout request signed with the tenant's key (what T23.2.4's SLO, or any
 /// external IdP, signs), embedded ahead of a forged assertion whose own
 /// signature element is a copy that verifies nothing.
 fn signature_confusion_document() -> String {
-    let cert = crate::cert::pem_cert_to_der(&material().cert_pem).expect("der");
-    let logout_id = "_logout-request";
-    let logout = format!(
-        r#"<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{logout_id}" Version="2.0" IssueInstant="{}"><saml:Issuer>{}</saml:Issuer>{}<saml:NameID>someone</saml:NameID></samlp:LogoutRequest>"#,
-        xml::instant(Utc::now()),
-        idp_entity_id(BASE_URL, tenant()),
-        sign::signature_template(logout_id, &cert),
-    );
+    let evil = evil_assertion_with(Dummy::Enveloped, None);
+    forged_response(
+        &format!(
+            "<samlp:Extensions>{}</samlp:Extensions>",
+            gadget(Gadget::LogoutRequest)
+        ),
+        "",
+        &evil,
+    )
+}
+
+/// Documents the tenant's key signs that carry no assertion.
+#[derive(Debug, Clone, Copy)]
+enum Gadget {
+    LogoutRequest,
+    LogoutResponse,
+    ErrorResponse,
+}
+
+/// Where the forged assertion's dummy (unverifiable) signature sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dummy {
+    /// As the assertion's enveloped child, referencing it.
+    Enveloped,
+    /// As a child of the response root, still referencing the assertion.
+    AtTheRoot,
+    /// Inside `Extensions`, referencing the assertion.
+    InExtensions,
+}
+
+/// Where the gadget sits.
+#[derive(Debug, Clone, Copy)]
+enum Placement {
+    Extensions,
+    SiblingOfTheAssertion,
+    AdviceOfTheAssertion,
+}
+
+const EVIL_ID: &str = "_evil-assertion";
+
+fn signed(document: &str) -> String {
     let key = signing_key();
     let key_der = sign::private_key_der(&key).expect("der");
-    let signed_logout = sign::sign(&logout, &key_der).expect("signed logout request");
-    let bogus_signature = sign::signature_template("_evil-assertion", &cert);
-    let evil = evil_assertion("_evil-assertion").replacen(
-        "<saml:Subject>",
-        &format!("{bogus_signature}<saml:Subject>"),
-        1,
-    );
+    sign::sign(document, &key_der).expect("signed gadget")
+}
+
+fn cert_bytes() -> Vec<u8> {
+    crate::cert::pem_cert_to_der(&material().cert_pem).expect("der")
+}
+
+/// A document of `kind`, validly signed with the tenant's credential.
+fn gadget(kind: Gadget) -> String {
+    let id = xml::new_id();
+    let at = xml::instant(Utc::now());
+    let issuer = idp_entity_id(BASE_URL, tenant());
+    let template = sign::signature_template(&id, &cert_bytes());
+    let ns = r#"xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion""#;
+    let document = match kind {
+        Gadget::LogoutRequest => format!(
+            r#"<samlp:LogoutRequest {ns} ID="{id}" Version="2.0" IssueInstant="{at}"><saml:Issuer>{issuer}</saml:Issuer>{template}<saml:NameID>someone</saml:NameID></samlp:LogoutRequest>"#
+        ),
+        Gadget::LogoutResponse => format!(
+            r#"<samlp:LogoutResponse {ns} ID="{id}" Version="2.0" IssueInstant="{at}" InResponseTo="{REQUEST_ID}"><saml:Issuer>{issuer}</saml:Issuer>{template}<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status></samlp:LogoutResponse>"#
+        ),
+        Gadget::ErrorResponse => format!(
+            r#"<samlp:Response {ns} ID="{id}" Version="2.0" IssueInstant="{at}" Destination="{ACS}" InResponseTo="{REQUEST_ID}"><saml:Issuer>{issuer}</saml:Issuer>{template}<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Requester"/></samlp:Status></samlp:Response>"#
+        ),
+    };
+    signed(&document)
+}
+
+/// The forged assertion, optionally with its dummy signature enveloped and
+/// optionally carrying `advice` (in `saml:Advice`, after `Conditions`).
+fn evil_assertion_with(dummy: Dummy, advice: Option<&str>) -> String {
+    let mut evil = evil_assertion(EVIL_ID);
+    if dummy == Dummy::Enveloped {
+        evil = evil.replacen(
+            "<saml:Subject>",
+            &format!(
+                "{}<saml:Subject>",
+                sign::signature_template(EVIL_ID, &cert_bytes())
+            ),
+            1,
+        );
+    }
+    if let Some(advice) = advice {
+        evil = evil.replacen(
+            "</saml:Assertion>",
+            &format!("<saml:Advice>{advice}</saml:Advice></saml:Assertion>"),
+            1,
+        );
+    }
+    evil
+}
+
+/// A response: `after_issuer` (signatures, `Extensions`), `Status` Success,
+/// then `body` (the assertion and anything beside it).
+fn forged_response(after_issuer: &str, before_assertion: &str, body: &str) -> String {
     format!(
-        r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_evil-response" Version="2.0" IssueInstant="{}" Destination="{ACS}" InResponseTo="{REQUEST_ID}"><saml:Issuer>{}</saml:Issuer><samlp:Extensions>{signed_logout}</samlp:Extensions><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>{evil}</samlp:Response>"#,
+        r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_evil-response" Version="2.0" IssueInstant="{}" Destination="{ACS}" InResponseTo="{REQUEST_ID}"><saml:Issuer>{}</saml:Issuer>{after_issuer}<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>{before_assertion}{body}</samlp:Response>"#,
         xml::instant(Utc::now()),
         idp_entity_id(BASE_URL, tenant()),
     )
+}
+
+/// Every gadget, in every placement, with the dummy signature enveloped or
+/// elsewhere: none may vouch for the forged assertion (D-23).
+#[tokio::test]
+async fn no_signed_gadget_vouches_for_a_forged_assertion_wherever_it_is_placed() {
+    let mut cases = 0;
+    for kind in [
+        Gadget::LogoutRequest,
+        Gadget::LogoutResponse,
+        Gadget::ErrorResponse,
+    ] {
+        for placement in [
+            Placement::Extensions,
+            Placement::SiblingOfTheAssertion,
+            Placement::AdviceOfTheAssertion,
+        ] {
+            for dummy in [Dummy::Enveloped, Dummy::AtTheRoot, Dummy::InExtensions] {
+                let g = gadget(kind);
+                let dummy_sig = sign::signature_template(EVIL_ID, &cert_bytes());
+                let mut extensions = String::new();
+                if matches!(placement, Placement::Extensions) {
+                    extensions.push_str(&g);
+                }
+                if dummy == Dummy::InExtensions {
+                    extensions.push_str(&dummy_sig);
+                }
+                let mut after_issuer = String::new();
+                if dummy == Dummy::AtTheRoot {
+                    after_issuer.push_str(&dummy_sig);
+                }
+                if !extensions.is_empty() {
+                    after_issuer.push_str(&format!(
+                        "<samlp:Extensions>{extensions}</samlp:Extensions>"
+                    ));
+                }
+                let advice =
+                    matches!(placement, Placement::AdviceOfTheAssertion).then_some(g.as_str());
+                let before = if matches!(placement, Placement::SiblingOfTheAssertion) {
+                    g.as_str()
+                } else {
+                    ""
+                };
+                let forged =
+                    forged_response(&after_issuer, before, &evil_assertion_with(dummy, advice));
+                let result = sp_accepts(&forged, Some(REQUEST_ID), Some(ACS), true).await;
+                assert!(
+                    result.is_err(),
+                    "{kind:?} gadget, {placement:?}, dummy {dummy:?}: the forged assertion was accepted"
+                );
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(cases, 27);
+
+    // The signed error response as the document itself, with the forged
+    // assertion added to it: its own signature no longer verifies.
+    let error = gadget(Gadget::ErrorResponse);
+    let forged = error.replacen(
+        "</samlp:Response>",
+        &format!(
+            "{}</samlp:Response>",
+            evil_assertion_with(Dummy::Enveloped, None)
+        ),
+        1,
+    );
+    assert!(
+        sp_accepts(&forged, Some(REQUEST_ID), Some(ACS), true)
+            .await
+            .is_err()
+    );
+}
+
+/// A legitimately signed response carrying one extra, unsigned `Signature`
+/// element is refused wherever the extra one sits: at the root, in
+/// `Extensions`, or as a second signature in the assertion.
+#[tokio::test]
+async fn a_valid_response_with_an_extra_unsigned_signature_is_refused() {
+    for sign_responses in [false, true] {
+        let mut case = Case::new();
+        case.sp.sign_responses = sign_responses;
+        let issued = case.issue_ok();
+        let xml = decode(&issued);
+        sp_accepts(&xml, Some(REQUEST_ID), Some(ACS), true)
+            .await
+            .expect("the untouched response is accepted");
+
+        let issuer_close = "</saml:Issuer>";
+        let at_root = sign::signature_template(&issued.response_id, &cert_bytes());
+        let in_assertion = sign::signature_template(&issued.assertion_id, &cert_bytes());
+        let assertion_issuer_end = {
+            let from = xml.find("<saml:Assertion").expect("assertion");
+            from + xml[from..].find(issuer_close).expect("assertion issuer") + issuer_close.len()
+        };
+        let mut variants = vec![
+            (
+                "in Extensions",
+                xml.replacen(
+                    "<samlp:Status>",
+                    &format!("<samlp:Extensions>{at_root}</samlp:Extensions><samlp:Status>"),
+                    1,
+                ),
+            ),
+            ("a second one in the assertion", {
+                let mut v = xml.clone();
+                v.insert_str(assertion_issuer_end, &in_assertion);
+                v
+            }),
+            (
+                "after the assertion",
+                xml.replacen(
+                    "</samlp:Response>",
+                    &format!("{at_root}</samlp:Response>"),
+                    1,
+                ),
+            ),
+        ];
+        if !sign_responses {
+            // Unsigned response: an unsigned root signature in the allowed
+            // place still has to verify.
+            variants.push((
+                "at the root",
+                xml.replacen("<samlp:Status>", &format!("{at_root}<samlp:Status>"), 1),
+            ));
+        }
+        for (where_, forged) in variants {
+            assert_ne!(forged, xml);
+            assert!(
+                sp_accepts(&forged, Some(REQUEST_ID), Some(ACS), true)
+                    .await
+                    .is_err(),
+                "sign_responses={sign_responses}: an extra signature {where_} was accepted"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

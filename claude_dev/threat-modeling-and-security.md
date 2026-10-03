@@ -22,6 +22,17 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-03 SAML SP signature-confusion fix (Phase 23 T23.2.2, D-23,
+> model 2.21.0).** No threat enters; one is amended. **T-67**, XML signature
+> wrapping at AXIAM's SAML service-provider side, stays Mitigated with a dated
+> note: building the IdP showed that the verifier checked only the first
+> signature in a response and accepted any reference that named the assertion,
+> so a document the identity provider had signed for another purpose (a logout
+> message, an error response) could vouch for a forged assertion. Every
+> signature is now verified on its own, a signature is accepted only as the
+> enveloped child of the response or of its assertion, and the assertion must
+> carry its own. The model stays at **316 threats, 298 mitigated / 18 open**.
+>
 > **The 2026-10-03 SAML identity provider issuer entry (Phase 23 T23.2.2,
 > model 2.21.0).** Thirteen threats enter, nine Mitigated on arrival and four
 > open, with a new trust boundary — **AXIAM ↔ SAML service provider** — around a
@@ -1449,7 +1460,10 @@ Inbound federation is a deliberate delegation of trust to an external IdP, harde
 against the classic federation attacks:
 
 - **SAML** verifies the signature over the *exact* element it then consumes (XML
-  Signature Wrapping defence), rejects unsigned or multiply-signed responses, checks
+  Signature Wrapping defence) — **every** signature in the response, each on its
+  own, with a signature accepted only as the enveloped child of the response or
+  of its single assertion and the assertion required to carry its own (D-23) —
+  rejects unsigned or multiply-signed responses, checks
   `Conditions`, `NotBefore`/`NotOnOrAfter`, `Audience`, `Destination` and
   `InResponseTo`, and refuses replayed assertion IDs.
 - **OIDC federation** requires `state` and `nonce` from server-side flow state

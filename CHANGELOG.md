@@ -330,6 +330,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **SAML SP: a signed document without an assertion can no longer vouch for a
+  forged one (T23.2.2, D-23, T-67).** The SAML assertion consumer verified only
+  the *first* `ds:Signature` in a response and bound the assertion to *any*
+  `Reference` that named it, verified or not. A document the upstream identity
+  provider signed for another purpose — a signed `LogoutRequest` or
+  `LogoutResponse`, a signed error response — placed ahead of a forged
+  assertion carrying a dummy signature made the forged assertion pass, and the
+  ACS signed in (or provisioned) whatever user it named: an authentication
+  bypass on every SAML federation whose IdP signs such messages with its
+  assertion key. A `ds:Signature` is now accepted only as the enveloped child of
+  the `Response` root or of the `Assertion` that is its child, at most one per
+  parent and each referencing its parent's `ID`; any other `Signature` element
+  refuses the whole response; every signature is verified individually on its
+  own node; IDs must be unique `NCName`s; and the assertion must carry its own
+  enveloped signature. A response signed only at the `Response` level was
+  already refused and still is. Present in every release that shipped SAML
+  federation.
+
 - **A directory configuration update can no longer redirect the stored bind
   secret (F4 P23W2-01, T-298).** `DirectoryConfigRepository::update` kept the
   encrypted bind secret whenever the request carried no new one, whatever else

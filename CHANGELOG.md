@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory sources: just-in-time provisioning and linking (T23.3.3, G-3, D-28).**
+  A login name that matches no local account is now offered to the tenant's
+  directory when it has an enabled directory with `jit_provisioning`: the typed
+  name and password are authenticated through the same bind as a directory
+  sign-in, timed beside the same dummy Argon2id verify under the same hash
+  permit, and on success the account is created **in one write** — `Active`,
+  marked with the entry's `entryUUID` / `objectGUID`, an unusable password hash,
+  `username` and `email` from the mapped attributes, the display name in
+  `metadata.oidc.name` — and the login continues like any other (MFA policy,
+  `amr = [pwd]`). A second first login for the same entry finds the first one's
+  account; the unique indexes make two concurrent ones yield one account. Every
+  other outcome — no directory, `jit_provisioning` off (answered **before** any
+  connection), a wrong password, no such entry, a directory that is down — is
+  exactly the unknown-name answer at the same cost. **A directory never takes
+  over a local account (D-28):** an entry whose username or email equals, in any
+  case and across both columns, an existing account's is refused with the
+  generic failure and a `directory.jit_refused` audit row; so is an entry with
+  no usable e-mail address. Attributes the directory supplies are bounded and
+  cleaned (control and bidirectional-override characters) before they are
+  stored. Linking an existing account is an explicit act,
+  `AuthService::link_local_account_to_directory` (no route yet — T23.3.8): it
+  resolves the entry through the directory by the account's login name, refuses
+  one already linked to another account, marks the account, then deletes its
+  WebAuthn credentials, revokes its `User`-type certificates and every session
+  and OAuth2 refresh token (TOTP is kept), and writes `directory.account_linked`;
+  interrupted, it is safe to repeat. New audit actions: `directory.jit_provisioned`,
+  `directory.jit_refused`, `directory.account_linked`. No API, contract or SDK
+  change. Repository additions: `UserRepository::create_directory_account` and
+  `find_identity_collision`, `CertificateRepository::revoke_user_certificates`.
+
 - **SAML 2.0 identity provider: the SSO endpoint (T23.2.3, G-2, D-24 … D-27).**
   `/saml/v2/{tenant_id}/sso` serves the Web Browser SSO profile per tenant, on
   the HTTP-Redirect (`GET`) and HTTP-POST (`POST`) bindings, plus

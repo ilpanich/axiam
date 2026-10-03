@@ -1097,6 +1097,15 @@ async fn main() -> std::io::Result<()> {
                 config.directory_encryption_key,
             ),
         ),
+    ))
+    // G-3 (T23.3.3): the rows for just-in-time provisioning, its refusals and
+    // the linking of an account, on the same append-only repository (and the
+    // same minimisation) as every other audit row.
+    .with_directory_audit(Arc::new(
+        axiam_auth::service::RepositoryDirectoryAuditSink(
+            SurrealAuditLogRepository::new(pool.handle_for_repo())
+                .with_minimisation(audit_minimisation),
+        ),
     ));
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());

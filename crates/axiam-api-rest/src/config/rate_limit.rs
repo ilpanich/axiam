@@ -20,8 +20,10 @@ use serde::Deserialize;
 /// on the endpoints where a client identity is actually known.
 ///
 /// **Scope — where this setting applies:** ONLY the three endpoints where an
-/// OAuth2 client authenticates itself via a form-encoded `client_id`
-/// (`client_secret_post`, RFC 6749 §2.3.1): `/oauth2/token`,
+/// OAuth2 client authenticates itself and names itself by a form-encoded
+/// `client_id` (`client_secret_post`, RFC 6749 §2.3.1) or by an
+/// `Authorization: Basic` header (`client_secret_basic`; the header's id
+/// selects the same bucket the form's would — T23.1.5): `/oauth2/token`,
 /// `/oauth2/revoke`, `/oauth2/introspect` (see `handlers::oauth2` and
 /// `server.rs`'s wiring of `RateLimitShared::new_client_identity_aware` /
 /// the client-aware governor for exactly those three resources).

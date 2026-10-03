@@ -916,6 +916,18 @@ pub async fn patch<C: Connection + Clone>(
     // paths do (see `axiam_api_rest::handlers::bootstrap`). Hashing with `None`
     // here would store a hash computed WITHOUT the pepper while login verifies
     // WITH it, so every SCIM-provisioned user would fail authentication.
+    //
+    // G-3 (T23.3.2): never for a directory account. Its password belongs to
+    // the tenant's directory, and a local hash written here would be a second
+    // credential for the account that the directory's own policy never sees —
+    // the takeover path that refusing local password writes exists to close.
+    // `mutability` is RFC 7644 §3.12's own `scimType` for an attribute the
+    // caller may not write.
+    if delta.password.is_some() && current.is_directory_account() {
+        return Err(ScimError::mutability(
+            "\"password\" is managed by the tenant's directory for this account",
+        ));
+    }
     let pepper = state.auth_config.pepper.as_ref().map(|p| p.expose_secret());
     let password_hash = match &delta.password {
         Some(pw) => Some(password::hash_password(pw, pepper).map_err(|e| {

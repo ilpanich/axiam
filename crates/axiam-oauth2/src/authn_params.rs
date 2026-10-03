@@ -37,7 +37,7 @@
 //! | `prompt` | yes | that the OP did, or did not, interact with the user |
 //! | `max_age` | yes | an upper bound on the age of the authentication |
 //! | `acr_values` | yes | which authentication method was used |
-//! | `claims` | yes | (its `id_token.acr` member) the same |
+//! | `claims` | yes | (its `id_token.acr` member) the same; (its **essential** `id_token.auth_time` member, D-12) that the authentication instant was reported |
 //! | `id_token_hint` | yes | which subject the RP believes is present |
 //! | `login_hint` | no | a prefill for a form |
 //! | `display` | no | a layout request |
@@ -100,10 +100,11 @@ impl Prompt {
 
 /// What an RP asked for in `claims.id_token.acr` (OIDC Core §5.5.1).
 ///
-/// Only this one member of the `claims` document is modelled, and discovery
-/// says so with `claims_parameter_supported: false`: a partially-honoured
-/// `claims` document is worse than an unsupported one, because an RP cannot
-/// tell which members were read.
+/// Only this one member of the `claims` document is modelled *here*; the
+/// `userinfo` members are read by `crate::claims_request`, and discovery
+/// publishes `claims_parameter_supported: true` for the two together. An
+/// `id_token.acr` request is honoured on the honour lane only, and refused on
+/// `fapi2` rather than dropped (see [`SECURITY_BEARING`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AcrRequest {
     /// `essential: true` — the RP wants the request to *fail* rather than
@@ -191,6 +192,25 @@ impl<'a> From<&'a PushedAuthParams> for RawAuthnParams<'a> {
 /// not, which is the shape the FAPI suite's
 /// `test-claims-parameter-identity-claims` module sends.
 /// See [`AuthnRequestParams::security_bearing_present`].
+///
+/// # …and the second member that is dropped (D-12, T23.1.4)
+///
+/// OIDC Core §2 makes `auth_time` REQUIRED in the ID token when it is requested
+/// as an **essential** claim, and a `fapi2` ID token has never carried it
+/// ([`crate::fapi::emits_session_evidence`] is the honour lane only). So a
+/// `fapi2` client sending `claims={"id_token":{"auth_time":{"essential":true}}}`
+/// was served a token without the claim it said it could not do without, and no
+/// error — the same silent downgrade, in the same parameter, as `id_token.acr`.
+/// It is refused exactly as `id_token.acr` is, and for the same reason.
+///
+/// Only the **essential** form is refused. `"auth_time": null` and
+/// `{"essential": false}` are voluntary requests, which OIDC Core §5.5.1 lets
+/// an OP decline to satisfy without telling anyone, so honouring them by
+/// omission is conformant and refusing them would turn away a request AXIAM
+/// can answer truthfully. A member that cannot be read (not `null`, not an
+/// object, or an `essential` that is not a boolean) cannot be shown to be
+/// voluntary and is treated as essential, the rule an unreadable `acr` member
+/// already follows.
 const SECURITY_BEARING: [&str; 4] = ["prompt", "max_age", "acr_values", "id_token_hint"];
 
 /// The parsed bundle.
@@ -231,6 +251,13 @@ pub struct AuthnRequestParams {
     /// enough to rule that out — the one member of `claims` that is dropped
     /// off the honour lane. See [`SECURITY_BEARING`]'s docs.
     claims_acr_requested: bool,
+    /// Whether `claims` asked for `id_token.auth_time` as **essential**, or
+    /// asked for it in a form that cannot be shown to be voluntary (D-12).
+    /// Deliberately separate from [`Self::claims_acr_requested`], and not a
+    /// parse error: on the honour lane an essential `auth_time` is simply
+    /// honoured (the lane emits it for every session), so an unreadable member
+    /// must not start refusing honour-lane clients that work today.
+    claims_auth_time_essential: bool,
 }
 
 impl AuthnRequestParams {
@@ -307,16 +334,19 @@ impl AuthnRequestParams {
             // the ACR request either present or impossible to rule out, which
             // is what `claims_acr_requested` records for the FAPI gate.
             match serde_json::from_str::<serde_json::Value>(raw_claims) {
-                Ok(doc) => match parse_claims_acr(&doc) {
-                    Ok(acr) => {
-                        out.claims_acr_requested = acr.is_some();
-                        out.claims_acr = acr;
+                Ok(doc) => {
+                    out.claims_auth_time_essential = auth_time_may_be_essential(&doc);
+                    match parse_claims_acr(&doc) {
+                        Ok(acr) => {
+                            out.claims_acr_requested = acr.is_some();
+                            out.claims_acr = acr;
+                        }
+                        Err(e) => {
+                            out.claims_acr_requested = true;
+                            fail(&mut out, e);
+                        }
                     }
-                    Err(e) => {
-                        out.claims_acr_requested = true;
-                        fail(&mut out, e);
-                    }
-                },
+                }
                 Err(e) => {
                     out.claims_acr_requested = true;
                     fail(&mut out, format!("claims is not a JSON object: {e}"));
@@ -388,16 +418,20 @@ impl AuthnRequestParams {
     /// what a token means. See the module docs for why the four cosmetic ones
     /// are not on this list.
     ///
-    /// `claims` is on it only when it asked for `id_token.acr`, or could not
-    /// be read well enough to rule that out; a `claims` that asks only for
-    /// `userinfo` members is honoured on every lane and is not refusable. See
-    /// [`SECURITY_BEARING`]'s docs for why.
+    /// `claims` is on it only when it asked for `id_token.acr`, asked for
+    /// `id_token.auth_time` as essential (D-12), or could not be read well
+    /// enough to rule either out; a `claims` that asks only for `userinfo`
+    /// members, or for `auth_time` voluntarily, is honoured (or truthfully
+    /// omitted) on every lane and is not refusable. See [`SECURITY_BEARING`]'s
+    /// docs for why.
     pub fn security_bearing_present(&self) -> Vec<&'static str> {
         self.present
             .iter()
             .copied()
             .filter(|n| {
-                SECURITY_BEARING.contains(n) || (*n == "claims" && self.claims_acr_requested)
+                SECURITY_BEARING.contains(n)
+                    || (*n == "claims"
+                        && (self.claims_acr_requested || self.claims_auth_time_essential))
             })
             .collect()
     }
@@ -412,13 +446,40 @@ fn present(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }
 
+/// Whether a parsed `claims` document asks for `id_token.auth_time` as an
+/// essential claim — or in a form that cannot be shown *not* to (D-12).
+///
+/// `false` for no member, `null` (OIDC Core §5.5: "requested with no
+/// constraints", i.e. voluntary) and `{"essential": false}` or an object with
+/// no `essential`. `true` for `{"essential": true}`, and fail-closed `true` for
+/// a member that is neither `null` nor an object, or whose `essential` is not a
+/// boolean. A document that is not an object at all is `false` here: it is
+/// already unreadable, which `parse_claims_acr` reports.
+fn auth_time_may_be_essential(doc: &serde_json::Value) -> bool {
+    let Some(member) = doc.get("id_token").and_then(|t| t.get("auth_time")) else {
+        return false;
+    };
+    if member.is_null() {
+        return false;
+    }
+    let Some(obj) = member.as_object() else {
+        return true;
+    };
+    match obj.get("essential") {
+        None => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => true,
+    }
+}
+
 /// Read `claims.id_token.acr` (OIDC Core §5.5.1) out of a parsed document.
 ///
 /// `Ok(None)` means the document parsed and asked for no ACR — which is the
 /// common case, and not an error: `claims` is frequently sent asking for
-/// `userinfo` members AXIAM does not implement, and discovery already says
-/// `claims_parameter_supported: false`. Only a *malformed* `id_token.acr` is
-/// an error, because that one member is the one AXIAM promises to read.
+/// `userinfo` members, which `crate::claims_request` reads, not this function
+/// (discovery publishes `claims_parameter_supported: true`). Only a
+/// *malformed* `id_token.acr` is an error, because that is the one member this
+/// function reads.
 fn parse_claims_acr(doc: &serde_json::Value) -> Result<Option<AcrRequest>, String> {
     if !doc.is_object() {
         return Err("claims must be a JSON object (OIDC Core §5.5)".to_owned());
@@ -779,6 +840,71 @@ mod tests {
             });
             assert!(p.parse_error().is_none(), "{doc}");
             assert!(p.security_bearing_present().is_empty(), "{doc}");
+        }
+    }
+
+    /// D-12 — an **essential** `claims.id_token.auth_time` is security-bearing
+    /// in every spelling that asks for it, beside other members included: OIDC
+    /// Core §2 makes the claim REQUIRED then, and a `fapi2` ID token never
+    /// carries it. A member that cannot be read cannot be shown to be voluntary
+    /// and counts as essential, as an unreadable `acr` member does.
+    #[test]
+    fn an_essential_auth_time_request_is_security_bearing() {
+        for doc in [
+            r#"{"id_token":{"auth_time":{"essential":true}}}"#,
+            r#"{"id_token":{"auth_time":{"essential":true,"value":1}}}"#,
+            r#"{"userinfo":{"name":null},"id_token":{"auth_time":{"essential":true}}}"#,
+            // Unreadable member: not shown to be voluntary.
+            r#"{"id_token":{"auth_time":42}}"#,
+            r#"{"id_token":{"auth_time":"yes"}}"#,
+            r#"{"id_token":{"auth_time":{"essential":"yes"}}}"#,
+            r#"{"id_token":{"auth_time":[]}}"#,
+        ] {
+            let p = parse(RawAuthnParams {
+                claims: Some(doc),
+                ..Default::default()
+            });
+            assert_eq!(p.security_bearing_present(), ["claims"], "{doc}");
+        }
+    }
+
+    /// D-12, the other side of the line: a **voluntary** `auth_time` request is
+    /// not refusable, and neither is any other `id_token` member.
+    #[test]
+    fn a_voluntary_auth_time_request_is_not_security_bearing() {
+        for doc in [
+            r#"{"id_token":{"auth_time":null}}"#,
+            r#"{"id_token":{"auth_time":{"essential":false}}}"#,
+            r#"{"id_token":{"auth_time":{}}}"#,
+            r#"{"id_token":{"auth_time":{"value":1}}}"#,
+            r#"{"id_token":{"auth_time":null,"given_name":{"essential":true}}}"#,
+            // `auth_time` under `userinfo` is not an ID token claim request.
+            r#"{"userinfo":{"auth_time":{"essential":true}}}"#,
+        ] {
+            let p = parse(RawAuthnParams {
+                claims: Some(doc),
+                ..Default::default()
+            });
+            assert!(p.security_bearing_present().is_empty(), "{doc}");
+            assert!(p.parse_error().is_none(), "{doc}");
+        }
+    }
+
+    /// D-12 and the honour lane: an `auth_time` member is never a parse error,
+    /// because the honour lane refuses a parse error and honours `auth_time`
+    /// anyway; only the `fapi2` gate reads the flag.
+    #[test]
+    fn an_essential_auth_time_request_is_never_a_parse_error() {
+        for doc in [
+            r#"{"id_token":{"auth_time":{"essential":true}}}"#,
+            r#"{"id_token":{"auth_time":42}}"#,
+            r#"{"id_token":{"auth_time":{"essential":"yes"}}}"#,
+        ] {
+            let p = parse(RawAuthnParams {
+                claims: Some(doc),
+                ..Default::default()
+            });
+            assert!(p.parse_error().is_none(), "{doc}");
         }
     }
 

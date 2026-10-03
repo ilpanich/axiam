@@ -53,15 +53,29 @@
 //!
 //! # `max_age = 0`
 //!
-//! `elapsed = floor(now − authenticated_at)`, reauthenticate iff
-//! `elapsed >= max_age`, per plan §4.3 — no special case and no leeway in the
-//! relying party's disfavour. One consequence is worth stating out loud
-//! because the plan's prose does not: **`max_age=0` can never be satisfied by
-//! any code.** It always demands a reauthentication, and the reauthentication
-//! it produces is itself zero seconds old, so `0 >= 0` holds again on the
-//! return leg and the answer is `login_required`. An RP that sends `max_age=0`
-//! is asking for an authentication of age zero, which no clock can report; the
-//! honest answer is the refusal, not a code minted under a rounder comparison.
+//! **Decision D-14 (T23.1.4): `max_age=0` is handled as `prompt=login`.**
+//! OIDC Core §3.1.2.1 (1.0 incorporating errata set 2) re-authenticates when
+//! the elapsed time is *greater than* `max_age` and says `max_age=0` is
+//! equivalent to `prompt=login`. The plan's literal `elapsed >= max_age`
+//! applied to `0` meant the reauthentication the hop produces was itself
+//! "too old" (`0 >= 0`), so the return leg answered `login_required` and an RP
+//! sending `max_age=0` could never sign in.
+//!
+//! So `max_age=0` takes **the `prompt=login` path and no path of its own**:
+//! the outbound leg always interacts (`reauth=1`, [`Reason::PromptAsked`]), and
+//! the return leg — whose session the hop itself just created — proceeds to a
+//! code whose `auth_time` is that new authentication. A forged return-leg
+//! marker on an old session behaves exactly as it does for `prompt=login`: the
+//! interaction is skipped, which only the request's author could have asked
+//! for, and `auth_time` still reports the old authentication truthfully.
+//! `prompt=none` with `max_age=0` is `login_required` (it can never be
+//! satisfied without interaction; not `invalid_request`, because `max_age` is
+//! not a `prompt` value and the parse treats them as independent).
+//!
+//! Positive values keep `elapsed >= max_age` (floored whole seconds, no
+//! leeway): one instant stricter than the clause, harmless, and pinned by the
+//! Basic OP module `oidcc-max-age-1`. An unmet positive `max_age` on the return
+//! leg is still `login_required`.
 //!
 //! # W5's cosmetic four are not here
 //!
@@ -264,8 +278,13 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
 
     // `max_age`: whole seconds, floored, never in the relying party's favour.
     // No session is "infinitely old" rather than "unconstrained".
+    //
+    // D-14: `max_age=0` is `prompt=login`, so it is not a freshness *test* at
+    // all (it would fail on the return leg, `0 >= 0`); it is folded into
+    // `asked_for_interaction` below and shares every rule of that path.
+    let max_age_is_login = params.max_age == Some(0);
     let max_age_unmet = match params.max_age {
-        None => false,
+        None | Some(0) => false,
         Some(limit) => match req.auth_time {
             None => true,
             Some(at) => elapsed_secs(req.now, at) >= limit,
@@ -280,10 +299,11 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
             hint.subject_id == Some(req.subject) && hint.client_id == req.client_id
         });
 
-    let asked_for_interaction = params
-        .prompt
-        .iter()
-        .any(|p| matches!(p, Prompt::Login | Prompt::Consent | Prompt::SelectAccount));
+    let asked_for_interaction = max_age_is_login
+        || params
+            .prompt
+            .iter()
+            .any(|p| matches!(p, Prompt::Login | Prompt::Consent | Prompt::SelectAccount));
     let select_account = params.prompt.contains(&Prompt::SelectAccount);
 
     // The value the code would carry, if a code is issued. Computed once so
@@ -314,6 +334,14 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
             return Outcome::Refuse(OAuth2Error::LoginRequired(
                 "the authentication behind this session is older than the requested max_age, \
                  and prompt=none forbids asking the end user to authenticate again"
+                    .into(),
+            ));
+        }
+        if max_age_is_login {
+            // D-14: `max_age=0` is `prompt=login`, which `prompt=none` forbids.
+            return Outcome::Refuse(OAuth2Error::LoginRequired(
+                "max_age=0 asks the end user to authenticate again, and prompt=none forbids \
+                 asking the end user to do anything"
                     .into(),
             ));
         }
@@ -373,10 +401,7 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
     }
     if max_age_unmet {
         return Outcome::Refuse(OAuth2Error::LoginRequired(
-            "the sign-in did not produce an authentication newer than the requested max_age; \
-             a max_age of 0 cannot be satisfied by any authentication, since one is never \
-             zero seconds old"
-                .into(),
+            "the sign-in did not produce an authentication newer than the requested max_age".into(),
         ));
     }
     if !acr_satisfied && acr_essential {
@@ -398,8 +423,7 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
 /// A clock that ran backwards (or an upstream provider asserting an
 /// authentication instant slightly in the future) yields `0` rather than a
 /// wrapped value: the session then reads as brand new, which is the *only*
-/// direction that cannot manufacture a refusal out of a clock error — and
-/// `max_age = 0` still refuses it, because `0 >= 0`.
+/// direction that cannot manufacture a refusal out of a clock error.
 fn elapsed_secs(now: DateTime<Utc>, authenticated_at: DateTime<Utc>) -> u64 {
     let secs = (now - authenticated_at).num_seconds();
     u64::try_from(secs).unwrap_or(0)
@@ -493,10 +517,12 @@ mod tests {
 
     // ---- T2.1 / T2.2 / T2.3 — max_age ------------------------------------
 
-    /// **T2.1.** `max_age=0` against a one-second-old session reauthenticates.
-    /// The comparison is `>=`, so this holds for a session of *any* age.
+    /// **T2.1 (rewritten by D-14).** `max_age=0` is `prompt=login`: whatever
+    /// the session's age, the outbound leg interacts for the same reason
+    /// `prompt=login` does and demands no particular factor, and the return
+    /// leg — the session the hop just created — proceeds to a code.
     #[test]
-    fn t2_1_max_age_zero_always_reauthenticates() {
+    fn t2_1_max_age_zero_interacts_and_then_proceeds_exactly_as_prompt_login_does() {
         let f = Fixture::new();
         let p = params(RawAuthnParams {
             max_age: Some("0"),
@@ -506,25 +532,119 @@ mod tests {
             let out = evaluate(f.request(&p, age, &[Amr::Pwd]));
             assert_eq!(
                 interaction(&out).reason,
-                Reason::MaxAgeExceeded,
-                "a {age}s-old session cannot satisfy max_age=0"
+                Reason::PromptAsked,
+                "a {age}s-old session must be asked to sign in again for max_age=0"
+            );
+            assert_eq!(interaction(&out).required_acr, None);
+
+            let mut back = f.request(&p, 0, &[Amr::Pwd]);
+            back.return_leg = true;
+            assert!(
+                proceeds(&evaluate(back)).is_some(),
+                "the sign-in max_age=0 asked for has happened; a refusal would make \
+                 max_age=0 unusable"
             );
         }
+        // No session at all is still an interaction, not a refusal.
+        let mut anonymous = f.request(&p, 0, &[]);
+        anonymous.auth_time = None;
+        assert_eq!(
+            interaction(&evaluate(anonymous)).reason,
+            Reason::PromptAsked
+        );
     }
 
-    /// …and it is still unsatisfiable on the return leg, where the answer is a
-    /// refusal rather than a second hop. Stated as a test because it is the
-    /// consequence of `>=` the plan's prose does not spell out.
+    /// D-14's drift guard: `max_age=0` and `prompt=login` are the same decision
+    /// at every age, on both legs, with and without a session, beside other
+    /// requirements. If one is ever changed without the other, this fails.
     #[test]
-    fn max_age_zero_is_refused_rather_than_looped_after_a_reauthentication() {
+    fn max_age_zero_and_prompt_login_cannot_drift_apart() {
         let f = Fixture::new();
-        let p = params(RawAuthnParams {
+        let zero = params(RawAuthnParams {
             max_age: Some("0"),
             ..Default::default()
         });
-        let mut req = f.request(&p, 0, &[Amr::Pwd]);
+        let login = params(RawAuthnParams {
+            prompt: Some("login"),
+            ..Default::default()
+        });
+        let zero_mfa = params(RawAuthnParams {
+            max_age: Some("0"),
+            acr_values: Some(ACR_MULTI_FACTOR),
+            ..Default::default()
+        });
+        let login_mfa = params(RawAuthnParams {
+            prompt: Some("login"),
+            acr_values: Some(ACR_MULTI_FACTOR),
+            ..Default::default()
+        });
+        for (a, b) in [(&zero, &login), (&zero_mfa, &login_mfa)] {
+            for age in [0, 1, 3600] {
+                for amr in [&[Amr::Pwd][..], &[Amr::Pwd, Amr::Otp, Amr::Mfa][..]] {
+                    for return_leg in [false, true] {
+                        for session in [true, false] {
+                            let make = |p| {
+                                let mut r = f.request(p, age, amr);
+                                r.return_leg = return_leg;
+                                if !session {
+                                    r.auth_time = None;
+                                }
+                                r
+                            };
+                            assert_eq!(
+                                format!("{:?}", evaluate(make(a))),
+                                format!("{:?}", evaluate(make(b))),
+                                "age={age} return_leg={return_leg} session={session}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// D-14: `max_age=0` under `prompt=none` is `login_required` — it can never
+    /// be satisfied without the interaction `prompt=none` forbids — on either
+    /// leg and with or without a session. (Not `invalid_request`: `max_age` is
+    /// not a `prompt` value, so the parse does not reject the pair; the
+    /// evaluation does.)
+    #[test]
+    fn max_age_zero_under_prompt_none_is_login_required() {
+        let f = Fixture::new();
+        let p = params(RawAuthnParams {
+            prompt: Some("none"),
+            max_age: Some("0"),
+            ..Default::default()
+        });
+        assert!(p.parse_error().is_none());
+        for age in [0, 1, 3600] {
+            for return_leg in [false, true] {
+                let mut req = f.request(&p, age, &[Amr::Pwd]);
+                req.return_leg = return_leg;
+                assert_eq!(refusal_code(&evaluate(req)), "login_required");
+            }
+        }
+        let mut anonymous = f.request(&p, 0, &[]);
+        anonymous.auth_time = None;
+        assert_eq!(refusal_code(&evaluate(anonymous)), "login_required");
+    }
+
+    /// Positive values keep `>=`, and an unmet one is still answered on the
+    /// return leg rather than looped — the half of the old rule D-14 keeps.
+    #[test]
+    fn a_positive_max_age_that_the_sign_in_did_not_meet_is_still_login_required() {
+        let f = Fixture::new();
+        let p = params(RawAuthnParams {
+            max_age: Some("60"),
+            ..Default::default()
+        });
+        let mut req = f.request(&p, 3600, &[Amr::Pwd]);
         req.return_leg = true;
         assert_eq!(refusal_code(&evaluate(req)), "login_required");
+
+        // `>=`: a session exactly `max_age` old is already too old.
+        let out = evaluate(f.request(&p, 60, &[Amr::Pwd]));
+        assert_eq!(interaction(&out).reason, Reason::MaxAgeExceeded);
     }
 
     /// **T2.2.** A session older than `max_age` is stepped through the login
@@ -1004,7 +1124,7 @@ mod tests {
                 prompt: Some("login"),
                 ..Default::default()
             },
-            // A freshness bound no session meets: Interact, then Refuse.
+            // `max_age=0`, i.e. `prompt=login` (D-14): Interact, then Proceed.
             RawAuthnParams {
                 max_age: Some("0"),
                 ..Default::default()

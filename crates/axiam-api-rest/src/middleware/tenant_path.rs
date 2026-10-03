@@ -90,6 +90,17 @@ pub struct TenantPathBinding {
     /// `Arc` because several extractors and handlers read it on one request and
     /// none of them mutates it.
     pub auth_config: Arc<AuthConfig>,
+    /// The query string exactly as the client sent it, before this middleware
+    /// appended `tenant_id` (T23.1.8).
+    ///
+    /// For the one kind of reader that must echo the request back to the
+    /// browser rather than act on it: the login and interaction hops build a
+    /// `return_to` that the browser presents to this same scope again. Built
+    /// from the rewritten query it carried a `tenant_id`, and the return leg
+    /// was then refused by step 2 below — a parameter this middleware added,
+    /// refused by this middleware. Every handler that *acts* on the request
+    /// keeps reading the rewritten query, which is the point of the rewrite.
+    pub client_query: String,
 }
 
 impl TenantPathBinding {
@@ -241,9 +252,11 @@ where
             return refuse(req, HttpResponse::NotFound().finish());
         };
 
+        let client_query = req.query_string().to_owned();
         req.extensions_mut().insert(TenantPathBinding {
             tenant_id,
             auth_config: Arc::new(config),
+            client_query,
         });
 
         // 4. Hand the tenant to the handlers where they already look for it.

@@ -66,7 +66,7 @@ use surrealdb::Connection;
 
 use crate::config::rate_limit::RateLimitKeyMode;
 use crate::extractors::rate_limit::{
-    RateLimitClientId, XForwardedForKeyExtractor, extract_form_client_id,
+    RateLimitClientId, XForwardedForKeyExtractor, extract_client_id,
 };
 use crate::state::AppState;
 
@@ -172,8 +172,9 @@ impl<C: Connection + Clone> RateLimitShared<C> {
     }
 
     /// D8 constructor for the three endpoints where an OAuth2 client
-    /// authenticates itself via a form-encoded `client_id`
-    /// (`client_secret_post`, RFC 6749 §2.3.1): `/oauth2/token`,
+    /// authenticates itself and names itself by a form-encoded `client_id`
+    /// (`client_secret_post`, RFC 6749 §2.3.1) or by an `Authorization: Basic`
+    /// header (`client_secret_basic`, T23.1.5): `/oauth2/token`,
     /// `/oauth2/revoke`, `/oauth2/introspect`.
     ///
     /// When `key_mode` is [`RateLimitKeyMode::ClientId`] or
@@ -310,7 +311,14 @@ where
             let client_id = if client_identity_aware {
                 let client_id = if key_mode != RateLimitKeyMode::Ip {
                     let bytes = req.extract::<web::Bytes>().await.unwrap_or_default();
-                    let client_id = extract_form_client_id(&bytes);
+                    // T23.1.5: the form's `client_id`, else the one an
+                    // `Authorization: Basic` header names — a
+                    // `client_secret_basic` client sends it there alone.
+                    let authorization = req
+                        .headers()
+                        .get(actix_web::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok());
+                    let client_id = extract_client_id(&bytes, authorization);
                     // Restore the body EXACTLY as read so the handler's
                     // `web::Form<..>` extraction downstream is unaffected —
                     // this middleware must be transparent to the request.

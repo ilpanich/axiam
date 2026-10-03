@@ -1,0 +1,51 @@
+[package]
+name = "axiam-directory"
+description = "AXIAM directory identity source: LDAP / Active Directory configuration and validation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# The ratchet (root `Cargo.toml`, `[workspace.lints.rust]`): this crate opts in
+# from its first commit, so `missing_docs` is a warning locally and an error in
+# CI (`clippy -D warnings`). There is no backlog to document first.
+[lints]
+workspace = true
+
+# No feature flags: the crate is pure Rust and, once it speaks LDAP, does so
+# over `rustls` -- there is no system library to make optional (plan §7 rule 5).
+[dependencies]
+axiam-core = { workspace = true }
+# Configuration validation (src/config.rs). `url` parses the server URL,
+# `x509-parser` checks that each trust anchor is a CA certificate -- the same
+# parser axiam-pki and axiam-federation use, so no new crate enters the graph.
+thiserror = { workspace = true }
+url = { workspace = true }
+x509-parser = { workspace = true }
+# T23.3.2 — the LDAP client (src/client.rs, src/tls.rs). `ldap3` over rustls
+# only (workspace pin: `default-features = false`, `tls-rustls-ring`); the
+# `ClientConfig` is built here, from the tenant's anchors or `webpki-roots`.
+ldap3 = { workspace = true }
+rustls = { workspace = true, features = ["ring"] }
+rustls-pki-types = "1"
+webpki-roots = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# Runtime-minted fixture passwords and secrets (no credential literals in tests).
+axiam-test-support = { workspace = true }
+# Generates throwaway CA and leaf certificates for the trust-anchor tests.
+rcgen = { workspace = true }
+# The in-process test directory (tests/support): the server half of the LDAP
+# codec, a rustls acceptor, and the framing glue between them. Test-only; none
+# of these reaches the production graph.
+ldap3_proto = "0.8.1"
+tokio-rustls = { workspace = true }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", features = ["sink"] }
+tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros", "time"] }
+chrono = { workspace = true }

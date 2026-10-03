@@ -135,6 +135,10 @@ async fn setup(strong_method: ClientAuthMethod) -> Fixture {
         grant_types: vec![
             "authorization_code".into(),
             "refresh_token".into(),
+            // T23.1.5: so the three ordinary token grants can be asked the
+            // same question as the five endpoints above, without the grant
+            // check giving a second reason to refuse.
+            "client_credentials".into(),
             TOKEN_EXCHANGE_GRANT_TYPE.into(),
             UMA_TICKET_GRANT_TYPE.into(),
         ],
@@ -496,6 +500,71 @@ async fn a_strong_clients_secret_in_a_basic_header_is_refused_at_all_five_endpoi
                  client registered for a strong method. Got {}",
                 method.as_str(),
                 String::from_utf8_lossy(&raw)
+            );
+        }
+    }
+}
+
+/// **T23.1.5 (X7.8, "every endpoint that authenticates a client").** The five
+/// endpoints above reach `authenticate_client`; the three ordinary token
+/// grants reach `authenticate_client_credential` directly. Both end in the
+/// same dispatch on the registered method, and this is the proof for the
+/// second door: a Basic header carrying the right secret does not
+/// authenticate a strong client at `authorization_code`, `refresh_token` or
+/// `client_credentials` either.
+#[actix_web::test]
+async fn a_strong_clients_secret_in_a_basic_header_is_refused_at_the_three_ordinary_grants() {
+    use base64::Engine as _;
+
+    for method in STRONG_METHODS {
+        let f = setup(method).await;
+        let app = test_app!(f);
+        let blob = format!(
+            "{}:{}",
+            url::form_urlencoded::byte_serialize(f.strong_client_id.as_bytes()).collect::<String>(),
+            url::form_urlencoded::byte_serialize(f.strong_secret.as_bytes()).collect::<String>()
+        );
+        let header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(blob)
+        );
+
+        for (grant, body) in [
+            (
+                "client_credentials",
+                "grant_type=client_credentials".to_owned(),
+            ),
+            (
+                "authorization_code",
+                format!(
+                    "grant_type=authorization_code&code=not-a-code&redirect_uri={}",
+                    enc(REDIRECT_URI)
+                ),
+            ),
+            (
+                "refresh_token",
+                "grant_type=refresh_token&refresh_token=not-a-token".to_owned(),
+            ),
+        ] {
+            let req = test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&format!("/oauth2/token?tenant_id={}", f.tenant_id))
+                .insert_header(("content-type", "application/x-www-form-urlencoded"))
+                .insert_header(("Authorization", header.clone()))
+                .set_payload(body)
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status().as_u16();
+            let raw = test::read_body(resp).await;
+            let error = serde_json::from_slice::<Value>(&raw)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_owned));
+            assert_eq!(
+                (status, error.as_deref()),
+                (401, Some("invalid_client")),
+                "{grant}/{}: a Basic header carrying the right secret must not authenticate a \
+                 client registered for a strong method",
+                method.as_str()
             );
         }
     }

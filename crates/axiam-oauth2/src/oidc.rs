@@ -146,8 +146,9 @@ pub struct OidcDiscoveryDocument {
     /// OIDC Discovery §3 — X7. `true`: the `userinfo` member of the `claims`
     /// document is honoured on every lane (`crate::claims_request`), and the
     /// `id_token.acr` member on the honour lane. A `fapi2` client asking for
-    /// `id_token.acr` is refused `invalid_request` rather than having the
-    /// member dropped (`crate::fapi::enforce_authorization_request`).
+    /// `id_token.acr`, or for `id_token.auth_time` as essential, is refused
+    /// `invalid_request` rather than having the member dropped
+    /// (`crate::fapi::enforce_authorization_request`).
     pub claims_parameter_supported: bool,
     /// OIDC Discovery §3 — X7 G3/G4. The authentication context class
     /// references AXIAM can assert.

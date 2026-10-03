@@ -46,7 +46,7 @@ use axiam_core::models::opaque::{
     opaque_suite_is_at_least,
 };
 use axiam_core::models::settings::OpaquePolicy;
-use axiam_core::repository::OpaqueCredentialRepository;
+use axiam_core::repository::{OpaqueCredentialRepository, UserRepository};
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -160,6 +160,14 @@ pub(crate) async fn store_credential<C: Connection + Clone>(
     let Some(enrolled) = enrolled else {
         return Ok(());
     };
+    // G-3 (T23.3.2): never for a directory account. Every caller that can
+    // reach a directory account (change, reset) refuses it first; this is the
+    // one write of a record, so it holds the rule too, whatever a future
+    // caller forgets.
+    let user = state.user_repo.get_by_id(tenant_id, user_id).await?;
+    if user.is_directory_account() {
+        return Err(axiam_auth::error::AuthError::DirectoryAccountPassword.into());
+    }
     state
         .opaque_credential_repo
         .upsert(CreateOpaqueCredential {

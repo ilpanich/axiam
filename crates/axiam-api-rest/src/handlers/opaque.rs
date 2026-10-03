@@ -163,13 +163,18 @@ pub async fn opaque_login_start<C: Connection + Clone>(
     // rather than returning an error, so all four outcomes — unknown name,
     // wrong tenant, known user without a record, known user with one — are
     // indistinguishable from outside.
-    let credential = match lookup_user_id(&state, tenant_id, &b.username_or_email).await {
-        Some(user_id) => state
+    //
+    // A directory account (G-3) is answered from the decoy branch too, whatever
+    // the table holds: its password belongs to the directory, OPAQUE login is
+    // refused for it, and taking the decoy branch is what keeps "this is a
+    // directory account" as invisible here as "this account exists".
+    let credential = match lookup_user(&state, tenant_id, &b.username_or_email).await {
+        Some(user) if !user.is_directory_account() => state
             .opaque_credential_repo
-            .get_by_user(tenant_id, user_id)
+            .get_by_user(tenant_id, user.id)
             .await
             .ok(),
-        None => None,
+        _ => None,
     };
 
     let mut started = match credential {
@@ -293,6 +298,16 @@ pub async fn opaque_login_finish<C: Connection + Clone>(
         .map_err(|_| AxiamError::AuthenticationFailed {
             reason: "invalid credentials".into(),
         })?;
+
+    // G-3 (T23.3.2): OPAQUE never authenticates a directory account. Marking
+    // an account deletes its record and `login/start` serves it the decoy, so
+    // reaching here would take a record written behind both; refused with the
+    // same 401 as every other failure here, and not counted.
+    if user.is_directory_account() {
+        return Err(AxiamApiError(AxiamError::AuthenticationFailed {
+            reason: "invalid credentials".into(),
+        }));
+    }
 
     // Lockout is checked here rather than at login/start on purpose: the start
     // response must stay indistinguishable for every identity, and refusing it
@@ -514,27 +529,26 @@ async fn resolve_workspace<C: Connection + Clone>(
     Ok((tenant.organization_id, tenant_id))
 }
 
-/// Resolve a username-or-email to a user id, or `None`.
+/// Resolve a username-or-email to a user, or `None`.
 ///
 /// Deliberately swallows every error into `None`: the caller's next step is the
 /// enumeration-safe decoy exchange, and surfacing "no such user" as an error
 /// here would defeat it.
-async fn lookup_user_id<C: Connection + Clone>(
+async fn lookup_user<C: Connection + Clone>(
     state: &AppState<C>,
     tenant_id: Uuid,
     username_or_email: &str,
-) -> Option<Uuid> {
+) -> Option<axiam_core::models::user::User> {
     if let Ok(user) = state
         .user_repo
         .get_by_username(tenant_id, username_or_email)
         .await
     {
-        return Some(user.id);
+        return Some(user);
     }
     state
         .user_repo
         .get_by_email(tenant_id, username_or_email)
         .await
         .ok()
-        .map(|user| user.id)
 }

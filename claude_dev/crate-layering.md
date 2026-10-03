@@ -14,7 +14,7 @@ outward.
 | 0 | domain | `axiam-core`, `axiam-test-support` |
 | 1 | domain services | `axiam-auth`, `axiam-authz`, `axiam-pki`, `axiam-email` |
 | 2 | infrastructure | `axiam-db`, `axiam-audit` |
-| 3 | federation protocol | `axiam-federation` |
+| 3 | federation protocol | `axiam-federation`, `axiam-directory` |
 | 4 | authorization server | `axiam-oauth2` |
 | 5 | messaging adapter | `axiam-amqp` |
 | 6 | protocol adapters | `axiam-api-rest`, `axiam-api-grpc` |
@@ -44,6 +44,25 @@ the actual mistake.
 **`axiam-federation` and `axiam-oauth2` are two layers, not one.** `axiam-oauth2`
 consumes `axiam-federation`; splitting them makes the reverse edge impossible
 rather than merely absent.
+
+**`axiam-directory` is layer 3, beside `axiam-federation`, not above or below it.**
+LDAP / Active Directory sign-in (G-3) is a federation protocol — an external
+identity source the tenant trusts to decide a password — and it has the same
+dependency shape as `axiam-federation`: domain types from layer 0, the services
+below it, and its own protocol code. It is a sibling rather than a child because
+neither needs the other, and `axiam-oauth2` (layer 4) has no reason to reach a
+directory. Placing it with `axiam-federation` keeps both rules the layer-3 slot
+already states: it may reach layers 0–2, and nothing at layer 3 or below may
+depend on it. It opts into `missing_docs` from its first commit, so the ratchet
+never has a backlog to clear for it.
+
+The login path lives in `axiam-auth` (layer 1), which may not reach it. The
+seam is a port in layer 0 — `axiam_core::models::directory::DirectoryAuthenticator`
+(T23.3.2): `axiam-directory` implements it, and only the composition root,
+`axiam-server`, depends on `axiam-directory`, constructing the implementation
+and handing it to `AuthService::with_directory_authenticator`. The same shape as
+the reactor gate (`DynReactorGate`), and for the same reason: the security
+crate asks a question without knowing what answers it.
 
 **`axiam-scim` sits above `axiam-api-rest` rather than beside it.** SCIM is a REST
 sub-surface mounted into the same Actix app: it consumes the REST crate's
@@ -85,7 +104,7 @@ in this workspace and all three create an edge.
 
 ```console
 $ scripts/check-crate-layering.py
-Crate layering OK: 15 crates, 50 internal production edge(s), all pointing inward;
+Crate layering OK: 19 crates, 56 internal production edge(s), all pointing inward;
 3 declared test-only inversion(s).
 
 $ scripts/check-crate-layering.py --graph      # the table, with resolved edges

@@ -190,6 +190,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "<64 hex chars>",
           ],
           [
+            "AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY",
+            "Optional. AES-256-GCM key (hex) encrypting each tenant's LDAP / Active Directory bind secret at rest; without it the directory feature is unavailable and saving a directory configuration is refused.",
+            "<64 hex chars>",
+          ],
+          [
             "AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER",
             "HMAC-SHA256 pepper (hex) pseudonymizing audit-log actor identities on GDPR erasure.",
             "<64 hex chars>",

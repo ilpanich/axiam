@@ -143,9 +143,36 @@ pub struct User {
     /// consent, read by nothing else.
     #[serde(default)]
     pub address: Option<Address>,
+    /// The directory marker (G-3, T23.3.2): the immutable identifier of the
+    /// LDAP / Active Directory entry this account belongs to — `entryUUID`, or
+    /// the decoded `objectGUID` — or `None` for every other account.
+    ///
+    /// `Some` means **the tenant's directory is the only authority for this
+    /// account's password**: sign-in binds to the directory and never verifies
+    /// a local hash (the stored `password_hash` is an unusable random one), and
+    /// every local password path — change, reset, an administrator's or SCIM's
+    /// password write, OPAQUE registration and login — refuses the account. It
+    /// is also what the login path matches the directory's answer against, so
+    /// a login name that resolves to a different entry is refused.
+    ///
+    /// Written only by `UserRepository::mark_directory_account`, the directory
+    /// path's own method. `CreateUser` and `UpdateUser` have no such field, so
+    /// neither the admin user API nor SCIM — both of which write through them —
+    /// can set or clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_external_id: Option<String>,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl User {
+    /// Whether the tenant's directory, not AXIAM, holds this account's
+    /// password (see [`Self::directory_external_id`]).
+    #[must_use]
+    pub fn is_directory_account(&self) -> bool {
+        self.directory_external_id.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -231,6 +258,10 @@ impl std::fmt::Debug for User {
             )
             .field("phone_number_verified_at", &self.phone_number_verified_at)
             .field("address", &self.address.as_ref().map(|_| "<redacted>"))
+            .field(
+                "directory_external_id",
+                &self.directory_external_id.as_ref().map(|_| "<redacted>"),
+            )
             .field("metadata", &self.metadata)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
@@ -393,6 +424,7 @@ mod tests {
             metadata: serde_json::Value::Null,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            directory_external_id: None,
         }
     }
 

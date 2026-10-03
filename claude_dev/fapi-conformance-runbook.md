@@ -380,11 +380,215 @@ cannot quietly undo one:
 
 ---
 
+## Maintainer run checklist (before the release tag)
+
+Decision of 2026-10-03: the maintainer runs the OpenID conformance suites —
+Basic OP and the FAPI 2.0 variants — **personally, before the release tag**.
+Nothing in an agent session produces a final run, and nothing below is a result;
+it is what to do and what to compare. The submission itself (§X5.3, next section)
+is sent by the maintainer only.
+
+The FAPI items were completed by T23.1.7 together with the judgements
+(`docs/conformance/REVIEW-JUDGEMENTS.md`) and the submission package
+([`fapi-certification-submission.md`](fapi-certification-submission.md)); the Basic
+OP items are T23.1.6's. Nothing here is a run result. The 2026-09-25 baseline was
+run on a build that **predates the Phase 23 W1 gates**, so the maintainer's run is
+the first against them: a change from the baseline is a finding to read, not
+necessarily a regression.
+
+### 1. Before the run
+
+- [ ] The suite pin is the one the reports record: `SUITE_VERSION` and
+      `SUITE_DIGEST` in `conformance/suite.env` against the digest in
+      `docs/conformance/README.md` (`release-v5.2.4`,
+      `sha256:3a2615ed95a7f3bb92d545b4c65c0268f82a3893d6cd97fd98fd8e44eb15d81f`
+      for the baseline). A moved pin is a finding of its own; say so in the report.
+- [ ] Bring the rig up as "Reproducing a run" in `docs/conformance/README.md`
+      lists it: `conformance-certs`, `conformance-frontend`, `conformance-up`,
+      `conformance-serve`, `conformance-register`, `conformance-register-basic`, a
+      restart of `conformance-serve` once after the first registration, then
+      `conformance-drive` in a second terminal. Check that `pgrep -a -f
+      drive-browser.mjs` shows **one** driver.
+- [ ] Use the **bare issuer** (`AXIAM_ISSUER`), not a `/t/{tenant}/` one: the
+      2026-09-25 baseline and the registered clients are on it, and a different
+      issuer is a different submission. (Browser SSO on a per-tenant issuer path
+      works since T23.1.8, D-11: each sign-in also sets the OP cookie at
+      `Path=/t/{tenant}/oauth2/authorize`. It is not what this run certifies.)
+- [ ] Move the previous `conformance/.run/results/*.results.json` aside before the
+      sweep. `just conformance-report` renders every file in that directory under
+      the new date, so a stale file would be published as part of the new run.
+- [ ] The AXIAM build under test, and its image digest if the run is against a
+      release image; `fapi-certification-submission.md` Steps 1–2 cover the release
+      image. Note that `fapi-conformance.yml` cannot drive a browser, so the
+      interactive modules (both FAPI `REVIEW` modules among them) are finished on the
+      local rig above; the workflow's artifact is a smoke test unless `axiam_image`
+      is a digest. Open: the Basic lane has no image path. `serve-axiam.sh` runs `AXIAM_BIN` (default
+      `target/debug/axiam-server`), and `fapi-conformance.yml` runs only the FAPI
+      plans. Whether the Basic run must be against the digest-pinned release
+      image, and how to serve it, is not documented anywhere in the repository.
+
+### 2. Which plans and variants
+
+There are **three** FAPI 2.0 variants, one plan file each, and one Basic OP plan.
+The competitor-gap plan's "four FAPI variants" counts the Basic OP plan with the
+three; there is no fourth FAPI variant and none is to be invented.
+
+| Plan file in `conformance/plans/` | Suite plan name | Baseline report (2026-09-25) |
+|---|---|---|
+| `oidcc-basic-static.json` | `oidcc-basic-certification-test-plan` | `2026-09-25-oidcc-basic-static.md`, 35 modules |
+| `fapi2-security-profile-final-mtls.json` | `fapi2-security-profile-final-test-plan` | `2026-09-25-fapi2-security-profile-final-mtls.md`, 37 modules |
+| `fapi2-security-profile-final-self-signed.json` | `fapi2-security-profile-final-test-plan` | `2026-09-25-fapi2-security-profile-final-self-signed.md`, 37 modules |
+| `fapi2-security-profile-final-private-key-jwt.json` | `fapi2-security-profile-final-test-plan` | `2026-09-25-fapi2-security-profile-final-private-key-jwt.md`, 56 modules |
+
+```bash
+just conformance-run-basic     # renders the Basic plan, then run-plan.sh on it
+just conformance-run           # the three FAPI plans, one after another
+```
+
+Per plan, the two commands underneath those recipes are:
+
+```bash
+bash conformance/scripts/render-plan.sh conformance/plans/<plan>.json
+bash conformance/scripts/run-plan.sh conformance/.run/<plan>.json <suite plan name>
+```
+
+### 3. What to compare with the baseline, and how
+
+Render the reports with a date, then compare each with its 2026-09-25 baseline:
+
+```bash
+CONFORMANCE_DATE=<YYYY-MM-DD> just conformance-report
+strip() { grep -E '^- `|^\| `' "$1" | sed -E 's/\| `[A-Za-z0-9]{15}` \|$/|/'; }
+diff <(strip docs/conformance/2026-09-25-<plan>.md) <(strip docs/conformance/<YYYY-MM-DD>-<plan>.md)
+```
+
+`strip` drops the suite log id, which differs on every run, and keeps the
+verdict-count rows, the not-passing rows and the passed list. An empty diff means
+the same shape and the same modules. (It was checked on the 2026-09-18 and
+2026-09-25 Basic OP reports, which it reports as identical.) The new
+`## Modules skipped` section lists the `SKIPPED` modules by name (T23.1.6); the
+2026-09-25 reports do not, so the baseline's skipped modules can be named only
+from a retained `conformance/.run/results/*.results.json` of that run, or from the
+suite's own logs. Read each skipped module's reason in its log.
+
+- **Basic OP.** Baseline: 30 `PASSED`, 4 `REVIEW`, 1 `SKIPPED` (30/35). The
+  plan's target is every module `PASSED` or a documented `SKIPPED`. Two things to
+  know before reading the diff. First, a module that asks for an uploaded
+  screenshot ends `REVIEW` by the suite's design
+  (`docs/conformance/evidence/2026-09-25/README.md`: "`REVIEW` is therefore a
+  terminal verdict, **not** a failure"); the four here are closed by
+  `docs/conformance/REVIEW-JUDGEMENTS.md`, not by a changed verdict, so the
+  expected shape of a good run is the baseline's with a judgement per `REVIEW`.
+  Open for the maintainer: whether the target is meant literally. Second,
+  anything that moves the other way (`FAILED`, `WAITING`, `INTERRUPTED`,
+  `TIMEOUT`, a new `WARNING`) is a finding.
+- **FAPI 2.0, every variant.** Every module equals its baseline except three:
+  `…-ensure-unsigned-authorization-request-without-using-par-fails` (`REVIEW`),
+  `…-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` (`REVIEW`)
+  and `…-test-claims-parameter-identity-claims` (`WARNING`). Those three may stay
+  as they are, each with its entry in `REVIEW-JUDGEMENTS.md` (T23.1.7), or change;
+  any change is to be read in the log. Baseline logs: `mtls` plan `A6nvEhaNVt4hQ`,
+  `self-signed` `9xDkyLVW61B39`, `private-key-jwt` `IKxIaLZ4ZWC1z`; the three
+  modules' log ids are in the judgements file's index. The three 2026-09-25 reports
+  record the `WARNING` on **all three** variants (logs `E3LMGPfxxRnrBff`,
+  `Ifh31qq9b0lDMpw`, `v440VDWfwxP7kKo`), not on `private-key-jwt` alone as the
+  plan's table says. `private-key-jwt` has 56 modules against the other two's 37,
+  so its diff is against its own baseline.
+- **F4 item (g) — the `claims` parameter on `fapi2`.** Confirm that
+  `fapi2-security-profile-final-test-claims-parameter-identity-claims` keeps its
+  verdict now that `claims.id_token.acr` is refused on `fapi2` (W1 T23.1.1) and,
+  from this wave, an essential `claims.id_token.auth_time` too (D-12, T23.1.4).
+  Run the one module on one variant:
+
+  ```bash
+  conformance/scripts/run-some.sh \
+    conformance/plans/fapi2-security-profile-final-private-key-jwt.json \
+    fapi2-security-profile-final-test-plan \
+    fapi2-security-profile-final-test-claims-parameter-identity-claims
+  ```
+
+  then open the full log it saved under `conformance/.run/some/`, find the entry
+  that records the authorization request, URL-decode its `claims` parameter and
+  look for `"acr"` and `"auth_time"` under `id_token`. If the module now fails,
+  that is a finding to be judged before submission, not a harness bug. Source:
+  `claude_dev/security-review-phase23-w1-2026-10-03.md` §8 (g). Also note which
+  condition raised the warning: the claims entry in `REVIEW-JUDGEMENTS.md` cannot be
+  closed without it, and says what is open for the maintainer if the cause is the
+  `id_token` member being ignored. If the D-12 change (T23.1.4) has landed, the
+  entry's description of it is then checked against the code.
+
+### 4. The REVIEW modules
+
+- [ ] Export the screenshots: `CONFORMANCE_DATE=<YYYY-MM-DD> just
+      conformance-evidence` (`conformance/scripts/export-evidence.py`). It writes
+      `docs/conformance/evidence/<date>/` with a `manifest.json` in the shape of
+      the earlier ones, and refuses a directory that already has one. It was
+      exercised against a local mock of the suite's API only; if it misbehaves
+      against the real one, the recipe in `evidence/2026-09-25/README.md` ("How
+      this was produced") is the fallback.
+- [ ] **View every distinct image**; do not classify by size or hash. Compare each
+      with the condition in the manifest.
+- [ ] `oidcc-prompt-login` and `oidcc-max-age-1`: the image must carry the notice
+      **"Please sign in again to continue."**. It is the only thing that tells the
+      second sign-in from the first; an image without it is the first visit's and
+      the module is not evidenced. Then read each module's log for what a
+      screenshot cannot show: the first sign-in completed, the second request
+      carried `prompt=login` / `max_age=1`, and (for `max-age-1`) a delay longer
+      than the bound preceded it. Keep the log with the image if the submission
+      package needs both; the suite log is the record.
+- [ ] `oidcc-ensure-request-object-with-redirect-uri`: read the log for which
+      `redirect_uri` the module put in the query and which in the request object,
+      as `REVIEW-JUDGEMENTS.md` says. The page "redirect_uri not registered" can
+      come only from the query value; if the log shows otherwise the entry must be
+      rewritten before the submission relies on it.
+- [ ] `…-ensure-unsigned-authorization-request-without-using-par-fails`, each of
+      the three variants: the image must be an error page carrying `invalid_request`
+      (the 2026-09-25 one says "this client must use pushed authorization requests").
+      Read the log for the request the module sent (no `request_uri`) and for
+      whether a sign-in page came before the refusal; the judgement records both as
+      open until read.
+- [ ] `…-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds`, each of
+      the three variants: the image must be the sign-in page, with no notice. Read
+      the log for which visit it is, that the second visit completed, and that the
+      second request came within 60 seconds of the push.
+- [ ] `…-test-claims-parameter-identity-claims`: no image; the item is §3's F4 item
+      (g) above. Do not close the entry until the log's `claims` value and the
+      raising condition are written into it.
+
+### 5. Where the results go
+
+- [ ] New dated reports under `docs/conformance/`, **alongside** the earlier ones,
+      never over them (`docs/conformance/README.md`). The regenerated `index.md`
+      lists the new run and, beneath it, the earlier dated reports.
+- [ ] `docs/conformance/README.md`: the suite image digest, and the AXIAM image
+      digest if the run was against one, beside the date. It is hand-maintained;
+      the generator never writes it.
+- [ ] Evidence under `docs/conformance/evidence/<date>/`, with a short README of
+      what each image shows, in the style of `evidence/2026-09-25/README.md`.
+- [ ] `docs/conformance/REVIEW-JUDGEMENTS.md`: add the new log ids to each entry
+      **alongside** the 2026-09-25 ones, edit any sentence the log contradicts,
+      and fill the sign-off table (plan id, image digest, date). Leave an entry
+      that the log does not support marked open rather than smoothing it over.
+- [ ] `docs/compliance/oidc-conformance.md`: the X7.9 rows say the final runs are
+      pending; update them to the run's date and result.
+- [ ] The submission package: fill every `<…>` placeholder in
+      `fapi-certification-submission.md` ("The X5.3 package") from the run, and work
+      its pre-send checklist. The website wording in it stays unpublished until the
+      mark is granted.
+- [ ] Issue #513 (G-1): the run's date, plan ids, digests and the verdicts that
+      differ from the baseline.
+- [ ] The submission (§X5.3) is sent by the maintainer only. No agent sends it.
+
+---
+
 ## Submitting (§X5.3)
 
-When the run is green and you are ready to make it official, follow
+When the run is green and you are ready to make it official (the checklist above
+comes first), follow
 [`fapi-certification-submission.md`](fapi-certification-submission.md) — the
-digest-pinned release run and the OIDF submission. The §X5.4 letter amendment
+digest-pinned release run and the OIDF submission, with its package (what is
+submitted, what is attached, the pre-send checklist, and the website wording for
+the mark). The §X5.4 letter amendment
 that document used to require is no longer needed: `private_key_jwt` landed, so
 the letter's scope sentence is accurate as drafted.
 

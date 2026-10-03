@@ -946,8 +946,10 @@ already pinned.
 
 ## X7 — OpenID Connect **Basic OP** certification, coexisting with FAPI 2.0
 
-**Plan:** [`basic-op-gap-plan.md`](basic-op-gap-plan.md) (plan only; no
-crate source changes yet). **Target:** the OpenID Foundation
+**Plan:** [`basic-op-gap-plan.md`](basic-op-gap-plan.md) (X7.1–X7.8 shipped
+in earlier phases and were audited against their specification in Phase 23 W1
+(T23.1.1–T23.1.3) and W2 (T23.1.4, with decision D-12); the text below is the
+plan as written). **Target:** the OpenID Foundation
 `oidcc-basic-certification-test-plan` in its
 `[server_metadata=discovery][client_registration=static_client]`
 configuration, certification profile "Basic OP", **without** loosening any

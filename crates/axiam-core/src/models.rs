@@ -5,6 +5,7 @@
 
 pub mod audit;
 pub mod certificate;
+pub mod directory;
 pub mod email;
 pub mod email_template;
 pub mod email_verification;

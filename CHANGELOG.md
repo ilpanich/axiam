@@ -9,6 +9,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory sign-in: the LDAP client and the bind-as-user path (T23.3.2,
+  G-3).** A tenant's LDAP or Active Directory server can now authenticate its
+  accounts. `axiam-directory` gains the client — `ldap3` over rustls only (no
+  OpenSSL, no native-tls) — with mandatory TLS verified against the tenant's own
+  trust anchors (or the public `webpki-roots` bundle when it configured none) and
+  the URL's host, TLS 1.2 as the floor because Active Directory on older Windows
+  Server releases has no TLS 1.3 on LDAPS; StartTLS before anything else,
+  failing closed when the server refuses it; login names entering filters only
+  through RFC 4515 escaping; no DN ever constructed; exactly one matching entry;
+  referrals never followed; an empty password refused before any packet; and a
+  bounded per-tenant connection pool with connect, operation and end-to-end
+  timeouts. The user bind runs on its own connection, which is never pooled. A
+  new port, `DirectoryAuthenticator` in `axiam-core`, keeps the layering intact:
+  `axiam-server` injects the implementation into `AuthService`, which binds a
+  **directory account** — one carrying the new `directory_external_id` marker
+  (schema v71, unique per tenant) — to its directory and to nothing else. The
+  lockout is checked before the directory is contacted, a failed bind counts
+  like a wrong password and a success resets the counter, an unavailable or
+  misconfigured directory fails closed and is never answered by the local hash,
+  the directory's answer must be the account's own entry, and every refusal is
+  the generic `401` with the same equalising Argon2id verify an unknown name
+  gets. A directory password is recorded as `amr: ["pwd"]`. Password change,
+  reset confirm, a SCIM password write, and OPAQUE login and registration are
+  refused for a directory account (`400 validation_error`, SCIM `mutability`,
+  OPAQUE's decoy and generic `401`); the reset request answers one exactly as an
+  unknown address. The marker's only writer, used first by provisioning
+  (T23.3.3), also replaces the account's password hash with an unusable random
+  one and drops any OPAQUE record. No account is a directory account yet: there
+  is still no provisioning and no management route. Threat model 2.20.0: a new
+  trust boundary (AXIAM ↔ tenant directory) and T-291…T-303, one of them open
+  (T-300: a tenant-chosen directory host is not held to the private-address
+  policy the IdP and webhook fetches apply). The OpenAPI document changes only
+  in the unreferenced `User` component, which gains the field.
+
+- **The `axiam-directory` crate and the encrypted directory configuration store
+  (T23.3.1, G-3).** The first piece of the LDAP / Active Directory identity
+  source: a new crate at layer 3, beside `axiam-federation`, that opts into
+  `missing_docs` from its first commit, and a per-tenant `directory_config` table
+  (schema v70) with a repository. `axiam_directory::config::validate` refuses, at
+  configuration time, a plaintext `ldap://` URL without StartTLS, any other
+  scheme, `ldaps://` combined with StartTLS, a URL carrying userinfo, a path, a
+  query or a fragment, an empty or control-character DN, a user-filter template
+  that is not a single balanced filter with exactly one `{username}` placeholder
+  in value position, an empty bind secret, out-of-bounds nesting depth or sync
+  interval, and a trust anchor that is not a parseable CA certificate. The bind
+  secret is encrypted at rest with AES-256-GCM under a fresh nonce, with a key the
+  secret provider holds as the new **optional** `directory_encryption_key`
+  (`AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY`); without it the feature is unavailable
+  and saving a configuration is refused with an error naming the key, while the
+  server still starts. The secret is write-only: never returned, never in `Debug`,
+  decrypted only by the one repository method the bind path will call. A tenant's
+  configuration is deleted with the tenant. There is no user-visible surface yet:
+  no LDAP client, no sign-in path and no REST route, which arrive in the following
+  tasks of the same item.
+
+- **Basic OP `REVIEW` judgements and the maintainer's run checklist (T23.1.6, X7.9).**
+  `docs/conformance/REVIEW-JUDGEMENTS.md` records, for each of the four Basic OP
+  modules the 2026-09-25 run left in `REVIEW` (`oidcc-prompt-login`,
+  `oidcc-max-age-1`, `oidcc-ensure-registered-redirect-uri`,
+  `oidcc-ensure-request-object-with-redirect-uri`), the suite log, the module's
+  own condition, what AXIAM does and the test that pins it, the clause, and what
+  the screenshot evidence does and does not show; facts only a suite log can give
+  are marked for the maintainer's run. The FAPI 2.0 entries follow (T23.1.7).
+  `claude_dev/fapi-conformance-runbook.md` gains the checklist for the final runs,
+  which the maintainer makes personally before the release tag. The conformance
+  harness gains three small things the final run needs: `report.py` names the
+  `SKIPPED` modules (it counted them and listed none) and keeps earlier dated
+  reports linked from `index.md`, and `export-evidence.py` /
+  `just conformance-evidence` exports the REVIEW screenshots with a manifest.
+  No plan, registrar or server behaviour changed, and no final run has been made.
+
+- **FAPI 2.0 `REVIEW`/`WARNING` judgements and the X5.3 submission package
+  (T23.1.7, G-1).** `docs/conformance/REVIEW-JUDGEMENTS.md` gains the three FAPI
+  2.0 entries, each over all three variants (`mtls`, `self-signed`,
+  `private-key-jwt`) with the 2026-09-25 log ids and the evidence images read:
+  `ensure-unsigned-authorization-request-without-using-par-fails`,
+  `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` (both
+  `REVIEW`) and `test-claims-parameter-identity-claims` (`WARNING`). The last is
+  written as open: the 2026-09-25 build published `claims_parameter_supported:
+  true`, so the warning is not the "claims not supported" deviation, its cause is
+  in the suite log only, and whether to honour the `id_token` member of `claims`
+  is left to the maintainer. The runbook's maintainer checklist is completed for
+  the FAPI plans, and `claude_dev/fapi-certification-submission.md` gains the
+  X5.3 package for both the Basic OP and the FAPI 2.0 certifications: what is
+  submitted, the run-dependent fields as placeholders, the files to attach, a
+  pre-send checklist, and website wording for the mark that stays unpublished
+  until the certification is granted. Documentation only. Every entry is
+  *proposed*, no final run has been made, and nothing has been sent to the
+  Foundation.
+
 - Verifiable-credentials design (OID4VCI issuer, OID4VP verifier, SD-JWT VC) — design only, no code (T23.9.1)
 
 - *Identity for agents* guide and website page (T23.15.1)
@@ -31,11 +121,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `update_client_registration`, `delete_client_registration`, token
   `Sensitive`); threat T-289, model 2.18.0.
 
+- **Browser sign-on on per-tenant issuer paths (T23.1.8, D-11).** On a
+  deployment with `AXIAM__AUTH__TENANT_ISSUER_PATHS` set, every completed
+  browser sign-in now sets the `axiam_op_session` cookie twice: at
+  `Path=/oauth2/authorize`, unchanged, and at
+  `Path=/t/{tenant_id}/oauth2/authorize`, for the session's own tenant only. The
+  sign-in paths are password, OPAQUE, MFA verify, forced enrolment, both WebAuthn
+  ceremonies and the federation handoff. The two copies carry the same value and
+  the same `HttpOnly; Secure; SameSite=Lax` and `Max-Age`. A `browser_sso`
+  relying party that discovered a tenant issuer therefore gets the login hop
+  instead of a `login_required` that always failed closed. The hop resolves under
+  exactly the bare path's rules: tenant-keyed lookup, account re-read,
+  `browser_sso` gate, honour lane. A copy presented on another tenant's path names
+  no session. Every logout clears every copy: `POST /api/v1/auth/logout`,
+  `end_session` (bare and per-tenant), and a stale cookie at the path it arrived
+  on. The paths come from one list (`csrf::op_session_cookie_paths`), so W3's SAML
+  SSO path is one entry. With the setting off, nothing changes. Browser-only: no
+  contract change.
+
+- **`GET /oauth2/authorize/logout`, the cookie half of RP-initiated logout
+  (T23.1.8, closes F4 residual P23W1-10).** The OP cookie never reached
+  `/oauth2/end_session`, so a logout without an `id_token_hint` `sid` cleared the
+  cookie and left the session row live. `end_session` now answers such a request
+  with a `302` to the `/logout` sub-path of the authorization endpoint it came
+  through, on the bare path or the tenant path. The cookie reaches that sub-path.
+  It revokes the one session the cookie names in that tenant, clears every
+  cookie, and continues exactly as `end_session` would: the allow-listed
+  `post_logout_redirect_uri` by exact match, or AXIAM's page. It is GET-only,
+  public, rate-limited with the `end_session` preset in its own bucket, and in
+  OpenAPI. It sends no back-channel fan-out, which stays reserved for a signed
+  hint. A hinted `end_session` is unchanged. Threat T-290; T-237 and T-238
+  amended; model 2.19.0.
+
 ### Changed
 
 - Front-channel logout declined by design and recorded (T23.12.1, D-6)
 
 ### Fixed
+
+- **A tenant delete that fails is reported as a failure (F4 P23W2-02).**
+  Since T23.3.1 the tenant delete removes the tenant's directory configuration
+  in the same transaction, but the repository never checked the response: a
+  transaction that rolled back answered success, so `DELETE
+  /api/v1/organizations/{org_id}/tenants/{tenant_id}` answered `204` and wrote
+  a "tenant deleted" audit record for a tenant that still existed, encrypted
+  bind secret included. The failure is now an error and nothing is recorded as
+  deleted.
+
+- **A `client_secret_basic` client now has the same per-client rate-limit bucket
+  as a `client_secret_post` one (T23.1.5).** The layer in front of
+  `/oauth2/token`, `/oauth2/revoke` and `/oauth2/introspect` read the bucket's
+  `client_id` from the form body alone, and RFC 6749 §2.3.1 lets a Basic client
+  name itself in the `Authorization` header alone. Under
+  `AXIAM__RATE_LIMIT__KEY=client_id` or `ip_client_id` such a request fell back
+  to the per-address key, so a Basic client's secret could be guessed from as
+  many addresses as the guesser held. The layer now falls back to the id the
+  header decodes to (through the same parser the handlers use; the secret is not
+  read and nothing is logged). The default key mode, `ip`, never differed.
+  Amends T-253. The audit behind it also added tests, with no behaviour change,
+  for the §2.3.1 decoding edges, duplicate `Authorization` headers, the
+  registered method at the three ordinary token grants, and the FAPI refusal of
+  `client_secret_basic` through the admin API, and for the X7.7 sensitive scopes
+  (the verified flag in both directions, the §5.1.1 shape, the claims absent
+  from the access token, introspection and a refresh, consent not crossing a
+  tenant, the update door onto registration, SCIM as the writer).
+
+- **The login hop on a per-tenant issuer path came back refused (T23.1.8).** Its
+  `return_to` was built from the query after the tenant scope had appended
+  `tenant_id`. The return leg therefore carried a second tenant selector, and the
+  scope that added it refused it with `invalid_request`. The interaction hop had
+  the same defect. Both now echo the client's own query.
+
+- **An organization-level administrator's logout revoked nothing after a tenant
+  switch (T23.1.8).** `POST /api/v1/auth/logout` revoked the session in the
+  acted-upon tenant. The admin UI sends `X-Axiam-Tenant` on every request, so
+  after a switch that was a child tenant where the session does not live. The
+  answer was `204` and the session stayed live. Logout now revokes, and clears
+  the OP cookies, in the principal's own tenant.
 
 - **A refreshed ID token on the honour lane no longer loses `auth_time`, `acr`
   and `amr` once the browser session has rotated (T23.1.2, D-9).** The refresh
@@ -60,6 +222,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the 16 KiB body limit on `PUT /oauth2/register/{client_id}`.
 
 ### Security
+
+- **A directory configuration update can no longer redirect the stored bind
+  secret (F4 P23W2-01, T-298).** `DirectoryConfigRepository::update` kept the
+  encrypted bind secret whenever the request carried no new one, whatever else
+  changed, so an update that repointed the URL (and named a CA of the editor's
+  choosing as the trust anchor) would have sent the write-only secret to that
+  host in the next service bind. Without a new secret, an update that changes
+  `url`, `start_tls`, `bind_dn` or `trust_anchors_pem` is now refused with
+  `400 validation_error` and changes nothing; re-entering the secret makes it an
+  ordinary update. No route writes a directory configuration yet (T23.3.8 adds
+  them), so nothing deployed changes behaviour.
+
+- **A `fapi2` client's authentication method is re-checked at request time at
+  PAR, introspection and revocation, as it already was at the token endpoint
+  (T23.1.5, D-17).** A `fapi2` row edited in the database to
+  `client_secret_basic` or `client_secret_post` — which registration validation
+  refuses, so only a direct edit produces it — still authenticated at those
+  three endpoints with a correct secret (PAR answered `201`, introspection and
+  revocation `200`). The `is_strong()` rule is now one function,
+  `fapi::enforce_client_authentication`, extracted from `enforce_token_request`
+  and called by all of them after the client authenticates and before anything
+  is pushed, revealed or revoked, with the same `invalid_client` as the token
+  endpoint. A caller without the secret sees nothing new, RFC 7009 §2.2's "an
+  invalid token is a 200" is untouched, and no client registered today changes.
+  Amends T-253 (its residual is removed).
+
+- **`max_age=0` on the honour lane is now handled as `prompt=login`, so a
+  relying party sending it can sign in (T23.1.4, D-14).** The honour lane
+  re-authenticated when `elapsed >= max_age`, which for `0` made the
+  reauthentication the login hop produces itself "too old" (`0 >= 0`): the
+  return leg answered `login_required`, and no relying party sending
+  `max_age=0` could ever obtain a code. OIDC Core §3.1.2.1 (1.0 incorporating
+  errata set 2) re-authenticates only when the elapsed time is *greater than*
+  `max_age` and says `max_age=0` is equivalent to `prompt=login`. `max_age=0`
+  now takes exactly the `prompt=login` path in `honour::evaluate`: the outbound
+  leg always sends the browser to sign in again (`reauth=1`, whatever the
+  session's age), and the return leg is answered with a code whose ID token
+  carries the new `auth_time`. A forged return-leg marker on an old session
+  behaves as it does for `prompt=login` (the interaction is skipped, and
+  `auth_time` still reports the old authentication; the accepted residual
+  P23W1-08 is unchanged), and `prompt=none` with `max_age=0` is
+  `login_required`. Positive `max_age` values keep `>=` and an unmet one is
+  still `login_required` on the return leg, so `oidcc-max-age-1` is unaffected;
+  the ignore lane still drops `max_age` and `fapi2` still refuses it. Amends
+  plan §4.3 test T2.1 and T-239's mitigation text (no new threat id).
+
+- **A FAPI 2.0 client's essential `auth_time` request is refused instead of
+  dropped (T23.1.4, D-12).** OIDC Core §2 makes `auth_time` REQUIRED in the ID
+  token when `claims.id_token.auth_time` is requested as **essential**, and a
+  `fapi2` ID token has never carried it, so such a client was served a token
+  without the claim it said it could not do without, and no error — the same
+  silent downgrade T23.1.1 closed for `claims.id_token.acr`. The `fapi2` gate
+  now answers `invalid_request` naming `claims` for it, on both carriers
+  (inline and pushed), by the same mechanism: `claims` is security-bearing when
+  it asks for `id_token.acr`, asks for `id_token.auth_time` as essential, or
+  cannot be read well enough to rule either out. A *voluntary* `auth_time`
+  request (`null`, or `essential: false`) stays as it was, because an OP may
+  decline it; a `claims` asking only for `userinfo` members is still served.
+  Nothing changes for a `standard` client: on the honour lane an essential
+  `auth_time` is honoured (the lane emits it for every session), and on the
+  ignore lane it is dropped as before. Amends T-239 (no new threat id).
+  `sdks/openapi.json` carries the extended discovery description; no contract
+  change. The audit that came with it pinned, over HTTP, the honour-lane rows
+  that had been tested only below it: `id_token_hint` must be signed by this
+  deployment and name this user and this client (an expired-but-signed one is
+  accepted), `prompt=select_account`, the ignore-lane twin for an essential
+  `claims.id_token.acr`, and RFC 6750 §2.2's media type on `POST
+  /oauth2/userinfo`.
 
 - **A federated login's recorded authentication instant is never later than the
   moment AXIAM verified the assertion (T23.1.2, D-10).** X7.2 dated a federated

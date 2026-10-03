@@ -2112,3 +2112,137 @@ async fn a_username_filter_past_the_end_reports_the_total_without_the_row() {
     );
     assert_eq!(missing["totalResults"], 0);
 }
+
+// ---------------------------------------------------------------------------
+// T23.1.5 / X7.7 — SCIM is the writer of `phone_number` and `address`
+// ---------------------------------------------------------------------------
+
+/// The GDPR-sensitive columns have no producer inside AXIAM: nothing
+/// authenticates against them and nothing else fills them in. SCIM is the path
+/// that does, so this proves it over HTTP rather than at the mapping layer
+/// alone — create writes them, an unrelated `PATCH` leaves them, `PATCH remove`
+/// of one clears that one only, and a `PUT` that omits them clears both
+/// (RFC 7644 §3.5.1: a replace). No assertion below formats a value; each
+/// names the case.
+#[actix_rt::test]
+async fn t23_1_5_scim_writes_the_sensitive_columns_and_only_as_told() {
+    const PHONE: &str = "+390212345678";
+    let (db, org_id, tenant_id) = setup_tenant().await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let app = test_app!(db, auth, authz);
+    let token = mint_token(
+        &auth,
+        scim_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+    let users = SurrealUserRepository::new(db.clone());
+
+    // Create: both are written, the primary entry wins, and the SCIM
+    // components land on the OIDC members of the same names.
+    let req = test::TestRequest::post()
+        .peer_addr(bench_peer())
+        .uri("/scim/v2/Users")
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "sensitive-writer",
+            "emails": [{ "value": "sensitive-writer@example.com", "primary": true }],
+            "phoneNumbers": [
+                { "value": "+10000000000", "type": "mobile" },
+                { "value": PHONE, "type": "work", "primary": true }
+            ],
+            "addresses": [{
+                "streetAddress": "Via Roma 1",
+                "locality": "Milano",
+                "region": "MI",
+                "postalCode": "20121",
+                "country": "Italia",
+                "formatted": "Via Roma 1, 20121 Milano",
+                "primary": true
+            }],
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201, "create");
+    let created: Value = test::read_body_json(resp).await;
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+
+    let stored = users.get_by_id(tenant_id, id).await.unwrap();
+    assert!(
+        stored.phone_number.as_deref() == Some(PHONE),
+        "create: the primary telephone number is the one stored"
+    );
+    assert!(
+        stored.phone_number_verified_at.is_none(),
+        "create: a provisioned number is not a verified one"
+    );
+    let address = stored.address.expect("create: an address is stored");
+    assert!(
+        address.street_address.as_deref() == Some("Via Roma 1")
+            && address.locality.as_deref() == Some("Milano")
+            && address.region.as_deref() == Some("MI")
+            && address.postal_code.as_deref() == Some("20121")
+            && address.country.as_deref() == Some("Italia")
+            && address.formatted.as_deref() == Some("Via Roma 1, 20121 Milano"),
+        "create: the six SCIM components map to the six OIDC members"
+    );
+
+    // A PATCH about something else touches neither.
+    let patch = |ops: Value| {
+        test::TestRequest::patch()
+            .peer_addr(bench_peer())
+            .uri(&format!("/scim/v2/Users/{id}"))
+            .insert_header(bearer(&token))
+            .set_json(json!({
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": ops,
+            }))
+            .to_request()
+    };
+    let resp = test::call_service(
+        &app,
+        patch(json!([{ "op": "replace", "path": "name.givenName", "value": "Ada" }])),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "unrelated patch");
+    let after = users.get_by_id(tenant_id, id).await.unwrap();
+    assert!(
+        after.phone_number.as_deref() == Some(PHONE) && after.address.is_some(),
+        "an unrelated PATCH must leave both columns alone"
+    );
+
+    // Removing the telephone number clears that one and not the address.
+    let resp = test::call_service(
+        &app,
+        patch(json!([{ "op": "remove", "path": "phoneNumbers" }])),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "remove phoneNumbers");
+    let after = users.get_by_id(tenant_id, id).await.unwrap();
+    assert!(after.phone_number.is_none(), "remove: the number is gone");
+    assert!(
+        after.address.is_some(),
+        "remove phoneNumbers must not touch the address"
+    );
+
+    // A PUT that omits both is a replace: nothing is left.
+    let req = test::TestRequest::put()
+        .peer_addr(bench_peer())
+        .uri(&format!("/scim/v2/Users/{id}"))
+        .insert_header(bearer(&token))
+        .set_json(json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "sensitive-writer",
+            "emails": [{ "value": "sensitive-writer@example.com", "primary": true }],
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "put");
+    let after = users.get_by_id(tenant_id, id).await.unwrap();
+    assert!(
+        after.phone_number.is_none() && after.address.is_none(),
+        "a PUT that omits them is a replace, and clears both"
+    );
+}

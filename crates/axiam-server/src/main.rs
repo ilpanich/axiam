@@ -173,6 +173,17 @@ struct AppConfig {
     /// Skipped by serde — populated manually from env at startup.
     #[serde(skip)]
     email_encryption_key: Option<[u8; 32]>,
+    /// AES-256-GCM key (32 bytes) for encrypting each tenant's directory (LDAP /
+    /// Active Directory) bind secret at rest (G-3, D-15). Fetched from the
+    /// secret provider as `directory_encryption_key`
+    /// (`AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY` under the default provider).
+    ///
+    /// **Optional, and never a reason to refuse boot**: absent, the directory
+    /// feature is unavailable — saving a directory configuration is refused
+    /// with an error naming the key — and everything else is unaffected.
+    /// Skipped by serde — populated from the secret provider at startup.
+    #[serde(skip)]
+    directory_encryption_key: Option<[u8; 32]>,
     /// HMAC-SHA256 pepper (32 bytes) for GDPR audit pseudonymization (D-02).
     /// Loaded from `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
@@ -378,6 +389,26 @@ async fn main() -> std::io::Result<()> {
     config.email_encryption_key = read_key(keys::EMAIL_ENCRYPTION_KEY);
     if config.email_encryption_key.is_some() {
         tracing::info!("Email encryption key loaded");
+    }
+
+    // The directory bind-secret key (G-3, D-15). Optional: a deployment that
+    // does not federate an LDAP / Active Directory source has no reason to hold
+    // one, so its absence is reported at INFO and never refuses boot. What it
+    // costs is stated where the operator will read it, because the symptom
+    // otherwise appears later and elsewhere — as a refused configuration save.
+    config.directory_encryption_key = read_key(keys::DIRECTORY_ENCRYPTION_KEY);
+    if config.directory_encryption_key.is_some() {
+        tracing::info!(
+            provider = secret_provider.describe(),
+            "directory encryption key loaded"
+        );
+    } else {
+        tracing::info!(
+            provider = secret_provider.describe(),
+            "directory encryption key not configured: the LDAP / Active Directory \
+             identity source is unavailable (set {} to enable it)",
+            keys::env_var_name(keys::DIRECTORY_ENCRYPTION_KEY),
+        );
     }
 
     // The AMQP message-signing key (SEC-022/055, SECHRD-08). Mandatory: there
@@ -1021,7 +1052,20 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         Arc::clone(&crypto_semaphore),
     )
-    .with_reactor_gate(Arc::clone(&reactor_gate));
+    .with_reactor_gate(Arc::clone(&reactor_gate))
+    // G-3 (T23.3.2): directory accounts authenticate through the tenant's LDAP /
+    // Active Directory server. Always attached: without
+    // `directory_encryption_key` the repository cannot decrypt a bind secret,
+    // so every directory sign-in fails closed as `Unavailable` (never a local
+    // hash), and tenants without a directory are untouched.
+    .with_directory_authenticator(Arc::new(
+        axiam_directory::RepositoryDirectoryAuthenticator::new(
+            axiam_db::SurrealDirectoryConfigRepository::new(
+                pool.handle_for_repo(),
+                config.directory_encryption_key,
+            ),
+        ),
+    ));
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());
     let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo());

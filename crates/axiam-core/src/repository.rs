@@ -8,12 +8,14 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::error::{AxiamError, AxiamResult};
 use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
+    directory::{DirectoryConfig, NewDirectoryConfig},
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
     email_template::{EmailTemplate, SetEmailTemplate, TemplateKind},
     email_verification::{CreateEmailVerificationToken, EmailVerificationToken},
@@ -319,6 +321,38 @@ pub trait UserRepository: Send + Sync {
         email_hash: &str,
         pseudonym: &str,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Make `user_id` a directory account (G-3): the **only** writer of
+    /// [`User::directory_external_id`].
+    ///
+    /// In one transaction it sets the marker to `external_id` (the entry's
+    /// `entryUUID` / decoded `objectGUID`), replaces `password_hash` with an
+    /// Argon2id hash of 32 fresh random bytes that nobody holds, and deletes any
+    /// OPAQUE registration record — so from the moment the marker is set no
+    /// local credential the account had before can authenticate it, whatever
+    /// a future path might forget to check.
+    ///
+    /// The marker is unique per tenant (schema v71): marking a second account
+    /// with an identifier already in use fails with `AlreadyExists`, so one
+    /// directory entry can never back two AXIAM accounts. `NotFound` when the
+    /// user does not exist in `tenant_id`.
+    ///
+    /// Called by the directory path only — just-in-time provisioning (T23.3.3)
+    /// is its first production caller. No REST, SCIM or gRPC handler reaches
+    /// it. The default implementation refuses, so a test double that never
+    /// exercises directories needs nothing new.
+    fn mark_directory_account(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _external_id: &str,
+    ) -> impl Future<Output = AxiamResult<User>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
 }
 
 pub trait RoleRepository: Send + Sync {
@@ -2876,6 +2910,68 @@ pub trait EmailConfigRepository: Send + Sync {
         org_id: Uuid,
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<EmailConfig>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Directory (LDAP / Active Directory) configuration — one per tenant (G-3)
+// ---------------------------------------------------------------------------
+
+/// Storage for a tenant's directory configuration.
+///
+/// The bind secret is encrypted at rest under the key the secret provider
+/// holds as `directory_encryption_key` (decision D-15). That key is optional:
+/// an implementation built without it **fails closed** on every method that
+/// needs it (`create`, `update` and `decrypt_bind_secret`) with an error naming
+/// the key, and still serves the methods that do not (`get_by_tenant`,
+/// `delete`, `list_enabled`).
+pub trait DirectoryConfigRepository: Send + Sync {
+    /// Create the tenant's configuration, encrypting `input.bind_secret`.
+    ///
+    /// Fails with `Validation` when the secret is absent, with `AlreadyExists`
+    /// when the tenant already has a configuration, and with `Validation`
+    /// (naming the key) when no encryption key is configured. Callers validate the values first
+    /// (`axiam-directory::config::validate`); the repository does not.
+    fn create(
+        &self,
+        input: NewDirectoryConfig,
+    ) -> impl Future<Output = AxiamResult<DirectoryConfig>> + Send;
+
+    /// Replace the non-secret fields of the tenant's configuration.
+    ///
+    /// `input.bind_secret == None` keeps the stored secret and its nonce;
+    /// `Some` encrypts the new one under a fresh nonce. `NotFound` when the
+    /// tenant has no configuration.
+    ///
+    /// **A kept secret keeps its connection** (F4 P23W2-01): with
+    /// `bind_secret == None`, an update whose `url`, `start_tls`, `bind_dn` or
+    /// `trust_anchors_pem` differs from the stored value is refused with
+    /// `Validation` and changes nothing, so the write-only secret can never be
+    /// redirected to a server it was not entered for.
+    fn update(
+        &self,
+        input: NewDirectoryConfig,
+    ) -> impl Future<Output = AxiamResult<DirectoryConfig>> + Send;
+
+    /// The tenant's configuration, **without** the secret, or `None`.
+    fn get_by_tenant(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<DirectoryConfig>>> + Send;
+
+    /// The only path to the plaintext bind secret, for the bind path.
+    ///
+    /// `NotFound` when the tenant has no configuration; `ServiceUnavailable`
+    /// (naming the key) when no encryption key is configured.
+    fn decrypt_bind_secret(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Zeroizing<String>>> + Send;
+
+    /// Delete the tenant's configuration. Succeeds when there is none.
+    fn delete(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Every enabled configuration across all tenants, for the sync job.
+    fn list_enabled(&self) -> impl Future<Output = AxiamResult<Vec<DirectoryConfig>>> + Send;
 }
 
 // ---------------------------------------------------------------------------

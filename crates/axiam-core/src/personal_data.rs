@@ -272,6 +272,17 @@ pub const USER_COLUMNS: &[UserColumn] = &[
                member — the members are erased and exported with the object \
                they belong to, and cannot be reached without it.",
     },
+    UserColumn {
+        name: "directory_external_id",
+        erasure: Some(Erasure::ToNone),
+        export: Some("directory_external_id"),
+        note: "G-3: the identifier of the subject's entry in the tenant's \
+               directory (`entryUUID` / `objectGUID`). An online identifier \
+               linking the account to a person in another system, so it is \
+               exported and both erasure paths clear it; an erased or deleted \
+               account then stops being a directory account, which its terminal \
+               status already makes moot.",
+    },
 ];
 
 /// The `SET` clause fragment both erasure statements share, derived from
@@ -394,7 +405,8 @@ mod tests {
              metadata = {}, \
              phone_number = NONE, \
              phone_number_verified_at = NONE, \
-             address = NONE"
+             address = NONE, \
+             directory_external_id = NONE"
         );
     }
 

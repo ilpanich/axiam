@@ -1,6 +1,7 @@
 //! Authentication service — login, logout, token refresh, and MFA.
 
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::directory::{DirectoryAuthError, SharedDirectoryAuthenticator};
 use axiam_core::models::password_history::CreatePasswordHistoryEntry;
 use axiam_core::models::reactor::{
     ReactorGate, ReactorOutcome, SharedReactorGate, events as reactor_events, noop_reactor_gate,
@@ -211,6 +212,16 @@ pub struct AuthService<
     /// [`axiam_core::models::reactor::NoopReactorGate`] here, so there is one
     /// login path in every build rather than two that can drift.
     reactor_gate: SharedReactorGate,
+    /// G-3 (T23.3.2) — how a directory account's password is checked.
+    ///
+    /// An `Option`, unlike the reactor gate, because absence has a meaning the
+    /// login path must act on: with no authenticator, **no tenant can use a
+    /// directory**, and a directory account (one whose
+    /// [`User::directory_external_id`] is set) fails sign-in closed with the
+    /// generic failure — it is never checked against its local hash. The
+    /// composition root always attaches one; test harnesses that do not
+    /// exercise directories leave it out.
+    directory_authenticator: Option<SharedDirectoryAuthenticator>,
 }
 
 impl<
@@ -236,7 +247,24 @@ impl<
             config,
             crypto_semaphore,
             reactor_gate: noop_reactor_gate(),
+            directory_authenticator: None,
         }
+    }
+
+    /// Attach the directory authenticator (G-3, T23.3.2) — the
+    /// [`axiam_core::models::directory::DirectoryAuthenticator`] port, which
+    /// `axiam-directory` implements and the composition root injects, so this
+    /// layer-1 crate never depends on the layer-3 LDAP client.
+    ///
+    /// Builder-style for the reason [`Self::with_reactor_gate`] is: every
+    /// existing construction site keeps compiling and keeps its behaviour.
+    #[must_use]
+    pub fn with_directory_authenticator(
+        mut self,
+        authenticator: SharedDirectoryAuthenticator,
+    ) -> Self {
+        self.directory_authenticator = Some(authenticator);
+        self
     }
 
     /// Attach the reactor gate (X1).
@@ -273,40 +301,7 @@ impl<
                 {
                     Ok(u) => u,
                     Err(AxiamError::NotFound { .. }) => {
-                        // SEC-026: timing equalization — run a dummy Argon2 verify so
-                        // user-not-found takes the same time as wrong-password (ASVS V2).
-                        //
-                        // B1: acquire the crypto permit with the SAME
-                        // acquire-with-timeout used by the real wrong-password
-                        // verify below (step 3), so the two branches stay
-                        // constant-time in BOTH regimes:
-                        //   * normal load — both acquire immediately and run
-                        //     exactly one Argon2id verify → 401;
-                        //   * saturation  — both hit the same timeout and return
-                        //     the same 503 backpressure error *before* hashing.
-                        // Making only the real path shed load (while this dummy
-                        // path waited unboundedly and always hashed) would make
-                        // "existing + wrong password → 503" distinguishable from
-                        // "no such user → 401" under load — reintroducing the very
-                        // enumeration oracle SEC-026 closes. Propagating the error
-                        // here keeps them indistinguishable, and also subjects the
-                        // enumeration/dummy path to the memory-DoS bound (an
-                        // attacker spamming unknown usernames is throttled too).
-                        let _permit = acquire_hash_permit(
-                            &self.crypto_semaphore,
-                            std::time::Duration::from_secs(self.config.hash_acquire_timeout_secs),
-                        )
-                        .await?;
-                        let pepper_owned = self.config.pepper.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            password::verify_password(
-                                "dummy",
-                                password::DUMMY_HASH,
-                                pepper_owned.as_ref().map(|p| p.expose_secret()),
-                            )
-                        })
-                        .await;
-                        return Err(AuthError::InvalidCredentials.into());
+                        return self.login_unknown_user(&input).await;
                     }
                     // CQ-B12: propagate real DB errors instead of swallowing them.
                     Err(e) => return Err(e),
@@ -316,10 +311,22 @@ impl<
         };
 
         // 2. Check temporary lockout (brute force protection).
+        //
+        //    Before the directory branch below, deliberately: a locked account
+        //    is refused without the directory hearing anything, so AXIAM cannot
+        //    be used to run up the failed-bind count that locks the account in
+        //    Active Directory (T-302).
         if let Some(locked_until) = user.locked_until
             && locked_until > Utc::now()
         {
             return Err(AuthError::InvalidCredentials.into());
+        }
+
+        // 2b. A directory account (G-3) is authenticated by its directory and
+        //     by nothing else — never by the local hash, which is an unusable
+        //     random one in any case.
+        if user.is_directory_account() {
+            return self.login_directory_account(user, input).await;
         }
 
         // 3. Verify password — CPU-bound Argon2id runs in spawn_blocking behind semaphore (CQ-B02).
@@ -358,6 +365,187 @@ impl<
             input.mfa_policy,
         )
         .await
+    }
+
+    /// The answer to a login name that matches no local account.
+    ///
+    /// SEC-026: run one dummy Argon2id verify so "no such user" costs what
+    /// "wrong password" costs, then refuse with the generic failure.
+    ///
+    /// # The just-in-time provisioning seam (G-3, T23.3.3)
+    ///
+    /// This is the one place a directory account that does not exist locally
+    /// yet will be created. T23.3.3 adds, here and only here: when the tenant
+    /// has an enabled directory with `jit_provisioning`, authenticate the login
+    /// name against it (the same `directory_authenticator` call
+    /// [`Self::login_directory_account`] makes, timed against the same dummy
+    /// verify), and on success create the user, mark it with
+    /// `UserRepository::mark_directory_account` and continue with
+    /// [`Self::complete_authenticated_login`]. Until then — and afterwards, for
+    /// every tenant without a directory — the answer is exactly the unknown-user
+    /// answer below, so nothing about the directory is observable from here.
+    async fn login_unknown_user(&self, _input: &LoginInput) -> AxiamResult<LoginResult> {
+        self.equalising_dummy_verify().await?;
+        Err(AuthError::InvalidCredentials.into())
+    }
+
+    /// One Argon2id verify against [`password::DUMMY_HASH`], to make a branch
+    /// that verifies no real hash cost what one that does costs (SEC-026).
+    ///
+    /// B1: the crypto permit is acquired with the SAME acquire-with-timeout the
+    /// real verify uses, so the branches stay indistinguishable in both regimes
+    /// — under normal load both run exactly one verify and answer `401`; under
+    /// saturation both hit the same timeout and answer the same `503`
+    /// backpressure error *before* hashing. Making only the real path shed
+    /// load would make "existing account, wrong password → 503" distinguishable
+    /// from "no such account → 401" under load — the oracle SEC-026 closes —
+    /// and it also subjects these branches to the memory bound, so an attacker
+    /// spamming unknown names is throttled too.
+    async fn equalising_dummy_verify(&self) -> AxiamResult<()> {
+        let permit = acquire_hash_permit(
+            &self.crypto_semaphore,
+            std::time::Duration::from_secs(self.config.hash_acquire_timeout_secs),
+        )
+        .await?;
+        self.dummy_verify_holding(permit).await;
+        Ok(())
+    }
+
+    /// The dummy verify itself, under a permit the caller already holds; the
+    /// permit is released when the verify finishes.
+    async fn dummy_verify_holding(&self, permit: tokio::sync::SemaphorePermit<'_>) {
+        let pepper_owned = self.config.pepper.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            password::equalising_dummy_verify(pepper_owned.as_ref().map(|p| p.expose_secret()))
+        })
+        .await;
+        drop(permit);
+    }
+
+    /// Sign-in for a directory account (G-3, T23.3.2).
+    ///
+    /// The directory decides: the presented password is checked by binding to
+    /// the tenant's directory as the account's entry, through the
+    /// [`DirectoryAuthenticator`](axiam_core::models::directory::DirectoryAuthenticator)
+    /// the composition root injected. Everything AXIAM puts in front of a
+    /// password still applies, in the same order as for a local account:
+    ///
+    /// * the temporary lockout was checked by the caller, **before** the
+    ///   directory is contacted, so a locked account cannot be used to lock the
+    ///   account in Active Directory (T-302);
+    /// * an account whose status refuses sign-in, an empty password (an
+    ///   RFC 4513 unauthenticated bind), and a deployment with no authenticator
+    ///   are all refused **without** contacting the directory;
+    /// * a failed bind increments the same counter a wrong local password does,
+    ///   and a success resets it (in [`Self::complete_authenticated_login`]);
+    /// * an unavailable, misconfigured or disabled directory fails closed with
+    ///   the generic failure and **never** falls back to the local hash, and it
+    ///   does not count against the account — the user did nothing wrong.
+    ///
+    /// The directory's answer must be **the entry this account is bound to**:
+    /// the identifier it returns is compared with the account's
+    /// `directory_external_id`, so a login name that resolves to another entry
+    /// in the directory (a renamed account, a colliding `uid`) cannot sign in as
+    /// this one even with that other entry's correct password.
+    ///
+    /// # Enumeration
+    ///
+    /// Every refusal here is `InvalidCredentials`, the answer an unknown name
+    /// and a wrong local password get, and every branch runs the same
+    /// equalising dummy Argon2id verify the unknown-name branch runs — on the
+    /// bind path concurrently with the bind, under the same permit and the same
+    /// `503` backpressure rule. What remains is the directory's own latency:
+    /// when a bind takes longer than one Argon2id verify (two TLS handshakes and
+    /// three round trips usually do), a directory account answers measurably
+    /// later than a local or unknown one. That is recorded, open to tuning and
+    /// bounded by the login rate limits, in T-301.
+    async fn login_directory_account(
+        &self,
+        user: User,
+        input: LoginInput,
+    ) -> AxiamResult<LoginResult> {
+        let status_permits = Self::check_user_status(
+            &user.status,
+            user.created_at,
+            self.config.email_verification_grace_period_hours,
+        )
+        .is_ok();
+        let authenticator = match (&self.directory_authenticator, status_permits) {
+            (Some(authenticator), true) if !input.password.is_empty() => Arc::clone(authenticator),
+            (authenticator, _) => {
+                // Refused before the directory hears anything.
+                self.equalising_dummy_verify().await?;
+                if authenticator.is_none() {
+                    tracing::warn!(
+                        target: "axiam::directory",
+                        tenant_id = %input.tenant_id,
+                        user_id = %user.id,
+                        "directory account sign-in refused: no directory authenticator is \
+                         configured in this deployment"
+                    );
+                } else if status_permits {
+                    // An empty password is a wrong password, and counts as one.
+                    self.record_failed_login(input.tenant_id, &user, input.lockout_policy.as_ref())
+                        .await?;
+                }
+                return Err(AuthError::InvalidCredentials.into());
+            }
+        };
+
+        // The equalising verify runs beside the bind, holding a hash permit
+        // acquired first — so saturation answers `503` exactly where the local
+        // path would, and before the directory is contacted.
+        let permit = acquire_hash_permit(
+            &self.crypto_semaphore,
+            std::time::Duration::from_secs(self.config.hash_acquire_timeout_secs),
+        )
+        .await?;
+        let ((), outcome) = tokio::join!(
+            self.dummy_verify_holding(permit),
+            authenticator.authenticate(input.tenant_id, &user.username, &input.password),
+        );
+
+        let marker = user.directory_external_id.as_deref().unwrap_or_default();
+        match outcome {
+            Ok(identity) if identity.external_id.eq_ignore_ascii_case(marker) => {
+                self.complete_authenticated_login(
+                    user,
+                    input.tenant_id,
+                    input.org_id,
+                    input.ip_address,
+                    input.user_agent,
+                    input.mfa_policy,
+                )
+                .await
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    target: "axiam::directory",
+                    tenant_id = %input.tenant_id,
+                    user_id = %user.id,
+                    "directory sign-in refused: the entry that answered is not the one \
+                     this account is bound to"
+                );
+                self.record_failed_login(input.tenant_id, &user, input.lockout_policy.as_ref())
+                    .await?;
+                Err(AuthError::InvalidCredentials.into())
+            }
+            Err(DirectoryAuthError::InvalidCredentials) => {
+                self.record_failed_login(input.tenant_id, &user, input.lockout_policy.as_ref())
+                    .await?;
+                Err(AuthError::InvalidCredentials.into())
+            }
+            Err(other) => {
+                tracing::info!(
+                    target: "axiam::directory",
+                    tenant_id = %input.tenant_id,
+                    user_id = %user.id,
+                    outcome = ?other,
+                    "directory sign-in refused without counting against the account"
+                );
+                Err(AuthError::InvalidCredentials.into())
+            }
+        }
     }
 
     /// Everything a login does **after** the credential itself has been
@@ -1112,6 +1300,14 @@ impl<
         http_client: Option<&reqwest::Client>, // CQ-B35: pass through to HIBP check
     ) -> AxiamResult<()> {
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+
+        // 0. G-3 (T23.3.2): a directory account's password belongs to its
+        //    directory. Refused before anything is verified or written — the
+        //    caller is authenticated as this account, so naming the reason
+        //    discloses nothing — and never by verifying the unusable local hash.
+        if user.is_directory_account() {
+            return Err(AuthError::DirectoryAccountPassword.into());
+        }
 
         // 1. Verify current password — CPU-bound, run in spawn_blocking behind semaphore (CQ-B02).
         //    B1: bounded acquire — held for the whole change_password call so the SEC-028

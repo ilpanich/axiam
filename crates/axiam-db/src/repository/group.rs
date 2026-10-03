@@ -122,6 +122,7 @@ impl MemberRow {
             phone_number: None,
             phone_number_verified_at: None,
             address: None,
+            directory_external_id: None,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,

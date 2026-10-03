@@ -670,6 +670,7 @@ impl UserRepository for MockUserRepo {
             phone_number: None,
             phone_number_verified_at: None,
             address: None,
+            directory_external_id: None,
             metadata: serde_json::Value::Null,
             created_at,
             updated_at: Utc::now(),
@@ -4549,4 +4550,173 @@ async fn p23w1_03_a_code_for_a_pending_account_past_its_grace_period_is_redeemed
     svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
         .await
         .expect("a federated account is pending for life and must still be served");
+}
+
+// ---------------------------------------------------------------------------
+// D-17 (T23.1.5) — the profile's client-authentication rule at revoke and
+// introspect
+// ---------------------------------------------------------------------------
+
+/// A `fapi2` row whose method is a shared secret, with the context that
+/// presents its correct credential in the channel the method names.
+fn d17_revoke_req(method: axiam_core::models::oauth2_client::ClientAuthMethod) -> RevokeRequest {
+    let mut req = revoke_req("t");
+    if method == axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretBasic {
+        // One authentication method per request (RFC 6749 §2.3): the secret
+        // travels in the header and nowhere else.
+        req.client_secret = None;
+    }
+    req
+}
+
+fn d17_introspect_req(
+    method: axiam_core::models::oauth2_client::ClientAuthMethod,
+) -> IntrospectRequest {
+    let mut req = introspect_req("t");
+    if method == axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretBasic {
+        req.client_secret = None;
+    }
+    req
+}
+
+fn d17_tampered_fapi2_client(
+    method: axiam_core::models::oauth2_client::ClientAuthMethod,
+) -> (Box<OAuth2Client>, TokenRequestContext) {
+    use axiam_core::models::oauth2_client::{ClientAuthMethod, ClientProfile};
+    use base64::Engine as _;
+
+    let mut client = make_client(&["refresh_token"], &[]);
+    client.profile = ClientProfile::Fapi2;
+    client.token_endpoint_auth_method = method;
+    let ctx = if method == ClientAuthMethod::ClientSecretBasic {
+        let blob = base64::engine::general_purpose::STANDARD.encode(format!("client-1:{SECRET}"));
+        let credentials = axiam_oauth2::client_secret_basic::decode_credentials(&blob)
+            .expect("a well-formed credential");
+        no_cert().with_basic_credentials(Some(credentials))
+    } else {
+        no_cert()
+    };
+    (client, ctx)
+}
+
+#[tokio::test]
+async fn d17_revoke_and_introspect_refuse_a_tampered_fapi2_row_after_it_authenticates() {
+    use axiam_core::models::oauth2_client::ClientAuthMethod as M;
+    for method in [M::ClientSecretPost, M::ClientSecretBasic] {
+        let (client, ctx) = d17_tampered_fapi2_client(method);
+
+        // A `Db` revoke mode: had the refusal not come first, an owned token
+        // would reach `revoke` and the answer would be a server error.
+        let mut refresh = MockRefreshRepo::new().with_get(make_refresh(None, "client-1", &[]));
+        refresh.revoke = RevokeMode::Db;
+        let svc = build(
+            ClientOutcome::Found(client.clone()),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .revoke_token(client_tenant(), d17_revoke_req(method), &ctx)
+            .await
+            .expect_err("revoke must refuse the row");
+        assert_eq!(
+            err.error_code(),
+            "invalid_client",
+            "revoke/{}",
+            method.as_str()
+        );
+
+        let svc = build(
+            ClientOutcome::Found(client),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        );
+        let err = svc
+            .introspect_token(client_tenant(), d17_introspect_req(method), &ctx)
+            .await
+            .expect_err("introspect must refuse the row");
+        assert_eq!(
+            err.error_code(),
+            "invalid_client",
+            "introspect/{}",
+            method.as_str()
+        );
+    }
+}
+
+/// RFC 7009 §2.2 ("an invalid token is a 200") and a strong `fapi2` client are
+/// both untouched: the gate asks about the client, never the token, and a
+/// strong method passes it.
+#[tokio::test]
+async fn d17_a_strong_fapi2_client_still_revokes_and_introspects() {
+    let (client, ctx) = fapi2_refresh_client();
+
+    // An unknown token: 200, as RFC 7009 §2.2 requires.
+    let svc = build(
+        ClientOutcome::Found(client.clone()),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    assert!(
+        svc.revoke_token(client_tenant(), revoke_req("not-a-token"), &ctx)
+            .await
+            .is_ok(),
+        "an unknown token is still a success for a strong fapi2 client"
+    );
+    assert!(
+        svc.introspect_token(client_tenant(), introspect_req("not-a-token"), &ctx)
+            .await
+            .is_ok(),
+        "introspection still answers for a strong fapi2 client"
+    );
+
+    // An owned token still reaches `revoke`: with a failing repository the
+    // answer is the server error, which proves the gate did not stand in front
+    // of it.
+    let mut refresh = MockRefreshRepo::new().with_get(make_refresh(None, "client-1", &[]));
+    refresh.revoke = RevokeMode::Db;
+    let svc = build(
+        ClientOutcome::Found(client),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let err = svc
+        .revoke_token(client_tenant(), revoke_req("t"), &ctx)
+        .await
+        .expect_err("the failing repository's error must surface");
+    assert_eq!(err.error_code(), "server_error");
+}
+
+/// The control: the same two weak methods on a **standard** row authenticate
+/// and revoke exactly as before (I4).
+#[tokio::test]
+async fn d17_a_standard_row_with_a_shared_secret_method_is_unaffected() {
+    use axiam_core::models::oauth2_client::{ClientAuthMethod as M, ClientProfile};
+    for method in [M::ClientSecretPost, M::ClientSecretBasic] {
+        let (mut client, ctx) = d17_tampered_fapi2_client(method);
+        client.profile = ClientProfile::Standard;
+        let svc = build(
+            ClientOutcome::Found(client),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new(),
+        );
+        assert!(
+            svc.revoke_token(client_tenant(), d17_revoke_req(method), &ctx)
+                .await
+                .is_ok(),
+            "revoke/{}",
+            method.as_str()
+        );
+        assert!(
+            svc.introspect_token(client_tenant(), d17_introspect_req(method), &ctx)
+                .await
+                .is_ok(),
+            "introspect/{}",
+            method.as_str()
+        );
+    }
 }

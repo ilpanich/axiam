@@ -278,6 +278,32 @@ async fn session_is_live(f: &Fixture, session_id: Uuid) -> bool {
         .is_ok()
 }
 
+/// Follow `end_session`'s bounce to its cookie-reading `/logout` hop
+/// (T23.1.8, P23W1-10) the way a browser would, carrying no cookie.
+macro_rules! follow {
+    ($app:expr, $location:expr) => {{
+        let req = test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri($location)
+            .to_request();
+        test::call_service(&$app, req).await
+    }};
+}
+
+/// The bounce `end_session` answers a request with no hint `sid` with.
+fn assert_bounced_to_cookie_logout(status: u16, location: Option<&str>) -> String {
+    assert_eq!(
+        status, 302,
+        "no hint sid: end_session bounces to the hop that can read the OP cookie"
+    );
+    let location = location.expect("a Location header").to_owned();
+    assert!(
+        location.starts_with("/oauth2/authorize/logout?"),
+        "a same-origin path under the cookie's path: {location}"
+    );
+    location
+}
+
 // ---------------------------------------------------------------------------
 // Reachability
 // ---------------------------------------------------------------------------
@@ -290,9 +316,18 @@ async fn end_session_is_mounted_and_public() {
     // /oauth2/device_authorization was.
     let f = setup().await;
     let app = test_app!(f);
-    let (status, _) = end_session!(app, &f, "");
+    let (status, location) = end_session!(app, &f, "");
     assert_ne!(status, 401, "end_session must not require authentication");
-    assert_eq!(status, 200, "no hint, no redirect: AXIAM's own page");
+    // T23.1.8: no hint, so the bounce to the cookie hop — which is public too,
+    // and with no redirect requested renders AXIAM's own page.
+    let location = assert_bounced_to_cookie_logout(status, location.as_deref());
+    let resp = follow!(app, &location);
+    assert_ne!(
+        resp.status().as_u16(),
+        401,
+        "the hop must not require authentication"
+    );
+    assert_eq!(resp.status().as_u16(), 200, "no redirect: AXIAM's own page");
 }
 
 #[actix_web::test]
@@ -304,7 +339,15 @@ async fn end_session_accepts_post_as_well_as_get() {
         .uri(&format!("/oauth2/end_session?tenant_id={}", f.tenant_id))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 200);
+    // T23.1.8: answered like the GET — no hint, so the bounce to the cookie
+    // hop, which the browser follows as a GET.
+    let location = resp
+        .headers()
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let location = assert_bounced_to_cookie_logout(resp.status().as_u16(), location.as_deref());
+    assert_eq!(follow!(app, &location).status().as_u16(), 200);
 }
 
 // ---------------------------------------------------------------------------
@@ -354,8 +397,15 @@ async fn an_unverifiable_hint_ends_nothing() {
     )
     .unwrap();
 
-    let (status, _) = end_session!(app, &f, format!("&id_token_hint={forged}"));
-    assert_eq!(status, 200);
+    let (status, location) = end_session!(app, &f, format!("&id_token_hint={forged}"));
+    // T23.1.8: a hint that does not verify is no hint — the bounce to the
+    // cookie hop, which, with no cookie, ends nothing either.
+    let location = assert_bounced_to_cookie_logout(status, location.as_deref());
+    assert!(
+        !location.contains("id_token_hint"),
+        "the hop is never handed a hint: {location}"
+    );
+    assert_eq!(follow!(app, &location).status().as_u16(), 200);
     assert!(
         session_is_live(&f, session).await,
         "a forged hint must not end a session"
@@ -368,8 +418,9 @@ async fn garbage_in_the_hint_is_not_an_error() {
     // the user asked to log out.
     let f = setup().await;
     let app = test_app!(f);
-    let (status, _) = end_session!(app, &f, "&id_token_hint=not-a-jwt");
-    assert_eq!(status, 200);
+    let (status, location) = end_session!(app, &f, "&id_token_hint=not-a-jwt");
+    let location = assert_bounced_to_cookie_logout(status, location.as_deref());
+    assert_eq!(follow!(app, &location).status().as_u16(), 200);
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +642,16 @@ async fn state_without_a_redirect_is_not_reflected_anywhere() {
         ))
         .to_request();
     let resp = test::call_service(&app, req).await;
+    // T23.1.8: the bounce carries `state` onward in its URL — it is the
+    // relying party's to have back on a redirect — and its body is empty.
+    let location = resp
+        .headers()
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let location = assert_bounced_to_cookie_logout(resp.status().as_u16(), location.as_deref());
+    assert!(test::read_body(resp).await.is_empty(), "a 302 with no body");
+    let resp = follow!(app, &location);
     assert_eq!(resp.status().as_u16(), 200);
     let body = test::read_body(resp).await;
     let body = String::from_utf8_lossy(&body);

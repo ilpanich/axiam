@@ -1,8 +1,12 @@
 # Competitor gap remediation plan — 2026-10-02
 
 > **Status: ACCEPTED — in execution as Phase 23.** W1 (G-1 X7.1–X7.3, G-4,
-> G-9, G-12, G-15) executed 2026-10-02/03 on `claude/phase23-w1`; D-9 and
-> D-10 taken during it, D-11 to D-13 open. Written against AXIAM `1.0.0-beta17` from the three
+> G-9, G-12, G-15) executed 2026-10-02/03 on `claude/phase23-w1` and merged
+> (PR #521); D-9 and D-10 taken during it. W2 (G-1 X7.4–X7.9 and the
+> submission package, T23.1.8, G-3's crate and bind path) runs on
+> `claude/phase23-w2`: D-11 taken by the maintainer on 2026-10-03 (option 1,
+> issue #516), D-12 and D-13 accepted as recommended, D-14 … D-18 taken during
+> it; all seven W2 tasks executed and the W2 F4 review done. Written against AXIAM `1.0.0-beta17` from the three
 > comparisons in this directory:
 > [`competitor-comparison-keycloak.md`](competitor-comparison-keycloak.md)
 > (Keycloak 26.8.0),
@@ -197,6 +201,126 @@ into tasks and assigns the model per task.
 > `claims.id_token.auth_time` on `fapi2` is still dropped — open as **D-12**.
 > W2's T23.1.4 and T23.1.5 are expected to be audits too, since X7.4 to X7.8
 > are in the tree; T23.1.6 and T23.1.7 (judgements, submission) are not.
+>
+> **EXECUTED (partly) — G-1, W2: T23.1.4 – T23.1.7, 2026-10-03.** On
+> `claude/phase23-w2`. G-1 stays open: the maintainer runs both suites
+> personally before the release tag (decision of 2026-10-03), and sends the
+> submission; issue #513 closes on the grant, not on this wave.
+>
+> - **T23.1.4** (`1218dbe`, `9799f87`, `3da0cc0`; Sonnet 5.5). An audit, as
+>   expected: every X7.4–X7.6 requirement (`prompt` in its four values and its
+>   `none` combinations, `max_age`, `id_token_hint`, ACR derivation and the
+>   essential-unmet refusal, the cosmetic four, POST userinfo, and the ignore
+>   and `fapi2` twins of each) is tabulated against a named test. No defect in
+>   the shipped lane; the rows pinned only at unit level are now pinned over
+>   HTTP too (`id_token_hint` wrong subject, wrong client, foreign key, access
+>   token, garbage and expired-but-signed; `select_account`; an essential
+>   `claims.id_token.acr` on the ignore lane; a non-form body at POST
+>   userinfo). **D-12** shipped: an essential (or unreadable)
+>   `claims.id_token.auth_time` on `fapi2` is `invalid_request` on both
+>   carriers, a voluntary one unchanged, the honour lane still honours it;
+>   amends T-239 in all three artifacts, OpenAPI's discovery description
+>   regenerated. The audit raised one question the plan had pinned the wrong
+>   way, decided as **D-14**: `max_age=0` could never yield a code (`0 >= 0` on
+>   the return leg), against OIDC Core §3.1.2.1's errata note that it equals
+>   `prompt=login`. It now takes the `prompt=login` path and no path of its own
+>   (a unit test proves the two outcomes equal at every age, leg and session
+>   state); `prompt=none` with `max_age=0` is `login_required`; test failed
+>   first; T-239 amended again. Also corrected: the "plan only" status lines of
+>   `extra-B-track-features.md` §X7 and `basic-op-gap-plan.md`, and every
+>   statement that discovery publishes `claims_parameter_supported: false`
+>   (it publishes `true`).
+> - **T23.1.5** (`34a5a8f`, `35a281e`, `6e01254`, `744651b`; Sonnet 5.5). An
+>   audit of X7.7 (shipped as schema **v57**, not v51) and X7.8 against RFC
+>   6749 §2.3.1, RFC 7617 and OIDC Core §5: every requirement tabulated, about
+>   thirty new pinning tests (the §2.3.1 decode edge cases end to end, two
+>   `Authorization` headers, the redaction at PAR, revocation and
+>   introspection, the strong-client refusal at the three ordinary grants,
+>   cross-tenant consent, no sensitive claim in the access token, introspection
+>   or a refreshed ID token, the OIDC Core §5.1.1 address shape, SCIM as the
+>   writer over HTTP). Two defects, each with a test that failed first: (1)
+>   **with per-client rate-limit keying configured, a `client_secret_basic`
+>   client had no per-client bucket**, because the limiter read `client_id`
+>   from the form only, so its secret could be guessed from many addresses
+>   (the default `ip` keying was never affected); the key now falls back to the
+>   id the Basic header decodes to, through the same parser the handlers use.
+>   (2) The `fapi2` client-authentication rule did not run at PAR,
+>   introspection or revocation, decided as **D-17**. Both amend T-253.
+> - **T23.1.6** (`6f1385b`, `cfb6fcf`, `f3dbea7`, `9c74955`; Sonnet 5.5).
+>   [`docs/conformance/REVIEW-JUDGEMENTS.md`](../docs/conformance/REVIEW-JUDGEMENTS.md)
+>   with the four Basic OP entries, each citing its 2026-09-25 log id and the
+>   screenshot it rests on, each marked *proposed* until the maintainer's run
+>   confirms it; nothing in it is a result of a run that was not made. Harness:
+>   `report.py` now names every `SKIPPED` module (it counted them and named
+>   none, so "PASSED or documented SKIPPED" could not be checked) and keeps the
+>   earlier dated reports in `index.md`; `export-evidence.py` (and `just
+>   conformance-evidence`) scripts the evidence export the three earlier
+>   directories were made by hand. A *maintainer run checklist* in
+>   [`fapi-conformance-runbook.md`](fapi-conformance-runbook.md).
+> - **T23.1.7** (`9f5fe95`, `47b856b`, `ac87a72`, `58bacf0`, `ee3bac0`;
+>   Sonnet 5.5). The three FAPI entries over all three variants, the FAPI half
+>   of the checklist (with F4 item (g): rerun
+>   `test-claims-parameter-identity-claims` and read its request for `acr` and
+>   `auth_time`), and the X5.3 package at the end of
+>   [`fapi-certification-submission.md`](fapi-certification-submission.md):
+>   what is submitted, every run-dependent field as a placeholder, what to
+>   attach and never attach, a pre-send checklist, and the website wording for
+>   the mark, kept there and **not** in `website/src/` until the mark is
+>   granted. Nothing was sent.
+>
+> What the plan did not anticipate. The claims `WARNING` is on **all three**
+> FAPI variants, every run since 2026-09-10, not on `private_key_jwt` only;
+> and it is **not** the "claims not supported" deviation §4 *Design* item 2
+> hoped for, since discovery says `true`, so its cause is in the suite log and
+> the entry stays *open* until the maintainer's run. The plan's "four FAPI
+> variants" are three plan files; the fourth is the Basic plan. `REVIEW` is a
+> terminal verdict by the suite's design, so "every module `PASSED`" cannot be
+> met literally; the expected shape is the baseline's, each `REVIEW` closed by
+> its judgement. And a `require_par` client's unpushed request from an
+> anonymous browser goes through the login hop before it is refused (found by
+> reading the code, carried to the F4 review). Questions for the maintainer
+> are in the W2 PR.
+>
+> **EXECUTED — T23.1.8 (D-11), 2026-10-03** (`f7f4c4c`, `4ee5e64`, `4a1e961`,
+> `c74fe80`; Opus 5.5). Browser SSO now works on a T21.6 per-tenant issuer
+> path. Every completed sign-in (password, OPAQUE, MFA verify, forced
+> enrolment, both WebAuthn ceremonies, the federation handoff) mints
+> `axiam_op_session` at every path `op_session_cookie_paths` names: the bare
+> `/oauth2/authorize` and, when `tenant_issuer_paths` is on,
+> `/t/{tenant_id}/oauth2/authorize` for the session's own tenant only. Same
+> name, same value, same attributes and lifetime; the paths never prefix one
+> another, so no request carries two copies and the existing tenant-keyed
+> digest lookup serves both paths without a new resolver. Removals are built
+> from the same list, and the per-path setter is private, so nothing mints at
+> a path the list does not name. Logout and both `end_session`s clear every
+> copy, and P23W1-10 is closed by the `/logout` hop decided as **D-16**.
+> Threat model **2.19.0**, **T-290**, T-237 and T-238 amended; OpenAPI gains
+> `/oauth2/authorize/logout`; no contract or schema change.
+>
+> Tests: `oauth2_tenant_path_sso_test.rs` (25) re-runs the T23.1.3 audit list
+> on the tenant path (code from the tenant cookie alone, the hop end to end,
+> fixation, cross-user, factor still owed, `POST` unrouted, nothing reflected,
+> the decline arm, M7, `account_may_act` with `PendingVerification` still
+> served, the hostile `return_to` list, `prompt=none`), cross-tenant refusal in
+> both directions including a digest that matches a live row in the other
+> tenant, both cookies cleared on every logout, and P23W1-10; six `csrf.rs`
+> unit tests pin the path list, its disjointness and the mirrored removals;
+> each sign-in path's own suite asserts both cookies.
+>
+> What the plan did not anticipate. Three defects the cookie had been hiding,
+> each fixed: the tenant-path `return_to` echoed the `tenant_id` that
+> `TenantPathScope` appends, so **every return leg on a tenant path was
+> refused** `invalid_request` (test failed first); the stale-cookie removal on
+> a tenant path used the bare path and never matched; and **`POST
+> /api/v1/auth/logout` revoked nothing after an admin switched tenant**,
+> because it looked the session up in the acted-on tenant rather than the
+> principal's (test failed first). `end_session` without a hint now costs the
+> RP one extra `302` on the bare path too. The threat-model text landed in
+> the third commit rather than with the first two code commits, all in this
+> wave. For W3: the SAML SSO path is one more entry in
+> `op_session_cookie_paths` (not gated on `tenant_issuer_paths`), plus a SAML
+> arm for the `return_to` validator, the SPA's `isAuthorizePath` and the
+> stale-cookie removal, with the 56-candidate list re-run against it.
 
 **Target.** Two certificates: OpenID Connect *Basic OP* and *FAPI 2.0 Security
 Profile (Final)*, as OpenID Provider, with the results published under
@@ -323,6 +447,89 @@ allow-list; Sonnet 5.5 for the SP CRUD, metadata import, console page and SDK
 fan-out.
 
 ### G-3 — LDAP / Active Directory identity source — **P1**
+
+> **EXECUTED (partly) — G-3, W2: T23.3.1, 2026-10-03** (`7279f66`, `2f60f4f`,
+> `227af53`; Sonnet 5.5; issue #522). The crate `axiam-directory` exists at
+> layer 3, in the layering table and `crate-layering.md` from its first
+> commit, opted into `missing_docs` (CLAUDE.md's list now names it), with no
+> feature flag and no network code yet. `DirectoryConfig` lives in
+> `axiam-core` as the pinned fields plus `enabled`, `kind` (`OpenLdap` |
+> `ActiveDirectory`, which only chooses defaults: `entryUUID`/`objectGUID`,
+> reverse `member`/`memberOf`, `modifyTimestamp`/`uSNChanged`, `uid`/
+> `sAMAccountName`) and `group_nesting_depth` (0–10, default 5); the
+> repository is schema **v70**, one row per tenant. The bind secret follows
+> **D-15**: AES-256-GCM in the row through the existing
+> `axiam_auth::crypto` helpers, keyed by the optional provider key
+> `directory_encryption_key`; no read returns it, only
+> `decrypt_bind_secret` does; without the key a save is refused naming the
+> key, serving is `503`, and boot is unaffected. `axiam_directory::config::
+> validate` is pure and refuses at config time a plaintext URL (`ldap://`
+> without StartTLS, `ldaps://` with it, any other scheme), userinfo, a path
+> or query, a filter template without exactly one `{username}` in value
+> position, an empty bind secret (an RFC 4513 unauthenticated bind), and a
+> trust anchor that is not a parseable CA certificate; an empty anchor list
+> means the platform roots the rest of the workspace uses. Tests: 44 unit
+> tests in the crate, 20 repository tests, the v70 schema tests, the key's
+> name and environment variable pinned.
+>
+> What the plan did not anticipate. The brief said the directory row should
+> go "with the tenant, exactly as its email config is": **no tenant-delete
+> cascade exists for anything**, the email configuration included, so a
+> deleted tenant leaves its SMTP ciphertext behind. The directory row is now
+> deleted in the same transaction as its tenant (tested); the email
+> configuration's missing cascade is carried to the F4 review. No threat
+> entry yet: the connector's elements, the bind secret at rest among them,
+> are written by T23.3.2 with the network path, pulled forward from T23.3.7
+> so that §7 rule 2 holds.
+>
+> **EXECUTED (partly) — G-3, W2: T23.3.2, 2026-10-03** (`1c17c68`, `42d0441`,
+> `f17c7e1`, `352351d`, `176219e`, `0552b19`; Opus 5.5). The security core
+> of G-3. `ldap3 0.12` over `rustls 0.23` (`tls-rustls-ring`): neither
+> OpenSSL nor `native-tls` is in `Cargo.lock`. TLS is mandatory, TLS 1.2
+> floor (AD and many OpenLDAP builds stop there), the trust store is the
+> tenant's anchors alone or the public roots when there are none, never
+> both, the name checked is the URL host, and StartTLS is completed before
+> anything is bound or it fails closed. One function escapes per RFC 4515
+> and is the only way a login name enters a filter; no DN is ever built.
+> Referrals and search references are neither followed nor matched. The
+> pool is bounded per tenant and in total, with connect, operation and
+> whole-flow deadlines; the user bind always runs on a fresh connection that
+> is never pooled; an empty password is refused with zero packets sent. The
+> port `DirectoryAuthenticator` lives in `axiam-core`, is implemented in
+> `axiam-directory` and is attached to `AuthService` by `axiam-server` only,
+> so the layering holds. The marker is **D-18**. A directory account signs
+> in only through the directory, behind the existing lockout (a locked
+> account never reaches the directory, so AXIAM cannot be used to lock
+> accounts in AD), with no fallback to a local hash, the answering entry
+> bound to the account's marker, timing equalised with the dummy Argon2
+> verify, and `amr = [pwd]`. Every local password door refuses a directory
+> account: change, reset request (answered as an unknown address) and
+> confirm, OPAQUE login and enrolment, the SCIM password write and gRPC
+> `ValidateCredentials`. The connector's threat entries were pulled forward
+> from T23.3.7: threat model **2.20.0**, a trust boundary AXIAM ↔ tenant
+> directory, **T-291 … T-303**, of which **T-300 is open** (a
+> tenant-chosen directory host is not held to `guarded_fetch`'s
+> private-address policy; reachable once T23.3.8 adds the management
+> routes). Tests: an in-process TLS test directory on `ldap3_proto` (25
+> client tests: ldaps and StartTLS, anchors, name mismatch, refused
+> StartTLS, referrals, zero and two matches, the injection attempt asserted
+> on the filter the server parsed, AD `data 533`, pool bounds, timeouts),
+> 64 unit tests, 7 authenticator tests, 12 `AuthService` tests, the marker's
+> 7 repository tests, and REST, SCIM and gRPC refusal tests.
+>
+> What the plan did not anticipate, and what W3 must pick up.
+> `SearchEntry::construct` panics on malformed BER, so entries are parsed by
+> a fallible parser of AXIAM's own; `ldap3`'s codec has no per-message size
+> cap (residual in T-295). `validate` accepts IPv6-literal URLs that `ldap3`
+> cannot name-check, so they always fail closed: **T23.3.8 refuses them at
+> config time**. A tenant in `opaque_mode = required` refuses `/auth/login`
+> before the credential is read, so directory accounts cannot sign in there:
+> **T23.3.8 refuses a directory together with `required`, both ways**, and
+> should add an operator allow-list of directory hosts for T-300. The JIT
+> seam is `AuthService::login_unknown_user`. Passkeys a directory account
+> enrolled keep working until the account is disabled, so the sync job
+> (T23.3.5) must disable or soft-delete vanished and disabled entries
+> (T-303). Its threats and contract §30 start at T-304.
 
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned
@@ -779,7 +986,7 @@ G-9, G-10, G-11, G-12, G-15       independent, documentation and measurement
 | Wave | Items | Why together |
 |---|---|---|
 | W1 | G-1 (X7.1–X7.3), G-4, G-12, G-15, G-9 | The P1 that is nearly free, three small items, and the two decision documents |
-| W2 | G-1 (X7.4–X7.9, X5.3 submission), G-3 (crate, model, bind path) | Certification closes; the directory crate's security core lands under Opus 5.5 |
+| W2 | G-1 (X7.4–X7.9, X5.3 submission package; T23.1.8 per-tenant OP cookie, D-11), G-3 (crate, model, bind path) | Certification closes; the directory crate's security core lands under Opus 5.5; T23.1.8 must be merged before W3, because G-2's SAML SSO reuses the login hop |
 | W3 | G-2 (SP registry, signing key, SSO), G-3 (sync, mapping, console) | SAML IdP on top of the login hop; directory completes |
 | W4 | G-2 (SLO, console, contract §29), G-5 (dispatcher, SETs, streams) | SAML completes; the outbound signal spine lands |
 | W5 | G-6, G-7, G-8 | Outbound SCIM on the dispatcher; CIBA on a green FAPI baseline; the minimal profile |
@@ -796,6 +1003,22 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > regression T23.1.3 introduced (P23W1-03) and one Low (P23W1-02, `Bearer`
 > case). Filed: three pre-existing Mediums (ilpanich/axiam#517, #518, #519)
 > and three Lows (#520); four residuals accepted with reasons.
+>
+> **W2 F4, 2026-10-03:** [`security-review-phase23-w2-2026-10-03.md`](security-review-phase23-w2-2026-10-03.md).
+> Thirteen findings, no merge blocker after fixes. Fixed on the branch, both
+> wave-introduced in T23.3.1's storage layer: a directory configuration update
+> without a new secret kept the stored bind secret while the URL, StartTLS,
+> bind DN or trust anchors changed, so the write-only secret could have been
+> redirected to an editor's host (**P23W2-01**, Medium, latent until
+> T23.3.8 adds write routes), and a tenant delete whose transaction
+> rolled back answered `204` (P23W2-02, Low). Filed: pre-existing tenant
+> deletion that cascades to nothing else (P23W2-04, Medium, ilpanich/axiam#523),
+> the `require_par` refusal coming only after the login hop (P23W2-03, Low,
+> #524), the SMTP password kept across a host change (P23W2-05, Low, #525) and
+> two informational gaps (P23W2-06/-07, #526). Accepted with reasons: the logout-hop residuals, T-300 and
+> `ldap3`'s missing frame cap (both latent with no writer, and **binding
+> preconditions on T23.3.8**), the directory timing residual, and the
+> evidence script. The T23.1.8 and T23.3.2 surfaces held.
 
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This
@@ -836,6 +1059,7 @@ when the oracle is weak, the model is Opus 5.5.
 | T23.1.5 | X7.7 sensitive scopes, X7.8 `client_secret_basic` | Sonnet 5.5 | Decision A is taken; RFC 6749 §2.3.1 pins the parsing; existing client-auth tests extend |
 | T23.1.6 | X7.9: Basic OP harness, final runs, `docs/conformance/REVIEW-JUDGEMENTS.md` | Sonnet 5.5 | Suite-driven; a judgement is prose over a log the suite produced |
 | T23.1.7 | FAPI `WARNING`/`REVIEW` judgements, X5.3 submission package, website mark | Sonnet 5.5 | Prose and packaging; the runs are already green |
+| T23.1.8 | D-11: per-tenant-prefix OP-session cookie minted at sign-in; principal resolution on `/t/{tenant_id}/oauth2/authorize` reads it; logout, `end_session` and session revocation clear every cookie the session minted (closes F4 residual P23W1-10); tests incl. the T23.1.3 audit list re-run on the tenant path, cross-tenant refusal, fixation | **Opus 5.5** | Cookie and session-fixation surface, same class as T23.1.3 |
 
 ### G-2 — SAML 2.0 identity provider
 
@@ -891,7 +1115,7 @@ when the oracle is weak, the model is Opus 5.5.
 | T23.15.1 | *Identity for agents* guide and website page with §28 SDK snippets | Sonnet 5.5 | Documentation over shipped features |
 | F4 (per wave) | Security review of the wave's diff before merge, threat-model reconciliation | **Opus 5.5** | The one place where a cheaper reviewer is false economy |
 
-**Totals.** 46 tasks: 13 on Opus 5.5 (12 implementation or design tasks plus
+**Totals.** 47 tasks: 14 on Opus 5.5 (13 implementation or design tasks plus
 the per-wave F4 review), 32 on Sonnet 5.5, and one split (T23.5.4, whose two
 threat entries ride the Opus session of T23.5.2). The Opus tasks are deliberately the
 small, dense ones (S or the core of an M); the long fan-outs, harnesses and
@@ -941,9 +1165,14 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-8 | Phase 23 in `roadmap.md` | **Yes**, on acceptance of this plan |
 | D-9 | *Taken by the orchestrator, 2026-10-02, on T23.1.2's escalation F-1.* Where does a refreshed honour-lane ID token get `auth_time`/`acr`/`amr` once the browser session it came from has rotated? Today `session_evidence_for_refresh` reads the session row the code was issued under, and `AuthService::refresh` deletes that row, so after one browser-session rotation the refreshed ID token carries no evidence (OIDC Core §12.2 wants the original `auth_time`) | **Snapshot it on the OAuth2 refresh token**, exactly as the authorization code already does and as R-2 did for `requested_userinfo_claims`: optional columns on `oauth2_refresh_token` (next schema version, no backfill), written at code exchange from the code's snapshot, copied verbatim across OAuth2 refresh rotation, read by the refresh grant. A pre-migration row (columns absent) falls back to today's live-session lookup, so nothing gets worse. Emission stays gated by the honour lane, unchanged. Rejected: a rotation-lineage pointer on the session (a second source of truth for the same event, and a join on every refresh) |
 | D-10 | *Taken by the orchestrator, 2026-10-02, on T23.1.2's escalation F-2.* What does AXIAM record when a federated IdP asserts an authentication instant in the future? `AuthenticationEvidence::upstream` takes it unbounded, and `honour.rs` clamps a future instant to "0 s old", so a session can stay fresh for `max_age` indefinitely and an ID token can carry a future `auth_time` | **`authenticated_at = min(upstream instant, verification instant)`**: never later than the moment AXIAM verified the assertion, so the evidence can only understate freshness (the rule the pre-v55 decode already follows). An instant later than the verification instant by more than the federation path's existing clock-skew allowance is additionally logged at `warn` with the IdP named. No new configuration |
-| D-11 | *Open, raised by T23.1.3, 2026-10-03.* Browser SSO on a T21.6 per-tenant issuer path: the `axiam_op_session` cookie is `Path=/oauth2/authorize`, which is not a prefix of `/t/{tenant_id}/oauth2/authorize`, so the browser never sends it there and the login hop always ends in `login_required` (fails closed). G-2's SAML SSO endpoint (`/saml/v2/{tenant}/sso`) reuses the hop and meets the same wall | **Decide before W3 (G-2).** Options: a second, path-scoped cookie per tenant prefix minted at sign-in; widening `Path` (which turns the browser's scoping into a code-enforced invariant; `__Host-` would need `Path=/` anyway); or a documented limitation that per-tenant issuers are API-only. The orchestrator leans to a per-prefix cookie, as the narrowest change, but it is an architectural choice about what an AXIAM issuer is |
-| D-12 | *Open, raised by T23.1.1, 2026-10-02.* An **essential** `claims.id_token.auth_time` on a `fapi2` client is dropped, while OIDC Core §2 makes `auth_time` REQUIRED when requested as essential | **Refuse it on `fapi2` exactly as `id_token.acr` now is** (`invalid_request`), for the reason T23.1.1 gave: a silently dropped essential request is a downgrade. Small; a candidate for T23.1.4 in W2 |
-| D-13 | *Open, raised by T23.9.1, 2026-10-02.* G-5 signs SETs "with the tenant's EdDSA issuer key", which does not exist: there is one deployment key (see the note under G-5's *Design*) | **Use the deployment key at the tenant's JWKS URL for G-5**, as ID tokens do today, and keep per-tenant keys a separate decision with its own key-management cost (the verifiable-credentials design needs per-tenant ES256 keys anyway, and is where that cost should be argued) |
+| D-11 | **Taken by the maintainer, 2026-10-03 — option 1** ([issue #516](https://github.com/ilpanich/axiam/issues/516)): at sign-in, mint a second, path-scoped OP-session cookie for each per-tenant issuer prefix (`Path=/t/{tenant_id}/oauth2/authorize`, later also the SAML SSO path), with the same attributes (`HttpOnly; Secure; SameSite=Lax`), lifetime and session binding as `axiam_op_session`; the bare-path cookie is unchanged. Logout, `end_session` and revocation clear every cookie a session minted, which also decides F4 residual P23W1-10. Implemented by **T23.1.8** in W2, which must merge before W3. *Raised by T23.1.3, 2026-10-03.* Browser SSO on a T21.6 per-tenant issuer path: the `axiam_op_session` cookie is `Path=/oauth2/authorize`, which is not a prefix of `/t/{tenant_id}/oauth2/authorize`, so the browser never sends it there and the login hop always ends in `login_required` (fails closed). G-2's SAML SSO endpoint (`/saml/v2/{tenant}/sso`) reuses the hop and meets the same wall | **Decide before W3 (G-2).** Options: a second, path-scoped cookie per tenant prefix minted at sign-in; widening `Path` (which turns the browser's scoping into a code-enforced invariant; `__Host-` would need `Path=/` anyway); or a documented limitation that per-tenant issuers are API-only. The orchestrator leans to a per-prefix cookie, as the narrowest change, but it is an architectural choice about what an AXIAM issuer is |
+| D-12 | **Accepted as recommended, 2026-10-03**; rides T23.1.4 in W2. *Raised by T23.1.1, 2026-10-02.* An **essential** `claims.id_token.auth_time` on a `fapi2` client is dropped, while OIDC Core §2 makes `auth_time` REQUIRED when requested as essential | **Refuse it on `fapi2` exactly as `id_token.acr` now is** (`invalid_request`), for the reason T23.1.1 gave: a silently dropped essential request is a downgrade. Small; a candidate for T23.1.4 in W2 |
+| D-13 | **Accepted as recommended, 2026-10-03**; binding on T23.5.2. *Raised by T23.9.1, 2026-10-02.* G-5 signs SETs "with the tenant's EdDSA issuer key", which does not exist: there is one deployment key (see the note under G-5's *Design*) | **Use the deployment key at the tenant's JWKS URL for G-5**, as ID tokens do today, and keep per-tenant keys a separate decision with its own key-management cost (the verifiable-credentials design needs per-tenant ES256 keys anyway, and is where that cost should be argued) |
+| D-14 | *Taken by the orchestrator, 2026-10-03, on T23.1.4's escalation.* On the honour lane, `max_age=0` can never yield a code: `honour::evaluate` re-authenticates when `elapsed >= max_age`, so on the return leg a session signed in a moment ago is still "too old" and the answer is `login_required`. Plan §4.3, test T2.1 and T-239's text pinned that literally ("always reauthenticate … never yields a code"), but OIDC Core §3.1.2.1 (1.0 incorporating errata set 2) says the OP re-authenticates when the elapsed time is *greater than* `max_age`, and adds that `max_age=0` is equivalent to `prompt=login`, after which a code is issued | **`max_age=0` is handled as `prompt=login`**: the outbound leg always re-authenticates (the `reauth=1` hop, as today), and the return leg, whose session the hop itself just created, is answered with a code and an ID token whose `auth_time` is the new authentication. Positive values keep `>=` (one instant stricter than the clause; harmless, and pinned by `oidcc-max-age-1`). The return-leg marker's accepted residual (F4 P23W1-08) applies unchanged, exactly as it does to `prompt=login`. Rejected: keeping it (an RP sending `max_age=0` could never sign in, which contradicts the errata note) and switching every value to strict `>` (changes the pinned `max_age=1` behaviour for no gain). Implemented in T23.1.4; amends test T2.1 and T-239's mitigation text |
+| D-15 | *Taken by the orchestrator, 2026-10-03, before T23.3.1, so the Sonnet task does not stall on it.* §4 G-3 says `bind_secret (secret provider, R-5 pattern)`, but the secret provider is deployment-wide and addressed by static logical names (`axiam_core::secrets`), while a bind secret is per tenant and set by a tenant administrator | **Encrypted at rest in the directory configuration row, exactly as the per-tenant SMTP password is** (`crates/axiam-db/src/repository/email_config.rs`): AES-256-GCM with a fresh nonce per write, the 256-bit key fetched from the secret provider under a **new logical name `directory_encryption_key`** (R-5: the key lives in the provider, never in the database or configuration file). The key is optional: without it the directory feature is unavailable and creating a configuration fails closed with a message naming the key, as OPAQUE does without its keys. The secret is write-only through every API (never returned, `Debug`-redacted, absent from audit rows), and decrypted only at bind time. Rejected: a per-tenant provider reference (`bind_secret_ref` resolved by name), because it would make a tenant administrator's configuration depend on a deployment operator's vault layout, and the admin console (T23.3.8) could not set the secret at all |
+| D-16 | *Taken in T23.1.8 (Opus 5.5), 2026-10-03, accepted by the orchestrator.* The OP cookie (`Path=/oauth2/authorize`, and since D-11 `/t/{tenant_id}/oauth2/authorize`) never reaches `/oauth2/end_session`, so a logout without an `id_token_hint` `sid` could expire the cookie but not read it, and the session row it named survived (F4 residual P23W1-10). How does such a logout end that row? | **A hop to the `/logout` sub-path of the authorization endpoint the request came through**: `end_session` answers a request with no verified hint `sid` with a `302` to `/oauth2/authorize/logout?tenant_id=…` (bare) or `/t/{tenant_id}/oauth2/authorize/logout`, which RFC 6265 §5.1.4 path-match sends the cookie to. The hop looks the digest up in the request's tenant, revokes that one row, clears every cookie and continues exactly as `end_session` (exact-match `post_logout_redirect_uri` against the identified client's allow-list, `state` echoed only on a redirect that happens; the continuation never carries the hint). GET-only, public, rate-limited with the `end_session` preset (bucket `oauth2_end_session_cookie`, both mounts), in OpenAPI, and with **no back-channel fan-out**, so logout CSRF stays exactly what `end_session` already was. Threat **T-290**. Rejected: adding `/oauth2/end_session` to the cookie path list (widens the maintainer's D-11 layout to a second endpoint, and misses cross-site form POSTs); fanning out back-channel logout from the hop (any page could log a user out of every RP); a confirmation prompt (against B5); leaving the residual. Residual: a hinted logout whose browser cookie names a *different* session leaves that row with its cookies cleared |
+| D-17 | *Taken by the orchestrator, 2026-10-03, on T23.1.5's escalation.* The request-time `fapi2` client-authentication re-check (`is_strong()`) ran at the token endpoint, token exchange and uma-ticket only; a `fapi2` row edited in the database to `client_secret_basic` or `client_secret_post` authenticated at PAR (`201`), introspection and revocation (`200`) with a correct secret | **The same rule runs at PAR, introspection and revocation**, after client authentication and before anything is pushed, revealed or revoked, through one extracted function (`fapi::enforce_client_authentication`, which `enforce_token_request` now calls first), so the endpoints cannot drift; the answer is the token endpoint's `invalid_client`. As with W1's "a `fapi2` row edited to `honour` is refused at authorize", the registration gate is not the only line. Rejected: accepting it as T-253's residual. Amends T-253 |
+| D-18 | *Taken in T23.3.2 (Opus 5.5), 2026-10-03, accepted by the orchestrator.* How is a directory account marked, so that the bind path can find it and every local password door can refuse it? The `User` model had no `source` or `external_id` | **One optional column, `user.directory_external_id`** (schema **v71**, unique per tenant, any number of unset rows): the entry's `entryUUID` or decoded `objectGUID`; `Some` means the tenant's directory is the only authority for the account's password. It has exactly one writer, `UserRepository::mark_directory_account`, which in one transaction sets it, replaces `password_hash` with an Argon2id hash of 32 random bytes nobody holds, and deletes any OPAQUE record; `CreateUser` and `UpdateUser` have no such field, so neither the admin API nor SCIM can set or clear it. Both erasure paths clear it and Art. 15 export carries it. Directory accounts are created `Active` by T23.3.3 (the directory vouches for them; the email-verification grace rule is about local passwords). Rejected: a `source` enum plus an external id (two columns that can disagree) and a link row like `federation_link` (an extra read on every login, and a row that can be deleted on its own, silently turning a directory account back into a local one with whatever hash it holds) |
 
 ---
 

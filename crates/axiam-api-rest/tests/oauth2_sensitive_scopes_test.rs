@@ -50,8 +50,9 @@ use axiam_core::models::settings::{SetTenantOverride, system_defaults};
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{Address, CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
-    AuditLogFilter, AuditLogRepository, ConsentRepository, OrganizationRepository, Pagination,
-    SessionRepository, SettingsRepository, TenantRepository, UserRepository,
+    AuditLogFilter, AuditLogRepository, ConsentRepository, OAuth2ClientRepository,
+    OrganizationRepository, Pagination, SessionRepository, SettingsRepository, TenantRepository,
+    UserRepository,
 };
 use axiam_db::repository::{
     SurrealAuditLogRepository, SurrealConsentRepository, SurrealOrganizationRepository,
@@ -1504,5 +1505,682 @@ async fn a_login_hop_marker_is_not_mistaken_for_a_consent_one() {
         query_param(&final_location, "error").as_deref(),
         Some("access_denied"),
         "{final_location}"
+    );
+}
+
+// ===========================================================================
+// T23.1.5 — an independent audit of X7.7 against its specification
+//
+// The tests above pin W7's gates. These close the cases the audit found
+// without a test of their own: the verified flag in both directions, a subject
+// with half the data, the §5.1.1 shape of the address, every other artefact
+// that must NOT carry the claims, consent that must not cross a tenant, the
+// update door onto registration, and the writers of the two columns.
+//
+// No assertion below formats a telephone number, an address, a token or a
+// user id: each names the case, and the comparisons are made first and
+// asserted as booleans.
+// ===========================================================================
+
+/// The claim names a release may carry. `userinfo` returns more (`sub`,
+/// `email`, ...); these are the three this wave added.
+const SENSITIVE_CLAIMS: [&str; 3] = ["phone_number", "phone_number_verified", "address"];
+
+fn carries_none_of_the_sensitive_claims(value: &serde_json::Value) -> bool {
+    let rendered = value.to_string();
+    SENSITIVE_CLAIMS
+        .iter()
+        .all(|claim| value.get(claim).is_none())
+        && !rendered.contains(PHONE)
+        && !rendered.contains(STREET)
+}
+
+/// A consented relying party and a token for it: the fixture most tests here
+/// start from.
+async fn consented_access_token(
+    app: &impl TestApp,
+    fx: &Fixture,
+    auth: &AuthConfig,
+    scopes: &[&str],
+) -> (String, String) {
+    let admin = admin_jwt(auth, fx);
+    enable_sensitive_scopes(fx).await;
+    let client_id = create_client(app, &admin, sensitive_client()).await;
+    let session = session_token(fx, auth).await;
+    let consented: Vec<&str> = scopes
+        .iter()
+        .copied()
+        .filter(|s| *s == "address" || *s == "phone")
+        .collect();
+    assert_eq!(
+        grant_consent(app, &session, &client_id, &consented).await,
+        200
+    );
+    (
+        client_id.clone(),
+        userinfo_token(auth, fx, scopes, Some(&client_id)),
+    )
+}
+
+/// `phone_number_verified` is `true` only when a verified instant is on file,
+/// and it is the instant, not the number, that decides. The number alone
+/// (every provisioned number) is `false`: the claim is never omitted while a
+/// number is released and never `true` by default.
+#[actix_web::test]
+async fn t23_1_5_phone_number_verified_follows_the_verified_instant_and_nothing_else() {
+    let fx = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(fx.db, auth);
+    let (_, access) = consented_access_token(&app, &fx, &auth, &["openid", "phone"]).await;
+
+    let before = userinfo(&app, &access).await;
+    assert!(
+        before["phone_number"].as_str() == Some(PHONE),
+        "an unverified number is still released"
+    );
+    assert_eq!(
+        before["phone_number_verified"].as_bool(),
+        Some(false),
+        "the flag is present and false while no verified instant is on file"
+    );
+
+    SurrealUserRepository::new(fx.db.clone())
+        .update(
+            fx.tenant_id,
+            fx.user_id,
+            UpdateUser {
+                phone_number_verified_at: Some(Some(chrono::Utc::now())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let verified = userinfo(&app, &access).await;
+    assert_eq!(
+        verified["phone_number_verified"].as_bool(),
+        Some(true),
+        "a verified instant makes the flag true"
+    );
+
+    SurrealUserRepository::new(fx.db.clone())
+        .update(
+            fx.tenant_id,
+            fx.user_id,
+            UpdateUser {
+                phone_number_verified_at: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        userinfo(&app, &access).await["phone_number_verified"].as_bool(),
+        Some(false),
+        "clearing the instant puts the flag back to false"
+    );
+}
+
+/// The verified flag rides with the number. A subject with no number on file
+/// is released neither, and a release that is empty writes no audit row —
+/// which is what makes a row mean "something was disclosed".
+#[actix_web::test]
+async fn t23_1_5_a_subject_with_half_the_data_is_released_half_and_a_subject_with_none_nothing() {
+    let fx = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(fx.db, auth);
+    let (_, access) =
+        consented_access_token(&app, &fx, &auth, &["openid", "address", "phone"]).await;
+    let users = SurrealUserRepository::new(fx.db.clone());
+
+    // No number, an address: the address only, and no verified flag.
+    users
+        .update(
+            fx.tenant_id,
+            fx.user_id,
+            UpdateUser {
+                phone_number: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let claims = userinfo(&app, &access).await;
+    assert!(
+        claims.get("phone_number").is_none(),
+        "no number, no number claim"
+    );
+    assert!(
+        claims.get("phone_number_verified").is_none(),
+        "no number, so nothing for a verified flag to be about"
+    );
+    assert!(claims.get("address").is_some(), "the address is released");
+
+    // A number, no address.
+    users
+        .update(
+            fx.tenant_id,
+            fx.user_id,
+            UpdateUser {
+                phone_number: Some(Some(PHONE.into())),
+                address: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let claims = userinfo(&app, &access).await;
+    assert!(
+        claims.get("phone_number").is_some(),
+        "the number is released"
+    );
+    assert!(
+        claims.get("address").is_none(),
+        "no address, no address claim"
+    );
+
+    // Neither: the rest of the response is untouched and no release is logged
+    // for this call.
+    users
+        .update(
+            fx.tenant_id,
+            fx.user_id,
+            UpdateUser {
+                phone_number: Some(None),
+                address: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let audit = SurrealAuditLogRepository::new(fx.db.clone());
+    let rows_before = audit
+        .list(
+            fx.tenant_id,
+            AuditLogFilter {
+                action: Some("userinfo.sensitive_claims_released".into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .unwrap()
+        .items
+        .len();
+    let claims = userinfo(&app, &access).await;
+    assert!(
+        SENSITIVE_CLAIMS.iter().all(|c| claims.get(c).is_none()),
+        "a subject holding neither is released neither"
+    );
+    assert!(
+        claims.get("sub").is_some(),
+        "the rest of the response stands"
+    );
+    let rows_after = audit
+        .list(
+            fx.tenant_id,
+            AuditLogFilter {
+                action: Some("userinfo.sensitive_claims_released".into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .unwrap()
+        .items
+        .len();
+    assert_eq!(rows_before, rows_after, "an empty release writes no row");
+}
+
+/// OIDC Core §5.1.1: `address` is a JSON object whose members are `formatted`,
+/// `street_address`, `locality`, `region`, `postal_code` and `country`, and
+/// only members that have a value are present (§5.1: omitted, not `null`).
+#[actix_web::test]
+async fn t23_1_5_the_address_claim_has_the_oidc_core_shape() {
+    let fx = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(fx.db, auth);
+    let (_, access) = consented_access_token(&app, &fx, &auth, &["openid", "address"]).await;
+    let users = SurrealUserRepository::new(fx.db.clone());
+
+    // The fixture's address has four members: exactly those four appear.
+    let partial = userinfo(&app, &access).await;
+    let object = partial["address"]
+        .as_object()
+        .expect("address is an object");
+    let mut names: Vec<&str> = object.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["country", "locality", "postal_code", "street_address"],
+        "only the members that hold a value are present, under the §5.1.1 names"
+    );
+    assert!(
+        object.values().all(|v| v.is_string()),
+        "no member is null or any other type"
+    );
+
+    // All six, including a multi-line street and a `formatted` that AXIAM did
+    // not derive from the components.
+    users
+        .update(
+            fx.tenant_id,
+            fx.user_id,
+            UpdateUser {
+                address: Some(Some(Address {
+                    formatted: Some("Via Roma 1\n20121 Milano MI\nItalia".into()),
+                    street_address: Some("Via Roma 1\nScala B".into()),
+                    locality: Some("Milano".into()),
+                    region: Some("MI".into()),
+                    postal_code: Some("20121".into()),
+                    country: Some("Italia".into()),
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let full = userinfo(&app, &access).await;
+    let object = full["address"].as_object().expect("address is an object");
+    let mut names: Vec<&str> = object.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "country",
+            "formatted",
+            "locality",
+            "postal_code",
+            "region",
+            "street_address"
+        ],
+        "all six §5.1.1 members"
+    );
+    assert!(
+        object["street_address"].as_str() == Some("Via Roma 1\nScala B"),
+        "a multi-line street survives unchanged"
+    );
+}
+
+/// The claims reach UserInfo and **nowhere else**: not the access token, not
+/// the introspection of it, not an ID token minted by the refresh grant. The
+/// code-exchange ID token is asserted by T8.3; this is the rest of the
+/// artefacts a relying party, a resource server or a log could hold.
+#[actix_web::test]
+async fn t23_1_5_neither_the_access_token_nor_introspection_nor_a_refreshed_id_token_carries_them()
+{
+    let fx = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(fx.db, auth);
+    let admin = admin_jwt(&auth, &fx);
+    enable_sensitive_scopes(&fx).await;
+    let (client_id, secret) = create_client_with_secret(&app, &admin, sensitive_client()).await;
+    let session = session_token(&fx, &auth).await;
+    assert_eq!(
+        grant_consent(&app, &session, &client_id, &["address", "phone"]).await,
+        200
+    );
+    let resp = authorize(
+        &app,
+        &session,
+        &base_query(&client_id, "openid+address+phone"),
+    )
+    .await;
+    let code = query_param(&location(&resp), "code").expect("a consented request earns a code");
+    let tokens = exchange_code(&app, fx.tenant_id, &client_id, &secret, &code).await;
+    let access = tokens["access_token"].as_str().expect("an access_token");
+
+    // Control: UserInfo does release them to this very token, so the absences
+    // below are not an artefact of nothing being consented.
+    assert!(
+        userinfo(&app, access).await.get("phone_number").is_some(),
+        "control: UserInfo releases to the token under test"
+    );
+
+    // 1. The access token's own claims.
+    assert!(
+        carries_none_of_the_sensitive_claims(&jwt_payload(access)),
+        "the access token must carry none of the claims"
+    );
+
+    // 2. Introspection of it, by the relying party that holds the secret.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/introspect?tenant_id={}", fx.tenant_id))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+        .set_payload(format!(
+            "token={access}&client_id={client_id}&client_secret={secret}"
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "introspection");
+    let introspected: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        introspected["active"].as_bool(),
+        Some(true),
+        "control: active"
+    );
+    assert!(
+        carries_none_of_the_sensitive_claims(&introspected),
+        "introspection must carry none of the claims"
+    );
+
+    // 3. Whatever the refresh grant returns. A refresh token is issued to a
+    //    client holding the grant; the new ID token (if any) and access token
+    //    are held to the same rule.
+    let refresh = tokens["refresh_token"]
+        .as_str()
+        .expect("the client holds the refresh_token grant, so one is issued");
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={}", fx.tenant_id))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+        .set_payload(format!(
+            "grant_type=refresh_token&refresh_token={refresh}\
+             &client_id={client_id}&client_secret={secret}"
+        ))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "refresh");
+    let refreshed: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        carries_none_of_the_sensitive_claims(&jwt_payload(
+            refreshed["access_token"].as_str().expect("an access_token")
+        )),
+        "a refreshed access token must carry none of the claims"
+    );
+    if let Some(id_token) = refreshed["id_token"].as_str() {
+        assert!(
+            carries_none_of_the_sensitive_claims(&jwt_payload(id_token)),
+            "a refreshed ID token must carry none of the claims"
+        );
+    }
+    assert!(
+        carries_none_of_the_sensitive_claims(&refreshed),
+        "nothing in the token response itself carries them"
+    );
+}
+
+/// Consent is per tenant as well as per user and per client. A consent row in
+/// one tenant must not release anything in another, even when the user id and
+/// the relying party's id are the very pair the row names: the worst case,
+/// built by hand because no endpoint would write it.
+#[actix_web::test]
+async fn t23_1_5_consent_recorded_in_one_tenant_releases_nothing_in_another() {
+    let fx = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(fx.db, auth);
+    enable_sensitive_scopes(&fx).await;
+
+    // A second tenant in the same organization, with its own subject (who has
+    // a number) and its own relying party registered for `phone`.
+    let tenant_b = SurrealTenantRepository::new(fx.db.clone())
+        .create(CreateTenant {
+            organization_id: fx.org_id,
+            kind: TenantKind::Standard,
+            name: "Tenant B".into(),
+            slug: "tenant-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let users = SurrealUserRepository::new(fx.db.clone());
+    let user_b = users
+        .create(CreateUser {
+            tenant_id: tenant_b.id,
+            username: "bob".into(),
+            email: "bob@example.com".into(),
+            password: PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    users
+        .update(
+            tenant_b.id,
+            user_b.id,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                phone_number: Some(Some(PHONE.into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (client_b, _) = axiam_db::repository::SurrealOAuth2ClientRepository::new(fx.db.clone())
+        .create(axiam_core::models::oauth2_client::CreateOAuth2Client {
+            tenant_id: tenant_b.id,
+            name: "rp-b".into(),
+            redirect_uris: vec![REDIRECT_URI.into()],
+            grant_types: vec!["authorization_code".into()],
+            scopes: vec!["openid".into(), "phone".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
+            profile: axiam_core::models::oauth2_client::ClientProfile::Standard,
+            token_endpoint_auth_method:
+                axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretPost,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: vec![],
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
+            authn_request_params: axiam_core::models::oauth2_client::AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
+            allowed_resources: Vec::new(),
+            managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+        })
+        .await
+        .unwrap();
+
+    let token_b = issue_access_token_for_client(
+        user_b.id,
+        tenant_b.id,
+        fx.org_id,
+        &["openid".to_owned(), "phone".to_owned()],
+        &auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        None,
+        None,
+        Some(&client_b.client_id),
+        None,
+        &[],
+    )
+    .unwrap();
+
+    let consents = SurrealConsentRepository::new(fx.db.clone());
+    let record = |tenant_id: Uuid| axiam_core::models::gdpr::CreateConsent {
+        tenant_id,
+        user_id: user_b.id,
+        consent_type: format!("oidc_scope_release:{}", client_b.client_id),
+        version: "phone".into(),
+        ip_address: None,
+        user_agent: None,
+    };
+
+    // The row exists, but under tenant A.
+    consents.create(record(fx.tenant_id)).await.unwrap();
+    let claims = userinfo(&app, &token_b).await;
+    assert!(
+        claims.get("phone_number").is_none(),
+        "a consent row in another tenant must release nothing"
+    );
+
+    // Control: the same row under the right tenant releases.
+    consents.create(record(tenant_b.id)).await.unwrap();
+    let claims = userinfo(&app, &token_b).await;
+    assert!(
+        claims["phone_number"].as_str() == Some(PHONE),
+        "control: the same record in the subject's own tenant releases"
+    );
+
+    // And withdrawal is tenant-scoped too: tenant A's copy is not tenant B's.
+    assert!(
+        consents
+            .list_by_user(tenant_b.id, user_b.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|c| c.tenant_id == tenant_b.id),
+        "a tenant's consent list holds only that tenant's rows"
+    );
+}
+
+/// The update path is the other door onto registration (plan §4.8, "on create
+/// **and** on the merged update path"): a patch that adds a sensitive scope is
+/// refused while the switch is off, and refused for a `fapi2` client whatever
+/// the switch says.
+#[actix_web::test]
+async fn t23_1_5_a_patch_cannot_add_a_sensitive_scope_the_switch_or_the_profile_forbids() {
+    let fx = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(fx.db, auth);
+    let admin = admin_jwt(&auth, &fx);
+
+    let put = |id: String, body: serde_json::Value| {
+        let admin = admin.clone();
+        test::TestRequest::put()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/api/v1/oauth2-clients/{id}"))
+            .insert_header(("Authorization", format!("Bearer {admin}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(body)
+            .to_request()
+    };
+    let created = |resp_body: serde_json::Value| resp_body["id"].as_str().unwrap().to_owned();
+
+    // A standard client registered without the scopes, the switch off.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {admin}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Plain",
+            "redirect_uris": [REDIRECT_URI],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let plain = created(test::read_body_json(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        put(
+            plain.clone(),
+            serde_json::json!({ "scopes": ["openid", "address"] }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "the switch is off: a patch may not add a sensitive scope"
+    );
+
+    // Switch on: the same patch is accepted.
+    enable_sensitive_scopes(&fx).await;
+    let resp = test::call_service(
+        &app,
+        put(
+            plain,
+            serde_json::json!({ "scopes": ["openid", "address"] }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200, "the switch is on");
+
+    // A fapi2 client: refused with the switch on.
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {admin}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "FAPI",
+            "redirect_uris": [REDIRECT_URI],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+            "profile": "fapi2",
+            "require_par": true,
+            "token_endpoint_auth_method": "private_key_jwt",
+            "jwks": "{\"keys\":[]}",
+            "tls_client_certificate_bound_access_tokens": true,
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let fapi = created(test::read_body_json(resp).await);
+    let resp = test::call_service(
+        &app,
+        put(fapi, serde_json::json!({ "scopes": ["openid", "phone"] })),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "a fapi2 client may not gain a sensitive scope by patch, switch on or not"
+    );
+}
+
+/// "SCIM and the admin API are the only writers" — in this tree the admin
+/// REST `PUT /users/{id}` has no `phone_number` or `address` member, so SCIM is
+/// the only writer (see the T23.1.5 report: plan §4.8 says the admin API too).
+/// What this pins is the privacy half of that sentence: a body that names the
+/// members is not a way to write them.
+#[actix_web::test]
+async fn t23_1_5_the_user_update_endpoint_is_not_a_writer_of_the_sensitive_columns() {
+    let fx = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(fx.db, auth);
+    let admin = admin_jwt(&auth, &fx);
+
+    let req = test::TestRequest::put()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{}", fx.user_id))
+        .insert_header(("Authorization", format!("Bearer {admin}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "phone_number": "+10000000000",
+            "phone_number_verified_at": "2026-01-01T00:00:00Z",
+            "address": { "street_address": "Elsewhere 9", "country": "Nowhere" },
+            "metadata": { "touched": true },
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        resp.status().is_success() || resp.status().as_u16() == 400,
+        "the endpoint answers the body, one way or the other"
+    );
+
+    let stored = SurrealUserRepository::new(fx.db.clone())
+        .get_by_id(fx.tenant_id, fx.user_id)
+        .await
+        .unwrap();
+    assert!(
+        stored.phone_number.as_deref() == Some(PHONE),
+        "the telephone number is unchanged"
+    );
+    assert!(
+        stored.phone_number_verified_at.is_none(),
+        "no verified instant was written"
+    );
+    assert!(
+        stored
+            .address
+            .as_ref()
+            .and_then(|a| a.street_address.as_deref())
+            == Some(STREET),
+        "the address is unchanged"
     );
 }

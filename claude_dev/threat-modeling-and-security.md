@@ -22,6 +22,72 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-03 W2 security review (F4, model 2.20.0).** No threat enters;
+> one is amended. **T-298**, the directory bind secret: the secret was
+> write-only through every read, but an update that carried no new secret kept
+> the stored one whatever else changed, so whoever may edit the configuration
+> could repoint the URL at a host of their own (with their own CA as the anchor)
+> and receive the secret in the next service bind. A kept secret now keeps its
+> connection: without a new secret, an update that changes the URL, StartTLS,
+> the bind DN or the trust anchors is refused and changes nothing
+> (W2 F4 review, P23W2-01). The same entry now also records that a tenant
+> delete whose transaction fails (it removes the directory row with the
+> tenant) is reported as a failure, where it used to answer success and leave
+> both in place (P23W2-02). The model stays at **303 threats, 289 mitigated /
+> 14 open**.
+>
+> **The 2026-10-03 directory connector entry (Phase 23 T23.3.2, model
+> 2.20.0).** Ten threats enter, nine Mitigated on arrival and one open, with a
+> new trust boundary — **AXIAM ↔ tenant directory** — around a new external
+> entity, the tenant's own LDAP or Active Directory server. They are the network
+> path of the directory identity source (G-3), recorded in the commit that adds
+> it. **T-291** filter injection: a login name enters a filter only through
+> RFC 4515 escaping, no DN is ever built, exactly one match is required.
+> **T-292** a password in the clear: plaintext is refused at save, at use and at
+> the socket, and a refused StartTLS fails the connection before any bind.
+> **T-293** an impersonated directory: verification against the tenant's own
+> anchors and the URL's host, never switched off. **T-294** the empty-password
+> "unauthenticated bind", refused before any packet. **T-295** a slow or
+> hostile directory: a bounded per-tenant pool with connect, operation and
+> end-to-end timeouts. **T-296** referrals, never followed. **T-297** one
+> tenant answered by another's directory: everything keyed by the tenant being
+> signed in to. **T-298** the bind secret (D-15, encrypted at rest; no
+> associated data binds a ciphertext to its tenant, as for the SMTP password).
+> **T-299** a missing key makes the feature unavailable, never insecure.
+> **T-300**, open and accepted: a tenant-chosen directory host is not held to
+> the private-address refusal the IdP and webhook fetches apply, because
+> corporate directories live on private networks. The login integration that
+> follows adds two more, both Mitigated: **T-301** sign-in latency (every
+> refusal is the generic one and every branch runs the equalising Argon2id
+> verify; a bind slower than a verify remains measurable) and **T-302** AXIAM
+> used to lock users out of Active Directory (the lockout is checked before the
+> directory is contacted, and a failed bind counts like a wrong password). And
+> **T-303**, Critical and Mitigated: a directory account taken over through a
+> local password path — a reset link, a change, a SCIM password write, an
+> OPAQUE record. Every one of those doors refuses a directory account, the
+> reset request answering it exactly as an unknown address, and the account
+> holds only an unusable random hash. The model is **303 threats, 289
+> mitigated / 14 open**.
+>
+> **The 2026-10-03 per-tenant browser sign-on entry (Phase 23 T23.1.8, model
+> 2.19.0).** One threat enters, Mitigated on arrival, and two are amended.
+> Browser sign-on now works on a per-tenant issuer path (the maintainer's D-11).
+> A sign-in mints the OP-session cookie at `/t/{tenant_id}/oauth2/authorize`
+> beside `/oauth2/authorize`, for the session's own tenant only, with the same
+> value and attributes. Every logout clears every copy (**T-237** amended), and
+> the hop's `return_to` on a tenant path no longer carries the tenant parameter
+> the path scope itself refuses (**T-238** amended). **T-290**: a logout that
+> carries no signed hint could clear the cookie but not end the session it
+> named, because the cookie never reaches `end_session` (F4 residual
+> P23W1-10). `end_session` now bounces such a logout to the `/logout` sub-path
+> of the authorization endpoint, which the cookie does reach. That hop revokes
+> the one session the cookie names in that tenant and continues exactly as
+> `end_session` would: an allow-listed target only, the same preset rate limit,
+> and no back-channel fan-out without a signed hint. Clearing also found an
+> organization-level administrator's logout revoking nothing after a tenant
+> switch; it now revokes in the administrator's own tenant. The model is
+> **290 threats, 277 mitigated / 13 open**; nothing on the open register moves.
+>
 > **The 2026-10-02 RFC 7592 entry (Phase 23 T23.4.1, model 2.18.0).** One
 > threat enters, Mitigated on arrival. **T-289**: a dynamically registered
 > client can now read, replace and delete its own registration at
@@ -292,7 +358,10 @@
 > load-bearing (T-237), a `return_to` validated three times and a loop guard with
 > a terminating argument (T-238), an honour lane on which a relying party gets
 > the freshness or assurance it asked for or is told it cannot — the ACR echo
-> designed out at the type level (T-239), authentication evidence dated by the
+> designed out at the type level (T-239; amended 2026-10-02 and 2026-10-03,
+> Phase 23 T23.1.1/T23.1.4: a `fapi2` client's `claims.id_token.acr` and its
+> essential `claims.id_token.auth_time` are refused, not silently dropped),
+> authentication evidence dated by the
 > upstream provider and copied rather than restamped across rotation (T-240),
 > the `address` and `phone` scopes behind four gates re-asked at every UserInfo
 > call and never in an ID token (T-241), an ID token that carries only what was
@@ -319,7 +388,11 @@
 > server does with a token it did not just mint. **Two decisions**:
 > `client_secret_basic`, accepted because 37 of the plan's 38 modules use it,
 > with its three failure modes each tested and the residual — what an ingress
-> logs — named (T-253); and the refresh-rotation grace window FAPI 2.0
+> logs — named (T-253; amended 2026-10-03, Phase 23 T23.1.5: a client naming
+> itself in the Basic header alone now selects the same per-client rate-limit
+> bucket as one naming itself in the form, and the request-time FAPI
+> client-authentication rule also runs at PAR, introspection and revocation,
+> D-17); and the refresh-rotation grace window FAPI 2.0
 > §5.3.2.1-9 requires, applied at beta13 to every profile, which on `standard`
 > gave a bearer refresh token a 60-second replay window the server could not
 > distinguish from an honest retry — recorded **open** (T-254), and T-37 amended
@@ -656,7 +729,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 289 threats** and a
+The system is verified against a **STRIDE threat model of 303 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -679,8 +752,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 289 |
-| Mitigated / Open | 276 / 13 |
+| Threats identified | 303 |
+| Mitigated / Open | 289 / 14 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -695,8 +768,8 @@ optimistic closed one.
 |---|---|---|
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
-| OAuth2 / OIDC authorization server | 59 | 0 |
-| Federation (SAML SP & OIDC RP) | 31 | 1 |
+| OAuth2 / OIDC authorization server | 60 | 0 |
+| Federation (SAML SP, OIDC RP & directory) | 44 | 2 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
@@ -706,8 +779,11 @@ optimistic closed one.
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. AXIAM's own request path —
-authentication, authorization, tokens, PKI, federation — carries **no open
-finding at all**. The one it briefly carried, the 60-second grace a rotated
+authentication, authorization, tokens, PKI, federation — carries **one** open
+finding, and it is an accepted trade-off rather than a defect: a tenant's LDAP or
+Active Directory host is not held to the private-address refusal the IdP and
+webhook fetches apply, because corporate directories live on private networks —
+bounded by mandatory, verified TLS before anything is sent (T-300). The one it briefly carried, the 60-second grace a rotated
 refresh token keeps, was recorded open at 1.0.0-beta13 rather than absorbed and
 then closed by a decision: the grace now applies only to the FAPI 2.0 profile
 that requires it and sender-constrains every token, and a rotated token presented
@@ -727,25 +803,25 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 71 | 3 |
-| Tampering | 59 | 1 |
+| Spoofing | 75 | 3 |
+| Tampering | 60 | 1 |
 | Repudiation | 6 | 0 |
-| Information disclosure | 67 | 6 |
-| Denial of service | 28 | 2 |
-| Elevation of privilege | 58 | 1 |
+| Information disclosure | 71 | 7 |
+| Denial of service | 31 | 2 |
+| Elevation of privilege | 60 | 1 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
-| Critical | 32 | 1 |
-| High | 136 | 8 |
-| Medium | 111 | 3 |
-| Low | 10 | 1 |
+| Critical | 35 | 1 |
+| High | 141 | 8 |
+| Medium | 116 | 4 |
+| Low | 11 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 13 still-open items are listed one by one in
+the weight the control carries. The 14 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -753,7 +829,7 @@ with the element it sits on and where responsibility for it lands.
 
 ## Trust boundaries
 
-Five trust boundaries recur across the system. A data flow that crosses one is a
+Six trust boundaries recur across the system. A data flow that crosses one is a
 place where authentication, authorization, validation and transport protection all
 have to be re-established — nothing is assumed across a boundary.
 
@@ -763,6 +839,7 @@ have to be re-established — nothing is assumed across a boundary.
 | **AXIAM ↔ data tier** | Application pods ↔ SurrealDB, RabbitMQ, Vault / Secrets | Private network, credentialed connections, TLS-only AMQP, parameterised queries, tenant scoping at the repository layer |
 | **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal; cross-tenant reach only as an explicit organization-scope claim — narrowable to named tenants per role assignment — verified to stay inside the caller's organization and reach |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries |
+| **AXIAM ↔ tenant directory** | AXIAM ↔ a tenant's own LDAP or Active Directory server | TLS before any bind or search — `ldaps://`, or StartTLS that fails closed — verified against the tenant's own anchors and the URL's host; referrals never followed; login names enter filters only through RFC 4515 escaping; a bounded per-tenant pool; a read-only bind account |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
 
 ### The assets worth protecting
@@ -777,6 +854,7 @@ have to be re-established — nothing is assumed across a boundary.
 | MFA secrets | AES-256-GCM encrypted at rest | Second factor defeated |
 | Refresh tokens & sessions | Stored hashed, single-use rotation; a 60-second grace after rotation for FAPI 2.0 clients only, and any presentation after rotation is marked and audited | Sustained impersonation |
 | Client & webhook secrets | Hashed / encrypted, redacted from logs | Service-account impersonation; forged events |
+| Directory bind secret | AES-256-GCM at rest under an optional key; write-only, never returned or logged | The tenant's directory readable by whoever holds it |
 | Authorization graph | Private data tier, API-only mutation, audited | Silent privilege escalation |
 | Audit log | Append-only, OpenPGP-signed | Loss of accountability |
 
@@ -1326,7 +1404,11 @@ are published rather than counted as passes.
   confirmed both checks against live routes (V2); its one informational finding
   — the query guard compares the raw query string where the extractor decodes it
   — is accepted because the request is refused either way, and that refusal is
-  pinned by a test (MCP-06).
+  pinned by a test (MCP-06). Browser sign-on reaches a tenant issuer too
+  (T23.1.8, D-11). The OP-session cookie is minted at
+  `/t/{tenant_id}/oauth2/authorize` for the session's own tenant, beside the
+  deployment-wide path, and a copy presented on another tenant's path names no
+  session there.
 
 ### Federation (SAML & OIDC)
 
@@ -1385,6 +1467,47 @@ against the classic federation attacks:
   accidental default. An organization's provider inherited by its tenants
   provisions the user in the *requesting* tenant, and an uploaded button icon is
   raster-only and size-bounded before it is served to every visitor.
+
+### Directory (LDAP & Active Directory)
+
+A tenant can point AXIAM at its own LDAP or Active Directory server, so its
+people sign in with their directory password. AXIAM reads the directory and never
+writes to it, and the directory, not AXIAM, decides whether a password is right:
+
+- **Nothing crosses the boundary in the clear.** The URL must be `ldaps://`, or
+  `ldap://` with StartTLS; plaintext is refused when the configuration is saved,
+  again when it is used, and again at the one place a socket is opened. With
+  StartTLS, a server that refuses the upgrade gets no bind at all. Verification
+  is never switched off: the tenant's own CA certificates are the whole trust
+  store (only an empty list means the public roots), and the certificate must
+  name the URL's host. TLS 1.2 is the floor, because Active Directory on older
+  Windows Server releases has no TLS 1.3 on LDAPS.
+- **A login name is data, never filter syntax.** It reaches the search only
+  through RFC 4515 escaping into the tenant's single `{username}` placeholder;
+  AXIAM never builds a distinguished name, binding as the one the directory
+  returned; and exactly one entry must match, zero and two being the same
+  failure.
+- **The password is checked by the directory, on a connection of its own.** An
+  empty password, which many servers accept as an anonymous "success", is
+  refused before any packet. The connection bound as the user is closed
+  afterwards and never pooled, and referrals are never followed.
+- **AXIAM's own brakes sit in front of the directory.** A locked or suspended
+  account is refused before the directory hears anything, so AXIAM cannot be
+  used to lock a user out of Active Directory; a failed bind counts toward
+  AXIAM's lockout exactly as a wrong password does; and a directory that is
+  down or misconfigured fails closed — a directory account never falls back to
+  a local password, and every refusal is the same generic answer.
+- **A slow or hostile directory cannot take AXIAM down.** Connections are pooled
+  per tenant with a hard cap, a fast refusal instead of a queue, and connect,
+  per-operation and end-to-end timeouts.
+- **No local password can open a directory account.** A password change, a
+  reset (the request answers a directory account exactly as an unknown
+  address), a SCIM provisioner's password write and an OPAQUE registration or
+  login are all refused for it, and the account holds only an unusable random
+  hash — so disabling the person in the directory is not undone by a
+  credential AXIAM kept.
+- **The bind secret is write-only.** It is encrypted at rest under an optional
+  key; without the key the feature is unavailable rather than insecure.
 
 ### PKI, certificates & device identity
 
@@ -1872,8 +1995,8 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 13 of
-289. On the website this table is generated from the Threat Dragon model, so it
+Every threat the model does not record as mitigated, most severe first — 14 of
+303. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -1893,6 +2016,7 @@ each.
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
+| T-300 — A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network | Medium | Directory sign-in (bind-as-user, bounded pool) · *Federation — SAML SP & OIDC relying party* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are

@@ -122,6 +122,12 @@ LAYERS: dict[str, int] = {
     #        axiam-oauth2 consumes axiam-federation and the reverse must stay
     #        impossible.
     "axiam-federation": 3,
+    # LDAP / Active Directory identity source (G-3). A federation protocol with
+    # the same dependency shape as axiam-federation -- domain types below it,
+    # protocol code in it -- so it takes the same layer. It is a sibling, not a
+    # child: neither may depend on the other, and axiam-oauth2 (layer 4) has no
+    # business reaching for a directory.
+    "axiam-directory": 3,
     "axiam-oauth2": 4,
     # 5 -- the messaging adapter, which both HTTP adapters publish through.
     "axiam-amqp": 5,

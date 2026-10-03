@@ -78,6 +78,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           { method: "PUT", path: "/oauth2/register/{client_id}", summary: "RFC 7592: replace the registration under the tenant's current policy; rotates the token.", public: true },
           { method: "DELETE", path: "/oauth2/register/{client_id}", summary: "RFC 7592: deregister the client and revoke its refresh tokens.", public: true },
           { method: "GET", path: "/oauth2/end_session", summary: "RP-initiated logout.", public: true },
+          { method: "GET", path: "/oauth2/authorize/logout", summary: "Where `end_session` sends a logout with no `id_token_hint` `sid`. The OP cookie reaches this path, so the session it names is ended here.", public: true },
         ],
       },
       {
@@ -284,6 +285,8 @@ export const OAUTH2_PAGES: DocPage[] = [
           "`return_to` **is validated three times** — by the builder, by the deployment-origin rule, and by the SPA before it navigates. It is exactly the authorization endpoint plus a query, on the API's own origin.",
           "**A chain is bounded at two authorization requests and one sign-in page.** Every login redirect carries an `axiam_login_hop=1` marker, and a request that arrives with it is never redirected again; if it still has no principal the answer is `login_required`, naming the two candidates — a browser refusing the cookie, or a sign-in against a different tenant.",
           "**An anonymous request must name its tenant**, with the same `tenant_id` parameter `/oauth2/token` and `/oauth2/end_session` already take. It is ignored whenever a principal was resolved from an access token, and omitting it gives today's `401` — which is why adding the parameter changed nothing for any client registered today.",
+          "**Per-tenant issuers have browser sign-on too** (T23.1.8). On a deployment serving `/t/{tenant_id}`, every sign-in also sets the cookie at `Path=/t/{tenant_id}/oauth2/authorize`, for the session's own tenant only. The value and attributes are the same; only the path differs. A relying party that discovered a tenant issuer therefore gets the same hop. The path names the tenant, so its requests carry no `tenant_id`. A copy presented on another tenant's path names no session there.",
+          "**Logging out clears every copy.** That covers the admin UI's logout and `end_session`, on either path. An `end_session` with no `id_token_hint` naming a session is redirected once more, to the `/logout` sub-path of the authorization endpoint, because only there does the browser send the cookie. That hop ends the session the cookie names, then continues to the allow-listed `post_logout_redirect_uri` exactly as `end_session` would have.",
         ],
       },
       {
@@ -301,7 +304,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         headers: ["Parameter", "On the `honour` lane"],
         rows: [
           ["`prompt`", "`login` reauthenticates; `none` is answered without interaction and is refused outright for an anonymous browser and on a return leg; `select_account` can answer `account_selection_required`. `none` combined with another value is `invalid_request`."],
-          ["`max_age`", "Compared as `elapsed >= max_age`, with **no leeway** in the relying party's disfavour — so `max_age=0` can never succeed, and a relying party meaning *authenticate them now* wants `prompt=login`."],
+          ["`max_age`", "A positive value is compared as `elapsed >= max_age`, with **no leeway** in the relying party's disfavour. `max_age=0` is handled as `prompt=login` (OIDC Core: they are equivalent): the browser always signs in again and the code that follows carries the new `auth_time`."],
           ["`acr_values` / `claims.id_token.acr`", "Matched against the session's own recorded authentication evidence through a function no request parameter can reach. An **essential** `acr` the end user cannot reach is `unmet_authentication_requirements`."],
           ["`id_token_hint`", "Checked against the established session; naming somebody else is `login_required`."],
           ["`login_hint`, `display`, `ui_locales`, `claims_locales`", "Cosmetic, and honoured without becoming an oracle: `login_hint` is carried and **looked up by nothing**, `display` is allow-listed, `ui_locales` is matched server-side (RFC 4647) against the five shipped locales, `claims_locales` is ignored."],
@@ -310,7 +313,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one. Sending one of the security-bearing parameters — including a `claims` that asks for `id_token.acr` — is `invalid_request` for such a client, pushed or inline, rather than a parameter silently dropped.",
+          "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one. Sending one of the security-bearing parameters — including a `claims` that asks for `id_token.acr` or for `id_token.auth_time` as essential — is `invalid_request` for such a client, pushed or inline, rather than a parameter silently dropped.",
           "**Request objects are rejected, not half-implemented** — `request` gives `request_not_supported`, at the authorization endpoint and at PAR alike, and a non-PAR `request_uri` gives `request_uri_not_supported`.",
           "**Authentication evidence is the provider's for a federated login** — `auth_time` comes from the upstream `auth_time` or `AuthnInstant`, never AXIAM's clock — and is copied, never restamped, across a refresh.",
           "**On the** `ignore` **lane none of the new refusals can occur**: a value AXIAM cannot parse is dropped, exactly as it always was.",
@@ -534,6 +537,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           "**The same handlers, re-based.** Every OAuth2 endpoint is served under `/t/{tenant_id}` as well as at the root, and the `iss` of everything minted there is the tenant issuer — the access token, the ID token, the RFC 9207 authorization-response parameter and the Back-Channel Logout token.",
           "**One key set signs every tenant**, which RFC 8414 permits, so the signature does not say which tenant a token is for. Two checks do: a token whose `iss` names a different tenant from its `tenant_id` claim is refused, and a token presented under `/t/{B}` that was minted for tenant A is refused with `401` — the same answer a request with no credential gets.",
           "**A** `tenant_id` **query parameter on a tenant path is** `invalid_request`, agreeing or not: two tenant selectors on one request is the shape a confused-deputy bug takes.",
+          "**Browser sign-on works here too** (T23.1.8). A `browser_sso` relying party on a tenant issuer gets the login hop, because each sign-in also sets the OP-session cookie at `Path=/t/{tenant_id}/oauth2/authorize`, for the session's own tenant. See [Signing in from a relying party](#/docs/oauth2#browser-sso).",
           "Turn it on when **one** AXIAM fronts MCP servers for **more than one** tenant. A single-tenant deployment needs none of it: `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` makes the bare document name its one tenant.",
         ],
       },

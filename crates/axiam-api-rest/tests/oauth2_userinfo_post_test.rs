@@ -667,6 +667,56 @@ async fn an_unauthenticated_post_is_the_same_401_as_an_unauthenticated_get() {
     assert_eq!(get, post);
 }
 
+/// **T23.1.4 — RFC 6750 §2.2 names the media type.** The body carrier exists
+/// only for `application/x-www-form-urlencoded`; the same field in a JSON body,
+/// or in a form-shaped body labelled as anything else, is not a carrier at all.
+/// The request is then an unauthenticated one, the same 401 an absent token
+/// gets. (The alternative — sniffing the body — is how a credential comes to be
+/// accepted from a place nobody decided it could come from.)
+#[actix_rt::test]
+async fn a_token_in_a_body_that_is_not_a_form_authenticates_nothing() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let token = token_with_scopes(&auth, user_id, tenant_id, org_id, &["openid"]);
+    let app = test_app!(db, auth);
+
+    let unauthenticated = answer(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(unauthenticated.status, 401);
+
+    let json_body = answer(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .set_json(serde_json::json!({ "access_token": token }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(json_body, unauthenticated, "a JSON body is not a carrier");
+
+    let mislabelled = answer(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(USERINFO)
+            .insert_header(("Content-Type", "text/plain"))
+            .set_payload(format!("access_token={token}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        mislabelled, unauthenticated,
+        "a form-shaped body with another media type is not a carrier"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // RFC 6750 §2.3 — the carrier neither method gained
 // ---------------------------------------------------------------------------

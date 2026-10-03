@@ -484,6 +484,12 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // endpoint identifies what to terminate from a *signed* `id_token_hint`,
     // so it is unauthenticated, not unauthenticated-and-unbounded.
     "/oauth2/end_session",
+    // T23.1.8 / P23W1-10 — `end_session`'s cookie-reading hop, public on the
+    // same ground: it ends a session, and a logout must work for a session
+    // that is already gone. It reads the OP browser-session cookie only to
+    // revoke the row it names, and validates its continuation exactly as
+    // `end_session` does.
+    "/oauth2/authorize/logout",
     // Federation callback endpoints (unauthenticated — IdP redirects here)
     "/api/v1/federation/oidc/callback",
     "/api/v1/federation/saml/acs",

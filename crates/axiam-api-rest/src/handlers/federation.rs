@@ -1862,17 +1862,26 @@ pub(crate) async fn issue_sso_session<C: Connection + Clone>(
             reason: "user not found after federation login".into(),
         })?;
 
-    Ok(HttpResponse::Ok()
-        // W3 (plan §4.0): the OP browser session. A federated sign-in is a
-        // browser sign-in like any other, and a user who arrived through an
-        // upstream identity provider must be able to complete
-        // `/oauth2/authorize`'s login hop afterwards — otherwise the hop would
-        // work for password and passkey users and silently not for federated
-        // ones, which is a difference nobody would think to look for.
-        .cookie(crate::middleware::csrf::op_session_cookie(
-            &auth_out.browser_session_token,
-            state.auth_config.refresh_token_lifetime_secs,
-        ))
+    let mut response = HttpResponse::Ok();
+    // W3 (plan §4.0): the OP browser session. A federated sign-in is a
+    // browser sign-in like any other, and a user who arrived through an
+    // upstream identity provider must be able to complete
+    // `/oauth2/authorize`'s login hop afterwards — otherwise the hop would
+    // work for password and passkey users and silently not for federated
+    // ones, which is a difference nobody would think to look for.
+    //
+    // T23.1.8 (D-11): one copy per path `op_session_cookies` names for the
+    // tenant the session was just created in — the same rule, for the same
+    // reason, on the per-tenant issuer path too.
+    for cookie in crate::middleware::csrf::op_session_cookies(
+        &auth_out.browser_session_token,
+        state.auth_config.refresh_token_lifetime_secs,
+        tenant_id,
+        &state.auth_config,
+    ) {
+        response.cookie(cookie);
+    }
+    Ok(response
         .cookie(crate::middleware::csrf::access_cookie(
             &auth_out.access_token,
             state.auth_config.access_token_lifetime_secs,

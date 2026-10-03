@@ -87,7 +87,7 @@ lane that would act on them is a later wave. Rows 23–26 therefore record the
 | 24 | `login_hint`, `display`, `ui_locales`, `claims_locales` are accepted and ignored **for a `standard`/`ignore` client** — the login URL such a client's browser is sent to is byte-identical to W3's, with no `login_hint`, `display` or `ui_locale` on it | Core §3.1.2.1, §5.2 | Ignored (by design, invariant 4) | same as row 23; `oauth2_cosmetic_params_test.rs::m5_m6_i4_twin_an_ignore_lane_client_gets_the_w3_login_url_byte_for_byte`, `::i4_twin_the_interaction_arm_is_unreachable_for_an_ignore_lane_client` |
 | 25 | `auth_time`, `acr` and `amr` are **not** emitted merely because a request asked for them — an `ignore`-lane client receives none of the three however much it asks | Core §2, §3.1.3.7 | Not emitted for `ignore` (still true after W4) | `oauth2_flow_test.rs::p1_…` asserts their absence; `oauth2_honour_lane_test.rs::t3_5_…`, `::t2_1_i4_twin_…` |
 | 26 | The same parameters are carried by PAR and by the inline query string, and parse identically from either | RFC 9126 §2.1 | Pass | `authn_params.rs::the_par_carrier_parses_identically_to_the_inline_one` |
-| 27 | A `fapi2` client is **refused** the security-bearing parameters with `invalid_request` — `prompt`, `max_age`, `acr_values`, `id_token_hint`, and a `claims` that asks for `id_token.acr` (a `claims` asking only for `userinfo` members is honoured, not refused) — whether they arrive inline or pushed | FAPI 2.0 §5.3.1; Core §5.5.1.1 | Pass | `fapi.rs::m1_m4_security_bearing_parameters_are_refused_for_a_fapi_client`, `::a_fapi2_client_may_send_claims_for_userinfo_but_not_for_id_token_acr`; `oauth2_flow_test.rs::a_fapi_client_is_refused_the_security_bearing_parameters`; `par_test.rs::a_fapi2_client_is_refused_what_it_pushed_exactly_as_what_it_sent_inline` |
+| 27 | A `fapi2` client is **refused** the security-bearing parameters with `invalid_request` — `prompt`, `max_age`, `acr_values`, `id_token_hint`, and a `claims` that asks for `id_token.acr` or for `id_token.auth_time` as **essential** (a `claims` asking only for `userinfo` members, or for `auth_time` voluntarily, is honoured or truthfully omitted, not refused) — whether they arrive inline or pushed | FAPI 2.0 §5.3.1; Core §5.5.1.1 | Pass | `fapi.rs::m1_m4_security_bearing_parameters_are_refused_for_a_fapi_client`, `::a_fapi2_client_may_send_claims_for_userinfo_but_not_for_id_token_acr`, `::a_fapi2_client_is_refused_an_essential_auth_time_and_only_that`; `oauth2_flow_test.rs::a_fapi_client_is_refused_the_security_bearing_parameters`; `par_test.rs::a_fapi2_client_is_refused_what_it_pushed_exactly_as_what_it_sent_inline`, `::a_fapi2_client_is_refused_an_essential_auth_time_it_pushed` |
 | 28 | A `fapi2` registration may not set `authn_request_params: honour`, on create or on update | FAPI 2.0 §5.3.1 | Pass | `fapi.rs::m1_m6_fapi_plus_honour_is_refused_at_creation`, `::…_on_update` |
 | 29 | A `fapi2` registration may not register the `address` or `phone` scope, on create or on update | Core §5.4 (GDPR) | Pass | `fapi.rs::m8_fapi_plus_sensitive_scopes_is_refused_at_creation`, `::…_on_update` |
 | 30 | A `fapi2` client sending none of the nine is unaffected by all of the above | — | Pass | `oauth2_flow_test.rs::p2_a_fapi_client_sending_none_of_them_is_unaffected`; `fapi.rs::p2_a_fapi_client_sending_none_of_them_is_unaffected` |
@@ -158,7 +158,7 @@ asked.
 | 50 | The return leg re-runs **every** gate: `require_par`, exact `redirect_uri`, PKCE, and the `fapi2` profile checks. Nothing is cached across the hop | RFC 9126 §2.2; FAPI 2.0 §5.3.1.2 | Pass | `…::t0_4_the_return_leg_still_refuses_a_require_par_client_sending_inline_parameters`; `fapi.rs::m7_browser_sso_does_not_change_what_a_request_may_contain`; `…::m7_a_fapi2_return_leg_with_inline_parameters_is_par_required`; `…::m7_a_fapi2_return_leg_without_pkce_gets_the_fapi_pkce_refusal` |
 | 51 | The hop terminates: a request carrying the server's own `axiam_login_hop` marker is never redirected a second time, and is answered `login_required` instead | Core §3.1.2.6 | Pass | `…::the_loop_guard_answers_the_return_leg_instead_of_redirecting_again`; `login_hop.rs::the_marker_makes_the_second_leg_recognisable` |
 | 52 | A pushed request that expired during the hop (a `request_uri` lives 60 s) is refused `invalid_request_uri` with a description saying so — and **only** on the return leg, so an ordinary request with a dead handle keeps today's `invalid_request` | Core §3.1.2.6; RFC 9126 §2.2 | Pass | `…::a_pushed_request_that_expired_during_the_hop_fails_with_invalid_request_uri` |
-| 53 | The `axiam_op_session` cookie is `HttpOnly; Secure; SameSite=Lax; Path=/oauth2/authorize`, with the session's lifetime. `Lax` is load-bearing: it is sent on a top-level navigation and not inside a frame, so cross-site iframe probing fails closed — and so, deliberately, does hidden-iframe silent renew | Core §3.1.2.1 | Pass | `csrf.rs::t0_6_the_op_session_cookie_attributes_are_pinned`; `oauth2_login_hop_test.rs::t0_6_a_browser_login_sets_the_op_session_cookie_with_its_intended_attributes` |
+| 53 | The `axiam_op_session` cookie is `HttpOnly; Secure; SameSite=Lax; Path=/oauth2/authorize`, with the session's lifetime. `Lax` is load-bearing: it is sent on a top-level navigation and not inside a frame, so cross-site iframe probing fails closed — and so, deliberately, does hidden-iframe silent renew. On a deployment serving per-tenant issuers a second copy, identical but for `Path=/t/{tenant_id}/oauth2/authorize`, is set for the session's own tenant (T23.1.8, D-11) | Core §3.1.2.1 | Pass | `csrf.rs::t0_6_the_op_session_cookie_attributes_are_pinned`, `::d11_every_copy_differs_from_the_bare_cookie_in_path_alone`; `oauth2_login_hop_test.rs::t0_6_a_browser_login_sets_the_op_session_cookie_with_its_intended_attributes`; `oauth2_tenant_path_sso_test.rs::d11_a_password_sign_in_sets_the_bare_and_the_tenant_cookie_identically_but_for_path` |
 | 54 | The three API cookies are unchanged — still `SameSite=Strict` — and the OP cookie is separate bytes, not a copy of the access or refresh token | — (SEC-046) | Pass | `csrf.rs::the_api_cookies_are_still_strict_and_unscoped_by_the_op_session_cookie`; `…::t0_6_a_browser_login_sets_…` |
 | 55 | A live OP session does not authorize a client that did not opt in: for `browser_sso: false` the cookie is not read at all, and the refusal is the same 401 as for a browser with no cookie | — (invariant 4) | Pass | `…::t0_5_the_op_session_cookie_is_not_honoured_for_a_client_that_did_not_opt_in` |
 | 56 | An anonymous caller cannot learn which client ids exist: an unknown `client_id`, an unknown tenant and an opted-out client all answer with the same 401 | — | Pass | `…::an_unknown_client_id_is_refused_the_same_way_as_one_that_did_not_opt_in`; `…::without_a_tenant_an_anonymous_request_gets_todays_401_even_for_a_browser_sso_client` |
@@ -183,9 +183,9 @@ table:
    evidence and nothing else; there is no parameter through which the request
    could reach it. The request's `acr_values` decide only whether a step-up is
    offered and *which satisfied value* is reported — never what the claim says.
-2. **`max_age = 0` is a value, not an absence**, and `elapsed >= max_age` has
-   no leeway in the relying party's disfavour. See the note below for the
-   consequence.
+2. **`max_age = 0` is a value, not an absence**, and a positive
+   `elapsed >= max_age` has no leeway in the relying party's disfavour.
+   `max_age=0` itself is handled as `prompt=login` (D-14); see the note below.
 3. **The login hop is the only interaction mechanism**, and its marker is what
    makes every requirement terminate: a requirement that survives one
    interaction is answered, not retried.
@@ -199,7 +199,7 @@ table:
 | 64 | `prompt=login` always reauthenticates, and the ID token issued afterwards carries a strictly later `auth_time` | Core §3.1.2.1 | Pass | `…::t1_5_prompt_login_reauthenticates_and_moves_auth_time_forward` |
 | 65 | The sign-in page refuses the same `reauth` destination more than three times in a minute and shows an error rather than a fourth form | — | Pass | `reauth.test.ts::recordReauthAttempt (T1.6)` |
 | 66 | `prompt=none` from an iframe-shaped request (no `Lax` cookie on a sub-frame navigation) is `login_required` — the login-status probe fails closed | Core §3.1.2.1 | Pass | `…::t1_1_and_t1_7_…` (same request, no cookie) |
-| 67 | `max_age=0` always reauthenticates — a one-second-old session does not satisfy it, and neither does the authentication the reauthentication produces, so the chain terminates in `login_required` and never in a code | Core §3.1.2.1 | Pass (see note) | `…::t2_1_max_age_zero_always_reauthenticates_and_never_yields_a_code`; `honour.rs::t2_1_…`, `::max_age_zero_is_refused_rather_than_looped_after_a_reauthentication` |
+| 67 | `max_age=0` is handled as `prompt=login` (D-14) — every session, however fresh, is sent to sign in again (`reauth=1`), and the return leg yields a code whose ID token carries the new `auth_time`; with `prompt=none` it is `login_required`; a forged return-leg marker on an old session buys a code that still reports the old `auth_time` | Core §3.1.2.1 (errata set 2: `max_age=0` is equivalent to `prompt=login`) | Pass (see note) | `…::t2_1_max_age_zero_reauthenticates_and_the_return_leg_yields_a_fresh_code`, `…::d14_a_forged_marker_on_max_age_zero_cannot_make_an_old_session_look_reauthenticated`, `…::d14_prompt_none_with_max_age_zero_is_login_required`; `honour.rs::t2_1_max_age_zero_interacts_and_then_proceeds_exactly_as_prompt_login_does`, `::max_age_zero_and_prompt_login_cannot_drift_apart`, `::max_age_zero_under_prompt_none_is_login_required` |
 | 68 | A session older than `max_age` reauthenticates; the token issued after the return leg carries a fresh `auth_time` (mirrors `OIDCCMaxAge1`) | Core §3.1.2.1 | Pass | `…::t2_2_an_expired_max_age_reauthenticates_and_the_second_token_is_fresh` |
 | 69 | Two requests with different, satisfied `max_age` bounds report the same `auth_time` and the same `sub`, and neither reauthenticates (mirrors `OIDCCMaxAge10000`) | Core §3.1.2.1 | Pass | `…::t2_3_a_satisfied_max_age_does_not_reauthenticate` |
 | 70 | A refreshed ID token's `auth_time` equals the original's (mirrors `OIDCCRefreshToken`) | Core §12.2 | Pass | `…::t2_4_a_refreshed_id_token_carries_the_original_auth_time`; after the browser session rotated away, across two refreshes: `…::d9_a_refreshed_id_token_keeps_the_original_evidence_after_the_session_rotated_away` |
@@ -390,7 +390,7 @@ about the *channel*, not the secret.
 | 136 | A malformed header — not base64, no separator, a truncated `%` escape, an empty half — is `invalid_client`, uniformly, with the four causes distinguishable only in a server-side `debug!` | RFC 6749 §5.2; SEC-086 | Pass | `client_secret_basic.rs::malformed_blobs_are_classified_rather_than_guessed_at`; `client_secret_basic_test.rs::a_malformed_basic_header_is_refused_and_challenged` |
 | 137 | A 401 answering a Basic attempt challenges with `WWW-Authenticate: Basic realm="axiam"`; one answering a form-body client keeps `Bearer realm="axiam"`. Decided from the request before the handler runs, so it holds on every exit including the edge refusal | RFC 6749 §5.2 | Pass | `oauth2_conformance.rs::a_basic_attempt_is_challenged_with_basic`, `::invalid_client_returns_www_authenticate_header`; `client_secret_basic_test.rs::a_failed_basic_attempt_is_challenged_with_basic`, `::a_failure_without_a_basic_header_keeps_the_bearer_challenge` |
 | 138 | The `Authorization` header never reaches a log. Asserted at TRACE over a successful request, a rejected one and one refused at the edge — none of the secret, the encoded secret, the base64 blob or the header value appears. `BasicCredentials`' `Debug` is hand-written to redact | plan §4.7 | Pass | `client_secret_basic.rs::the_secret_never_reaches_a_debug_rendering`; `client_secret_basic_test.rs::t9_4_a_failed_basic_attempt_logs_neither_the_secret_nor_the_blob`, `::t9_4_the_request_logging_layer_records_no_headers_at_all` |
-| 139 | The FAPI gate needed no new code: `validate_registration` refuses a `fapi2` + `client_secret_basic` registration through the existing `WeakClientAuth` arm, and `enforce_token_request` re-checks `is_strong()` at request time — both ask the question rather than enumerate the methods | FAPI 2.0 §5.3.1.1 | Pass | `fapi.rs::fapi_with_secret_auth_is_refused`, `::dpop_does_not_make_a_secret_client_fapi`, `::fapi_token_request_refuses_a_tampered_row` (all parametrised over both weak methods) |
+| 139 | The FAPI gate needed no new code: `validate_registration` refuses a `fapi2` + `client_secret_basic` registration through the existing `WeakClientAuth` arm, and `enforce_token_request` re-checks `is_strong()` at request time at the token endpoint, and since D-17 (T23.1.5) `enforce_client_authentication`, the same rule extracted, does so at PAR, introspection and revocation too — all ask the question rather than enumerate the methods | FAPI 2.0 §5.3.1.1 | Pass | `fapi.rs::fapi_with_secret_auth_is_refused`, `::dpop_does_not_make_a_secret_client_fapi`, `::fapi_token_request_refuses_a_tampered_row`, `::the_client_authentication_rule_asks_is_strong_and_nothing_else` (all parametrised over both weak methods); `client_secret_basic_test.rs::d17_a_tampered_fapi2_row_is_refused_at_par_introspection_and_revocation`; `token_service.rs::d17_*` |
 | 140 | `token_endpoint_auth_methods_supported` advertises `client_secret_basic`, listed after `client_secret_post` — the order is the operator's recommendation. The list is asserted **exhaustively**, so a method wired into `authenticate_client_credential` and never advertised fails the gate | Discovery §3 | Pass | `oidc_conformance.rs::discovery_advertises_every_implemented_client_auth_method` |
 | 141 | `none` (RFC 6749 §2.1, T21.2) is advertised **last**: the list is a capability statement about the deployment, and the method that authenticates nothing is never the operator's recommendation. Advertising it is what lets an MCP client establish it can register at all; per-client posture is still never published | Discovery §3; RFC 6749 §2.1 | Pass | `oidc_conformance.rs::discovery_advertises_every_implemented_client_auth_method`; `public_client_test.rs::discovery_advertises_the_public_method_last` |
 
@@ -431,6 +431,52 @@ defects that had to be fixed before a single module executed, is in
 | 152 | **Every endpoint the discovery document publishes is usable at the URL it publishes.** Token, PAR, introspection, revocation, device-authorization and end-session all take a *required* `tenant_id`, and `/oauth2/authorize` needs one for any request without a principal — every browser. The document advertised all of them bare, so a client that did exactly what Discovery says to do got `400 Query deserialize error: missing field tenant_id`. The endpoints now carry the tenant the document describes | OIDC Discovery §3; RFC 6749 §3.1, §3.2 | Pass | `oidc.rs::every_client_authenticating_endpoint_carries_the_tenant`; `oidc.rs::the_mtls_aliases_carry_the_tenant_too` |
 | 153 | `userinfo_endpoint`, `jwks_uri` and `issuer` stay **bare**: UserInfo resolves its tenant from the bearer token, a JWKS is deployment-wide, and an `issuer` carrying a query would stop matching the `iss` of every token AXIAM mints | OIDC Discovery §4.3 | Pass | `oidc.rs::userinfo_jwks_and_the_issuer_stay_bare` |
 | 154 | A deployment that names no default tenant serves the document it served before row 152 — no endpoint gains a query string. The setting states a fact in a document and changes no endpoint's behaviour: an unparameterised request is still refused, because the tenant is the isolation boundary | — | Pass | `oidc.rs::a_document_that_names_no_tenant_carries_no_query_string`; `AuthConfig::default_tenant_id` |
+
+## Conformance-suite execution — Basic OP, the final runs (X7.9, T23.1.6)
+
+Several notes above say that no conformance run has happened and that
+`docs/conformance/` does not exist. They were true when written (2026-09-07) and
+are not now: the suite has been run in full on 2026-09-08, 09-10, 09-11, 09-13,
+09-14, 09-15, 09-18 and 09-25, and every report is under
+[`docs/conformance/`](../conformance/README.md). What has **not** happened is the
+final run: the maintainer runs the Basic OP and FAPI 2.0 suites personally, before
+the release tag (decision of 2026-10-03). These rows say what X7.9 shipped and
+what is still pending, and none of them is a certification claim.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 170 | The Basic OP harness exists and a full sweep of it completes: `oidcc-basic-static.json` (plan `oidcc-basic-certification-test-plan`, `server_metadata=discovery`, `client_registration=static_client`), the `register-clients.sh basic` registrar (clients `standard`, `browser_sso`, `authn_request_params: honour`) and the browser driver. The 2026-09-25 sweep ran 35 modules with 0 `FAILED` | X7.9; plan W9 | Pass (harness) | `conformance/plans/oidcc-basic-static.json`; `conformance/scripts/register-clients.sh`; `docs/conformance/2026-09-25-oidcc-basic-static.md` (plan `FP0jd1UNlpYEv`) |
+| 171 | The last Basic OP sweep's shape: 30 `PASSED`, 4 `REVIEW`, 1 `SKIPPED`, no `FAILED`, `WAITING` or `INTERRUPTED`. The same shape on 2026-09-10, 09-11, 09-15, 09-18 and 09-25 (09-13 and 09-14 had a fifth `REVIEW`) | Core §3.1.2.1; RFC 6749 §3.1.2.4 | **Not yet submittable** — 4 `REVIEW` modules, 1 unnamed `SKIPPED` | the dated `*-oidcc-basic-static.md` reports |
+| 172 | The four Basic OP `REVIEW` modules — `oidcc-prompt-login`, `oidcc-max-age-1`, `oidcc-ensure-registered-redirect-uri`, `oidcc-ensure-request-object-with-redirect-uri` — each have a written judgement: the log, the module's own condition, what AXIAM does with the test that pins it, and the clause | Core §3.1.2.1; RFC 6749 §3.1.2.4, §4.1.2.1 | **Proposed** — written from the 2026-09-25 evidence, not yet confirmed against a final run | `docs/conformance/REVIEW-JUDGEMENTS.md`; `docs/conformance/evidence/2026-09-25/` |
+| 173 | The final runs of the Basic OP plan and the three FAPI 2.0 plans (`mtls`, `self-signed`, `private-key-jwt`) on a digest-pinned image, compared with the 2026-09-25 baseline | X7.9 | **Pending** — the maintainer's, before the release tag | `claude_dev/fapi-conformance-runbook.md`, "Maintainer run checklist" |
+| 174 | The report names the plan's `SKIPPED` modules, the index keeps earlier reports linked, and the REVIEW screenshots can be exported with a manifest. Exercised with fixtures and a local mock of the suite's API, **not** against a live suite | X7.9 harness | Pass (fixtures only) | `conformance/scripts/report.py`; `conformance/scripts/export-evidence.py`; `just conformance-evidence` |
+| 175 | The three FAPI 2.0 modules the 2026-09-25 runs left open — `…-ensure-unsigned-authorization-request-without-using-par-fails` and `…-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` (`REVIEW`, each on all three variants) and `…-test-claims-parameter-identity-claims` (`WARNING`, all three variants) — each have a written judgement. The `WARNING`'s is **open**: discovery publishes `claims_parameter_supported: true`, so it is not the "not supported" deviation, and the reason is in the suite log only | FAPI 2.0 SP §5.3.1.2; RFC 9126; OIDC Core §5.5 | **Proposed** — written from the 2026-09-25 reports and evidence, not confirmed against a final run | `docs/conformance/REVIEW-JUDGEMENTS.md`, "FAPI 2.0 Security Profile (Final)"; `docs/conformance/evidence/2026-09-25/` |
+
+**Not asserted here.** That the Basic OP plan is green: it is not (row 171). That
+the four `REVIEW` modules will be accepted: that is a reviewer's decision, and row
+172 is AXIAM's account for them, not their verdict. That the FAPI 2.0 plans are
+certifiable: their two `REVIEW` modules and one `WARNING` are written up by
+T23.1.7 in the same judgements file (row 175), the `WARNING`'s entry as an open
+question. The submission package is prepared and unsent
+(`claude_dev/fapi-certification-submission.md`, "The X5.3 package").
+
+## The sensitive scopes and `client_secret_basic`, audited (X7.7, X7.8, T23.1.5)
+
+Both shipped in W7 and W8. T23.1.5 held them against their specifications
+requirement by requirement, found one defect (row 176) and added the tests the
+rows below name. None of the rows is a conformance-suite result.
+
+| # | Behaviour | Spec Ref | Status | Evidence |
+|---|-----------|----------|--------|----------|
+| 176 | A `client_secret_basic` client that names itself in the `Authorization` header alone is charged to the same per-client rate-limit bucket as a `client_secret_post` client, under `AXIAM__RATE_LIMIT__KEY=client_id` and `ip_client_id`. The bucket's id is the form's `client_id`, else the id the header decodes to, through the parser the handlers use; the secret half is not read and nothing is logged. A request naming two different ids is refused before any secret is compared | RFC 6749 §2.3.1; D8 (rate-limit keying) | Pass (**defect fixed**, T-253 amended) | `client_secret_basic_test.rs::t23_1_5_a_basic_clients_wrong_secrets_share_the_same_bucket` (failed first) with `t23_1_5_control_a_post_clients_wrong_secrets_share_one_bucket_across_addresses`; `extractors/rate_limit.rs::a_basic_header_names_the_client_the_handlers_would_authenticate` |
+| 177 | The RFC 6749 §2.3.1 decoding at its edges: an encoded `%3A` in the id, `%2B`/`%2b`/raw `+`/`%20`, `&` and `=`, non-ASCII raw and percent-encoded (and non-UTF-8 refused), a colon in the secret, an empty half, unpadded and URL-safe base64 refused, the scheme in any case, extra spaces, a tab is no separator | RFC 6749 §2.3.1; RFC 7617 §2; RFC 9110 §11.1 | Pass | `client_secret_basic.rs` unit tests (`a_percent_encoded_colon_in_the_id_is_a_colon_in_the_id` and six others); `client_secret_basic_test.rs::t23_1_5_*` (scheme case, encoded id half, non-ASCII, `&`/`=`, plus versus `%2B`, empty and non-canonical base64) |
+| 178 | Two `Authorization` headers are refused, not resolved by position: two Basic, Basic then Bearer, correct then wrong. A Basic header in second place after another scheme is never read | RFC 9110 §5.3 | Pass | `client_secret_basic_test.rs::t23_1_5_two_authorization_headers_never_let_an_intermediary_choose` |
+| 179 | The registered method decides at all eight endpoints that authenticate a client: a strong client's secret in a Basic header is refused at PAR, revoke, introspect, token-exchange, uma-ticket **and** at the `authorization_code`, `refresh_token` and `client_credentials` grants; a `client_secret_post` client with a wrong Basic header and a right body secret is authenticated by the body; a client assertion beside a Basic header authenticates nothing | SEC-093 | Pass | `sec093_client_auth_method_test.rs::a_strong_clients_secret_in_a_basic_header_is_refused_at_all_five_endpoints`, `…_at_the_three_ordinary_grants`; `client_secret_basic_test.rs::t23_1_5_a_post_client_with_both_channels_is_authenticated_by_the_body_alone`, `t23_1_5_a_client_assertion_beside_a_basic_header_authenticates_nothing` |
+| 180 | The FAPI gate refuses `client_secret_basic` through `is_strong()`: at registration on the admin API (create and merged update, both directions) and, for a row edited past registration, at request time at **every** endpoint that authenticates a client: the token endpoint, token exchange, uma-ticket, and (D-17) PAR, introspection and revocation, in both shared-secret channels, after authentication and before anything is pushed, revealed or revoked. A wrong secret learns nothing from the gate; RFC 7009 §2.2 and a strong `fapi2` client are untouched | FAPI 2.0 §5.3.1.1 | Pass | `oauth2_client_test.rs::a_fapi2_client_may_not_register_client_secret_basic`, `a_patch_cannot_make_a_client_fapi2_and_client_secret_basic_at_once`; `client_secret_basic_test.rs::t23_1_5_a_fapi2_row_edited_to_client_secret_basic_is_refused_at_the_token_endpoint`, `d17_a_tampered_fapi2_row_is_refused_at_par_introspection_and_revocation`, `d17_a_wrong_secret_learns_nothing_from_the_gate`; `token_service.rs::d17_revoke_and_introspect_refuse_a_tampered_fapi2_row_after_it_authenticates`, `d17_a_strong_fapi2_client_still_revokes_and_introspects`, `d17_a_standard_row_with_a_shared_secret_method_is_unaffected`; `fapi.rs::the_client_authentication_rule_asks_is_strong_and_nothing_else` |
+| 181 | The Basic header reaches no log at PAR, revoke and introspect either (a wrong secret and a refused duplicate at each, captured at TRACE); the RFC 7591 default method (`client_secret_basic`) is walked from registration to a Basic header at an authenticating endpoint, and the same secret in the body of that client authenticates nothing; CIMD still refuses the method | RFC 7591 §2; RFC 6749 §2.3.1 | Pass | `client_secret_basic_test.rs::t23_1_5_a_basic_attempt_at_par_revoke_and_introspect_logs_nothing_either`; `dynamic_registration_test.rs::a_default_registered_client_authenticates_with_its_basic_header`; `cimd.rs::a_shared_secret_method_is_refused` |
+| 182 | `phone_number_verified` is `false` for a number with no verified instant, `true` with one, back to `false` when it is cleared, never omitted while a number is released, and absent when there is no number. An address carries exactly the §5.1.1 members that hold a value, as strings, never `null`; a subject holding neither is released neither and a call that discloses nothing writes no audit row | OIDC Core §5.1, §5.1.1, §5.4 | Pass | `oauth2_sensitive_scopes_test.rs::t23_1_5_phone_number_verified_follows_the_verified_instant_and_nothing_else`, `t23_1_5_a_subject_with_half_the_data_is_released_half_and_a_subject_with_none_nothing`, `t23_1_5_the_address_claim_has_the_oidc_core_shape` |
+| 183 | The claims reach UserInfo and nowhere else: not the access token, not its introspection, not a refresh response (access token or ID token), alongside T8.3's code-exchange ID token. A consent row in another tenant releases nothing, and withdrawal and listing are tenant-scoped | OIDC Core §5.4; GDPR Art. 5(1)(c) | Pass | `oauth2_sensitive_scopes_test.rs::t23_1_5_neither_the_access_token_nor_introspection_nor_a_refreshed_id_token_carries_them`, `t23_1_5_consent_recorded_in_one_tenant_releases_nothing_in_another` |
+| 184 | A patch cannot add a sensitive scope the switch or the profile forbids (the update door onto row 105 and row 112). SCIM writes `phoneNumbers` and `addresses` on create, leaves them on an unrelated `PATCH`, clears only the one a `remove` names, and a `PUT` that omits them clears both; the admin `PUT /users/{id}` writes neither (SCIM is the only writer in this tree) | RFC 7644 §3.5.1; GDPR Art. 5(1)(b) | Pass | `oauth2_sensitive_scopes_test.rs::t23_1_5_a_patch_cannot_add_a_sensitive_scope_the_switch_or_the_profile_forbids`, `t23_1_5_the_user_update_endpoint_is_not_a_writer_of_the_sensitive_columns`; `axiam-scim/tests/contract_test.rs::t23_1_5_scim_writes_the_sensitive_columns_and_only_as_told` |
 
 ## FAPI 2.0 §5.3.2.1-9 and BCP §4.14 — the refresh-rotation grace window (T-254)
 
@@ -502,7 +548,7 @@ costs a round trip per request, which is why integrators do not adopt it.
 
 | # | Behaviour | Spec Ref | Status | Evidence |
 |---|-----------|----------|--------|----------|
-| 35 | `claims_parameter_supported: false` — only `claims.id_token.acr` is ever read, and a partially-honoured `claims` is worse than an unsupported one | Discovery §3 | Pass | `oidc.rs::discovery_tells_the_truth_about_request_objects_and_claims` |
+| 35 | `claims_parameter_supported: true` — the `userinfo` member of `claims` is honoured on every lane and `id_token.acr` on the honour lane; a `fapi2` client asking for `id_token.acr` or an essential `id_token.auth_time` is refused rather than dropped (was `false` until the `userinfo` member was implemented) | Discovery §3 | Pass | `oidc.rs::discovery_tells_the_truth_about_request_objects_and_claims` |
 | 36 | `acr_values_supported` publishes exactly `urn:axiam:acr:1fa` and `urn:axiam:acr:mfa` — a fixed vocabulary, not an operator-configurable one | Discovery §3 | Pass | `oidc.rs::discovery_advertises_the_two_axiam_acr_urns` |
 | 37 | `claims_supported` includes `auth_time`, `acr`, `amr` as server capabilities (row 25 records that no client receives them yet) | Discovery §3 | Pass | `oidc.rs::discovery_advertises_the_three_authentication_evidence_claims` |
 | 38 | `id_token_signing_alg_values_supported` remains exactly `["EdDSA"]` — escalation B was answered **no**, so no RSA key enters the JWKS | Discovery §3 | Pass | `oidc.rs::the_id_token_algorithm_list_is_still_eddsa_only` + row 8 |
@@ -579,24 +625,29 @@ costs a round trip per request, which is why integrators do not adopt it.
 - **`consent_required` was unreachable in W4 and is reachable from W7.**
   It needs a consent-gated scope, and there were none until W7 defined the two;
   row 108 is where it is now raised. `interaction_required` remains unreachable.
-  As W4 put it:
-  `consent_required` needs a consent-gated scope and there are none until W7;
-  every `prompt=none` refusal the honour lane can produce has a more specific
+  Every `prompt=none` refusal the honour lane can produce has a more specific
   name than `interaction_required`. Both variants exist in `OAuth2Error` — the
   four OIDC interaction codes are one vocabulary and splitting it across waves
-  is how a code comes to be spelled twice — and neither is raised by any branch.
-  The audit action `oauth2.prompt_none.consent_required` the plan names is,
-  for the same reason, not written.
+  is how a code comes to be spelled twice — and only `consent_required` is
+  raised by a branch (W7). The audit action
+  `oauth2.prompt_none.consent_required` the plan names is not written: a silent
+  `consent_required` is audited as `oauth2.prompt_none.refused`.
 
-- **`max_age=0` cannot be satisfied by any code, and that is the honest
-  answer.** The plan fixes the comparison as `elapsed >= max_age` with no
-  special case and no leeway; an authentication is never zero seconds old, so
-  `max_age=0` always demands a reauthentication and the reauthentication it
-  produces fails the same comparison. The relying party gets an interaction and
-  then `login_required`. A rounder comparison (`>`) would let it succeed, at the
-  cost of the one guarantee the parameter exists to give. Note that the OpenID
-  Foundation's Basic OP plan exercises `max_age=1` and `max_age=10000`, not
-  `max_age=0`.
+- **`max_age=0` is handled as `prompt=login` (D-14, T23.1.4).** The plan fixed
+  the comparison as `elapsed >= max_age` with no special case, which made
+  `max_age=0` unsatisfiable: the reauthentication it demanded was itself zero
+  seconds old, so the return leg answered `login_required` and a relying party
+  sending `max_age=0` could never sign in. OIDC Core §3.1.2.1 (errata set 2)
+  re-authenticates when the elapsed time is *greater than* `max_age` and says
+  `max_age=0` is equivalent to `prompt=login`, so `max_age=0` now takes exactly
+  the `prompt=login` path in `honour::evaluate` and no path of its own (the
+  outbound leg always interacts; the return leg proceeds to a code with the new
+  `auth_time`; `prompt=none` with it is `login_required`). Positive values keep
+  `>=`: one instant stricter than the clause, harmless, and what
+  `oidcc-max-age-1` exercises (the OpenID Foundation's Basic OP plan runs
+  `max_age=1` and `max_age=10000`, not `max_age=0`). The return-leg marker's
+  accepted residual (F4 P23W1-08) applies to `max_age=0` exactly as it does to
+  `prompt=login`.
 
 - **A pushed `prompt=none` from an anonymous browser cannot be read before the
   hop.** The handle is consumed inside the authorization handler, after the
@@ -639,3 +690,6 @@ costs a round trip per request, which is why integrators do not adopt it.
 *Rows 158–160 added: R-2 of the 2026-09-12 residual pass (the claims request across a refresh) — 2026-09-12*
 *Rows 161–164 added: R-8 of the same pass (the SDK half of contract 1.40–1.42) — 2026-09-12*
 *Rows 165–169 added: R-6 of the same pass (the session-revocation feed) — 2026-09-12*
+*Rows 170–174 added: X7.9 final-run preparation (T23.1.6) — 2026-10-03*
+*Row 175 added: the FAPI 2.0 judgements (T23.1.7) — 2026-10-03*
+*Rows 176–184 added: the X7.7/X7.8 audit (T23.1.5) — 2026-10-03*

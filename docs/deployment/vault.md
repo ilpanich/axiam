@@ -34,6 +34,7 @@ else here.
 | `mfa_encryption_key` | 32-byte hex | Stored TOTP secrets become undecryptable. |
 | `federation_encryption_key` | 32-byte hex | Stored IdP client secrets become undecryptable. |
 | `email_encryption_key` | 32-byte hex | Stored email addresses become undecryptable. |
+| `directory_encryption_key` | 32-byte hex | **Optional** — only needed for the LDAP / Active Directory identity source. Stored directory bind secrets become undecryptable and must be re-entered (the directory itself is untouched). Absent, the directory feature is unavailable and the server still starts. |
 | `gdpr_pseudonym_pepper` | 32-byte hex | Existing audit pseudonyms stop linking to new ones; the audit trail breaks. |
 | `amqp_signing_key` | 32-byte hex | AMQP message signing is mandatory and has no unsigned path, so a release build **refuses to start** without it. Rotating it needs producers and consumers moved together. |
 | `jwt_public_key_pem` | Ed25519 PEM | Not secret, but a mismatched pair is a confusing outage. |

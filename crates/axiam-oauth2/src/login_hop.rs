@@ -738,78 +738,101 @@ mod tests {
     /// read side by side. The variant is not asserted: several of these could
     /// honestly be refused by more than one rule, and what matters is that no
     /// rule lets them through.
+    const AUDIT_LIST: &[&str] = &[
+        // Absolute and scheme-relative forms.
+        "https://evil.example/oauth2/authorize?x=1",
+        "https://iam.example.com/oauth2/authorize?x=1",
+        "//evil.example/oauth2/authorize?x=1",
+        "///evil.example/oauth2/authorize?x=1",
+        "//user@evil.example/oauth2/authorize?x=1",
+        // Backslash spellings.
+        "/\\evil.example/oauth2/authorize?x=1",
+        "\\\\evil.example/oauth2/authorize?x=1",
+        "\\/evil.example/oauth2/authorize?x=1",
+        "/oauth2\\authorize?x=1",
+        "/oauth2/authorize?x=1\\",
+        // Encoded slashes and double encoding: never decoded.
+        "/%2f%2fevil.example/oauth2/authorize?x=1",
+        "/%2F%2Fevil.example?x=1",
+        "/oauth2%2fauthorize?x=1",
+        "/%5cevil.example?x=1",
+        "/%252f%252fevil.example?x=1",
+        "%2Foauth2%2Fauthorize%3Fx%3D1",
+        // Scripting schemes, in any case.
+        "javascript:alert(1)",
+        "JaVaScRiPt:alert(1)",
+        "/javascript:alert(1)?x=1",
+        "data:text/html,<script>alert(1)</script>",
+        "DATA:text/html;base64,PHNjcmlwdD4=",
+        "vbscript:msgbox(1)",
+        "VBScript:msgbox(1)",
+        // Whitespace and control characters.
+        " /oauth2/authorize?x=1",
+        "/oauth2/authorize?x=1 ",
+        "\t/oauth2/authorize?x=1",
+        "/oauth2/authorize?x=\t1",
+        "/oauth2/authorize?x=1\rSet-Cookie:a=b",
+        "/oauth2/authorize?x=1\nSet-Cookie:a=b",
+        "/oauth2/authorize?x=1\u{0}",
+        "/oauth2/authorize?x=1\u{7f}",
+        "/oauth2/authorize?x=1\u{85}",
+        "\u{2028}/oauth2/authorize?x=1",
+        "/oauth2/authorize?x=\u{a0}1",
+        "\u{feff}/oauth2/authorize?x=1",
+        "/\t/evil.example?x=1",
+        // Traversal and other paths.
+        "/oauth2/authorize/../../admin?x=1",
+        "/oauth2/./authorize?x=1",
+        "/oauth2/authorize/.?x=1",
+        "/oauth2/authorize/%2e%2e/%2e%2e/admin?x=1",
+        "/oauth2/authorize/%2E%2E?x=1",
+        "/oauth2/authorize/?x=1",
+        "/OAuth2/Authorize?x=1",
+        "/oauth2/token?x=1",
+        "/oauth2?x=1",
+        "/?x=1",
+        // `@` userinfo tricks.
+        "/@evil.example/oauth2/authorize?x=1",
+        "/oauth2/authorize@evil.example?x=1",
+        "https://iam.example.com@evil.example/oauth2/authorize?x=1",
+        // Unicode look-alikes.
+        "\u{ff0f}oauth2/authorize?x=1",
+        "\u{ff0f}\u{ff0f}evil.example?x=1",
+        "/\u{2215}evil.example?x=1",
+        "\u{2044}\u{2044}evil.example?x=1",
+        "/oauth2/author\u{456}ze?x=1",
+        "/oauth2/authorize\u{200b}?x=1",
+        "/oauth2/authorize\u{ff1f}x=1",
+    ];
+
     #[test]
     fn the_audit_list_is_refused_on_the_server_too() {
-        for candidate in [
-            // Absolute and scheme-relative forms.
-            "https://evil.example/oauth2/authorize?x=1",
-            "https://iam.example.com/oauth2/authorize?x=1",
-            "//evil.example/oauth2/authorize?x=1",
-            "///evil.example/oauth2/authorize?x=1",
-            "//user@evil.example/oauth2/authorize?x=1",
-            // Backslash spellings.
-            "/\\evil.example/oauth2/authorize?x=1",
-            "\\\\evil.example/oauth2/authorize?x=1",
-            "\\/evil.example/oauth2/authorize?x=1",
-            "/oauth2\\authorize?x=1",
-            "/oauth2/authorize?x=1\\",
-            // Encoded slashes and double encoding: never decoded.
-            "/%2f%2fevil.example/oauth2/authorize?x=1",
-            "/%2F%2Fevil.example?x=1",
-            "/oauth2%2fauthorize?x=1",
-            "/%5cevil.example?x=1",
-            "/%252f%252fevil.example?x=1",
-            "%2Foauth2%2Fauthorize%3Fx%3D1",
-            // Scripting schemes, in any case.
-            "javascript:alert(1)",
-            "JaVaScRiPt:alert(1)",
-            "/javascript:alert(1)?x=1",
-            "data:text/html,<script>alert(1)</script>",
-            "DATA:text/html;base64,PHNjcmlwdD4=",
-            "vbscript:msgbox(1)",
-            "VBScript:msgbox(1)",
-            // Whitespace and control characters.
-            " /oauth2/authorize?x=1",
-            "/oauth2/authorize?x=1 ",
-            "\t/oauth2/authorize?x=1",
-            "/oauth2/authorize?x=\t1",
-            "/oauth2/authorize?x=1\rSet-Cookie:a=b",
-            "/oauth2/authorize?x=1\nSet-Cookie:a=b",
-            "/oauth2/authorize?x=1\u{0}",
-            "/oauth2/authorize?x=1\u{7f}",
-            "/oauth2/authorize?x=1\u{85}",
-            "\u{2028}/oauth2/authorize?x=1",
-            "/oauth2/authorize?x=\u{a0}1",
-            "\u{feff}/oauth2/authorize?x=1",
-            "/\t/evil.example?x=1",
-            // Traversal and other paths.
-            "/oauth2/authorize/../../admin?x=1",
-            "/oauth2/./authorize?x=1",
-            "/oauth2/authorize/.?x=1",
-            "/oauth2/authorize/%2e%2e/%2e%2e/admin?x=1",
-            "/oauth2/authorize/%2E%2E?x=1",
-            "/oauth2/authorize/?x=1",
-            "/OAuth2/Authorize?x=1",
-            "/oauth2/token?x=1",
-            "/oauth2?x=1",
-            "/?x=1",
-            // `@` userinfo tricks.
-            "/@evil.example/oauth2/authorize?x=1",
-            "/oauth2/authorize@evil.example?x=1",
-            "https://iam.example.com@evil.example/oauth2/authorize?x=1",
-            // Unicode look-alikes.
-            "\u{ff0f}oauth2/authorize?x=1",
-            "\u{ff0f}\u{ff0f}evil.example?x=1",
-            "/\u{2215}evil.example?x=1",
-            "\u{2044}\u{2044}evil.example?x=1",
-            "/oauth2/author\u{456}ze?x=1",
-            "/oauth2/authorize\u{200b}?x=1",
-            "/oauth2/authorize\u{ff1f}x=1",
-        ] {
+        for candidate in AUDIT_LIST {
             assert!(
                 validate_return_to(candidate).is_err(),
                 "must refuse {candidate:?}"
             );
+        }
+    }
+
+    /// **T23.1.8** — the same list, when the hop started on a per-tenant
+    /// issuer path: every candidate refused against the tenant authorization
+    /// path both verbatim and with its `/oauth2/` re-based under
+    /// `/t/{tenant_id}/`, so a hostile value cannot become acceptable by being
+    /// spelled in the tenant form. Accepting the tenant path widened nothing:
+    /// it is still one exact path per call.
+    #[test]
+    fn t23_1_8_the_audit_list_is_refused_against_the_tenant_path_too() {
+        let tenant = t21_6_path();
+        let rebase = format!("/t/{T21_6_TENANT}/oauth2/");
+        for candidate in AUDIT_LIST {
+            let rebased = candidate.replace("/oauth2/", &rebase);
+            for spelled in [(*candidate).to_owned(), rebased] {
+                assert!(
+                    validate_return_to_at(&spelled, &tenant).is_err(),
+                    "must refuse {spelled:?} against the tenant path"
+                );
+            }
         }
     }
 

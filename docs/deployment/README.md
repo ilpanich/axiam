@@ -230,6 +230,7 @@ never in git):
 | `AXIAM__AUTH__PKI_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting CA signing private keys at rest. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting SAML/OIDC federation client secrets at rest (SECHRD-09). Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting email/SMTP provider secrets at rest. Generate with `openssl rand -hex 32`. |
+| `AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY` | **Optional.** AES-256-GCM key (32 bytes, hex) encrypting each tenant's LDAP / Active Directory bind secret at rest. Without it the directory feature is unavailable: creating or updating a directory configuration is refused with an error naming this key, and the server still starts. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` | HMAC-SHA256 pepper (32 bytes, hex) used to pseudonymize audit-log actor identities on GDPR erasure. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__PEPPER` | Server pepper (plain string). Prepended before Argon2id password hashing, **and** keys client-secret hashing (OBS-1). **Mandatory in a release build** — the server refuses to start without it. Generate a long random string, e.g. `openssl rand -base64 32`. |
 | `AXIAM__AUTH__PEPPER_PREVIOUS` | Outgoing pepper, **verify-only**, set for the duration of a pepper rotation. Unset outside a rotation. See below. |
@@ -237,6 +238,36 @@ never in git):
 Set every value to a placeholder such as `<set-in-secret-manager>` in any
 example or template you author — never commit real key material, and never
 reuse the same value across environments.
+
+### What a tenant's directory needs (LDAP / Active Directory)
+
+The full guide arrives with the management routes; until then, three things an
+operator must know before pointing AXIAM at a directory:
+
+- **A read-only bind account.** AXIAM binds as `bind_dn` only to search for the
+  user signing in, then binds as that user to check the password. It never adds,
+  modifies, deletes or changes a password in the directory. Give the account
+  read rights on the user subtree (and, for group mapping later, the group
+  subtree) and nothing else — on Active Directory an ordinary domain user with no
+  extra privileges is enough. Its secret is encrypted at rest under
+  `AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY` and never returned by any API.
+- **Trust anchors.** The directory's server certificate is verified against the
+  tenant's own `trust_anchors_pem` — the CA that issued it (your corporate CA,
+  or the organization's AXIAM CA) — and it must name the host in the URL. Only an
+  empty list means the public Mozilla roots; the two are never combined, and
+  verification cannot be switched off. Use a hostname, not an IPv6 literal, in the
+  URL: a bracketed address cannot be verified and fails closed. TLS 1.2 is the
+  minimum.
+- **Why plaintext is refused.** A directory bind carries the user's corporate
+  password, which unlocks everything else the directory gates. `ldap://` is
+  accepted only with StartTLS, and AXIAM sends nothing but the StartTLS request
+  before the handshake completes; a server that refuses the upgrade receives no
+  bind at all. Plain `ldap://` without StartTLS is refused when the configuration
+  is saved, and again at every sign-in.
+
+AXIAM's lockout applies in front of the directory, so set the tenant's
+`max_failed_login_attempts` **below** the directory's own lockout threshold:
+AXIAM then stops binding before the directory would lock the account.
 
 ### ⚠ Rotating `AXIAM__AUTH__PEPPER`
 

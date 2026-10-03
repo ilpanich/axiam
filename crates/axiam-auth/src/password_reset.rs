@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::crypto_gate::acquire_hash_permit;
 use crate::error::AuthError;
-use crate::password::{self, DUMMY_HASH, hash_password, verify_password};
+use crate::password::{self, hash_password, verify_password};
 use crate::policy::{PolicyCheckResult, evaluate_password};
 use crate::token;
 
@@ -130,7 +130,7 @@ where
         if let Ok(Ok(_permit)) = acquired {
             let pepper_owned = pepper.map(str::to_string);
             let _ = tokio::task::spawn_blocking(move || {
-                password::verify_password("dummy", DUMMY_HASH, pepper_owned.as_deref())
+                password::equalising_dummy_verify(pepper_owned.as_deref())
             })
             .await;
         }
@@ -175,6 +175,16 @@ where
         if !links.is_empty() {
             // T-24-91: same constant-time treatment as the unknown-email
             // branch above — a federated account must not resolve faster.
+            self.dummy_hash_wait(pepper).await;
+            return Ok(None);
+        }
+
+        // G-3 (T23.3.2): neither can a directory account — its password belongs
+        // to the tenant's directory, and a reset link would mint a local
+        // credential beside it. Answered exactly as the unknown address above,
+        // dummy verify included, so the request reveals no more about a
+        // directory account than about whether an address exists.
+        if user.is_directory_account() {
             self.dummy_hash_wait(pepper).await;
             return Ok(None);
         }
@@ -247,6 +257,13 @@ where
             .await?;
         if !links.is_empty() {
             return Err(AuthError::FederatedUserPasswordReset.into());
+        }
+
+        // G-3 (T23.3.2): a token for a directory account can only predate the
+        // account becoming one (the request path issues none). It is spent,
+        // and nothing is written: no hash, no history row, no OPAQUE record.
+        if user.is_directory_account() {
+            return Err(AuthError::DirectoryAccountPassword.into());
         }
 
         // T-24-92 / RESEARCH Pitfall 4: explicit current-password-reuse

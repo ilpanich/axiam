@@ -359,6 +359,154 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // T23.1.5 — the RFC 6749 §2.3.1 / RFC 7617 edge cases an audit of the
+    // module against its specification found without a pinning test. No
+    // secret below is a real credential, and no assertion formats one: the
+    // cases are named instead.
+    // -----------------------------------------------------------------
+
+    fn blob(raw: &str) -> String {
+        base64::engine::general_purpose::STANDARD.encode(raw)
+    }
+
+    #[test]
+    fn a_percent_encoded_colon_in_the_id_is_a_colon_in_the_id() {
+        // `%3A` is the form-urlencoding of the one character the Basic
+        // user-id may not carry raw. The split happens on the raw colon
+        // FIRST, so an encoded one survives into the decoded id.
+        let c = decode_credentials(&blob("oa%3Aabc:secret")).expect("well-formed");
+        assert_eq!(c.client_id(), "oa:abc");
+        assert_eq!(c.client_secret(), "secret");
+    }
+
+    #[test]
+    fn plus_and_percent_two_b_are_different_characters_in_the_secret() {
+        // Raw `+` is a space; `%2B` and `%2b` are a plus. Lower-case hex is
+        // as valid as upper-case.
+        for (encoded, expected, case) in [
+            ("a+b", "a b", "raw plus"),
+            ("a%2Bb", "a+b", "upper-case %2B"),
+            ("a%2bb", "a+b", "lower-case %2b"),
+            ("a%20b", "a b", "%20"),
+            ("a%25b", "a%b", "%25"),
+        ] {
+            let c = decode_credentials(&blob(&format!("oa_abc:{encoded}"))).expect("well-formed");
+            assert_eq!(c.client_secret(), expected, "case: {case}");
+        }
+    }
+
+    #[test]
+    fn ampersand_and_equals_in_the_secret_survive() {
+        // The reason the decoder is hand-written: a query-string parser
+        // splits on both and would truncate the secret silently.
+        let c = decode_credentials(&blob("oa_abc:a&b=c")).expect("well-formed");
+        assert_eq!(c.client_secret(), "a&b=c");
+    }
+
+    #[test]
+    fn non_ascii_is_accepted_raw_or_percent_encoded_and_must_be_utf8() {
+        // A client following RFC 6749 §2.3.1 percent-encodes the UTF-8
+        // bytes; a client that does not sends them raw. Both decode to the
+        // same string. Bytes that are not UTF-8 either way are refused.
+        let raw = decode_credentials(&blob("oa_abc:p\u{e4}ss\u{20ac}")).expect("raw UTF-8");
+        let encoded =
+            decode_credentials(&blob("oa_abc:p%C3%A4ss%E2%82%AC")).expect("percent-encoded UTF-8");
+        assert_eq!(raw.client_secret(), encoded.client_secret());
+        assert_eq!(encoded.client_secret(), "p\u{e4}ss\u{20ac}");
+
+        assert_eq!(
+            decode_credentials(&blob("oa_abc:%FF%FE")),
+            Err(BasicAuthError::BadEncoding),
+            "percent-encoded bytes that are not UTF-8"
+        );
+        let not_utf8 = base64::engine::general_purpose::STANDARD.encode([b'o', b':', 0xFF, 0xFE]);
+        assert_eq!(
+            decode_credentials(&not_utf8),
+            Err(BasicAuthError::BadEncoding),
+            "raw bytes that are not UTF-8"
+        );
+    }
+
+    #[test]
+    fn only_canonical_padded_standard_base64_is_accepted() {
+        // 'oa_abc:s3cret' is 13 bytes, so its canonical encoding needs one
+        // `=`. Neither the unpadded form nor the URL-safe alphabet is a
+        // second spelling of the same credential.
+        let padded = blob("oa_abc:s3cret");
+        assert!(padded.ends_with('='), "fixture needs a padded blob");
+        assert!(decode_credentials(&padded).is_ok());
+
+        let unpadded = padded.trim_end_matches('=');
+        assert_eq!(
+            decode_credentials(unpadded),
+            Err(BasicAuthError::NotBase64),
+            "unpadded"
+        );
+
+        // A value whose standard encoding uses `+` or `/` has a different
+        // URL-safe spelling.
+        let standard = base64::engine::general_purpose::STANDARD.encode([0xFB, 0xFF, 0xBF, b':']);
+        let url_safe = base64::engine::general_purpose::URL_SAFE.encode([0xFB, 0xFF, 0xBF, b':']);
+        assert_ne!(standard, url_safe, "fixture needs a character that differs");
+        assert_eq!(
+            decode_credentials(&url_safe),
+            Err(BasicAuthError::NotBase64),
+            "URL-safe alphabet"
+        );
+    }
+
+    #[test]
+    fn whitespace_around_the_scheme_and_credentials_is_tolerated_but_only_spaces_separate() {
+        let blob = blob("oa_abc:s3cret");
+        for (raw, case) in [
+            (format!("Basic {blob}"), "one space"),
+            (format!("Basic    {blob}"), "several spaces"),
+            (format!("  Basic {blob}  "), "leading and trailing spaces"),
+            (format!("BASIC {blob}"), "upper-case scheme"),
+            (format!("basic {blob}"), "lower-case scheme"),
+        ] {
+            let parsed = parse_authorization_header(&raw)
+                .unwrap_or_else(|| panic!("case {case}: not recognised as Basic"))
+                .unwrap_or_else(|_| panic!("case {case}: not decoded"));
+            assert_eq!(parsed.client_id(), "oa_abc", "case: {case}");
+        }
+
+        // RFC 9110 §11.1 separates scheme and credentials with 1*SP. A tab is
+        // not that, and what `names_basic_scheme` says must agree with the
+        // parser either way.
+        let tabbed = format!("Basic\t{blob}");
+        assert_eq!(
+            names_basic_scheme(&tabbed),
+            parse_authorization_header(&tabbed).is_some()
+        );
+        assert!(!names_basic_scheme(&tabbed), "a tab is not a separator");
+    }
+
+    #[test]
+    fn an_empty_half_is_refused_whichever_half_it_is() {
+        for (raw, case) in [
+            ("oa_abc:", "empty secret"),
+            (":secret", "empty id"),
+            (":", "both empty"),
+            (
+                "oa_abc:%",
+                "a lone percent sign is a bad escape, not an empty secret",
+            ),
+        ] {
+            let expected = if case.starts_with("a lone") {
+                BasicAuthError::BadEncoding
+            } else {
+                BasicAuthError::EmptyHalf
+            };
+            assert_eq!(
+                decode_credentials(&blob(raw)),
+                Err(expected),
+                "case: {case}"
+            );
+        }
+    }
+
     #[test]
     fn the_secret_never_reaches_a_debug_rendering() {
         // The one property this type exists to hold. `TokenRequestContext`

@@ -45,6 +45,20 @@ pub enum AuthError {
     #[error("federated users cannot reset passwords")]
     FederatedUserPasswordReset,
 
+    /// G-3 (T23.3.2): a local password operation — change, reset, an OPAQUE
+    /// registration — was attempted on a directory account, whose password
+    /// belongs to the tenant's LDAP / Active Directory server.
+    ///
+    /// Maps onto the existing `Validation` (`400 validation_error`) like
+    /// [`Self::FederatedUserPasswordReset`], so no SDK sees a new code; the
+    /// message says what to do instead. Raised only where the caller already
+    /// holds the account (an authenticated change, a consumed reset token), so
+    /// it reveals nothing to an unauthenticated caller; the unauthenticated
+    /// reset *request* answers a directory account exactly as it answers an
+    /// unknown address.
+    #[error("this account's password is managed by the organization's directory; change it there")]
+    DirectoryAccountPassword,
+
     #[error("MFA setup token expired or invalid")]
     MfaSetupTokenInvalid,
 
@@ -161,6 +175,7 @@ impl From<AuthError> for AxiamError {
             | AuthError::EmailAlreadyVerified
             | AuthError::ResetTokenInvalid
             | AuthError::FederatedUserPasswordReset
+            | AuthError::DirectoryAccountPassword
             | AuthError::MfaAlreadyConfigured
             | AuthError::MfaCannotRemoveLastMethod => AxiamError::Validation {
                 message: err.to_string(),

@@ -1191,6 +1191,103 @@ async fn a_fapi2_client_is_refused_what_it_pushed_exactly_as_what_it_sent_inline
     }
 }
 
+/// **D-12 (T23.1.4), on the PAR carrier.** A `fapi2` client that pushes
+/// `claims` asking for `id_token.auth_time` as **essential** is refused
+/// `invalid_request` when the pushed request is redeemed — OIDC Core §2 makes
+/// the claim REQUIRED then, and a `fapi2` ID token never carries it, so
+/// serving the request would be a silent downgrade, the one `id_token.acr`
+/// was refused for in T23.1.1. The refusal names the member.
+///
+/// Twins in the same test: the same push from a `standard`/`ignore` client is
+/// served a code as before (invariant 1), and a `fapi2` push asking for
+/// `auth_time` **voluntarily** is served a code too, because an OP may decline
+/// a voluntary claim and refusing it would turn away a request AXIAM can
+/// answer truthfully.
+#[actix_web::test]
+async fn a_fapi2_client_is_refused_an_essential_auth_time_it_pushed() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let pkce = format!("&code_challenge={PKCE}&code_challenge_method=S256&scope=openid");
+
+    let essential = format!(
+        "{pkce}&claims={}",
+        form(r#"{"id_token":{"auth_time":{"essential":true}}}"#)
+    );
+    let unreadable = format!(
+        "{pkce}&claims={}",
+        form(r#"{"id_token":{"auth_time":{"essential":"yes"}}}"#)
+    );
+    let voluntary = format!(
+        "{pkce}&claims={}",
+        form(r#"{"id_token":{"auth_time":{"essential":false}}}"#)
+    );
+
+    // Push everything while the client is still `standard`.
+    let mut pushed = Vec::new();
+    for (what, extra) in [
+        ("essential", &essential),
+        ("unreadable", &unreadable),
+        ("voluntary", &voluntary),
+    ] {
+        let (status, body) = par!(app, f, f.client_id, f.client_secret, extra.clone());
+        assert_eq!(status, 201, "push {what}: {body}");
+        pushed.push((what, body["request_uri"].as_str().unwrap().to_owned()));
+    }
+    let (status, body) = par!(
+        app,
+        f,
+        f.other_client_id,
+        f.other_client_secret,
+        essential.clone()
+    );
+    assert_eq!(status, 201, "twin push: {body}");
+    let twin = body["request_uri"].as_str().unwrap().to_owned();
+
+    make_fapi2(&f, false).await;
+
+    for (what, uri) in &pushed {
+        let (status, location) = authorize_at!(
+            app,
+            &f,
+            format!("client_id={}&request_uri={}", f.client_id, enc(uri))
+        );
+        assert_eq!(status, 302, "{what}: the URI is registered, so by redirect");
+        let q = query_of(&location.unwrap());
+        if *what == "voluntary" {
+            assert!(
+                q.contains_key("code"),
+                "{what}: a voluntary auth_time request must still be served a code: {q:?}"
+            );
+            continue;
+        }
+        assert_eq!(
+            q.get("error").map(String::as_str),
+            Some("invalid_request"),
+            "{what}: {q:?}"
+        );
+        assert!(
+            !q.contains_key("code"),
+            "{what}: no code may be issued: {q:?}"
+        );
+        assert!(
+            q.get("error_description")
+                .is_some_and(|d| d.contains("claims") && d.contains("auth_time")),
+            "{what}: the refusal must name the member: {q:?}"
+        );
+    }
+
+    let (status, location) = authorize_at!(
+        app,
+        &f,
+        format!("client_id={}&request_uri={}", f.other_client_id, enc(&twin))
+    );
+    assert_eq!(status, 302, "I1 twin");
+    assert!(
+        query_of(&location.unwrap()).contains_key("code"),
+        "I1 twin: a standard/ignore client must still be served a code"
+    );
+}
+
 /// **M1 layer 2, the defence-in-depth case, at the HTTP layer.** A `fapi2`
 /// row that says `honour` cannot have passed `validate_registration` on create
 /// or on update, so it was edited in the database. The authorization request is

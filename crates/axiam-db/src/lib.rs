@@ -47,7 +47,7 @@ pub use repository::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
     SurrealAuditLogRepository, SurrealAuthorizationCodeRepository, SurrealCaCertificateRepository,
     SurrealCertificateRepository, SurrealConsentRepository, SurrealDeviceGrantRepository,
-    SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
+    SurrealDirectoryConfigRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
     SurrealEmailVerificationTokenRepository, SurrealErasureProofRepository,
     SurrealExportJobRepository, SurrealFederationConfigRepository, SurrealFederationLinkRepository,
     SurrealFederationLoginStateRepository, SurrealGroupRepository, SurrealMdsRepository,

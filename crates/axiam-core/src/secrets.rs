@@ -67,6 +67,20 @@ pub const FEDERATION_ENCRYPTION_KEY: &str = "federation_encryption_key";
 /// Encrypts stored email addresses at rest.
 pub const EMAIL_ENCRYPTION_KEY: &str = "email_encryption_key";
 
+/// Encrypts each tenant's directory (LDAP / Active Directory) bind secret at
+/// rest (G-3, decision D-15).
+///
+/// **Optional.** Without it the directory feature is unavailable: creating or
+/// updating a directory configuration fails closed with an error naming this
+/// key, exactly as OPAQUE does without its keys. It is never refused at boot,
+/// because a deployment that does not use a directory has no reason to hold one.
+///
+/// Losing it makes every stored bind secret unopenable; the remedy is to
+/// re-enter each one (the directory itself is untouched). Leaking it is
+/// worth little without the database, but together they yield a service
+/// account with read access to the tenant's directory.
+pub const DIRECTORY_ENCRYPTION_KEY: &str = "directory_encryption_key";
+
 /// Encrypts CA private keys at rest.
 ///
 /// Ranks with the token signing key for blast radius: a leaked CA key means an
@@ -95,6 +109,7 @@ pub const ALL_KEYS: &[&str] = &[
     MFA_ENCRYPTION_KEY,
     FEDERATION_ENCRYPTION_KEY,
     EMAIL_ENCRYPTION_KEY,
+    DIRECTORY_ENCRYPTION_KEY,
     GDPR_PSEUDONYM_PEPPER,
     PKI_ENCRYPTION_KEY,
     AMQP_SIGNING_KEY,
@@ -302,5 +317,20 @@ mod env_name_tests {
                 "`{name}` does not follow the documented rule"
             );
         }
+    }
+
+    /// The directory key (G-3, D-15) is a 256-bit key like the others, read
+    /// from the documented variable, and in `ALL_KEYS` so that a preloading
+    /// provider fetches it in the round trip it already makes. Absent from
+    /// that list a Vault deployment would answer `None` and the feature would
+    /// be silently unavailable.
+    #[test]
+    fn the_directory_key_is_a_preloaded_auth_prefixed_key() {
+        assert_eq!(DIRECTORY_ENCRYPTION_KEY, "directory_encryption_key");
+        assert!(ALL_KEYS.contains(&DIRECTORY_ENCRYPTION_KEY));
+        assert_eq!(
+            env_var_name(DIRECTORY_ENCRYPTION_KEY),
+            "AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY"
+        );
     }
 }

@@ -157,13 +157,17 @@ AXIAM cannot parse is dropped, as it always was.
 
 ## Things worth knowing before you turn it on
 
-**`max_age=0` can never succeed.** The comparison is
-`elapsed >= max_age` with no leeway in the relying party's favour, and an
-authentication is never zero seconds old — so `max_age=0` always demands a
-reauthentication, and the reauthentication fails the same comparison. The
-relying party is sent to sign in and then answered `login_required`. If a
-relying party in your deployment sends `max_age=0` meaning "authenticate them
-now", it wants `prompt=login`.
+**`max_age=0` is handled as `prompt=login`.** OIDC Core §3.1.2.1 says
+`max_age=0` is equivalent to `prompt=login`, so that is what AXIAM does: the
+browser is always sent to sign in again, and when it comes back the
+authorization request is answered with a code whose ID token carries the new
+`auth_time`. (Before D-14 it was answered `login_required`, because
+the fresh sign-in was itself "zero seconds old" and failed the comparison, so a
+relying party sending `max_age=0` could never sign in.) `max_age=0` together
+with `prompt=none` is `login_required`: it cannot be satisfied without the
+interaction `prompt=none` forbids. A positive `max_age` is unchanged: the
+comparison is `elapsed >= max_age` with no leeway in the relying party's favour,
+and a sign-in that still does not meet it is answered `login_required`.
 
 **`prompt=none` is a login-status oracle, and it is audited.** A registered
 relying party learns, without interaction, whether this browser is signed in.

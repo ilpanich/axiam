@@ -117,6 +117,19 @@ tenant-scoped discovery document already take. Two properties worth knowing:
 The published `authorization_endpoint` in the discovery document does not carry
 it. A relying party on the hop appends it.
 
+### On a per-tenant issuer path, the path is the tenant
+
+A deployment with `AXIAM__AUTH__TENANT_ISSUER_PATHS` set also serves the
+authorization endpoint at `/t/{tenant_id}/oauth2/authorize` (T21.6), and that
+endpoint's discovery document publishes it with no `tenant_id` parameter. A
+relying party that discovered a tenant issuer sends no `tenant_id`. If it does
+send one, the request is refused `invalid_request`, because two tenant selectors
+on one request is the shape a confused-deputy bug takes. The hop on that path
+sends the browser back to that same path, with exactly the query the relying
+party sent, so the authorization response names the tenant issuer the client
+discovered (RFC 9207). Browser sign-on there needs the cookie copy described
+below.
+
 ---
 
 ## The `axiam_op_session` cookie
@@ -152,6 +165,40 @@ token is. Every attribute is doing a job:
   fix is TLS, not a flag.
 - **`Max-Age`** — the session's lifetime (`refresh_token_lifetime_secs`), not
   the access token's: the value names the session row.
+
+### A second copy for a per-tenant issuer
+
+`Path=/oauth2/authorize` is not a prefix of `/t/{tenant_id}/oauth2/authorize`,
+so the browser never sends that cookie to a per-tenant authorization endpoint.
+Until D-11 the hop there always ended in `login_required`. On a deployment
+serving per-tenant issuers, every sign-in therefore sets the cookie **twice**:
+
+```
+Set-Cookie: axiam_op_session=<value>; HttpOnly; Secure; SameSite=Lax;
+            Path=/oauth2/authorize; Max-Age=<session lifetime>
+Set-Cookie: axiam_op_session=<same value>; HttpOnly; Secure; SameSite=Lax;
+            Path=/t/<the session's tenant>/oauth2/authorize; Max-Age=<same>
+```
+
+- **Only the session's own tenant.** A browser signed in to tenant A holds no
+  cookie scoped to tenant B. A copy presented at another tenant's path is looked
+  up in that tenant and names nothing: the browser is asked to sign in, and is
+  never issued a code there.
+- **Same name, same value.** Browsers keep cookies with one name and different
+  paths side by side, and these paths never overlap, so a request carries at
+  most one copy and both copies name the same session row. Revoking the session
+  ends both.
+- **The same rules on both paths.** The `browser_sso` gate, the account re-read
+  and the honour lane apply on both paths. A password step that still owes a
+  factor sets no copy.
+- With the setting off, only the bare cookie is set, exactly as before.
+
+Every sign-in sets both copies: password, OPAQUE, MFA verify, forced enrolment,
+both passkey ceremonies and the federated sign-in. The tenant copy's path spells
+the tenant as the lower-case, hyphenated UUID that discovery publishes. A
+relying party that spells the segment another way (upper case, no hyphens)
+reaches an endpoint the browser sends no cookie to, and the hop ends in
+`login_required`.
 
 ### The limitation this buys, stated plainly
 
@@ -273,10 +320,24 @@ It is logged at `warn` with the tenant and client id.
 
 ## What logging out does
 
-Both `POST /api/v1/auth/logout` and RP-initiated `GET /oauth2/end_session`
-clear `axiam_op_session` alongside the other three cookies, and the session row
-it named is gone either way. A user who signs out through one relying party is
-not silently recognised by the next.
+Both `POST /api/v1/auth/logout` and RP-initiated `GET /oauth2/end_session`, on
+the bare path or a tenant path, clear **every** copy of `axiam_op_session`
+alongside the other three cookies, and the session row it named is gone either
+way. A user who signs out through one relying party is not silently recognised
+by the next.
+
+An `end_session` request with an `id_token_hint` naming the session (`sid`)
+ends that session directly. Without one, the endpoint cannot see the cookie,
+which is scoped to the authorization endpoint. It answers with a `302` to the
+`/logout` sub-path of the authorization endpoint it came through, either
+`/oauth2/authorize/logout` or `/t/{tenant_id}/oauth2/authorize/logout`, which
+the cookie does reach. That hop ends the one session the cookie names in that
+tenant, clears every cookie, and continues to the allow-listed
+`post_logout_redirect_uri` (exact match, the relying party's `state` echoed),
+or to AXIAM's own signed-out page. The relying party sees one more redirect, and
+nothing else changes for it. Back-channel logout is sent only for a session a
+signed hint named, so a page that merely navigates a browser to `end_session`
+cannot sign the user out of every relying party.
 
 Suspending an account ends its OP session too, without a logout. Locking or
 deactivating a user revokes no session by itself; instead, every time the cookie

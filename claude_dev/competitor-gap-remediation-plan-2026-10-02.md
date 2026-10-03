@@ -182,7 +182,9 @@ into tasks and assigns the model per task.
 >   session, and `/oauth2/authorize` was the one place a session became a
 >   principal without re-reading the account. It now applies the refresh
 >   path's rule (`AuthService::check_session_holder`), amending T-237 and
->   T-238. Added: session fixation, cross-tenant and cross-user cookie use,
+>   T-238. (The F4 review then found that this refused every federated user a
+>   day after provisioning, since federated accounts are `PendingVerification`
+>   for life (T-160), and narrowed it to `account_may_act`, P23W1-03.) Added: session fixation, cross-tenant and cross-user cookie use,
 >   no cookie from a password step that still owes a factor, `POST
 >   /oauth2/authorize` unrouted, nothing reflected, the decline arm's
 >   delivery rule, and M7's end-to-end half.
@@ -735,7 +737,8 @@ competitor change logs track them.
 > holds a direct user token with no `act`. And the **actor token is not bound
 > to the exchanging client**: the server checks only that it is a valid
 > same-tenant access token. The guide states this in *What AXIAM does not do*,
-> and it was handed to the W1 F4 review.
+> and the W1 F4 review rated it Medium and pre-existing (P23W1-06, filed as
+> ilpanich/axiam#518).
 >
 > Not verified: the SDK snippets follow the operation names and parameter
 > order `CONTRACT.md` §15 and §28 pin, but the per-language packaging (one
@@ -784,6 +787,15 @@ G-9, G-10, G-11, G-12, G-15       independent, documentation and measurement
 
 Every wave ends with the F4 security review before merge, as Track B
 required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
+
+> **W1 F4, 2026-10-03:** [`security-review-phase23-w1-2026-10-03.md`](security-review-phase23-w1-2026-10-03.md).
+> Fifteen findings, no merge blocker after fixes. Fixed on the branch: two
+> **High**, both pre-existing siblings of T23.1.3's defect: the OAuth2
+> refresh and code grants never re-read the account (P23W1-01), and federated
+> sign-in ignored a suspended account (P23W1-04). Also fixed: one Medium
+> regression T23.1.3 introduced (P23W1-03) and one Low (P23W1-02, `Bearer`
+> case). Filed: three pre-existing Mediums (ilpanich/axiam#517, #518, #519)
+> and three Lows (#520); four residuals accepted with reasons.
 
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This

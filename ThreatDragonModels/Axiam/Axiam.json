@@ -8885,6 +8885,17 @@
                   "mitigation": "AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`.",
                   "modelType": "STRIDE",
                   "number": 302
+                },
+                {
+                  "id": "25230226-c2e2-50fa-b6a5-309a89943e28",
+                  "title": "A directory account is taken over through a local password path",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Elevation of privilege",
+                  "description": "A directory account's password belongs to the directory, where the customer's own policy, rotation and offboarding apply. A local credential beside it \u2014 a reset link mailed to the account's address, a self-service change, an administrator's or a SCIM provisioner's password write, an OPAQUE record, or simply the local hash it was created with \u2014 is a second way in that the directory never sees: disabling the person in Active Directory would leave it working, and whoever controls the mailbox or the provisioning token owns the account.",
+                  "mitigation": "Every local door is refused, and the account holds nothing a door could open. **The hash.** `mark_directory_account`, the marker's only writer, replaces `password_hash` with an Argon2id hash of 32 random bytes nobody holds and deletes any OPAQUE record, in the same transaction; and no sign-in path verifies a directory account's hash at all (`AuthService::login` binds to the directory, gRPC `ValidateCredentials` answers `valid: false`). **Change.** `AuthService::change_password` refuses before verifying or writing anything (`400 validation_error`, an existing code). **Reset.** The request answers a directory account exactly as an unknown address \u2014 the same `200`, the same dummy Argon2id verify, no token \u2014 so it reveals no more than existence does today; a confirm with a token that predates the marking spends it and writes nothing. **Administrators.** The native admin API has no password write; SCIM `PATCH` refuses `password` for a directory account with RFC 7644's `mutability`. **OPAQUE.** `login/start` serves a directory account the decoy whatever the table holds, `login/finish` refuses one with the generic `401`, and `store_credential` \u2014 the one place a record is written \u2014 refuses one too. **The marker itself** cannot be set or cleared by the admin API or SCIM (neither `CreateUser` nor `UpdateUser` carries it). Tests: `directory_account_test.rs` in `axiam-auth` (change, reset request, reset confirm), in `axiam-api-rest` (the change, reset and confirm routes, both OPAQUE doors, the admin API), in `axiam-scim` (password write, marker), `grpc_units.rs::validate_credentials_refuses_a_directory_account`, and `user_directory_marker_test.rs` (the transaction). Residual: a passkey enrolled by the account keeps working until the account is disabled in AXIAM (the sync job, T23.3.5, carries directory disablement over).",
+                  "modelType": "STRIDE",
+                  "number": 303
                 }
               ]
             }
@@ -16649,6 +16660,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 302
+    "threatTop": 303
   }
 }

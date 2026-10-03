@@ -477,3 +477,186 @@ async fn an_unknown_name_is_answered_as_today_without_the_directory() {
     assert!(is_invalid_credentials(&outcome));
     assert_eq!(directory.calls(), 0);
 }
+
+// -----------------------------------------------------------------------
+// Refusals: no local password path reaches a directory account
+// -----------------------------------------------------------------------
+
+type ResetSvc = axiam_auth::password_reset::PasswordResetService<
+    SurrealUserRepository<Db>,
+    axiam_db::repository::SurrealPasswordResetTokenRepository<Db>,
+    SurrealFederationLinkRepository<Db>,
+    axiam_db::repository::SurrealPasswordHistoryRepository<Db>,
+    SurrealSessionRepository<Db>,
+    SurrealRefreshTokenRepository<Db>,
+>;
+
+fn reset_service(h: &Harness) -> ResetSvc {
+    axiam_auth::password_reset::PasswordResetService::new(
+        h.users.clone(),
+        axiam_db::repository::SurrealPasswordResetTokenRepository::new(h.db.clone()),
+        SurrealFederationLinkRepository::new(h.db.clone()),
+        axiam_db::repository::SurrealPasswordHistoryRepository::new(h.db.clone()),
+        h.sessions.clone(),
+        SurrealRefreshTokenRepository::new(h.db.clone()),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        5,
+    )
+}
+
+fn relaxed_policy() -> axiam_core::models::settings::PasswordPolicy {
+    axiam_core::models::settings::PasswordPolicy {
+        min_length: 8,
+        require_uppercase: false,
+        require_lowercase: false,
+        require_digits: false,
+        require_symbols: false,
+        password_history_count: 0,
+        hibp_check_enabled: false,
+    }
+}
+
+fn is_directory_refusal<T>(outcome: &Result<T, AxiamError>) -> bool {
+    matches!(
+        outcome,
+        Err(AxiamError::Validation { message }) if message == &AuthError::DirectoryAccountPassword.to_string()
+    )
+}
+
+async fn stored_hash(h: &Harness, id: Uuid) -> String {
+    h.users
+        .get_by_id(h.tenant_id, id)
+        .await
+        .unwrap()
+        .password_hash
+}
+
+/// Password change: refused for a directory account before anything is
+/// verified or written; a local account still changes its password.
+#[tokio::test]
+async fn a_password_change_is_refused_for_a_directory_account() {
+    let h = harness().await;
+    let svc = service(&h, Some(StubDirectory::accepting(ENTRY)));
+    let history = axiam_db::repository::SurrealPasswordHistoryRepository::new(h.db.clone());
+    let policy = relaxed_policy();
+    let before = stored_hash(&h, h.directory_user).await;
+    let outcome = svc
+        .change_password(
+            h.tenant_id,
+            h.directory_user,
+            Uuid::new_v4(),
+            "whatever-they-type",
+            &fresh_password(),
+            &policy,
+            &history,
+            None,
+        )
+        .await;
+    assert!(
+        is_directory_refusal(&outcome),
+        "a directory account's password cannot change here"
+    );
+    assert_eq!(stored_hash(&h, h.directory_user).await, before);
+
+    let changed = svc
+        .change_password(
+            h.tenant_id,
+            h.local_user,
+            Uuid::new_v4(),
+            &h.local_password,
+            &fresh_password(),
+            &policy,
+            &history,
+            None,
+        )
+        .await;
+    assert!(
+        changed.is_ok(),
+        "a local account still changes its password"
+    );
+}
+
+/// Reset request: a directory account is answered exactly as an unknown
+/// address — `Ok(None)`, no token minted — so the request reveals nothing more.
+#[tokio::test]
+async fn a_reset_request_for_a_directory_account_is_answered_as_an_unknown_address() {
+    let h = harness().await;
+    let reset = reset_service(&h);
+    let directory = reset
+        .initiate_reset(h.tenant_id, "alice@example.com", 1, None)
+        .await
+        .unwrap();
+    assert!(
+        directory.is_none(),
+        "no reset token for a directory account"
+    );
+    let unknown = reset
+        .initiate_reset(h.tenant_id, "nobody@example.com", 1, None)
+        .await
+        .unwrap();
+    assert!(unknown.is_none());
+    use axiam_core::repository::PasswordResetTokenRepository;
+    let tokens = axiam_db::repository::SurrealPasswordResetTokenRepository::new(h.db.clone());
+    assert_eq!(
+        tokens
+            .count_today(h.tenant_id, h.directory_user)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let local = reset
+        .initiate_reset(h.tenant_id, "bob@example.com", 1, None)
+        .await
+        .unwrap();
+    assert!(local.is_some(), "a local account still gets a reset token");
+}
+
+/// Reset confirm: a token that predates the account becoming a directory
+/// account is spent and refused, and nothing is written.
+#[tokio::test]
+async fn a_reset_confirm_is_refused_for_a_directory_account() {
+    let h = harness().await;
+    let reset = reset_service(&h);
+    // Mint the token while the account is still local, then make it a
+    // directory account — the only way such a token can exist.
+    let local = h
+        .users
+        .create(CreateUser {
+            tenant_id: h.tenant_id,
+            username: "carol".into(),
+            email: "carol@example.com".into(),
+            password: fresh_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let (token, _, _) = reset
+        .initiate_reset(h.tenant_id, "carol@example.com", 1, None)
+        .await
+        .unwrap()
+        .expect("a local account gets a token");
+    h.users
+        .mark_directory_account(h.tenant_id, local, "00000000-0000-4000-8000-0000000000c0")
+        .await
+        .unwrap();
+    let before = stored_hash(&h, local).await;
+
+    let policy = relaxed_policy();
+    let outcome = reset
+        .confirm_reset(h.tenant_id, &token, &fresh_password(), &policy, None, None)
+        .await;
+    assert!(is_directory_refusal(&outcome), "the reset must be refused");
+    assert_eq!(
+        stored_hash(&h, local).await,
+        before,
+        "nothing may be written"
+    );
+    // The token is spent: a retry is an invalid token, not a second chance.
+    let retry = reset
+        .confirm_reset(h.tenant_id, &token, &fresh_password(), &policy, None, None)
+        .await;
+    assert!(matches!(retry, Err(AxiamError::Validation { .. })));
+    assert!(!is_directory_refusal(&retry));
+}

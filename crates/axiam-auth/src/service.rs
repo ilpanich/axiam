@@ -1305,6 +1305,14 @@ impl<
     ) -> AxiamResult<()> {
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
 
+        // 0. G-3 (T23.3.2): a directory account's password belongs to its
+        //    directory. Refused before anything is verified or written — the
+        //    caller is authenticated as this account, so naming the reason
+        //    discloses nothing — and never by verifying the unusable local hash.
+        if user.is_directory_account() {
+            return Err(AuthError::DirectoryAccountPassword.into());
+        }
+
         // 1. Verify current password — CPU-bound, run in spawn_blocking behind semaphore (CQ-B02).
         //    B1: bounded acquire — held for the whole change_password call so the SEC-028
         //    same-password check and the history verify reuse this single permit.

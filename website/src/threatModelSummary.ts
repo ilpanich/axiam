@@ -55,9 +55,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.20.0",
  "diagramCount": 9,
- "total": 302,
+ "total": 303,
  "open": 14,
- "mitigated": 288,
+ "mitigated": 289,
  "areas": [
   {
    "id": 0,
@@ -80,7 +80,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 43,
+   "total": 44,
    "open": 2
   },
   {
@@ -142,14 +142,14 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Elevation of privilege",
-   "total": 59,
+   "total": 60,
    "open": 1
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 34,
+   "total": 35,
    "open": 1
   },
   {

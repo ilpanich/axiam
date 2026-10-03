@@ -699,6 +699,34 @@ async fn validate_credentials_wrong_password_records_failure() {
     assert!(!resp.valid);
 }
 
+/// G-3 (T23.3.2): a directory account's password is its directory's to
+/// check. Even with a usable local hash and the matching password, the RPC
+/// answers `valid: false` — never a fallback to the local hash.
+#[tokio::test]
+async fn validate_credentials_refuses_a_directory_account() {
+    let tenant = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let mut user = active_user(tenant, hash);
+    user.directory_external_id = Some("6f9619ff-8b86-d011-b42d-00c04fc964ff".into());
+    let svc = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo { user: Some(user) },
+        auth_config(),
+        test_crypto_gate(),
+    );
+    let mut req = Request::new(ValidateCredentialsRequest {
+        tenant_id: tenant.to_string(),
+        username_or_email: "alice".into(),
+        password: test_password(),
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+    let resp = svc.validate_credentials(req).await.unwrap().into_inner();
+    assert!(
+        !resp.valid,
+        "a directory account must not validate against a local hash"
+    );
+    assert!(resp.user_id.is_empty());
+}
+
 #[tokio::test]
 async fn validate_credentials_unknown_user_is_invalid() {
     let tenant = Uuid::new_v4();

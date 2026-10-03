@@ -47,8 +47,13 @@
 > refusal is the generic one and every branch runs the equalising Argon2id
 > verify; a bind slower than a verify remains measurable) and **T-302** AXIAM
 > used to lock users out of Active Directory (the lockout is checked before the
-> directory is contacted, and a failed bind counts like a wrong password). The
-> model is **302 threats, 288 mitigated / 14 open**.
+> directory is contacted, and a failed bind counts like a wrong password). And
+> **T-303**, Critical and Mitigated: a directory account taken over through a
+> local password path — a reset link, a change, a SCIM password write, an
+> OPAQUE record. Every one of those doors refuses a directory account, the
+> reset request answering it exactly as an unknown address, and the account
+> holds only an unusable random hash. The model is **303 threats, 289
+> mitigated / 14 open**.
 >
 > **The 2026-10-03 per-tenant browser sign-on entry (Phase 23 T23.1.8, model
 > 2.19.0).** One threat enters, Mitigated on arrival, and two are amended.
@@ -710,7 +715,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 302 threats** and a
+The system is verified against a **STRIDE threat model of 303 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -733,8 +738,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 302 |
-| Mitigated / Open | 288 / 14 |
+| Threats identified | 303 |
+| Mitigated / Open | 289 / 14 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -750,7 +755,7 @@ optimistic closed one.
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 60 | 0 |
-| Federation (SAML SP, OIDC RP & directory) | 43 | 2 |
+| Federation (SAML SP, OIDC RP & directory) | 44 | 2 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
@@ -789,13 +794,13 @@ the category recorded against it in the model.
 | Repudiation | 6 | 0 |
 | Information disclosure | 71 | 7 |
 | Denial of service | 31 | 2 |
-| Elevation of privilege | 59 | 1 |
+| Elevation of privilege | 60 | 1 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
-| Critical | 34 | 1 |
+| Critical | 35 | 1 |
 | High | 141 | 8 |
 | Medium | 116 | 4 |
 | Low | 11 | 1 |
@@ -1481,6 +1486,12 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
 - **A slow or hostile directory cannot take AXIAM down.** Connections are pooled
   per tenant with a hard cap, a fast refusal instead of a queue, and connect,
   per-operation and end-to-end timeouts.
+- **No local password can open a directory account.** A password change, a
+  reset (the request answers a directory account exactly as an unknown
+  address), a SCIM provisioner's password write and an OPAQUE registration or
+  login are all refused for it, and the account holds only an unusable random
+  hash — so disabling the person in the directory is not undone by a
+  credential AXIAM kept.
 - **The bind secret is write-only.** It is encrypted at rest under an optional
   key; without the key the feature is unavailable rather than insecure.
 
@@ -1971,7 +1982,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 14 of
-302. On the website this table is generated from the Threat Dragon model, so it
+303. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind

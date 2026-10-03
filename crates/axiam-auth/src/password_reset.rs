@@ -179,6 +179,16 @@ where
             return Ok(None);
         }
 
+        // G-3 (T23.3.2): neither can a directory account — its password belongs
+        // to the tenant's directory, and a reset link would mint a local
+        // credential beside it. Answered exactly as the unknown address above,
+        // dummy verify included, so the request reveals no more about a
+        // directory account than about whether an address exists.
+        if user.is_directory_account() {
+            self.dummy_hash_wait(pepper).await;
+            return Ok(None);
+        }
+
         // Rate limit: max resets per day.
         let count = self.token_repo.count_today(tenant_id, user.id).await?;
         if count >= MAX_RESETS_PER_DAY {
@@ -247,6 +257,13 @@ where
             .await?;
         if !links.is_empty() {
             return Err(AuthError::FederatedUserPasswordReset.into());
+        }
+
+        // G-3 (T23.3.2): a token for a directory account can only predate the
+        // account becoming one (the request path issues none). It is spent,
+        // and nothing is written: no hash, no history row, no OPAQUE record.
+        if user.is_directory_account() {
+            return Err(AuthError::DirectoryAccountPassword.into());
         }
 
         // T-24-92 / RESEARCH Pitfall 4: explicit current-password-reuse

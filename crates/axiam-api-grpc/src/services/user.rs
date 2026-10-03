@@ -222,6 +222,16 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
             return Ok(invalid);
         }
 
+        // G-3 (T23.3.2): a directory account's password is its directory's to
+        // check, and this RPC has no directory client. It answers `valid: false`
+        // without verifying the account's local hash — an unusable random one —
+        // and without counting a failure: the caller did not guess wrong, it
+        // asked a credential check that cannot answer for this account. Never a
+        // fallback to the local hash, exactly as `AuthService::login` refuses one.
+        if user.is_directory_account() {
+            return Ok(invalid);
+        }
+
         // Verify password — CPU-bound Argon2id, gated and offloaded exactly as
         // `AuthService::login` does it (axiam-auth/src/service.rs, CQ-B02/B1).
         //

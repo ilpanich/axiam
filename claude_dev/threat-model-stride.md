@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 302 |
-| **Mitigated / Open** | 288 / 14 |
+| **Threats identified** | 303 |
+| **Mitigated / Open** | 289 / 14 |
 | **Owner** | ilpanich |
 
 ---
@@ -1271,9 +1271,9 @@ The OP-session cookie is scoped to the authorization endpoint — `Path=/oauth2/
 
 Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the *public* login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a `SameSite=Strict` session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config.
 
-The 2026-10-03 pass (T23.3.2, Phase 23's G-3) adds the LDAP / Active Directory identity source's network path: a new trust boundary, **AXIAM ↔ tenant directory**, around a new external entity (the tenant's directory), the *Directory sign-in* process that binds to it — `axiam-directory`'s client, `ldap3` over rustls — and the `directory_config` store holding the D-15 encrypted bind secret, with flows for the service bind and search and for the user bind. T-291…T-300 are its threats. They entered `Axiam.json` in the same commit as the network code, at model 2.20.0. T-301 and T-302 followed with the login integration that puts the brute-force counters and the enumeration rule in front of the directory, and T-297 gained the entry binding, all still 2.20.0. T-300 is open: a tenant-chosen directory host is not held to the outbound address policy.
+The 2026-10-03 pass (T23.3.2, Phase 23's G-3) adds the LDAP / Active Directory identity source's network path: a new trust boundary, **AXIAM ↔ tenant directory**, around a new external entity (the tenant's directory), the *Directory sign-in* process that binds to it — `axiam-directory`'s client, `ldap3` over rustls — and the `directory_config` store holding the D-15 encrypted bind secret, with flows for the service bind and search and for the user bind. T-291…T-300 are its threats. They entered `Axiam.json` in the same commit as the network code, at model 2.20.0. T-301 and T-302 followed with the login integration that puts the brute-force counters and the enumeration rule in front of the directory, T-297 gained the entry binding, and T-303 records the refusal of every local password door for a directory account, all still 2.20.0. T-300 is open: a tenant-chosen directory host is not held to the outbound address policy.
 
-*43 threats — 6 critical, 17 high, 17 medium, 3 low; 2 open.*
+*44 threats — 7 critical, 17 high, 17 medium, 3 low; 2 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -1320,6 +1320,7 @@ The 2026-10-03 pass (T23.3.2, Phase 23's G-3) adds the LDAP / Active Directory i
 | T-300 | Directory sign-in (bind-as-user, bounded pool) <br/>*Process* | I | A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network | Medium | Open |
 | T-301 | Directory sign-in (bind-as-user, bounded pool) <br/>*Process* | I | Sign-in latency tells directory accounts apart from local and unknown ones | Medium | Mitigated |
 | T-302 | Directory sign-in (bind-as-user, bounded pool) <br/>*Process* | D | AXIAM is used to lock users out of the corporate directory | Medium | Mitigated |
+| T-303 | Directory sign-in (bind-as-user, bounded pool) <br/>*Process* | E | A directory account is taken over through a local password path | Critical | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -1630,6 +1631,13 @@ A directory account's password is checked by a network bind; a local one's by an
 Active Directory and many OpenLDAP deployments lock an account after a number of failed binds. An attacker who sprays passwords at AXIAM's login endpoint could make AXIAM perform those failed binds, locking real users out of their corporate accounts — mail, VPN, workstation — not just out of AXIAM; and the directory's own lockout may be absent altogether, leaving AXIAM's as the only brake.
 
 > AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`.
+
+**T-303 — A directory account is taken over through a local password path**  
+`Directory sign-in (bind-as-user, bounded pool)` (Process) · Elevation of privilege · Critical · Mitigated
+
+A directory account's password belongs to the directory, where the customer's own policy, rotation and offboarding apply. A local credential beside it — a reset link mailed to the account's address, a self-service change, an administrator's or a SCIM provisioner's password write, an OPAQUE record, or simply the local hash it was created with — is a second way in that the directory never sees: disabling the person in Active Directory would leave it working, and whoever controls the mailbox or the provisioning token owns the account.
+
+> Every local door is refused, and the account holds nothing a door could open. **The hash.** `mark_directory_account`, the marker's only writer, replaces `password_hash` with an Argon2id hash of 32 random bytes nobody holds and deletes any OPAQUE record, in the same transaction; and no sign-in path verifies a directory account's hash at all (`AuthService::login` binds to the directory, gRPC `ValidateCredentials` answers `valid: false`). **Change.** `AuthService::change_password` refuses before verifying or writing anything (`400 validation_error`, an existing code). **Reset.** The request answers a directory account exactly as an unknown address — the same `200`, the same dummy Argon2id verify, no token — so it reveals no more than existence does today; a confirm with a token that predates the marking spends it and writes nothing. **Administrators.** The native admin API has no password write; SCIM `PATCH` refuses `password` for a directory account with RFC 7644's `mutability`. **OPAQUE.** `login/start` serves a directory account the decoy whatever the table holds, `login/finish` refuses one with the generic `401`, and `store_credential` — the one place a record is written — refuses one too. **The marker itself** cannot be set or cleared by the admin API or SCIM (neither `CreateUser` nor `UpdateUser` carries it). Tests: `directory_account_test.rs` in `axiam-auth` (change, reset request, reset confirm), in `axiam-api-rest` (the change, reset and confirm routes, both OPAQUE doors, the admin API), in `axiam-scim` (password write, marker), `grpc_units.rs::validate_credentials_refuses_a_directory_account`, and `user_directory_marker_test.rs` (the transaction). Residual: a passkey enrolled by the account keeps working until the account is disabled in AXIAM (the sync job, T23.3.5, carries directory disablement over).
 
 </details>
 
@@ -3013,7 +3021,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-14 of 302 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
+14 of 303 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. The thirteen that remain are the ones that were always here.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -3099,13 +3107,13 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Repudiation | 6 |
 | Information disclosure | 71 |
 | Denial of service | 31 |
-| Elevation of privilege | 59 |
+| Elevation of privilege | 60 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
-| Critical | 34 | 1 |
+| Critical | 35 | 1 |
 | High | 141 | 8 |
 | Medium | 116 | 4 |
 | Low | 11 | 1 |
@@ -3117,7 +3125,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | System diagram | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 60 | 0 |
-| Federation — SAML SP & OIDC relying party | 43 | 2 |
+| Federation — SAML SP & OIDC relying party | 44 | 2 |
 | Authorization engine — RBAC, hierarchy & scopes | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |

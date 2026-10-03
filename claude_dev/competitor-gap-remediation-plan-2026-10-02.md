@@ -480,6 +480,55 @@ fan-out.
 > entry yet: the connector's elements, the bind secret at rest among them,
 > are written by T23.3.2 with the network path, pulled forward from T23.3.7
 > so that §7 rule 2 holds.
+>
+> **EXECUTED (partly) — G-3, W2: T23.3.2, 2026-10-03** (`1c17c68`, `42d0441`,
+> `f17c7e1`, `352351d`, `176219e`, `0552b19`; Opus 5.5). The security core
+> of G-3. `ldap3 0.12` over `rustls 0.23` (`tls-rustls-ring`): neither
+> OpenSSL nor `native-tls` is in `Cargo.lock`. TLS is mandatory, TLS 1.2
+> floor (AD and many OpenLDAP builds stop there), the trust store is the
+> tenant's anchors alone or the public roots when there are none, never
+> both, the name checked is the URL host, and StartTLS is completed before
+> anything is bound or it fails closed. One function escapes per RFC 4515
+> and is the only way a login name enters a filter; no DN is ever built.
+> Referrals and search references are neither followed nor matched. The
+> pool is bounded per tenant and in total, with connect, operation and
+> whole-flow deadlines; the user bind always runs on a fresh connection that
+> is never pooled; an empty password is refused with zero packets sent. The
+> port `DirectoryAuthenticator` lives in `axiam-core`, is implemented in
+> `axiam-directory` and is attached to `AuthService` by `axiam-server` only,
+> so the layering holds. The marker is **D-18**. A directory account signs
+> in only through the directory, behind the existing lockout (a locked
+> account never reaches the directory, so AXIAM cannot be used to lock
+> accounts in AD), with no fallback to a local hash, the answering entry
+> bound to the account's marker, timing equalised with the dummy Argon2
+> verify, and `amr = [pwd]`. Every local password door refuses a directory
+> account: change, reset request (answered as an unknown address) and
+> confirm, OPAQUE login and enrolment, the SCIM password write and gRPC
+> `ValidateCredentials`. The connector's threat entries were pulled forward
+> from T23.3.7: threat model **2.20.0**, a trust boundary AXIAM ↔ tenant
+> directory, **T-291 … T-303**, of which **T-300 is open** (a
+> tenant-chosen directory host is not held to `guarded_fetch`'s
+> private-address policy; reachable once T23.3.8 adds the management
+> routes). Tests: an in-process TLS test directory on `ldap3_proto` (25
+> client tests: ldaps and StartTLS, anchors, name mismatch, refused
+> StartTLS, referrals, zero and two matches, the injection attempt asserted
+> on the filter the server parsed, AD `data 533`, pool bounds, timeouts),
+> 64 unit tests, 7 authenticator tests, 12 `AuthService` tests, the marker's
+> 7 repository tests, and REST, SCIM and gRPC refusal tests.
+>
+> What the plan did not anticipate, and what W3 must pick up.
+> `SearchEntry::construct` panics on malformed BER, so entries are parsed by
+> a fallible parser of AXIAM's own; `ldap3`'s codec has no per-message size
+> cap (residual in T-295). `validate` accepts IPv6-literal URLs that `ldap3`
+> cannot name-check, so they always fail closed: **T23.3.8 refuses them at
+> config time**. A tenant in `opaque_mode = required` refuses `/auth/login`
+> before the credential is read, so directory accounts cannot sign in there:
+> **T23.3.8 refuses a directory together with `required`, both ways**, and
+> should add an operator allow-list of directory hosts for T-300. The JIT
+> seam is `AuthService::login_unknown_user`. Passkeys a directory account
+> enrolled keep working until the account is disabled, so the sync job
+> (T23.3.5) must disable or soft-delete vanished and disabled entries
+> (T-303). Its threats and contract §30 start at T-304.
 
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned
@@ -1106,6 +1155,7 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-15 | *Taken by the orchestrator, 2026-10-03, before T23.3.1, so the Sonnet task does not stall on it.* §4 G-3 says `bind_secret (secret provider, R-5 pattern)`, but the secret provider is deployment-wide and addressed by static logical names (`axiam_core::secrets`), while a bind secret is per tenant and set by a tenant administrator | **Encrypted at rest in the directory configuration row, exactly as the per-tenant SMTP password is** (`crates/axiam-db/src/repository/email_config.rs`): AES-256-GCM with a fresh nonce per write, the 256-bit key fetched from the secret provider under a **new logical name `directory_encryption_key`** (R-5: the key lives in the provider, never in the database or configuration file). The key is optional: without it the directory feature is unavailable and creating a configuration fails closed with a message naming the key, as OPAQUE does without its keys. The secret is write-only through every API (never returned, `Debug`-redacted, absent from audit rows), and decrypted only at bind time. Rejected: a per-tenant provider reference (`bind_secret_ref` resolved by name), because it would make a tenant administrator's configuration depend on a deployment operator's vault layout, and the admin console (T23.3.8) could not set the secret at all |
 | D-16 | *Taken in T23.1.8 (Opus 5.5), 2026-10-03, accepted by the orchestrator.* The OP cookie (`Path=/oauth2/authorize`, and since D-11 `/t/{tenant_id}/oauth2/authorize`) never reaches `/oauth2/end_session`, so a logout without an `id_token_hint` `sid` could expire the cookie but not read it, and the session row it named survived (F4 residual P23W1-10). How does such a logout end that row? | **A hop to the `/logout` sub-path of the authorization endpoint the request came through**: `end_session` answers a request with no verified hint `sid` with a `302` to `/oauth2/authorize/logout?tenant_id=…` (bare) or `/t/{tenant_id}/oauth2/authorize/logout`, which RFC 6265 §5.1.4 path-match sends the cookie to. The hop looks the digest up in the request's tenant, revokes that one row, clears every cookie and continues exactly as `end_session` (exact-match `post_logout_redirect_uri` against the identified client's allow-list, `state` echoed only on a redirect that happens; the continuation never carries the hint). GET-only, public, rate-limited with the `end_session` preset (bucket `oauth2_end_session_cookie`, both mounts), in OpenAPI, and with **no back-channel fan-out**, so logout CSRF stays exactly what `end_session` already was. Threat **T-290**. Rejected: adding `/oauth2/end_session` to the cookie path list (widens the maintainer's D-11 layout to a second endpoint, and misses cross-site form POSTs); fanning out back-channel logout from the hop (any page could log a user out of every RP); a confirmation prompt (against B5); leaving the residual. Residual: a hinted logout whose browser cookie names a *different* session leaves that row with its cookies cleared |
 | D-17 | *Taken by the orchestrator, 2026-10-03, on T23.1.5's escalation.* The request-time `fapi2` client-authentication re-check (`is_strong()`) ran at the token endpoint, token exchange and uma-ticket only; a `fapi2` row edited in the database to `client_secret_basic` or `client_secret_post` authenticated at PAR (`201`), introspection and revocation (`200`) with a correct secret | **The same rule runs at PAR, introspection and revocation**, after client authentication and before anything is pushed, revealed or revoked, through one extracted function (`fapi::enforce_client_authentication`, which `enforce_token_request` now calls first), so the endpoints cannot drift; the answer is the token endpoint's `invalid_client`. As with W1's "a `fapi2` row edited to `honour` is refused at authorize", the registration gate is not the only line. Rejected: accepting it as T-253's residual. Amends T-253 |
+| D-18 | *Taken in T23.3.2 (Opus 5.5), 2026-10-03, accepted by the orchestrator.* How is a directory account marked, so that the bind path can find it and every local password door can refuse it? The `User` model had no `source` or `external_id` | **One optional column, `user.directory_external_id`** (schema **v71**, unique per tenant, any number of unset rows): the entry's `entryUUID` or decoded `objectGUID`; `Some` means the tenant's directory is the only authority for the account's password. It has exactly one writer, `UserRepository::mark_directory_account`, which in one transaction sets it, replaces `password_hash` with an Argon2id hash of 32 random bytes nobody holds, and deletes any OPAQUE record; `CreateUser` and `UpdateUser` have no such field, so neither the admin API nor SCIM can set or clear it. Both erasure paths clear it and Art. 15 export carries it. Directory accounts are created `Active` by T23.3.3 (the directory vouches for them; the email-verification grace rule is about local passwords). Rejected: a `source` enum plus an external id (two columns that can disagree) and a link row like `federation_link` (an extra read on every login, and a row that can be deleted on its own, silently turning a directory account back into a local one with whatever hash it holds) |
 
 ---
 

@@ -416,6 +416,51 @@ security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 > generation makes the PKI tests ~3 minutes in a debug build. No threat entry:
 > the signing-key-at-rest threat is T23.2.2's (§7 rule 2, pulled forward to the
 > Opus task that first signs with it).
+>
+> **EXECUTED (partly) — G-2, W3: T23.2.2, 2026-10-03** (`0d0aaaa`, `c3db35c`;
+> Opus 5.5). `axiam_federation::saml_idp` (behind `saml`), a library with no
+> route: `idp_entity_id`/`idp_sso_url`/`idp_slo_url` as one function of the
+> root issuer and the path tenant; `SamlIdpIssuer::issue` builds the
+> assertion (bearer confirmation and `Conditions` five minutes, audience = SP
+> entity id, `Recipient`/`Destination` = the ACS used, `InResponseTo` only when
+> SP-initiated, `SessionIndex` = the AXIAM session id, `AuthnInstant` =
+> `authenticated_at`, a pinned `amr` → `AuthnContextClassRef` table, attributes
+> XML-escaped over every `AttributeSource`), signs it always and the `Response`
+> after it by policy (`rsa-sha256`, `sha256`, exclusive c14n, the certificate
+> in `KeyInfo`), and re-verifies its own output before returning it; failure
+> responses are status-only and **never signed**, so the key mints no
+> wrapping gadget. A credential outside its validity window refuses to sign.
+> The pre-hop checks T23.2.3 needs are exposed on their own (`check_acs_url`,
+> `check_request_id`, `check_relay_state`, `check_allowed_groups`). **D-22**:
+> the persistent `NameID` is HMAC-SHA256 under a new optional deployment key
+> `saml_pairwise_key`, keyed on the SP entity id, independent of the signing
+> credential; without the key a persistent sign-on is a `Responder` failure.
+> D-2's encryption is **refused** for now (`samael` has no encryption API): an
+> `encrypt_assertions` SP gets `Responder`, never plaintext. Threat model
+> **2.21.0**: trust boundary AXIAM ↔ SAML service providers, **T-304 … T-316**
+> (316 threats, 298 mitigated, 18 open; T-306, T-309, T-312, T-313 open).
+> Tests: 41 in `saml_idp::tests`, including a round trip through AXIAM's own
+> SP verifier, xmlsec against the credential certificate only, a changed byte
+> in every signed element, XSW1–XSW4 copies refused, pairwise stability across
+> a rotation and separation across SPs, tenants and users.
+>
+> What the plan did not anticipate. **A Critical, pre-existing defect in the
+> SP verifier** (`saml.rs`): only the first `ds:Signature` was verified and any
+> reference naming the assertion bound it, so a document the upstream IdP had
+> signed for another purpose vouched for a forged assertion. Fixed in the same
+> task per **D-23** (`c3db35c`): a signature is admitted only as the enveloped
+> child of the `Response` root or of its `Assertion`, each is verified on its
+> own node with xmlsec, the consumed assertion must carry its own verified
+> signature; 27 gadget placements and the extra-unsigned-signature variants
+> are refused; T-67 amended, CHANGELOG *Security*. No other SP-side SAML
+> signature check exists (there is no SP-side SLO, and IdP metadata
+> signatures are not checked at all, an absent control rather than a
+> sibling). Also: `SessionIndex` = session id lets colluding SPs correlate
+> (T-312); most accounts never have `email_verified_at`, so an email `NameID`
+> for an unverified address stays open as T-313 for T23.2.3 to decide;
+> `samael` signs only the first template, so the assertion is signed alone and
+> embedded; the `pem` crate keeps copies of the key text, so it is decoded by
+> hand into `Zeroizing` buffers.
 
 **Target.** AXIAM issues SAML 2.0 assertions to registered service providers,
 per tenant: IdP metadata, Web Browser SSO profile with HTTP-Redirect and

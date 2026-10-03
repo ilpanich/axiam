@@ -19,7 +19,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -40,7 +40,24 @@ use tokio_util::codec::Framed;
 pub const STARTTLS_OID: &str = "1.3.6.1.4.1.1466.20037";
 pub const BASE_DN: &str = "dc=example,dc=com";
 pub const SERVICE_DN: &str = "cn=axiam-reader,dc=example,dc=com";
-pub const SERVICE_SECRET: &str = "service-secret-for-tests";
+
+/// The service account's bind secret: minted per process, stable within one,
+/// never a literal in the source.
+pub fn service_secret() -> String {
+    static VALUE: OnceLock<String> = OnceLock::new();
+    VALUE
+        .get_or_init(axiam_test_support::other_password)
+        .clone()
+}
+
+/// The fixture user "alice"'s directory password: minted per process, stable
+/// within one, never a literal in the source.
+pub fn alice_password() -> String {
+    static VALUE: OnceLock<String> = OnceLock::new();
+    VALUE
+        .get_or_init(axiam_test_support::other_password)
+        .clone()
+}
 
 /// A throwaway certificate authority.
 pub struct TestCa {
@@ -410,7 +427,9 @@ impl Session {
                 LdapOp::BindRequest(req) => {
                     let password = match req.cred {
                         LdapBindCred::Simple(pw) => pw,
-                        LdapBindCred::SASL(_) => String::from("\u{0}sasl"),
+                        // A SASL bind carries no simple password. Give it a value no
+                        // entry or service secret can equal, so it is never accepted.
+                        LdapBindCred::SASL(_) => uuid::Uuid::new_v4().to_string(),
                     };
                     self.record(Event::Bind {
                         dn: req.dn.clone(),
@@ -460,7 +479,7 @@ impl Session {
             self.bound = None;
             return (LdapResultCode::Success, String::new());
         }
-        if dn == SERVICE_DN && password == SERVICE_SECRET {
+        if dn == SERVICE_DN && password == service_secret() {
             self.bound = Some(dn.to_string());
             return (LdapResultCode::Success, String::new());
         }

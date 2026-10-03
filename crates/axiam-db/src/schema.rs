@@ -3836,10 +3836,10 @@ mod tests {
             "idx_directory_config_tenant ON TABLE directory_config \
     COLUMNS tenant_id UNIQUE"
         ));
-        for secret in ["bind_secret_ciphertext", "bind_secret_nonce"] {
+        for column in ["bind_secret_ciphertext", "bind_secret_nonce"] {
             assert!(
-                SCHEMA_V70.contains(&format!("{secret} ON TABLE directory_config TYPE string")),
-                "v70 must define {secret} as a required string"
+                SCHEMA_V70.contains(&format!("{column} ON TABLE directory_config TYPE string")),
+                "v70 must define {column} as a required string"
             );
         }
         assert!(

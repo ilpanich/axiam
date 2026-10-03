@@ -137,8 +137,9 @@ struct Harness {
     local_password: String,
 }
 
+/// A fresh policy-valid password; never a literal in this file.
 fn fresh_password() -> String {
-    format!("Pw1!{}", Uuid::new_v4().simple())
+    axiam_test_support::other_password()
 }
 
 async fn harness() -> Harness {
@@ -274,7 +275,7 @@ async fn a_successful_bind_signs_in_resets_the_counter_and_records_pwd() {
     // Signed in by email: the directory is asked about the account's local
     // login name, the one provisioning copied from the directory.
     let outcome = svc
-        .login(input(&h, "alice@example.com", "the-directory-password"))
+        .login(input(&h, "alice@example.com", &fresh_password()))
         .await;
     let session_id = match outcome {
         Ok(LoginResult::Success(out)) => out.session_id,
@@ -305,7 +306,7 @@ async fn a_locked_account_is_refused_before_the_directory_is_called() {
         .unwrap();
     let directory = StubDirectory::accepting(ENTRY);
     let svc = service(&h, Some(Arc::clone(&directory)));
-    let outcome = svc.login(input(&h, "alice", "any-password")).await;
+    let outcome = svc.login(input(&h, "alice", &fresh_password())).await;
     assert!(is_invalid_credentials(&outcome));
     assert_eq!(directory.calls(), 0, "the directory must not be contacted");
 }
@@ -318,7 +319,7 @@ async fn failed_binds_count_and_lock_and_then_stop_reaching_the_directory() {
     let directory = StubDirectory::answering(Err(DirectoryAuthError::InvalidCredentials));
     let svc = service(&h, Some(Arc::clone(&directory)));
     for expected in 1..=3u32 {
-        let outcome = svc.login(input(&h, "alice", "wrong")).await;
+        let outcome = svc.login(input(&h, "alice", &fresh_password())).await;
         assert!(is_invalid_credentials(&outcome));
         assert_eq!(failed_attempts(&h, h.directory_user).await, expected);
     }
@@ -328,7 +329,7 @@ async fn failed_binds_count_and_lock_and_then_stop_reaching_the_directory() {
         .await
         .unwrap();
     assert!(locked.locked_until.is_some_and(|t| t > Utc::now()));
-    let outcome = svc.login(input(&h, "alice", "wrong")).await;
+    let outcome = svc.login(input(&h, "alice", &fresh_password())).await;
     assert!(is_invalid_credentials(&outcome));
     assert_eq!(
         directory.calls(),
@@ -392,9 +393,7 @@ async fn an_answer_from_another_entry_is_refused_and_counted() {
     let h = harness().await;
     let directory = StubDirectory::accepting("00000000-0000-4000-8000-0000000000ff");
     let svc = service(&h, Some(directory));
-    let outcome = svc
-        .login(input(&h, "alice", "someone-elses-password"))
-        .await;
+    let outcome = svc.login(input(&h, "alice", &fresh_password())).await;
     assert!(is_invalid_credentials(&outcome));
     assert_eq!(failed_attempts(&h, h.directory_user).await, 1);
 
@@ -404,7 +403,7 @@ async fn an_answer_from_another_entry_is_refused_and_counted() {
         Some(StubDirectory::accepting(&ENTRY.to_ascii_uppercase())),
     );
     assert!(matches!(
-        svc.login(input(&h, "alice", "the-password")).await,
+        svc.login(input(&h, "alice", &fresh_password())).await,
         Ok(LoginResult::Success(_))
     ));
 }
@@ -416,7 +415,8 @@ async fn an_empty_password_never_reaches_the_directory() {
     let h = harness().await;
     let directory = StubDirectory::accepting(ENTRY);
     let svc = service(&h, Some(Arc::clone(&directory)));
-    let outcome = svc.login(input(&h, "alice", "")).await;
+    let empty = String::new();
+    let outcome = svc.login(input(&h, "alice", &empty)).await;
     assert!(is_invalid_credentials(&outcome));
     assert_eq!(directory.calls(), 0);
     assert_eq!(failed_attempts(&h, h.directory_user).await, 1);
@@ -440,7 +440,7 @@ async fn an_inactive_directory_account_is_refused_before_the_directory() {
         .unwrap();
     let directory = StubDirectory::accepting(ENTRY);
     let svc = service(&h, Some(Arc::clone(&directory)));
-    let outcome = svc.login(input(&h, "alice", "the-password")).await;
+    let outcome = svc.login(input(&h, "alice", &fresh_password())).await;
     assert!(is_invalid_credentials(&outcome));
     assert_eq!(directory.calls(), 0);
 }
@@ -456,7 +456,7 @@ async fn a_local_account_is_unchanged() {
         svc.login(input(&h, "bob", &h.local_password)).await,
         Ok(LoginResult::Success(_))
     ));
-    let outcome = svc.login(input(&h, "bob", "wrong")).await;
+    let outcome = svc.login(input(&h, "bob", &fresh_password())).await;
     assert!(is_invalid_credentials(&outcome));
     assert_eq!(failed_attempts(&h, h.local_user).await, 1);
     assert_eq!(
@@ -473,7 +473,7 @@ async fn an_unknown_name_is_answered_as_today_without_the_directory() {
     let h = harness().await;
     let directory = StubDirectory::accepting(ENTRY);
     let svc = service(&h, Some(Arc::clone(&directory)));
-    let outcome = svc.login(input(&h, "nobody", "anything")).await;
+    let outcome = svc.login(input(&h, "nobody", &fresh_password())).await;
     assert!(is_invalid_credentials(&outcome));
     assert_eq!(directory.calls(), 0);
 }
@@ -545,7 +545,7 @@ async fn a_password_change_is_refused_for_a_directory_account() {
             h.tenant_id,
             h.directory_user,
             Uuid::new_v4(),
-            "whatever-they-type",
+            &fresh_password(),
             &fresh_password(),
             &policy,
             &history,

@@ -369,7 +369,8 @@ async fn a_directory_account_signs_in_and_cannot_change_its_password() {
     mark_alice(&db, &ids).await;
     let app = app!(db);
 
-    let session = login(&app, &ids, "alice", "the-directory-password")
+    let directory_password = axiam_test_support::other_password();
+    let session = login(&app, &ids, "alice", &directory_password)
         .await
         .expect("a directory account signs in through the directory");
     let before = stored_hash(&db, &ids).await;
@@ -381,7 +382,7 @@ async fn a_directory_account_signs_in_and_cannot_change_its_password() {
             post(
                 "/api/v1/auth/password/change",
                 serde_json::json!({
-                    "current_password": "the-directory-password",
+                    "current_password": directory_password,
                     "new_password": new_password(),
                     "opaque": opaque,
                 }),
@@ -631,7 +632,7 @@ async fn the_admin_user_api_cannot_set_or_clear_the_marker() {
     let (db, ids) = setup("dir-admin").await;
     mark_alice(&db, &ids).await;
     let app = app!(db);
-    let session = login(&app, &ids, "alice", "the-directory-password")
+    let session = login(&app, &ids, "alice", &axiam_test_support::other_password())
         .await
         .expect("directory sign-in");
     let users = SurrealUserRepository::new(db.clone());

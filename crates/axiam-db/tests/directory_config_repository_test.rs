@@ -17,6 +17,8 @@
 //! No assertion message in this file formats the secret, the ciphertext, a key
 //! or an identifier: a failing case is named, never printed.
 
+use std::sync::OnceLock;
+
 use axiam_core::error::AxiamError;
 use axiam_core::models::directory::{DirectoryConfig, DirectoryKind, NewDirectoryConfig};
 use axiam_core::models::organization::CreateOrganization;
@@ -31,8 +33,34 @@ use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-const KEY: [u8; 32] = [0xAB; 32];
-const OTHER_KEY: [u8; 32] = [0xCD; 32];
+/// 32 key bytes drawn from two random UUIDs: random per process, never a
+/// literal in the source.
+fn random_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    key
+}
+
+/// The encryption key every keyed repository in this binary uses: stable
+/// within the process, because tests write under it and read back under it.
+fn key() -> [u8; 32] {
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    *KEY.get_or_init(random_key)
+}
+
+/// A second key, different from [`key`], for the wrong-key case.
+fn other_key() -> [u8; 32] {
+    static OTHER_KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    *OTHER_KEY.get_or_init(|| {
+        loop {
+            let candidate = random_key();
+            if candidate != key() {
+                break candidate;
+            }
+        }
+    })
+}
 
 async fn setup() -> Surreal<Db> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
@@ -105,7 +133,7 @@ async fn row_count(db: &Surreal<Db>) -> usize {
 #[tokio::test]
 async fn create_round_trips_every_non_secret_field() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let want = input(tenant, Some(&fresh_secret()));
 
@@ -135,7 +163,7 @@ async fn create_round_trips_every_non_secret_field() {
 #[tokio::test]
 async fn optional_group_fields_and_an_empty_anchor_list_round_trip_as_absent() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let mut want = input(tenant, Some(&fresh_secret()));
     want.kind = DirectoryKind::OpenLdap;
@@ -155,7 +183,7 @@ async fn optional_group_fields_and_an_empty_anchor_list_round_trip_as_absent() {
 #[tokio::test]
 async fn the_bind_secret_is_encrypted_at_rest_and_decrypts_back() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let secret = fresh_secret();
 
@@ -182,7 +210,7 @@ async fn the_bind_secret_is_encrypted_at_rest_and_decrypts_back() {
 #[tokio::test]
 async fn the_stored_row_has_no_plaintext_secret_column() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let secret = fresh_secret();
     repo.create(input(tenant, Some(&secret))).await.unwrap();
@@ -204,7 +232,7 @@ async fn the_stored_row_has_no_plaintext_secret_column() {
 #[tokio::test]
 async fn an_update_without_a_secret_keeps_the_stored_one() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let secret = fresh_secret();
     repo.create(input(tenant, Some(&secret))).await.unwrap();
@@ -235,7 +263,7 @@ async fn an_update_without_a_secret_keeps_the_stored_one() {
 #[tokio::test]
 async fn an_update_keeps_the_row_identity_and_creation_time() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let created = repo
         .create(input(tenant, Some(&fresh_secret())))
@@ -252,7 +280,7 @@ async fn an_update_keeps_the_row_identity_and_creation_time() {
 #[tokio::test]
 async fn an_update_with_a_secret_rotates_the_ciphertext_and_the_nonce() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     repo.create(input(tenant, Some(&fresh_secret())))
         .await
@@ -283,7 +311,7 @@ async fn an_update_with_a_secret_rotates_the_ciphertext_and_the_nonce() {
 #[tokio::test]
 async fn writing_the_same_secret_twice_still_uses_a_fresh_nonce() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let secret = fresh_secret();
     repo.create(input(tenant, Some(&secret))).await.unwrap();
@@ -302,7 +330,7 @@ async fn writing_the_same_secret_twice_still_uses_a_fresh_nonce() {
 #[tokio::test]
 async fn a_second_create_for_the_same_tenant_is_refused() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let secret = fresh_secret();
     repo.create(input(tenant, Some(&secret))).await.unwrap();
@@ -327,7 +355,7 @@ async fn a_second_create_for_the_same_tenant_is_refused() {
 #[tokio::test]
 async fn create_requires_a_secret() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
 
     let err = repo.create(input(Uuid::new_v4(), None)).await.unwrap_err();
 
@@ -338,7 +366,7 @@ async fn create_requires_a_secret() {
 #[tokio::test]
 async fn updating_a_tenant_with_no_configuration_is_not_found() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
 
     let err = repo
         .update(input(Uuid::new_v4(), Some(&fresh_secret())))
@@ -352,7 +380,7 @@ async fn updating_a_tenant_with_no_configuration_is_not_found() {
 #[tokio::test]
 async fn tenants_cannot_read_each_others_configuration_or_secret() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
     let secret_a = fresh_secret();
     repo.create(input(a, Some(&secret_a))).await.unwrap();
@@ -418,7 +446,7 @@ async fn without_the_key_the_feature_fails_closed_and_names_the_key() {
 #[tokio::test]
 async fn a_keyless_repository_still_reads_lists_and_deletes() {
     let db = setup().await;
-    let keyed = repo(&db, Some(KEY));
+    let keyed = repo(&db, Some(key()));
     let keyless = repo(&db, None);
     let tenant = Uuid::new_v4();
     keyed
@@ -437,12 +465,12 @@ async fn the_wrong_key_does_not_decrypt_and_says_nothing_about_the_secret() {
     let db = setup().await;
     let tenant = Uuid::new_v4();
     let secret = fresh_secret();
-    repo(&db, Some(KEY))
+    repo(&db, Some(key()))
         .create(input(tenant, Some(&secret)))
         .await
         .unwrap();
 
-    let err = repo(&db, Some(OTHER_KEY))
+    let err = repo(&db, Some(other_key()))
         .decrypt_bind_secret(tenant)
         .await
         .unwrap_err();
@@ -484,7 +512,7 @@ async fn the_datastore_refuses_a_row_with_no_secret_columns() {
 #[tokio::test]
 async fn list_enabled_returns_only_enabled_configurations() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let (on, off) = (Uuid::new_v4(), Uuid::new_v4());
     repo.create(input(on, Some(&fresh_secret()))).await.unwrap();
     let mut disabled = input(off, Some(&fresh_secret()));
@@ -500,7 +528,7 @@ async fn list_enabled_returns_only_enabled_configurations() {
 #[tokio::test]
 async fn delete_removes_the_row_and_is_ok_when_there_is_none() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     repo.create(input(tenant, Some(&fresh_secret())))
         .await
@@ -517,7 +545,7 @@ async fn the_configuration_is_deleted_with_its_tenant() {
     let db = setup().await;
     let orgs = SurrealOrganizationRepository::new(db.clone());
     let tenants = SurrealTenantRepository::new(db.clone());
-    let directories = repo(&db, Some(KEY));
+    let directories = repo(&db, Some(key()));
 
     let org = orgs
         .create(CreateOrganization {
@@ -566,7 +594,7 @@ async fn the_configuration_is_deleted_with_its_tenant() {
 #[tokio::test]
 async fn debug_and_serialisation_carry_no_secret_material() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let secret = fresh_secret();
     let write = input(tenant, Some(&secret));
@@ -607,7 +635,7 @@ async fn debug_and_serialisation_carry_no_secret_material() {
 #[tokio::test]
 async fn p23w2_01_moving_the_connection_requires_the_secret_again() {
     let db = setup().await;
-    let repo = repo(&db, Some(KEY));
+    let repo = repo(&db, Some(key()));
     let tenant = Uuid::new_v4();
     let secret = fresh_secret();
     repo.create(input(tenant, Some(&secret))).await.unwrap();
@@ -675,7 +703,7 @@ async fn p23w2_02_a_tenant_delete_that_fails_is_reported_and_removes_nothing() {
     let db = setup().await;
     let orgs = SurrealOrganizationRepository::new(db.clone());
     let tenants = SurrealTenantRepository::new(db.clone());
-    let directories = repo(&db, Some(KEY));
+    let directories = repo(&db, Some(key()));
 
     let org = orgs
         .create(CreateOrganization {

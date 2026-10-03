@@ -18,15 +18,15 @@ use axiam_directory::client::{ClientLimits, DirectoryClient, DirectoryTarget};
 use axiam_directory::tls::client_config;
 use ldap3_proto::proto::{LdapDerefAliases, LdapFilter, LdapResultCode};
 use support::{
-    BASE_DN, Entry, Event, SERVICE_DN, SERVICE_SECRET, Script, TestCa, TestServer, Transport,
+    BASE_DN, Entry, Event, SERVICE_DN, Script, TestCa, TestServer, Transport, alice_password,
+    service_secret,
 };
 use uuid::Uuid;
 
 const ALICE_UUID: &str = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
-const ALICE_PASSWORD: &str = "alice-correct-horse";
 
 fn alice() -> Entry {
-    Entry::person("alice", ALICE_PASSWORD, ALICE_UUID)
+    Entry::person("alice", &alice_password(), ALICE_UUID)
 }
 
 fn target_for(server: &TestServer, tenant_id: Uuid) -> DirectoryTarget {
@@ -68,7 +68,7 @@ async fn auth(
     password: &str,
 ) -> Result<axiam_core::models::directory::DirectoryIdentity, DirectoryAuthError> {
     client
-        .authenticate(target, SERVICE_SECRET, login, password)
+        .authenticate(target, &service_secret(), login, password)
         .await
 }
 
@@ -84,7 +84,7 @@ async fn bind_as_user_succeeds_over_ldaps() {
     let client = DirectoryClient::new(fast_limits());
     let target = target_for(&server, Uuid::new_v4());
 
-    let identity = auth(&client, &target, "alice", ALICE_PASSWORD)
+    let identity = auth(&client, &target, "alice", &alice_password())
         .await
         .expect("a correct directory password must authenticate");
     // entryUUID normalised to lowercase hyphenated form.
@@ -141,7 +141,7 @@ async fn bind_as_user_succeeds_over_starttls_and_nothing_precedes_the_upgrade() 
     let client = DirectoryClient::new(fast_limits());
     let target = starttls_target(&server);
 
-    auth(&client, &target, "alice", ALICE_PASSWORD)
+    auth(&client, &target, "alice", &alice_password())
         .await
         .expect("StartTLS sign-in must succeed");
 
@@ -181,7 +181,7 @@ async fn a_tls_1_2_only_directory_is_accepted() {
             &client,
             &target_for(&server, Uuid::new_v4()),
             "alice",
-            ALICE_PASSWORD
+            &alice_password()
         )
         .await
         .is_ok()
@@ -200,7 +200,7 @@ async fn a_wrong_password_is_invalid_credentials() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "alice",
-        "wrong",
+        &axiam_test_support::other_password(),
     )
     .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::InvalidCredentials);
@@ -220,7 +220,7 @@ async fn a_certificate_outside_the_tenant_anchors_is_refused_before_any_bind() {
     let mut target = target_for(&server, Uuid::new_v4());
     target.tls = client_config(&[TestCa::new().pem]).unwrap();
 
-    let outcome = auth(&client, &target, "alice", ALICE_PASSWORD).await;
+    let outcome = auth(&client, &target, "alice", &alice_password()).await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Unavailable);
     assert!(
         server.binds().is_empty(),
@@ -241,7 +241,7 @@ async fn the_public_bundle_does_not_trust_a_private_ca() {
     let client = DirectoryClient::new(fast_limits());
     let mut target = target_for(&server, Uuid::new_v4());
     target.tls = client_config(&[]).unwrap();
-    let outcome = auth(&client, &target, "alice", ALICE_PASSWORD).await;
+    let outcome = auth(&client, &target, "alice", &alice_password()).await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Unavailable);
     assert!(server.binds().is_empty());
 }
@@ -260,7 +260,7 @@ async fn a_server_name_mismatch_is_refused_before_any_bind() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "alice",
-        ALICE_PASSWORD,
+        &alice_password(),
     )
     .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Unavailable);
@@ -281,7 +281,13 @@ async fn a_refused_starttls_fails_closed_with_no_bind_in_the_clear() {
     })
     .await;
     let client = DirectoryClient::new(fast_limits());
-    let outcome = auth(&client, &starttls_target(&server), "alice", ALICE_PASSWORD).await;
+    let outcome = auth(
+        &client,
+        &starttls_target(&server),
+        "alice",
+        &alice_password(),
+    )
+    .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Unavailable);
     assert!(server.events().contains(&Event::StartTlsRequested));
     assert!(
@@ -303,7 +309,7 @@ async fn a_plaintext_target_is_refused_with_zero_connections() {
     let client = DirectoryClient::new(fast_limits());
     let mut target = starttls_target(&server);
     target.start_tls = false; // ldap:// without StartTLS
-    let outcome = auth(&client, &target, "alice", ALICE_PASSWORD).await;
+    let outcome = auth(&client, &target, "alice", &alice_password()).await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Misconfigured);
     assert_eq!(server.connections(), 0);
 }
@@ -331,7 +337,7 @@ async fn search_references_are_neither_followed_nor_matched() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "alice",
-        ALICE_PASSWORD,
+        &alice_password(),
     )
     .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::InvalidCredentials);
@@ -350,7 +356,7 @@ async fn search_references_are_neither_followed_nor_matched() {
             &client,
             &target_for(&server, Uuid::new_v4()),
             "alice",
-            ALICE_PASSWORD
+            &alice_password()
         )
         .await
         .is_ok()
@@ -384,7 +390,7 @@ async fn a_referral_result_is_not_followed() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "alice",
-        ALICE_PASSWORD,
+        &alice_password(),
     )
     .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Misconfigured);
@@ -408,7 +414,7 @@ async fn zero_matches_is_the_generic_failure_without_a_user_bind() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "nobody",
-        "anything",
+        &axiam_test_support::other_password(),
     )
     .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::InvalidCredentials);
@@ -419,7 +425,7 @@ async fn zero_matches_is_the_generic_failure_without_a_user_bind() {
 async fn two_matches_is_the_generic_failure_without_a_user_bind() {
     let mut twin = Entry::person(
         "alice",
-        ALICE_PASSWORD,
+        &alice_password(),
         "00000000-0000-4000-8000-000000000002",
     );
     twin.dn = format!("uid=alice,ou=contractors,{BASE_DN}");
@@ -433,7 +439,7 @@ async fn two_matches_is_the_generic_failure_without_a_user_bind() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "alice",
-        ALICE_PASSWORD,
+        &alice_password(),
     )
     .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::InvalidCredentials);
@@ -454,7 +460,11 @@ async fn filter_injection_reaches_the_server_as_a_literal_value() {
     let server = TestServer::start(Script {
         entries: vec![
             alice(),
-            Entry::person("bob", "bob-pw", "00000000-0000-4000-8000-0000000000b0"),
+            Entry::person(
+                "bob",
+                &axiam_test_support::other_password(),
+                "00000000-0000-4000-8000-0000000000b0",
+            ),
         ],
         ..Script::default()
     })
@@ -471,7 +481,7 @@ async fn filter_injection_reaches_the_server_as_a_literal_value() {
         "al*",
     ];
     for login in hostile {
-        let outcome = auth(&client, &target, login, ALICE_PASSWORD).await;
+        let outcome = auth(&client, &target, login, &alice_password()).await;
         assert_eq!(
             outcome.unwrap_err(),
             DirectoryAuthError::InvalidCredentials,
@@ -501,10 +511,11 @@ async fn filter_injection_reaches_the_server_as_a_literal_value() {
 /// UTF-8 survives the octet-by-octet escaping and is matched as itself.
 #[tokio::test]
 async fn a_utf8_login_name_is_matched_as_itself() {
+    let jose_password = axiam_test_support::other_password();
     let server = TestServer::start(Script {
         entries: vec![Entry::person(
             "josé",
-            "jose-pw",
+            &jose_password,
             "00000000-0000-4000-8000-00000000000e",
         )],
         ..Script::default()
@@ -516,7 +527,7 @@ async fn a_utf8_login_name_is_matched_as_itself() {
             &client,
             &target_for(&server, Uuid::new_v4()),
             "josé",
-            "jose-pw"
+            &jose_password
         )
         .await
         .is_ok()
@@ -533,7 +544,14 @@ async fn an_empty_password_is_refused_with_zero_packets() {
     })
     .await;
     let client = DirectoryClient::new(fast_limits());
-    let outcome = auth(&client, &target_for(&server, Uuid::new_v4()), "alice", "").await;
+    let empty = String::new();
+    let outcome = auth(
+        &client,
+        &target_for(&server, Uuid::new_v4()),
+        "alice",
+        &empty,
+    )
+    .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::InvalidCredentials);
     assert_eq!(server.connections(), 0, "no connection may be opened");
 }
@@ -557,7 +575,7 @@ async fn an_active_directory_disabled_account_is_refused() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "alice",
-        ALICE_PASSWORD,
+        &alice_password(),
     )
     .await;
     assert_eq!(
@@ -576,7 +594,7 @@ async fn an_active_directory_object_guid_is_decoded() {
     ];
     let entry = Entry {
         dn: format!("CN=Alice,CN=Users,{BASE_DN}"),
-        password: ALICE_PASSWORD.into(),
+        password: alice_password(),
         attrs: vec![
             ("objectClass".into(), vec![b"person".to_vec()]),
             ("sAMAccountName".into(), vec![b"alice".to_vec()]),
@@ -592,7 +610,7 @@ async fn an_active_directory_object_guid_is_decoded() {
     let mut target = target_for(&server, Uuid::new_v4());
     target.attributes = DirectoryKind::ActiveDirectory.default_user_attribute_map();
     target.user_filter = "(&(objectClass=person)(sAMAccountName={username}))".into();
-    let identity = auth(&client, &target, "alice", ALICE_PASSWORD)
+    let identity = auth(&client, &target, "alice", &alice_password())
         .await
         .unwrap();
     assert_eq!(identity.external_id, "6f9619ff-8b86-d011-b42d-00c04fc964ff");
@@ -614,7 +632,7 @@ async fn the_pool_reuses_service_connections_and_never_user_bound_ones() {
     let target = target_for(&server, tenant);
 
     for _ in 0..3 {
-        auth(&client, &target, "alice", ALICE_PASSWORD)
+        auth(&client, &target, "alice", &alice_password())
             .await
             .unwrap();
     }
@@ -647,7 +665,7 @@ async fn the_pool_reuses_service_connections_and_never_user_bound_ones() {
     // A new configuration generation discards the pooled connection.
     let mut changed = target.clone();
     changed.generation = "g2".into();
-    auth(&client, &changed, "alice", ALICE_PASSWORD)
+    auth(&client, &changed, "alice", &alice_password())
         .await
         .unwrap();
     assert_eq!(server.service_binds(), 2);
@@ -682,7 +700,7 @@ async fn the_pool_bounds_concurrent_connections_per_tenant() {
         let target = target.clone();
         tasks.push(tokio::spawn(async move {
             client
-                .authenticate(&target, SERVICE_SECRET, "alice", ALICE_PASSWORD)
+                .authenticate(&target, &service_secret(), "alice", &alice_password())
                 .await
         }));
     }
@@ -719,8 +737,8 @@ async fn pools_are_partitioned_by_tenant() {
     let client = DirectoryClient::new(limits);
     let a = target_for(&server, Uuid::new_v4());
     let b = target_for(&server, Uuid::new_v4());
-    auth(&client, &a, "alice", ALICE_PASSWORD).await.unwrap();
-    auth(&client, &b, "alice", ALICE_PASSWORD).await.unwrap();
+    auth(&client, &a, "alice", &alice_password()).await.unwrap();
+    auth(&client, &b, "alice", &alice_password()).await.unwrap();
     assert_eq!(client.idle_connections(a.tenant_id), 1);
     assert_eq!(client.idle_connections(b.tenant_id), 1);
     assert_eq!(
@@ -744,7 +762,7 @@ async fn a_silent_directory_times_out_at_connect() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "alice",
-        ALICE_PASSWORD,
+        &alice_password(),
     )
     .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Unavailable);
@@ -766,7 +784,7 @@ async fn a_stalling_directory_times_out_per_operation() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "alice",
-        ALICE_PASSWORD,
+        &alice_password(),
     )
     .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Unavailable);
@@ -794,7 +812,7 @@ async fn the_authentication_deadline_bounds_the_whole_flow() {
         &client,
         &target_for(&server, Uuid::new_v4()),
         "alice",
-        ALICE_PASSWORD,
+        &alice_password(),
     )
     .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Unavailable);
@@ -814,9 +832,9 @@ async fn a_refused_service_bind_is_a_misconfiguration() {
     let outcome = client
         .authenticate(
             &target_for(&server, Uuid::new_v4()),
-            "not-the-service-secret",
+            &axiam_test_support::other_password(),
             "alice",
-            ALICE_PASSWORD,
+            &alice_password(),
         )
         .await;
     assert_eq!(outcome.unwrap_err(), DirectoryAuthError::Misconfigured);

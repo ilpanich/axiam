@@ -53,10 +53,13 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// The fixture user's password: minted per process, never a literal.
+fn password() -> String {
+    axiam_test_support::test_password()
+}
+
 const TEST_PEER: &str = "127.0.0.1:12345";
 const CSRF_TOKEN: &str = "test-csrf-token";
-/// Test-only placeholder — not a real credential. gitleaks:allow
-const PASSWORD: &str = "TenantPathSsoPassw0rd";
 const REDIRECT_URI: &str = "https://rp.example.com/callback";
 const POST_LOGOUT_URI: &str = "https://rp.example.com/signed-out";
 const ROOT_ISSUER: &str = "https://iam.example.com";
@@ -114,7 +117,7 @@ async fn create_user(db: &Surreal<TestDb>, tenant_id: Uuid, username: &str) -> U
             tenant_id,
             username: username.into(),
             email: format!("{username}@example.com"),
-            password: PASSWORD.into(),
+            password: password(),
             metadata: None,
         })
         .await
@@ -268,7 +271,7 @@ fn login_request(org_id: Uuid, tenant_id: Uuid, username: &str) -> test::TestReq
             "tenant_id": tenant_id,
             "org_id": org_id,
             "username_or_email": username,
-            "password": PASSWORD,
+            "password": password(),
         }))
 }
 
@@ -1490,7 +1493,7 @@ async fn d11_logout_by_an_org_level_principal_acting_on_a_child_tenant_ends_its_
             .set_json(serde_json::json!({
                 "org_id": org_id,
                 "username_or_email": "org-admin",
-                "password": PASSWORD,
+                "password": password(),
             }))
             .to_request(),
     )
@@ -1920,8 +1923,8 @@ async fn d11_a_revoked_sessions_tenant_cookie_resolves_to_nothing() {
         ))
         .insert_header(("X-CSRF-Token", browser_2.csrf.clone()))
         .set_json(serde_json::json!({
-            "current_password": PASSWORD,
-            "new_password": "TenantPathSsoPassw0rd-Rotated!",
+            "current_password": password(),
+            "new_password": axiam_test_support::other_password(),
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;

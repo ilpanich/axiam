@@ -15,7 +15,7 @@ use axiam_core::models::directory::{
 use axiam_core::repository::DirectoryConfigRepository;
 use axiam_directory::{ClientLimits, DirectoryClient, RepositoryDirectoryAuthenticator};
 use chrono::Utc;
-use support::{BASE_DN, Entry, SERVICE_DN, SERVICE_SECRET, Script, TestServer};
+use support::{BASE_DN, Entry, SERVICE_DN, Script, TestServer, alice_password, service_secret};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -96,7 +96,7 @@ async fn server() -> TestServer {
     TestServer::start(Script {
         entries: vec![Entry::person(
             "alice",
-            "alice-pw",
+            &alice_password(),
             "00000000-0000-4000-8000-00000000a11c",
         )],
         ..Script::default()
@@ -109,7 +109,7 @@ async fn an_enabled_configuration_authenticates_end_to_end() {
     let server = server().await;
     let tenant = Uuid::new_v4();
     let repo = FakeRepo {
-        secret: Some(SERVICE_SECRET.into()),
+        secret: Some(service_secret()),
         ..FakeRepo::default()
     };
     repo.configs
@@ -118,7 +118,7 @@ async fn an_enabled_configuration_authenticates_end_to_end() {
         .insert(tenant, config_for(&server, tenant));
     let authenticator = RepositoryDirectoryAuthenticator::with_client(repo, client());
     let identity = authenticator
-        .authenticate(tenant, "alice", "alice-pw")
+        .authenticate(tenant, "alice", &alice_password())
         .await
         .expect("the configured directory must authenticate");
     assert_eq!(identity.external_id, "00000000-0000-4000-8000-00000000a11c");
@@ -129,13 +129,13 @@ async fn no_configuration_or_a_disabled_one_is_not_configured() {
     let server = server().await;
     let tenant = Uuid::new_v4();
     let repo = FakeRepo {
-        secret: Some(SERVICE_SECRET.into()),
+        secret: Some(service_secret()),
         ..FakeRepo::default()
     };
     let authenticator = RepositoryDirectoryAuthenticator::with_client(repo.clone(), client());
     assert_eq!(
         authenticator
-            .authenticate(tenant, "alice", "alice-pw")
+            .authenticate(tenant, "alice", &alice_password())
             .await,
         Err(DirectoryAuthError::NotConfigured)
     );
@@ -144,7 +144,7 @@ async fn no_configuration_or_a_disabled_one_is_not_configured() {
     repo.configs.lock().unwrap().insert(tenant, disabled);
     assert_eq!(
         authenticator
-            .authenticate(tenant, "alice", "alice-pw")
+            .authenticate(tenant, "alice", &alice_password())
             .await,
         Err(DirectoryAuthError::NotConfigured)
     );
@@ -159,7 +159,7 @@ async fn one_tenant_is_never_answered_by_another_tenants_directory() {
     let tenant_a = Uuid::new_v4();
     let tenant_b = Uuid::new_v4();
     let repo = FakeRepo {
-        secret: Some(SERVICE_SECRET.into()),
+        secret: Some(service_secret()),
         ..FakeRepo::default()
     };
     repo.configs
@@ -169,13 +169,13 @@ async fn one_tenant_is_never_answered_by_another_tenants_directory() {
     let authenticator = RepositoryDirectoryAuthenticator::with_client(repo, client());
     assert!(
         authenticator
-            .authenticate(tenant_a, "alice", "alice-pw")
+            .authenticate(tenant_a, "alice", &alice_password())
             .await
             .is_ok()
     );
     assert_eq!(
         authenticator
-            .authenticate(tenant_b, "alice", "alice-pw")
+            .authenticate(tenant_b, "alice", &alice_password())
             .await,
         Err(DirectoryAuthError::NotConfigured)
     );
@@ -195,7 +195,7 @@ async fn a_missing_encryption_key_is_unavailable_with_no_connection() {
     let authenticator = RepositoryDirectoryAuthenticator::with_client(repo, client());
     assert_eq!(
         authenticator
-            .authenticate(tenant, "alice", "alice-pw")
+            .authenticate(tenant, "alice", &alice_password())
             .await,
         Err(DirectoryAuthError::Unavailable)
     );
@@ -209,7 +209,7 @@ async fn a_stored_plaintext_url_is_refused_before_any_connection() {
     let server = server().await;
     let tenant = Uuid::new_v4();
     let repo = FakeRepo {
-        secret: Some(SERVICE_SECRET.into()),
+        secret: Some(service_secret()),
         ..FakeRepo::default()
     };
     let mut plaintext = config_for(&server, tenant);
@@ -219,7 +219,7 @@ async fn a_stored_plaintext_url_is_refused_before_any_connection() {
     let authenticator = RepositoryDirectoryAuthenticator::with_client(repo, client());
     assert_eq!(
         authenticator
-            .authenticate(tenant, "alice", "alice-pw")
+            .authenticate(tenant, "alice", &alice_password())
             .await,
         Err(DirectoryAuthError::Misconfigured)
     );
@@ -231,7 +231,7 @@ async fn unusable_stored_anchors_are_a_misconfiguration() {
     let server = server().await;
     let tenant = Uuid::new_v4();
     let repo = FakeRepo {
-        secret: Some(SERVICE_SECRET.into()),
+        secret: Some(service_secret()),
         ..FakeRepo::default()
     };
     let mut broken = config_for(&server, tenant);
@@ -240,7 +240,7 @@ async fn unusable_stored_anchors_are_a_misconfiguration() {
     let authenticator = RepositoryDirectoryAuthenticator::with_client(repo, client());
     assert_eq!(
         authenticator
-            .authenticate(tenant, "alice", "alice-pw")
+            .authenticate(tenant, "alice", &alice_password())
             .await,
         Err(DirectoryAuthError::Misconfigured)
     );
@@ -252,7 +252,7 @@ async fn an_empty_password_is_refused_before_the_configuration_is_read() {
     let server = server().await;
     let tenant = Uuid::new_v4();
     let repo = FakeRepo {
-        secret: Some(SERVICE_SECRET.into()),
+        secret: Some(service_secret()),
         ..FakeRepo::default()
     };
     repo.configs
@@ -260,8 +260,9 @@ async fn an_empty_password_is_refused_before_the_configuration_is_read() {
         .unwrap()
         .insert(tenant, config_for(&server, tenant));
     let authenticator = RepositoryDirectoryAuthenticator::with_client(repo, client());
+    let empty = String::new();
     assert_eq!(
-        authenticator.authenticate(tenant, "alice", "").await,
+        authenticator.authenticate(tenant, "alice", &empty).await,
         Err(DirectoryAuthError::InvalidCredentials)
     );
     assert_eq!(server.connections(), 0);

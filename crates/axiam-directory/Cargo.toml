@@ -36,6 +36,8 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+# Runtime-minted fixture passwords and secrets (no credential literals in tests).
+axiam-test-support = { workspace = true }
 # Generates throwaway CA and leaf certificates for the trust-anchor tests.
 rcgen = { workspace = true }
 # The in-process test directory (tests/support): the server half of the LDAP

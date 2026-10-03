@@ -1049,7 +1049,7 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
 
 ---
 
-## Phase 23: Competitor gap closure — IN PROGRESS (W1 merged 2026-10-03, W2 in progress)
+## Phase 23: Competitor gap closure — IN PROGRESS (W1 merged 2026-10-03, W2 executed 2026-10-03, PR open)
 
 Close the gaps the three competitor comparisons
 ([Keycloak](competitor-comparison-keycloak.md),
@@ -1148,7 +1148,7 @@ where §5 says it depends on it.
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
 | Phase 22 | 20 | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates, gRPC client auth, service accounts on management, non-inheritable assignments, contracts 1.51/1.52 and the eleven SDK ports) |
-| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **in progress**, W1 executed |
+| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **in progress**, W1 merged, W2 executed |
 
 **Total: 132 tasks across 23 complete phases, plus Phase 23 (47 tasks) in progress**
 

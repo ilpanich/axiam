@@ -5,7 +5,8 @@
 > (PR #521); D-9 and D-10 taken during it. W2 (G-1 X7.4–X7.9 and the
 > submission package, T23.1.8, G-3's crate and bind path) runs on
 > `claude/phase23-w2`: D-11 taken by the maintainer on 2026-10-03 (option 1,
-> issue #516), D-12 and D-13 accepted as recommended. Written against AXIAM `1.0.0-beta17` from the three
+> issue #516), D-12 and D-13 accepted as recommended, D-14 … D-18 taken during
+> it; all seven W2 tasks executed and the W2 F4 review done. Written against AXIAM `1.0.0-beta17` from the three
 > comparisons in this directory:
 > [`competitor-comparison-keycloak.md`](competitor-comparison-keycloak.md)
 > (Keycloak 26.8.0),

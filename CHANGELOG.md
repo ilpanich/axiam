@@ -214,6 +214,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A directory configuration update can no longer redirect the stored bind
+  secret (F4 P23W2-01, T-298).** `DirectoryConfigRepository::update` kept the
+  encrypted bind secret whenever the request carried no new one, whatever else
+  changed, so an update that repointed the URL (and named a CA of the editor's
+  choosing as the trust anchor) would have sent the write-only secret to that
+  host in the next service bind. Without a new secret, an update that changes
+  `url`, `start_tls`, `bind_dn` or `trust_anchors_pem` is now refused with
+  `400 validation_error` and changes nothing; re-entering the secret makes it an
+  ordinary update. No route writes a directory configuration yet (T23.3.8 adds
+  them), so nothing deployed changes behaviour.
+
 - **A `fapi2` client's authentication method is re-checked at request time at
   PAR, introspection and revocation, as it already was at the token endpoint
   (T23.1.5, D-17).** A `fapi2` row edited in the database to

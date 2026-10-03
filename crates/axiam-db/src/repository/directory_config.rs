@@ -287,6 +287,29 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
             ""
         };
 
+        // P23W2-01: a stored secret is never sent to a server it was not
+        // entered for. Without a new secret, the fields that decide where and
+        // how the service bind goes — the URL, StartTLS, the bind DN and the
+        // trust anchors — must equal the stored ones, or the update matches no
+        // row. Otherwise whoever may edit the configuration could point it at a
+        // host they control, with their own CA as the anchor, and receive the
+        // write-only secret (D-15) in the next service bind. The guard is in
+        // the `WHERE`, so the comparison and the write are one statement.
+        let connection_guard = if sealed.is_some() {
+            ""
+        } else {
+            " AND url = $url AND start_tls = $start_tls AND bind_dn = $bind_dn \
+             AND trust_anchors_pem = $trust_anchors_pem"
+        };
+        let moved = sealed.is_none().then(|| {
+            (
+                input.url.clone(),
+                input.start_tls,
+                input.bind_dn.clone(),
+                input.trust_anchors_pem.clone(),
+            )
+        });
+
         let tenant_id = input.tenant_id;
         let interval =
             i64::try_from(input.sync_interval_secs).map_err(|_| AxiamError::Validation {
@@ -308,7 +331,7 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
                  jit_provisioning = $jit_provisioning, \
                  trust_anchors_pem = $trust_anchors_pem, \
                  updated_at = time::now() \
-                 WHERE tenant_id = $tenant_id"
+                 WHERE tenant_id = $tenant_id{connection_guard}"
             ))
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("enabled", input.enabled))
@@ -341,11 +364,28 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
             .map_err(|e| classify_write_error(e, "directory_config"))?;
 
         let updated = self.fetch_public(tenant_id).await?;
-        Ok(take_first_or_not_found(
+        let updated = take_first_or_not_found(
             updated.into_iter().collect(),
             "directory_config",
             &tenant_id.to_string(),
-        )?)
+        )?;
+        // The row exists; if the guard held it back, its connection still
+        // differs from the one asked for. The message names the rule and none
+        // of the values.
+        if let Some((url, start_tls, bind_dn, anchors)) = moved
+            && (updated.url != url
+                || updated.start_tls != start_tls
+                || updated.bind_dn != bind_dn
+                || updated.trust_anchors_pem != anchors)
+        {
+            return Err(AxiamError::Validation {
+                message: "changing the directory's url, start_tls, bind_dn or trust anchors \
+                          requires entering the bind secret again: a stored bind secret is \
+                          never sent to a server it was not entered for"
+                    .into(),
+            });
+        }
+        Ok(updated)
     }
 
     async fn get_by_tenant(&self, tenant_id: Uuid) -> AxiamResult<Option<DirectoryConfig>> {

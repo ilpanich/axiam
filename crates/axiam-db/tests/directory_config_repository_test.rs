@@ -210,13 +210,15 @@ async fn an_update_without_a_secret_keeps_the_stored_one() {
     repo.create(input(tenant, Some(&secret))).await.unwrap();
     let before = raw_secret(&db, tenant).await;
 
+    // Fields that do not decide where the secret is sent. (Moving the
+    // connection without the secret is refused: P23W2-01, below.)
     let mut change = input(tenant, None);
-    change.url = "ldaps://dc02.corp.example.com".into();
+    change.base_dn = "OU=Staff,DC=corp,DC=example,DC=com".into();
     change.enabled = false;
     change.group_nesting_depth = 2;
     let updated = repo.update(change).await.unwrap();
 
-    assert_eq!(updated.url, "ldaps://dc02.corp.example.com");
+    assert_eq!(updated.base_dn, "OU=Staff,DC=corp,DC=example,DC=com");
     assert!(!updated.enabled);
     assert_eq!(updated.group_nesting_depth, 2);
     assert!(
@@ -593,4 +595,70 @@ async fn debug_and_serialisation_carry_no_secret_material() {
         !json.contains("secret") && !json.contains("ciphertext") && !json.contains("nonce"),
         "the serialised configuration must have no secret-bearing field"
     );
+}
+
+/// **P23W2-01.** A stored bind secret is never sent to a server it was not
+/// entered for. An update that changes where or how the service bind goes — the
+/// URL, StartTLS, the bind DN or the trust anchors — without carrying a secret
+/// is refused, and changes nothing: otherwise whoever may edit the
+/// configuration could point it at a host they control (with their own CA as
+/// the anchor) and receive the write-only secret in the next service bind
+/// (D-15). With the secret re-entered, the same change is accepted.
+#[tokio::test]
+async fn p23w2_01_moving_the_connection_requires_the_secret_again() {
+    let db = setup().await;
+    let repo = repo(&db, Some(KEY));
+    let tenant = Uuid::new_v4();
+    let secret = fresh_secret();
+    repo.create(input(tenant, Some(&secret))).await.unwrap();
+    let before_secret = raw_secret(&db, tenant).await;
+    let before = repo.get_by_tenant(tenant).await.unwrap().expect("a config");
+
+    let cases: [(&str, fn(&mut NewDirectoryConfig)); 5] = [
+        ("another host", |c| {
+            c.url = "ldaps://collector.attacker.example".into();
+        }),
+        ("another port", |c| {
+            c.url = "ldaps://dc01.corp.example.com:10636".into();
+        }),
+        ("StartTLS toggled", |c| {
+            c.url = "ldap://dc01.corp.example.com:389".into();
+            c.start_tls = true;
+        }),
+        ("another bind DN", |c| {
+            c.bind_dn = "CN=someone-else,DC=corp,DC=example,DC=com".into();
+        }),
+        ("other trust anchors", |c| {
+            c.trust_anchors_pem =
+                vec!["-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n".into()];
+        }),
+    ];
+    for (case, change) in cases {
+        let mut moved = input(tenant, None);
+        change(&mut moved);
+        moved.enabled = false; // a non-connection field riding along
+        match repo.update(moved).await {
+            Err(AxiamError::Validation { message }) => assert!(
+                message.contains("bind secret"),
+                "{case}: the refusal must say the secret is required"
+            ),
+            Err(_) => panic!("{case}: expected a validation refusal, got another error"),
+            Ok(_) => panic!("{case}: a moved connection kept the stored secret"),
+        }
+        let after = repo.get_by_tenant(tenant).await.unwrap().expect("a config");
+        assert!(
+            after == before,
+            "{case}: a refused update must change nothing"
+        );
+        assert!(
+            raw_secret(&db, tenant).await == before_secret,
+            "{case}: the stored secret must be untouched"
+        );
+    }
+
+    // The same move with the secret re-entered is an ordinary update.
+    let mut moved = input(tenant, Some(&secret));
+    moved.url = "ldaps://dc02.corp.example.com".into();
+    let updated = repo.update(moved).await.unwrap();
+    assert_eq!(updated.url, "ldaps://dc02.corp.example.com");
 }

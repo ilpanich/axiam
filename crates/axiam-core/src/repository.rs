@@ -2928,9 +2928,8 @@ pub trait DirectoryConfigRepository: Send + Sync {
     /// Create the tenant's configuration, encrypting `input.bind_secret`.
     ///
     /// Fails with `Validation` when the secret is absent, with `AlreadyExists`
-    /// when the tenant already has a configuration, and with
-    /// `ServiceUnavailable` (naming the key) when no encryption key is
-    /// configured. Callers validate the values first
+    /// when the tenant already has a configuration, and with `Validation`
+    /// (naming the key) when no encryption key is configured. Callers validate the values first
     /// (`axiam-directory::config::validate`); the repository does not.
     fn create(
         &self,
@@ -2942,6 +2941,12 @@ pub trait DirectoryConfigRepository: Send + Sync {
     /// `input.bind_secret == None` keeps the stored secret and its nonce;
     /// `Some` encrypts the new one under a fresh nonce. `NotFound` when the
     /// tenant has no configuration.
+    ///
+    /// **A kept secret keeps its connection** (F4 P23W2-01): with
+    /// `bind_secret == None`, an update whose `url`, `start_tls`, `bind_dn` or
+    /// `trust_anchors_pem` differs from the stored value is refused with
+    /// `Validation` and changes nothing, so the write-only secret can never be
+    /// redirected to a server it was not entered for.
     fn update(
         &self,
         input: NewDirectoryConfig,

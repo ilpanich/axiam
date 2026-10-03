@@ -22,6 +22,16 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-03 W2 security review (F4, model 2.20.0).** No threat enters;
+> one is amended. **T-298**, the directory bind secret: the secret was
+> write-only through every read, but an update that carried no new secret kept
+> the stored one whatever else changed, so whoever may edit the configuration
+> could repoint the URL at a host of their own (with their own CA as the anchor)
+> and receive the secret in the next service bind. A kept secret now keeps its
+> connection: without a new secret, an update that changes the URL, StartTLS,
+> the bind DN or the trust anchors is refused and changes nothing
+> (W2 F4 review, P23W2-01). The model stays at **303 threats, 289 mitigated / 14 open**.
+>
 > **The 2026-10-03 directory connector entry (Phase 23 T23.3.2, model
 > 2.20.0).** Ten threats enter, nine Mitigated on arrival and one open, with a
 > new trust boundary — **AXIAM ↔ tenant directory** — around a new external

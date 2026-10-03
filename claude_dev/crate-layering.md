@@ -56,6 +56,14 @@ already states: it may reach layers 0–2, and nothing at layer 3 or below may
 depend on it. It opts into `missing_docs` from its first commit, so the ratchet
 never has a backlog to clear for it.
 
+The login path lives in `axiam-auth` (layer 1), which may not reach it. The
+seam is a port in layer 0 — `axiam_core::models::directory::DirectoryAuthenticator`
+(T23.3.2): `axiam-directory` implements it, and only the composition root,
+`axiam-server`, depends on `axiam-directory`, constructing the implementation
+and handing it to `AuthService::with_directory_authenticator`. The same shape as
+the reactor gate (`DynReactorGate`), and for the same reason: the security
+crate asks a question without knowing what answers it.
+
 **`axiam-scim` sits above `axiam-api-rest` rather than beside it.** SCIM is a REST
 sub-surface mounted into the same Actix app: it consumes the REST crate's
 `AppState` and extractors. One layer out records the invariant that matters —

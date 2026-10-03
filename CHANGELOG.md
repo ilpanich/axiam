@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory sign-in: the LDAP client and the bind-as-user path (T23.3.2,
+  G-3).** A tenant's LDAP or Active Directory server can now authenticate its
+  accounts. `axiam-directory` gains the client — `ldap3` over rustls only (no
+  OpenSSL, no native-tls) — with mandatory TLS verified against the tenant's own
+  trust anchors (or the public `webpki-roots` bundle when it configured none) and
+  the URL's host, TLS 1.2 as the floor because Active Directory on older Windows
+  Server releases has no TLS 1.3 on LDAPS; StartTLS before anything else,
+  failing closed when the server refuses it; login names entering filters only
+  through RFC 4515 escaping; no DN ever constructed; exactly one matching entry;
+  referrals never followed; an empty password refused before any packet; and a
+  bounded per-tenant connection pool with connect, operation and end-to-end
+  timeouts. The user bind runs on its own connection, which is never pooled. A
+  new port, `DirectoryAuthenticator` in `axiam-core`, keeps the layering intact:
+  `axiam-server` injects the implementation into `AuthService`, which binds a
+  **directory account** — one carrying the new `directory_external_id` marker
+  (schema v71, unique per tenant) — to its directory and to nothing else. The
+  lockout is checked before the directory is contacted, a failed bind counts
+  like a wrong password and a success resets the counter, an unavailable or
+  misconfigured directory fails closed and is never answered by the local hash,
+  the directory's answer must be the account's own entry, and every refusal is
+  the generic `401` with the same equalising Argon2id verify an unknown name
+  gets. A directory password is recorded as `amr: ["pwd"]`. Password change,
+  reset confirm, a SCIM password write, and OPAQUE login and registration are
+  refused for a directory account (`400 validation_error`, SCIM `mutability`,
+  OPAQUE's decoy and generic `401`); the reset request answers one exactly as an
+  unknown address. The marker's only writer, used first by provisioning
+  (T23.3.3), also replaces the account's password hash with an unusable random
+  one and drops any OPAQUE record. No account is a directory account yet: there
+  is still no provisioning and no management route. Threat model 2.20.0: a new
+  trust boundary (AXIAM ↔ tenant directory) and T-291…T-303, one of them open
+  (T-300: a tenant-chosen directory host is not held to the private-address
+  policy the IdP and webhook fetches apply). The OpenAPI document changes only
+  in the unreferenced `User` component, which gains the field.
+
 - **The `axiam-directory` crate and the encrypted directory configuration store
   (T23.3.1, G-3).** The first piece of the LDAP / Active Directory identity
   source: a new crate at layer 3, beside `axiam-federation`, that opts into

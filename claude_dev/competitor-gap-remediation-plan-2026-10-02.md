@@ -1002,6 +1002,22 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > regression T23.1.3 introduced (P23W1-03) and one Low (P23W1-02, `Bearer`
 > case). Filed: three pre-existing Mediums (ilpanich/axiam#517, #518, #519)
 > and three Lows (#520); four residuals accepted with reasons.
+>
+> **W2 F4, 2026-10-03:** [`security-review-phase23-w2-2026-10-03.md`](security-review-phase23-w2-2026-10-03.md).
+> Thirteen findings, no merge blocker after fixes. Fixed on the branch, both
+> wave-introduced in T23.3.1's storage layer: a directory configuration update
+> without a new secret kept the stored bind secret while the URL, StartTLS,
+> bind DN or trust anchors changed, so the write-only secret could have been
+> redirected to an editor's host (**P23W2-01**, Medium, latent until
+> T23.3.8 adds write routes), and a tenant delete whose transaction
+> rolled back answered `204` (P23W2-02, Low). To file: pre-existing tenant
+> deletion that cascades to nothing else (P23W2-04, Medium), the `require_par`
+> refusal coming only after the login hop (P23W2-03, Low), the SMTP password
+> kept across a host change (P23W2-05, Low) and two informational gaps
+> (P23W2-06/-07). Accepted with reasons: the logout-hop residuals, T-300 and
+> `ldap3`'s missing frame cap (both latent with no writer, and **binding
+> preconditions on T23.3.8**), the directory timing residual, and the
+> evidence script. The T23.1.8 and T23.3.2 surfaces held.
 
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This

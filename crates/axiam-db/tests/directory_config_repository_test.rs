@@ -614,7 +614,8 @@ async fn p23w2_01_moving_the_connection_requires_the_secret_again() {
     let before_secret = raw_secret(&db, tenant).await;
     let before = repo.get_by_tenant(tenant).await.unwrap().expect("a config");
 
-    let cases: [(&str, fn(&mut NewDirectoryConfig)); 5] = [
+    type Move = fn(&mut NewDirectoryConfig);
+    let cases: [(&str, Move); 5] = [
         ("another host", |c| {
             c.url = "ldaps://collector.attacker.example".into();
         }),

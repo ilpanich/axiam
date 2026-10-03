@@ -324,6 +324,12 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // an encrypted service-account credential for the tenant's directory,
         // and a deleted tenant must not leave that ciphertext behind. It is a
         // single query, so the two deletes commit or roll back together.
+        //
+        // F4 P23W2-02: and a transaction that rolled back is an error. The
+        // driver reports a failed statement inside the response, not from
+        // `.await`, so without `check` a cancelled delete answered `Ok` — the
+        // handler then answered `204` and wrote a "tenant deleted" record for
+        // a tenant that still existed, with its encrypted bind secret.
         self.db
             .current()
             .query(
@@ -334,6 +340,8 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             )
             .bind(("id", id.to_string()))
             .await
+            .map_err(DbError::from)?
+            .check()
             .map_err(DbError::from)?;
 
         Ok(())

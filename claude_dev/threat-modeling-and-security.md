@@ -30,7 +30,11 @@
 > and receive the secret in the next service bind. A kept secret now keeps its
 > connection: without a new secret, an update that changes the URL, StartTLS,
 > the bind DN or the trust anchors is refused and changes nothing
-> (W2 F4 review, P23W2-01). The model stays at **303 threats, 289 mitigated / 14 open**.
+> (W2 F4 review, P23W2-01). The same entry now also records that a tenant
+> delete whose transaction fails (it removes the directory row with the
+> tenant) is reported as a failure, where it used to answer success and leave
+> both in place (P23W2-02). The model stays at **303 threats, 289 mitigated /
+> 14 open**.
 >
 > **The 2026-10-03 directory connector entry (Phase 23 T23.3.2, model
 > 2.20.0).** Ten threats enter, nine Mitigated on arrival and one open, with a

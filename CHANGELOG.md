@@ -159,6 +159,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tenant delete that fails is reported as a failure (F4 P23W2-02).**
+  Since T23.3.1 the tenant delete removes the tenant's directory configuration
+  in the same transaction, but the repository never checked the response: a
+  transaction that rolled back answered success, so `DELETE
+  /api/v1/organizations/{org_id}/tenants/{tenant_id}` answered `204` and wrote
+  a "tenant deleted" audit record for a tenant that still existed, encrypted
+  bind secret included. The failure is now an error and nothing is recorded as
+  deleted.
+
 - **A `client_secret_basic` client now has the same per-client rate-limit bucket
   as a `client_secret_post` one (T23.1.5).** The layer in front of
   `/oauth2/token`, `/oauth2/revoke` and `/oauth2/introspect` read the bucket's

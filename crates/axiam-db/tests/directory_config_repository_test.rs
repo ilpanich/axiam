@@ -662,3 +662,63 @@ async fn p23w2_01_moving_the_connection_requires_the_secret_again() {
     let updated = repo.update(moved).await.unwrap();
     assert_eq!(updated.url, "ldaps://dc02.corp.example.com");
 }
+
+/// **P23W2-02.** The tenant delete is one transaction, so a cascade that fails
+/// removes nothing — and the failure must be reported. Unchecked, the
+/// cancelled transaction answered `Ok`, the handler answered `204` and wrote a
+/// "tenant deleted" audit record, and the tenant and its encrypted bind secret
+/// were still there. The failure is forced with an event that refuses the
+/// directory row's deletion.
+#[tokio::test]
+async fn p23w2_02_a_tenant_delete_that_fails_is_reported_and_removes_nothing() {
+    let db = setup().await;
+    let orgs = SurrealOrganizationRepository::new(db.clone());
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let directories = repo(&db, Some(KEY));
+
+    let org = orgs
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "directory-cascade-failure".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let tenant = tenants
+        .create(CreateTenant {
+            organization_id: org,
+            kind: TenantKind::Standard,
+            name: "stuck".into(),
+            slug: "stuck".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    directories
+        .create(input(tenant, Some(&fresh_secret())))
+        .await
+        .unwrap();
+    db.query(
+        "DEFINE EVENT refuse_directory_delete ON TABLE directory_config \
+         WHEN $event = 'DELETE' THEN { THROW 'refused by the test' };",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    assert!(
+        tenants.delete(tenant).await.is_err(),
+        "a cancelled tenant delete must not be reported as a success"
+    );
+    assert!(
+        tenants.get_by_id(tenant).await.is_ok(),
+        "the tenant must still exist: the transaction removed nothing"
+    );
+    assert!(
+        directories.get_by_tenant(tenant).await.unwrap().is_some(),
+        "the directory configuration must still exist"
+    );
+}

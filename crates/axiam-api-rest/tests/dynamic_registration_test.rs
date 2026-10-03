@@ -1447,6 +1447,67 @@ async fn rfc7592_register_read_update_delete_round_trip() {
     assert_eq!(status, 401, "a second DELETE finds nothing to delete");
 }
 
+/// **F4 P23W1-02.** The authentication scheme is case-insensitive (RFC 9110
+/// §11.1; RFC 6750 §2.1 inherits it), so `bearer` and `BEARER` name the same
+/// credential `Bearer` does — before the review a lower-case scheme was read
+/// as *no* token and answered with the bare challenge, which a client follows
+/// by discarding a token that was good. A scheme with no token after it, and a
+/// different scheme, are still no token.
+#[actix_rt::test]
+async fn p23w1_02_the_bearer_scheme_is_matched_case_insensitively() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (status, registered) = register!(app, f, inspector_registration());
+    assert_eq!(status, 201, "{registered}");
+    let uri = config_path(&registered);
+    let token = rat(&registered);
+
+    for header in [
+        format!("bearer {token}"),
+        format!("BEARER {token}"),
+        format!("Bearer  {token}"),
+    ] {
+        let (status, _, body) = manage!(app, get, &uri, Some(header.clone()));
+        assert_eq!(status, 200, "{header:?}: {body}");
+    }
+    for header in [
+        "Bearer".to_owned(),
+        "Bearer ".to_owned(),
+        "bearer    ".to_owned(),
+        format!("Basic {token}"),
+        format!("Bearer{token}"),
+    ] {
+        let (status, challenge, _) = manage!(app, get, &uri, Some(header.clone()));
+        assert_eq!(status, 401, "{header:?}");
+        assert_eq!(challenge.as_deref(), Some("Bearer"), "{header:?}");
+    }
+}
+
+/// **F4 pin.** The 16 KiB body limit holds on `PUT` as it does on `POST
+/// /oauth2/register`, and it is applied by the extractor — before the token is
+/// looked at, so an oversized body costs no datastore read — without touching
+/// the registration.
+#[actix_rt::test]
+async fn p23w1_an_oversized_update_is_refused_before_it_is_read() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+    let (status, registered) = register!(app, f, inspector_registration());
+    assert_eq!(status, 201, "{registered}");
+    let uri = config_path(&registered);
+    let token = rat(&registered);
+
+    let mut body = update_from(&registered);
+    body["client_name"] = json!("x".repeat(64 * 1024));
+    let (status, _, _) = manage!(app, put, &uri, bearer(&token), Some(body));
+    assert_eq!(status, 413);
+
+    let (status, _, read) = manage!(app, get, &uri, bearer(&token));
+    assert_eq!(status, 200, "the presented token was not rotated: {read}");
+    assert_eq!(read["client_name"], registered["client_name"]);
+}
+
 /// **Acceptance: rotation.** After a `PUT` the presented token is dead for
 /// every operation and the returned one works.
 #[actix_rt::test]

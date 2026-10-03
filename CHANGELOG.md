@@ -50,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live-session lookup, so nothing gets worse. Emission is unchanged: honour
   lane only, never `fapi2` or `ignore`. Amends T-240.
 
+- **`Authorization: bearer <token>` is accepted at `/oauth2/register` and the
+  RFC 7592 client configuration endpoint (F4 P23W1-02).** The scheme was
+  matched as the literal `Bearer `, so a lower-case or upper-case scheme was
+  read as no token at all and answered with the bare `WWW-Authenticate: Bearer`
+  challenge, which a client follows by discarding a token that was good. The
+  scheme is now case-insensitive, as RFC 9110 §11.1 requires; a scheme with no
+  token after it, and any other scheme, are still no token. A pin was added
+  for the 16 KiB body limit on `PUT /oauth2/register/{client_id}`.
+
 ### Security
 
 - **A federated login's recorded authentication instant is never later than the

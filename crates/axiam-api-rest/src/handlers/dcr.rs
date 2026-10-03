@@ -140,13 +140,23 @@ async fn effective_policy<C: Connection + Clone>(
 /// read as *absent* rather than as an error, so every way of failing to
 /// present a usable token produces the one refusal
 /// [`DcrError::InitialAccessTokenRequired`] describes.
+///
+/// The scheme is matched case-insensitively (RFC 9110 §11.1, which RFC 6750
+/// §2.1 inherits): `bearer` read as *no token* would answer a good credential
+/// with the bare challenge, which a client follows by discarding it (F4
+/// P23W1-02). Shared by `POST /oauth2/register`'s initial access token and the
+/// RFC 7592 registration access token.
 fn bearer_token(req: &HttpRequest) -> Option<String> {
-    req.headers()
+    let value = req
+        .headers()
         .get(actix_web::http::header::AUTHORIZATION)?
         .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-        .map(str::trim)
+        .ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    Some(token.trim())
         .filter(|t| !t.is_empty())
         .map(str::to_owned)
 }

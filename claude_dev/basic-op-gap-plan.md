@@ -706,6 +706,9 @@ question had been settled.
 
 ### 4.7 G9 — `client_secret_basic` (**gated on escalation A, §10**)
 
+> **Correction (T23.1.5).** Escalation A was answered yes on 2026-09-07 and the
+> method shipped in W8; the W8 amendment below is what the tree holds.
+
 **Mechanism.**
 
 - `ClientAuthMethod::ClientSecretBasic` (`"client_secret_basic"` on the wire);
@@ -825,6 +828,11 @@ the method unregistrable from the admin UI while `STRONG_AUTH_METHODS`'
 allow-list shape meant the FAPI validation needed no edit at all.
 
 ### 4.8 G8 — `address` and `phone` scopes (GDPR item)
+
+> **Correction (T23.1.5).** The migration is schema **v57**, not "v51" (W7
+> amendment, item 1 below); it shipped in W7. SCIM is the only writer of the
+> two columns in this tree: the admin `PUT /users/{id}` has no member for them,
+> although the paragraph below says "admin API and SCIM".
 
 **Mechanism.**
 

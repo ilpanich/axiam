@@ -117,7 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Amends T-253. The audit behind it also added tests, with no behaviour change,
   for the §2.3.1 decoding edges, duplicate `Authorization` headers, the
   registered method at the three ordinary token grants, and the FAPI refusal of
-  `client_secret_basic` through the admin API.
+  `client_secret_basic` through the admin API, and for the X7.7 sensitive scopes
+  (the verified flag in both directions, the §5.1.1 shape, the claims absent
+  from the access token, introspection and a refresh, consent not crossing a
+  tenant, the update door onto registration, SCIM as the writer).
 
 - **The login hop on a per-tenant issuer path came back refused (T23.1.8).** Its
   `return_to` was built from the query after the tenant scope had appended

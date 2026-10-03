@@ -1022,6 +1022,12 @@ name = "axiam-directory"
 version = "1.0.0-beta17"
 dependencies = [
  "axiam-core",
+ "rcgen",
+ "thiserror 2.0.21",
+ "url",
+ "uuid",
+ "x509-parser 0.18.1",
+ "zeroize",
 ]
 
 [[package]]

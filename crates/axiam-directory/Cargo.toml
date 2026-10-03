@@ -17,3 +17,15 @@ workspace = true
 # over `rustls` -- there is no system library to make optional (plan §7 rule 5).
 [dependencies]
 axiam-core = { workspace = true }
+# Configuration validation (src/config.rs). `url` parses the server URL,
+# `x509-parser` checks that each trust anchor is a CA certificate -- the same
+# parser axiam-pki and axiam-federation use, so no new crate enters the graph.
+thiserror = { workspace = true }
+url = { workspace = true }
+x509-parser = { workspace = true }
+
+[dev-dependencies]
+# Generates throwaway CA and leaf certificates for the trust-anchor tests.
+rcgen = { workspace = true }
+zeroize = { workspace = true }
+uuid = { workspace = true }

@@ -8,12 +8,14 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::error::{AxiamError, AxiamResult};
 use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
+    directory::{DirectoryConfig, NewDirectoryConfig},
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
     email_template::{EmailTemplate, SetEmailTemplate, TemplateKind},
     email_verification::{CreateEmailVerificationToken, EmailVerificationToken},
@@ -2876,6 +2878,63 @@ pub trait EmailConfigRepository: Send + Sync {
         org_id: Uuid,
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<EmailConfig>>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Directory (LDAP / Active Directory) configuration — one per tenant (G-3)
+// ---------------------------------------------------------------------------
+
+/// Storage for a tenant's directory configuration.
+///
+/// The bind secret is encrypted at rest under the key the secret provider
+/// holds as `directory_encryption_key` (decision D-15). That key is optional:
+/// an implementation built without it **fails closed** on every method that
+/// needs it (`create`, `update` and `decrypt_bind_secret`) with an error naming
+/// the key, and still serves the methods that do not (`get_by_tenant`,
+/// `delete`, `list_enabled`).
+pub trait DirectoryConfigRepository: Send + Sync {
+    /// Create the tenant's configuration, encrypting `input.bind_secret`.
+    ///
+    /// Fails with `Validation` when the secret is absent, with `AlreadyExists`
+    /// when the tenant already has a configuration, and with
+    /// `ServiceUnavailable` (naming the key) when no encryption key is
+    /// configured. Callers validate the values first
+    /// (`axiam-directory::config::validate`); the repository does not.
+    fn create(
+        &self,
+        input: NewDirectoryConfig,
+    ) -> impl Future<Output = AxiamResult<DirectoryConfig>> + Send;
+
+    /// Replace the non-secret fields of the tenant's configuration.
+    ///
+    /// `input.bind_secret == None` keeps the stored secret and its nonce;
+    /// `Some` encrypts the new one under a fresh nonce. `NotFound` when the
+    /// tenant has no configuration.
+    fn update(
+        &self,
+        input: NewDirectoryConfig,
+    ) -> impl Future<Output = AxiamResult<DirectoryConfig>> + Send;
+
+    /// The tenant's configuration, **without** the secret, or `None`.
+    fn get_by_tenant(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<DirectoryConfig>>> + Send;
+
+    /// The only path to the plaintext bind secret, for the bind path.
+    ///
+    /// `NotFound` when the tenant has no configuration; `ServiceUnavailable`
+    /// (naming the key) when no encryption key is configured.
+    fn decrypt_bind_secret(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Zeroizing<String>>> + Send;
+
+    /// Delete the tenant's configuration. Succeeds when there is none.
+    fn delete(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Every enabled configuration across all tenants, for the sync job.
+    fn list_enabled(&self) -> impl Future<Output = AxiamResult<Vec<DirectoryConfig>>> + Send;
 }
 
 // ---------------------------------------------------------------------------

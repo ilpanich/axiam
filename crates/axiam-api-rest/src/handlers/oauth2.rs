@@ -607,7 +607,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     // path re-reads the account instead (`check_user_status`) — so this is
     // another place a session becomes a principal, and it applies the
     // existing-credential rule (`axiam_auth::service::account_may_act`, shared
-    // with the OAuth2 grants since F4 P23W1-01):
+    // with the OAuth2 grants and federated sign-in since F4 P23W1-01/-04):
     // suspended statuses are refused, `PendingVerification` is not (P23W1-03 —
     // every federated account holds it for life, so refusing it past the grace
     // period ended browser sign-on for all of them a day after provisioning).

@@ -167,6 +167,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Deleted` — the rule T-160 already applies to token exchange — and leaves the
   grace period to password sign-in, where it belongs. Amends T-237.
 
+- **A suspended account is no longer signed back in by its identity provider
+  (F4 P23W1-04).** Every federated callback — OIDC, SAML and plain OAuth2
+  "Sign in with …" — loaded the linked AXIAM user and issued a full session
+  without reading its status. Locking or deactivating the account in AXIAM, by
+  hand or through SCIM `active: false`, left the upstream account untouched,
+  so the user's next federated sign-in undid the suspension. Token exchange
+  already refused this (T-160); the browser path did not. Every federated
+  sign-in now applies `account_may_act` before a session or a handoff code
+  exists: a locked, inactive, deleted or anonymised account is refused with
+  the sign-in error a password login gets, and a pending one — every
+  federated account is — signs in as before. Amends T-160.
+
 ## [1.0.0-beta17] - 2026-09-25
 
 ### Added

@@ -1714,6 +1714,22 @@ pub(crate) async fn sso_login_post_auth<C: Connection + Clone>(
     user: &axiam_core::models::user::User,
 ) -> Result<(), AxiamApiError> {
     use crate::extractors::client_info::{client_ip, user_agent};
+    // F4 P23W1-04 — the account, before anything else. A federated callback
+    // resolves the linked user and never read its status, so suspending an
+    // account in AXIAM (by hand, or through SCIM `active: false`) was undone by
+    // the next "Sign in with …": the upstream account is not ours to suspend.
+    // Every federated sign-in passes through here before a session or a
+    // handoff code exists, so this is the one place to ask. The rule is
+    // `account_may_act` — the one `/oauth2/authorize` and the OAuth2 grants
+    // apply, and the one T-160 applies to token exchange: suspended statuses
+    // are refused, `PendingVerification` is not, because every federated
+    // account holds it for life. The refusal is the sign-in refusal a password
+    // login gets, and it is shown only to whoever the identity provider has
+    // just authenticated.
+    state
+        .auth_service
+        .check_session_holder(user)
+        .map_err(|e| AxiamApiError(e.into()))?;
     state
         .auth_service
         .intercept_federated_login_post_auth(

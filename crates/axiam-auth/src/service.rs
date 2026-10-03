@@ -1645,8 +1645,10 @@ impl<
 ///
 /// The question every place that turns a long-lived credential back into a
 /// principal asks — `/oauth2/authorize` resolving the OP cookie
-/// ([`AuthService::check_session_holder`]) and the OAuth2 `authorization_code`
-/// and `refresh_token` grants in `axiam-oauth2`. An
+/// ([`AuthService::check_session_holder`]), the OAuth2 `authorization_code`
+/// and `refresh_token` grants in `axiam-oauth2`, and a federated sign-in,
+/// whose identity provider vouches for the person and not for the account
+/// (F4 P23W1-04). An
 /// account status change revokes no credential (only deletion, SCIM
 /// deprovisioning and a credential reset do), so each of them must ask; one
 /// function answers, so no two of them can disagree about who may act.

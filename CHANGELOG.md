@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `oidcc-ensure-request-object-with-redirect-uri`), the suite log, the module's
   own condition, what AXIAM does and the test that pins it, the clause, and what
   the screenshot evidence does and does not show; facts only a suite log can give
-  are marked for the maintainer's run. The FAPI 2.0 entries are left to T23.1.7.
+  are marked for the maintainer's run. The FAPI 2.0 entries follow (T23.1.7).
   `claude_dev/fapi-conformance-runbook.md` gains the checklist for the final runs,
   which the maintainer makes personally before the release tag. The conformance
   harness gains three small things the final run needs: `report.py` names the
@@ -24,6 +24,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports linked from `index.md`, and `export-evidence.py` /
   `just conformance-evidence` exports the REVIEW screenshots with a manifest.
   No plan, registrar or server behaviour changed, and no final run has been made.
+
+- **FAPI 2.0 `REVIEW`/`WARNING` judgements and the X5.3 submission package
+  (T23.1.7, G-1).** `docs/conformance/REVIEW-JUDGEMENTS.md` gains the three FAPI
+  2.0 entries, each over all three variants (`mtls`, `self-signed`,
+  `private-key-jwt`) with the 2026-09-25 log ids and the evidence images read:
+  `ensure-unsigned-authorization-request-without-using-par-fails`,
+  `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` (both
+  `REVIEW`) and `test-claims-parameter-identity-claims` (`WARNING`). The last is
+  written as open: the 2026-09-25 build published `claims_parameter_supported:
+  true`, so the warning is not the "claims not supported" deviation, its cause is
+  in the suite log only, and whether to honour the `id_token` member of `claims`
+  is left to the maintainer. The runbook's maintainer checklist is completed for
+  the FAPI plans, and `claude_dev/fapi-certification-submission.md` gains the
+  X5.3 package for both the Basic OP and the FAPI 2.0 certifications: what is
+  submitted, the run-dependent fields as placeholders, the files to attach, a
+  pre-send checklist, and website wording for the mark that stays unpublished
+  until the certification is granted. Documentation only. Every entry is
+  *proposed*, no final run has been made, and nothing has been sent to the
+  Foundation.
 
 - Verifiable-credentials design (OID4VCI issuer, OID4VP verifier, SD-JWT VC) — design only, no code (T23.9.1)
 

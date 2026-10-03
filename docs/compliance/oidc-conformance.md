@@ -450,12 +450,15 @@ what is still pending, and none of them is a certification claim.
 | 172 | The four Basic OP `REVIEW` modules — `oidcc-prompt-login`, `oidcc-max-age-1`, `oidcc-ensure-registered-redirect-uri`, `oidcc-ensure-request-object-with-redirect-uri` — each have a written judgement: the log, the module's own condition, what AXIAM does with the test that pins it, and the clause | Core §3.1.2.1; RFC 6749 §3.1.2.4, §4.1.2.1 | **Proposed** — written from the 2026-09-25 evidence, not yet confirmed against a final run | `docs/conformance/REVIEW-JUDGEMENTS.md`; `docs/conformance/evidence/2026-09-25/` |
 | 173 | The final runs of the Basic OP plan and the three FAPI 2.0 plans (`mtls`, `self-signed`, `private-key-jwt`) on a digest-pinned image, compared with the 2026-09-25 baseline | X7.9 | **Pending** — the maintainer's, before the release tag | `claude_dev/fapi-conformance-runbook.md`, "Maintainer run checklist" |
 | 174 | The report names the plan's `SKIPPED` modules, the index keeps earlier reports linked, and the REVIEW screenshots can be exported with a manifest. Exercised with fixtures and a local mock of the suite's API, **not** against a live suite | X7.9 harness | Pass (fixtures only) | `conformance/scripts/report.py`; `conformance/scripts/export-evidence.py`; `just conformance-evidence` |
+| 175 | The three FAPI 2.0 modules the 2026-09-25 runs left open — `…-ensure-unsigned-authorization-request-without-using-par-fails` and `…-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds` (`REVIEW`, each on all three variants) and `…-test-claims-parameter-identity-claims` (`WARNING`, all three variants) — each have a written judgement. The `WARNING`'s is **open**: discovery publishes `claims_parameter_supported: true`, so it is not the "not supported" deviation, and the reason is in the suite log only | FAPI 2.0 SP §5.3.1.2; RFC 9126; OIDC Core §5.5 | **Proposed** — written from the 2026-09-25 reports and evidence, not confirmed against a final run | `docs/conformance/REVIEW-JUDGEMENTS.md`, "FAPI 2.0 Security Profile (Final)"; `docs/conformance/evidence/2026-09-25/` |
 
 **Not asserted here.** That the Basic OP plan is green: it is not (row 171). That
 the four `REVIEW` modules will be accepted: that is a reviewer's decision, and row
 172 is AXIAM's account for them, not their verdict. That the FAPI 2.0 plans are
 certifiable: their two `REVIEW` modules and one `WARNING` are written up by
-T23.1.7 in the same judgements file.
+T23.1.7 in the same judgements file (row 175), the `WARNING`'s entry as an open
+question. The submission package is prepared and unsent
+(`claude_dev/fapi-certification-submission.md`, "The X5.3 package").
 
 ## FAPI 2.0 §5.3.2.1-9 and BCP §4.14 — the refresh-rotation grace window (T-254)
 
@@ -670,3 +673,4 @@ costs a round trip per request, which is why integrators do not adopt it.
 *Rows 161–164 added: R-8 of the same pass (the SDK half of contract 1.40–1.42) — 2026-09-12*
 *Rows 165–169 added: R-6 of the same pass (the session-revocation feed) — 2026-09-12*
 *Rows 170–174 added: X7.9 final-run preparation (T23.1.6) — 2026-10-03*
+*Row 175 added: the FAPI 2.0 judgements (T23.1.7) — 2026-10-03*

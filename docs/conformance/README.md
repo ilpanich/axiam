@@ -24,6 +24,12 @@ screenshots are under `evidence/<date>/`, with a `manifest.json` per directory.
 The judgements are updated with the new log ids after each final run, alongside
 the earlier ones, on the same rule as the reports.
 
+The package a submission is built from, covering both the Basic OP and the FAPI
+2.0 certifications — what is submitted, what is attached, the pre-send checklist —
+is in the "X5.3 package" section of
+[`claude_dev/fapi-certification-submission.md`](../../claude_dev/fapi-certification-submission.md).
+It is prepared and **unsent**: the maintainer runs the suites and sends it.
+
 ## What is here
 
 The first run, 2026-09-08, against suite `release-v5.2.4`

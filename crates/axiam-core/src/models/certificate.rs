@@ -45,6 +45,25 @@ pub enum CertificateType {
     /// refuses it, and its `serverAuth`-only usage fails the `clientAuth` check
     /// every chain-validating client-certificate verifier makes.
     Server,
+    /// The leaf of a tenant's SAML identity provider signing credential
+    /// (G-2, T23.2.1, D-21).
+    ///
+    /// **Internal only, and not on the wire.** It is issued by
+    /// `axiam_pki::saml_signing` and kept in the tenant's
+    /// `saml_idp_credential` row, never in the `certificate` inventory (the
+    /// schema's `cert_type` assertion refuses it), and `#[serde(skip)]` keeps it
+    /// out of every request, response and OpenAPI schema: nothing can ask for
+    /// one, and no certificate list or get can return one.
+    ///
+    /// `keyUsage: digitalSignature` only, `extendedKeyUsage:
+    /// id-kp-documentSigning` (RFC 9336) and no `subjectAltName` — see
+    /// [`LeafProfile::for_leaf`].
+    ///
+    /// It authenticates nobody: the bind endpoint refuses it, device login
+    /// refuses it, and every client-certificate check refuses it by type, as
+    /// they refuse `Server`.
+    #[serde(skip)]
+    SamlSigning,
 }
 
 /// A name to put in a `Server` certificate's `subjectAltName`.
@@ -76,6 +95,31 @@ pub enum LeafExtendedKeyUsage {
     ClientAuth,
     /// `id-kp-serverAuth`.
     ServerAuth,
+    /// `id-kp-documentSigning` (RFC 9336, `1.3.6.1.5.5.7.3.36`): the key signs
+    /// documents. The SAML assertion signer's purpose.
+    DocumentSigning,
+}
+
+impl LeafExtendedKeyUsage {
+    /// The purpose's object identifier, as the arcs of its dotted form.
+    #[must_use]
+    pub const fn oid_arcs(self) -> &'static [u64] {
+        match self {
+            Self::ClientAuth => &[1, 3, 6, 1, 5, 5, 7, 3, 2],
+            Self::ServerAuth => &[1, 3, 6, 1, 5, 5, 7, 3, 1],
+            Self::DocumentSigning => &[1, 3, 6, 1, 5, 5, 7, 3, 36],
+        }
+    }
+
+    /// The dotted form of [`Self::oid_arcs`].
+    #[must_use]
+    pub fn oid_dotted(self) -> String {
+        self.oid_arcs()
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
 }
 
 /// The usages every AXIAM leaf of a given type and key is issued with.
@@ -89,6 +133,19 @@ pub enum LeafExtendedKeyUsage {
 /// | `User`, `Service`, `Device` | RSA | digitalSignature, keyEncipherment | clientAuth |
 /// | `Server` | Ed25519 | digitalSignature | serverAuth |
 /// | `Server` | RSA | digitalSignature, keyEncipherment | serverAuth |
+/// | `SamlSigning` | any | digitalSignature | documentSigning |
+///
+/// **`SamlSigning`'s purpose is `id-kp-documentSigning`** (RFC 9336, D-21).
+/// Omitting the extension would be RFC 5280's "any purpose", which a
+/// chain-validating TLS verifier reads as acceptable for client authentication;
+/// naming `clientAuth` or `serverAuth` would be wrong. Naming document signing
+/// means a verifier that checks the purpose accepts neither a TLS use nor a
+/// client-certificate use. The refusal does not rest on the extension alone:
+/// every door that turns a certificate into an identity (the bind endpoint,
+/// `MtlsService::authenticate_der` behind device login and native mTLS) also
+/// refuses the type by an exhaustive match. Key usage is `digitalSignature` only
+/// whatever the key: a signing key never enciphers, so `keyEncipherment` on an
+/// RSA key would only widen it.
 ///
 /// Before S-7 a leaf carried neither extension, which RFC 5280 reads as "any
 /// usage". The profile only ever narrows that.
@@ -102,15 +159,16 @@ impl LeafProfile {
     /// The profile for a leaf of `cert_type` over a key of `key_algorithm`.
     pub fn for_leaf(cert_type: &CertificateType, key_algorithm: &KeyAlgorithm) -> Self {
         let mut key_usage = vec![LeafKeyUsage::DigitalSignature];
-        if *key_algorithm == KeyAlgorithm::Rsa4096 {
+        if *key_algorithm == KeyAlgorithm::Rsa4096 && *cert_type != CertificateType::SamlSigning {
             key_usage.push(LeafKeyUsage::KeyEncipherment);
         }
-        let extended_key_usage = vec![match cert_type {
-            CertificateType::Server => LeafExtendedKeyUsage::ServerAuth,
+        let extended_key_usage = match cert_type {
+            CertificateType::Server => vec![LeafExtendedKeyUsage::ServerAuth],
             CertificateType::User | CertificateType::Service | CertificateType::Device => {
-                LeafExtendedKeyUsage::ClientAuth
+                vec![LeafExtendedKeyUsage::ClientAuth]
             }
-        }];
+            CertificateType::SamlSigning => vec![LeafExtendedKeyUsage::DocumentSigning],
+        };
         Self {
             key_usage,
             extended_key_usage,
@@ -882,5 +940,71 @@ mod tests {
     fn only_a_chained_certificate_is_chained_to_an_anchor() {
         assert!(CertTrust::ChainedToAnchor.is_chained_to_anchor());
         assert!(!CertTrust::SelfAsserted.is_chained_to_anchor());
+    }
+
+    /// G-2 — the `SamlSigning` row of the profile table: `digitalSignature`
+    /// only whatever the key, and `id-kp-documentSigning` as the only purpose.
+    /// The other types keep exactly the profile S-7 gave them.
+    #[test]
+    fn the_saml_signing_profile_is_digital_signature_and_document_signing_only() {
+        for key in [KeyAlgorithm::Ed25519, KeyAlgorithm::Rsa4096] {
+            let p = LeafProfile::for_leaf(&CertificateType::SamlSigning, &key);
+            assert_eq!(p.key_usage, vec![LeafKeyUsage::DigitalSignature]);
+            assert_eq!(
+                p.extended_key_usage,
+                vec![LeafExtendedKeyUsage::DocumentSigning]
+            );
+        }
+        assert_eq!(
+            LeafExtendedKeyUsage::DocumentSigning.oid_dotted(),
+            "1.3.6.1.5.5.7.3.36"
+        );
+        assert_eq!(
+            LeafExtendedKeyUsage::ServerAuth.oid_dotted(),
+            "1.3.6.1.5.5.7.3.1"
+        );
+        assert_eq!(
+            LeafExtendedKeyUsage::ClientAuth.oid_dotted(),
+            "1.3.6.1.5.5.7.3.2"
+        );
+    }
+
+    /// D-21 — the type is not on the wire: it can be neither requested nor
+    /// returned, so no API response can carry it and no request can name it.
+    #[test]
+    fn the_saml_signing_type_is_not_on_the_wire() {
+        assert!(serde_json::from_str::<CertificateType>("\"SamlSigning\"").is_err());
+        assert!(serde_json::to_string(&CertificateType::SamlSigning).is_err());
+        for wire in ["User", "Service", "Device", "Server"] {
+            let parsed: CertificateType =
+                serde_json::from_str(&format!("\"{wire}\"")).expect("an existing type");
+            assert_eq!(
+                serde_json::to_string(&parsed).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
+    }
+
+    /// The other types keep the S-7 profile (I4).
+    #[test]
+    fn the_other_leaf_profiles_are_unchanged() {
+        let server_rsa = LeafProfile::for_leaf(&CertificateType::Server, &KeyAlgorithm::Rsa4096);
+        assert_eq!(
+            server_rsa.key_usage,
+            vec![
+                LeafKeyUsage::DigitalSignature,
+                LeafKeyUsage::KeyEncipherment
+            ]
+        );
+        assert_eq!(
+            server_rsa.extended_key_usage,
+            vec![LeafExtendedKeyUsage::ServerAuth]
+        );
+        let device = LeafProfile::for_leaf(&CertificateType::Device, &KeyAlgorithm::Ed25519);
+        assert_eq!(device.key_usage, vec![LeafKeyUsage::DigitalSignature]);
+        assert_eq!(
+            device.extended_key_usage,
+            vec![LeafExtendedKeyUsage::ClientAuth]
+        );
     }
 }

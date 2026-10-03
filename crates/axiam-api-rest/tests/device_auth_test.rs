@@ -969,3 +969,118 @@ async fn a_server_certificate_cannot_be_bound() {
         "I4: a Device certificate still binds"
     );
 }
+
+// ---------------------------------------------------------------------------
+// G-2 / T23.2.1 — a SamlSigning certificate authenticates nobody, and cannot be
+// requested over the wire.
+// ---------------------------------------------------------------------------
+
+/// `bind` refuses a `SamlSigning` certificate with 400, exactly as it refuses a
+/// `Server` one. The SAML signing leaf is never a `certificate` row (D-21), so
+/// the door can only meet one if something wrote a row around the service
+/// layer; that is emulated by widening the assertion in the test database and
+/// retyping an issued Device leaf. The Device twin still binds (I4).
+#[actix_rt::test]
+async fn a_saml_signing_certificate_cannot_be_bound() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+    let anchor_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, anchor_id);
+    let (retyped_id, _) = generate_device_cert!(app, ca_id, token);
+    let (device_id, _) = generate_device_cert!(app, ca_id, token);
+    let sa_id = create_service_account!(app, token);
+
+    db.query(
+        "DEFINE FIELD OVERWRITE cert_type ON TABLE certificate TYPE string \
+         ASSERT $value IN ['User', 'Service', 'Device', 'Server', 'SamlSigning']; \
+         UPDATE type::record('certificate', $id) SET cert_type = 'SamlSigning'",
+    )
+    .bind(("id", retyped_id.clone()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let bind = |cert_id: String| {
+        test::TestRequest::post()
+            .uri(&format!(
+                "/api/v1/service-accounts/{sa_id}/bind-certificate"
+            ))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .insert_header(("Content-Type", "application/json"))
+            .set_json(serde_json::json!({ "certificate_id": cert_id }))
+            .to_request()
+    };
+    let resp = test::call_service(&app, bind(retyped_id)).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        status, 400,
+        "a SamlSigning certificate must not bind: {body}"
+    );
+    assert!(
+        body.to_string().contains("SamlSigning certificate"),
+        "{body}"
+    );
+
+    let resp = test::call_service(&app, bind(device_id)).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "I4: a Device certificate still binds"
+    );
+}
+
+/// `cert_type: SamlSigning` is not a value the API knows (D-21): both issuance
+/// endpoints answer `400` before anything is issued, and the type is not in the
+/// OpenAPI enum.
+#[actix_rt::test]
+async fn the_certificate_endpoints_do_not_know_the_saml_signing_type() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+    let anchor_id = generate_ca!(app, org_id, ca_token);
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, anchor_id);
+
+    for (uri, body) in [
+        (
+            "/api/v1/certificates",
+            serde_json::json!({
+                "issuer_ca_id": ca_id,
+                "subject": "saml-signing",
+                "cert_type": "SamlSigning",
+                "key_algorithm": "Ed25519",
+                "validity_days": 90,
+            }),
+        ),
+        (
+            "/api/v1/certificates/sign-csr",
+            serde_json::json!({
+                "issuer_ca_id": ca_id,
+                "csr_pem": "not parsed: the type is refused first",
+                "cert_type": "SamlSigning",
+                "validity_days": 90,
+            }),
+        ),
+    ] {
+        let req = test::TestRequest::post()
+            .uri(uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .insert_header(("Content-Type", "application/json"))
+            .set_json(body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400, "{uri} must refuse SamlSigning");
+    }
+}

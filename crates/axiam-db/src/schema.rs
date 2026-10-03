@@ -3887,6 +3887,14 @@ mod tests {
         }
     }
 
+    /// D-21 — v72 does **not** widen the `cert_type` assertion: the SAML signing
+    /// leaf is not a `certificate` row, and the datastore keeps refusing it.
+    #[test]
+    fn v72_leaves_the_certificate_type_assertion_alone() {
+        assert!(!SCHEMA_V72.contains("cert_type"));
+        assert!(SCHEMA_V67.contains("['User', 'Service', 'Device', 'Server']"));
+    }
+
     /// T23.2.1 — v72 is additive DDL only and defaults the IdP switch to off.
     #[test]
     fn v72_is_additive_and_defaults_the_saml_idp_to_off() {

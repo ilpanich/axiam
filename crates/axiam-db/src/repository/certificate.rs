@@ -105,6 +105,10 @@ fn parse_cert_type(s: &str) -> Result<CertificateType, DbError> {
         "Service" => Ok(CertificateType::Service),
         "Device" => Ok(CertificateType::Device),
         "Server" => Ok(CertificateType::Server),
+        // Reads what a bypass of the service layer might have left behind, so a
+        // door refuses it *by type* (and says so) rather than failing opaquely
+        // on the read. Nothing writes it: see `cert_type_str`.
+        "SamlSigning" => Ok(CertificateType::SamlSigning),
         other => Err(DbError::Migration(format!(
             "unknown certificate type: {other}"
         ))),
@@ -117,6 +121,11 @@ fn cert_type_str(t: &CertificateType) -> &'static str {
         CertificateType::Service => "Service",
         CertificateType::Device => "Device",
         CertificateType::Server => "Server",
+        // Never stored (D-21): the SAML signing leaf lives in
+        // `saml_idp_credential`. The arm exists so the match is exhaustive, and
+        // the schema's `cert_type` assertion refuses the value if anything ever
+        // tries to write it.
+        CertificateType::SamlSigning => "SamlSigning",
     }
 }
 

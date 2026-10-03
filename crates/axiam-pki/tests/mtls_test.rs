@@ -669,3 +669,123 @@ async fn a_server_certificate_cannot_log_in_as_a_device() {
         .await
         .expect("I4: a Device certificate bound the same way still authenticates");
 }
+
+/// G-2 — the same door, the second type that authenticates nobody.
+///
+/// The SAML signing leaf is never a `certificate` row (D-21: the schema's
+/// `cert_type` assertion refuses it), so this door can only meet one if
+/// something wrote a row around the service layer. That is emulated honestly:
+/// the assertion is widened in the test database and an issued Device leaf is
+/// retyped to `SamlSigning`. Bound through the repository, it does not log in
+/// as a device, and the refusal names the type. A Device leaf bound the same
+/// way still authenticates (I4).
+#[tokio::test]
+async fn a_saml_signing_certificate_cannot_log_in_as_a_device() {
+    use axiam_core::repository::ServiceAccountRepository;
+
+    let db = setup_db().await;
+    let org_id = uuid::Uuid::new_v4();
+    let tenant_id = uuid::Uuid::new_v4();
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let ca = CaService::new(
+        ca_repo.clone(),
+        test_pki_config(),
+        sem.clone(),
+        test_ca_custodians(),
+    )
+    .generate(CreateCaCertificate {
+        organization_id: org_id,
+        subject: "mTLS Test CA".into(),
+        key_algorithm: KeyAlgorithm::Ed25519,
+        validity_days: 365,
+        intermediate_subject: None,
+        intermediate_validity_days: None,
+        issue_from_root: false,
+    })
+    .await
+    .unwrap();
+    ca_repo
+        .set_mtls_trust_anchor(org_id, ca.certificate.id, true)
+        .await
+        .unwrap();
+
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let certs = CertService::new(
+        ca_repo,
+        cert_repo.clone(),
+        test_pki_config(),
+        sem,
+        test_ca_custodians(),
+    );
+    let issue = |subject: &str| CreateCertificate {
+        tenant_id,
+        issuer_ca_id: ca.certificate.id,
+        subject: subject.into(),
+        cert_type: CertificateType::Device,
+        key_algorithm: KeyAlgorithm::Ed25519,
+        validity_days: 30,
+        metadata: None,
+        subject_alt_names: vec![],
+    };
+    let retyped = certs
+        .generate(
+            org_id,
+            IssuingScope::Organization,
+            issue("saml-signing"),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+    let device = certs
+        .generate(
+            org_id,
+            IssuingScope::Organization,
+            issue("device-7"),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+
+    // The row a bypass of the service layer would leave behind.
+    db.query(
+        "DEFINE FIELD OVERWRITE cert_type ON TABLE certificate TYPE string \
+         ASSERT $value IN ['User', 'Service', 'Device', 'Server', 'SamlSigning']; \
+         UPDATE type::record('certificate', $id) SET cert_type = 'SamlSigning'",
+    )
+    .bind(("id", retyped.certificate.id.to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let (sa, _secret) = SurrealServiceAccountRepository::new(db.clone())
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "SA".into(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    for id in [retyped.certificate.id, device.certificate.id] {
+        cert_repo
+            .bind_to_service_account(tenant_id, id, sa.id)
+            .await
+            .unwrap();
+    }
+
+    let auth = DeviceAuthService::new(cert_repo, SurrealCaCertificateRepository::new(db.clone()));
+    let err = auth
+        .authenticate(&retyped.certificate.public_cert_pem)
+        .await
+        .expect_err("a SamlSigning certificate must not authenticate");
+    assert!(
+        matches!(&err, axiam_core::error::AxiamError::Certificate(m) if m.contains("SamlSigning")),
+        "got {err:?}"
+    );
+    auth.authenticate(&device.certificate.public_cert_pem)
+        .await
+        .expect("I4: a Device certificate bound the same way still authenticates");
+}

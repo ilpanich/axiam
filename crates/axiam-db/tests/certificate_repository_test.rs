@@ -304,3 +304,35 @@ async fn get_bound_service_account_unbound_is_none() {
         None
     );
 }
+
+/// G-2 / D-21: the SAML signing leaf is never an inventory row. The repository
+/// writes the type's name and the schema's assertion refuses it, so a path that
+/// forgot the rule fails at the insert; every other type round-trips.
+#[tokio::test]
+async fn the_inventory_stores_every_type_but_the_saml_signing_leaf() {
+    let (db, _org, tenant_id) = setup().await;
+    let repo = SurrealCertificateRepository::new(db.clone());
+    for (n, cert_type) in [
+        CertificateType::User,
+        CertificateType::Service,
+        CertificateType::Device,
+        CertificateType::Server,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut input = sample_cert(tenant_id, Uuid::new_v4(), &format!("fp-type-{n}"));
+        input.cert_type = cert_type.clone();
+        let created = repo.create(input).await.unwrap();
+        assert_eq!(created.cert_type, cert_type);
+        let read = repo.get_by_id(tenant_id, created.id).await.unwrap();
+        assert_eq!(read.cert_type, cert_type);
+    }
+
+    let mut saml = sample_cert(tenant_id, Uuid::new_v4(), "fp-type-saml");
+    saml.cert_type = CertificateType::SamlSigning;
+    assert!(
+        repo.create(saml).await.is_err(),
+        "the certificate inventory must refuse the SAML signing leaf"
+    );
+}

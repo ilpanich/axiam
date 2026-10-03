@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CertificateType::SamlSigning` (T23.2.1, G-2, D-21).** A fifth certificate
+  type for the leaf of a tenant SAML identity provider's signing credential, on
+  T22.14's per-type profile: `keyUsage` is `digitalSignature` only (no
+  `keyEncipherment` even on an RSA key), `extendedKeyUsage` is
+  `id-kp-documentSigning` (RFC 9336, `1.3.6.1.5.5.7.3.36`) so no TLS verifier
+  accepts it, and there is no `subjectAltName`; the Vault PKI custodian states
+  the purpose as an OID (`ext_key_usage_oids`). It is **internal only and not on
+  the wire**: `#[serde(skip)]` keeps it out of every request, response and the
+  OpenAPI enum, the certificate inventory refuses it (the `cert_type` assertion
+  is unchanged), and `generate` / `sign_csr` refuse it by name. It authenticates
+  nobody: the bind endpoint and `MtlsService::authenticate_der` (device login and
+  native mTLS) refuse it by type, and both doors are now exhaustive `match`es
+  instead of `== Server`, so the next such type is a compile error rather than a
+  silently accepted one. Leaf issuance is split so the SAML credential can reuse
+  the whole issuing path without writing an inventory row.
+
 - **The SAML service-provider registry (T23.2.1, G-2): model, validation,
   repository, schema v72.** `SamlServiceProvider` in `axiam-core` — entity id
   (unique per tenant), an ACS allow-list (`url`, `binding`, `index`,

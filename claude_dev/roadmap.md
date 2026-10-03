@@ -1084,7 +1084,7 @@ with an F4 security review of the wave's diff against
 | T23.2.7 | e2e: `samael` test SP and Keycloak round trip, refusals, feature-off 404 | Sonnet 5.5 | W4 | |
 | T23.2.8 | Contract §29, threat-model elements, design-document federation chapter | Opus 5.5 | W4 | |
 | T23.2.9 | OpenAPI, website *Integrate*, eleven SDK ports of §29 | Sonnet 5.5 | W4 | |
-| T23.3.1 | `axiam-directory` crate at layer 3, `DirectoryConfig` with the secret provider | Sonnet 5.5 | W2 | |
+| T23.3.1 | `axiam-directory` crate at layer 3, `DirectoryConfig` with the secret provider | Sonnet 5.5 | W2 | ✓ |
 | T23.3.2 | LDAP client over `rustls`, RFC 4515 escaping, bind-as-user path, refusals for directory users | Opus 5.5 | W2 | |
 | T23.3.3 | JIT provisioning | Sonnet 5.5 | W3 | |
 | T23.3.4 | Group mapping (`memberOf`, reverse `member`, nested) | Sonnet 5.5 | W3 | |

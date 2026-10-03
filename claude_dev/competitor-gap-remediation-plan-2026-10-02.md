@@ -447,6 +447,40 @@ fan-out.
 
 ### G-3 — LDAP / Active Directory identity source — **P1**
 
+> **EXECUTED (partly) — G-3, W2: T23.3.1, 2026-10-03** (`7279f66`, `2f60f4f`,
+> `227af53`; Sonnet 5.5; issue #522). The crate `axiam-directory` exists at
+> layer 3, in the layering table and `crate-layering.md` from its first
+> commit, opted into `missing_docs` (CLAUDE.md's list now names it), with no
+> feature flag and no network code yet. `DirectoryConfig` lives in
+> `axiam-core` as the pinned fields plus `enabled`, `kind` (`OpenLdap` |
+> `ActiveDirectory`, which only chooses defaults: `entryUUID`/`objectGUID`,
+> reverse `member`/`memberOf`, `modifyTimestamp`/`uSNChanged`, `uid`/
+> `sAMAccountName`) and `group_nesting_depth` (0–10, default 5); the
+> repository is schema **v70**, one row per tenant. The bind secret follows
+> **D-15**: AES-256-GCM in the row through the existing
+> `axiam_auth::crypto` helpers, keyed by the optional provider key
+> `directory_encryption_key`; no read returns it, only
+> `decrypt_bind_secret` does; without the key a save is refused naming the
+> key, serving is `503`, and boot is unaffected. `axiam_directory::config::
+> validate` is pure and refuses at config time a plaintext URL (`ldap://`
+> without StartTLS, `ldaps://` with it, any other scheme), userinfo, a path
+> or query, a filter template without exactly one `{username}` in value
+> position, an empty bind secret (an RFC 4513 unauthenticated bind), and a
+> trust anchor that is not a parseable CA certificate; an empty anchor list
+> means the platform roots the rest of the workspace uses. Tests: 44 unit
+> tests in the crate, 20 repository tests, the v70 schema tests, the key's
+> name and environment variable pinned.
+>
+> What the plan did not anticipate. The brief said the directory row should
+> go "with the tenant, exactly as its email config is": **no tenant-delete
+> cascade exists for anything**, the email configuration included, so a
+> deleted tenant leaves its SMTP ciphertext behind. The directory row is now
+> deleted in the same transaction as its tenant (tested); the email
+> configuration's missing cascade is carried to the F4 review. No threat
+> entry yet: the connector's elements, the bind secret at rest among them,
+> are written by T23.3.2 with the network path, pulled forward from T23.3.7
+> so that §7 rule 2 holds.
+
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned
 just in time, and their directory groups map onto AXIAM groups, so roles and

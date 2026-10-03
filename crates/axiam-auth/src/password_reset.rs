@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::crypto_gate::acquire_hash_permit;
 use crate::error::AuthError;
-use crate::password::{self, DUMMY_HASH, hash_password, verify_password};
+use crate::password::{self, hash_password, verify_password};
 use crate::policy::{PolicyCheckResult, evaluate_password};
 use crate::token;
 
@@ -130,7 +130,7 @@ where
         if let Ok(Ok(_permit)) = acquired {
             let pepper_owned = pepper.map(str::to_string);
             let _ = tokio::task::spawn_blocking(move || {
-                password::verify_password("dummy", DUMMY_HASH, pepper_owned.as_deref())
+                password::equalising_dummy_verify(pepper_owned.as_deref())
             })
             .await;
         }

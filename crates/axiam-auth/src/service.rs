@@ -416,11 +416,7 @@ impl<
     async fn dummy_verify_holding(&self, permit: tokio::sync::SemaphorePermit<'_>) {
         let pepper_owned = self.config.pepper.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            password::verify_password(
-                "dummy",
-                password::DUMMY_HASH,
-                pepper_owned.as_ref().map(|p| p.expose_secret()),
-            )
+            password::equalising_dummy_verify(pepper_owned.as_ref().map(|p| p.expose_secret()))
         })
         .await;
         drop(permit);

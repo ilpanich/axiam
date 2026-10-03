@@ -1,6 +1,10 @@
 # OpenID Connect **Basic OP** — gap-closure plan, coexisting with FAPI 2.0
 
-**Status: plan only.** No crate source changes accompany this document. It
+**Status: executed.** X7.1–X7.8 shipped in earlier phases and were audited
+against their specification, test by test, in Phase 23 W1 (T23.1.1–T23.1.3)
+and W2 (T23.1.4, with decision D-12); the body below is the plan as written,
+not rewritten. *Original status: plan only — no crate source changes accompany
+this document.* It
 designs the work needed for AXIAM to pass the OpenID Foundation's
 `oidcc-basic-certification-test-plan` (certification profile **"Basic OP"**)
 without loosening any security property the FAPI 2.0 Security Profile (Final)

@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SAML 2.0 identity provider: assertion issuance (T23.2.2, G-2, D-22).**
+  `axiam_federation::saml_idp`, a library behind the `saml` feature that the SSO
+  endpoint (T23.2.3) will call; no route serves SAML yet. `SamlIdpIssuer::issue`
+  turns a verified AXIAM session into a `samlp:Response` for a registered service
+  provider: `Issuer` from `idp_entity_id` (`{base}/saml/v2/{tenant}/metadata`,
+  the one definition the metadata endpoint will reuse), a bearer
+  `SubjectConfirmation` whose `Recipient` and the response's `Destination` are
+  the registered HTTP-POST ACS URL used, `InResponseTo` on both when
+  SP-initiated and on neither when IdP-initiated, `Conditions` valid five
+  minutes and backdated by the existing 60 s skew allowance, the SP's entity id
+  as the only `Audience`, `AuthnInstant` = the session's `authenticated_at`,
+  `SessionIndex` = the session id, `AuthnContextClassRef` from the session's
+  `amr` only (REFEDS MFA, `X509`, `PasswordProtectedTransport` or
+  `unspecified`), and an `AttributeStatement` from the SP's attribute mapping
+  over user fields, group names and role names. The `NameID` is a persistent
+  **pairwise** identifier by default — HMAC-SHA256 under the new optional
+  deployment key `saml_pairwise_key` over the tenant, the user and the SP entity
+  id (D-22), stable across credential rotation and never containing the user id
+  — or the user's email when the SP asks (no address is a refusal). The
+  assertion is always signed (enveloped XML-DSig, `rsa-sha256`, `sha256`,
+  exclusive c14n, the certificate in `KeyInfo`), the response too when the SP's
+  `sign_responses` is set, after the assertion so its signature covers it; the
+  issuer then verifies every signature and the document's shape before
+  returning. A credential that is not the tenant's, not `active` or outside
+  `not_before..not_after` is refused. `failure` builds unsigned, status-only
+  responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`,
+  `RequestDenied`, `InvalidNameIDPolicy`). `check_allowed_groups`,
+  `check_acs_url`, `check_request_id` and `check_relay_state` (80 bytes) are
+  exposed for the SSO endpoint to call before the login hop. An SP registered
+  with `encrypt_assertions` is refused (`Responder`): encryption (D-2) is not
+  implemented. Threat model 2.21.0: the trust boundary AXIAM ↔ SAML service
+  provider, T-304…T-316.
+
 - **`CertificateType::SamlSigning` (T23.2.1, G-2, D-21).** A fifth certificate
   type for the leaf of a tenant SAML identity provider's signing credential, on
   T22.14's per-type profile: `keyUsage` is `digitalSignature` only (no

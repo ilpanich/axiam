@@ -1,5 +1,5 @@
 {
-  "version": "2.20.0",
+  "version": "2.21.0",
   "summary": {
     "title": "Axiam",
     "owner": "ilpanich",
@@ -6853,7 +6853,7 @@
       {
         "id": 3,
         "title": "Federation \u2014 SAML SP & OIDC relying party",
-        "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface \u2014 the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization\u2192tenant inheritance of a federation config.",
+        "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface \u2014 the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization\u2192tenant inheritance of a federation config. Since Phase 23 (G-2) it also covers AXIAM as a SAML identity provider: the assertion issuer (`axiam_federation::saml_idp`, T23.2.2), the tenant's sealed signing credential (`saml_idp_credential`, D-21) and the trust boundary to the service providers it issues to.",
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
@@ -6932,7 +6932,7 @@
             },
             "size": {
               "width": 380,
-              "height": 620
+              "height": 740
             },
             "attrs": {
               "label": {
@@ -9240,6 +9240,408 @@
               "isEncrypted": true,
               "isPublicNetwork": false,
               "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "position": {
+              "x": 20,
+              "y": 850
+            },
+            "size": {
+              "width": 260,
+              "height": 190
+            },
+            "attrs": {
+              "label": {
+                "text": "SAML service providers"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 3,
+                "strokeDasharray": "10 5"
+              }
+            },
+            "visible": true,
+            "shape": "trust-boundary-box",
+            "zIndex": -50,
+            "id": "ba2d3e30-eb5c-53ec-b467-783b02929021",
+            "data": {
+              "type": "tm.BoundaryBox",
+              "name": "SAML service providers",
+              "description": "AXIAM \u2194 SAML service provider (G-2): the applications a tenant administrator registers to receive SAML assertions from the tenant's IdP. What crosses is a signed response, delivered through the user's browser by the HTTP-POST binding; the SP trusts it by the certificate it pinned from the tenant's metadata.",
+              "isTrustBoundary": true,
+              "hasOpenThreats": false,
+              "crossingFlows": [],
+              "containedElements": []
+            }
+          },
+          {
+            "position": {
+              "x": 45,
+              "y": 910
+            },
+            "size": {
+              "width": 150,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "SAML service provider\n(registered per tenant)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "actor",
+            "zIndex": 1,
+            "id": "0650fae0-6076-575a-82ea-efbb5f39ab39",
+            "data": {
+              "type": "tm.Actor",
+              "name": "SAML service provider\n(registered per tenant)",
+              "description": "A relying application (SaaS or internal) registered in the tenant's SP registry (T23.2.1): entity id, ACS allow-list, NameID policy, attribute mapping. External: AXIAM controls what it signs for the SP, not what the SP does with it.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "providesAuthentication": false,
+              "threats": [
+                {
+                  "id": "f42bf2c2-09cb-5fb4-96d5-4de99a9e952b",
+                  "title": "A leaked signing key keeps forging assertions after the credential is retired",
+                  "status": "Open",
+                  "severity": "Critical",
+                  "type": "Spoofing",
+                  "description": "Service providers pin the IdP certificate from metadata and cache metadata for hours or days, and SAML has no revocation channel SPs consult. Once a tenant's signing key has leaked, every SP that trusts the tenant accepts assertions forged for any user until its own administrator removes the certificate.",
+                  "mitigation": "Partly mitigated. Retiring the credential destroys its key and takes its certificate out of the tenant's metadata (D-21; the metadata endpoint is T23.2.5), and a credential is valid for at most two years (`MAX_SAML_IDP_CREDENTIAL_VALIDITY_DAYS`), after which AXIAM's own signer refuses it (T-308) and SPs that check validity do too. Open because nothing AXIAM does reaches an SP's pinned trust: recovering from a leak means telling every SP administrator, which is a procedure, not a control. T-304 and T-305 are what keep the key from leaking.",
+                  "modelType": "STRIDE",
+                  "number": 306
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 820,
+              "y": 510
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "SAML assertion issuer\n(saml_idp)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "d311d7ba-fb5e-54ed-aab1-9d7aed357c69",
+            "data": {
+              "type": "tm.Process",
+              "name": "SAML assertion issuer\n(saml_idp)",
+              "description": "axiam_federation::saml_idp (T23.2.2, behind the `saml` feature): builds the assertion (pairwise or email NameID, bearer confirmation, five-minute conditions, AuthnStatement from the session, attribute mapping), signs it with the tenant's credential (enveloped XML-DSig, rsa-sha256), optionally signs the response, checks its own output and returns the HTTP-POST binding value. Pure library; the SSO endpoint (T23.2.3) calls it.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "dab74e7c-9b38-5bd9-866b-c59a40f63fa3",
+                  "title": "The SAML signing key leaks from memory, a log line, a Debug print or an error",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "The signing key is opened on every sign-on. A copy left in a freed buffer, printed by a derived `Debug`, interpolated into a log line or carried in an error string reaches crash dumps, log pipelines and support tickets, and from there anyone can sign as the tenant.",
+                  "mitigation": "The plaintext exists only as `SamlIdpSigningKey::private_key_pem`, a `Zeroizing<String>` whose `Debug` prints `[REDACTED]` (T23.2.1). The issuer (`axiam_federation::saml_idp`) decodes it to DER itself, into `Zeroizing` buffers, rather than through the `pem` crate, whose parser keeps intermediate copies of the base64 text it does not wipe; the DER is dropped as soon as the last signature is made. `SamlIdpError` is a closed set of fixed strings with no fields, so no refusal can carry key material, and the signing path logs only xmlsec's own error text. The pairwise-identifier key (D-22) is held the same way (`PairwiseKey`: zeroizing, `Debug` redacted). Tests: `no_debug_output_carries_key_material`, `a_pkcs1_key_signs_too_and_a_key_that_does_not_match_the_certificate_is_refused`. Residual: libxmlsec1 and OpenSSL hold their own copy of the key for the duration of a signature and release it under their own discipline (OpenSSL clears an RSA key's private components when it frees them).",
+                  "modelType": "STRIDE",
+                  "number": 305
+                },
+                {
+                  "id": "43d9e989-3d2b-50f2-8242-c80e855531b9",
+                  "title": "An assertion is signed with one tenant's key, or under one tenant's Issuer, for another tenant's user or SP",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Elevation of privilege",
+                  "description": "Credentials, SP registrations, users and sessions of every tenant sit in one process. An issuer that took its tenant from the SP row, the session or the credential rather than from the request could sign tenant B's user into tenant A's SP, or put tenant A's `Issuer` on tenant B's assertion; an SP trusting tenant A would then admit a user tenant A never authenticated.",
+                  "mitigation": "The tenant is an explicit input taken from the request path (`SsoIssuance::tenant_id`), and the `Issuer` and `NameQualifier` are `idp_entity_id(public_base_url, tenant_id)` \u2014 one function, never a stored value; T23.2.5's metadata `entityID` uses the same one. `SamlIdpIssuer::issue` refuses with `TenantMismatch` (answered `Responder`) unless the SP row, the user, the session, every group and role passed for the attribute statement, and the signing credential all carry that tenant; the session must also be the user's and unexpired. Tests: `every_input_from_another_tenant_is_refused`, `a_credential_outside_its_validity_window_or_not_active_refuses_to_sign` (another tenant's credential), `the_session_must_be_the_users_and_live_and_the_account_may_act`, `the_idp_entity_id_is_one_function_of_the_base_url_and_the_path_tenant`.",
+                  "modelType": "STRIDE",
+                  "number": 307
+                },
+                {
+                  "id": "7d6ba29e-96e7-580a-8556-e203d0c2d41d",
+                  "title": "An expired, not-yet-valid or retired credential signs assertions",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "`SamlIdpCredentialService::get_active_signing_key` returns the tenant's active row whatever its dates (T23.2.1 left the decision to the signer). A signer that used it anyway would issue under a certificate its SPs may already distrust, or keep a credential in service past the date an administrator relied on.",
+                  "mitigation": "The signer refuses before any key is decoded: the credential must be `active` and `not_before \u2264 now < not_after`, otherwise `CredentialNotActive` or `CredentialNotValid`, both answered `Responder` with no status message. Tests: `a_credential_outside_its_validity_window_or_not_active_refuses_to_sign` (one second past `not_after`, exactly at it, one second before `not_before`, `next`, `retired`).",
+                  "modelType": "STRIDE",
+                  "number": 308
+                },
+                {
+                  "id": "18456420-1d38-51ee-8d1b-1a6ab03d8ddf",
+                  "title": "The SAML signing certificate is accepted as a TLS or client-authentication credential",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "description": "The leaf is signed by a CA of the tenant's organization, which other verifiers \u2014 mTLS, device login \u2014 trust. A SAML signing certificate those verifiers accepted would make the IdP key a client credential, and an application-layer use of one key a cross-protocol one.",
+                  "mitigation": "D-21's `SamlSigning` profile: keyUsage `digitalSignature` only (no `keyEncipherment`, even on RSA), extendedKeyUsage `id-kp-documentSigning` (RFC 9336) only, no SANs, so no TLS verifier accepts it for server or client authentication. The type is internal (`serde`-skipped and absent from the OpenAPI enum) and is refused by certificate generation, CSR signing, the bind endpoint, device login and mTLS; the leaf is never a `certificate` row. Tests (T23.2.1): `saml_idp_credential_test.rs::the_generic_issuance_paths_and_the_certificate_store_refuse_saml_signing`, `mtls_test.rs::a_saml_signing_certificate_cannot_log_in_as_a_device`, `device_auth_test.rs::a_saml_signing_certificate_cannot_be_bound`.",
+                  "modelType": "STRIDE",
+                  "number": 310
+                },
+                {
+                  "id": "ef8ce6f4-d5d9-5fbf-8a2b-c0f833ff4b37",
+                  "title": "The signer emits a wrapped, mis-referenced or markup-injected document under the tenant's signature",
+                  "status": "Mitigated",
+                  "severity": "Critical",
+                  "type": "Tampering",
+                  "description": "Signature-wrapping attacks need a signed element and a second, unsigned one an SP reads instead. An issuer that signed the wrong element, emitted two assertions, reused an `ID`, referenced something other than the element its signature sits in, or let a user-controlled value \u2014 a display name, a group name, an attribute name, an `AuthnRequest` id \u2014 close an element and open another, would hand an attacker a document signed by the tenant whose meaning the attacker chose.",
+                  "mitigation": "The assertion is written as text through one escaping function for element text and attribute values alike (`&`, `<`, `>` and quotes as entities; tab, line feed and carriage return as character references; a character XML 1.0 cannot carry becomes U+FFFD). `InResponseTo` is echoed only when it is an ASCII `NCName` of at most 256 bytes. `ID`s are `_` followed by 160 CSPRNG bits. Signing is enveloped XML-DSig, `rsa-sha256` over `sha256` with exclusive canonicalization, the reference naming the signed element's `ID` and the certificate in `KeyInfo`; the assertion is signed on its own, embedded, and the response signed after it when the SP's `sign_responses` is set, so that signature covers the signed assertion. Before anything is returned the issuer re-parses its output and requires exactly one `Assertion`, the root's child; exactly the intended `ds:Signature`s, each referencing its parent's `ID`; two distinct `ID`s; and every signature verifying against the credential's certificate with the xmlsec verifier the SP side uses. Anything else is `SigningFailed`. Tests: `the_output_has_one_assertion_unique_ids_and_matching_references`, `values_are_escaped_and_round_trip_as_text_not_markup`, `a_single_changed_byte_in_any_signed_element_fails_verification`, `with_response_signing_on_both_signatures_verify_and_the_response_signature_covers_the_signed_assertion`, `xsw1_and_xsw2_wrapped_copies_of_a_signed_response_are_refused_by_the_sp`, `assertion_level_wrapping_of_the_builder_output_is_refused_by_the_sp`, `a_pkcs1_key_signs_too_and_a_key_that_does_not_match_the_certificate_is_refused` (a signature the certificate does not verify never leaves).",
+                  "modelType": "STRIDE",
+                  "number": 311
+                },
+                {
+                  "id": "8a88c95b-e2aa-52de-9e70-1a57f98d7022",
+                  "title": "Service providers link a user across SPs, or back to the AXIAM account",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "A `NameID` that is the same at every SP, or derivable from the user id, lets SPs that compare notes \u2014 or an attacker who breaches two of them \u2014 follow a person across services the person kept apart, and hands every SP an AXIAM internal identifier.",
+                  "mitigation": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. Open because `SessionIndex` is the AXIAM session id (plan \u00a74 G-2, so that SLO and the revocation feed revoke the same thing): it is identical at every SP of one sign-on, as is `AuthnInstant`, so SPs that collude can correlate concurrent sessions despite pairwise identifiers. T23.2.4 decides whether SLO can map a per-SP index back to the session.",
+                  "modelType": "STRIDE",
+                  "number": 312
+                },
+                {
+                  "id": "00294ccc-0234-5987-95bf-b1de95bf3705",
+                  "title": "An email NameID vouches for an address AXIAM never verified",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "An SP that keys accounts on email trusts the IdP to say who owns the address. In a tenant that allows self-registration, someone can create an account under a victim's address and, within the email-verification grace period (or as one of the accounts that stay pending for life, T-160), sign on to such an SP and land in the victim's existing account there.",
+                  "mitigation": "Partly mitigated. The default `NameID` is the pairwise identifier, which no address can collide with; the email policy is a per-SP opt-in; an account with no address is refused (`NameIdUnavailable`, answered `InvalidNameIDPolicy`) rather than sent an empty `NameID`. SAML carries no `email_verified` the way OpenID Connect does, and most provisioning paths (administrator, SCIM, directory, federation) never set `email_verified_at`, so refusing every unverified address would end email `NameID`s for nearly every account. Open: the rule (refuse an unverified self-registered address, or a per-SP switch) is T23.2.3's to decide with the SSO endpoint's account checks. Test: `an_email_name_id_is_the_address_and_a_missing_address_is_a_refusal`.",
+                  "modelType": "STRIDE",
+                  "number": 313
+                },
+                {
+                  "id": "c30a64ce-a217-5061-9138-9f4e75244ddd",
+                  "title": "The authentication context overstates how the user authenticated",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "SPs that require a second factor read `AuthnContextClassRef`. Copied from the SP's `RequestedAuthnContext`, or from an upstream IdP's claim, it says multi-factor for a password login, and the SP releases what it meant to protect.",
+                  "mitigation": "`authn_context_class_ref` takes the session's `amr` and nothing else; there is no request parameter to echo, the rule `acr_for` follows for OIDC (W4). Multi-factor evidence (`mfa`, or `hwk`/`swk` with `user`) is the REFEDS MFA profile; `x509` is `X509`; `pwd` is `PasswordProtectedTransport`; a federated login (`fed`), a presence-only key and no evidence are `unspecified`. Tests: `the_authn_context_mapping_table_is_pinned`, `the_authn_statement_carries_the_session_id_instant_and_class`.",
+                  "modelType": "STRIDE",
+                  "number": 314
+                },
+                {
+                  "id": "7f519059-97eb-560c-a496-5946d6df9e1a",
+                  "title": "An SP registered for encrypted assertions receives them in plaintext",
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "An administrator who set `encrypt_assertions` expects the attributes to be readable by the SP alone \u2014 not by a TLS-terminating proxy in front of it, nor from browser history. A silent downgrade would release them in the clear while the console says otherwise.",
+                  "mitigation": "Assertion encryption (D-2) is not implemented: `samael` has no encryption API and nothing in the tree could verify an AES-256-GCM `EncryptedAssertion`. The issuer refuses such an SP outright (`EncryptionUnsupported`, answered `Responder`) and never emits the plaintext. Residual: the registry still accepts the flag, so the refusal surfaces at sign-on rather than at save; the write path (T23.2.5/T23.2.6) should refuse it until encryption ships. Test: `request_shaped_refusals`.",
+                  "modelType": "STRIDE",
+                  "number": 315
+                },
+                {
+                  "id": "cf9f6241-2323-5aeb-82dd-512c1e90e248",
+                  "title": "A document signed by the tenant's key is harvested as a signature-wrapping gadget",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "Some SP verifiers check only the first signature in a document, or treat a signature as covering an assertion because a reference names it. Against them, any document the tenant's key signed that carries no assertion \u2014 an error response echoing a request id an attacker chose, for instance \u2014 can be placed ahead of a forged assertion and vouch for it. Anyone who can send an `AuthnRequest` could collect one.",
+                  "mitigation": "The tenant's key signs one shape of document only: a response carrying exactly one assertion (T-311). Failure responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`, `RequestDenied`, `InvalidNameIDPolicy`) carry no assertion and are never signed, which SAML Profiles \u00a74.1.3.5 permits, and they have no status message or detail. Tests: `failure_responses_are_status_only_unsigned_and_echo_what_can_be_echoed`, `axiam_own_sp_refuses_a_failure_response`. Constraint for T23.2.4: a signed `LogoutRequest` or `LogoutResponse` is exactly such a document, so SLO signing needs its own decision rather than reusing this key by default.",
+                  "modelType": "STRIDE",
+                  "number": 316
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 1075,
+              "y": 715
+            },
+            "size": {
+              "width": 170,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "saml_idp_credential\n(sealed signing key)"
+              },
+              "topLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              },
+              "bottomLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "store",
+            "zIndex": 1,
+            "id": "2a2a1983-07c2-5847-a3d0-7de61be737f2",
+            "data": {
+              "type": "tm.Store",
+              "name": "saml_idp_credential\n(sealed signing key)",
+              "description": "One active and at most one next credential per tenant (schema v72, D-21): the RSA-4096 SamlSigning leaf and its private key sealed AES-256-GCM under pki_encryption_key by the database custodian.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "isALog": false,
+              "isEncrypted": true,
+              "isSigned": false,
+              "storesCredentials": true,
+              "storesInventory": false,
+              "threats": [
+                {
+                  "id": "52263411-558a-5b7f-8e48-ee0bf5388b5d",
+                  "title": "The tenant's SAML signing key is disclosed from the database or a backup",
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "Whoever holds a tenant's SAML signing key can sign an assertion for any user of the tenant, to every service provider that trusts the tenant's metadata: account takeover at every SP, with no AXIAM sign-in at all. The key lives in the tenant's `saml_idp_credential` row.",
+                  "mitigation": "Decision D-21: the key is sealed with AES-256-GCM under `pki_encryption_key` through `DatabaseCaKeyStore` \u2014 the database custodian, chosen explicitly whatever the deployment's CA custody \u2014 with the custody recorded on the row. A database dump or backup alone yields ciphertext; it takes the dump and the provider-held `pki_encryption_key` together. Only `SamlIdpCredentialRepository::get_active_sealed` selects the ciphertext (every list and get returns `SamlIdpCredential`, a type with no key field); the leaf is never a `certificate` row, so no certificate API can return it; `retire` clears the sealed key in the same write that takes the row out of its slot; and both SAML tables go with their tenant in the tenant-delete transaction. Tests: `saml_idp_credential_test.rs::an_issued_credential_has_the_saml_profile_chains_to_its_ca_and_seals_its_key` (T23.2.1). Residual: no audit record is written when the key is unsealed \u2014 it is unsealed on every sign-on, so a record per read would be one per assertion \u2014 and a compromised application process can unseal it exactly as the signer does.",
+                  "modelType": "STRIDE",
+                  "number": 304
+                },
+                {
+                  "id": "946f3f1f-6c46-5888-ad51-53a99f4818ff",
+                  "title": "Sign-on stops when the active credential expires or is retired before a successor is in place",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "Because the signer refuses an expired credential (T-308), a tenant whose credential reaches `not_after` stops issuing assertions to every SP, and so does one whose administrator retires the active credential. SPs pin the certificate, so a successor must be published in metadata before it signs, or every SP rejects its first assertion.",
+                  "mitigation": "Open until rotation exists. The `next` slot is in the schema (at most one per tenant, enforced by the database), so a successor can be issued ahead of time, but there is no promote verb and the metadata endpoint does not yet publish `next` (T23.2.5). Until then an administrator issues the successor early and coordinates the switch with each SP. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion.",
+                  "modelType": "STRIDE",
+                  "number": 309
+                }
+              ]
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "7d696844-4832-50fc-875a-20131322325c",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "unseal active signing key"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "d311d7ba-fb5e-54ed-aab1-9d7aed357c69"
+            },
+            "target": {
+              "cell": "2a2a1983-07c2-5847-a3d0-7de61be737f2"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "unseal active signing key",
+              "description": "SamlIdpCredentialService::get_active_signing_key: the one read that selects the ciphertext; the key is opened into a Zeroizing buffer for one issuance.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "f92614c0-f205-5e5f-9730-1b48f5a720cb",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "signed SAML response (HTTP-POST via the browser)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "d311d7ba-fb5e-54ed-aab1-9d7aed357c69"
+            },
+            "target": {
+              "cell": "0650fae0-6076-575a-82ea-efbb5f39ab39"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "signed SAML response (HTTP-POST)",
+              "description": "Base64 of the samlp:Response, auto-posted by the user's browser to the registered ACS URL, with RelayState echoed verbatim (at most 80 bytes).",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS (SAML HTTP-POST binding)",
               "threats": [],
               "trustBoundaryIds": []
             }
@@ -16660,6 +17062,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 303
+    "threatTop": 316
   }
 }

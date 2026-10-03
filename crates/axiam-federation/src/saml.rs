@@ -1314,7 +1314,10 @@ fn deflate_encode(input: &[u8]) -> Result<Vec<u8>, FederationError> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    // `pub(crate)` so the SAML IdP tests (`saml_idp::tests`) can drive the
+    // issuer's output through this SP's own `handle_saml_response_for` — the
+    // strongest verifier in the tree — with these same repository stubs.
     use super::*;
     use axiam_core::models::federation::FederationProtocol;
 
@@ -1339,7 +1342,7 @@ mod tests {
         .unwrap_or_else(|_| panic!("fixture {name} must be present"))
     }
 
-    fn test_federation_config(
+    pub(crate) fn test_federation_config(
         cert_pem: Option<String>,
     ) -> axiam_core::models::federation::FederationConfig {
         axiam_core::models::federation::FederationConfig {
@@ -1376,10 +1379,10 @@ mod tests {
     }
 
     // Minimal in-memory replay repo for unit tests.
-    struct MemReplayRepo(std::sync::Mutex<std::collections::HashSet<(Uuid, String)>>);
+    pub(crate) struct MemReplayRepo(std::sync::Mutex<std::collections::HashSet<(Uuid, String)>>);
 
     impl MemReplayRepo {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self(std::sync::Mutex::new(std::collections::HashSet::new()))
         }
     }
@@ -1699,8 +1702,8 @@ mod tests {
     use axiam_core::models::user::UserStatus;
 
     /// Config repo that returns a preset config (or NotFound if `None`).
-    struct MapConfigRepo {
-        config: Option<FederationConfig>,
+    pub(crate) struct MapConfigRepo {
+        pub(crate) config: Option<FederationConfig>,
     }
     impl FederationConfigRepository for MapConfigRepo {
         async fn create(
@@ -1769,14 +1772,14 @@ mod tests {
     /// Link repo that records created links and can be configured to return an
     /// existing link, a NotFound (→ provisioning path), a generic DB error, or
     /// a create failure.
-    struct RecordingLinkRepo {
+    pub(crate) struct RecordingLinkRepo {
         existing: Option<FederationLink>,
         get_returns_db_error: bool,
         fail_create: bool,
         created: Mutex<Vec<CreateFederationLink>>,
     }
     impl RecordingLinkRepo {
-        fn provisioning() -> Self {
+        pub(crate) fn provisioning() -> Self {
             Self {
                 existing: None,
                 get_returns_db_error: false,
@@ -1834,13 +1837,13 @@ mod tests {
 
     /// User repo that records created users and can be configured with a preset
     /// user for `get_by_id` (existing-link path) or a create failure.
-    struct RecordingUserRepo {
+    pub(crate) struct RecordingUserRepo {
         preset: Option<User>,
         fail_create: bool,
         created: Mutex<Vec<CreateUser>>,
     }
     impl RecordingUserRepo {
-        fn provisioning() -> Self {
+        pub(crate) fn provisioning() -> Self {
             Self {
                 preset: None,
                 fail_create: false,
@@ -1940,7 +1943,7 @@ mod tests {
         }
     }
 
-    type AcsService =
+    pub(crate) type AcsService =
         SamlFederationService<MapConfigRepo, RecordingLinkRepo, RecordingUserRepo, MemReplayRepo>;
 
     /// A federation config wired to the committed fixtures: `client_id` matches
@@ -1953,7 +1956,7 @@ mod tests {
         c
     }
 
-    fn make_acs_service(
+    pub(crate) fn make_acs_service(
         config: Option<FederationConfig>,
         link: RecordingLinkRepo,
         user: RecordingUserRepo,

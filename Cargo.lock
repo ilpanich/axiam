@@ -1073,8 +1073,10 @@ dependencies = [
  "chrono",
  "flate2",
  "hex",
+ "hmac 0.13.0",
  "jsonwebtoken 11.1.0",
  "libxml",
+ "openssl",
  "pem 4.0.0",
  "rand 0.10.3",
  "rcgen",
@@ -1091,6 +1093,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "x509-parser 0.18.1",
+ "zeroize",
 ]
 
 [[package]]

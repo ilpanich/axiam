@@ -22,6 +22,32 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-03 SAML identity provider issuer entry (Phase 23 T23.2.2,
+> model 2.21.0).** Thirteen threats enter, nine Mitigated on arrival and four
+> open, with a new trust boundary — **AXIAM ↔ SAML service provider** — around a
+> new external entity, a service provider a tenant administrator registered. They
+> are the assertion issuer of the SAML IdP (G-2), recorded in the commit that adds
+> it; nothing serves SAML yet (the SSO endpoint is T23.2.3). **T-304** the
+> tenant's signing key at rest: sealed under `pki_encryption_key` (D-21), read by
+> one query, destroyed on retirement; no audit record per unseal. **T-305** the
+> key in memory, logs and errors: zeroizing buffers, redacted `Debug`, errors with
+> no values. **T-306**, Critical and open: a leaked key keeps forging at every SP
+> that pinned the certificate, because SAML has no revocation channel SPs consult.
+> **T-307** wrong-tenant signing: the tenant comes from the request path and every
+> input must match it. **T-308** an expired, not-yet-valid or inactive credential
+> never signs. **T-309**, open: the rotation window until T23.2.5's promote verb.
+> **T-310** the certificate as a TLS credential: `documentSigning` only.
+> **T-311** signature wrapping and injection at the signer: one escaping function,
+> one assertion, references that name their parents, and every signature verified
+> before the response leaves. **T-312**, open: the pairwise `NameID` (D-22) is
+> unlinkable, but `SessionIndex` is the session id at every SP. **T-313**, open:
+> an email `NameID` for an address AXIAM never verified, for T23.2.3 to decide.
+> **T-314** an overstated authentication context: derived from the session's
+> evidence only. **T-315** an encryption downgrade: an SP that asked for
+> encryption is refused, never sent plaintext. **T-316** the key's signature
+> harvested as a wrapping gadget: failure responses are never signed. The model
+> is **316 threats, 298 mitigated / 18 open**.
+>
 > **The 2026-10-03 W2 security review (F4, model 2.20.0).** No threat enters;
 > one is amended. **T-298**, the directory bind secret: the secret was
 > write-only through every read, but an update that carried no new secret kept
@@ -729,7 +755,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 303 threats** and a
+The system is verified against a **STRIDE threat model of 316 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -752,8 +778,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 303 |
-| Mitigated / Open | 289 / 14 |
+| Threats identified | 316 |
+| Mitigated / Open | 298 / 18 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -769,7 +795,7 @@ optimistic closed one.
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 60 | 0 |
-| Federation (SAML SP, OIDC RP & directory) | 44 | 2 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 57 | 6 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
@@ -779,11 +805,17 @@ optimistic closed one.
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. AXIAM's own request path —
-authentication, authorization, tokens, PKI, federation — carries **one** open
-finding, and it is an accepted trade-off rather than a defect: a tenant's LDAP or
+authentication, authorization, tokens, PKI, federation — carries **five** open
+items, and none is a defect. One is an accepted trade-off: a tenant's LDAP or
 Active Directory host is not held to the private-address refusal the IdP and
 webhook fetches apply, because corporate directories live on private networks —
-bounded by mandatory, verified TLS before anything is sent (T-300). The one it briefly carried, the 60-second grace a rotated
+bounded by mandatory, verified TLS before anything is sent (T-300). Four entered
+with the SAML identity provider's issuer, before anything serves SAML: a leaked
+signing key outlives its retirement at service providers that pinned the
+certificate (T-306), credential rotation waits for a promote verb (T-309), a
+`SessionIndex` shared by every SP of one sign-on lets colluding SPs correlate it
+(T-312), and whether an email `NameID` may carry an address AXIAM never verified
+is the SSO endpoint's decision (T-313). The one it briefly carried, the 60-second grace a rotated
 refresh token keeps, was recorded open at 1.0.0-beta13 rather than absorbed and
 then closed by a decision: the grace now applies only to the FAPI 2.0 profile
 that requires it and sender-constrains every token, and a rotated token presented
@@ -803,25 +835,25 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 75 | 3 |
-| Tampering | 60 | 1 |
+| Spoofing | 80 | 5 |
+| Tampering | 61 | 1 |
 | Repudiation | 6 | 0 |
-| Information disclosure | 71 | 7 |
-| Denial of service | 31 | 2 |
-| Elevation of privilege | 60 | 1 |
+| Information disclosure | 75 | 8 |
+| Denial of service | 32 | 3 |
+| Elevation of privilege | 62 | 1 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
-| Critical | 35 | 1 |
-| High | 141 | 8 |
-| Medium | 116 | 4 |
+| Critical | 38 | 2 |
+| High | 147 | 9 |
+| Medium | 120 | 6 |
 | Low | 11 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 14 still-open items are listed one by one in
+the weight the control carries. The 18 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -829,7 +861,7 @@ with the element it sits on and where responsibility for it lands.
 
 ## Trust boundaries
 
-Six trust boundaries recur across the system. A data flow that crosses one is a
+Seven trust boundaries recur across the system. A data flow that crosses one is a
 place where authentication, authorization, validation and transport protection all
 have to be re-established — nothing is assumed across a boundary.
 
@@ -840,6 +872,7 @@ have to be re-established — nothing is assumed across a boundary.
 | **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal; cross-tenant reach only as an explicit organization-scope claim — narrowable to named tenants per role assignment — verified to stay inside the caller's organization and reach |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries |
 | **AXIAM ↔ tenant directory** | AXIAM ↔ a tenant's own LDAP or Active Directory server | TLS before any bind or search — `ldaps://`, or StartTLS that fails closed — verified against the tenant's own anchors and the URL's host; referrals never followed; login names enter filters only through RFC 4515 escaping; a bounded per-tenant pool; a read-only bind account |
+| **AXIAM ↔ SAML service provider** | AXIAM's SAML identity provider ↔ the applications a tenant registered to receive assertions | Assertions always signed with the tenant's own credential, inside its validity window, under the `Issuer` of the tenant in the request path; delivered only to a registered ACS URL; five-minute validity; a pairwise `NameID` by default; failure responses never signed |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
 
 ### The assets worth protecting
@@ -1430,6 +1463,17 @@ against the classic federation attacks:
   loopback, link-local and ULA addresses, **pins the validated IP for the actual
   connection** (closing the DNS-rebind window), enforces HTTPS on every hop
   including redirects, and caps the response body.
+- **AXIAM as a SAML identity provider signs one shape of document.** The
+  issuer (G-2) signs every assertion with the tenant's own RSA-4096 credential —
+  never an expired, retired or other tenant's one — and the response too when
+  the service provider asks, then re-reads its own output and verifies every
+  signature before it leaves: one assertion, references that name the element
+  they sit in, values escaped so no display name or group name can become markup.
+  The default `NameID` is a pairwise identifier (an HMAC under a dedicated key),
+  different at every service provider and not reversible to the account; the
+  authentication context comes from the session's own evidence, never from the
+  request; failure responses carry a status code and nothing else, and are never
+  signed, so the key cannot be harvested as a wrapping gadget.
 - **Attribute-to-role mapping is an explicit, tenant-scoped allow-list** set by an
   AXIAM administrator; unmapped IdP attributes are discarded, so an IdP cannot
   self-assign privileged roles.
@@ -1995,8 +2039,8 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 14 of
-303. On the website this table is generated from the Threat Dragon model, so it
+Every threat the model does not record as mitigated, most severe first — 18 of
+316. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -2005,6 +2049,7 @@ each.
 | Threat | Severity | Where it sits |
 |---|---|---|
 | T-148 — Compromised release pipeline publishes a backdoored SDK | Critical | Public package registries · *Client SDKs & admin UI integration surface* |
+| T-306 — A leaked signing key keeps forging assertions after the credential is retired | Critical | SAML service provider (registered per tenant) · *Federation — SAML SP & OIDC relying party* |
 | T-18 — Backup or snapshot exfiltration | High | SurrealDB cluster (all tenant data) · *System diagram* |
 | T-94 — Key extracted from device firmware or flash | High | IoT device · *PKI, certificates & IoT device identity* |
 | T-124 — Operator credentials grant unaudited data access | High | Cluster operator / SRE · *Deployment & platform (Kubernetes)* |
@@ -2013,10 +2058,13 @@ each.
 | T-146 — Long-lived client secret committed to a repository | High | SDK configuration (client secrets, CA bundles) · *Client SDKs & admin UI integration surface* |
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
+| T-313 — An email NameID vouches for an address AXIAM never verified | High | SAML assertion issuer (saml_idp) · *Federation — SAML SP & OIDC relying party* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-300 — A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network | Medium | Directory sign-in (bind-as-user, bounded pool) · *Federation — SAML SP & OIDC relying party* |
+| T-309 — Sign-on stops when the active credential expires or is retired before a successor is in place | Medium | saml_idp_credential (sealed signing key) · *Federation — SAML SP & OIDC relying party* |
+| T-312 — Service providers link a user across SPs, or back to the AXIAM account | Medium | SAML assertion issuer (saml_idp) · *Federation — SAML SP & OIDC relying party* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are

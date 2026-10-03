@@ -183,9 +183,9 @@ table:
    evidence and nothing else; there is no parameter through which the request
    could reach it. The request's `acr_values` decide only whether a step-up is
    offered and *which satisfied value* is reported — never what the claim says.
-2. **`max_age = 0` is a value, not an absence**, and `elapsed >= max_age` has
-   no leeway in the relying party's disfavour. See the note below for the
-   consequence.
+2. **`max_age = 0` is a value, not an absence**, and a positive
+   `elapsed >= max_age` has no leeway in the relying party's disfavour.
+   `max_age=0` itself is handled as `prompt=login` (D-14); see the note below.
 3. **The login hop is the only interaction mechanism**, and its marker is what
    makes every requirement terminate: a requirement that survives one
    interaction is answered, not retried.
@@ -199,7 +199,7 @@ table:
 | 64 | `prompt=login` always reauthenticates, and the ID token issued afterwards carries a strictly later `auth_time` | Core §3.1.2.1 | Pass | `…::t1_5_prompt_login_reauthenticates_and_moves_auth_time_forward` |
 | 65 | The sign-in page refuses the same `reauth` destination more than three times in a minute and shows an error rather than a fourth form | — | Pass | `reauth.test.ts::recordReauthAttempt (T1.6)` |
 | 66 | `prompt=none` from an iframe-shaped request (no `Lax` cookie on a sub-frame navigation) is `login_required` — the login-status probe fails closed | Core §3.1.2.1 | Pass | `…::t1_1_and_t1_7_…` (same request, no cookie) |
-| 67 | `max_age=0` always reauthenticates — a one-second-old session does not satisfy it, and neither does the authentication the reauthentication produces, so the chain terminates in `login_required` and never in a code | Core §3.1.2.1 | Pass (see note) | `…::t2_1_max_age_zero_always_reauthenticates_and_never_yields_a_code`; `honour.rs::t2_1_…`, `::max_age_zero_is_refused_rather_than_looped_after_a_reauthentication` |
+| 67 | `max_age=0` is handled as `prompt=login` (D-14) — every session, however fresh, is sent to sign in again (`reauth=1`), and the return leg yields a code whose ID token carries the new `auth_time`; with `prompt=none` it is `login_required`; a forged return-leg marker on an old session buys a code that still reports the old `auth_time` | Core §3.1.2.1 (errata set 2: `max_age=0` is equivalent to `prompt=login`) | Pass (see note) | `…::t2_1_max_age_zero_reauthenticates_and_the_return_leg_yields_a_fresh_code`, `…::d14_a_forged_marker_on_max_age_zero_cannot_make_an_old_session_look_reauthenticated`, `…::d14_prompt_none_with_max_age_zero_is_login_required`; `honour.rs::t2_1_max_age_zero_interacts_and_then_proceeds_exactly_as_prompt_login_does`, `::max_age_zero_and_prompt_login_cannot_drift_apart`, `::max_age_zero_under_prompt_none_is_login_required` |
 | 68 | A session older than `max_age` reauthenticates; the token issued after the return leg carries a fresh `auth_time` (mirrors `OIDCCMaxAge1`) | Core §3.1.2.1 | Pass | `…::t2_2_an_expired_max_age_reauthenticates_and_the_second_token_is_fresh` |
 | 69 | Two requests with different, satisfied `max_age` bounds report the same `auth_time` and the same `sub`, and neither reauthenticates (mirrors `OIDCCMaxAge10000`) | Core §3.1.2.1 | Pass | `…::t2_3_a_satisfied_max_age_does_not_reauthenticate` |
 | 70 | A refreshed ID token's `auth_time` equals the original's (mirrors `OIDCCRefreshToken`) | Core §12.2 | Pass | `…::t2_4_a_refreshed_id_token_carries_the_original_auth_time`; after the browser session rotated away, across two refreshes: `…::d9_a_refreshed_id_token_keeps_the_original_evidence_after_the_session_rotated_away` |
@@ -502,7 +502,7 @@ costs a round trip per request, which is why integrators do not adopt it.
 
 | # | Behaviour | Spec Ref | Status | Evidence |
 |---|-----------|----------|--------|----------|
-| 35 | `claims_parameter_supported: false` — only `claims.id_token.acr` is ever read, and a partially-honoured `claims` is worse than an unsupported one | Discovery §3 | Pass | `oidc.rs::discovery_tells_the_truth_about_request_objects_and_claims` |
+| 35 | `claims_parameter_supported: true` — the `userinfo` member of `claims` is honoured on every lane and `id_token.acr` on the honour lane; a `fapi2` client asking for `id_token.acr` or an essential `id_token.auth_time` is refused rather than dropped (was `false` until the `userinfo` member was implemented) | Discovery §3 | Pass | `oidc.rs::discovery_tells_the_truth_about_request_objects_and_claims` |
 | 36 | `acr_values_supported` publishes exactly `urn:axiam:acr:1fa` and `urn:axiam:acr:mfa` — a fixed vocabulary, not an operator-configurable one | Discovery §3 | Pass | `oidc.rs::discovery_advertises_the_two_axiam_acr_urns` |
 | 37 | `claims_supported` includes `auth_time`, `acr`, `amr` as server capabilities (row 25 records that no client receives them yet) | Discovery §3 | Pass | `oidc.rs::discovery_advertises_the_three_authentication_evidence_claims` |
 | 38 | `id_token_signing_alg_values_supported` remains exactly `["EdDSA"]` — escalation B was answered **no**, so no RSA key enters the JWKS | Discovery §3 | Pass | `oidc.rs::the_id_token_algorithm_list_is_still_eddsa_only` + row 8 |
@@ -579,24 +579,29 @@ costs a round trip per request, which is why integrators do not adopt it.
 - **`consent_required` was unreachable in W4 and is reachable from W7.**
   It needs a consent-gated scope, and there were none until W7 defined the two;
   row 108 is where it is now raised. `interaction_required` remains unreachable.
-  As W4 put it:
-  `consent_required` needs a consent-gated scope and there are none until W7;
-  every `prompt=none` refusal the honour lane can produce has a more specific
+  Every `prompt=none` refusal the honour lane can produce has a more specific
   name than `interaction_required`. Both variants exist in `OAuth2Error` — the
   four OIDC interaction codes are one vocabulary and splitting it across waves
-  is how a code comes to be spelled twice — and neither is raised by any branch.
-  The audit action `oauth2.prompt_none.consent_required` the plan names is,
-  for the same reason, not written.
+  is how a code comes to be spelled twice — and only `consent_required` is
+  raised by a branch (W7). The audit action
+  `oauth2.prompt_none.consent_required` the plan names is not written: a silent
+  `consent_required` is audited as `oauth2.prompt_none.refused`.
 
-- **`max_age=0` cannot be satisfied by any code, and that is the honest
-  answer.** The plan fixes the comparison as `elapsed >= max_age` with no
-  special case and no leeway; an authentication is never zero seconds old, so
-  `max_age=0` always demands a reauthentication and the reauthentication it
-  produces fails the same comparison. The relying party gets an interaction and
-  then `login_required`. A rounder comparison (`>`) would let it succeed, at the
-  cost of the one guarantee the parameter exists to give. Note that the OpenID
-  Foundation's Basic OP plan exercises `max_age=1` and `max_age=10000`, not
-  `max_age=0`.
+- **`max_age=0` is handled as `prompt=login` (D-14, T23.1.4).** The plan fixed
+  the comparison as `elapsed >= max_age` with no special case, which made
+  `max_age=0` unsatisfiable: the reauthentication it demanded was itself zero
+  seconds old, so the return leg answered `login_required` and a relying party
+  sending `max_age=0` could never sign in. OIDC Core §3.1.2.1 (errata set 2)
+  re-authenticates when the elapsed time is *greater than* `max_age` and says
+  `max_age=0` is equivalent to `prompt=login`, so `max_age=0` now takes exactly
+  the `prompt=login` path in `honour::evaluate` and no path of its own (the
+  outbound leg always interacts; the return leg proceeds to a code with the new
+  `auth_time`; `prompt=none` with it is `login_required`). Positive values keep
+  `>=`: one instant stricter than the clause, harmless, and what
+  `oidcc-max-age-1` exercises (the OpenID Foundation's Basic OP plan runs
+  `max_age=1` and `max_age=10000`, not `max_age=0`). The return-leg marker's
+  accepted residual (F4 P23W1-08) applies to `max_age=0` exactly as it does to
+  `prompt=login`.
 
 - **A pushed `prompt=none` from an anonymous browser cannot be read before the
   hop.** The handle is consumed inside the authorization handler, after the

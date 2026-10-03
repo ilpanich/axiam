@@ -388,6 +388,8 @@ produces the typed bundle:
 - `claims`: JSON; only `id_token.acr` is read (`value`, `values`,
   `essential`); everything else is ignored *and said to be ignored* in
   discovery (`claims_parameter_supported: false`).
+  *(Superseded: discovery now publishes `claims_parameter_supported: true`,
+  because the `userinfo` member of `claims` is honoured; T23.1.4.)*
 - `id_token_hint`: opaque string until decoded on the honour lane.
 - `login_hint`, `display`, `ui_locales`, `claims_locales`: bounded-length
   strings (256 bytes), treated as data.
@@ -502,6 +504,11 @@ seconds; reauthenticate iff `elapsed >= max_age`. Hence `max_age=0` ⇒
 T2.1). Server clock only; no leeway in the RP's disfavour. After reauth, the
 second evaluation runs on the new session; if it still fails (clock went
 backwards) the answer is `login_required`, never a code.
+
+> **Amended by D-14 (T23.1.4, 2026-10-03):** `max_age=0` is handled as
+> `prompt=login`, not as `0 >= 0` — its return leg yields a code with the new
+> `auth_time` (see §8 D-14); positive values keep `>=` as written here, and T2.1
+> below is superseded accordingly.
 
 **Invariants.** I1–I4 via the bundle. I5 touchpoints: `session` model/schema,
 `CreateSession`, `create_session_and_tokens` and its five callers, refresh
@@ -1074,7 +1081,7 @@ must start from this paragraph.
 | Field | Change | Gate |
 |---|---|---|
 | `request_parameter_supported` | add, `false` | global (truthful today) |
-| `claims_parameter_supported` | add, `false` | global (only `id_token.acr` is read; the RP is told not to rely on `claims`) |
+| `claims_parameter_supported` | add, `false` *(now `true`; see §4.1 note, T23.1.4)* | global (only `id_token.acr` is read; the RP is told not to rely on `claims`) |
 | `acr_values_supported` | add, `["urn:axiam:acr:1fa", "urn:axiam:acr:mfa"]` | global capability statement |
 | `claims_supported` | add `auth_time`, `acr`, `amr`; add `phone_number`, `phone_number_verified`, `address` | first three global; last three only when `sensitive_scopes_enabled` **and** the request named a `tenant_id` (W7: this document is not tenant-scoped — see §4.8's amendment) |
 | `scopes_supported` | add `address`, `phone` | as above |

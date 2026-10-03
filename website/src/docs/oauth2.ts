@@ -301,7 +301,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         headers: ["Parameter", "On the `honour` lane"],
         rows: [
           ["`prompt`", "`login` reauthenticates; `none` is answered without interaction and is refused outright for an anonymous browser and on a return leg; `select_account` can answer `account_selection_required`. `none` combined with another value is `invalid_request`."],
-          ["`max_age`", "Compared as `elapsed >= max_age`, with **no leeway** in the relying party's disfavour — so `max_age=0` can never succeed, and a relying party meaning *authenticate them now* wants `prompt=login`."],
+          ["`max_age`", "A positive value is compared as `elapsed >= max_age`, with **no leeway** in the relying party's disfavour. `max_age=0` is handled as `prompt=login` (OIDC Core: they are equivalent): the browser always signs in again and the code that follows carries the new `auth_time`."],
           ["`acr_values` / `claims.id_token.acr`", "Matched against the session's own recorded authentication evidence through a function no request parameter can reach. An **essential** `acr` the end user cannot reach is `unmet_authentication_requirements`."],
           ["`id_token_hint`", "Checked against the established session; naming somebody else is `login_required`."],
           ["`login_hint`, `display`, `ui_locales`, `claims_locales`", "Cosmetic, and honoured without becoming an oracle: `login_hint` is carried and **looked up by nothing**, `display` is allow-listed, `ui_locales` is matched server-side (RFC 4647) against the five shipped locales, `claims_locales` is ignored."],

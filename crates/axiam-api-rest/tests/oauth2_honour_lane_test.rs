@@ -830,20 +830,20 @@ async fn prompt_consent_interacts_rather_than_being_silently_dropped() {
 // T2.* — max_age and auth_time
 // ---------------------------------------------------------------------------
 
-/// **T2.1.** `max_age=0` against a one-second-old session reauthenticates, and
-/// never issues a code.
-///
-/// The comparison is `elapsed >= max_age` (plan §4.3), so `max_age=0` is a
-/// request no authentication can satisfy: it is always stale by the time it is
-/// evaluated. What the relying party gets is an interaction and then a refusal,
-/// which is the honest answer to "authenticate them zero seconds ago".
+/// **T2.1 (rewritten by D-14).** `max_age=0` is handled as `prompt=login`
+/// (OIDC Core §3.1.2.1, errata set 2): the outbound leg always sends the
+/// browser to sign in in `reauth` mode, and the return leg — whose session the
+/// hop just created — yields a code whose ID token carries the **new**
+/// `auth_time`. Before D-14 the return leg answered `login_required`
+/// (`elapsed >= max_age`, `0 >= 0`), so a relying party sending `max_age=0`
+/// could never sign in.
 #[actix_rt::test]
-async fn t2_1_max_age_zero_always_reauthenticates_and_never_yields_a_code() {
+async fn t2_1_max_age_zero_reauthenticates_and_the_return_leg_yields_a_fresh_code() {
     let (db, org_id, tenant_id, user_id) = setup_db().await;
     let auth = test_auth_config();
     let app = test_app!(db, auth);
     let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
-    let (client_id, _) = create_client(&app, &jwt, honour_client()).await;
+    let (client_id, secret) = create_client(&app, &jwt, honour_client()).await;
     let (_, token) = session_token(
         &db,
         &auth,
@@ -855,6 +855,7 @@ async fn t2_1_max_age_zero_always_reauthenticates_and_never_yields_a_code() {
     )
     .await;
 
+    // Outbound: even a one-second-old session is sent to sign in again.
     let resp = authorize(
         &app,
         &token,
@@ -866,12 +867,13 @@ async fn t2_1_max_age_zero_always_reauthenticates_and_never_yields_a_code() {
     assert!(loc.starts_with("/login?return_to="), "{loc}");
     assert!(loc.contains("&reauth=1"), "{loc}");
     assert!(
-        !loc.contains("code="),
-        "a one-second-old session must not satisfy max_age=0: {loc}"
+        !loc.contains("&acr="),
+        "…demanding no particular factor, as prompt=login does: {loc}"
     );
+    assert!(!loc.contains("code="), "{loc}");
 
-    // …and the reauthentication it produces cannot satisfy it either, so the
-    // chain terminates with a refusal rather than a second hop.
+    // Return leg, after the sign-in the page performed: a code, and an ID
+    // token whose auth_time is the new authentication.
     let (_, fresh) = session_token(
         &db,
         &auth,
@@ -882,19 +884,99 @@ async fn t2_1_max_age_zero_always_reauthenticates_and_never_yields_a_code() {
         vec![Amr::Pwd],
     )
     .await;
+    let claims = id_token_claims(
+        &app,
+        tenant_id,
+        &fresh,
+        &client_id,
+        &secret,
+        "&max_age=0&axiam_login_hop=1",
+    )
+    .await;
+    let auth_time = claims["auth_time"].as_i64().expect("auth_time");
+    let now = chrono::Utc::now().timestamp();
+    assert!(
+        (now - 10..=now + 1).contains(&auth_time),
+        "auth_time must be the new authentication, not the one-second-old one's \
+         predecessor: {auth_time} vs {now}"
+    );
+}
+
+/// **D-14 — a forged return-leg marker on `max_age=0`** is exactly what it is
+/// on `prompt=login` (`a_forged_return_leg_marker_cannot_make_an_old_session_look_reauthenticated`):
+/// the interaction is skipped, which only the request's author could have
+/// asked for, and the ID token's `auth_time` is still the hour-old
+/// authentication the session really holds. No fresh-looking token is minted.
+#[actix_rt::test]
+async fn d14_a_forged_marker_on_max_age_zero_cannot_make_an_old_session_look_reauthenticated() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, honour_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::hours(1),
+        vec![Amr::Pwd],
+    )
+    .await;
+
+    let claims = id_token_claims(
+        &app,
+        tenant_id,
+        &token,
+        &client_id,
+        &secret,
+        "&max_age=0&axiam_login_hop=1",
+    )
+    .await;
+    let auth_time = claims["auth_time"].as_i64().expect("auth_time");
+    let an_hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp();
+    assert!(
+        (auth_time - an_hour_ago).abs() <= 5,
+        "auth_time must describe the session's authentication, not the request's \
+         wish: {auth_time} vs {an_hour_ago}"
+    );
+}
+
+/// **D-14 — `prompt=none` with `max_age=0`** can never be satisfied without
+/// the interaction `prompt=none` forbids, so it is answered `login_required`
+/// at the relying party's `redirect_uri` — never a code, never a hop, and
+/// however fresh the session. (`invalid_request` is not used: `max_age` is not
+/// a `prompt` value, so only `prompt=none` beside another *prompt* is a
+/// contradiction at parse time.)
+#[actix_rt::test]
+async fn d14_prompt_none_with_max_age_zero_is_login_required() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, honour_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::zero(),
+        vec![Amr::Pwd],
+    )
+    .await;
+
     let resp = authorize(
         &app,
-        &fresh,
-        &format!("{}&max_age=0&axiam_login_hop=1", base_query(&client_id)),
+        &token,
+        &format!("{}&prompt=none&max_age=0", base_query(&client_id)),
     )
     .await;
     assert_eq!(resp.status().as_u16(), 302);
     let loc = location(&resp);
     assert!(loc.starts_with(REDIRECT_URI), "{loc}");
-    assert_eq!(
-        query_param(&loc, "error").as_deref(),
-        Some("login_required")
-    );
+    assert_eq!(error_of(&resp), "login_required");
     assert!(query_param(&loc, "code").is_none(), "{loc}");
 }
 

@@ -61,6 +61,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`max_age=0` on the honour lane is now handled as `prompt=login`, so a
+  relying party sending it can sign in (T23.1.4, D-14).** The honour lane
+  re-authenticated when `elapsed >= max_age`, which for `0` made the
+  reauthentication the login hop produces itself "too old" (`0 >= 0`): the
+  return leg answered `login_required`, and no relying party sending
+  `max_age=0` could ever obtain a code. OIDC Core §3.1.2.1 (1.0 incorporating
+  errata set 2) re-authenticates only when the elapsed time is *greater than*
+  `max_age` and says `max_age=0` is equivalent to `prompt=login`. `max_age=0`
+  now takes exactly the `prompt=login` path in `honour::evaluate`: the outbound
+  leg always sends the browser to sign in again (`reauth=1`, whatever the
+  session's age), and the return leg is answered with a code whose ID token
+  carries the new `auth_time`. A forged return-leg marker on an old session
+  behaves as it does for `prompt=login` (the interaction is skipped, and
+  `auth_time` still reports the old authentication; the accepted residual
+  P23W1-08 is unchanged), and `prompt=none` with `max_age=0` is
+  `login_required`. Positive `max_age` values keep `>=` and an unmet one is
+  still `login_required` on the return leg, so `oidcc-max-age-1` is unaffected;
+  the ignore lane still drops `max_age` and `fapi2` still refuses it. Amends
+  plan §4.3 test T2.1 and T-239's mitigation text (no new threat id).
+
 - **A FAPI 2.0 client's essential `auth_time` request is refused instead of
   dropped (T23.1.4, D-12).** OIDC Core §2 makes `auth_time` REQUIRED in the ID
   token when `claims.id_token.auth_time` is requested as **essential**, and a

@@ -37,7 +37,7 @@ bound on an outbound fetch a stranger chooses the target of),
 [Standard-lane OIDC parameters](oidc-authn-parameters.md)
 (`authn_request_params`: making `prompt`, `max_age`, `acr_values` and
 `id_token_hint` mean what they say, the two ACR values, why `max_age=0`
-never succeeds),
+is handled as `prompt=login`),
 [API docs](../api/README.md).
 
 All endpoints below require a bearer JWT (`Authorization: Bearer <token>`,

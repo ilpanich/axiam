@@ -236,11 +236,16 @@ async fn resolve_session_evidence<C: Connection + Clone>(
 /// operator can see and count rather than something they have to be told about
 /// by the party doing it.
 ///
-/// Two actions are emitted, `oauth2.prompt_none.code` and
-/// `oauth2.prompt_none.login_required`. The plan names a third,
-/// `oauth2.prompt_none.consent_required`, which **cannot** be emitted in W4:
-/// it needs a consent-gated scope and there are none until W7 (plan §4.8). It
-/// is not written here rather than written into a branch that can never run.
+/// Three actions are emitted: `oauth2.prompt_none.code`,
+/// `oauth2.prompt_none.login_required`, and `oauth2.prompt_none.refused` for
+/// every other refusal. The plan names a fourth,
+/// `oauth2.prompt_none.consent_required`, which is **not** written: W4 could
+/// not raise `consent_required` at all (it needs a consent-gated scope), and
+/// since W7 defined `address` and `phone` a silent request for them without a
+/// recorded consent *is* refused `consent_required` — but it is audited as
+/// `oauth2.prompt_none.refused`, the error code in the row's `error` metadata
+/// being what distinguishes it. A dedicated action would be a one-line match
+/// arm below, and has not been needed.
 ///
 /// Never fails the request. An audit sink that is down costs a row, not a
 /// login (T-15-04).

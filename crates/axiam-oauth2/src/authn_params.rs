@@ -100,10 +100,11 @@ impl Prompt {
 
 /// What an RP asked for in `claims.id_token.acr` (OIDC Core §5.5.1).
 ///
-/// Only this one member of the `claims` document is modelled, and discovery
-/// says so with `claims_parameter_supported: false`: a partially-honoured
-/// `claims` document is worse than an unsupported one, because an RP cannot
-/// tell which members were read.
+/// Only this one member of the `claims` document is modelled *here*; the
+/// `userinfo` members are read by `crate::claims_request`, and discovery
+/// publishes `claims_parameter_supported: true` for the two together. An
+/// `id_token.acr` request is honoured on the honour lane only, and refused on
+/// `fapi2` rather than dropped (see [`SECURITY_BEARING`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AcrRequest {
     /// `essential: true` — the RP wants the request to *fail* rather than
@@ -475,9 +476,10 @@ fn auth_time_may_be_essential(doc: &serde_json::Value) -> bool {
 ///
 /// `Ok(None)` means the document parsed and asked for no ACR — which is the
 /// common case, and not an error: `claims` is frequently sent asking for
-/// `userinfo` members AXIAM does not implement, and discovery already says
-/// `claims_parameter_supported: false`. Only a *malformed* `id_token.acr` is
-/// an error, because that one member is the one AXIAM promises to read.
+/// `userinfo` members, which `crate::claims_request` reads, not this function
+/// (discovery publishes `claims_parameter_supported: true`). Only a
+/// *malformed* `id_token.acr` is an error, because that is the one member this
+/// function reads.
 fn parse_claims_acr(doc: &serde_json::Value) -> Result<Option<AcrRequest>, String> {
     if !doc.is_object() {
         return Err("claims must be a JSON object (OIDC Core §5.5)".to_owned());

@@ -48,6 +48,8 @@ pub mod client;
 pub mod config;
 pub mod dn;
 pub mod escape;
+pub mod group_lookup;
+pub mod groups;
 pub mod tls;
 
 pub use authenticator::RepositoryDirectoryAuthenticator;

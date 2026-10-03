@@ -99,6 +99,55 @@ pub fn user_filter_for(template: &str, login_name: &str) -> Result<String, UserF
     Ok(template.replacen(USERNAME_PLACEHOLDER, &escape_filter_value(login_name), 1))
 }
 
+/// Most DNs one reverse-member search carries in its `(|...)` filter. Bounds
+/// the size of a filter built from directory-supplied names.
+pub const REVERSE_MEMBER_BATCH: usize = 16;
+
+/// Build the reverse group-membership filter (T23.3.4, D-30): the groups, under
+/// the group base, whose member attribute names one of `dns`.
+///
+/// ```text
+/// (&<group_filter>(<attribute>=<escaped dn>))            one DN
+/// (&<group_filter>(|(<attribute>=<dn>)(<attribute>=<dn>)))   several
+/// ```
+///
+/// Without a `group_filter` the `(&...)` wrapper is dropped. **Each DN enters
+/// the filter only through [`escape_filter_value`]**, exactly as a login name
+/// does: a user's DN is a directory-supplied string and may carry `*`, `(`,
+/// `)`, `\` or NUL, none of which can then widen the search. `group_filter` is
+/// the tenant's own, validated, static filter; `attribute` is checked to be a
+/// plain attribute name here as well, because it too is placed in the filter.
+///
+/// `None` when `dns` is empty or `attribute` is not a plain attribute name
+/// (letters, digits and `-`, starting with a letter) — the caller treats it as
+/// a misconfiguration and refuses; an unparameterised filter is never sent.
+#[must_use]
+pub fn reverse_member_filter(
+    group_filter: Option<&str>,
+    attribute: &str,
+    dns: &[&str],
+) -> Option<String> {
+    let plain = attribute.starts_with(|c: char| c.is_ascii_alphabetic())
+        && attribute
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if dns.is_empty() || !plain {
+        return None;
+    }
+    let clauses: Vec<String> = dns
+        .iter()
+        .map(|dn| format!("({attribute}={})", escape_filter_value(dn)))
+        .collect();
+    let membership = match clauses.as_slice() {
+        [only] => only.clone(),
+        many => format!("(|{})", many.concat()),
+    };
+    Some(match group_filter {
+        Some(group_filter) => format!("(&{group_filter}{membership})"),
+        None => membership,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +279,43 @@ mod tests {
                 Err(UserFilterError::TemplateWithoutSinglePlaceholder)
             );
         }
+    }
+    #[test]
+    fn the_reverse_member_filter_escapes_every_dn_and_never_widens() {
+        let hostile = "uid=a*)(uid=*\\,ou=\u{0}x,dc=example,dc=com";
+        let filter =
+            reverse_member_filter(Some("(objectClass=groupOfNames)"), "member", &[hostile])
+                .unwrap();
+        assert_eq!(
+            filter,
+            "(&(objectClass=groupOfNames)(member=uid=a\\2a\\29\\28uid=\\2a\\5c,ou=\\00x,dc=example,dc=com))"
+        );
+        // The only parentheses are the filter's own: 3 opens, 3 closes.
+        assert_eq!(filter.matches('(').count(), 3);
+        assert_eq!(filter.matches(')').count(), 3);
+        assert!(!filter.contains('*'));
+    }
+
+    #[test]
+    fn several_dns_share_one_or_and_none_is_refused() {
+        let filter = reverse_member_filter(None, "member", &["cn=a,dc=x", "cn=b,dc=x"]).unwrap();
+        assert_eq!(filter, "(|(member=cn=a,dc=x)(member=cn=b,dc=x))");
+        assert_eq!(
+            reverse_member_filter(None, "member", &["cn=a,dc=x"]).unwrap(),
+            "(member=cn=a,dc=x)"
+        );
+        assert_eq!(reverse_member_filter(None, "member", &[]), None);
+    }
+
+    #[test]
+    fn an_attribute_that_is_not_plain_is_never_placed_in_a_filter() {
+        for attribute in ["", "me mber", "member)(uid=*", "1member", "member=", "mem*"] {
+            assert_eq!(
+                reverse_member_filter(None, attribute, &["cn=a,dc=x"]),
+                None,
+                "{attribute:?}"
+            );
+        }
+        assert!(reverse_member_filter(None, "uniqueMember", &["cn=a,dc=x"]).is_some());
     }
 }

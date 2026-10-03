@@ -185,10 +185,10 @@ struct TenantPool {
 }
 
 /// A connection in use, holding the permits it was opened under.
-struct Lease {
-    ldap: Ldap,
+pub(crate) struct Lease {
+    pub(crate) ldap: Ldap,
     opened: Instant,
-    reused: bool,
+    pub(crate) reused: bool,
     _tenant: OwnedSemaphorePermit,
     _global: OwnedSemaphorePermit,
 }
@@ -196,13 +196,13 @@ struct Lease {
 /// Why one step failed, before it is collapsed into a [`DirectoryAuthError`].
 /// Carries only fixed text, for the operator's log line.
 #[derive(Debug)]
-struct Failure {
-    error: DirectoryAuthError,
-    reason: &'static str,
+pub(crate) struct Failure {
+    pub(crate) error: DirectoryAuthError,
+    pub(crate) reason: &'static str,
 }
 
 impl Failure {
-    fn new(error: DirectoryAuthError, reason: &'static str) -> Self {
+    pub(crate) fn new(error: DirectoryAuthError, reason: &'static str) -> Self {
         Self { error, reason }
     }
 }
@@ -397,7 +397,7 @@ impl DirectoryClient {
 
     /// A service-bound connection: an idle pooled one of the current
     /// generation if there is one, otherwise a fresh one.
-    async fn service_connection(
+    pub(crate) async fn service_connection(
         &self,
         target: &DirectoryTarget,
         bind_secret: &str,
@@ -437,7 +437,7 @@ impl DirectoryClient {
         Ok(lease)
     }
 
-    async fn fresh_service_connection(
+    pub(crate) async fn fresh_service_connection(
         &self,
         target: &DirectoryTarget,
         bind_secret: &str,
@@ -721,7 +721,7 @@ impl DirectoryClient {
     /// Return a service-bound connection to the pool, or close it when the
     /// pool is full or the connection too old. The lease's permits are held
     /// until the socket is closed, so the bound counts real sockets.
-    async fn release(&self, target: &DirectoryTarget, mut lease: Lease) {
+    pub(crate) async fn release(&self, target: &DirectoryTarget, mut lease: Lease) {
         let pool = self.pool_for(target.tenant_id);
         let leftover = {
             let mut idle = pool
@@ -751,7 +751,7 @@ impl DirectoryClient {
     }
 
     /// Close a lease's connection, then release its permits.
-    async fn discard(&self, lease: Lease) {
+    pub(crate) async fn discard(&self, lease: Lease) {
         self.close(lease.ldap.clone()).await;
     }
 
@@ -763,7 +763,7 @@ impl DirectoryClient {
 
     /// Log a failure for the operator — fixed text and the tenant, nothing the
     /// user typed and nothing the directory said — and return its kind.
-    fn log(&self, target: &DirectoryTarget, failure: Failure) -> DirectoryAuthError {
+    pub(crate) fn log(&self, target: &DirectoryTarget, failure: Failure) -> DirectoryAuthError {
         match failure.error {
             DirectoryAuthError::InvalidCredentials | DirectoryAuthError::AccountRestricted(_) => {
                 tracing::info!(
@@ -803,7 +803,7 @@ pub fn transport_is_encrypted(url: &str, start_tls: bool) -> bool {
     }
 }
 
-fn transport_failure(error: LdapError) -> Failure {
+pub(crate) fn transport_failure(error: LdapError) -> Failure {
     tracing::debug!(target: "axiam::directory", error = %error, "directory operation failed");
     match error {
         LdapError::Timeout { .. } => Failure::new(
@@ -818,7 +818,7 @@ fn transport_failure(error: LdapError) -> Failure {
 }
 
 /// The diagnostic text is the directory's own words: `debug` only.
-fn debug_diagnostic(operation: &'static str, result: &LdapResult) {
+pub(crate) fn debug_diagnostic(operation: &'static str, result: &LdapResult) {
     tracing::debug!(
         target: "axiam::directory",
         operation,
@@ -919,12 +919,12 @@ fn requested_attributes(map: &UserAttributeMap) -> Vec<String> {
 ///
 /// `ldap3::SearchEntry::construct` panics on malformed BER; a directory is an
 /// external system, so its entries are parsed here with every step fallible.
-struct RawEntry {
-    dn: String,
+pub(crate) struct RawEntry {
+    pub(crate) dn: String,
     attrs: Vec<(String, Vec<Vec<u8>>)>,
 }
 
-fn parse_entry(tag: StructureTag) -> Option<RawEntry> {
+pub(crate) fn parse_entry(tag: StructureTag) -> Option<RawEntry> {
     let mut parts = tag.match_id(4)?.expect_constructed()?.into_iter();
     let dn = String::from_utf8(parts.next()?.expect_primitive()?).ok()?;
     let mut attrs = Vec::new();
@@ -943,11 +943,21 @@ fn parse_entry(tag: StructureTag) -> Option<RawEntry> {
 }
 
 impl RawEntry {
-    fn values(&self, name: &str) -> Option<&Vec<Vec<u8>>> {
+    pub(crate) fn values(&self, name: &str) -> Option<&Vec<Vec<u8>>> {
         self.attrs
             .iter()
             .find(|(attr, _)| attr.eq_ignore_ascii_case(name))
             .map(|(_, values)| values)
+    }
+
+    /// Whether the entry carries `name` in a ranged form
+    /// (`memberOf;range=0-1499`), which means the server has truncated the
+    /// values and sent the rest in further requests AXIAM does not make.
+    pub(crate) fn has_ranged(&self, name: &str) -> bool {
+        let prefix = format!("{name};range=");
+        self.attrs.iter().any(|(attr, _)| {
+            attr.len() >= prefix.len() && attr[..prefix.len()].eq_ignore_ascii_case(&prefix)
+        })
     }
 
     fn text(&self, name: &str) -> Option<String> {

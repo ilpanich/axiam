@@ -695,16 +695,17 @@ where
 
     /// Refuse a user-bound grant whose account may no longer act (F4 P23W1-01).
     ///
-    /// Locking, deactivating or soft-deleting a user, and a `PendingVerification`
-    /// account outliving its grace period, revoke no credential: the session
-    /// refresh path and `/oauth2/authorize` (T23.1.3) re-read the account
-    /// instead. The two OAuth2 grants that mint tokens *for a user* are the
-    /// other places a long-lived credential turns back into a principal — a
+    /// Locking, deactivating or soft-deleting a user revokes no credential: the
+    /// session refresh path and `/oauth2/authorize` (T23.1.3) re-read the
+    /// account instead. The two OAuth2 grants that mint tokens *for a user* are
+    /// the other places a long-lived credential turns back into a principal — a
     /// refresh token stamps a fresh `expires_at` at every rotation, so without
     /// this read a relying party holding a suspended user's grant kept minting
-    /// access and ID tokens for as long as it kept refreshing. The rule is the
-    /// sign-in rule, through the same function (`axiam_auth::service::
-    /// account_may_act`), so the three places cannot disagree.
+    /// access and ID tokens for as long as it kept refreshing. The rule is
+    /// `axiam_auth::service::account_may_act`, the one `/oauth2/authorize`
+    /// uses, so the places cannot disagree. It does not refuse
+    /// `PendingVerification` (P23W1-03): every federated account holds that
+    /// status for life.
     ///
     /// The refusal is `invalid_grant` whatever the reason — RFC 6749 §5.2's
     /// "revoked" — and a removed account reads as one. Nothing is revoked:
@@ -725,11 +726,7 @@ where
             Err(AxiamError::NotFound { .. }) => return Err(refused()),
             Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
         };
-        axiam_auth::service::account_may_act(
-            &user,
-            self.auth_config.email_verification_grace_period_hours,
-        )
-        .map_err(|reason| {
+        axiam_auth::service::account_may_act(&user).map_err(|reason| {
             tracing::info!(
                 %tenant_id,
                 %user_id,

@@ -604,8 +604,13 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     // when; it says nothing about whether that account may still act, and the
     // cookie naming it lives as long as the session does. An administrator who
     // locks or deactivates a user does not revoke their sessions — the refresh
-    // path re-reads the account instead (`check_user_status`) — so this is the
-    // other place a session becomes a principal, and it applies the same rule.
+    // path re-reads the account instead (`check_user_status`) — so this is
+    // another place a session becomes a principal, and it applies the
+    // existing-credential rule (`axiam_auth::service::account_may_act`, shared
+    // with the OAuth2 grants since F4 P23W1-01):
+    // suspended statuses are refused, `PendingVerification` is not (P23W1-03 —
+    // every federated account holds it for life, so refusing it past the grace
+    // period ended browser sign-on for all of them a day after provisioning).
     // A session whose account fails it is treated exactly as a session that no
     // longer exists: the cookie is stale, the browser is asked to sign in, and
     // the sign-in page is where the account's state is explained.

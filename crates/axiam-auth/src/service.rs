@@ -1335,8 +1335,8 @@ impl<
 
     /// May an existing session still act for `user`? (T23.1.3)
     ///
-    /// The rule the refresh path applies before it rotates a session, exposed
-    /// for the one other place a long-lived session credential is accepted:
+    /// The account-status rule, exposed for a place a long-lived session
+    /// credential is accepted:
     /// `/oauth2/authorize` resolving the `axiam_op_session` cookie. That cookie
     /// lives as long as the session (`refresh_token_lifetime_secs`), and an
     /// account status change — an administrator locking or deactivating the
@@ -1345,14 +1345,16 @@ impl<
     /// suspended user's browser kept buying authorization codes for the rest
     /// of the session's life.
     ///
-    /// Same statuses, same email-verification grace period, same answer as a
-    /// sign-in would get, so the two can never disagree about who may act.
+    /// The statuses that suspend an account are refused; `PendingVerification`
+    /// is not, whatever the grace period says — see [`account_may_act`], which
+    /// this is, for why (F4 P23W1-03: every federated account is pending for
+    /// life).
     ///
     /// # Errors
     ///
     /// The [`AuthError`] a sign-in by this user would be refused with.
     pub fn check_session_holder(&self, user: &User) -> Result<(), AuthError> {
-        account_may_act(user, self.config.email_verification_grace_period_hours)
+        account_may_act(user)
     }
 
     // -------------------------------------------------------------------
@@ -1639,25 +1641,37 @@ impl<
     }
 }
 
-/// May an already-issued credential still act for `user`? (F4 P23W1-01)
+/// May an already-issued credential still act for `user`? (F4 P23W1-01, -03)
 ///
-/// The account-status half of the sign-in rule — the statuses and the
-/// email-verification grace period [`AuthService::check_session_holder`]
-/// applies — as a free function, for the places outside `AuthService` that
-/// turn a long-lived credential back into a principal: the OAuth2
-/// `authorization_code` and `refresh_token` grants in `axiam-oauth2`. An
+/// The question every place that turns a long-lived credential back into a
+/// principal asks — `/oauth2/authorize` resolving the OP cookie
+/// ([`AuthService::check_session_holder`]) and the OAuth2 `authorization_code`
+/// and `refresh_token` grants in `axiam-oauth2`. An
 /// account status change revokes no credential (only deletion, SCIM
-/// deprovisioning and a credential reset do), so every such place must ask
-/// this question itself; one function answers it everywhere, so no two of
-/// them can disagree about who may act.
+/// deprovisioning and a credential reset do), so each of them must ask; one
+/// function answers, so no two of them can disagree about who may act.
 ///
-/// `grace_period_hours` is `AuthConfig::email_verification_grace_period_hours`.
+/// **Refused:** `Locked`, `Inactive`, `Anonymized`, `Deleted` — the states
+/// that mean "this account must not be used".
+///
+/// **Not refused: `PendingVerification`, whatever its age.** The email
+/// verification grace period is a rule about *signing in with a password*,
+/// which [`AuthService::login`] still applies. It is not a suspension, and it
+/// cannot be one here: `UserRepository::create` writes `PendingVerification`
+/// for every new row and federation provisioning never moves a federated user
+/// off it, so every federated account is pending for life. Refusing it here
+/// ended browser sign-on and every OAuth2 grant for the whole federated
+/// population a day after each account was provisioned. This is the rule T-160
+/// already applies to the token-exchange path, for the same reason.
 ///
 /// # Errors
 ///
 /// The [`AuthError`] a sign-in by this user would be refused with.
-pub fn account_may_act(user: &User, grace_period_hours: u32) -> Result<(), AuthError> {
-    account_status_permits(&user.status, user.created_at, grace_period_hours)
+pub fn account_may_act(user: &User) -> Result<(), AuthError> {
+    match user.status {
+        UserStatus::PendingVerification => Ok(()),
+        ref status => account_status_permits(status, user.created_at, 0),
+    }
 }
 
 /// The status rule itself; see `AuthService::check_user_status`.

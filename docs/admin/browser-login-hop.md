@@ -280,11 +280,15 @@ not silently recognised by the next.
 
 Suspending an account ends its OP session too, without a logout. Locking or
 deactivating a user revokes no session by itself; instead, every time the cookie
-is turned back into a principal the account is re-read and held to the rule a
-sign-in would be held to (the same check the refresh path makes, including the
-email-verification grace period). A browser whose account was locked after it
-signed in is sent back to the sign-in page with `reauth=1`, the cookie is
-cleared, and the sign-in page is where the account's state is explained.
+is turned back into a principal the account is re-read: a locked, inactive,
+deleted or anonymised account authorizes nothing. A browser whose account was
+locked after it signed in is sent back to the sign-in page with `reauth=1`, the
+cookie is cleared, and the sign-in page is where the account's state is
+explained. An account still pending email verification is **not** refused,
+whatever the grace period: the grace period governs password sign-in, and every
+federated account stays pending for life, so refusing it would end browser
+sign-on for every federated user a day after their first login. The OAuth2
+`authorization_code` and `refresh_token` grants apply the same rule.
 
 Refresh-token rotation is the opposite case and is handled the other way: the
 cookie in the browser is not reissued by a refresh, so the digest is **copied**

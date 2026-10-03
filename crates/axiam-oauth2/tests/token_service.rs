@@ -4447,14 +4447,10 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
 
 /// Every account state the sign-in rule refuses, with the id the mock answers
 /// it for.
-const REFUSED_ACCOUNTS: [(&str, Uuid); 5] = [
+const REFUSED_ACCOUNTS: [(&str, Uuid); 4] = [
     ("locked", LOCKED_USER),
     ("inactive", INACTIVE_USER),
     ("deleted", DELETED_USER),
-    (
-        "pending verification past its grace period",
-        LAPSED_PENDING_USER,
-    ),
     ("removed", REMOVED_USER),
 ];
 
@@ -4482,11 +4478,14 @@ async fn p23w1_01_a_refresh_grant_for_an_account_that_may_no_longer_sign_in_mint
     }
 }
 
-/// The other side of the line: an active account, and a grant with no user
-/// behind it at all, refresh exactly as before.
+/// The other side of the line: an active account, a grant with no user behind
+/// it at all, and a `PendingVerification` account long past its grace period
+/// (F4 P23W1-03 — every federated account is pending for life, so the grace
+/// period is a password sign-in rule and never a reason to end a grant) all
+/// refresh exactly as before.
 #[tokio::test]
 async fn p23w1_01_a_refresh_grant_for_an_active_account_or_no_account_still_rotates() {
-    for user_id in [Some(Uuid::new_v4()), None] {
+    for user_id in [Some(Uuid::new_v4()), None, Some(LAPSED_PENDING_USER)] {
         let refresh =
             MockRefreshRepo::new().with_get(make_refresh(user_id, "client-1", &["openid"]));
         let svc = build(
@@ -4530,4 +4529,20 @@ async fn p23w1_01_a_code_for_an_account_that_may_no_longer_sign_in_mints_nothing
         assert_eq!(err.error_code(), "invalid_grant", "{label}: {err}");
         assert!(created.lock().unwrap().is_empty(), "{label}");
     }
+}
+
+/// F4 P23W1-03 — the code grant's twin of the pending row above.
+#[tokio::test]
+async fn p23w1_03_a_code_for_a_pending_account_past_its_grace_period_is_redeemed() {
+    let mut code = make_auth_code(&["profile"], None);
+    code.user_id = LAPSED_PENDING_USER;
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+        .await
+        .expect("a federated account is pending for life and must still be served");
 }

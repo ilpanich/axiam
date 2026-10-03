@@ -1274,12 +1274,23 @@ async fn an_op_session_stops_authorizing_once_its_account_is_suspended_or_remove
     }
 }
 
-/// A `PendingVerification` account past its grace period is refused at sign-in,
-/// so a session minted inside the grace period must stop authorizing once the
-/// period ends — the same rule, the same reason, and the one status whose
-/// answer depends on the clock rather than on an administrator.
+/// **F4 P23W1-03.** A `PendingVerification` account keeps its OP session,
+/// whatever the grace period says.
+///
+/// T23.1.3 first applied the password sign-in rule here, grace period
+/// included, and so refused this cookie once the period ended. But
+/// `UserRepository::create` writes `PendingVerification` for every new row and
+/// federation provisioning never moves a federated user off it (there is
+/// nothing for AXIAM to verify), so **every federated account is pending for
+/// life**: browser sign-on stopped working for the whole federated population
+/// a day after each account was provisioned, and the hop sent them round
+/// `/login` and back to `login_required`. The grace period is a rule about
+/// signing in with a password, which this session has already done; the
+/// statuses that mean "this account must not be used" are the four
+/// `an_op_session_stops_authorizing_once_its_account_is_suspended_or_removed`
+/// pins — the rule T-160 already applies to the token-exchange path.
 #[actix_rt::test]
-async fn an_op_session_follows_the_email_verification_grace_period() {
+async fn p23w1_03_an_op_session_survives_a_pending_verification_status() {
     let (db, org_id, tenant_id, user_id) = setup_db().await;
     // No grace period, so a pending account is one whose grace has ended.
     let auth = AuthConfig {
@@ -1312,8 +1323,8 @@ async fn an_op_session_follows_the_email_verification_grace_period() {
     assert_eq!(resp.status().as_u16(), 302);
     let loc = location(&resp);
     assert!(
-        loc.starts_with("/login?return_to=") && loc.contains("&reauth=1"),
-        "{loc}"
+        loc.starts_with(REDIRECT_URI) && loc.contains("code="),
+        "a pending account's live session must still authorize: {loc}"
     );
 }
 

@@ -296,6 +296,17 @@ fn tenant_path(tenant_id: Uuid) -> String {
     format!("/t/{tenant_id}/oauth2/authorize")
 }
 
+/// Every path a sign-in into `tenant_id` mints the OP cookie at on this
+/// deployment: the bare one, the tenant one (D-11) and the tenant's SAML SSO
+/// path (T23.2.3), in that order.
+fn minted_paths(tenant_id: Uuid) -> Vec<String> {
+    vec![
+        "/oauth2/authorize".to_owned(),
+        tenant_path(tenant_id),
+        format!("/saml/v2/{tenant_id}/sso"),
+    ]
+}
+
 /// Sign `username` in to `tenant_id` over HTTP; return the OP cookie's value.
 ///
 /// Asserts the copies the sign-in set are exactly the bare one and this
@@ -306,13 +317,13 @@ async fn sign_in_as(app: &impl TestApp, org_id: Uuid, tenant_id: Uuid, username:
     assert_eq!(resp.status().as_u16(), 200, "login must succeed");
     assert_eq!(
         op_paths(&resp),
-        vec!["/oauth2/authorize".to_owned(), tenant_path(tenant_id)],
-        "a sign-in mints the bare copy and its own tenant's copy, and no other"
+        minted_paths(tenant_id),
+        "a sign-in mints the bare copy and its own tenant's copies, and no other"
     );
     let cookies = op_cookies(&resp);
     assert!(
-        cookies[0].value() == cookies[1].value(),
-        "both copies name the same session"
+        cookies.iter().all(|c| c.value() == cookies[0].value()),
+        "every copy names the same session"
     );
     cookies[0].value().to_owned()
 }
@@ -403,8 +414,8 @@ async fn d11_a_password_sign_in_sets_the_bare_and_the_tenant_cookie_identically_
     let cookies = op_cookies(&resp);
     assert_eq!(
         cookies.len(),
-        2,
-        "the bare copy and the tenant copy: {:?}",
+        3,
+        "the bare copy, the tenant copy and the SAML copy: {:?}",
         op_paths(&resp)
     );
     let (bare, tenant) = (&cookies[0], &cookies[1]);
@@ -444,9 +455,9 @@ async fn d11_a_password_sign_in_sets_the_bare_and_the_tenant_cookie_identically_
                 .join("; ")
         })
         .collect();
-    assert_eq!(headers.len(), 2);
-    assert_eq!(
-        headers[0], headers[1],
+    assert_eq!(headers.len(), 3);
+    assert!(
+        headers.iter().all(|h| *h == headers[0]),
         "the attributes other than Path are identical"
     );
 }
@@ -659,7 +670,7 @@ async fn d11_a_sign_in_never_adopts_a_cookie_planted_at_the_tenant_path() {
     let resp = test::call_service(&app, login).await;
     assert_eq!(resp.status().as_u16(), 200);
     let minted = op_cookies(&resp);
-    assert_eq!(minted.len(), 2, "{:?}", op_paths(&resp));
+    assert_eq!(minted.len(), 3, "{:?}", op_paths(&resp));
     for c in &minted {
         assert!(c.value() != planted, "the sign-in must mint its own value");
         assert_eq!(
@@ -1378,7 +1389,7 @@ fn assert_clears_both_copies(resp: &actix_web::dev::ServiceResponse, tenant_id: 
     let removals = op_cookies(resp);
     assert_eq!(
         op_paths(resp),
-        vec!["/oauth2/authorize".to_owned(), tenant_path(tenant_id)],
+        minted_paths(tenant_id),
         "{label}: one removal per copy the sign-in minted"
     );
     for c in &removals {
@@ -1501,7 +1512,7 @@ async fn d11_logout_by_an_org_level_principal_acting_on_a_child_tenant_ends_its_
     assert_eq!(resp.status().as_u16(), 200, "an organization-scope sign-in");
     assert_eq!(
         op_paths(&resp),
-        vec!["/oauth2/authorize".to_owned(), tenant_path(org_tenant)],
+        minted_paths(org_tenant),
         "the copies are minted for the session's own (organization) tenant"
     );
     let cookie = |name: &str| {

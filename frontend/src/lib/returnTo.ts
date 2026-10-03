@@ -21,9 +21,10 @@ import { clearReauthAttempts } from "@/lib/reauth";
  * 2. no control characters, whitespace, `#` or `\`;
  * 3. begins with a single `/` — not `//`, which reads as a path and resolves
  *    to a different host;
- * 4. the path is exactly `/oauth2/authorize`, or exactly
- *    `/t/{uuid}/oauth2/authorize` (T21.6, per-tenant path issuers), and there
- *    is a query.
+ * 4. the path is exactly `/oauth2/authorize`, exactly
+ *    `/t/{uuid}/oauth2/authorize` (T21.6, per-tenant path issuers), or exactly
+ *    `/saml/v2/{uuid}/sso/continue` (T23.2.3, the SAML SSO endpoint's return
+ *    leg), and there is a query.
  *
  * Rule 4 is what makes traversal a non-question: nothing is normalised and
  * then compared, because nothing but one of two exact shapes is accepted in the
@@ -49,9 +50,26 @@ export const AUTHORIZE_PATH = "/oauth2/authorize";
 const TENANT_AUTHORIZE_PATH =
   /^\/t\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/oauth2\/authorize$/;
 
-/** Is `path` an authorization-endpoint path this deployment could serve? */
+/**
+ * The SAML 2.0 IdP's SSO return leg (T23.2.3). Mirrors
+ * `login_hop::saml_sso_continue_path`/`build_saml_return_to`: the SSO endpoint
+ * stores the parsed `AuthnRequest` server-side and the hop comes back here with
+ * nothing but its opaque handle. The same three rules above apply first; this
+ * is one more exact shape, never a prefix.
+ */
+const SAML_SSO_CONTINUE_PATH =
+  /^\/saml\/v2\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/sso\/continue$/;
+
+/**
+ * Is `path` a sign-in continuation this deployment could serve — an
+ * authorization endpoint, or the SAML SSO return leg?
+ */
 function isAuthorizePath(path: string): boolean {
-  return path === AUTHORIZE_PATH || TENANT_AUTHORIZE_PATH.test(path);
+  return (
+    path === AUTHORIZE_PATH ||
+    TENANT_AUTHORIZE_PATH.test(path) ||
+    SAML_SSO_CONTINUE_PATH.test(path)
+  );
 }
 
 /** Mirrors `login_hop::MAX_RETURN_TO_LEN`. */

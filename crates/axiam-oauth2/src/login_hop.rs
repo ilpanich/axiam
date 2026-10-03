@@ -27,6 +27,13 @@
 //! third check is free and closes the case where a `return_to` is stored,
 //! logged or replayed between the two.
 //!
+//! Since T23.2.3 there is a second caller with a second exact path: the SAML
+//! 2.0 IdP's SSO endpoint, whose hop comes back to
+//! `/saml/v2/{tenant_id}/sso/continue?handle=…` ([`build_saml_return_to`]).
+//! It is the same validator ([`validate_return_to_at`]) told to expect that one
+//! path, so it is still one exact shape per call and the audit list is refused
+//! against it row for row.
+//!
 //! Anything else is an open redirect. The interesting members of that family
 //! are foreign origins (`https://evil.example/…`), scheme-relative values
 //! (`//evil.example/…`, which a browser resolves to a *different host* while
@@ -254,6 +261,55 @@ pub fn tenant_authorize_path(tenant_id: uuid::Uuid) -> String {
         tenant_id,
         AUTHORIZE_PATH
     )
+}
+
+/// The SAML 2.0 IdP's SSO endpoint for a tenant, `/saml/v2/{tenant_id}/sso`
+/// (G-2, T23.2.3).
+///
+/// Also the `Path` of the third OP-session cookie copy
+/// (`op_session_cookie_paths` in the REST layer), so the cookie reaches the
+/// endpoint and its two sub-paths — `/continue`, the return leg of the login
+/// hop, and `/idp-initiated` — and nothing else. Built from the typed tenant id,
+/// so it cannot be anything but `/saml/v2/{uuid}/sso`.
+#[must_use]
+pub fn saml_sso_path(tenant_id: uuid::Uuid) -> String {
+    format!("/saml/v2/{tenant_id}/sso")
+}
+
+/// The SAML SSO endpoint's return leg, `/saml/v2/{tenant_id}/sso/continue`
+/// (T23.2.3): the **only** path a SAML login hop's `return_to` may name.
+///
+/// A SAML `AuthnRequest` is not replayable by redirect (the HTTP-POST binding
+/// arrives as a cross-site form post), so the SSO endpoint parses and checks it,
+/// stores it server-side under an opaque handle, and the browser comes back here
+/// carrying only that handle. [`validate_return_to_at`] with this path is the
+/// whole of the SAML arm: the same five rules, one exact path per call.
+#[must_use]
+pub fn saml_sso_continue_path(tenant_id: uuid::Uuid) -> String {
+    format!("{}/continue", saml_sso_path(tenant_id))
+}
+
+/// The `return_to` of a SAML login hop: the tenant's
+/// [`saml_sso_continue_path`] with the pending request's opaque `handle` and
+/// [`LOGIN_HOP_MARKER`].
+///
+/// `handle` must be the unpadded base64url string the SSO endpoint minted; a
+/// value outside that alphabet is refused (`None`) rather than encoded, because
+/// nothing but such a handle is ever put here. The result is validated before
+/// it is returned, exactly as [`build_return_to_at`]'s is.
+#[must_use]
+pub fn build_saml_return_to(tenant_id: uuid::Uuid, handle: &str) -> Option<String> {
+    if handle.is_empty()
+        || !handle
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    let path = saml_sso_continue_path(tenant_id);
+    let candidate = format!("{path}?handle={handle}&{LOGIN_HOP_MARKER}=1");
+    validate_return_to_at(&candidate, &path).ok()?;
+    Some(candidate)
 }
 
 /// Build the `return_to` for an authorization request whose raw query string is
@@ -833,6 +889,58 @@ mod tests {
                     "must refuse {spelled:?} against the tenant path"
                 );
             }
+        }
+    }
+
+    /// **T23.2.3** — the same list against the SAML arm: every candidate refused
+    /// against `/saml/v2/{tenant}/sso/continue`, verbatim and with
+    /// `/oauth2/authorize` re-based onto the SAML return leg (and `/oauth2/` onto
+    /// `/saml/v2/{tenant}/`), so no hostile value becomes acceptable by being
+    /// spelled in the SAML form. The SAML arm is still one exact path per call.
+    #[test]
+    fn t23_2_3_the_audit_list_is_refused_against_the_saml_continue_path_too() {
+        let tenant = uuid::Uuid::parse_str(T21_6_TENANT).unwrap();
+        let path = saml_sso_continue_path(tenant);
+        for candidate in AUDIT_LIST {
+            let onto_continue = candidate.replace("/oauth2/authorize", &path);
+            let onto_saml_root = candidate.replace("/oauth2/", &format!("/saml/v2/{tenant}/"));
+            for spelled in [(*candidate).to_owned(), onto_continue, onto_saml_root] {
+                assert!(
+                    validate_return_to_at(&spelled, &path).is_err(),
+                    "must refuse {spelled:?} against the SAML continue path"
+                );
+            }
+        }
+    }
+
+    /// The SAML builder emits exactly what the SAML validator accepts, carries
+    /// the loop guard's marker, and refuses a handle outside base64url rather
+    /// than encoding it — nothing but a minted handle is ever put here.
+    #[test]
+    fn t23_2_3_the_saml_return_to_is_the_continue_path_with_the_handle_alone() {
+        let tenant = uuid::Uuid::parse_str(T21_6_TENANT).unwrap();
+        assert_eq!(
+            saml_sso_path(tenant),
+            format!("/saml/v2/{T21_6_TENANT}/sso")
+        );
+        let built = build_saml_return_to(tenant, "AbC-_09").expect("a return_to");
+        assert_eq!(
+            built,
+            format!("/saml/v2/{T21_6_TENANT}/sso/continue?handle=AbC-_09&{LOGIN_HOP_MARKER}=1")
+        );
+        assert!(validate_return_to_at(&built, &saml_sso_continue_path(tenant)).is_ok());
+        // Measured against exactly one path: neither authorization endpoint
+        // accepts it, and it accepts neither of theirs.
+        assert!(validate_return_to(&built).is_err());
+        assert!(validate_return_to_at(&built, &tenant_authorize_path(tenant)).is_err());
+        assert!(
+            validate_return_to_at("/oauth2/authorize?x=1", &saml_sso_continue_path(tenant))
+                .is_err()
+        );
+        for hostile in [
+            "", "a b", "a&x=1", "a#b", "a/b", "a%2f", "a\r\nb", "a?b", "a=b",
+        ] {
+            assert_eq!(build_saml_return_to(tenant, hostile), None, "{hostile:?}");
         }
     }
 

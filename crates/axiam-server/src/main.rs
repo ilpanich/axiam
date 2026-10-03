@@ -1085,6 +1085,10 @@ async fn main() -> std::io::Result<()> {
             config.directory_encryption_key,
         ),
     ));
+    // The mapper flushes the authorization decision cache for a user whose
+    // memberships it changed, as the group-membership routes do. The cache does
+    // not exist yet, so the hook is set below, once `rest_authz` is built.
+    let directory_membership_slot = axiam_directory::MembershipChangeSlot::new();
     let auth_service = AuthService::new(
         user_repo.clone(),
         session_repo.clone(),
@@ -1104,10 +1108,13 @@ async fn main() -> std::io::Result<()> {
     // successful directory sign-in, before anything is issued; a mapping that
     // cannot be applied (the directory cannot be asked, the 1 000-group cap) is
     // a refused sign-in. A tenant with an empty table asks the directory nothing.
-    .with_directory_group_mapper(Arc::new(axiam_directory::RepositoryGroupMapper::new(
-        Arc::clone(&directory_authenticator),
-        axiam_db::SurrealGroupRepository::new(pool.handle_for_repo()),
-    )))
+    .with_directory_group_mapper(Arc::new(
+        axiam_directory::RepositoryGroupMapper::new(
+            Arc::clone(&directory_authenticator),
+            axiam_db::SurrealGroupRepository::new(pool.handle_for_repo()),
+        )
+        .with_change_slot(directory_membership_slot.clone()),
+    ))
     // G-3 (T23.3.3): the rows for just-in-time provisioning, its refusals and
     // the linking of an account, on the same append-only repository (and the
     // same minimisation) as every other audit row.
@@ -2062,6 +2069,31 @@ async fn main() -> std::io::Result<()> {
             None => engine,
         })
     };
+
+    // G-3 (T23.3.4): a membership the directory mapping changes at sign-in
+    // flushes that one subject's cached decisions locally and on every replica
+    // (the same call the group-membership routes make), so a role that arrived
+    // through a group the directory has since removed does not outlive the
+    // sign-in that noticed. A failed broadcast is logged: the local cache is
+    // already flushed and the TTL bounds the other replicas.
+    {
+        let authz = Arc::clone(&rest_authz);
+        directory_membership_slot.set(Arc::new(move |tenant_id, user_id| {
+            let authz = Arc::clone(&authz);
+            Box::pin(async move {
+                if let Err(error) = authz.invalidate_subject(tenant_id, user_id).await {
+                    tracing::error!(
+                        target: "axiam::directory",
+                        %tenant_id,
+                        %user_id,
+                        %error,
+                        "the decision-cache flush after a directory group mapping change \
+                         could not be broadcast to the other replicas"
+                    );
+                }
+            })
+        }));
+    }
 
     // Spawn AMQP authorization consumer on a background task.
     // Uses a publisher channel because the consumer also publishes responses.

@@ -56,7 +56,7 @@ use axiam_db::repository::{
 };
 use axiam_directory::config::validate;
 use axiam_directory::{ClientLimits, DirectoryClient, RepositoryDirectoryAuthenticator};
-use axiam_directory::{RepositoryGroupMapper, mapper::apply_backed_groups};
+use axiam_directory::{MembershipChangeSlot, RepositoryGroupMapper, mapper::apply_backed_groups};
 use ldap3_proto::proto::LdapResultCode;
 use support::{
     BASE_DN, Entry, GROUP_BASE_DN, SERVICE_DN, Script, TestServer, alice_password, group_dn,
@@ -156,6 +156,8 @@ struct Harness {
     audit: SurrealAuditLogRepository<Db>,
     config_repo: ConfigRepo,
     svc: Svc,
+    /// Where the mapper reports a changed membership; empty until a test sets it.
+    slot: MembershipChangeSlot,
     /// The AXIAM groups of the tenant, by the name they were created under.
     staff: Uuid,
     eng: Uuid,
@@ -266,7 +268,9 @@ async fn harness_with(
         config_repo.clone(),
         Arc::new(DirectoryClient::new(limits())),
     ));
-    let mapper = RepositoryGroupMapper::new(Arc::clone(&authenticator), groups.clone());
+    let slot = MembershipChangeSlot::new();
+    let mapper = RepositoryGroupMapper::new(Arc::clone(&authenticator), groups.clone())
+        .with_change_slot(slot.clone());
     let svc = AuthService::new(
         users.clone(),
         SurrealSessionRepository::new(db.clone()),
@@ -293,6 +297,7 @@ async fn harness_with(
         audit,
         config_repo,
         svc,
+        slot,
     };
     let table = mappings(&h);
     let input = config_input(&h.server, tenant_id, kind, table, depth);
@@ -722,6 +727,137 @@ async fn a_mapping_row_whose_group_was_deleted_is_skipped() {
     h.groups.delete(h.tenant_id, h.eng).await.unwrap();
     assert!(sign_in(&h).await.is_ok());
     assert_eq!(group_names(&h).await, names(&["ax-staff", "ax-ops"]));
+}
+
+/// A role that arrived through a group must not outlive the sign-in that
+/// noticed the directory had removed it — **even with the decision cache on**.
+/// The mapper reports a changed membership through the slot the composition
+/// root sets to the engine's `invalidate_subject`, as the group routes do.
+/// The first half is the control: without the hook a cached allow survives.
+#[tokio::test]
+async fn a_membership_change_flushes_the_decision_cache_through_the_hook() {
+    use axiam_authz::{DecisionCache, DecisionCacheConfig};
+
+    let h = harness().await;
+    let resource = SurrealResourceRepository::new(h.db.clone())
+        .create(CreateResource {
+            tenant_id: h.tenant_id,
+            name: "ledger".into(),
+            resource_type: "service".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let roles = SurrealRoleRepository::new(h.db.clone());
+    let perms = SurrealPermissionRepository::new(h.db.clone());
+    let role = roles
+        .create(CreateRole {
+            tenant_id: h.tenant_id,
+            name: "ledger-reader".into(),
+            description: String::new(),
+            is_global: false,
+        })
+        .await
+        .unwrap();
+    let perm = perms
+        .create(CreatePermission {
+            tenant_id: h.tenant_id,
+            action: "read".into(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+    perms
+        .grant_to_role(h.tenant_id, role.id, perm.id)
+        .await
+        .unwrap();
+    roles
+        .assign_to_group(
+            h.tenant_id,
+            h.staff,
+            role.id,
+            AssignmentScope::resource(resource),
+        )
+        .await
+        .unwrap();
+    let engine: Arc<Engine> = Arc::new(
+        AuthorizationEngine::new(
+            roles.clone(),
+            perms.clone(),
+            SurrealResourceRepository::new(h.db.clone()),
+            SurrealScopeRepository::new(h.db.clone()),
+            h.groups.clone(),
+        )
+        .with_decision_cache(Arc::new(DecisionCache::new(DecisionCacheConfig {
+            ttl: Duration::from_secs(300),
+            max_entries_per_tenant: 100,
+        }))),
+    );
+    let may_read = |user_id: Uuid| {
+        let engine = Arc::clone(&engine);
+        let tenant_id = h.tenant_id;
+        async move {
+            engine
+                .check_access(&AccessRequest {
+                    tenant_id,
+                    subject_scope: SubjectScope::Tenant,
+                    subject_id: user_id,
+                    action: "read".into(),
+                    resource_id: resource,
+                    scope: None,
+                })
+                .await
+                .unwrap()
+        }
+    };
+
+    // Control: no hook. The allow is cached, the directory removes alice, she
+    // signs in, the membership is gone — and the cached allow still stands.
+    h.server.set_entries(directory(&["staff"]));
+    assert!(sign_in(&h).await.is_ok());
+    let id = alice_id(&h).await;
+    assert_eq!(may_read(id).await, AccessDecision::Allow);
+    h.server.set_entries(directory(&[]));
+    assert!(sign_in(&h).await.is_ok());
+    assert!(group_names(&h).await.is_empty());
+    assert_eq!(
+        may_read(id).await,
+        AccessDecision::Allow,
+        "control: without the hook the cache is stale, which is what the hook is for"
+    );
+
+    // Now the hook the composition root sets.
+    let flushes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let engine = Arc::clone(&engine);
+        let flushes = Arc::clone(&flushes);
+        assert!(h.slot.set(Arc::new(move |tenant_id, user_id| {
+            let engine = Arc::clone(&engine);
+            let flushes = Arc::clone(&flushes);
+            Box::pin(async move {
+                flushes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                engine.invalidate_subject(tenant_id, user_id).await.unwrap();
+            })
+        })));
+    }
+    // Put alice back in staff: the addition flushes too (the stale deny is
+    // cleared and the allow is cached).
+    h.server.set_entries(directory(&["staff"]));
+    assert!(sign_in(&h).await.is_ok());
+    assert_eq!(may_read(id).await, AccessDecision::Allow);
+    assert_eq!(flushes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // A sign-in that changes nothing flushes nothing.
+    assert!(sign_in(&h).await.is_ok());
+    assert_eq!(flushes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // The removal is effective at once, with the cache on.
+    h.server.set_entries(directory(&[]));
+    assert!(sign_in(&h).await.is_ok());
+    assert!(matches!(may_read(id).await, AccessDecision::Deny(_)));
+    assert_eq!(flushes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // The slot takes one hook.
+    assert!(!h.slot.set(Arc::new(|_, _| Box::pin(async {}))));
 }
 
 // ---------------------------------------------------------------------------

@@ -58,4 +58,4 @@ pub mod tls;
 
 pub use authenticator::{MappedGroups, RepositoryDirectoryAuthenticator};
 pub use client::{ClientLimits, DirectoryClient, DirectoryTarget};
-pub use mapper::RepositoryGroupMapper;
+pub use mapper::{MembershipChangeHook, MembershipChangeSlot, RepositoryGroupMapper};

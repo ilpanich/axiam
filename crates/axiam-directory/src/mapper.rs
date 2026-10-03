@@ -36,6 +36,7 @@
 //! more. It is idempotent, so the next sign-in finishes the work.
 
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use axiam_core::error::AxiamError;
 use axiam_core::models::directory::{
@@ -145,12 +146,52 @@ pub async fn apply_backed_groups<G: GroupRepository>(
     Ok(outcome)
 }
 
+/// What the mapper calls after it has changed a user's memberships:
+/// `(tenant_id, user_id)`. The composition root sets it to flush the
+/// authorization engine's decision cache for that subject, exactly as the
+/// group-membership routes do — a membership the directory removed must not
+/// leave a cached *allow* behind.
+pub type MembershipChangeHook =
+    Arc<dyn Fn(Uuid, Uuid) -> DirectoryFuture<'static, ()> + Send + Sync>;
+
+/// A hook that may be set **after** the mapper is built.
+///
+/// The composition root builds the sign-in path (and with it the mapper) before
+/// the authorization engine and its decision cache exist, so the hook cannot be
+/// handed over at construction. Clones share one slot; it can be set once, and
+/// an unset slot does nothing (a deployment without a decision cache has
+/// nothing to flush).
+#[derive(Clone, Default)]
+pub struct MembershipChangeSlot {
+    hook: Arc<OnceLock<MembershipChangeHook>>,
+}
+
+impl MembershipChangeSlot {
+    /// An empty slot.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the hook. `false` when one was already set (the first stays).
+    pub fn set(&self, hook: MembershipChangeHook) -> bool {
+        self.hook.set(hook).is_ok()
+    }
+
+    async fn notify(&self, tenant_id: Uuid, user_id: Uuid) {
+        if let Some(hook) = self.hook.get() {
+            hook(tenant_id, user_id).await;
+        }
+    }
+}
+
 /// The production [`DirectoryGroupMapper`]: the directory authenticator (which
 /// owns the configuration, the bind secret and the pooled client) and a group
 /// repository.
 pub struct RepositoryGroupMapper<R, G> {
     authenticator: Arc<RepositoryDirectoryAuthenticator<R>>,
     groups: G,
+    on_change: MembershipChangeSlot,
 }
 
 impl<R, G> RepositoryGroupMapper<R, G> {
@@ -161,7 +202,17 @@ impl<R, G> RepositoryGroupMapper<R, G> {
         Self {
             authenticator,
             groups,
+            on_change: MembershipChangeSlot::new(),
         }
+    }
+
+    /// Call the slot's hook whenever a user's memberships change (see
+    /// [`MembershipChangeHook`]). The slot is shared with the caller, who sets
+    /// it when the thing it flushes exists.
+    #[must_use]
+    pub fn with_change_slot(mut self, slot: MembershipChangeSlot) -> Self {
+        self.on_change = slot;
+        self
     }
 }
 
@@ -181,8 +232,15 @@ where
                 .authenticator
                 .resolve_mapped_groups(tenant_id, user_dn)
                 .await?;
-            let mut outcome =
-                apply_backed_groups(&self.groups, tenant_id, user_id, &mapped.group_ids).await?;
+            let applied =
+                apply_backed_groups(&self.groups, tenant_id, user_id, &mapped.group_ids).await;
+            // After the writes and before the caller issues anything. Also on a
+            // failure: removals made before it already narrowed the user's
+            // access, and a cached allow must not outlive them.
+            if applied.as_ref().map_or(true, GroupMappingOutcome::changed) {
+                self.on_change.notify(tenant_id, user_id).await;
+            }
+            let mut outcome = applied?;
             outcome.directory_groups_resolved = mapped.directory_groups_resolved;
             outcome.directory_groups_mapped = mapped.group_ids.len();
             Ok(outcome)

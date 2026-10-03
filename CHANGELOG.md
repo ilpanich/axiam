@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordinary failure (not counted against the account) and changes nothing; a
   just-provisioned account whose lookup fails holds no membership and grants
   nothing. A tenant with an empty table asks the directory no group question.
+  A membership the mapping changes flushes that one subject's cached
+  authorization decisions, locally and on every replica, through the same call
+  the group-membership routes make, so a role that arrived through a group the
+  directory has since removed does not outlive the sign-in that noticed.
   New audit actions `directory.groups_mapped` (the AXIAM groups added and
   removed and counts, nothing that names a person) and
   `directory.group_mapping_refused`. `DirectoryGroupMapper::apply_for_user`

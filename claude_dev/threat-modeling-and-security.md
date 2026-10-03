@@ -292,7 +292,10 @@
 > load-bearing (T-237), a `return_to` validated three times and a loop guard with
 > a terminating argument (T-238), an honour lane on which a relying party gets
 > the freshness or assurance it asked for or is told it cannot — the ACR echo
-> designed out at the type level (T-239), authentication evidence dated by the
+> designed out at the type level (T-239; amended 2026-10-02 and 2026-10-03,
+> Phase 23 T23.1.1/T23.1.4: a `fapi2` client's `claims.id_token.acr` and its
+> essential `claims.id_token.auth_time` are refused, not silently dropped),
+> authentication evidence dated by the
 > upstream provider and copied rather than restamped across rotation (T-240),
 > the `address` and `phone` scopes behind four gates re-asked at every UserInfo
 > call and never in an ID token (T-241), an ID token that carries only what was

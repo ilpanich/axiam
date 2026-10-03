@@ -1602,6 +1602,93 @@ async fn t3_5_acr_values_on_an_ignore_lane_client_produces_no_claim() {
     }
 }
 
+/// **D-12 (T23.1.4) — the honour lane's half.** An *essential*
+/// `claims.id_token.auth_time` is honoured, not refused: OIDC Core §2 makes the
+/// claim REQUIRED in the ID token then, and the honour lane emits it for every
+/// session. The `fapi2` lane refuses the same request
+/// (`fapi::tests::a_fapi2_client_is_refused_an_essential_auth_time_and_only_that`)
+/// because it could never satisfy it; this is the proof that the refusal did
+/// not leak onto a client that opted in, and that the claim really is there.
+#[actix_rt::test]
+async fn d12_an_essential_auth_time_is_honoured_on_the_honour_lane() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, honour_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::seconds(30),
+        vec![Amr::Pwd],
+    )
+    .await;
+
+    let claims_param: String =
+        url::form_urlencoded::byte_serialize(br#"{"id_token":{"auth_time":{"essential":true}}}"#)
+            .collect();
+    let claims = id_token_claims(
+        &app,
+        tenant_id,
+        &token,
+        &client_id,
+        &secret,
+        &format!("&claims={claims_param}"),
+    )
+    .await;
+
+    let auth_time = claims["auth_time"]
+        .as_i64()
+        .expect("an essential auth_time request must be answered with the claim");
+    let now = chrono::Utc::now().timestamp();
+    assert!(
+        (now - 120..=now - 10).contains(&auth_time),
+        "auth_time must be the session's authentication instant (about 30 s ago)"
+    );
+}
+
+/// **D-12's invariant-1 twin.** The same essential `auth_time` request from a
+/// `standard`/`ignore` client — every client registered today — is still
+/// served a code and an ID token with no `auth_time`, exactly as before the
+/// `fapi2` gate learned the member.
+#[actix_rt::test]
+async fn d12_i1_twin_an_essential_auth_time_is_still_ignored_on_the_ignore_lane() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, ignore_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::seconds(30),
+        vec![Amr::Pwd],
+    )
+    .await;
+
+    let claims_param: String =
+        url::form_urlencoded::byte_serialize(br#"{"id_token":{"auth_time":{"essential":true}}}"#)
+            .collect();
+    let claims = id_token_claims(
+        &app,
+        tenant_id,
+        &token,
+        &client_id,
+        &secret,
+        &format!("&claims={claims_param}"),
+    )
+    .await;
+    for absent in ["auth_time", "acr", "amr"] {
+        assert!(claims.get(absent).is_none(), "{absent} in {claims}");
+    }
+}
+
 /// A satisfied ACR request asks for no interaction at all, and reports the
 /// class that satisfied it.
 #[actix_rt::test]
@@ -1732,6 +1819,243 @@ async fn m4_i4_twin_an_id_token_hint_is_ignored_on_the_ignore_lane() {
     assert_eq!(resp.status().as_u16(), 302);
     let loc = location(&resp);
     assert!(query_param(&loc, "code").is_some(), "{loc}");
+}
+
+// ---------------------------------------------------------------------------
+// T23.1.4 — id_token_hint and prompt=select_account, over HTTP
+// ---------------------------------------------------------------------------
+
+/// Sign an ID-token-shaped claim set with `key` — the deployment's own, or a
+/// stranger's — so a hint can be wrong in exactly one way at a time.
+/// `exp_offset` is relative to now and may be negative.
+fn signed_hint(key: &jsonwebtoken::EncodingKey, sub: Uuid, aud: &str, exp_offset: i64) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let claims = serde_json::json!({
+        "iss": "axiam-test",
+        "sub": sub.to_string(),
+        "aud": aud,
+        "exp": now + exp_offset,
+        "iat": now - 3600,
+    });
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA),
+        &claims,
+        key,
+    )
+    .expect("sign the hint")
+}
+
+fn deployment_key(auth: &AuthConfig) -> jsonwebtoken::EncodingKey {
+    jsonwebtoken::EncodingKey::from_ed_pem(auth.jwt_private_key_pem.as_bytes())
+        .expect("the test deployment's signing key")
+}
+
+fn foreign_key() -> jsonwebtoken::EncodingKey {
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("generate Ed25519");
+    jsonwebtoken::EncodingKey::from_ed_pem(kp.serialize_pem().as_bytes()).expect("encoding key")
+}
+
+/// **T23.1.4 — `id_token_hint`, one wrong thing at a time (OIDC Core
+/// §3.1.2.1).** Only a hint signed by this deployment, naming *this* end user
+/// and *this* client, asks for nothing. Every other hint — somebody else's
+/// subject, another client's audience, a stranger's signature, an access token
+/// in place of an ID token — is a mismatch: the browser is sent to sign in
+/// again, and under `prompt=none`, where it cannot be, the answer is
+/// `login_required`. None of them is dropped, which would serve the code the
+/// hint said was meant for somebody else.
+///
+/// The other half is OIDC Core's own allowance: an ID token that has *expired*
+/// is still a valid hint (it is a statement about who, not about when), so an
+/// expired-but-signed hint naming this user and this client proceeds to a code.
+#[actix_rt::test]
+async fn t23_1_4_an_id_token_hint_must_be_signed_here_and_name_this_user_and_client() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, honour_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::seconds(30),
+        vec![Amr::Pwd],
+    )
+    .await;
+    let own = deployment_key(&auth);
+
+    let wrong: [(&str, String); 5] = [
+        (
+            "another subject",
+            signed_hint(&own, Uuid::new_v4(), &client_id, 600),
+        ),
+        (
+            "another client",
+            signed_hint(&own, user_id, "oa_some_other_client", 600),
+        ),
+        (
+            "a stranger's signature",
+            signed_hint(&foreign_key(), user_id, &client_id, 600),
+        ),
+        // Right shape of claim set is not enough; the wrong *kind* of token
+        // carries this user's subject under another audience.
+        ("an access token", token.clone()),
+        ("garbage", "not.a.jwt".to_owned()),
+    ];
+    for (what, hint) in &wrong {
+        let resp = authorize(
+            &app,
+            &token,
+            &format!("{}&id_token_hint={hint}", base_query(&client_id)),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 302, "{what}");
+        let loc = location(&resp);
+        assert!(
+            loc.starts_with("/login?return_to=") && loc.contains("&reauth=1"),
+            "{what}: a wrong hint must send the browser to sign in again, not be dropped"
+        );
+        assert!(!loc.contains("code="), "{what}: no code may be issued");
+
+        let resp = authorize(
+            &app,
+            &token,
+            &format!(
+                "{}&prompt=none&id_token_hint={hint}",
+                base_query(&client_id)
+            ),
+        )
+        .await;
+        assert_eq!(
+            error_of(&resp),
+            "login_required",
+            "{what} under prompt=none"
+        );
+    }
+
+    // The right subject and client, signed here, expired an hour ago: accepted.
+    let expired = signed_hint(&own, user_id, &client_id, -3600);
+    for extra in ["", "&prompt=none"] {
+        let resp = authorize(
+            &app,
+            &token,
+            &format!("{}{extra}&id_token_hint={expired}", base_query(&client_id)),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 302);
+        let loc = location(&resp);
+        assert!(
+            query_param(&loc, "code").is_some(),
+            "an expired but signed hint naming this user and client must be accepted \
+             (OIDC Core allows it): {extra:?}"
+        );
+    }
+}
+
+/// **T23.1.4 — `prompt=select_account` (OIDC Core §3.1.2.1).** Handled as
+/// `login` for the first leg (a single-account SPA's sign-in page *is* its
+/// account chooser), so the browser is sent to sign in in `reauth` mode. It
+/// is what turns a hint mismatch that survives the sign-in into
+/// `account_selection_required` — the user did sign in, just not as the account
+/// the relying party named — where the same state without `select_account` is
+/// `login_required`.
+#[actix_rt::test]
+async fn t23_1_4_prompt_select_account_signs_in_again_and_names_a_surviving_mismatch() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, _) = create_client(&app, &jwt, honour_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::seconds(30),
+        vec![Amr::Pwd],
+    )
+    .await;
+
+    let resp = authorize(
+        &app,
+        &token,
+        &format!("{}&prompt=select_account", base_query(&client_id)),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with("/login?return_to=") && loc.contains("&reauth=1"),
+        "select_account must interact, in reauth mode: {loc}"
+    );
+
+    let somebody_else = signed_hint(&deployment_key(&auth), Uuid::new_v4(), &client_id, 600);
+    let resp = authorize(
+        &app,
+        &token,
+        &format!(
+            "{}&prompt=select_account&id_token_hint={somebody_else}&axiam_login_hop=1",
+            base_query(&client_id)
+        ),
+    )
+    .await;
+    assert_eq!(error_of(&resp), "account_selection_required");
+
+    let resp = authorize(
+        &app,
+        &token,
+        &format!(
+            "{}&id_token_hint={somebody_else}&axiam_login_hop=1",
+            base_query(&client_id)
+        ),
+    )
+    .await;
+    assert_eq!(error_of(&resp), "login_required");
+}
+
+/// **T23.1.4 — the ignore lane, for the `claims` carrier of an essential ACR.**
+/// `t3_5` covers `acr_values`; this is the same twin for the form that can be
+/// *essential*. A client registered today that sends an essential
+/// `claims.id_token.acr` it cannot satisfy is served a code, as it always was,
+/// with no `acr` claim — the refusal `unmet_authentication_requirements` is
+/// the honour lane's, and does not leak onto a client that did not opt in.
+#[actix_rt::test]
+async fn t23_1_4_an_essential_acr_in_claims_is_ignored_on_the_ignore_lane() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (client_id, secret) = create_client(&app, &jwt, ignore_client()).await;
+    let (_, token) = session_token(
+        &db,
+        &auth,
+        org_id,
+        tenant_id,
+        user_id,
+        chrono::Duration::seconds(30),
+        vec![Amr::Pwd],
+    )
+    .await;
+
+    let claims_param: String = url::form_urlencoded::byte_serialize(
+        br#"{"id_token":{"acr":{"essential":true,"values":["urn:axiam:acr:mfa"]}}}"#,
+    )
+    .collect();
+    let claims = id_token_claims(
+        &app,
+        tenant_id,
+        &token,
+        &client_id,
+        &secret,
+        &format!("&claims={claims_param}"),
+    )
+    .await;
+    for absent in ["auth_time", "acr", "amr"] {
+        assert!(claims.get(absent).is_none(), "{absent} in {claims}");
+    }
 }
 
 // ---------------------------------------------------------------------------

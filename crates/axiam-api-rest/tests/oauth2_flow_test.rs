@@ -2350,7 +2350,8 @@ async fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
 /// listener for. The refusal's *wire* shape is covered by the handler's
 /// existing error-response tests, which all of them reach by the same path.
 ///
-/// `claims` is a fifth case **only in its `id_token.acr` form** (T23.1.1). It
+/// `claims` is a fifth case **only in its `id_token.acr` form** (T23.1.1) and its
+/// **essential `id_token.auth_time`** form (D-12, T23.1.4). It
 /// is refused when AXIAM would *drop* it: the `userinfo` member is honoured on
 /// every lane (OIDC Core §5.5, `axiam_oauth2::claims_request`) and is not
 /// refused, but `id_token.acr` is read on the honour lane only, which a `fapi2`
@@ -2397,7 +2398,7 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
         last_authorized_at: None,
     };
 
-    let cases: [(&str, RawAuthnParams<'_>); 5] = [
+    let cases: [(&str, RawAuthnParams<'_>); 6] = [
         (
             "prompt",
             RawAuthnParams {
@@ -2430,6 +2431,15 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
             "claims",
             RawAuthnParams {
                 claims: Some(r#"{"id_token":{"acr":{"essential":true}}}"#),
+                ..Default::default()
+            },
+        ),
+        // D-12 (T23.1.4): the second `claims` member that a `fapi2` ID token
+        // can never carry.
+        (
+            "claims",
+            RawAuthnParams {
+                claims: Some(r#"{"id_token":{"auth_time":{"essential":true}}}"#),
                 ..Default::default()
             },
         ),

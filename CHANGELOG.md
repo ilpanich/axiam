@@ -61,6 +61,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A FAPI 2.0 client's essential `auth_time` request is refused instead of
+  dropped (T23.1.4, D-12).** OIDC Core §2 makes `auth_time` REQUIRED in the ID
+  token when `claims.id_token.auth_time` is requested as **essential**, and a
+  `fapi2` ID token has never carried it, so such a client was served a token
+  without the claim it said it could not do without, and no error — the same
+  silent downgrade T23.1.1 closed for `claims.id_token.acr`. The `fapi2` gate
+  now answers `invalid_request` naming `claims` for it, on both carriers
+  (inline and pushed), by the same mechanism: `claims` is security-bearing when
+  it asks for `id_token.acr`, asks for `id_token.auth_time` as essential, or
+  cannot be read well enough to rule either out. A *voluntary* `auth_time`
+  request (`null`, or `essential: false`) stays as it was, because an OP may
+  decline it; a `claims` asking only for `userinfo` members is still served.
+  Nothing changes for a `standard` client: on the honour lane an essential
+  `auth_time` is honoured (the lane emits it for every session), and on the
+  ignore lane it is dropped as before. Amends T-239 (no new threat id).
+  `sdks/openapi.json` carries the extended discovery description; no contract
+  change. The audit that came with it pinned, over HTTP, the honour-lane rows
+  that had been tested only below it: `id_token_hint` must be signed by this
+  deployment and name this user and this client (an expired-but-signed one is
+  accepted), `prompt=select_account`, the ignore-lane twin for an essential
+  `claims.id_token.acr`, and RFC 6750 §2.2's media type on `POST
+  /oauth2/userinfo`.
+
 - **A federated login's recorded authentication instant is never later than the
   moment AXIAM verified the assertion (T23.1.2, D-10).** X7.2 dated a federated
   session by what the upstream provider said — OIDC `auth_time`, SAML

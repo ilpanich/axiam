@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:19a72b9ba183461d7d47d32fb96e3a8194328a912302f1abb1121aeb3a52a70b"
+    "x-axiam-spec-digest": "sha256:48d3f6800d1faaf6d39adc54b26225e67743240e092728260cb1e49f07a77374"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -16928,7 +16928,7 @@
           },
           "claims_parameter_supported": {
             "type": "boolean",
-            "description": "OIDC Discovery §3 — X7. `true`: the `userinfo` member of the `claims`\ndocument is honoured on every lane (`crate::claims_request`), and the\n`id_token.acr` member on the honour lane. A `fapi2` client asking for\n`id_token.acr` is refused `invalid_request` rather than having the\nmember dropped (`crate::fapi::enforce_authorization_request`)."
+            "description": "OIDC Discovery §3 — X7. `true`: the `userinfo` member of the `claims`\ndocument is honoured on every lane (`crate::claims_request`), and the\n`id_token.acr` member on the honour lane. A `fapi2` client asking for\n`id_token.acr`, or for `id_token.auth_time` as essential, is refused\n`invalid_request` rather than having the member dropped\n(`crate::fapi::enforce_authorization_request`)."
           },
           "claims_supported": {
             "type": "array",

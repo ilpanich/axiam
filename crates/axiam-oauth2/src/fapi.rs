@@ -82,7 +82,7 @@
 //! | Constraint | Registration | Request time |
 //! |---|---|---|
 //! | `fapi2` may not say `honour` | [`FapiRegistrationError::AuthnParamsOnFapiClient`] | refused + `error!`, as the row must have been edited in the database |
-//! | `fapi2` may not send the *security-bearing* parameters (`prompt`, `max_age`, `acr_values`, `id_token_hint`, and a `claims` asking for `id_token.acr`) | — (they are per-request) | `invalid_request`, naming each |
+//! | `fapi2` may not send the *security-bearing* parameters (`prompt`, `max_age`, `acr_values`, `id_token_hint`, a `claims` asking for `id_token.acr`, and a `claims` asking for `id_token.auth_time` as essential) | — (they are per-request) | `invalid_request`, naming each |
 //! | `fapi2` may not register `address`/`phone` | [`FapiRegistrationError::SensitiveScopesOnFapiClient`] | refused `invalid_scope` at the authorization endpoint whatever the row says, and never released at UserInfo (W7) |
 //!
 //! Two asymmetries in that table are deliberate. The four *cosmetic*
@@ -566,15 +566,19 @@ fn is_https_absolute(uri: &str) -> bool {
 ///    remaining gap is a confidential client omitting `code_challenge`.
 /// 2. **A `fapi2` client is refused the security-bearing authentication-request
 ///    parameters** (X7.1) — `prompt`, `max_age`, `acr_values`,
-///    `id_token_hint`, and a `claims` that asks for `id_token.acr` (or cannot
-///    be read well enough to rule that out; T23.1.1). Refusing rather than
+///    `id_token_hint`, and a `claims` that asks for `id_token.acr` or for
+///    `id_token.auth_time` as **essential** (or cannot be read well enough to
+///    rule either out; T23.1.1, D-12). Refusing rather than
 ///    ignoring is the point: ignoring `max_age` tells a relying party it got a
 ///    freshness guarantee it did not get, and *that* silent downgrade is what
 ///    this whole gate exists to prevent. A `claims` that asks only for
 ///    `userinfo` members is not refused — that member is honoured on every
 ///    lane (`crate::claims_request`) — but its `id_token.acr` member is read
 ///    only on the honour lane, which a `fapi2` client is never on, so on this
-///    profile it would be dropped. A conforming FAPI 2.0 relying party sends
+///    profile it would be dropped, and so would an essential
+///    `id_token.auth_time` (OIDC Core §2: REQUIRED when essential; a `fapi2`
+///    ID token never carries it). A *voluntary* `auth_time` request is not
+///    refused: an OP may decline it. A conforming FAPI 2.0 relying party sends
 ///    none of these (the FAPI conformance plans run `openid: plain_oauth`), so
 ///    no client that passes the FAPI plan today observes this.
 /// 3. **A `fapi2` row that says `honour`** cannot have passed
@@ -655,7 +659,8 @@ pub fn enforce_authorization_request(
         // reasonably stop sending the `userinfo` requests AXIAM does honour.
         let claims_note = if refused.contains(&"claims") {
             " (claims is accepted on this profile for its userinfo member only; an \
-             id_token.acr request, or a claims value that cannot be read, is refused)"
+             id_token.acr request, an essential id_token.auth_time request, or a claims \
+             value that cannot be read, is refused)"
         } else {
             ""
         };
@@ -2039,6 +2044,57 @@ mod tests {
                 "{consent_gated} must stay unreachable through the claims parameter"
             );
         }
+    }
+
+    /// D-12 (T23.1.4) — an **essential** `claims.id_token.auth_time` is refused
+    /// on `fapi2` exactly as `id_token.acr` is: OIDC Core §2 makes the claim
+    /// REQUIRED then, and a `fapi2` ID token never carries it, so serving the
+    /// request would be a silent downgrade. A voluntary request is not refused.
+    #[test]
+    fn a_fapi2_client_is_refused_an_essential_auth_time_and_only_that() {
+        let c = fapi_client();
+        for value in [
+            r#"{"id_token":{"auth_time":{"essential":true}}}"#,
+            r#"{"userinfo":{"name":null},"id_token":{"auth_time":{"essential":true}}}"#,
+            // Unreadable member: cannot be shown to be voluntary.
+            r#"{"id_token":{"auth_time":{"essential":"yes"}}}"#,
+            r#"{"id_token":{"auth_time":7}}"#,
+        ] {
+            let err =
+                enforce_authorization_request(&c, Some(PKCE), &one_param("claims", value), &[])
+                    .expect_err("a fapi2 client must be refused an essential auth_time");
+            assert_eq!(err.error_code(), "invalid_request", "{value}");
+            assert!(err.to_string().contains("claims"), "{value}: {err}");
+            assert!(
+                err.to_string().contains("auth_time"),
+                "the refusal must say which member is refused: {err}"
+            );
+        }
+        for value in [
+            r#"{"id_token":{"auth_time":null}}"#,
+            r#"{"id_token":{"auth_time":{"essential":false}}}"#,
+            r#"{"id_token":{"auth_time":{}}}"#,
+            r#"{"userinfo":{"auth_time":{"essential":true}}}"#,
+        ] {
+            assert!(
+                enforce_authorization_request(&c, Some(PKCE), &one_param("claims", value), &[])
+                    .is_ok(),
+                "a voluntary auth_time request must stay as it was: {value}"
+            );
+        }
+    }
+
+    /// D-12's invariant-1 twin at this layer: a `standard`/`ignore` client and
+    /// a `standard`/`honour` client are refused nothing for an essential
+    /// `auth_time` (the honour lane emits it; the ignore lane ignores it).
+    #[test]
+    fn an_essential_auth_time_is_not_refused_off_the_fapi_profile() {
+        let params = one_param("claims", r#"{"id_token":{"auth_time":{"essential":true}}}"#);
+        let ignore = base_client();
+        assert!(enforce_authorization_request(&ignore, None, &params, &[]).is_ok());
+        let mut honour = base_client();
+        honour.authn_request_params = AuthnRequestParamsMode::Honour;
+        assert!(enforce_authorization_request(&honour, None, &params, &[]).is_ok());
     }
 
     /// M5-M6 request half. The cosmetic four are **not** refused on an honest

@@ -310,7 +310,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one. Sending one of the security-bearing parameters — including a `claims` that asks for `id_token.acr` — is `invalid_request` for such a client, pushed or inline, rather than a parameter silently dropped.",
+          "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one. Sending one of the security-bearing parameters — including a `claims` that asks for `id_token.acr` or for `id_token.auth_time` as essential — is `invalid_request` for such a client, pushed or inline, rather than a parameter silently dropped.",
           "**Request objects are rejected, not half-implemented** — `request` gives `request_not_supported`, at the authorization endpoint and at PAR alike, and a non-PAR `request_uri` gives `request_uri_not_supported`.",
           "**Authentication evidence is the provider's for a federated login** — `auth_time` comes from the upstream `auth_time` or `AuthnInstant`, never AXIAM's clock — and is copied, never restamped, across a refresh.",
           "**On the** `ignore` **lane none of the new refusals can occur**: a value AXIAM cannot parse is dropped, exactly as it always was.",

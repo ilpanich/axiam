@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:99079727494dfc1449af9c53362ed637c62f53deba681624ea042c9e72e33946"
+    "x-axiam-spec-digest": "sha256:19a72b9ba183461d7d47d32fb96e3a8194328a912302f1abb1121aeb3a52a70b"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -11697,6 +11697,225 @@
         }
       }
     },
+    "/oauth2/register/{client_id}": {
+      "get": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`GET /oauth2/register/{client_id}` — RFC 7592 §2.1 client read.",
+        "description": "Returns the client information response without the token: only its\ndigest is stored, and the token is rotated on `PUT`, never on read.",
+        "operationId": "read_registration",
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "path",
+            "description": "The client's issued `client_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The client's current registration (no `registration_access_token`, no `client_secret`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistrationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The token was sent in the query string",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, a token that does not belong to this client in this tenant, or no such client (indistinguishable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate-limited (the registration limiter's preset)"
+          }
+        },
+        "security": [
+          {
+            "registration_access_token": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`PUT /oauth2/register/{client_id}` — RFC 7592 §2.2 client update.",
+        "description": "A full replacement, held to the same `validate` a registration is under\nthe tenant's current policy, and the management token rotates: the response\ncarries the new one, once, and the presented one is dead.",
+        "operationId": "update_registration",
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "path",
+            "description": "The client's issued `client_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Registration replaced; the rotated `registration_access_token` is returned once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistrationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The metadata is not one this tenant would register, names a server-stated member, or names another client",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, a token that does not belong to this client in this tenant (including one a concurrent update rotated away), or no such client",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Dynamic registration is no longer enabled for this tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate-limited (the registration limiter's preset)"
+          }
+        },
+        "security": [
+          {
+            "registration_access_token": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`DELETE /oauth2/register/{client_id}` — RFC 7592 §2.3 client delete.",
+        "description": "Deletes the row through a delete conditional on the token, so the\nmanagement token dies with it and a second `DELETE` is `401`; then revokes\nevery refresh token issued to the client. The deleted row no longer counts\nagainst `dcr_max_clients`.",
+        "operationId": "delete_registration",
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "path",
+            "description": "The client's issued `client_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Client deregistered; its refresh tokens are revoked"
+          },
+          "400": {
+            "description": "The token was sent in the query string",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token, a token that does not belong to this client in this tenant, or no such client",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DcrErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate-limited (the registration limiter's preset)"
+          }
+        },
+        "security": [
+          {
+            "registration_access_token": []
+          }
+        ]
+      }
+    },
     "/oauth2/revocations": {
       "get": {
         "tags": [
@@ -18211,7 +18430,7 @@
       },
       "RegistrationResponse": {
         "type": "object",
-        "description": "An RFC 7591 §3.2.1 registration response.\n\n`registration_access_token` and `registration_client_uri` are **absent**:\nRFC 7592's client configuration endpoint is deferred (the plan's item 4),\nand RFC 7591 §3.2.1 makes both OPTIONAL. Returning them would promise an\nendpoint that does not exist, which a conforming client would then try.",
+        "description": "An RFC 7591 §3.2.1 registration response, which is also RFC 7592 §3's\nclient information response.\n\nOne shape for all three answers — the `201` of a registration, the `200`\nof a read and the `200` of a replacement — because RFC 7592 §3 defines the\nclient information response as the RFC 7591 one plus two members, and a\nclient that round-trips what it read must find the members it was given.\nWhat differs between the three is which of the two secrets is present:\n\n| | `client_secret` | `registration_access_token` |\n|---|---|---|\n| `POST /oauth2/register` (201) | once, if issued | **once** |\n| `GET  …/register/{client_id}` | never | never |\n| `PUT  …/register/{client_id}` | never | **once** (the rotated one) |\n\nA read never returns the token. Only its digest is stored, so it could not\nbe returned if we wanted to; and the plan rotates on update only, so a read\nhas no new one to hand out (RFC 7592 §2.1 permits rotation on read; AXIAM\ndoes not do it). The secret is never returned after the registration for\nthe same reason: the row holds a keyed hash.",
         "required": [
           "client_id",
           "client_id_issued_at",
@@ -18220,7 +18439,8 @@
           "grant_types",
           "response_types",
           "token_endpoint_auth_method",
-          "scope"
+          "scope",
+          "registration_client_uri"
         ],
         "properties": {
           "client_id": {
@@ -18258,12 +18478,33 @@
             },
             "description": "The stored grant types."
           },
+          "jwks": {
+            "description": "RFC 7591 §2 `jwks`, as stored, for a `private_key_jwt` client.\n\nEchoed so that an RFC 7592 §2.2 replacement — which is a full\nreplacement, and treats an omitted member as a request to delete it —\ncan be built from a read without silently dropping the client's keys."
+          },
+          "jwks_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7591 §2 `jwks_uri`, as stored. Echoed for the reason `jwks` is."
+          },
           "redirect_uris": {
             "type": "array",
             "items": {
               "type": "string"
             },
             "description": "The stored redirect URIs."
+          },
+          "registration_access_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 7592 §3 `registration_access_token`. **Sensitive**: a bearer\ncredential for this registration. Present on the registration and on a\nreplacement (the rotated value), each exactly once; absent on a read."
+          },
+          "registration_client_uri": {
+            "type": "string",
+            "description": "RFC 7592 §3 `registration_client_uri`: where this client reads,\nreplaces and deletes its registration.\n\n`{issuer}/oauth2/register/{client_id}`, built from the issuer the\nrequest arrived under (see [`registration_client_uri`])."
           },
           "response_types": {
             "type": "array",
@@ -22154,6 +22395,11 @@
         "scheme": "bearer",
         "bearerFormat": "JWT",
         "description": "An AXIAM access token issued to a user (`aud` = `axiam:user`), from the `axiam_access` cookie or the `Authorization` header."
+      },
+      "registration_access_token": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The RFC 7592 registration access token `POST /oauth2/register` returned (and each `PUT` rotates). Opaque, shown once, **sensitive**: it authorizes reading, replacing and deleting that one client's registration and nothing else. Accepted only in the `Authorization` header; a user or service-account access token is refused."
       },
       "service_account": {
         "type": "http",

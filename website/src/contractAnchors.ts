@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.52";
+export const CONTRACT_VERSION = "1.53";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -193,7 +193,15 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "28.8": "#§288-sensitivet-applicability",
  "28.9": "#§289-required-tests",
  "28.10": "#§2810-per-sdk-posture",
- "28.11": "#§2811-cross-sdk-conformance-review-contract-149"
+ "28.11": "#§2811-cross-sdk-conformance-review-contract-149",
+ "28.12": "#§2812-rfc-7592-client-configuration-operations-contract-153",
+ "28.12.1": "#§28121-canonical-operation-set",
+ "28.12.2": "#§28122-rules-normative",
+ "28.12.3": "#§28123-error-mapping",
+ "28.12.4": "#§28124-sensitivet-applicability",
+ "28.12.5": "#§28125-per-language-naming-map",
+ "28.12.6": "#§28126-required-tests",
+ "28.12.7": "#§28127-per-sdk-posture"
 };
 
 /**

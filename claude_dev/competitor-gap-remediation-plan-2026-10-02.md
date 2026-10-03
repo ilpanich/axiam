@@ -585,6 +585,47 @@ fan-out.
 
 ### G-3 — LDAP / Active Directory identity source — **P1**
 
+> **EXECUTED (partly) — G-3, W3: T23.3.3, 2026-10-03** (`7bd2b2a`,
+> `b70fa3e`, `f5db88e`, `110a25e`; Sonnet 5.5). Just-in-time provisioning at
+> the seam T23.3.2 left, `AuthService::login_unknown_user`. The port gained
+> `authenticate_for_provisioning`, gated inside the authenticator, so a tenant
+> without an enabled directory and `jit_provisioning` answers before the bind
+> secret is decrypted or a socket opens, and `lookup_entry` (the same escaped
+> exactly-one search, no user bind) for linking. The hash permit is taken
+> first and the dummy verify runs beside the directory call, so every
+> non-success branch is the unknown-user answer at its cost, and saturation is
+> the same `503` before the directory hears anything. On success a cleaned
+> profile (username and email refused, not repaired, when they hold control,
+> whitespace or bidi characters or are overlong; display name stripped and
+> capped, stored where `ProfileClaims` reads it) passes a case-folded
+> collision probe over both columns of every account, tombstones included, and
+> is created by one `CREATE`, `Active` and marked (**D-29**), the v71 unique
+> indexes deciding a race. **D-28**: JIT never links; a collision is the
+> generic failure plus a `directory.jit_refused` audit row.
+> `link_local_account_to_directory` resolves the entry by the account's
+> username, refuses an entry linked elsewhere, marks the account, deletes its
+> passkeys, revokes its `User` certificates (by convention, D-29), and revokes
+> its sessions and refresh tokens last, through the repositories so the
+> validation cache and revocation feed see it; TOTP is kept; an interrupted
+> link is retried to completion. Audit rows carry identifiers and counts only,
+> through a new `DirectoryAuditSink` port attached by `axiam-server`. Tests: 9
+> repository, 16 `AuthService` (every refusal branch timed against the
+> unknown-user cost, five collision variants, a race run six times, the full
+> linking revocation set), 6 more authenticator tests against the in-process
+> TLS directory, 6 cleaner unit tests.
+>
+> What the plan did not anticipate. No certificate is bound to a user, D-18's
+> single writer, and AD entries without `mail` (all three in D-29). The
+> repository does not fold case, so the probe folds explicitly and scans one
+> tenant per first-ever login. "One unit of work" is ordered rather than one
+> transaction, because a raw cross-table write would bypass the session
+> validation cache. A case variant of an existing directory account's name
+> (`ALICE` for `alice`) is refused as a collision, as a local account's would
+> be. No real-server test here (layering keeps `axiam-auth` from depending on
+> `axiam-directory`); T23.3.6 is the oracle. Threats listed for T23.3.7: the
+> unknown-name bind oracle (T-302 widened), JIT as an account-creation oracle,
+> directory-side takeover by name, attribute injection, linking completeness.
+
 > **EXECUTED (partly) — G-3, W2: T23.3.1, 2026-10-03** (`7279f66`, `2f60f4f`,
 > `227af53`; Sonnet 5.5; issue #522). The crate `axiam-directory` exists at
 > layer 3, in the layering table and `crate-layering.md` from its first
@@ -1320,6 +1361,7 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-26 | *Taken in T23.2.3 (Opus 5.5), 2026-10-03.* D-3 makes IdP-initiated SSO a per-SP opt-in but designs no trigger, and §4 G-2 says nothing about which refusals an SP is told about. What starts an unsolicited response, and what does a refusal look like? | **Trigger: `GET /saml/v2/{t}/sso/idp-initiated?sp=<entity id>[&RelayState=…]`**, for AXIAM's own pages and bookmarks: refused with `403` when `Sec-Fetch-Site: cross-site` (a third-party page could otherwise sign a visitor in to an SP with a `RelayState` of its choosing), for an SP without `allow_idp_initiated`, a disabled SP, an SP asking for encryption, an unusable default ACS or an over-long `RelayState` — all before the hop, all error pages (an unsolicited failure response is no use to an SP). The response goes to the SP's default ACS with no `InResponseTo`. **Refusals, SP-initiated:** a request that has not shown it comes from the SP — undecodable, oversized, DTD-bearing, stale, malformed, unknown issuer, a failed or misplaced signature, a `Destination` mismatch, an ACS URL or index outside the registry, a non-POST `ProtocolBinding`, an over-long `RelayState`, a replayed `ID` — gets an **error page that posts nowhere** (`400`/`413`, generic text, nothing reflected); once the ACS is a registered POST endpoint, policy refusals are **posted** as unsigned status-only failures (`RequestDenied` for a disabled SP, `Responder` for encryption, `InvalidNameIDPolicy` for a conflicting `NameIDPolicy@Format`; after the hop `NoPassive`, `AuthnFailed`, `RequestDenied` for `allowed_groups`, `Responder` for a missing credential). An AuthnRequest naming a `Subject` is refused (not honoured); `RequestedAuthnContext` is not read (the assertion's class is the session's evidence, T-314). A signed request from an SP that registered no certificate is treated as unsigned (it cannot be evaluated); one that registered a certificate has every signature checked whether or not it requires signing. Rejected: a `POST` trigger with the API's CSRF token (the console has no launcher yet, and a top-level `GET` is what bookmarks and portals use); answering every refusal at the ACS (that posts attacker-chosen `RelayState`/`InResponseTo` to an SP on an unauthenticated request's word) |
 | D-27 | *Taken in T23.2.3 (Opus 5.5), 2026-10-03.* The auto-post page needs an inline `submit()` and a `form-action` naming the ACS origin, but `SecurityHeadersMiddleware` overwrote every response's `Content-Security-Policy` with the global one (`script-src 'self'; form-action 'self'`); and the SSO routes need a rate-limit preset (§7 rule 6), and an indistinguishable `404` (D-20) | **The middleware writes the global policy only when the handler set none**; exactly one handler sets its own — the auto-post page's `default-src 'none'; script-src 'nonce-<per response>'; form-action <ACS origin>; frame-ancestors 'none'; base-uri 'none'`, stricter than the global policy everywhere but those two directives — with `Cache-Control: no-store`. **Rate limit:** the browser-endpoint preset `end_session_per_min` (human-driven, unauthenticated, 30/min/IP by default) on each route, with buckets of their own (`saml_idp_sso`, `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`) — no new configuration key. **D-20:** the tenant check (canonical UUID spelling, tenant exists, effective `saml_idp_enabled`) runs before the body is read, and every other method and sub-path under `/saml/v2/{t}` answers the same empty `404` via `default_service`, so no `405` tells a build with SAML from one without. Rejected: loosening the global CSP (`form-action *` everywhere); a new `saml_sso_per_min` key (one more knob for the same human-driven posture); `login_per_min` (10/min would throttle a NAT'd office that signs in to several SPs, the continue leg counting twice per hop). Residuals: Chrome applies `form-action` to redirects after the submission, so an SP whose ACS redirects to another origin before rendering needs that origin to be the ACS's; a flood tells a build with SAML from one without (429 vs 404) though not one tenant from another |
 | D-28 | *Taken by the orchestrator, 2026-10-03, before T23.3.3, on the W2 F4 review's §12.* Does just-in-time provisioning (or the sync job) ever turn an **existing local account** into a directory account, and if an account is linked, what happens to what it already holds? `mark_directory_account` replaces the hash and deletes the OPAQUE record but revokes nothing, so the account's sessions, refresh tokens, passkeys and user certificates would keep working | **JIT and sync never link.** JIT creates an account only for a login name that matches no local account; if the entry the directory returns would collide with an existing account's username or email (case-folded as the repository folds them), the answer is the ordinary invalid-credentials failure, with the same dummy-verify timing, plus an audit row naming the collision (never the password) — so a directory administrator cannot take over a local account (e.g. `admin`) by creating a matching entry. The sync job (T23.3.5) never creates or links by name either; it acts only on accounts already carrying a `directory_external_id`. **Linking is an explicit administrator act**: T23.3.3 provides one service function, `link_local_account_to_directory`, that resolves the entry by the directory (not by a caller-supplied id), refuses an entry already linked to another account, and in one unit of work marks the account (`mark_directory_account`), **revokes all its sessions and OAuth2 refresh tokens, deletes its WebAuthn credentials and revokes its `User`-type certificates** (both authenticate without the directory deciding); TOTP enrolment is kept, since it is a second factor behind the directory password. It is audited. T23.3.8 exposes it as a route. Rejected: auto-linking by username or email (a directory-side takeover of local accounts), and keeping passkeys and certificates on a linked account (sign-in that the directory never sees, T-303's residual widened) |
+| D-29 | *Taken by the orchestrator, 2026-10-03, on T23.3.3's report.* Three points D-18 and D-28 assumed and the tree contradicts: (1) **no certificate is bound to a user** — a certificate authenticates only as the service account it is bound to, so "revoke its `User`-type certificates" had no data model; (2) D-18 names exactly one writer of `directory_external_id`, but a half-made JIT account can only be avoided by creating it marked; (3) `User.email` is required and unique, and an AD entry may have no `mail` | (1) **Accepted for W3 as T23.3.3 built it**: linking revokes the tenant's still-active `User`-type certificates whose `metadata.user_id` names the account or whose subject CN equals its username or email, ignoring case (over-matching is the safe side of an administrator act that is audited); a real `user_id` binding on certificates (schema, issuance API, an SDK-visible field) is **filed as a follow-up issue**, not done in this phase. (2) **D-18 amended**: the marker has **two writers, both on the directory path only** — `mark_directory_account` (linking) and `create_directory_account` (JIT, one `CREATE` that is `Active`, marked and holding an unusable hash); neither `CreateUser` nor `UpdateUser`, the admin API nor SCIM can set or clear it. (3) **An entry without a usable email is refused** (the generic failure plus an `unusable_attributes` audit row): a synthesised placeholder address would be released as an email `NameID` (D-25 serves `Active` accounts) and as OIDC `email`. The *Directory* admin guide (T23.3.8) says so |
 
 ---
 

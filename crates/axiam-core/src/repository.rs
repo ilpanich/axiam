@@ -48,6 +48,7 @@ use crate::models::{
     reactor::{CreateReactor, Reactor, UpdateReactor},
     resource::{CreateResource, Resource, UpdateResource},
     role::{AssignmentScope, CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole},
+    saml_idp_credential::{SamlIdpCredential, SealedSamlIdpCredential, StoreSamlIdpCredential},
     saml_sp::{SamlServiceProvider, SamlServiceProviderInput},
     scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
@@ -3035,6 +3036,68 @@ pub trait SamlServiceProviderRepository: Send + Sync {
     /// Remove a service provider. `NotFound` when it does not exist in this
     /// tenant.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SAML IdP signing credential (tenant-scoped) (G-2, D-21)
+// ---------------------------------------------------------------------------
+
+/// Storage for a tenant's SAML identity-provider signing credentials.
+///
+/// Every method takes the `tenant_id`; an id belonging to another tenant
+/// answers `NotFound`, exactly as an id that does not exist.
+///
+/// **At most one `active` and one `next` credential per tenant**, enforced by a
+/// unique index in the datastore. A second `create` into an occupied slot is
+/// `AlreadyExists`, whichever of two concurrent callers lost the race.
+///
+/// **Key material.** Only [`Self::get_active_sealed`] returns a key, and it
+/// returns it sealed ([`SealedSamlIdpCredential`]); `create` takes it sealed.
+/// Nothing in this trait ever sees a plaintext key, and none of
+/// [`Self::get`], [`Self::get_active`] or [`Self::list`] can return one.
+pub trait SamlIdpCredentialRepository: Send + Sync {
+    /// Store a credential. `Validation` when `input.status` is `Retired`;
+    /// `AlreadyExists` when the tenant already has a credential in that slot.
+    fn create(
+        &self,
+        input: StoreSamlIdpCredential,
+    ) -> impl Future<Output = AxiamResult<SamlIdpCredential>> + Send;
+
+    /// One credential by id, without its key. `NotFound` when it does not exist
+    /// in this tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<SamlIdpCredential>> + Send;
+
+    /// The tenant's `active` credential, without its key, or `None`.
+    fn get_active(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<SamlIdpCredential>>> + Send;
+
+    /// The tenant's `active` credential **with its sealed key**, or `None`. The
+    /// signer's lookup, and the only method here that returns key material.
+    fn get_active_sealed(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<SealedSamlIdpCredential>>> + Send;
+
+    /// Every credential of the tenant, oldest first, without key material.
+    fn list(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<SamlIdpCredential>>> + Send;
+
+    /// Retire a credential: it leaves its slot, and its sealed key is
+    /// destroyed in the same write. Retiring a retired credential returns it
+    /// unchanged. `NotFound` when it does not exist in this tenant.
+    fn retire(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<SamlIdpCredential>> + Send;
 }
 
 // ---------------------------------------------------------------------------

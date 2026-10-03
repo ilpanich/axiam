@@ -323,6 +323,10 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // registry of where this tenant's assertions may be delivered has no
         // meaning, and no business surviving, without the tenant.
         //
+        // So does its SAML IdP signing credential (T23.2.1, D-21): a sealed
+        // private key for a tenant that no longer exists is key material
+        // nobody can account for, and it goes in the same transaction.
+        //
         // The tenant's directory configuration goes with it (T23.3.1, G-3): it
         // holds an encrypted service-account credential for the tenant's
         // directory, and a deleted tenant must not leave that ciphertext
@@ -340,6 +344,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
                 "BEGIN TRANSACTION; \
                  DELETE directory_config WHERE tenant_id = $id; \
                  DELETE saml_service_provider WHERE tenant_id = $id; \
+                 DELETE saml_idp_credential WHERE tenant_id = $id; \
                  DELETE type::record('tenant', $id); \
                  COMMIT TRANSACTION;",
             )

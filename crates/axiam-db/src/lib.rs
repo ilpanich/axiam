@@ -58,10 +58,11 @@ pub use repository::{
     SurrealPermissionRepository, SurrealPgpKeyRepository, SurrealProofReplayRepository,
     SurrealPushedAuthRequestRepository, SurrealRateLimitBucketRepository, SurrealReactorRepository,
     SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRevokedSessionRepository,
-    SurrealRoleRepository, SurrealSamlServiceProviderRepository, SurrealScimTokenRepository,
-    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealSessionClientRepository,
-    SurrealSessionRepository, SurrealSettingsRepository, SurrealSsoHandoffCodeRepository,
-    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealRoleRepository, SurrealSamlIdpCredentialRepository,
+    SurrealSamlServiceProviderRepository, SurrealScimTokenRepository, SurrealScopeRepository,
+    SurrealServiceAccountRepository, SurrealSessionClientRepository, SurrealSessionRepository,
+    SurrealSettingsRepository, SurrealSsoHandoffCodeRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
     SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 

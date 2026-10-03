@@ -3826,6 +3826,22 @@ DEFINE INDEX IF NOT EXISTS idx_user_tenant_directory_external_id ON TABLE user \
 // certificate columns hold public PEM only; the validator refuses anything but
 // one CERTIFICATE block. Rows are removed with their tenant
 // (`SurrealTenantRepository::delete`).
+//
+// **`saml_idp_credential`** (D-21) is the tenant's SAML signing leaf and its
+// sealed private key — deliberately **not** a `certificate` row, so no
+// certificate list or get response can carry it. `encrypted_private_key` is
+// AES-256-GCM ciphertext under `pki_encryption_key` (the CA custodian's database
+// sealing); `key_custody` records which custodian sealed it, as
+// `ca_certificate.key_custody` does, and is *not* enumerated in the DDL so a
+// later custodian is a new value rather than a migration. The `slot` field is a
+// `VALUE` expression the datastore evaluates on every write:
+// `<tenant>:active` and `<tenant>:next` for the two live statuses and a
+// per-row `<tenant>:retired:<id>` for a retired one, with a UNIQUE index on it.
+// That is how "at most one active and one next per tenant" is a property of the
+// database and not of the service: a second active credential is an index
+// violation whichever caller wrote it, and retired rows are unbounded because
+// each carries its own slot. Retiring a credential also clears
+// `encrypted_private_key`.
 const SCHEMA_V72: &str = "\
 DEFINE FIELD IF NOT EXISTS oidc_saml_idp_enabled ON TABLE security_settings
     TYPE option<bool> DEFAULT false;
@@ -3857,6 +3873,34 @@ DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_service_provider TYPE dateti
 DEFINE FIELD IF NOT EXISTS updated_at ON TABLE saml_service_provider TYPE datetime;
 DEFINE INDEX IF NOT EXISTS idx_saml_sp_tenant_entity ON TABLE saml_service_provider
     COLUMNS tenant_id, entity_id UNIQUE;
+DEFINE TABLE IF NOT EXISTS saml_idp_credential SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS issuer_ca_id ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS certificate_pem ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS serial ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS fingerprint ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS not_before ON TABLE saml_idp_credential TYPE datetime;
+DEFINE FIELD IF NOT EXISTS not_after ON TABLE saml_idp_credential TYPE datetime;
+DEFINE FIELD IF NOT EXISTS status ON TABLE saml_idp_credential TYPE string
+    ASSERT $value IN ['active', 'next', 'retired'];
+DEFINE FIELD IF NOT EXISTS key_custody ON TABLE saml_idp_credential TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS key_locator ON TABLE saml_idp_credential TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS encrypted_private_key ON TABLE saml_idp_credential
+    TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS slot ON TABLE saml_idp_credential TYPE string
+    VALUE IF $this.status IN ['active', 'next'] {
+        string::concat($this.tenant_id, ':', $this.status)
+    } ELSE {
+        string::concat($this.tenant_id, ':retired:', meta::id($this.id))
+    };
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_idp_credential TYPE datetime;
+DEFINE FIELD IF NOT EXISTS retired_at ON TABLE saml_idp_credential TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE saml_idp_credential TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_saml_idp_credential_slot ON TABLE saml_idp_credential
+    COLUMNS slot UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_idp_credential_tenant ON TABLE saml_idp_credential
+    COLUMNS tenant_id;
 ";
 
 #[cfg(test)]
@@ -3893,6 +3937,38 @@ mod tests {
     fn v72_leaves_the_certificate_type_assertion_alone() {
         assert!(!SCHEMA_V72.contains("cert_type"));
         assert!(SCHEMA_V67.contains("['User', 'Service', 'Device', 'Server']"));
+    }
+
+    /// D-21 — the signing credential is its own table (not a `certificate`
+    /// row), its key column is bytes and optional (retiring clears it), and
+    /// the one-active/one-next rule is a unique index over a computed slot.
+    #[test]
+    fn v72_defines_the_idp_credential_with_a_database_enforced_slot() {
+        assert!(SCHEMA_V72.contains("DEFINE TABLE IF NOT EXISTS saml_idp_credential SCHEMAFULL"));
+        assert!(SCHEMA_V72.contains(
+            "encrypted_private_key ON TABLE saml_idp_credential
+    TYPE option<bytes>"
+        ));
+        assert!(SCHEMA_V72.contains(
+            "idx_saml_idp_credential_slot ON TABLE saml_idp_credential
+    COLUMNS slot UNIQUE"
+        ));
+        assert!(SCHEMA_V72.contains("ASSERT $value IN ['active', 'next', 'retired']"));
+        // A later custodian must not need a migration: the custody column is
+        // not an enumeration.
+        let custody = SCHEMA_V72
+            .split("key_custody ON TABLE saml_idp_credential")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("key_custody field");
+        assert!(!custody.contains("IN ["), "custody must not be enumerated");
+        // No plaintext-key column of any spelling.
+        for forbidden in ["private_key_pem", "key_pem", "plaintext"] {
+            assert!(
+                !SCHEMA_V72.contains(forbidden),
+                "no plaintext key column: {forbidden}"
+            );
+        }
     }
 
     /// T23.2.1 — v72 is additive DDL only and defaults the IdP switch to off.

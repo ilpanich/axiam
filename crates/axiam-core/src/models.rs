@@ -29,6 +29,7 @@ pub mod pgp_key;
 pub mod reactor;
 pub mod resource;
 pub mod role;
+pub mod saml_idp_credential;
 pub mod saml_sp;
 pub mod scim_token;
 pub mod scope;

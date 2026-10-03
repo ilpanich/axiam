@@ -24,6 +24,10 @@ pub const AUDIT_ACCOUNT_DEACTIVATED: &str = "directory.account_deactivated";
 /// the row says that an administrator must act if the account should be live
 /// again. Written once per account until the situation changes.
 pub const AUDIT_ACCOUNT_REAPPEARED: &str = "directory.account_reappeared";
+/// Audit action: the sync job updated a directory account's username, email
+/// address or display name to match its entry. `metadata.fields` names which;
+/// no value appears.
+pub const AUDIT_ACCOUNT_UPDATED: &str = "directory.account_updated";
 /// Audit action: a username or email change the directory made was **not**
 /// applied because it would collide with another account (D-28, D-31).
 pub const AUDIT_SYNC_ATTRIBUTE_SKIPPED: &str = "directory.sync_attribute_skipped";

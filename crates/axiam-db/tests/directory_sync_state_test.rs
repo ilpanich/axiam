@@ -461,3 +461,41 @@ async fn the_collision_probe_can_leave_one_account_out() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn an_account_is_found_by_its_marker_within_its_tenant_only() {
+    let db = setup().await;
+    let repo = SurrealUserRepository::new(db);
+    let tenant = Uuid::new_v4();
+    let marker = Uuid::new_v4().to_string();
+    let created = repo
+        .create_directory_account(CreateDirectoryAccount {
+            tenant_id: tenant,
+            username: "alice".into(),
+            email: "alice@example.com".into(),
+            external_id: marker.clone(),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    local(&repo, tenant, "bob").await;
+
+    let found = repo
+        .get_by_directory_external_id(tenant, &marker)
+        .await
+        .unwrap()
+        .expect("the marked account");
+    assert_eq!(found.id, created.id);
+    assert!(
+        repo.get_by_directory_external_id(Uuid::new_v4(), &marker)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repo.get_by_directory_external_id(tenant, &Uuid::new_v4().to_string())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

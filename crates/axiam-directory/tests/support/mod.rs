@@ -253,6 +253,14 @@ pub struct Script {
     /// `sizeLimitExceeded` once it is reached. Off by default, so the older
     /// tests keep the server that does not.
     pub enforce_sizelimit: bool,
+    /// From this (zero-based) **user** search on, **across all connections**,
+    /// answer `busy` (T23.3.5): a directory that fails part-way through a run
+    /// and stays failed (a retry on a fresh connection fails too). The rootDSE
+    /// and group searches are not counted.
+    pub fail_user_searches_from: Option<usize>,
+    /// Answer `busy` to every group search whose parsed filter mentions this
+    /// text (T23.3.5): one user's group lookup fails, another's does not.
+    pub fail_group_searches_matching: Option<String>,
 }
 
 impl Default for Script {
@@ -270,6 +278,8 @@ impl Default for Script {
             group_search_delay: None,
             fail_group_searches_from: None,
             enforce_sizelimit: false,
+            fail_user_searches_from: None,
+            fail_group_searches_matching: None,
         }
     }
 }
@@ -306,6 +316,8 @@ struct Live {
     /// The attributes the rootDSE (a base-object search of the empty DN) answers
     /// with. `None`: the server answers `noSuchObject`, as one that hides it.
     root_dse: Mutex<Option<Vec<EntryAttr>>>,
+    /// User searches answered so far, across connections.
+    user_searches: AtomicUsize,
 }
 
 pub struct TestServer {
@@ -355,6 +367,7 @@ impl TestServer {
             entries: Mutex::new(script.entries.clone()),
             group_search_done: Mutex::new(script.group_search_done.clone()),
             root_dse: Mutex::new(None),
+            user_searches: AtomicUsize::new(0),
         });
         let script = Arc::new(script);
 
@@ -612,9 +625,30 @@ impl Session {
                     if is_group_search(&req) {
                         let index = self.group_searches;
                         self.group_searches += 1;
+                        let needle_hit = self
+                            .script
+                            .fail_group_searches_matching
+                            .as_ref()
+                            .is_some_and(|needle| format!("{:?}", req.filter).contains(needle));
+                        if needle_hit
+                            || self
+                                .script
+                                .fail_group_searches_from
+                                .is_some_and(|n| index >= n)
+                        {
+                            vec![LdapOp::SearchResultDone(result(
+                                LdapResultCode::Busy,
+                                "scripted failure",
+                                vec![],
+                            ))]
+                        } else {
+                            self.search(&req)
+                        }
+                    } else if !is_root_dse(&req) {
+                        let index = self.live.user_searches.fetch_add(1, Ordering::SeqCst);
                         if self
                             .script
-                            .fail_group_searches_from
+                            .fail_user_searches_from
                             .is_some_and(|n| index >= n)
                         {
                             vec![LdapOp::SearchResultDone(result(

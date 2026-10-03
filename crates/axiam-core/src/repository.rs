@@ -434,6 +434,24 @@ pub trait UserRepository: Send + Sync {
         }
     }
 
+    /// The tenant's account that carries `external_id` as its directory marker,
+    /// or `None` (T23.3.5): the sync job's incremental run, which learns of a
+    /// changed entry by its identifier and must find the one account it could
+    /// belong to without listing them all. The marker is unique per tenant.
+    ///
+    /// The default implementation refuses.
+    fn get_by_directory_external_id(
+        &self,
+        _tenant_id: Uuid,
+        _external_id: &str,
+    ) -> impl Future<Output = AxiamResult<Option<User>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
     /// One page of the tenant's **directory accounts** — those carrying
     /// [`User::directory_external_id`] — in id order, strictly after `after`
     /// (the id of the last row of the previous page; `None` for the first),

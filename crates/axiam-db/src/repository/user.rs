@@ -933,6 +933,40 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .await
     }
 
+    async fn get_by_directory_external_id(
+        &self,
+        tenant_id: Uuid,
+        external_id: &str,
+    ) -> AxiamResult<Option<User>> {
+        // The unique `(tenant_id, directory_external_id)` index answers this.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, \
+                        tenant_id, username, email, password_hash, status, \
+                        mfa_enabled, \
+                        failed_login_attempts, last_failed_login_at, \
+                        locked_until, email_verified_at, \
+                        deletion_pending, scheduled_purge_at, \
+                        phone_number, phone_number_verified_at, address, \
+                        directory_external_id, \
+                        metadata, created_at, updated_at \
+                 FROM user \
+                 WHERE tenant_id = $tenant_id AND directory_external_id = $external_id \
+                 LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("external_id", external_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<UserRowWithId> = result.take(0).map_err(DbError::from)?;
+        match rows.into_iter().next() {
+            Some(row) => Ok(Some(row.try_into_user()?)),
+            None => Ok(None),
+        }
+    }
+
     async fn list_directory_accounts(
         &self,
         tenant_id: Uuid,

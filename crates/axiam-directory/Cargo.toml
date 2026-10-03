@@ -22,6 +22,9 @@ axiam-core = { workspace = true }
 # parser axiam-pki and axiam-federation use, so no new crate enters the graph.
 thiserror = { workspace = true }
 url = { workspace = true }
+# T23.3.5 -- the sync job's schedule arithmetic and audit metadata.
+chrono = { workspace = true }
+serde_json = { workspace = true }
 x509-parser = { workspace = true }
 # T23.3.2 — the LDAP client (src/client.rs, src/tls.rs). `ldap3` over rustls
 # only (workspace pin: `default-features = false`, `tls-rustls-ring`); the
@@ -48,7 +51,6 @@ tokio-rustls = { workspace = true }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = { version = "0.3", features = ["sink"] }
 tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros", "time"] }
-chrono = { workspace = true }
 # T23.3.4 — group mapping end to end (tests/group_mapping_test.rs): the real
 # sign-in path, the real repositories and the real authorization engine, over
 # the in-process directory. All three sit in lower layers than this crate, so
@@ -57,4 +59,3 @@ axiam-auth = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-db = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
-serde_json = { workspace = true }

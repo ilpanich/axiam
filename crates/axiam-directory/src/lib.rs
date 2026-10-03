@@ -23,7 +23,12 @@
 //!   nested resolution to a configured depth under a hard cap, and the
 //!   application that owns only the memberships it wrote.
 //!
-//! The sync job and the management routes are later tasks of the same item.
+//! * [`sync_lookup`] and [`sync`] are the sync job (T23.3.5, D-31): the
+//!   read-only questions it asks the directory, and the full and incremental
+//!   runs that turn the answers into `Inactive` accounts, refreshed attributes
+//!   and group mappings — and never into a re-enabled, created or linked one.
+//!
+//! The management routes are a later task of the same item.
 //!
 //! # Boundaries that bind every later task
 //!
@@ -54,9 +59,12 @@ pub mod escape;
 pub mod group_lookup;
 pub mod groups;
 pub mod mapper;
+pub mod sync;
 pub mod sync_lookup;
 pub mod tls;
 
 pub use authenticator::{MappedGroups, RepositoryDirectoryAuthenticator};
 pub use client::{ClientLimits, DirectoryClient, DirectoryTarget};
 pub use mapper::{MembershipChangeHook, MembershipChangeSlot, RepositoryGroupMapper};
+pub use sync::{DirectorySync, RunKind, SyncError, SyncLimits, SyncSummary, TenantReport};
+pub use sync_lookup::DirectorySession;

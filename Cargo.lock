@@ -1022,7 +1022,10 @@ dependencies = [
 name = "axiam-directory"
 version = "1.0.0-beta17"
 dependencies = [
+ "axiam-auth",
+ "axiam-authz",
  "axiam-core",
+ "axiam-db",
  "axiam-test-support",
  "chrono",
  "futures-util",
@@ -1031,6 +1034,8 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "serde_json",
+ "surrealdb",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",

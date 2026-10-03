@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory sources: group mapping (T23.3.4, G-3, D-30).** A directory user's
+  groups now become AXIAM group memberships, so roles and permissions assigned
+  to those groups apply to them unchanged. **An explicit mapping table only**:
+  `DirectoryConfig.group_mappings`, at most 500 rows of `{ directory_group_dn,
+  group_id }` stored in the tenant's `directory_config` row (schema **v74**).
+  There is no match by name, prefix or wildcard and no AXIAM group is ever
+  created from a directory one: a directory group called `admins` gains nothing
+  unless a tenant administrator mapped it. A DN is compared after RFC 4514
+  normalisation (case of types and values, spacing around the separators,
+  `\,` against `\2C`, UTF-8 hex escapes, the order inside a multi-valued RDN);
+  every `group_id` must be a group **of the same tenant**, checked in the
+  repository's write path before anything is written, and `config::validate`
+  refuses a table over 500 rows, a DN that does not parse, a repeated pair, and
+  — for OpenLDAP, whose groups are found by search — a table with no
+  `group_base_dn`. **The mapping owns only its own memberships**: every
+  `member_of` edge it writes carries `source = directory` (new column, schema
+  v74; an edge without it is manual), each application adds the missing mapped
+  memberships and removes the directory-sourced ones the directory no longer
+  backs, and a manual membership — of the same group or another — is never
+  touched and never duplicated. Resolution runs over the service-bound pooled
+  connection, never the user's bind: Active Directory reads `memberOf` off the
+  entry (and each group's own), OpenLDAP searches `group_base_dn` for
+  `(&<group_filter>(<member attribute>=<DN>))` with the DN entering the filter
+  only through the RFC 4515 escape; nested groups are followed to
+  `group_nesting_depth` levels (level N + 1 is never read), a cycle terminates,
+  a **hard cap of 1 000 groups per user** refuses rather than truncates (a
+  ranged `memberOf` counts as the cap), search references are skipped, a
+  referral result fails, and entries go through the fallible parser. It runs on
+  **every successful directory sign-in**, a just-provisioned account and an
+  existing one alike, before any session or MFA challenge is issued, so a
+  removal in the directory takes effect at the next sign-in. **Fail closed**: a
+  lookup that fails, times out or hits the cap refuses the sign-in with the
+  ordinary failure (not counted against the account) and changes nothing; a
+  just-provisioned account whose lookup fails holds no membership and grants
+  nothing. A tenant with an empty table asks the directory no group question.
+  New audit actions `directory.groups_mapped` (the AXIAM groups added and
+  removed and counts, nothing that names a person) and
+  `directory.group_mapping_refused`. `DirectoryGroupMapper::apply_for_user`
+  (`axiam-core` port, `RepositoryGroupMapper` in `axiam-directory`) is the one
+  function the sync job (T23.3.5) will call. `GroupRepository` gains
+  `add_directory_member`, `remove_directory_member` and
+  `get_user_directory_group_ids`. No API, contract or SDK change: no route
+  writes a directory configuration yet (T23.3.8).
+
 - **Directory sources: just-in-time provisioning and linking (T23.3.3, G-3, D-28).**
   A login name that matches no local account is now offered to the tenant's
   directory when it has an enabled directory with `jit_provisioning`: the typed

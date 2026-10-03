@@ -3,10 +3,12 @@
 //!
 //! # The rule
 //!
-//! A value that came from outside AXIAM — a login name typed into a form —
-//! reaches an LDAP filter **only** through [`escape_filter_value`], and only
-//! through [`user_filter_for`], which substitutes the escaped value into the
-//! single `{username}` placeholder of the tenant's template. Nothing in this
+//! A value that came from outside AXIAM — a login name typed into a form, or a
+//! distinguished name a directory returned — reaches an LDAP filter **only**
+//! through [`escape_filter_value`], and only through [`user_filter_for`] (which
+//! substitutes the escaped login name into the single `{username}` placeholder
+//! of the tenant's template) or [`reverse_member_filter`] (which does the same
+//! for the DNs of a reverse group-membership search). Nothing in this
 //! crate builds a filter with `format!` around raw input, and nothing builds a
 //! distinguished name at all: the DN the user binds as is the one the directory
 //! returned from the search, so RFC 4514 DN escaping is never needed and is not

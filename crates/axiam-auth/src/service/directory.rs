@@ -41,6 +41,15 @@ pub const AUDIT_JIT_REFUSED: &str = "directory.jit_refused";
 /// Audit action: an administrator linked an existing account to its directory
 /// entry.
 pub const AUDIT_ACCOUNT_LINKED: &str = "directory.account_linked";
+/// Audit action (T23.3.4): applying the directory group mapping changed a
+/// user's memberships. Identifiers and counts only: the AXIAM groups added and
+/// removed, and how many directory groups were resolved and mapped.
+pub const AUDIT_GROUPS_MAPPED: &str = "directory.groups_mapped";
+/// Audit action (T23.3.4): a sign-in the directory vouched for was refused
+/// because the group mapping could not be applied — the directory could not be
+/// asked, or the user is in more groups than the cap allows. Nothing was
+/// changed.
+pub const AUDIT_GROUP_MAPPING_REFUSED: &str = "directory.group_mapping_refused";
 
 /// Longest username or display name taken from a directory, in characters.
 const MAX_NAME_CHARS: usize = 255;
@@ -327,6 +336,12 @@ impl<
             Err(other) => return Err(other),
         };
 
+        // T23.3.4: the new account holds no membership yet, so a lookup that
+        // fails here leaves it granting nothing; the sign-in is refused and the
+        // next one maps the groups.
+        self.apply_directory_group_mapping(input, &created, &identity.dn)
+            .await?;
+
         self.complete_authenticated_login(
             created,
             tenant_id,
@@ -336,6 +351,79 @@ impl<
             input.mfa_policy.clone(),
         )
         .await
+    }
+
+    /// Apply the tenant's directory group mapping for `user`, whose directory
+    /// entry is `user_dn` (G-3, T23.3.4, D-30).
+    ///
+    /// Called on every successful directory sign-in, after the directory has
+    /// vouched for the password and before the session (or an MFA challenge) is
+    /// issued. **Fail closed:** when the mapping cannot be applied — the
+    /// directory cannot be asked, the cap is hit, a write fails — the answer is
+    /// the ordinary invalid-credentials failure, **not counted** against the
+    /// account (the user did nothing wrong), with an audit row; memberships the
+    /// directory may have revoked are never kept by letting the sign-in through.
+    ///
+    /// A changed membership set is audited (`directory.groups_mapped`) with
+    /// identifiers and counts only; an unchanged one writes nothing, so a
+    /// sign-in that maps nothing new leaves no row.
+    pub(super) async fn apply_directory_group_mapping(
+        &self,
+        input: &LoginInput,
+        user: &User,
+        user_dn: &str,
+    ) -> AxiamResult<()> {
+        let Some(mapper) = &self.directory_group_mapper else {
+            return Ok(());
+        };
+        match mapper
+            .apply_for_user(input.tenant_id, user.id, user_dn)
+            .await
+        {
+            Ok(outcome) => {
+                if outcome.changed() {
+                    self.audit_directory(
+                        input,
+                        AUDIT_GROUPS_MAPPED,
+                        user.id,
+                        serde_json::json!({
+                            "source": "directory",
+                            "groups_added": outcome.added,
+                            "groups_removed": outcome.removed,
+                            "added_count": outcome.added.len(),
+                            "removed_count": outcome.removed.len(),
+                            "manual_memberships_left": outcome.left_manual.len(),
+                            "directory_groups_resolved": outcome.directory_groups_resolved,
+                            "directory_groups_mapped": outcome.directory_groups_mapped,
+                        }),
+                        AuditOutcome::Success,
+                    )
+                    .await;
+                }
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "axiam::directory",
+                    tenant_id = %input.tenant_id,
+                    user_id = %user.id,
+                    outcome = ?error,
+                    "directory sign-in refused: the group mapping could not be applied"
+                );
+                self.audit_directory(
+                    input,
+                    AUDIT_GROUP_MAPPING_REFUSED,
+                    user.id,
+                    serde_json::json!({
+                        "reason": "mapping_not_applied",
+                        "outcome": format!("{error:?}"),
+                    }),
+                    AuditOutcome::Failure,
+                )
+                .await;
+                Err(AuthError::InvalidCredentials.into())
+            }
+        }
     }
 
     /// Link an **existing local account** to the directory entry it names

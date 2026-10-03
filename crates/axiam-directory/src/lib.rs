@@ -18,9 +18,12 @@
 //!   [`authenticator`] is the
 //!   [`DirectoryAuthenticator`](axiam_core::models::directory::DirectoryAuthenticator)
 //!   the composition root injects into the login path (T23.3.2).
+//! * [`dn`], [`groups`], [`group_lookup`] and [`mapper`] are group mapping
+//!   (T23.3.4, D-30): an explicit table of directory group DNs to AXIAM groups,
+//!   nested resolution to a configured depth under a hard cap, and the
+//!   application that owns only the memberships it wrote.
 //!
-//! Provisioning on first sign-in, group mapping, the sync job and the
-//! management routes are later tasks of the same item.
+//! The sync job and the management routes are later tasks of the same item.
 //!
 //! # Boundaries that bind every later task
 //!
@@ -50,7 +53,9 @@ pub mod dn;
 pub mod escape;
 pub mod group_lookup;
 pub mod groups;
+pub mod mapper;
 pub mod tls;
 
-pub use authenticator::RepositoryDirectoryAuthenticator;
+pub use authenticator::{MappedGroups, RepositoryDirectoryAuthenticator};
 pub use client::{ClientLimits, DirectoryClient, DirectoryTarget};
+pub use mapper::RepositoryGroupMapper;

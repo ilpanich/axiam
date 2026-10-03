@@ -1076,6 +1076,15 @@ async fn main() -> std::io::Result<()> {
          'reactor.dispatch_failed'."
     );
 
+    // G-3 (T23.3.2, T23.3.4): one directory authenticator, shared by the sign-in
+    // path and the group mapper, so both read the same configuration and draw
+    // on the same bounded connection pool.
+    let directory_authenticator = Arc::new(axiam_directory::RepositoryDirectoryAuthenticator::new(
+        axiam_db::SurrealDirectoryConfigRepository::new(
+            pool.handle_for_repo(),
+            config.directory_encryption_key,
+        ),
+    ));
     let auth_service = AuthService::new(
         user_repo.clone(),
         session_repo.clone(),
@@ -1090,14 +1099,15 @@ async fn main() -> std::io::Result<()> {
     // `directory_encryption_key` the repository cannot decrypt a bind secret,
     // so every directory sign-in fails closed as `Unavailable` (never a local
     // hash), and tenants without a directory are untouched.
-    .with_directory_authenticator(Arc::new(
-        axiam_directory::RepositoryDirectoryAuthenticator::new(
-            axiam_db::SurrealDirectoryConfigRepository::new(
-                pool.handle_for_repo(),
-                config.directory_encryption_key,
-            ),
-        ),
-    ))
+    .with_directory_authenticator(Arc::clone(&directory_authenticator) as _)
+    // G-3 (T23.3.4, D-30): the tenant's mapping table is applied on every
+    // successful directory sign-in, before anything is issued; a mapping that
+    // cannot be applied (the directory cannot be asked, the 1 000-group cap) is
+    // a refused sign-in. A tenant with an empty table asks the directory nothing.
+    .with_directory_group_mapper(Arc::new(axiam_directory::RepositoryGroupMapper::new(
+        Arc::clone(&directory_authenticator),
+        axiam_db::SurrealGroupRepository::new(pool.handle_for_repo()),
+    )))
     // G-3 (T23.3.3): the rows for just-in-time provisioning, its refusals and
     // the linking of an account, on the same append-only repository (and the
     // same minimisation) as every other audit row.

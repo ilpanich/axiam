@@ -263,9 +263,17 @@ pub enum Event {
     Unbind,
 }
 
+/// What a test can change while the server runs: the directory's contents and
+/// the scripted outcome of group searches. Everything else is fixed at start.
+struct Live {
+    entries: Mutex<Vec<Entry>>,
+    group_search_done: Mutex<Option<(LdapResultCode, Vec<String>)>>,
+}
+
 pub struct TestServer {
     pub addr: SocketAddr,
     pub ca: Arc<TestCa>,
+    live: Arc<Live>,
     events: Arc<Mutex<Vec<Event>>>,
     open_now: Arc<AtomicUsize>,
     open_max: Arc<AtomicUsize>,
@@ -305,9 +313,14 @@ impl TestServer {
         let events = Arc::new(Mutex::new(Vec::new()));
         let open_now = Arc::new(AtomicUsize::new(0));
         let open_max = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(Live {
+            entries: Mutex::new(script.entries.clone()),
+            group_search_done: Mutex::new(script.group_search_done.clone()),
+        });
         let script = Arc::new(script);
 
         let task = {
+            let live = Arc::clone(&live);
             let events = Arc::clone(&events);
             let open_now = Arc::clone(&open_now);
             let open_max = Arc::clone(&open_max);
@@ -318,6 +331,7 @@ impl TestServer {
                     };
                     let session = Session {
                         script: Arc::clone(&script),
+                        live: Arc::clone(&live),
                         events: Arc::clone(&events),
                         bound: None,
                         group_searches: 0,
@@ -333,11 +347,22 @@ impl TestServer {
         Self {
             addr,
             ca,
+            live,
             events,
             open_now,
             open_max,
             task,
         }
+    }
+
+    /// Replace the directory's contents: what the next bind and search see.
+    pub fn set_entries(&self, entries: Vec<Entry>) {
+        *self.live.entries.lock().unwrap() = entries;
+    }
+
+    /// Change the scripted final result of group searches (`None`: success).
+    pub fn set_group_search_done(&self, done: Option<(LdapResultCode, Vec<String>)>) {
+        *self.live.group_search_done.lock().unwrap() = done;
     }
 
     pub fn port(&self) -> u16 {
@@ -422,6 +447,7 @@ impl Drop for Gauge {
 
 struct Session {
     script: Arc<Script>,
+    live: Arc<Live>,
     events: Arc<Mutex<Vec<Event>>>,
     bound: Option<String>,
     /// Group searches answered so far on this connection.
@@ -580,7 +606,15 @@ impl Session {
             self.bound = Some(dn.to_string());
             return (LdapResultCode::Success, String::new());
         }
-        if let Some(entry) = self.script.entries.iter().find(|e| e.dn == dn)
+        let found = self
+            .live
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.dn == dn)
+            .cloned();
+        if let Some(entry) = found
             && entry.password == password
         {
             if let Some((code, message)) = &self.script.user_bind_result {
@@ -616,9 +650,8 @@ impl Session {
         let base_object = matches!(req.scope, LdapSearchScope::Base);
         let mut found_base = false;
         let mut limited = false;
-        for (sent, entry) in self
-            .script
-            .entries
+        let entries = self.live.entries.lock().unwrap().clone();
+        for (sent, entry) in entries
             .iter()
             .filter(|e| {
                 if base_object {
@@ -657,7 +690,7 @@ impl Session {
             }));
         }
         let scripted = if group_search {
-            self.script.group_search_done.clone()
+            self.live.group_search_done.lock().unwrap().clone()
         } else {
             None
         };

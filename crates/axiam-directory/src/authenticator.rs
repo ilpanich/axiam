@@ -38,6 +38,7 @@ use rustls::ClientConfig;
 use uuid::Uuid;
 
 use crate::client::{DirectoryClient, DirectoryTarget, transport_is_encrypted};
+use crate::groups::{GroupLookup, mapped_group_ids};
 use crate::tls::client_config;
 
 /// Why the directory is being asked, which decides what is checked first and
@@ -51,6 +52,17 @@ enum Purpose<'a> {
     Provision(&'a str),
     /// Find the entry, bind nothing (an administrator linking an account).
     Lookup,
+}
+
+/// The AXIAM groups a user's directory groups map to
+/// ([`RepositoryDirectoryAuthenticator::resolve_mapped_groups`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MappedGroups {
+    /// How many directory groups the user is in, nesting included (`0` when the
+    /// mapping table is empty and the directory was not asked).
+    pub directory_groups_resolved: usize,
+    /// The AXIAM groups the mapping table puts the user into.
+    pub group_ids: std::collections::BTreeSet<Uuid>,
 }
 
 /// The production [`DirectoryAuthenticator`]: a configuration repository and
@@ -89,40 +101,14 @@ impl<R: DirectoryConfigRepository> RepositoryDirectoryAuthenticator<R> {
         {
             return Err(DirectoryAuthError::InvalidCredentials);
         }
-        let config = match self.repo.get_by_tenant(tenant_id).await {
-            Ok(Some(config)) if config.enabled => config,
-            Ok(_) => return Err(DirectoryAuthError::NotConfigured),
-            Err(error) => {
-                tracing::warn!(
-                    target: "axiam::directory",
-                    tenant_id = %tenant_id,
-                    error = %error,
-                    "directory configuration could not be read"
-                );
-                return Err(DirectoryAuthError::Unavailable);
-            }
-        };
+        let config = self.enabled_config(tenant_id).await?;
         // The provisioning gate (T23.3.3): a tenant that did not ask for
         // just-in-time provisioning is answered as one with no directory,
         // before the bind secret is even decrypted, let alone a socket opened.
         if matches!(purpose, Purpose::Provision(_)) && !config.jit_provisioning {
             return Err(DirectoryAuthError::NotConfigured);
         }
-        let secret = match self.repo.decrypt_bind_secret(tenant_id).await {
-            Ok(secret) => secret,
-            Err(AxiamError::NotFound { .. }) => return Err(DirectoryAuthError::NotConfigured),
-            Err(error) => {
-                // `ServiceUnavailable` names the missing key; the message
-                // carries no secret material.
-                tracing::warn!(
-                    target: "axiam::directory",
-                    tenant_id = %tenant_id,
-                    error = %error,
-                    "directory bind secret could not be decrypted"
-                );
-                return Err(DirectoryAuthError::Unavailable);
-            }
-        };
+        let secret = self.bind_secret(tenant_id).await?;
         let target = self.target(&config)?;
         match purpose {
             Purpose::SignIn(password) | Purpose::Provision(password) => {
@@ -132,6 +118,91 @@ impl<R: DirectoryConfigRepository> RepositoryDirectoryAuthenticator<R> {
             }
             Purpose::Lookup => self.client.lookup(&target, &secret, login_name).await,
         }
+    }
+
+    /// The tenant's configuration, if it has an enabled one.
+    async fn enabled_config(&self, tenant_id: Uuid) -> Result<DirectoryConfig, DirectoryAuthError> {
+        match self.repo.get_by_tenant(tenant_id).await {
+            Ok(Some(config)) if config.enabled => Ok(config),
+            Ok(_) => Err(DirectoryAuthError::NotConfigured),
+            Err(error) => {
+                tracing::warn!(
+                    target: "axiam::directory",
+                    tenant_id = %tenant_id,
+                    error = %error,
+                    "directory configuration could not be read"
+                );
+                Err(DirectoryAuthError::Unavailable)
+            }
+        }
+    }
+
+    /// The decrypted bind secret, failing closed as `run` always has.
+    async fn bind_secret(
+        &self,
+        tenant_id: Uuid,
+    ) -> Result<zeroize::Zeroizing<String>, DirectoryAuthError> {
+        match self.repo.decrypt_bind_secret(tenant_id).await {
+            Ok(secret) => Ok(secret),
+            Err(AxiamError::NotFound { .. }) => Err(DirectoryAuthError::NotConfigured),
+            Err(error) => {
+                // `ServiceUnavailable` names the missing key; the message
+                // carries no secret material.
+                tracing::warn!(
+                    target: "axiam::directory",
+                    tenant_id = %tenant_id,
+                    error = %error,
+                    "directory bind secret could not be decrypted"
+                );
+                Err(DirectoryAuthError::Unavailable)
+            }
+        }
+    }
+
+    /// The AXIAM groups the tenant's mapping table puts `user_dn` into,
+    /// according to the directory right now (G-3, T23.3.4, D-30).
+    ///
+    /// * An empty table asks the directory **nothing**: no group can be backed,
+    ///   so nothing is looked up and the bind secret is not even decrypted.
+    /// * Otherwise the groups above `user_dn` are resolved
+    ///   ([`DirectoryClient::resolve_groups`]) over the service-bound pooled
+    ///   connection and passed through the table.
+    /// * **Every failure is an error**, never a smaller answer: the caller
+    ///   removes memberships the directory no longer backs, and it must never
+    ///   do so on a lookup that did not complete.
+    ///
+    /// # Errors
+    ///
+    /// [`DirectoryAuthError::NotConfigured`] when the tenant has no enabled
+    /// directory; otherwise the failure the client reports, which for a lookup
+    /// that failed or hit the cap is [`DirectoryAuthError::Unavailable`].
+    pub async fn resolve_mapped_groups(
+        &self,
+        tenant_id: Uuid,
+        user_dn: &str,
+    ) -> Result<MappedGroups, DirectoryAuthError> {
+        let config = self.enabled_config(tenant_id).await?;
+        if config.group_mappings.is_empty() {
+            return Ok(MappedGroups::default());
+        }
+        let secret = self.bind_secret(tenant_id).await?;
+        let target = self.target(&config)?;
+        let lookup = GroupLookup {
+            strategy: config.kind.group_strategy(),
+            base_dn: config.group_base_dn.clone(),
+            filter: config.group_filter.clone(),
+            member_attribute: config.group_member_attribute.clone(),
+            max_depth: config.group_nesting_depth,
+        };
+        let resolved = self
+            .client
+            .resolve_groups(&target, &secret, user_dn, &lookup)
+            .await?;
+        let group_ids = mapped_group_ids(&config.group_mappings, &resolved);
+        Ok(MappedGroups {
+            directory_groups_resolved: resolved.len(),
+            group_ids,
+        })
     }
 
     fn target(&self, config: &DirectoryConfig) -> Result<DirectoryTarget, DirectoryAuthError> {

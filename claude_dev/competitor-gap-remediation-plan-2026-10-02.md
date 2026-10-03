@@ -708,6 +708,40 @@ fan-out.
 > `axiam-directory`); T23.3.6 is the oracle. Threats listed for T23.3.7: the
 > unknown-name bind oracle (T-302 widened), JIT as an account-creation oracle,
 > directory-side takeover by name, attribute injection, linking completeness.
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.4, 2026-10-03** (`624376d`,
+> `ab9e41a`, `198aa66`, `5aaa7fa`, `45ee025`; Sonnet 5.5). Group mapping per
+> **D-30**: `DirectoryConfig.group_mappings` (≤ 500, every group of the same
+> tenant, refused at write before anything is written) and `member_of.source`
+> (absent reads as manual), schema **v74**. `axiam_directory::dn::normalize`
+> folds what RFC 4514 lets two spellings of one DN differ by and refuses what
+> it cannot parse. Resolution on the pooled service connection: AD reads
+> `memberOf` by base-object read, OpenLDAP runs the reverse search with the DN
+> entering the filter only through `escape::reverse_member_filter`; depth N
+> follows N levels, cycles terminate on the normalised DN, the 1 001st group
+> refuses rather than truncates, a ranged `memberOf` counts as the cap,
+> referrals fail. Application removes before it adds (a stop part-way leaves
+> less access), never touches or duplicates a manual edge, skips a mapping
+> whose group was deleted, and runs on every successful directory sign-in
+> before any session or MFA challenge; a mapping that cannot be applied
+> refuses the sign-in (generic answer, not counted against the account) and
+> changes nothing. Membership changes flush the authorization decision cache
+> for the user (local and broadcast). Tests: 13 repository, 2 schema, 39 unit
+> (DN, groups, escape, mapper, config), 23 lookup tests against the
+> in-process TLS directory (the injection attempt asserted on the filter the
+> server parsed), 14 end-to-end over the real `AuthService`, repositories and
+> authorization engine, including a role through a mapped group that is
+> effective and then gone after the directory removes the user.
+>
+> What the plan did not anticipate. Mapping writes bypassed the decision
+> cache, so a cached allow survived a removal until its TTL; a hook now
+> invalidates the subject (a failed broadcast is logged and bounded by the
+> TTL on other replicas). A JIT account is created before the mapping runs, so
+> a failed lookup leaves an `Active` account with no memberships (it grants
+> nothing). An administrator's `add_member` on a pair the directory owns does
+> not promote the edge to manual, so the membership leaves with the directory
+> (the safe direction). AD's primary group (`primaryGroupID`) is not resolved.
+> A stale schema tripwire (`Some(&72)` with v73 registered) is corrected.
 
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned

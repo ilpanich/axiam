@@ -341,7 +341,9 @@
 > server does with a token it did not just mint. **Two decisions**:
 > `client_secret_basic`, accepted because 37 of the plan's 38 modules use it,
 > with its three failure modes each tested and the residual — what an ingress
-> logs — named (T-253); and the refresh-rotation grace window FAPI 2.0
+> logs — named (T-253; amended 2026-10-03, Phase 23 T23.1.5: a client naming
+> itself in the Basic header alone now selects the same per-client rate-limit
+> bucket as one naming itself in the form); and the refresh-rotation grace window FAPI 2.0
 > §5.3.2.1-9 requires, applied at beta13 to every profile, which on `standard`
 > gave a bearer refresh token a 60-second replay window the server could not
 > distinguish from an honest retry — recorded **open** (T-254), and T-37 amended

@@ -41,6 +41,7 @@
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
 use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
+use axiam_api_rest::config::rate_limit::RateLimitKeyMode;
 use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
@@ -247,6 +248,26 @@ macro_rules! test_app {
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
+        )
+        .await
+    };
+}
+
+/// As [`test_app!`], with the deployment's rate-limit configuration chosen by
+/// the test.
+macro_rules! test_app_rate_limited {
+    ($f:expr, $cfg:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($f.auth.clone()))
+                .app_data(web::Data::new(AppState::for_test(
+                    $f.db.clone(),
+                    $f.auth.clone(),
+                )))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &$cfg)),
         )
         .await
     };
@@ -746,14 +767,17 @@ async fn t9_4_a_failed_basic_attempt_logs_neither_the_secret_nor_the_blob() {
     // The header values themselves, verbatim. Broader greps than this catch
     // AXIAM's own prose about the header (and SurrealDB's TRACE chatter);
     // what matters is that no *value* a client sent was rendered anywhere.
-    for sent in [
-        format!("Basic {good_blob}"),
-        format!("Basic {bad_blob}"),
-        "Basic !!!not-base64!!!".to_owned(),
+    for (case, sent) in [
+        (
+            "the successful request's header",
+            format!("Basic {good_blob}"),
+        ),
+        ("the rejected request's header", format!("Basic {bad_blob}")),
+        ("the malformed header", "Basic !!!not-base64!!!".to_owned()),
     ] {
         assert!(
             !log.contains(&sent),
-            "an Authorization header value was rendered into the log: {sent}\n{log}"
+            "an Authorization header value was rendered into the log: {case}"
         );
     }
 }
@@ -782,5 +806,509 @@ async fn t9_4_the_request_logging_layer_records_no_headers_at_all() {
         !source.contains("AUTHORIZATION"),
         "axiam-server names the Authorization header; if it now logs one, W8's T9.4 redaction \
          obligation is broken"
+    );
+}
+
+// ===========================================================================
+// T23.1.5 — an independent audit of X7.8 against RFC 6749 §2.3.1 / RFC 7617
+//
+// Everything above shipped with W8. What follows closes the cases the audit
+// found without a test of their own. Assertion messages name the case and
+// never format a secret, a header value or a blob.
+// ===========================================================================
+
+/// One token request that may carry any number of `Authorization` headers.
+///
+/// `post_token` takes one value because that is what a client sends;
+/// duplicates are what an intermediary produces, and `insert_header` would
+/// replace rather than append them.
+async fn post_token_with_headers(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    tenant_id: Uuid,
+    body: &str,
+    authorization_values: &[String],
+) -> Outcome {
+    let mut req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"));
+    for value in authorization_values {
+        req = req.append_header(("Authorization", value.clone()));
+    }
+    let resp = test::call_service(app, req.set_payload(body.to_owned()).to_request()).await;
+    let status = resp.status().as_u16();
+    let challenge = resp
+        .headers()
+        .get("WWW-Authenticate")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let body = test::read_body(resp).await;
+    let error = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_owned));
+    Outcome {
+        status,
+        error,
+        challenge,
+    }
+}
+
+fn good_basic_value(f: &Fixture) -> String {
+    basic_header(&basic_blob(&f.basic_client_id, AWKWARD_SECRET_ENCODED))
+}
+
+const CC_BODY: &str = "grant_type=client_credentials";
+
+// --- The scheme name and the whitespace around it ---------------------------
+
+#[actix_rt::test]
+async fn t23_1_5_the_scheme_name_is_case_insensitive_and_extra_spaces_are_tolerated() {
+    // RFC 9110 §11.1: the scheme is a case-insensitive token. W1's P23W1-02
+    // fixed this for `Bearer`; `Basic` goes through its own parser.
+    let f = setup().await;
+    let app = test_app!(f);
+    let blob = base64::engine::general_purpose::STANDARD
+        .encode(basic_blob(&f.basic_client_id, AWKWARD_SECRET_ENCODED));
+
+    for (case, value) in [
+        ("lower-case scheme", format!("basic {blob}")),
+        ("upper-case scheme", format!("BASIC {blob}")),
+        ("mixed-case scheme", format!("bAsIc {blob}")),
+        (
+            "several spaces after the scheme",
+            format!("Basic    {blob}"),
+        ),
+    ] {
+        let out = post_token(&app, f.tenant_id, CC_BODY, Some(&value)).await;
+        assert_eq!(out.status, 200, "case: {case}");
+    }
+}
+
+// --- RFC 6749 §2.3.1 decoding, end to end ----------------------------------
+
+#[actix_rt::test]
+async fn t23_1_5_a_percent_encoded_client_id_half_authenticates() {
+    // §2.3.1 form-urlencodes the id as well as the secret. Real ids contain
+    // `_`, which a conforming client may encode as `%5F`.
+    let f = setup().await;
+    let app = test_app!(f);
+    let encoded_id = f.basic_client_id.replace('_', "%5F");
+    assert_ne!(
+        encoded_id, f.basic_client_id,
+        "fixture needs an id with a character to encode"
+    );
+
+    let out = post_token(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        Some(&basic_header(&basic_blob(
+            &encoded_id,
+            AWKWARD_SECRET_ENCODED,
+        ))),
+    )
+    .await;
+    assert_eq!(out.status, 200, "an encoded id half must decode and match");
+}
+
+#[actix_rt::test]
+async fn t23_1_5_a_non_ascii_secret_authenticates_encoded_or_raw() {
+    // The encoded spelling is what §2.3.1 specifies (UTF-8 bytes, each
+    // percent-encoded); the raw spelling is what a client that skips the step
+    // sends. The decoder accepts both and they mean the same string.
+    let f = setup().await;
+    let non_ascii = "p\u{e4}ssw\u{f6}rd\u{20ac}";
+    force_secret(&f.db, &f.basic_client_id, non_ascii).await;
+    let app = test_app!(f);
+
+    for (case, secret_half) in [
+        ("percent-encoded UTF-8", "p%C3%A4ssw%C3%B6rd%E2%82%AC"),
+        ("raw UTF-8", non_ascii),
+    ] {
+        let out = post_token(
+            &app,
+            f.tenant_id,
+            CC_BODY,
+            Some(&basic_header(&basic_blob(&f.basic_client_id, secret_half))),
+        )
+        .await;
+        assert_eq!(out.status, 200, "case: {case}");
+    }
+
+    // And a near miss is refused, so the cases above prove a comparison.
+    let out = post_token(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        Some(&basic_header(&basic_blob(
+            &f.basic_client_id,
+            "p%C3%A4ssw%C3%B6rd",
+        ))),
+    )
+    .await;
+    assert_eq!(out.status, 401, "a truncated non-ASCII secret");
+}
+
+#[actix_rt::test]
+async fn t23_1_5_a_secret_with_ampersand_and_equals_is_not_truncated() {
+    // The decoder is hand-written because a query-string parser splits on
+    // both. A secret holding them must survive to the hash comparison.
+    let f = setup().await;
+    force_secret(&f.db, &f.basic_client_id, "a&b=c&d").await;
+    let app = test_app!(f);
+
+    let out = post_token(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        Some(&basic_header(&basic_blob(
+            &f.basic_client_id,
+            "a%26b%3Dc%26d",
+        ))),
+    )
+    .await;
+    assert_eq!(out.status, 200, "encoded `&` and `=`");
+    let out = post_token(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        Some(&basic_header(&basic_blob(&f.basic_client_id, "a&b=c&d"))),
+    )
+    .await;
+    assert_eq!(out.status, 200, "raw `&` and `=`");
+}
+
+#[actix_rt::test]
+async fn t23_1_5_an_encoded_plus_is_a_plus_and_a_raw_plus_is_a_space() {
+    // The secret `a+b` is sent as `a%2Bb`. The same secret sent raw as `a+b`
+    // decodes to `a b` — the RFC's answer — and must NOT authenticate.
+    let f = setup().await;
+    force_secret(&f.db, &f.basic_client_id, "a+b").await;
+    let app = test_app!(f);
+
+    let ok = post_token(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        Some(&basic_header(&basic_blob(&f.basic_client_id, "a%2Bb"))),
+    )
+    .await;
+    assert_eq!(ok.status, 200, "an encoded plus");
+
+    let space = post_token(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        Some(&basic_header(&basic_blob(&f.basic_client_id, "a+b"))),
+    )
+    .await;
+    assert_eq!(space.status, 401, "a raw plus means a space");
+    assert_eq!(space.error.as_deref(), Some("invalid_client"));
+}
+
+#[actix_rt::test]
+async fn t23_1_5_an_empty_secret_and_non_canonical_base64_are_refused_and_challenged() {
+    let f = setup().await;
+    // A secret whose length makes the credential's base64 form carry padding,
+    // so that "no padding" is a different string. Chosen rather than assumed:
+    // the id's length is the repository's.
+    let secret = ["s", "ss", "sss"]
+        .into_iter()
+        .find(|s| (f.basic_client_id.len() + 1 + s.len()) % 3 != 0)
+        .expect("one of three consecutive lengths is not a multiple of three");
+    force_secret(&f.db, &f.basic_client_id, secret).await;
+    let app = test_app!(f);
+
+    let canonical =
+        base64::engine::general_purpose::STANDARD.encode(basic_blob(&f.basic_client_id, secret));
+    let unpadded = canonical.trim_end_matches('=').to_owned();
+    assert_ne!(
+        unpadded, canonical,
+        "fixture needs a blob whose canonical form carries padding"
+    );
+
+    // Control: the canonical spelling authenticates, so the refusals below are
+    // about the spelling and not the credential.
+    let out = post_token(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        Some(&format!("Basic {canonical}")),
+    )
+    .await;
+    assert_eq!(out.status, 200, "control");
+
+    for (case, value) in [
+        (
+            "empty secret",
+            basic_header(&format!("{}:", f.basic_client_id)),
+        ),
+        ("no padding", format!("Basic {unpadded}")),
+        (
+            "a space inside the blob",
+            format!("Basic {} {}", &canonical[..4], &canonical[4..]),
+        ),
+    ] {
+        let out = post_token(&app, f.tenant_id, CC_BODY, Some(&value)).await;
+        assert_eq!(out.status, 401, "case: {case}");
+        assert_eq!(out.error.as_deref(), Some("invalid_client"), "case: {case}");
+        assert_eq!(
+            out.challenge.as_deref(),
+            Some("Basic realm=\"axiam\""),
+            "case: {case}"
+        );
+    }
+}
+
+// --- More than one Authorization header ------------------------------------
+
+#[actix_rt::test]
+async fn t23_1_5_two_authorization_headers_never_let_an_intermediary_choose() {
+    // RFC 9110 §5.3: `Authorization` is not a list-valued field. A request
+    // carrying two is malformed; resolving it by position would let whoever
+    // appends a header decide which credential authenticates.
+    let f = setup().await;
+    let app = test_app!(f);
+    let good = good_basic_value(&f);
+
+    // Two Basic headers, both correct: still refused, not "either works".
+    let out =
+        post_token_with_headers(&app, f.tenant_id, CC_BODY, &[good.clone(), good.clone()]).await;
+    assert_eq!(out.status, 401, "two identical Basic headers");
+    assert_eq!(out.error.as_deref(), Some("invalid_client"));
+
+    // A correct Basic header first and a Bearer one second.
+    let out = post_token_with_headers(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        &[good.clone(), "Bearer not-a-credential".to_owned()],
+    )
+    .await;
+    assert_eq!(out.status, 401, "Basic first, Bearer second");
+    assert_eq!(out.error.as_deref(), Some("invalid_client"));
+
+    // A correct Basic header first and a wrong Basic header second.
+    let wrong = basic_header(&basic_blob(&f.basic_client_id, "wrong"));
+    let out =
+        post_token_with_headers(&app, f.tenant_id, CC_BODY, &[good.clone(), wrong.clone()]).await;
+    assert_eq!(out.status, 401, "correct Basic first, wrong Basic second");
+
+    // The other order: the first header is another scheme, so no Basic
+    // credential is read from the request at all, and the second header —
+    // correct as it is — is never consulted.
+    let out = post_token_with_headers(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        &["Bearer not-a-credential".to_owned(), good.clone()],
+    )
+    .await;
+    // Nothing was read from the second header, so there is no client to
+    // authenticate: the request is refused for naming none (400), which is not
+    // the 200 a reader of the second header would have produced.
+    assert_ne!(
+        out.status, 200,
+        "a Basic header in second place must not authenticate"
+    );
+    assert!(
+        out.error.is_some(),
+        "and it is refused with an OAuth2 error"
+    );
+
+    // Control: the same header alone authenticates.
+    let out = post_token_with_headers(&app, f.tenant_id, CC_BODY, &[good]).await;
+    assert_eq!(out.status, 200, "the control must succeed");
+}
+
+// --- Two credential carriers in one request --------------------------------
+
+#[actix_rt::test]
+async fn t23_1_5_a_client_assertion_beside_a_basic_header_authenticates_nothing() {
+    // SEC-093 again, from the third channel. A `client_secret_basic` client is
+    // authenticated by its header; an assertion in the body is not a second
+    // way in and not a way round. The request carries a correct header AND an
+    // assertion, and the result must be what the header alone would give —
+    // never an `OR`.
+    let f = setup().await;
+    let app = test_app!(f);
+
+    // Header alone: 200.
+    let out = post_token(&app, f.tenant_id, CC_BODY, Some(&good_basic_value(&f))).await;
+    assert_eq!(out.status, 200);
+
+    // A junk assertion beside a WRONG header: the assertion must not rescue it.
+    let out = post_token(
+        &app,
+        f.tenant_id,
+        &format!(
+            "{CC_BODY}&client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+             &client_assertion=e30.e30.e30"
+        ),
+        Some(&basic_header(&basic_blob(&f.basic_client_id, "wrong"))),
+    )
+    .await;
+    assert_eq!(out.status, 401, "an assertion cannot rescue a wrong header");
+    assert_eq!(out.error.as_deref(), Some("invalid_client"));
+}
+
+// --- Registered method wins, in the other direction ------------------------
+
+#[actix_rt::test]
+async fn t23_1_5_a_post_client_with_both_channels_is_authenticated_by_the_body_alone() {
+    // I4. A `client_secret_post` client that presents a Basic header carrying
+    // a WRONG secret beside a CORRECT body secret authenticates: the header is
+    // inert, not a second factor and not an override.
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let out = post_token(
+        &app,
+        f.tenant_id,
+        &format!(
+            "{CC_BODY}&client_id={}&client_secret={AWKWARD_SECRET_ENCODED}",
+            f.post_client_id
+        ),
+        Some(&basic_header(&basic_blob(&f.post_client_id, "wrong"))),
+    )
+    .await;
+    assert_eq!(
+        out.status, 200,
+        "an inert header must not break a post client"
+    );
+}
+
+// --- The FAPI gate, request time -------------------------------------------
+
+#[actix_rt::test]
+async fn t23_1_5_a_fapi2_row_edited_to_client_secret_basic_is_refused_at_the_token_endpoint() {
+    // M9 layer 2 / T9.6, over HTTP. `validate_registration` would refuse this
+    // row; an operator who edits the database bypasses it, and
+    // `enforce_token_request` asks `is_strong()` at the moment the credential
+    // is presented. The control (the same row with the standard profile)
+    // proves the refusal is the profile's and not the fixture's.
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let control = post_token(&app, f.tenant_id, CC_BODY, Some(&good_basic_value(&f))).await;
+    assert_eq!(control.status, 200, "control: the standard profile");
+
+    SurrealOAuth2ClientRepository::new(f.db.clone())
+        .update(
+            f.tenant_id,
+            client_row_id(&f).await,
+            UpdateOAuth2Client {
+                profile: Some(ClientProfile::Fapi2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let out = post_token(&app, f.tenant_id, CC_BODY, Some(&good_basic_value(&f))).await;
+    assert_eq!(
+        out.status, 401,
+        "a fapi2 row holding a shared-secret method"
+    );
+    assert_eq!(out.error.as_deref(), Some("invalid_client"));
+}
+
+async fn client_row_id(f: &Fixture) -> Uuid {
+    SurrealOAuth2ClientRepository::new(f.db.clone())
+        .get_by_client_id(f.tenant_id, &f.basic_client_id)
+        .await
+        .unwrap()
+        .id
+}
+
+// --- Brute force counts toward the same limiter -----------------------------
+
+/// Four callers from four addresses, three allowed per minute. Returns the
+/// statuses in order.
+async fn four_wrong_attempts_from_four_addresses(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    tenant_id: Uuid,
+    body: &str,
+    authorization: Option<&str>,
+) -> Vec<u16> {
+    let mut statuses = Vec::new();
+    for n in 1..=4u8 {
+        let mut req = test::TestRequest::post()
+            .peer_addr(format!("127.0.0.{n}:34567").parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+            .insert_header(("content-type", "application/x-www-form-urlencoded"));
+        if let Some(value) = authorization {
+            req = req.append_header(("Authorization", value.to_owned()));
+        }
+        let resp = test::call_service(app, req.set_payload(body.to_owned()).to_request()).await;
+        statuses.push(resp.status().as_u16());
+    }
+    statuses
+}
+
+fn client_keyed_limit() -> RateLimitConfig {
+    RateLimitConfig {
+        token_per_min: 3,
+        key: RateLimitKeyMode::ClientId,
+        ..RateLimitConfig::default()
+    }
+}
+
+#[actix_rt::test]
+async fn t23_1_5_control_a_post_clients_wrong_secrets_share_one_bucket_across_addresses() {
+    // The baseline the next test is measured against. In `client_id` key mode
+    // the bucket is the client's, whatever address the guess comes from, so
+    // four wrong secrets from four addresses meet the limit of three.
+    let f = setup().await;
+    let app = test_app_rate_limited!(f, client_keyed_limit());
+
+    let statuses = four_wrong_attempts_from_four_addresses(
+        &app,
+        f.tenant_id,
+        &format!(
+            "{CC_BODY}&client_id={}&client_secret=wrong",
+            f.post_client_id
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(
+        statuses,
+        vec![401, 401, 401, 429],
+        "the client-keyed bucket must apply to a body-carried client_id"
+    );
+}
+
+#[actix_rt::test]
+async fn t23_1_5_a_basic_clients_wrong_secrets_share_the_same_bucket() {
+    // X7.8: "`client_secret_basic` brute force counts toward the same limiter
+    // as `client_secret_post`". The Basic spelling carries the id only in the
+    // header (RFC 6749 §2.3.1 makes the body parameter optional), and the
+    // rate-limit layer used to read the id from the form alone, so under
+    // `AXIAM__RATE_LIMIT__KEY=client_id` a header-only request fell back to
+    // the per-address key and a distributed guesser was never throttled
+    // per client.
+    let f = setup().await;
+    let app = test_app_rate_limited!(f, client_keyed_limit());
+
+    let statuses = four_wrong_attempts_from_four_addresses(
+        &app,
+        f.tenant_id,
+        CC_BODY,
+        Some(&basic_header(&basic_blob(&f.basic_client_id, "wrong"))),
+    )
+    .await;
+    assert_eq!(
+        statuses,
+        vec![401, 401, 401, 429],
+        "a header-carried client_id must select the same client bucket"
     );
 }

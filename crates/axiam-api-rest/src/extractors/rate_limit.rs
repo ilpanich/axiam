@@ -175,11 +175,11 @@ impl KeyExtractor for XForwardedForKeyExtractor {
 pub struct RateLimitClientId(pub Option<String>);
 
 /// Parses the `client_id` field out of an `application/x-www-form-urlencoded`
-/// body — the ONLY client-authentication style AXIAM's `/oauth2/token`,
-/// `/oauth2/revoke`, and `/oauth2/introspect` handlers accept
-/// (`client_secret_post`, RFC 6749 §2.3.1; see `handlers::oauth2` and
-/// `axiam_oauth2::token::{TokenRequest, RevokeRequest, IntrospectRequest}`,
-/// all form-decoded via `web::Form<..>`).
+/// body — where a `client_secret_post` client (RFC 6749 §2.3.1, see
+/// `handlers::oauth2` and `axiam_oauth2::token::{TokenRequest, RevokeRequest,
+/// IntrospectRequest}`, all form-decoded via `web::Form<..>`) names itself.
+/// A `client_secret_basic` client may name itself in the `Authorization`
+/// header alone; see [`extract_basic_client_id`] and [`extract_client_id`].
 ///
 /// Returns `None` for a missing/empty/unparseable `client_id` — the caller
 /// (the rate limiter) must fail SAFE by falling back to the IP key rather
@@ -191,6 +191,36 @@ pub fn extract_form_client_id(body: &[u8]) -> Option<String> {
         .find(|(k, _)| k == "client_id")
         .map(|(_, v)| v.into_owned())
         .filter(|v| !v.is_empty())
+}
+
+/// The `client_id` an `Authorization: Basic` header names (RFC 6749 §2.3.1,
+/// decoded by `axiam_oauth2::client_secret_basic` exactly as the handlers
+/// decode it), or `None` for no header, another scheme, or a header that does
+/// not decode.
+///
+/// T23.1.5. RFC 6749 §2.3.1 makes the body's `client_id` optional for a client
+/// authenticating through the header, and 37 of the Basic OP suite's 38
+/// modules send it there alone. A rate limiter that read the form only keyed
+/// such a request on the source address whatever `AXIAM__RATE_LIMIT__KEY` said,
+/// so a `client_secret_basic` client had no per-client bucket and its secret
+/// could be guessed from as many addresses as the guesser owned. The secret
+/// half of the credential is dropped on the floor here: only the id selects a
+/// bucket, and the header is never logged.
+pub fn extract_basic_client_id(authorization: &str) -> Option<String> {
+    axiam_oauth2::client_secret_basic::parse_authorization_header(authorization)?
+        .ok()
+        .map(|credentials| credentials.client_id().to_owned())
+}
+
+/// The `client_id` a request names itself by: the form body's when present,
+/// otherwise the `Authorization: Basic` header's.
+///
+/// The body wins because that is the order the handlers resolve it in
+/// (`resolve_client_id`), and a request naming two different ids is refused
+/// there before any secret is checked, so a caller cannot use the disagreement
+/// to guess a secret under a bucket other than the one it is charged to.
+pub fn extract_client_id(body: &[u8], authorization: Option<&str>) -> Option<String> {
+    extract_form_client_id(body).or_else(|| authorization.and_then(extract_basic_client_id))
 }
 
 /// D8 key extractor for the token/introspect/revoke endpoints: honors
@@ -268,6 +298,58 @@ mod client_aware_tests {
     use std::net::SocketAddr;
 
     const PEER_A: &str = "203.0.113.9:1";
+
+    fn basic(raw: &str) -> String {
+        use base64::Engine as _;
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        )
+    }
+
+    /// T23.1.5. The Basic header names a client exactly as the handlers decode
+    /// it, so the bucket a request is charged to is the one its credential
+    /// would authenticate under.
+    #[test]
+    fn a_basic_header_names_the_client_the_handlers_would_authenticate() {
+        assert_eq!(
+            extract_basic_client_id(&basic("oa%5Fabc:secret")).as_deref(),
+            Some("oa_abc"),
+            "the id half is form-urldecoded"
+        );
+        assert_eq!(
+            extract_basic_client_id(&basic("oa_abc:a:b")).as_deref(),
+            Some("oa_abc")
+        );
+        for (raw, case) in [
+            ("Bearer abc".to_owned(), "another scheme"),
+            ("Basic !!!".to_owned(), "not base64"),
+            (basic("no-colon"), "no separator"),
+            (basic("oa_abc:"), "empty secret"),
+            (basic(":secret"), "empty id"),
+        ] {
+            assert_eq!(extract_basic_client_id(&raw), None, "case: {case}");
+        }
+    }
+
+    #[test]
+    fn the_form_client_id_wins_over_the_header_and_the_header_fills_in_for_its_absence() {
+        let header = basic("from_header:secret");
+        assert_eq!(
+            extract_client_id(b"client_id=from_form", Some(&header)).as_deref(),
+            Some("from_form")
+        );
+        assert_eq!(
+            extract_client_id(b"grant_type=client_credentials", Some(&header)).as_deref(),
+            Some("from_header")
+        );
+        assert_eq!(
+            extract_client_id(b"client_id=", Some(&header)).as_deref(),
+            Some("from_header"),
+            "an empty form value is no value"
+        );
+        assert_eq!(extract_client_id(b"grant_type=x", None), None);
+    }
     const PEER_B: &str = "203.0.113.10:2";
 
     fn req_with_client_id(peer: &str, client_id: Option<&str>) -> ServiceRequest {

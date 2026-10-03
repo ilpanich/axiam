@@ -1490,8 +1490,9 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
                     .route(web::get().to(handlers::oauth2::authorize::<C>)),
             )
             // D8: `/token`, `/revoke`, `/introspect` are the ONLY three
-            // endpoints with a form-encoded OAuth2 `client_id`
-            // (`client_secret_post`, RFC 6749 §2.3.1) — the client-aware
+            // endpoints with an OAuth2 `client_id` to key on, in the form
+            // (`client_secret_post`, RFC 6749 §2.3.1) or the `Authorization:
+            // Basic` header (`client_secret_basic`, T23.1.5) — the client-aware
             // governor/`RateLimitShared` constructors honor
             // `rate_limit_cfg.key` (`AXIAM__RATE_LIMIT__KEY`) here so a
             // NAT'd fleet of distinct OAuth2 clients no longer collides into

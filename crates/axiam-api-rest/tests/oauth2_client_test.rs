@@ -1092,3 +1092,176 @@ async fn update_oauth2_client_refuses_the_unimplemented_dpop_nonce_switch() {
 
     assert_eq!(test::call_service(&app, req).await.status().as_u16(), 400);
 }
+
+// ---------------------------------------------------------------------------
+// T23.1.5 — `client_secret_basic` at registration (X7.8, matrix row M9 layer 1)
+// ---------------------------------------------------------------------------
+//
+// `fapi::validate_registration` asks `is_strong()`, so the FAPI profile
+// refuses the Basic method through the arm that already refused
+// `client_secret_post`. Those are unit tests; what is pinned here is that the
+// admin API actually reaches the gate on both of its doors, and that a
+// `standard` client is unaffected.
+
+/// A `standard` client may register `client_secret_basic` through the admin
+/// API, and the stored row says so.
+#[actix_rt::test]
+async fn a_standard_client_may_register_client_secret_basic() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "Basic Client",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+            "token_endpoint_auth_method": "client_secret_basic"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    let id = created["id"].as_str().unwrap();
+
+    // The creation response does not echo the method; the stored row does.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let stored: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(stored["token_endpoint_auth_method"], "client_secret_basic");
+}
+
+/// A `fapi2` client may not register `client_secret_basic`, on create. The
+/// refusal names the method, which is how an operator learns why.
+#[actix_rt::test]
+async fn a_fapi2_client_may_not_register_client_secret_basic() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let req = test::TestRequest::post()
+        .uri("/api/v1/oauth2-clients")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "name": "FAPI Basic Client",
+            "redirect_uris": ["https://app.example.com/callback"],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid"],
+            "profile": "fapi2",
+            "require_par": true,
+            "tls_client_certificate_bound_access_tokens": true,
+            "token_endpoint_auth_method": "client_secret_basic"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let body = test::read_body(resp).await;
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("client_secret_basic"),
+        "the refusal must name the method it refused"
+    );
+}
+
+/// The update path is the other door: switching an existing `standard` Basic
+/// client to `fapi2`, or an existing `fapi2` client to Basic, is validated on
+/// the **merged** row and refused in both directions.
+#[actix_rt::test]
+async fn a_patch_cannot_make_a_client_fapi2_and_client_secret_basic_at_once() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    // Direction 1: a Basic client is flipped to the FAPI profile.
+    let basic = {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/oauth2-clients")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(serde_json::json!({
+                "name": "Basic Then FAPI",
+                "redirect_uris": ["https://app.example.com/callback"],
+                "grant_types": ["authorization_code"],
+                "scopes": ["openid"],
+                "token_endpoint_auth_method": "client_secret_basic"
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 201);
+        test::read_body_json::<serde_json::Value, _>(resp).await
+    };
+    let id = basic["id"].as_str().unwrap();
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({
+            "profile": "fapi2",
+            "require_par": true,
+            "tls_client_certificate_bound_access_tokens": true
+        }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        400,
+        "flipping a client_secret_basic client to fapi2 must be refused"
+    );
+
+    // Direction 2: a client with the FAPI profile is switched to Basic. The
+    // only way to hold the profile through the admin API is with a strong
+    // method, so build one with `private_key_jwt`.
+    let fapi = {
+        let req = test::TestRequest::post()
+            .uri("/api/v1/oauth2-clients")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(serde_json::json!({
+                "name": "FAPI Then Basic",
+                "redirect_uris": ["https://app.example.com/callback"],
+                "grant_types": ["authorization_code"],
+                "scopes": ["openid"],
+                "profile": "fapi2",
+                "require_par": true,
+                "tls_client_certificate_bound_access_tokens": true,
+                "token_endpoint_auth_method": "private_key_jwt",
+                "jwks": "{\"keys\":[]}"
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 201);
+        test::read_body_json::<serde_json::Value, _>(resp).await
+    };
+    let id = fapi["id"].as_str().unwrap();
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(serde_json::json!({ "token_endpoint_auth_method": "client_secret_basic" }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        400,
+        "switching a fapi2 client to client_secret_basic must be refused"
+    );
+}

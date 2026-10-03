@@ -104,6 +104,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `client_secret_basic` client now has the same per-client rate-limit bucket
+  as a `client_secret_post` one (T23.1.5).** The layer in front of
+  `/oauth2/token`, `/oauth2/revoke` and `/oauth2/introspect` read the bucket's
+  `client_id` from the form body alone, and RFC 6749 §2.3.1 lets a Basic client
+  name itself in the `Authorization` header alone. Under
+  `AXIAM__RATE_LIMIT__KEY=client_id` or `ip_client_id` such a request fell back
+  to the per-address key, so a Basic client's secret could be guessed from as
+  many addresses as the guesser held. The layer now falls back to the id the
+  header decodes to (through the same parser the handlers use; the secret is not
+  read and nothing is logged). The default key mode, `ip`, never differed.
+  Amends T-253. The audit behind it also added tests, with no behaviour change,
+  for the §2.3.1 decoding edges, duplicate `Authorization` headers, the
+  registered method at the three ordinary token grants, and the FAPI refusal of
+  `client_secret_basic` through the admin API.
+
 - **The login hop on a per-tenant issuer path came back refused (T23.1.8).** Its
   `return_to` was built from the query after the tenant scope had appended
   `tenant_id`. The return leg therefore carried a second tenant selector, and the

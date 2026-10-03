@@ -7,7 +7,10 @@
 use axiam_auth::password;
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
-use axiam_core::models::user::{Address, CreateUser, UpdateUser, User, UserStatus};
+use axiam_core::models::user::{
+    Address, CollisionAttribute, CreateDirectoryAccount, CreateUser, IdentityCollision, UpdateUser,
+    User, UserStatus,
+};
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -167,6 +170,13 @@ impl std::fmt::Debug for UserRowWithId {
 struct TotpStepCasRow {
     #[allow(dead_code)]
     record_id: String,
+}
+
+/// One row of the identity-collision probe.
+#[derive(Debug, SurrealValue)]
+struct CollisionRow {
+    record_id: String,
+    by_username: bool,
 }
 
 fn parse_status(s: &str) -> Result<UserStatus, DbError> {
@@ -352,6 +362,22 @@ impl<C: Connection> SurrealUserRepository<C> {
             db,
             pepper: Some(pepper),
         }
+    }
+}
+
+impl<C: Connection> SurrealUserRepository<C> {
+    /// An unusable password: the Argon2id hash of 32 random bytes nobody
+    /// holds, so the column keeps its shape (a valid PHC string that every
+    /// verifier parses) without being a hash of anything guessable. Never
+    /// empty: the empty string is the erasure tombstone, and a verifier handed
+    /// one errors instead of answering "no".
+    fn unusable_password_hash(&self) -> AxiamResult<String> {
+        use rand::Rng;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        let secret = zeroize::Zeroizing::new(hex::encode(bytes));
+        password::hash_password(&secret, self.pepper.as_deref())
+            .map_err(|e| classify_write_error(e, "user").into())
     }
 }
 
@@ -750,19 +776,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                 DbError::Migration("a directory external id must not be empty".into()).into(),
             );
         }
-        // An unusable password: the Argon2id hash of 32 random bytes nobody
-        // holds, so the column keeps its shape (a valid PHC string that every
-        // verifier parses) without being a hash of anything guessable. Never
-        // empty: the empty string is the erasure tombstone, and a verifier
-        // handed one errors instead of answering "no".
-        let unusable = {
-            use rand::Rng;
-            let mut bytes = [0u8; 32];
-            rand::rng().fill_bytes(&mut bytes);
-            let secret = zeroize::Zeroizing::new(hex::encode(bytes));
-            password::hash_password(&secret, self.pepper.as_deref())
-                .map_err(|e| classify_write_error(e, "user"))?
-        };
+        let unusable = self.unusable_password_hash()?;
         let id_str = user_id.to_string();
         let result = self
             .db
@@ -794,6 +808,102 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             id: id_str,
         })?;
         Ok(row.into_user(user_id)?)
+    }
+
+    async fn create_directory_account(&self, input: CreateDirectoryAccount) -> AxiamResult<User> {
+        if input.external_id.trim().is_empty() {
+            return Err(
+                DbError::Migration("a directory external id must not be empty".into()).into(),
+            );
+        }
+        let id = new_id();
+        let id_str = id.to_string();
+        let unusable = self.unusable_password_hash()?;
+        // One CREATE: the row is born `Active`, marked, with a hash nobody
+        // holds. There is no earlier state to be left behind by a failure
+        // between two writes, and the unique indexes (username, email, marker)
+        // decide a race in the datastore.
+        let result = self
+            .db
+            .current()
+            .query(
+                "CREATE type::record('user', $id) SET \
+                 tenant_id = $tenant_id, \
+                 username = $username, email = $email, \
+                 password_hash = $password_hash, \
+                 status = 'Active', \
+                 mfa_enabled = false, \
+                 failed_login_attempts = 0, \
+                 last_failed_login_at = NONE, \
+                 locked_until = NONE, \
+                 email_verified_at = NONE, \
+                 directory_external_id = $external_id, \
+                 metadata = $metadata",
+            )
+            .bind(("id", id_str.clone()))
+            .bind(("tenant_id", input.tenant_id.to_string()))
+            .bind(("username", input.username))
+            .bind(("email", input.email))
+            .bind(("password_hash", unusable))
+            .bind(("external_id", input.external_id))
+            .bind(("metadata", input.metadata))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
+        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
+            entity: "user".into(),
+            id: id_str,
+        })?;
+        Ok(row.into_user(id)?)
+    }
+
+    async fn find_identity_collision(
+        &self,
+        tenant_id: Uuid,
+        names: &[String],
+    ) -> AxiamResult<Option<IdentityCollision>> {
+        let folded: Vec<String> = names
+            .iter()
+            .map(|name| name.trim().to_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if folded.is_empty() {
+            return Ok(None);
+        }
+        // Every status, tombstones included. The scan is bounded by the
+        // tenant (the first column of both unique indexes) and runs once per
+        // first-ever directory login, never per sign-in.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, \
+                        string::lowercase(username) IN $names AS by_username \
+                 FROM user \
+                 WHERE tenant_id = $tenant_id \
+                   AND (string::lowercase(username) IN $names \
+                        OR string::lowercase(email) IN $names) \
+                 LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("names", folded))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<CollisionRow> = result.take(0).map_err(DbError::from)?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(IdentityCollision {
+            user_id: parse_uuid(&row.record_id, "user")?,
+            attribute: if row.by_username {
+                CollisionAttribute::Username
+            } else {
+                CollisionAttribute::Email
+            },
+        }))
     }
 
     async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<bool> {

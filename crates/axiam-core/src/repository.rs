@@ -57,7 +57,7 @@ use crate::models::{
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     uma::{CreatePermissionTicket, PermissionTicket},
-    user::{CreateUser, UpdateUser, User},
+    user::{CreateDirectoryAccount, CreateUser, IdentityCollision, UpdateUser, User},
     webauthn_credential::{CreateWebauthnCredential, WebauthnCredential},
     webauthn_policy::WebauthnAttestationPolicy,
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
@@ -349,6 +349,62 @@ pub trait UserRepository: Send + Sync {
         _user_id: Uuid,
         _external_id: &str,
     ) -> impl Future<Output = AxiamResult<User>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// Create a directory account in **one write** (G-3, T23.3.3): `Active`,
+    /// the marker set, and `password_hash` an Argon2id hash of 32 random bytes
+    /// nobody holds — the row never exists in any other state, so just-in-time
+    /// provisioning cannot leave a half-made account (a created-but-unmarked
+    /// local account whose password nobody knows, squatting the name).
+    ///
+    /// This is the second, and last, place the marker is written, beside
+    /// [`Self::mark_directory_account`]: that one turns an *existing* account
+    /// into a directory account (an administrator's act, D-28), this one makes
+    /// a *new* one. Neither is reachable from `CreateUser`, `UpdateUser`, the
+    /// admin API or SCIM. `AlreadyExists` when the username, the email or the
+    /// marker is taken in the tenant — which of them is not said, and the
+    /// caller does not need it: it re-reads by username to tell a lost race
+    /// for the same entry from a real collision.
+    ///
+    /// The default implementation refuses.
+    fn create_directory_account(
+        &self,
+        _input: CreateDirectoryAccount,
+    ) -> impl Future<Output = AxiamResult<User>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// The existing account, if any, that a prospective directory account
+    /// would collide with: one whose username or email equals, **ignoring
+    /// case**, any of `names` (G-3, T23.3.3, D-28).
+    ///
+    /// `names` are the prospective username, the prospective email and the
+    /// login name that was typed. Both of an existing account's columns are
+    /// compared with each name — a new username equal to somebody's *email* is
+    /// a collision too, because the login lookup tries the username first and
+    /// would hand that person's address to the new account. Every status
+    /// counts, tombstones included: a name an account holds is held.
+    ///
+    /// The ordinary lookups (`get_by_username`, `get_by_email`) are exact; this
+    /// is the one place case is folded, and it is deliberately wider than the
+    /// unique indexes so that `Admin` cannot be provisioned beside `admin`.
+    ///
+    /// The default implementation refuses, so a double that cannot answer
+    /// never reads as "no collision".
+    fn find_identity_collision(
+        &self,
+        _tenant_id: Uuid,
+        _names: &[String],
+    ) -> impl Future<Output = AxiamResult<Option<IdentityCollision>>> + Send {
         async {
             Err(AxiamError::Internal(
                 "this user repository does not support directory accounts".into(),
@@ -2489,6 +2545,31 @@ pub trait CertificateRepository: Send + Sync {
         fingerprint: &str,
     ) -> impl Future<Output = AxiamResult<Certificate>> + Send;
     fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Revoke every **active `User`-type certificate** that belongs to
+    /// `user_id`, returning how many were revoked (G-3, T23.3.3, D-28).
+    ///
+    /// **The model has no user-to-certificate relation**: a certificate
+    /// authenticates as the service account it is bound to, and nothing
+    /// records that a `User` certificate was issued *for* an account. "Belongs
+    /// to" is therefore the only convention that exists — a certificate's
+    /// `metadata.user_id` naming the account (the example
+    /// [`Certificate::metadata`] has always given), or its subject common name
+    /// equal, ignoring case, to the account's `username` or `email`. Both are
+    /// matched, and only among `User`-type, still-active certificates of the
+    /// tenant; over-matching revokes a certificate, which is the safe side of
+    /// the error.
+    ///
+    /// Required, with no default, for the reason
+    /// [`WebauthnCredentialRepository::delete_by_user`] gives: a default of
+    /// "zero revoked" would make every double silently not revoke.
+    fn revoke_user_certificates(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        username: &str,
+        email: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,

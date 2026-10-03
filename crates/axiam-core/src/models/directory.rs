@@ -412,10 +412,89 @@ pub trait DirectoryAuthenticator: Send + Sync {
                 + 'a,
         >,
     >;
+
+    /// Authenticate `login_name` / `password` for a login name **AXIAM holds no
+    /// account for** (just-in-time provisioning, G-3, T23.3.3).
+    ///
+    /// Same contract as [`Self::authenticate`], plus one gate: the
+    /// implementation answers [`DirectoryAuthError::NotConfigured`], **without
+    /// contacting the directory**, unless the tenant's directory is enabled
+    /// **and** has `jit_provisioning` on. The gate sits in front of the bind
+    /// because a bind for a name the tenant never asked to provision would run
+    /// up a failed-bind count in the directory that no AXIAM counter can see
+    /// (T-302).
+    ///
+    /// A provided method, defaulting to `NotConfigured`: an implementation that
+    /// does not override it provisions nobody, which is the safe reading of "I
+    /// was not asked to". It is a method of this port rather than a second
+    /// port so that one injected object is all `AuthService` knows about
+    /// directories.
+    fn authenticate_for_provisioning<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        login_name: &'a str,
+        password: &'a str,
+    ) -> DirectoryFuture<'a, Result<DirectoryIdentity, DirectoryAuthError>> {
+        let _ = (tenant_id, login_name, password);
+        Box::pin(async { Err(DirectoryAuthError::NotConfigured) })
+    }
+
+    /// Resolve the entry `login_name` names, through the tenant's configured
+    /// user filter, **without binding as it** — the lookup an administrator's
+    /// act of linking an existing account needs, since the administrator does
+    /// not hold the user's directory password.
+    ///
+    /// The entry is found by the directory and returned as the directory
+    /// describes it; a caller never supplies an identifier of its own. Exactly
+    /// one match, as for [`Self::authenticate`]: none or several is
+    /// [`DirectoryAuthError::InvalidCredentials`] ("no such single entry").
+    /// Not gated on `jit_provisioning` — linking is an administrator's
+    /// decision, not provisioning — but it does require an enabled directory.
+    /// Defaults to `NotConfigured`, like the method above.
+    fn lookup_entry<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        login_name: &'a str,
+    ) -> DirectoryFuture<'a, Result<DirectoryIdentity, DirectoryAuthError>> {
+        let _ = (tenant_id, login_name);
+        Box::pin(async { Err(DirectoryAuthError::NotConfigured) })
+    }
 }
 
 /// What `AuthService` holds: a shared, type-erased authenticator.
 pub type SharedDirectoryAuthenticator = std::sync::Arc<dyn DirectoryAuthenticator>;
+
+// ---------------------------------------------------------------------------
+// Provisioning and linking (T23.3.3)
+// ---------------------------------------------------------------------------
+
+/// A boxed future, the shape every method of the object-safe directory ports
+/// returns.
+pub type DirectoryFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// Where the directory path writes its audit rows (G-3, T23.3.3).
+///
+/// `AuthService` has four repository type parameters already and `axiam-audit`
+/// (layer 2) sits above `axiam-auth`, so the audit write is a type-erased port
+/// declared here and implemented in `axiam-auth` over the existing
+/// append-only [`crate::repository::AuditLogRepository`]. An implementation
+/// never fails the caller: the directory path has already done, or refused,
+/// what the row describes, and a row that cannot be written is logged, not
+/// turned into a second failure.
+///
+/// **No row may carry a password or a bind secret.** The callers put
+/// identifiers and the *name* of what collided, nothing else.
+pub trait DirectoryAuditSink: Send + Sync {
+    /// Append one row.
+    fn record<'a>(
+        &'a self,
+        entry: crate::models::audit::CreateAuditLogEntry,
+    ) -> DirectoryFuture<'a, ()>;
+}
+
+/// What `AuthService` holds: a shared, type-erased audit sink.
+pub type SharedDirectoryAuditSink = std::sync::Arc<dyn DirectoryAuditSink>;
 
 #[cfg(test)]
 mod tests {

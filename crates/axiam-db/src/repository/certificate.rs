@@ -55,6 +55,12 @@ struct CertificateRowWithId {
 }
 
 #[derive(Debug, SurrealValue)]
+struct RevokedCertificateRow {
+    #[allow(dead_code)]
+    record_id: String,
+}
+
+#[derive(Debug, SurrealValue)]
 struct BoundTargetRow {
     sa_id: String,
 }
@@ -340,6 +346,46 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         }
 
         Ok(())
+    }
+
+    async fn revoke_user_certificates(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        username: &str,
+        email: &str,
+    ) -> AxiamResult<u64> {
+        // See the trait for why "belongs to" is a convention here. A
+        // certificate matches on `metadata.user_id`, or on its subject common
+        // name equalling the account's username or email, ignoring case — and
+        // only `User`-type certificates that are still active.
+        let names: Vec<String> = [username, email]
+            .into_iter()
+            .map(|name| name.trim().to_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect();
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM \
+                 (UPDATE certificate SET status = 'Revoked' \
+                  WHERE tenant_id = $tenant_id \
+                    AND cert_type = 'User' \
+                    AND status = 'Active' \
+                    AND (metadata.user_id = $user_id \
+                         OR string::lowercase(subject) IN $names))",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("names", names))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<RevokedCertificateRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
     }
 
     async fn list(

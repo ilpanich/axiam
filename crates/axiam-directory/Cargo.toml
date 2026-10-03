@@ -1,0 +1,19 @@
+[package]
+name = "axiam-directory"
+description = "AXIAM directory identity source: LDAP / Active Directory configuration and validation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# The ratchet (root `Cargo.toml`, `[workspace.lints.rust]`): this crate opts in
+# from its first commit, so `missing_docs` is a warning locally and an error in
+# CI (`clippy -D warnings`). There is no backlog to document first.
+[lints]
+workspace = true
+
+# No feature flags: the crate is pure Rust and, once it speaks LDAP, does so
+# over `rustls` -- there is no system library to make optional (plan §7 rule 5).
+[dependencies]
+axiam-core = { workspace = true }

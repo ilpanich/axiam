@@ -1018,6 +1018,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiam-directory"
+version = "1.0.0-beta17"
+dependencies = [
+ "axiam-core",
+]
+
+[[package]]
 name = "axiam-email"
 version = "1.0.0-beta17"
 dependencies = [

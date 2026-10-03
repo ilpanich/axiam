@@ -11,6 +11,7 @@ members = [
     "crates/axiam-amqp",
     "crates/axiam-oauth2",
     "crates/axiam-federation",
+    "crates/axiam-directory",
     "crates/axiam-audit",
     "crates/axiam-pki",
     "crates/axiam-email",
@@ -38,7 +39,8 @@ resolver = "3"
 # fail while you are mid-thought on a new public item, and a pull request
 # should not merge without the sentence explaining it.
 #
-# Currently opted in: axiam-authz.
+# Currently opted in: axiam-authz, axiam-directory (new crates opt in from
+# their first commit).
 #
 # The rest of the workspace is a ratchet target -- add `[lints] workspace = true`
 # to a crate once its public surface is documented. Do NOT add the key to a

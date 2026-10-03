@@ -57,6 +57,7 @@ axiam/
 │   ├── axiam-amqp/         # AMQP consumer/producer (Lapin)
 │   ├── axiam-oauth2/       # OAuth2 authorization server + OIDC provider
 │   ├── axiam-federation/   # SAML SP + OIDC federation
+│   ├── axiam-directory/    # LDAP / Active Directory identity source (read-only, no Kerberos)
 │   ├── axiam-audit/        # Audit logging service
 │   ├── axiam-pki/          # Certificate management, CA, GnuPG integration
 │   ├── axiam-email/        # Transactional mail (verification, reset, alerts)
@@ -78,7 +79,8 @@ axiam/
 `Cargo.toml` and opted into **per crate** with `[lints] workspace = true`. It is
 a warning locally and an error in CI, where clippy runs `-D warnings`.
 
-Opted in today: **`axiam-authz`**. Next target: **`axiam-core`, 993 sites** —
+Opted in today: **`axiam-authz`**, **`axiam-directory`** (a new crate opts in from its
+first commit). Next target: **`axiam-core`, 993 sites** —
 `missing_docs` fires on struct and enum *fields*, so the count is roughly four
 times the number of public types. Do not add the `[lints]` key to a crate you
 have not documented first; a lint that fires on every build is one everybody

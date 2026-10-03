@@ -328,7 +328,21 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
     };
 
     let csrf_token = generate_csrf_token();
-    Ok(HttpResponse::Ok()
+    let mut response = HttpResponse::Ok();
+    // T23.1.8 (D-11): one copy of the OP cookie per path the session's tenant
+    // is served at — the bare `/oauth2/authorize` always, and
+    // `/t/{tenant_id}/oauth2/authorize` where per-tenant issuers are on. The
+    // tenant is the one the just-issued access token names, i.e. the session's
+    // own: no other tenant's path is ever minted.
+    for cookie in crate::middleware::csrf::op_session_cookies(
+        &out.browser_session_token,
+        config.refresh_token_lifetime_secs,
+        tenant_id,
+        config,
+    ) {
+        response.cookie(cookie);
+    }
+    Ok(response
         // W3 (plan §4.0): the OP browser session, set on every browser login
         // beside the three cookies that were already here.
         //
@@ -343,10 +357,9 @@ pub async fn cookie_response_from_output<C: Connection + Clone>(
         // the access token's: the value it names is the session row, and a
         // cookie that expired every fifteen minutes would send a signed-in user
         // back through the login hop several times an hour.
-        .cookie(crate::middleware::csrf::op_session_cookie(
-            &out.browser_session_token,
-            config.refresh_token_lifetime_secs,
-        ))
+        //
+        // (Set above, through `op_session_cookies`, which is where the paths
+        // are chosen.)
         .cookie(access_cookie(
             &out.access_token,
             config.access_token_lifetime_secs,

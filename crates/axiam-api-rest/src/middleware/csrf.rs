@@ -16,8 +16,10 @@ use actix_web::body::EitherBody;
 use actix_web::cookie::{Cookie, SameSite, time::Duration};
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use actix_web::http::Method;
+use axiam_auth::config::AuthConfig;
 use axiam_core::error::AxiamError;
 use subtle::ConstantTimeEq;
+use uuid::Uuid;
 
 use crate::error::AxiamApiError;
 
@@ -363,7 +365,14 @@ pub fn csrf_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cooki
 /// - `httpOnly(true)` — script must never read it; it buys authorization codes
 /// - `Secure` — **unconditionally `true`**, unlike the other three; see below
 /// - `SameSite::Lax` — **the load-bearing attribute**, see below
-/// - `path("/oauth2/authorize")` — the only endpoint that consults it
+/// - `path("/oauth2/authorize")` — the only endpoint that consults it, and
+///   the only one under the deployment-wide issuer. A deployment serving T21.6
+///   per-tenant issuers also mints a copy at `/t/{tenant_id}/oauth2/authorize`
+///   for the session's own tenant, identical but for `Path` (T23.1.8, D-11) —
+///   see [`op_session_cookie_paths`], which every sign-in and every logout goes
+///   through, and which is the only place a path is chosen. The one route under
+///   either path besides the endpoint itself is its `/logout` sub-path, which
+///   reads the cookie only to revoke the session it names (P23W1-10).
 /// - `Max-Age` = the session's, i.e. `AuthConfig::refresh_token_lifetime_secs`
 ///
 /// # Why `Lax`, and why it must stay `Lax`
@@ -415,13 +424,106 @@ pub fn csrf_cookie(token: &str, max_age_secs: u64, cookie_secure: bool) -> Cooki
 /// over plaintext to a *non-loopback* host — which is a deployment that should
 /// not be completing OpenID Connect authorization requests at all.
 pub fn op_session_cookie(token: &str, max_age_secs: u64) -> Cookie<'static> {
+    op_session_cookie_at(token, max_age_secs, AUTHORIZE_PATH.to_owned())
+}
+
+/// [`op_session_cookie`], at one of the paths [`op_session_cookie_paths`]
+/// names (T23.1.8, D-11).
+///
+/// Every attribute but `Path` is fixed here, so the bare-path cookie and each
+/// per-tenant one differ in `Path` and in nothing else — the property the
+/// acceptance tests assert attribute by attribute. Private to this module on
+/// purpose: a caller that could choose the path could mint the cookie
+/// somewhere the list does not say, and a removal built from the list would
+/// then never reach it.
+fn op_session_cookie_at(token: &str, max_age_secs: u64, path: String) -> Cookie<'static> {
     Cookie::build(COOKIE_OP_SESSION, token.to_owned())
         .http_only(true)
         .secure(true)
         .same_site(SameSite::Lax)
-        .path("/oauth2/authorize")
+        .path(path)
         .max_age(Duration::seconds(max_age_secs as i64))
         .finish()
+}
+
+/// The authorization endpoint at the deployment root — the bare cookie's path.
+const AUTHORIZE_PATH: &str = axiam_oauth2::login_hop::AUTHORIZE_PATH;
+
+/// **Every path a sign-in into `tenant_id` mints the OP-session cookie at**
+/// (T23.1.8, D-11). The one list: every setter and every remover is built from
+/// it, so a path cannot be minted without also being cleared.
+///
+/// - `/oauth2/authorize` — the deployment-wide issuer's authorization endpoint,
+///   always. Unchanged by D-11.
+/// - `/t/{tenant_id}/oauth2/authorize` — the T21.6 per-tenant issuer's, only
+///   where the deployment serves per-tenant paths
+///   (`AuthConfig::tenant_issuer_paths`), and only for **the session's own
+///   tenant**. A browser signed in to tenant A holds no cookie scoped to any
+///   other tenant, so a request to `/t/B/oauth2/authorize` carries nothing it
+///   could be resolved from.
+///
+/// W3 (plan §4 G-2) adds the SAML SSO endpoint, `/saml/v2/{tenant_id}/sso`, by
+/// adding one entry here.
+///
+/// # Why one name for every path
+///
+/// A browser keys cookies by name, domain **and path** (RFC 6265 §5.3 step 11),
+/// so several `axiam_op_session` cookies with different paths coexist, and a
+/// request carries the ones whose path is a prefix of its own (§5.1.4). The
+/// paths here are pairwise disjoint in that sense — `/oauth2/authorize` is not
+/// a prefix of `/t/{uuid}/oauth2/authorize`, nor the reverse, nor one tenant's
+/// of another's — so **no request ever carries two of them**, and the one
+/// resolution path that reads `COOKIE_OP_SESSION` serves the bare endpoint and
+/// every tenant endpoint unchanged. A distinct name per path would buy nothing
+/// a path does not already give, and would make the resolver choose a name by
+/// route — a second place the route-to-cookie mapping could drift.
+///
+/// # Why one value
+///
+/// Every path carries the **same** value, so every cookie names the same
+/// session row through the one `browser_token_hash` it already stores — no
+/// schema change, and revoking the row ends every copy at once. What keeps a
+/// copy from being used in the wrong tenant is not its path (a path is a
+/// browser courtesy, and a cookie value can be replayed anywhere) but the
+/// resolver's tenant-keyed lookup: a digest is looked up in the tenant the
+/// request names, and a session in tenant A is not there when the request
+/// names tenant B.
+///
+/// # The path is the canonical one
+///
+/// The tenant segment is written as `Uuid`'s hyphenated lower-case form, which
+/// is what [`axiam_oauth2::login_hop::tenant_authorize_path`] builds and so
+/// what every `return_to` and every discovery document names. The `/t/` scope
+/// also routes the other spellings `Uuid::parse_str` accepts (upper case,
+/// unhyphenated); a browser that requests one of those carries no cookie,
+/// because cookie paths match case-sensitively and byte for byte, and fails
+/// closed as `login_required`. Nothing a server builds sends it there.
+#[must_use]
+pub fn op_session_cookie_paths(tenant_id: Uuid, config: &AuthConfig) -> Vec<String> {
+    let mut paths = vec![AUTHORIZE_PATH.to_owned()];
+    if config.tenant_issuer_paths {
+        paths.push(axiam_oauth2::login_hop::tenant_authorize_path(tenant_id));
+    }
+    paths
+}
+
+/// The OP-session cookies a completed sign-in into `tenant_id` sets: one per
+/// path in [`op_session_cookie_paths`], every one carrying `token` and
+/// `max_age_secs` (T23.1.8, D-11).
+///
+/// The bare-path cookie comes first, so a reader that takes the first
+/// `axiam_op_session` it finds sees exactly the cookie it saw before D-11.
+#[must_use]
+pub fn op_session_cookies(
+    token: &str,
+    max_age_secs: u64,
+    tenant_id: Uuid,
+    config: &AuthConfig,
+) -> Vec<Cookie<'static>> {
+    op_session_cookie_paths(tenant_id, config)
+        .into_iter()
+        .map(|path| op_session_cookie_at(token, max_age_secs, path))
+        .collect()
 }
 
 // A removal cookie is still a `Set-Cookie` the browser parses and stores until
@@ -480,9 +582,51 @@ pub fn clear_csrf_cookie(cookie_secure: bool) -> Cookie<'static> {
 /// `Secure`, without which the removal could not overwrite it at all
 /// ("Leave Secure Cookies Alone").
 pub fn clear_op_session_cookie() -> Cookie<'static> {
-    let mut c = op_session_cookie("", 0);
+    clear_op_session_cookie_at(AUTHORIZE_PATH.to_owned())
+}
+
+/// Clear the OP-session cookie at one path, built from
+/// [`op_session_cookie_at`] so it mirrors the setter's attributes at that path.
+fn clear_op_session_cookie_at(path: String) -> Cookie<'static> {
+    let mut c = op_session_cookie_at("", 0, path);
     c.make_removal();
     c
+}
+
+/// Clear **every** OP-session cookie a sign-in into `tenant_id` set
+/// (T23.1.8, D-11): one removal per path in [`op_session_cookie_paths`], each
+/// built from the setter at that path, so the list that minted them is the list
+/// that clears them.
+///
+/// With `AuthConfig::tenant_issuer_paths` off this is exactly
+/// `[clear_op_session_cookie()]`. A per-tenant cookie minted while the flag was
+/// on and left behind after an operator turned it off is not cleared — it is
+/// scoped to a path that is then not mounted, so no request reaches anything
+/// that reads it, and the session it names is revoked by the same logout
+/// regardless.
+#[must_use]
+pub fn clear_op_session_cookies(tenant_id: Uuid, config: &AuthConfig) -> Vec<Cookie<'static>> {
+    op_session_cookie_paths(tenant_id, config)
+        .into_iter()
+        .map(clear_op_session_cookie_at)
+        .collect()
+}
+
+/// The removal for the one OP-session cookie the request in hand could have
+/// carried: the per-tenant one on a `/t/{tenant_id}/…` request, the bare one
+/// otherwise (T23.1.8).
+///
+/// For a handler that has just found the presented cookie stale. It clears the
+/// copy that proved stale and nothing else: the other paths may carry a value
+/// minted by a later sign-in into another tenant, which is still good there.
+#[must_use]
+pub fn clear_presented_op_session_cookie(tenant_path: Option<Uuid>) -> Cookie<'static> {
+    match tenant_path {
+        None => clear_op_session_cookie(),
+        Some(tenant_id) => {
+            clear_op_session_cookie_at(axiam_oauth2::login_hop::tenant_authorize_path(tenant_id))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +872,177 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // T23.1.8 / D-11 — the per-tenant copies of the OP-session cookie
+    // -----------------------------------------------------------------------
+
+    const TENANT_A: &str = "11111111-2222-3333-4444-555555555555";
+    const TENANT_B: &str = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+
+    fn tenant(id: &str) -> Uuid {
+        Uuid::parse_str(id).unwrap()
+    }
+
+    fn deployment(tenant_issuer_paths: bool) -> AuthConfig {
+        AuthConfig {
+            tenant_issuer_paths,
+            ..AuthConfig::default()
+        }
+    }
+
+    /// **The list, pinned.** Every setter and every remover is built from
+    /// `op_session_cookie_paths`, so this is the whole of where the cookie can
+    /// exist. W3 adds the SAML SSO path here and nowhere else — and changes
+    /// this test in the same commit, which is the point of it.
+    #[test]
+    fn d11_the_op_session_cookie_paths_are_pinned() {
+        assert_eq!(
+            op_session_cookie_paths(tenant(TENANT_A), &deployment(true)),
+            vec![
+                "/oauth2/authorize".to_owned(),
+                format!("/t/{TENANT_A}/oauth2/authorize"),
+            ],
+        );
+        // A deployment that does not serve per-tenant paths mints exactly the
+        // cookie it minted before D-11, and nothing for a path it has not
+        // mounted.
+        assert_eq!(
+            op_session_cookie_paths(tenant(TENANT_A), &deployment(false)),
+            vec!["/oauth2/authorize".to_owned()],
+        );
+    }
+
+    /// A sign-in into tenant A is given no cookie scoped to any other tenant.
+    #[test]
+    fn d11_a_sign_in_into_one_tenant_mints_no_cookie_for_another() {
+        for c in op_session_cookies("tok", 86_400, tenant(TENANT_A), &deployment(true)) {
+            let path = c.path().unwrap_or_default();
+            assert!(
+                !path.contains(TENANT_B),
+                "a tenant-A sign-in must not be scoped to tenant B: {path}"
+            );
+            assert!(
+                path == "/oauth2/authorize" || path.starts_with(&format!("/t/{TENANT_A}/")),
+                "every path is the bare one or tenant A's own: {path}"
+            );
+        }
+    }
+
+    /// The per-tenant copy is the bare cookie with another `Path` — the same
+    /// name, value, `HttpOnly`, `Secure`, `SameSite=Lax` and `Max-Age` — and
+    /// the bare copy comes first and is byte-identical to `op_session_cookie`.
+    #[test]
+    fn d11_every_copy_differs_from_the_bare_cookie_in_path_alone() {
+        let set = op_session_cookies("tok", 86_400, tenant(TENANT_A), &deployment(true));
+        assert_eq!(set.len(), 2);
+        let bare = op_session_cookie("tok", 86_400);
+        assert_eq!(
+            set[0].to_string(),
+            bare.to_string(),
+            "the bare copy comes first and is unchanged by D-11"
+        );
+        for c in &set {
+            assert_eq!(c.name(), bare.name());
+            assert!(
+                c.value() == bare.value(),
+                "every copy names the same session"
+            );
+            assert_eq!(c.http_only(), bare.http_only());
+            assert_eq!(c.secure(), bare.secure());
+            assert_eq!(c.same_site(), bare.same_site());
+            assert_eq!(c.max_age(), bare.max_age());
+            assert_eq!(c.domain(), bare.domain(), "host-only, as the bare cookie");
+        }
+        assert_eq!(
+            set[1].path(),
+            Some(format!("/t/{TENANT_A}/oauth2/authorize").as_str())
+        );
+    }
+
+    /// No request carries two copies: the paths are pairwise disjoint under
+    /// RFC 6265 §5.1.4 path-match, which is what lets one resolver read one
+    /// cookie name on every route.
+    #[test]
+    fn d11_no_request_path_matches_two_copies() {
+        // §5.1.4: the cookie path is a prefix of the request path, and either
+        // they are equal, the cookie path ends in `/`, or the next request
+        // character is `/`.
+        fn path_matches(request: &str, cookie: &str) -> bool {
+            request == cookie
+                || (request.starts_with(cookie)
+                    && (cookie.ends_with('/') || request[cookie.len()..].starts_with('/')))
+        }
+        let mut paths = op_session_cookie_paths(tenant(TENANT_A), &deployment(true));
+        paths.extend(op_session_cookie_paths(tenant(TENANT_B), &deployment(true)));
+        paths.sort();
+        paths.dedup();
+        for request in [
+            "/oauth2/authorize".to_owned(),
+            "/oauth2/authorize/logout".to_owned(),
+            format!("/t/{TENANT_A}/oauth2/authorize"),
+            format!("/t/{TENANT_A}/oauth2/authorize/logout"),
+            format!("/t/{TENANT_B}/oauth2/authorize"),
+        ] {
+            let carried = paths.iter().filter(|p| path_matches(&request, p)).count();
+            assert_eq!(carried, 1, "{request} must carry exactly one copy");
+        }
+        for request in [
+            "/oauth2/end_session".to_owned(),
+            format!("/t/{TENANT_A}/oauth2/end_session"),
+            format!("/t/{TENANT_A}/oauth2/token"),
+            "/api/v1/auth/me".to_owned(),
+        ] {
+            assert!(
+                paths.iter().all(|p| !path_matches(&request, p)),
+                "{request} must carry no copy at all"
+            );
+        }
+    }
+
+    /// Every removal is built from its own setter: one per minted path, the
+    /// same attributes at the same path, and still an expiring removal.
+    #[test]
+    fn d11_the_removals_mirror_every_copy_the_sign_in_minted() {
+        for flag in [true, false] {
+            let config = deployment(flag);
+            let set = op_session_cookies("tok", 86_400, tenant(TENANT_A), &config);
+            let clear = clear_op_session_cookies(tenant(TENANT_A), &config);
+            assert_eq!(clear.len(), set.len(), "one removal per minted copy");
+            for (s, c) in set.iter().zip(&clear) {
+                assert_eq!(c.name(), s.name());
+                assert_eq!(c.path(), s.path());
+                assert_eq!(c.http_only(), s.http_only());
+                assert_eq!(c.secure(), s.secure());
+                assert_eq!(c.same_site(), s.same_site());
+                assert_eq!(c.value(), "");
+                assert_eq!(c.max_age(), Some(Duration::seconds(0)));
+            }
+        }
+        assert_eq!(
+            clear_op_session_cookies(tenant(TENANT_A), &deployment(false))[0].to_string(),
+            clear_op_session_cookie().to_string(),
+            "with per-tenant paths off, the removal is exactly the pre-D-11 one"
+        );
+    }
+
+    /// The stale-cookie removal targets the copy the request could carry.
+    #[test]
+    fn d11_the_presented_copy_removal_follows_the_request_path() {
+        assert_eq!(
+            clear_presented_op_session_cookie(None).to_string(),
+            clear_op_session_cookie().to_string()
+        );
+        let on_tenant = clear_presented_op_session_cookie(Some(tenant(TENANT_A)));
+        assert_eq!(
+            on_tenant.path(),
+            Some(format!("/t/{TENANT_A}/oauth2/authorize").as_str())
+        );
+        assert_eq!(on_tenant.same_site(), Some(SameSite::Lax));
+        assert!(on_tenant.secure().unwrap_or(false));
+        assert!(on_tenant.http_only().unwrap_or(false));
+        assert_eq!(on_tenant.max_age(), Some(Duration::seconds(0)));
     }
 
     /// `make_removal` is what actually expires the cookie; the attribute

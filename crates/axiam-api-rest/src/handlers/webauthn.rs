@@ -161,17 +161,25 @@ pub struct WebauthnLoginResponse {
 /// the body sees no difference.
 fn webauthn_session_response(
     config: &axiam_auth::config::AuthConfig,
+    tenant_id: Uuid,
     out: axiam_auth::LoginOutput,
 ) -> HttpResponse {
     let csrf_token = generate_csrf_token();
 
-    HttpResponse::Ok()
-        // W3 (plan §4.0): the OP browser session, on the same terms as the
-        // password path — `Max-Age` is the session's, not the access token's.
-        .cookie(crate::middleware::csrf::op_session_cookie(
-            &out.browser_session_token,
-            config.refresh_token_lifetime_secs,
-        ))
+    let mut response = HttpResponse::Ok();
+    // W3 (plan §4.0): the OP browser session, on the same terms as the
+    // password path — `Max-Age` is the session's, not the access token's.
+    // T23.1.8 (D-11): one copy per path `op_session_cookies` names for the
+    // session's own tenant — the tenant the ceremony authenticated in.
+    for cookie in crate::middleware::csrf::op_session_cookies(
+        &out.browser_session_token,
+        config.refresh_token_lifetime_secs,
+        tenant_id,
+        config,
+    ) {
+        response.cookie(cookie);
+    }
+    response
         .cookie(access_cookie(
             &out.access_token,
             config.access_token_lifetime_secs,
@@ -1041,7 +1049,11 @@ pub async fn finish_discoverable_authentication<C: Connection + Clone>(
         )
         .await?;
 
-    Ok(webauthn_session_response(&state.auth_config, out))
+    Ok(webauthn_session_response(
+        &state.auth_config,
+        tenant_id,
+        out,
+    ))
 }
 
 /// `POST /api/v1/auth/webauthn/authenticate/finish`
@@ -1092,7 +1104,11 @@ pub async fn finish_authentication<C: Connection + Clone>(
         )
         .await?;
 
-    Ok(webauthn_session_response(&state.auth_config, out))
+    Ok(webauthn_session_response(
+        &state.auth_config,
+        tenant_id,
+        out,
+    ))
 }
 
 // -------------------------------------------------------------------
@@ -1289,7 +1305,7 @@ mod tests {
             cookie_secure: true,
             ..AuthConfig::default()
         };
-        let set = cookies(&webauthn_session_response(&config, out()));
+        let set = cookies(&webauthn_session_response(&config, Uuid::nil(), out()));
 
         let access = cookie_named(&set, "axiam_access");
         assert!(access.contains("access-token-value"));
@@ -1331,12 +1347,49 @@ mod tests {
         );
     }
 
+    /// **T23.1.8 / D-11.** On a deployment serving per-tenant issuers, a passkey
+    /// sign-in sets the OP cookie at the bare path and at the session's own
+    /// tenant path, the two identical but for `Path` — the same guarantee the
+    /// password path gives, because a passkey user who could not complete a
+    /// tenant-path hop would be this helper's original bug again.
+    #[test]
+    fn d11_sets_the_tenant_copy_of_the_op_cookie_beside_the_bare_one() {
+        let config = AuthConfig {
+            tenant_issuer_paths: true,
+            ..AuthConfig::default()
+        };
+        let tenant = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let res = webauthn_session_response(&config, tenant, out());
+        let ops: Vec<_> = res
+            .cookies()
+            .filter(|c| c.name() == "axiam_op_session")
+            .collect();
+        assert_eq!(ops.len(), 2, "the bare copy and the tenant copy");
+        assert_eq!(ops[0].path(), Some("/oauth2/authorize"));
+        assert_eq!(
+            ops[1].path(),
+            Some("/t/11111111-2222-3333-4444-555555555555/oauth2/authorize")
+        );
+        for c in &ops {
+            assert!(c.value() == "op-session-value", "both name the session");
+            assert!(c.http_only().unwrap_or(false));
+            assert!(c.secure().unwrap_or(false));
+            assert_eq!(c.same_site(), Some(actix_web::cookie::SameSite::Lax));
+            assert_eq!(
+                c.max_age(),
+                Some(actix_web::cookie::time::Duration::seconds(
+                    config.refresh_token_lifetime_secs as i64
+                ))
+            );
+        }
+    }
+
     /// §3's non-browser rule: the same token, in the header and the cookie.
     /// An SDK reads the header; a mismatch would make the very first
     /// state-changing call after a passkey sign-in fail CSRF validation.
     #[test]
     fn echoes_the_csrf_token_in_the_header_and_the_cookie() {
-        let res = webauthn_session_response(&AuthConfig::default(), out());
+        let res = webauthn_session_response(&AuthConfig::default(), Uuid::nil(), out());
 
         let header = res
             .headers()
@@ -1359,8 +1412,8 @@ mod tests {
     #[test]
     fn mints_a_distinct_csrf_token_per_response() {
         let config = AuthConfig::default();
-        let first = webauthn_session_response(&config, out());
-        let second = webauthn_session_response(&config, out());
+        let first = webauthn_session_response(&config, Uuid::nil(), out());
+        let second = webauthn_session_response(&config, Uuid::nil(), out());
         assert_ne!(
             first.headers().get(HEADER_CSRF).unwrap(),
             second.headers().get(HEADER_CSRF).unwrap()
@@ -1372,7 +1425,7 @@ mod tests {
     #[test]
     fn keeps_the_token_pair_in_the_body() {
         let config = AuthConfig::default();
-        let res = webauthn_session_response(&config, out());
+        let res = webauthn_session_response(&config, Uuid::nil(), out());
         assert_eq!(res.status(), actix_web::http::StatusCode::OK);
 
         let body = actix_web::body::to_bytes(res.into_body());

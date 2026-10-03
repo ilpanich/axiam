@@ -363,7 +363,7 @@ async fn opaque_login(
     serde_json::Value,
     u16,
     serde_json::Value,
-    Vec<(String, String)>,
+    Vec<actix_web::cookie::Cookie<'static>>,
 ) {
     let (state, ke1) = ClientLoginState::start(password).unwrap();
 
@@ -409,10 +409,10 @@ async fn opaque_login(
         .to_request();
     let resp = test::call_service(app, req).await;
     let status = resp.status().as_u16();
-    let cookies: Vec<(String, String)> = resp
+    let cookies: Vec<actix_web::cookie::Cookie<'static>> = resp
         .response()
         .cookies()
-        .map(|c| (c.name().to_string(), c.value().to_string()))
+        .map(actix_web::cookie::Cookie::into_owned)
         .collect();
     let body: serde_json::Value = test::read_body_json(resp).await;
     (start_status, started, status, body, cookies)
@@ -420,10 +420,13 @@ async fn opaque_login(
 
 /// Enrol the account and return the app-independent handle the tests reuse.
 macro_rules! enrolled_app {
-    ($slug:expr) => {{
+    ($slug:expr) => {
+        enrolled_app!($slug, test_auth_config())
+    };
+    ($slug:expr, $auth:expr) => {{
         let (db, org_id, tenant_id, user_id) = setup_db($slug).await;
         set_opaque_mode(&db, org_id, OpaqueMode::Optional).await;
-        let auth = test_auth_config();
+        let auth = $auth;
         let app = test_app!(db, auth);
 
         let (access, csrf) = password_login(&app, org_id, tenant_id, password())
@@ -456,11 +459,49 @@ async fn a_full_opaque_exchange_issues_the_same_cookies_as_a_password_login() {
         opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
     assert_eq!(status, 200, "a correct password must authenticate");
 
-    let names: Vec<&str> = cookies.iter().map(|(n, _)| n.as_str()).collect();
+    let names: Vec<&str> = cookies.iter().map(|c| c.name()).collect();
     for expected in ["axiam_access", "axiam_refresh", "axiam_csrf"] {
         assert!(
             names.contains(&expected),
             "OPAQUE login must set {expected} exactly as the password path does; got {names:?}"
+        );
+    }
+}
+
+/// **T23.1.8 / D-11.** An OPAQUE sign-in on a deployment serving per-tenant
+/// issuers sets the OP cookie at the bare path and at the session's own tenant
+/// path, the two identical but for `Path` — it goes through the password path's
+/// response builder, and this pins that it keeps doing so.
+#[actix_web::test]
+async fn d11_an_opaque_sign_in_sets_the_bare_and_the_tenant_op_cookie() {
+    let auth = AuthConfig {
+        tenant_issuer_paths: true,
+        oauth2_issuer_url: "https://iam.example.com".into(),
+        ..test_auth_config()
+    };
+    let lifetime = auth.refresh_token_lifetime_secs;
+    let (_db, org_id, tenant_id, _user_id, app) = enrolled_app!("d11", auth);
+
+    let (_, _, status, _body, cookies) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert_eq!(status, 200, "a correct password must authenticate");
+
+    let ops: Vec<_> = cookies
+        .iter()
+        .filter(|c| c.name() == "axiam_op_session")
+        .collect();
+    let paths: Vec<&str> = ops.iter().filter_map(|c| c.path()).collect();
+    let tenant_path = format!("/t/{tenant_id}/oauth2/authorize");
+    assert_eq!(paths, vec!["/oauth2/authorize", tenant_path.as_str()]);
+    for c in &ops {
+        assert!(c.value() == ops[0].value(), "one value names one session");
+        assert!(!c.value().is_empty());
+        assert!(c.http_only().unwrap_or(false));
+        assert!(c.secure().unwrap_or(false));
+        assert_eq!(c.same_site(), Some(actix_web::cookie::SameSite::Lax));
+        assert_eq!(
+            c.max_age(),
+            Some(actix_web::cookie::time::Duration::seconds(lifetime as i64))
         );
     }
 }

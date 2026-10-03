@@ -284,7 +284,12 @@ macro_rules! test_app {
 #[actix_rt::test]
 async fn first_time_oidc_sso_sets_cookies_and_me_succeeds() {
     let (db, org_id, tenant_id) = setup_db().await;
-    let auth = test_auth_config();
+    // T23.1.8 / D-11: per-tenant issuers on, so the federated sign-in's OP
+    // cookie copies are asserted below. Nothing else in this flow reads it.
+    let auth = AuthConfig {
+        tenant_issuer_paths: true,
+        ..test_auth_config()
+    };
     let admin_user_id = create_admin_user(&db, tenant_id).await;
     let admin_token = mint_token(&auth, admin_user_id, tenant_id, org_id);
 
@@ -431,6 +436,27 @@ async fn first_time_oidc_sso_sets_cookies_and_me_succeeds() {
     // refresh_cookie is asserted present above; unused beyond that (me only
     // needs the access + csrf cookies).
     let _ = refresh_cookie;
+
+    // T23.1.8 / D-11 — a federated sign-in is a browser sign-in like any other:
+    // the OP cookie at the bare path and at the session's own tenant path,
+    // identical but for `Path`. Asserted without formatting the value.
+    let ops: Vec<_> = callback_resp
+        .response()
+        .cookies()
+        .filter(|c| c.name() == "axiam_op_session")
+        .map(actix_web::cookie::Cookie::into_owned)
+        .collect();
+    let paths: Vec<&str> = ops.iter().filter_map(|c| c.path()).collect();
+    let tenant_path = format!("/t/{tenant_id}/oauth2/authorize");
+    assert_eq!(paths, vec!["/oauth2/authorize", tenant_path.as_str()]);
+    for c in &ops {
+        assert!(c.value() == ops[0].value() && !c.value().is_empty());
+        assert!(c.http_only().unwrap_or(false));
+        assert!(c.secure().unwrap_or(false));
+        assert_eq!(c.same_site(), Some(actix_web::cookie::SameSite::Lax));
+        assert_eq!(c.max_age(), ops[0].max_age());
+        assert!(c.max_age().is_some());
+    }
 
     let callback_body: serde_json::Value = test::read_body_json(callback_resp).await;
     assert!(

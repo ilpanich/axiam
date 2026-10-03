@@ -1100,6 +1100,135 @@ async fn mfa_setup_full_flow_sets_cookies() {
     );
 }
 
+/// The `axiam_op_session` copies a response set, as `(path, attributes)`
+/// pairs with the value left out — a failure message may name these and must
+/// not name the value.
+fn op_session_copies<B>(resp: &actix_web::dev::ServiceResponse<B>) -> Vec<(String, bool)> {
+    let cookies: Vec<_> = resp
+        .response()
+        .cookies()
+        .filter(|c: &actix_web::cookie::Cookie| c.name() == "axiam_op_session")
+        .map(actix_web::cookie::Cookie::into_owned)
+        .collect();
+    cookies
+        .iter()
+        .map(|c| {
+            let same_attributes = c.http_only() == Some(true)
+                && c.secure() == Some(true)
+                && c.same_site() == Some(actix_web::cookie::SameSite::Lax)
+                && c.max_age().is_some()
+                && c.max_age() == cookies[0].max_age()
+                && !c.value().is_empty()
+                && c.value() == cookies[0].value();
+            (c.path().unwrap_or_default().to_owned(), same_attributes)
+        })
+        .collect()
+}
+
+/// **T23.1.8 / D-11.** Forced first-login enrolment and the second-factor
+/// step are completed sign-ins, and each sets the OP cookie at the bare path
+/// and at the session's own tenant path, identical but for `Path` — while the
+/// password step that still owed the factor (`403` setup-required here, `202`
+/// challenge below) set none.
+#[actix_rt::test]
+async fn d11_forced_enrolment_and_mfa_verify_set_the_bare_and_the_tenant_op_cookie() {
+    let (db, org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = AuthConfig {
+        tenant_issuer_paths: true,
+        oauth2_issuer_url: "https://iam.example.com".into(),
+        ..mfa_auth_config()
+    };
+    enable_mfa_enforcement(&db, org_id).await;
+    let app = test_app!(db, auth);
+    let expected = vec![
+        ("/oauth2/authorize".to_owned(), true),
+        (format!("/t/{tenant_id}/oauth2/authorize"), true),
+    ];
+    let login = || {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/login")
+            .set_json(serde_json::json!({
+                "tenant_id": tenant_id,
+                "org_id": org_id,
+                "username_or_email": "alice",
+                "password": "password12345"
+            }))
+            .to_request()
+    };
+
+    let resp = test::call_service(&app, login()).await;
+    assert_eq!(resp.status().as_u16(), 403);
+    assert!(
+        op_session_copies(&resp).is_empty(),
+        "a password step that still owes enrolment sets no OP cookie"
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let setup_token = body["setup_token"].as_str().unwrap().to_string();
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/setup/enroll")
+        .set_json(serde_json::json!({ "setup_token": &setup_token }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let secret = totp_rs::Secret::try_from_base32(body["secret_base32"].as_str().unwrap())
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let totp = totp_rs::Builder::new()
+        .with_algorithm(totp_rs::Algorithm::SHA1)
+        .with_digits(6)
+        .with_skew(1)
+        .with_step_duration(30)
+        .with_secret(secret)
+        .with_issuer(Some("AXIAM-Test"))
+        .with_account_name("alice@example.com")
+        .build()
+        .unwrap();
+    let step = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / 30;
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/setup/confirm")
+        .set_json(serde_json::json!({
+            "setup_token": &setup_token,
+            "totp_code": totp.generate(step * 30).to_string(),
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "forced enrolment completes");
+    assert_eq!(op_session_copies(&resp), expected, "forced enrolment");
+
+    // The account now has a factor: the password step is a challenge, and the
+    // factor completes it. The next step's code, because the replay guard has
+    // spent this one (SECHRD-01).
+    let resp = test::call_service(&app, login()).await;
+    assert_eq!(resp.status().as_u16(), 202);
+    assert!(
+        op_session_copies(&resp).is_empty(),
+        "a password step that still owes a factor sets no OP cookie"
+    );
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/mfa/verify")
+        .set_json(serde_json::json!({
+            "challenge_token": body["challenge_token"].as_str().unwrap(),
+            "totp_code": totp.generate((step + 1) * 30).to_string(),
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "the second factor completes");
+    assert_eq!(op_session_copies(&resp), expected, "MFA verify");
+}
+
 #[actix_rt::test]
 async fn reset_mfa_requires_authentication() {
     let (db, _org_id, _tenant_id, user_id) = setup_db().await;

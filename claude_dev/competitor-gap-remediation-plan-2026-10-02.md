@@ -1010,11 +1010,11 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > bind DN or trust anchors changed, so the write-only secret could have been
 > redirected to an editor's host (**P23W2-01**, Medium, latent until
 > T23.3.8 adds write routes), and a tenant delete whose transaction
-> rolled back answered `204` (P23W2-02, Low). To file: pre-existing tenant
-> deletion that cascades to nothing else (P23W2-04, Medium), the `require_par`
-> refusal coming only after the login hop (P23W2-03, Low), the SMTP password
-> kept across a host change (P23W2-05, Low) and two informational gaps
-> (P23W2-06/-07). Accepted with reasons: the logout-hop residuals, T-300 and
+> rolled back answered `204` (P23W2-02, Low). Filed: pre-existing tenant
+> deletion that cascades to nothing else (P23W2-04, Medium, ilpanich/axiam#523),
+> the `require_par` refusal coming only after the login hop (P23W2-03, Low,
+> #524), the SMTP password kept across a host change (P23W2-05, Low, #525) and
+> two informational gaps (P23W2-06/-07, #526). Accepted with reasons: the logout-hop residuals, T-300 and
 > `ldap3`'s missing frame cap (both latent with no writer, and **binding
 > preconditions on T23.3.8**), the directory timing residual, and the
 > evidence script. The T23.1.8 and T23.3.2 surfaces held.

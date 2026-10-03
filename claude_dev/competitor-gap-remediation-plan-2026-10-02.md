@@ -585,47 +585,6 @@ fan-out.
 
 ### G-3 — LDAP / Active Directory identity source — **P1**
 
-> **EXECUTED (partly) — G-3, W3: T23.3.3, 2026-10-03** (`7bd2b2a`,
-> `b70fa3e`, `f5db88e`, `110a25e`; Sonnet 5.5). Just-in-time provisioning at
-> the seam T23.3.2 left, `AuthService::login_unknown_user`. The port gained
-> `authenticate_for_provisioning`, gated inside the authenticator, so a tenant
-> without an enabled directory and `jit_provisioning` answers before the bind
-> secret is decrypted or a socket opens, and `lookup_entry` (the same escaped
-> exactly-one search, no user bind) for linking. The hash permit is taken
-> first and the dummy verify runs beside the directory call, so every
-> non-success branch is the unknown-user answer at its cost, and saturation is
-> the same `503` before the directory hears anything. On success a cleaned
-> profile (username and email refused, not repaired, when they hold control,
-> whitespace or bidi characters or are overlong; display name stripped and
-> capped, stored where `ProfileClaims` reads it) passes a case-folded
-> collision probe over both columns of every account, tombstones included, and
-> is created by one `CREATE`, `Active` and marked (**D-29**), the v71 unique
-> indexes deciding a race. **D-28**: JIT never links; a collision is the
-> generic failure plus a `directory.jit_refused` audit row.
-> `link_local_account_to_directory` resolves the entry by the account's
-> username, refuses an entry linked elsewhere, marks the account, deletes its
-> passkeys, revokes its `User` certificates (by convention, D-29), and revokes
-> its sessions and refresh tokens last, through the repositories so the
-> validation cache and revocation feed see it; TOTP is kept; an interrupted
-> link is retried to completion. Audit rows carry identifiers and counts only,
-> through a new `DirectoryAuditSink` port attached by `axiam-server`. Tests: 9
-> repository, 16 `AuthService` (every refusal branch timed against the
-> unknown-user cost, five collision variants, a race run six times, the full
-> linking revocation set), 6 more authenticator tests against the in-process
-> TLS directory, 6 cleaner unit tests.
->
-> What the plan did not anticipate. No certificate is bound to a user, D-18's
-> single writer, and AD entries without `mail` (all three in D-29). The
-> repository does not fold case, so the probe folds explicitly and scans one
-> tenant per first-ever login. "One unit of work" is ordered rather than one
-> transaction, because a raw cross-table write would bypass the session
-> validation cache. A case variant of an existing directory account's name
-> (`ALICE` for `alice`) is refused as a collision, as a local account's would
-> be. No real-server test here (layering keeps `axiam-auth` from depending on
-> `axiam-directory`); T23.3.6 is the oracle. Threats listed for T23.3.7: the
-> unknown-name bind oracle (T-302 widened), JIT as an account-creation oracle,
-> directory-side takeover by name, attribute injection, linking completeness.
-
 > **EXECUTED (partly) — G-3, W2: T23.3.1, 2026-10-03** (`7279f66`, `2f60f4f`,
 > `227af53`; Sonnet 5.5; issue #522). The crate `axiam-directory` exists at
 > layer 3, in the layering table and `crate-layering.md` from its first
@@ -708,6 +667,47 @@ fan-out.
 > enrolled keep working until the account is disabled, so the sync job
 > (T23.3.5) must disable or soft-delete vanished and disabled entries
 > (T-303). Its threats and contract §30 start at T-304.
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.3, 2026-10-03** (`7bd2b2a`,
+> `b70fa3e`, `f5db88e`, `110a25e`; Sonnet 5.5). Just-in-time provisioning at
+> the seam T23.3.2 left, `AuthService::login_unknown_user`. The port gained
+> `authenticate_for_provisioning`, gated inside the authenticator, so a tenant
+> without an enabled directory and `jit_provisioning` answers before the bind
+> secret is decrypted or a socket opens, and `lookup_entry` (the same escaped
+> exactly-one search, no user bind) for linking. The hash permit is taken
+> first and the dummy verify runs beside the directory call, so every
+> non-success branch is the unknown-user answer at its cost, and saturation is
+> the same `503` before the directory hears anything. On success a cleaned
+> profile (username and email refused, not repaired, when they hold control,
+> whitespace or bidi characters or are overlong; display name stripped and
+> capped, stored where `ProfileClaims` reads it) passes a case-folded
+> collision probe over both columns of every account, tombstones included, and
+> is created by one `CREATE`, `Active` and marked (**D-29**), the v71 unique
+> indexes deciding a race. **D-28**: JIT never links; a collision is the
+> generic failure plus a `directory.jit_refused` audit row.
+> `link_local_account_to_directory` resolves the entry by the account's
+> username, refuses an entry linked elsewhere, marks the account, deletes its
+> passkeys, revokes its `User` certificates (by convention, D-29), and revokes
+> its sessions and refresh tokens last, through the repositories so the
+> validation cache and revocation feed see it; TOTP is kept; an interrupted
+> link is retried to completion. Audit rows carry identifiers and counts only,
+> through a new `DirectoryAuditSink` port attached by `axiam-server`. Tests: 9
+> repository, 16 `AuthService` (every refusal branch timed against the
+> unknown-user cost, five collision variants, a race run six times, the full
+> linking revocation set), 6 more authenticator tests against the in-process
+> TLS directory, 6 cleaner unit tests.
+>
+> What the plan did not anticipate. No certificate is bound to a user, D-18's
+> single writer, and AD entries without `mail` (all three in D-29). The
+> repository does not fold case, so the probe folds explicitly and scans one
+> tenant per first-ever login. "One unit of work" is ordered rather than one
+> transaction, because a raw cross-table write would bypass the session
+> validation cache. A case variant of an existing directory account's name
+> (`ALICE` for `alice`) is refused as a collision, as a local account's would
+> be. No real-server test here (layering keeps `axiam-auth` from depending on
+> `axiam-directory`); T23.3.6 is the oracle. Threats listed for T23.3.7: the
+> unknown-name bind oracle (T-302 widened), JIT as an account-creation oracle,
+> directory-side takeover by name, attribute injection, linking completeness.
 
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned

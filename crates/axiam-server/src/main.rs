@@ -1079,16 +1079,38 @@ async fn main() -> std::io::Result<()> {
     // G-3 (T23.3.2, T23.3.4): one directory authenticator, shared by the sign-in
     // path and the group mapper, so both read the same configuration and draw
     // on the same bounded connection pool.
+    let directory_config_repo = axiam_db::SurrealDirectoryConfigRepository::new(
+        pool.handle_for_repo(),
+        config.directory_encryption_key,
+    );
     let directory_authenticator = Arc::new(axiam_directory::RepositoryDirectoryAuthenticator::new(
-        axiam_db::SurrealDirectoryConfigRepository::new(
-            pool.handle_for_repo(),
-            config.directory_encryption_key,
-        ),
+        directory_config_repo.clone(),
     ));
     // The mapper flushes the authorization decision cache for a user whose
     // memberships it changed, as the group-membership routes do. The cache does
     // not exist yet, so the hook is set below, once `rest_authz` is built.
     let directory_membership_slot = axiam_directory::MembershipChangeSlot::new();
+    // One mapper and one audit sink, shared by the sign-in path and the sync job
+    // (T23.3.5): the job applies the very same function, flushes the very same
+    // decision cache, and writes to the very same append-only log.
+    let directory_group_mapper = Arc::new(
+        axiam_directory::RepositoryGroupMapper::new(
+            Arc::clone(&directory_authenticator),
+            axiam_db::SurrealGroupRepository::new(pool.handle_for_repo()),
+        )
+        .with_change_slot(directory_membership_slot.clone()),
+    );
+    let directory_audit_sink = Arc::new(axiam_auth::service::RepositoryDirectoryAuditSink(
+        SurrealAuditLogRepository::new(pool.handle_for_repo())
+            .with_minimisation(audit_minimisation),
+    ));
+    // The sync job revokes through the same repository the sign-in path owns, so
+    // the session validation cache and the revocation feed see what it revokes.
+    let directory_sync_refresh_repo = auth_refresh_token_repo.clone();
+    // Built here, with the handle the rest of this block uses: `pool` is moved
+    // into the health checker further down.
+    let directory_sync_state_repo =
+        axiam_db::SurrealDirectorySyncStateRepository::new(pool.handle_for_repo());
     let auth_service = AuthService::new(
         user_repo.clone(),
         session_repo.clone(),
@@ -1108,22 +1130,11 @@ async fn main() -> std::io::Result<()> {
     // successful directory sign-in, before anything is issued; a mapping that
     // cannot be applied (the directory cannot be asked, the 1 000-group cap) is
     // a refused sign-in. A tenant with an empty table asks the directory nothing.
-    .with_directory_group_mapper(Arc::new(
-        axiam_directory::RepositoryGroupMapper::new(
-            Arc::clone(&directory_authenticator),
-            axiam_db::SurrealGroupRepository::new(pool.handle_for_repo()),
-        )
-        .with_change_slot(directory_membership_slot.clone()),
-    ))
+    .with_directory_group_mapper(Arc::clone(&directory_group_mapper) as _)
     // G-3 (T23.3.3): the rows for just-in-time provisioning, its refusals and
     // the linking of an account, on the same append-only repository (and the
     // same minimisation) as every other audit row.
-    .with_directory_audit(Arc::new(
-        axiam_auth::service::RepositoryDirectoryAuditSink(
-            SurrealAuditLogRepository::new(pool.handle_for_repo())
-                .with_minimisation(audit_minimisation),
-        ),
-    ));
+    .with_directory_audit(Arc::clone(&directory_audit_sink) as _);
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());
     let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo());
@@ -2594,6 +2605,9 @@ async fn main() -> std::io::Result<()> {
         "saml_assertion_replay",
         "federation_login_state",
         "saml_authn_request",
+        // G-3 (T23.3.5): the directory sync job. Registered like the others, so a
+        // deployment where it has never run once still lists it.
+        "directory_sync",
         "amqp_nonce_replay",
         "gdpr_purge",
         "gdpr_export",
@@ -2647,7 +2661,21 @@ async fn main() -> std::io::Result<()> {
         Arc::new(settings_repo.clone()),
         job_health.clone(),
         cleanup_shutdown_rx,
-    );
+    )
+    // G-3 (T23.3.5, D-31): the directory sync job runs on this scheduler, last in
+    // each tick, one tenant at a time. There is no multi-replica guard (none of
+    // the sweeps has one): every replica runs it, and every write is idempotent
+    // or a compare-and-set.
+    .with_directory_sync(Arc::new(axiam_directory::DirectorySync::new(
+        directory_config_repo.clone(),
+        Arc::clone(&directory_authenticator),
+        user_repo.clone(),
+        session_repo.clone(),
+        directory_sync_refresh_repo,
+        directory_sync_state_repo,
+        Arc::clone(&directory_group_mapper) as _,
+        Arc::clone(&directory_audit_sink) as _,
+    )));
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared

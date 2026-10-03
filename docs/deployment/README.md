@@ -243,7 +243,8 @@ reuse the same value across environments.
 ### What a tenant's directory needs (LDAP / Active Directory)
 
 The full guide arrives with the management routes; until then, three things an
-operator must know before pointing AXIAM at a directory:
+operator must know before pointing AXIAM at a directory (and, after them, what
+the sync job does):
 
 - **A read-only bind account.** AXIAM binds as `bind_dn` only to search for the
   user signing in, then binds as that user to check the password. It never adds,
@@ -269,6 +270,73 @@ operator must know before pointing AXIAM at a directory:
 AXIAM's lockout applies in front of the directory, so set the tenant's
 `max_failed_login_attempts` **below** the directory's own lockout threshold:
 AXIAM then stops binding before the directory would lock the account.
+
+#### Sync: what the job disables, and what it never does
+
+A background job on the server's cleanup scheduler (job name `directory_sync` in
+`GET /health/jobs`) keeps AXIAM's directory accounts in step with the directory,
+one tenant at a time, for tenants whose directory is **enabled**. It is
+read-only against the directory and **cannot grant anything**.
+
+- **What it disables.** An account whose entry has **vanished** from the
+  directory (not found by its immutable identifier under `base_dn`, or moved out
+  of `base_dn`) or that the directory has **disabled** is set `Inactive`: its
+  sessions and OAuth2 refresh tokens are revoked, the group memberships the
+  directory mapping gave it are removed (memberships an administrator added by
+  hand are kept), and from then on nothing authenticates it — passkeys and the
+  browser single sign-on cookie included. *Disabled* means `userAccountControl`
+  bit `0x2` on Active Directory and the **presence** of `pwdAccountLockedTime`
+  (the `ppolicy` overlay) on OpenLDAP; note that `ppolicy` also sets it for a
+  temporary lockout after failed attempts. The row, its directory marker and its
+  audit trail stay: sync never hard-deletes and never marks an account
+  `Deleted`. Erasure under GDPR remains an explicit administrator action.
+- **Nothing re-enables.** If the directory enables an account again, or an entry
+  reappears, the account **stays `Inactive`**; the audit log gets one
+  `directory.account_reappeared` row ("administrator action required") and an
+  administrator re-enables the account if that is right. Sync also never creates
+  an account and never links one by name; it acts only on accounts that already
+  carry a directory marker. It keeps a present, enabled account's username, email
+  and display name in step with its entry (a change that would collide with
+  another account is skipped and audited, never applied) and applies the group
+  mapping.
+- **Two kinds of run.** An *incremental* run every `sync_interval_secs` (5
+  minutes to 24 hours; the scheduler ticks every `cleanup_interval_secs`, 5
+  minutes by default) asks for entries changed since a stored watermark —
+  `modifyTimestamp` on OpenLDAP, `uSNChanged` on Active Directory, where the
+  watermark is `highestCommittedUSN` read from the rootDSE of the same domain
+  controller. A *full* run every 24 hours (and first, and after any run that
+  skipped an account, hit a bound, or could not trust its watermark) looks up
+  **every** directory account by `entryUUID` / `objectGUID`. Only a full run
+  concludes that an entry has vanished. If the Active Directory server your URL
+  reaches changes (a different `dsServiceName`, as behind a load balancer) or the
+  rootDSE gives no watermark, the run is a full one; on such a setup point the
+  URL at one domain controller to keep runs incremental.
+- **The safety valve.** A full run that would deactivate **more than 10 %** of
+  the tenant's directory accounts **and at least 5** of them applies nothing at
+  all, writes `directory.sync_safety_valve` once, and shows as a failure of
+  `directory_sync` in `GET /health/jobs`. An empty search after a
+  misconfiguration, a wrong `base_dn` or an outage must not disable a company.
+  The run is retried at each interval and stays blocked until the directory is
+  fixed or the accounts that are really gone are deactivated by hand.
+- **Failure changes nothing.** A directory that cannot be reached, a refused
+  search or a deadline ends that tenant's run before anything is written, and
+  records the failure; the other tenants still run. An unreadable question — an
+  identifier that is not a GUID, two entries with one identifier — skips that
+  account and is never read as "vanished".
+- **Rights the bind account needs, beyond reading the users.** It must be able
+  to read, on the user subtree, the identifier (`entryUUID` / `objectGUID`), the
+  attributes you mapped, the change attribute (`modifyTimestamp` / `uSNChanged`)
+  and the disabled attribute (`pwdAccountLockedTime` / `userAccountControl`),
+  and on Active Directory the rootDSE (`highestCommittedUSN`, `dsServiceName`).
+  OpenLDAP's `modifyTimestamp` and `pwdAccountLockedTime` are operational
+  attributes: grant `read` on them explicitly if your ACLs hide them. An
+  attribute the account cannot read is treated as absent: it never disables an
+  account, and without a readable change attribute every run is a full one.
+- **No multi-replica guard.** Every replica runs the job. Each write is
+  idempotent or a compare-and-set, so the outcome is the same; the cost is
+  duplicate directory reads and, for attribute and group changes, duplicate
+  audit rows. Run it on one replica (or accept the duplication) if the directory
+  is small or slow.
 
 ### ⚠ Rotating `AXIAM__AUTH__PEPPER`
 

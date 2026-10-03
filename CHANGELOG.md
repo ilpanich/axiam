@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory sources: the sync job (T23.3.5, G-3, D-31).** A background job on
+  the cleanup scheduler (`directory_sync` in `GET /health/jobs`, last in each
+  tick, one tenant at a time, only tenants whose directory is enabled) keeps
+  directory accounts in step with their directory and **cannot grant anything**.
+  A vanished entry or one the directory disabled (`userAccountControl` bit `0x2`
+  on Active Directory, the presence of `pwdAccountLockedTime` on OpenLDAP) sets
+  the account **`Inactive`** — never `Deleted`, never a hard delete: sessions and
+  OAuth2 refresh tokens are revoked through the repositories (so the validation
+  cache and revocation feed see it), directory-sourced memberships are removed
+  through the D-30 mapper (manual ones kept, decision cache flushed), and
+  `account_may_act` then refuses the account on every path, which closes
+  T-303's residual for passkeys and the OP cookie. The status is flipped last by
+  one compare-and-set, so a failure part-way leaves the account `Active` for the
+  next run. **Sync never re-enables, never creates and never links** (D-28): an
+  `Inactive` account whose entry is present and enabled is reported once as
+  `directory.account_reappeared` ("administrator action required"). A *full* run
+  (first, every 24 h, and after any skipped account, bound hit or untrusted
+  watermark) looks up every marked account by `entryUUID` or by `objectGUID`
+  (the 16 little-endian octets, each escaped, through a new binary-value escaper
+  in the one module that puts values into filters) and is the only run that
+  concludes "vanished"; an *incremental* run every `sync_interval_secs` searches
+  `(<modifyTimestamp|uSNChanged> >= <watermark>)` under `base_dn`, acts only on
+  entries whose identifier belongs to a marked account, applies what it read when
+  its result bound is hit (and owes a full run), and on Active Directory
+  takes the watermark from the rootDSE's `highestCommittedUSN` and falls back to
+  a full run when `dsServiceName` changes or no watermark is readable. Present
+  and enabled accounts have their username, email and display name refreshed
+  through the same cleaners provisioning uses (a colliding change is skipped and
+  audited as `directory.sync_attribute_skipped`) and their group mapping applied.
+  **The safety valve:** a full run that would deactivate more than 10 % of a
+  tenant's directory accounts **and** at least 5 applies nothing, audits
+  `directory.sync_safety_valve` once and fails `directory_sync` in job health.
+  **Errors change nothing**: a full run reads every answer before it writes any,
+  so an unreachable directory, a refused search or a deadline leaves every
+  account as it was; an identifier that cannot be put in a filter or matches two
+  entries skips that account and is never read as "vanished". State (watermark,
+  server identity, last runs, last result) is one row per tenant, schema **v75**
+  `directory_sync_state`, deleted in the tenant-delete transaction. There is no
+  multi-replica guard (no sweep has one): every replica runs the job and every
+  write is idempotent or a compare-and-set. New audit actions
+  `directory.account_deactivated`, `.account_reappeared`, `.account_updated`,
+  `.sync_attribute_skipped`, `.sync_user_skipped`, `.sync_safety_valve` and
+  `.sync_run`; none carries a name, address or DN. `UserRepository` gains
+  `list_directory_accounts`, `get_by_directory_external_id`,
+  `deactivate_directory_account` and `find_identity_collision_excluding`
+  (refusing defaults); `DirectoryGroupMapper` gains
+  `remove_directory_memberships`. The attribute cleaners moved from `axiam-auth`
+  to `axiam-core` so both callers apply one definition. Operator documentation:
+  *Sync* in `docs/deployment/README.md`. No API, contract or SDK change.
+
 - **Directory sources: group mapping (T23.3.4, G-3, D-30).** A directory user's
   groups now become AXIAM group memberships, so roles and permissions assigned
   to those groups apply to them unchanged. **An explicit mapping table only**:

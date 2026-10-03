@@ -41,9 +41,10 @@ Three rules keep the file honest.
 **Status of this revision.** The Basic OP entries (T23.1.6) and the FAPI 2.0
 entries (T23.1.7) are written from the 2026-09-25 reports and evidence, against
 the tree at `claude/phase23-w2`. No entry has been confirmed against a final run
-yet; every entry's verdict below is *proposed*. The FAPI claims entry describes
-D-12 (an essential `claims.id_token.auth_time` refused on `fapi2`) as decided and
-landing in W2, because it had not landed when that entry was written.
+yet; every entry's verdict below is *proposed*. D-12 (an essential
+`claims.id_token.auth_time` refused on `fapi2`) landed on the same branch as
+`1218dbe` (T23.1.4), after the FAPI claims entry was first drafted; the entry
+was re-read against that commit.
 
 ## Index
 
@@ -677,10 +678,14 @@ and that the ACR-requesting conditions belong to the Brazil profile and not to
 - **W2, D-12 (decided 2026-10-03, rides T23.1.4).** An **essential**
   `claims.id_token.auth_time` is to be refused on `fapi2` exactly as
   `id_token.acr` is, because OIDC Core §2 makes `auth_time` REQUIRED when
-  requested as essential and today it is dropped. At the time of writing it has
-  not landed on `claude/phase23-w2` (`authn_params.rs` there has no `auth_time`
-  handling at `5e3df3c`); this entry describes it as decided and landing in W2,
-  and must be re-read against the code once it does.
+  requested as essential and it used to be dropped. Landed as `1218dbe`
+  (T23.1.4): `authn_params.rs` records an essential (or unreadable)
+  `id_token.auth_time` member, and `security_bearing_present` then reports
+  `claims`, so the `fapi2` gate answers `invalid_request` on both carriers
+  (`fapi.rs::a_fapi2_client_is_refused_an_essential_auth_time_and_only_that`,
+  `par_test.rs::a_fapi2_client_is_refused_an_essential_auth_time_it_pushed`). A
+  voluntary `auth_time` request is unchanged. Like the W1 change, the 2026-09-25
+  build predates it.
 - Neither change touches `claims` for `userinfo` members.
 
 **Why that is conformant.** For the part the code settles: AXIAM does not
@@ -756,13 +761,11 @@ something the repository cannot decide. Items 1 to 3 are the Basic OP entries'
    request with no `request_uri` is refused only after sign-in today (return
    leg). Whether to refuse it earlier is the maintainer's; nothing here proposes
    it.
-7. **D-12 and the stale `false`.** Re-read the claims entry once D-12 (an
-   essential `claims.id_token.auth_time` refused on `fapi2`, T23.1.4) lands. Four
-   places still say discovery publishes `claims_parameter_supported: false`
-   though the code and its test say `true`: the 2026-09-18 and 2026-09-25
-   evidence READMEs, comments in `authn_params.rs`, and row 35 of
-   `docs/compliance/oidc-conformance.md`. They are outside this task's files and
-   are not edited here.
+7. **The stale `false`.** The 2026-09-18 and 2026-09-25 evidence READMEs say
+   discovery publishes `claims_parameter_supported: false`, though the code and
+   its test say `true`. They are dated receipts and are not rewritten; the
+   `authn_params.rs` comments and row 35 of `docs/compliance/oidc-conformance.md`
+   were corrected by T23.1.4 (`3da0cc0`).
 
 ## Sign-off
 

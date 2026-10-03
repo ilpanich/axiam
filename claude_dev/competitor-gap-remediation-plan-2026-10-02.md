@@ -263,6 +263,47 @@ into tasks and assigns the model per task.
 > anonymous browser goes through the login hop before it is refused (found by
 > reading the code, carried to the F4 review). Questions for the maintainer
 > are in the W2 PR.
+>
+> **EXECUTED — T23.1.8 (D-11), 2026-10-03** (`f7f4c4c`, `4ee5e64`, `4a1e961`,
+> `c74fe80`; Opus 5.5). Browser SSO now works on a T21.6 per-tenant issuer
+> path. Every completed sign-in (password, OPAQUE, MFA verify, forced
+> enrolment, both WebAuthn ceremonies, the federation handoff) mints
+> `axiam_op_session` at every path `op_session_cookie_paths` names: the bare
+> `/oauth2/authorize` and, when `tenant_issuer_paths` is on,
+> `/t/{tenant_id}/oauth2/authorize` for the session's own tenant only. Same
+> name, same value, same attributes and lifetime; the paths never prefix one
+> another, so no request carries two copies and the existing tenant-keyed
+> digest lookup serves both paths without a new resolver. Removals are built
+> from the same list, and the per-path setter is private, so nothing mints at
+> a path the list does not name. Logout and both `end_session`s clear every
+> copy, and P23W1-10 is closed by the `/logout` hop decided as **D-16**.
+> Threat model **2.19.0**, **T-290**, T-237 and T-238 amended; OpenAPI gains
+> `/oauth2/authorize/logout`; no contract or schema change.
+>
+> Tests: `oauth2_tenant_path_sso_test.rs` (25) re-runs the T23.1.3 audit list
+> on the tenant path (code from the tenant cookie alone, the hop end to end,
+> fixation, cross-user, factor still owed, `POST` unrouted, nothing reflected,
+> the decline arm, M7, `account_may_act` with `PendingVerification` still
+> served, the hostile `return_to` list, `prompt=none`), cross-tenant refusal in
+> both directions including a digest that matches a live row in the other
+> tenant, both cookies cleared on every logout, and P23W1-10; six `csrf.rs`
+> unit tests pin the path list, its disjointness and the mirrored removals;
+> each sign-in path's own suite asserts both cookies.
+>
+> What the plan did not anticipate. Three defects the cookie had been hiding,
+> each fixed: the tenant-path `return_to` echoed the `tenant_id` that
+> `TenantPathScope` appends, so **every return leg on a tenant path was
+> refused** `invalid_request` (test failed first); the stale-cookie removal on
+> a tenant path used the bare path and never matched; and **`POST
+> /api/v1/auth/logout` revoked nothing after an admin switched tenant**,
+> because it looked the session up in the acted-on tenant rather than the
+> principal's (test failed first). `end_session` without a hint now costs the
+> RP one extra `302` on the bare path too. The threat-model text landed in
+> the third commit rather than with the first two code commits, all in this
+> wave. For W3: the SAML SSO path is one more entry in
+> `op_session_cookie_paths` (not gated on `tenant_issuer_paths`), plus a SAML
+> arm for the `return_to` validator, the SPA's `isAuthorizePath` and the
+> stale-cookie removal, with the 56-candidate list re-run against it.
 
 **Target.** Two certificates: OpenID Connect *Basic OP* and *FAPI 2.0 Security
 Profile (Final)*, as OpenID Provider, with the results published under
@@ -1013,6 +1054,7 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-13 | **Accepted as recommended, 2026-10-03**; binding on T23.5.2. *Raised by T23.9.1, 2026-10-02.* G-5 signs SETs "with the tenant's EdDSA issuer key", which does not exist: there is one deployment key (see the note under G-5's *Design*) | **Use the deployment key at the tenant's JWKS URL for G-5**, as ID tokens do today, and keep per-tenant keys a separate decision with its own key-management cost (the verifiable-credentials design needs per-tenant ES256 keys anyway, and is where that cost should be argued) |
 | D-14 | *Taken by the orchestrator, 2026-10-03, on T23.1.4's escalation.* On the honour lane, `max_age=0` can never yield a code: `honour::evaluate` re-authenticates when `elapsed >= max_age`, so on the return leg a session signed in a moment ago is still "too old" and the answer is `login_required`. Plan §4.3, test T2.1 and T-239's text pinned that literally ("always reauthenticate … never yields a code"), but OIDC Core §3.1.2.1 (1.0 incorporating errata set 2) says the OP re-authenticates when the elapsed time is *greater than* `max_age`, and adds that `max_age=0` is equivalent to `prompt=login`, after which a code is issued | **`max_age=0` is handled as `prompt=login`**: the outbound leg always re-authenticates (the `reauth=1` hop, as today), and the return leg, whose session the hop itself just created, is answered with a code and an ID token whose `auth_time` is the new authentication. Positive values keep `>=` (one instant stricter than the clause; harmless, and pinned by `oidcc-max-age-1`). The return-leg marker's accepted residual (F4 P23W1-08) applies unchanged, exactly as it does to `prompt=login`. Rejected: keeping it (an RP sending `max_age=0` could never sign in, which contradicts the errata note) and switching every value to strict `>` (changes the pinned `max_age=1` behaviour for no gain). Implemented in T23.1.4; amends test T2.1 and T-239's mitigation text |
 | D-15 | *Taken by the orchestrator, 2026-10-03, before T23.3.1, so the Sonnet task does not stall on it.* §4 G-3 says `bind_secret (secret provider, R-5 pattern)`, but the secret provider is deployment-wide and addressed by static logical names (`axiam_core::secrets`), while a bind secret is per tenant and set by a tenant administrator | **Encrypted at rest in the directory configuration row, exactly as the per-tenant SMTP password is** (`crates/axiam-db/src/repository/email_config.rs`): AES-256-GCM with a fresh nonce per write, the 256-bit key fetched from the secret provider under a **new logical name `directory_encryption_key`** (R-5: the key lives in the provider, never in the database or configuration file). The key is optional: without it the directory feature is unavailable and creating a configuration fails closed with a message naming the key, as OPAQUE does without its keys. The secret is write-only through every API (never returned, `Debug`-redacted, absent from audit rows), and decrypted only at bind time. Rejected: a per-tenant provider reference (`bind_secret_ref` resolved by name), because it would make a tenant administrator's configuration depend on a deployment operator's vault layout, and the admin console (T23.3.8) could not set the secret at all |
+| D-16 | *Taken in T23.1.8 (Opus 5.5), 2026-10-03, accepted by the orchestrator.* The OP cookie (`Path=/oauth2/authorize`, and since D-11 `/t/{tenant_id}/oauth2/authorize`) never reaches `/oauth2/end_session`, so a logout without an `id_token_hint` `sid` could expire the cookie but not read it, and the session row it named survived (F4 residual P23W1-10). How does such a logout end that row? | **A hop to the `/logout` sub-path of the authorization endpoint the request came through**: `end_session` answers a request with no verified hint `sid` with a `302` to `/oauth2/authorize/logout?tenant_id=…` (bare) or `/t/{tenant_id}/oauth2/authorize/logout`, which RFC 6265 §5.1.4 path-match sends the cookie to. The hop looks the digest up in the request's tenant, revokes that one row, clears every cookie and continues exactly as `end_session` (exact-match `post_logout_redirect_uri` against the identified client's allow-list, `state` echoed only on a redirect that happens; the continuation never carries the hint). GET-only, public, rate-limited with the `end_session` preset (bucket `oauth2_end_session_cookie`, both mounts), in OpenAPI, and with **no back-channel fan-out**, so logout CSRF stays exactly what `end_session` already was. Threat **T-290**. Rejected: adding `/oauth2/end_session` to the cookie path list (widens the maintainer's D-11 layout to a second endpoint, and misses cross-site form POSTs); fanning out back-channel logout from the hop (any page could log a user out of every RP); a confirmation prompt (against B5); leaving the residual. Residual: a hinted logout whose browser cookie names a *different* session leaves that row with its cookies cleared |
 
 ---
 

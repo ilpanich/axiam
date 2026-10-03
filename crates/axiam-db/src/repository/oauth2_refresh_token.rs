@@ -3,6 +3,7 @@
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::oauth2_client::{CreateRefreshToken, RefreshToken};
+use axiam_core::models::session::Amr;
 use axiam_core::repository::RefreshTokenRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -57,6 +58,18 @@ struct RefreshTokenRow {
     /// it always did.
     #[surreal(default)]
     resource: Option<String>,
+    /// X7.2 / D-9 — see [`RefreshToken::auth_time`]. Absent on every row
+    /// written before schema v68, which is how the refresh grant recognises a
+    /// row it must fall back to the live-session lookup for.
+    #[surreal(default)]
+    auth_time: Option<DateTime<Utc>>,
+    /// X7.2 / D-9 — see [`RefreshToken::acr`].
+    #[surreal(default)]
+    acr: Option<String>,
+    /// X7.2 / D-9 — see [`RefreshToken::amr`]. `None` decodes to the empty
+    /// list: no methods, the strict reading.
+    #[surreal(default)]
+    amr: Option<Vec<String>>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -84,6 +97,18 @@ struct RefreshTokenRowWithId {
     /// it always did.
     #[surreal(default)]
     resource: Option<String>,
+    /// X7.2 / D-9 — see [`RefreshToken::auth_time`]. Absent on every row
+    /// written before schema v68, which is how the refresh grant recognises a
+    /// row it must fall back to the live-session lookup for.
+    #[surreal(default)]
+    auth_time: Option<DateTime<Utc>>,
+    /// X7.2 / D-9 — see [`RefreshToken::acr`].
+    #[surreal(default)]
+    acr: Option<String>,
+    /// X7.2 / D-9 — see [`RefreshToken::amr`]. `None` decodes to the empty
+    /// list: no methods, the strict reading.
+    #[surreal(default)]
+    amr: Option<Vec<String>>,
 }
 
 impl RefreshTokenRowWithId {
@@ -114,6 +139,12 @@ impl RefreshTokenRowWithId {
             rotated_at: self.rotated_at,
             requested_userinfo_claims: self.requested_userinfo_claims.unwrap_or_default(),
             resource: self.resource,
+            auth_time: self.auth_time,
+            acr: self.acr,
+            amr: self
+                .amr
+                .map(|raw| Amr::decode_list(&raw))
+                .unwrap_or_default(),
         })
     }
 }
@@ -160,6 +191,9 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
                  session_id = $session_id, \
                  requested_userinfo_claims = $requested_userinfo_claims, \
                  resource = $resource, \
+                 auth_time = $auth_time, \
+                 acr = $acr, \
+                 amr = $amr, \
                  expires_at = $expires_at, \
                  revoked = false",
             )
@@ -172,6 +206,9 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             .bind(("session_id", input.session_id.map(|id| id.to_string())))
             .bind(("requested_userinfo_claims", input.requested_userinfo_claims))
             .bind(("resource", input.resource))
+            .bind(("auth_time", input.auth_time))
+            .bind(("acr", input.acr))
+            .bind(("amr", Amr::encode_list(&input.amr)))
             .bind(("expires_at", input.expires_at))
             .await
             .map_err(DbError::from)?;
@@ -207,6 +244,12 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             rotated_at: row.rotated_at,
             requested_userinfo_claims: row.requested_userinfo_claims.unwrap_or_default(),
             resource: row.resource,
+            auth_time: row.auth_time,
+            acr: row.acr,
+            amr: row
+                .amr
+                .map(|raw| Amr::decode_list(&raw))
+                .unwrap_or_default(),
         })
     }
 
@@ -523,6 +566,9 @@ mod tests {
             requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + chrono::Duration::days(30),
             resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
         })
         .await
         .unwrap()
@@ -552,6 +598,9 @@ mod tests {
                 requested_userinfo_claims: vec!["email".into(), "name".into()],
                 expires_at: Utc::now() + chrono::Duration::days(30),
                 resource: None,
+                auth_time: None,
+                acr: None,
+                amr: Vec::new(),
             })
             .await
             .unwrap();
@@ -595,6 +644,9 @@ mod tests {
             requested_userinfo_claims: vec!["email".into()],
             expires_at: Utc::now() + chrono::Duration::days(30),
             resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
         })
         .await
         .unwrap();
@@ -616,6 +668,109 @@ mod tests {
         assert!(
             read.requested_userinfo_claims.is_empty(),
             "absent means the grant named no claims, which is today's behaviour"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // X7.2 / D-9 — the authentication evidence on the refresh token
+    // (schema v68)
+    // -----------------------------------------------------------------
+
+    /// The snapshot round-trips through the row on both read paths, in the
+    /// units it was written in, with order preserved.
+    #[tokio::test]
+    async fn the_authentication_evidence_round_trips_through_the_row() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db);
+        let tenant_id = Uuid::new_v4();
+        let authenticated_at = Utc::now() - chrono::Duration::hours(4);
+        let amr = vec![Amr::Pwd, Amr::Otp, Amr::Mfa];
+
+        let created = repo
+            .create(CreateRefreshToken {
+                tenant_id,
+                token_hash: "d9-roundtrip".into(),
+                client_id: "oa_test".into(),
+                user_id: Some(Uuid::new_v4()),
+                scopes: vec!["openid".into()],
+                session_id: Some(Uuid::new_v4()),
+                requested_userinfo_claims: Vec::new(),
+                expires_at: Utc::now() + chrono::Duration::days(30),
+                resource: None,
+                auth_time: Some(authenticated_at),
+                acr: Some("urn:axiam:acr:mfa".into()),
+                amr: amr.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            created.auth_time.map(|t| t.timestamp()),
+            Some(authenticated_at.timestamp())
+        );
+        assert_eq!(created.acr.as_deref(), Some("urn:axiam:acr:mfa"));
+        assert_eq!(created.amr, amr);
+
+        let read = repo
+            .get_by_token_hash(tenant_id, "d9-roundtrip")
+            .await
+            .unwrap();
+        assert_eq!(
+            read.auth_time.map(|t| t.timestamp()),
+            Some(authenticated_at.timestamp()),
+            "the authentication instant, not the row's own created_at"
+        );
+        assert_eq!(read.acr.as_deref(), Some("urn:axiam:acr:mfa"));
+        assert_eq!(read.amr, amr);
+    }
+
+    /// **Pre-migration decode.** A row written before v68 has none of the three
+    /// columns. It must still decode — every refresh token in flight across the
+    /// migration is one of these — to the value that tells the refresh grant to
+    /// fall back to the live-session lookup: no `auth_time`, no `acr`, no `amr`.
+    ///
+    /// Reproduced with `UNSET` for the reason `a_row_written_before_v61_…`
+    /// gives: `create` always writes the columns now.
+    #[tokio::test]
+    async fn a_row_written_before_v68_decodes_to_no_evidence() {
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db.clone());
+        let tenant_id = Uuid::new_v4();
+        repo.create(CreateRefreshToken {
+            tenant_id,
+            token_hash: "d9-premigration".into(),
+            client_id: "oa_test".into(),
+            user_id: Some(Uuid::new_v4()),
+            scopes: vec!["openid".into()],
+            session_id: Some(Uuid::new_v4()),
+            requested_userinfo_claims: Vec::new(),
+            expires_at: Utc::now() + chrono::Duration::days(30),
+            resource: None,
+            auth_time: Some(Utc::now()),
+            acr: Some("urn:axiam:acr:1fa".into()),
+            amr: vec![Amr::Pwd],
+        })
+        .await
+        .unwrap();
+
+        db.query(
+            "UPDATE oauth2_refresh_token UNSET auth_time, acr, amr \
+             WHERE token_hash = $h",
+        )
+        .bind(("h", "d9-premigration"))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let read = repo
+            .get_by_token_hash(tenant_id, "d9-premigration")
+            .await
+            .expect("a pre-v68 row must still decode, not error");
+        assert!(read.auth_time.is_none());
+        assert!(read.acr.is_none());
+        assert!(
+            read.amr.is_empty(),
+            "an absent amr is evidence of nothing, never evidence of a password"
         );
     }
 

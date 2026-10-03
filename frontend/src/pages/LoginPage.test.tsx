@@ -261,6 +261,74 @@ describe("LoginPage — the OIDC login hop", () => {
   });
 
   /**
+   * **T23.1.3.** The rest of the audit's open-redirect list, end to end
+   * through the page. `@/lib/returnTo`'s own tests walk every member; these are
+   * the ones whose failure would be a navigation rather than a string.
+   */
+  it.each([
+    ["a javascript: URL", "javascript:alert(1)"],
+    ["a backslash variant", "/\\evil.example/oauth2/authorize?x=1"],
+    ["encoded slashes", "/%2f%2fevil.example/oauth2/authorize?x=1"],
+    ["a full-width solidus", "\uff0f\uff0fevil.example/oauth2/authorize?x=1"],
+    ["userinfo before the path", "/@evil.example/oauth2/authorize?x=1"],
+    ["a leading space", " /oauth2/authorize?x=1"],
+  ])("refuses %s too", async (_label, hostile) => {
+    signInSucceeds();
+    await goToCredentials(`/login?return_to=${encodeURIComponent(hostile)}`);
+    await submitCredentials();
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A repeated `return_to` is read once — the first value, as
+   * `URLSearchParams.get` answers — and that value is validated like any
+   * other. Neither ordering sends the browser to the hostile one.
+   */
+  it("validates the return_to it reads when the parameter is repeated", async () => {
+    signInSucceeds();
+    const { unmount } = await goToCredentials(
+      `/login?return_to=${encodeURIComponent("https://evil.example/")}` +
+        `&return_to=${encodeURIComponent(RETURN_TO)}`,
+    );
+    await submitCredentials();
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/dashboard"));
+    expect(assign).not.toHaveBeenCalled();
+    unmount();
+
+    signInSucceeds();
+    await goToCredentials(
+      `/login?return_to=${encodeURIComponent(RETURN_TO)}` +
+        `&return_to=${encodeURIComponent("https://evil.example/")}`,
+    );
+    await submitCredentials();
+    await waitFor(() => expect(assign).toHaveBeenCalledWith(RETURN_TO));
+    expect(assign).not.toHaveBeenCalledWith(expect.stringContaining("evil.example"));
+  });
+
+  /**
+   * Cancel returns to the validated `return_to` plus exactly one parameter this
+   * page controls, so the server can answer `access_denied` — and it is not
+   * offered at all when there is no pending authorization request to decline,
+   * which includes a `return_to` the sanitizer refused.
+   */
+  it("declines back to the validated authorization request, and only to it", async () => {
+    signInSucceeds();
+    const { unmount } = await goToCredentials(
+      `/login?return_to=${encodeURIComponent(RETURN_TO)}`,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(assign).toHaveBeenCalledWith(`${RETURN_TO}&axiam_user_declined=1`);
+    unmount();
+
+    await goToCredentials(
+      `/login?return_to=${encodeURIComponent("https://evil.example/oauth2/authorize?x=1")}`,
+    );
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  });
+
+  /**
    * `reauth=1` means this browser arrived believing it was signed in and was
    * not. Whatever session it still holds is ended before the form is shown, so
    * that what follows is a real authentication event — the one thing a later

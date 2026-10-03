@@ -370,6 +370,54 @@ Producer                    AMQP Broker              AXIAM Consumer
   │    authz.response ─────────│                         │
 ```
 
+### 4.5 Logout
+
+What ships (B5; the discovery fields below are advertised by
+`crates/axiam-oauth2/src/oidc.rs`):
+
+- **RP-Initiated Logout 1.0** — `GET`/`POST /oauth2/end_session`, advertised as
+  `end_session_endpoint`. It ends the session named by `id_token_hint` (or the
+  browser's own AXIAM cookie when there is no verifiable hint) and redirects
+  only to an exact match against the client's `post_logout_redirect_uris`.
+- **Back-Channel Logout 1.0** — on logout AXIAM POSTs a signed logout token to
+  each participating client's registered `backchannel_logout_uri` (one token per
+  client, `sid` always present, 120 s lifetime). Discovery advertises
+  `backchannel_logout_supported` and `backchannel_logout_session_supported`,
+  both `true`.
+- **Revocation feed** — `GET /oauth2/revocations` (opt-in via
+  `AXIAM__AUTH__REVOCATION_FEED_ENABLED`) lets a resource server or SDK route
+  guard reject a revoked session within one poll interval. It narrows a
+  residual window; it is not a control.
+
+#### Front-channel logout — declined (D-6, 2026-10-02)
+
+**Decision.** AXIAM does not implement OIDC Front-Channel Logout 1.0 (gap G-12,
+[remediation plan](competitor-gap-remediation-plan-2026-10-02.md)). Discovery
+does not advertise `frontchannel_logout_supported` or
+`frontchannel_logout_session_supported`, and the client model has no
+`frontchannel_logout_uri`.
+
+**What it is.** On logout the OP renders a page containing one iframe per
+participating RP, each pointing at that RP's `frontchannel_logout_uri`, and
+relies on the browser sending the RP's session cookie with the iframe request so
+the RP can clear its own session.
+
+**Why it is declined.** The mechanism needs the RP's cookie to travel in a
+third-party iframe request. Safari (Intelligent Tracking Prevention), Firefox
+(Total Cookie Protection) and Chrome's third-party cookie restrictions block or
+partition exactly that, so the RP does not see its session cookie and the logout
+silently does nothing. The OP cannot observe the failure: the iframe loads, the
+OP shows "logged out", and the RP session survives. That is a false sense of
+logout, which is worse than no feature.
+
+**What to use instead.** Back-channel logout: a server-to-server signed logout
+token that does not depend on the browser, cookies or iframes, and whose
+delivery the OP performs itself rather than delegating to the user agent. For resource servers and route guards that
+need a bounded revocation window, poll `GET /oauth2/revocations`.
+
+**Reopen condition.** A concrete adopter request. Not a competitor comparison:
+Keycloak and authentik offer the feature, and that alone does not reopen it.
+
 ---
 
 ## 5. Authorization Engine

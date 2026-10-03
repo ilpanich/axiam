@@ -28,6 +28,11 @@
 //!    T21.2a).
 //! 6. It presents the token to the MCP server, which validates `aud`.
 //! 7. The MCP server introspects the token (RFC 7662) and is told its `aud`.
+//! 8. On the registration path only: the client reads its own registration at
+//!    the `registration_client_uri` with its registration access token
+//!    (RFC 7592 §2.1, T23.4.1) ...
+//! 9. ... and deletes it (§2.3), after which the refresh token it was issued
+//!    no longer refreshes and the registration reads as `401`.
 //!
 //! # What this file proves that the per-task tests do not
 //!
@@ -910,6 +915,29 @@ async fn dcr_sequence(mode: Mode) {
         "a public client is issued no secret: {registered}"
     );
 
+    // T23.4.1 / RFC 7592 §3 — the registration also hands back where and how
+    // the client manages itself, under the issuer it registered against.
+    let registration_client_uri = registered["registration_client_uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no registration_client_uri: {registered}"))
+        .to_owned();
+    assert_eq!(
+        registration_client_uri,
+        format!(
+            "{ROOT_ISSUER}{}",
+            mode.endpoint(f.a.id, &format!("register/{client_id}"), "")
+        ),
+        "the configuration URI follows the issuer mode the client registered under"
+    );
+    let management_token = registered["registration_access_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no registration_access_token: {registered}"))
+        .to_owned();
+    let config_path = registration_client_uri
+        .strip_prefix(ROOT_ISSUER)
+        .unwrap()
+        .to_owned();
+
     let tokens = complete_grant(&app, &f, mode, &stub, &client_id, 49_152).await;
     introspect_as_resource_server(
         &app,
@@ -919,6 +947,86 @@ async fn dcr_sequence(mode: Mode) {
         tokens["access_token"].as_str().unwrap(),
     )
     .await;
+
+    // 8 — the client reads its registration (RFC 7592 §2.1) ...
+    let (status, read) = manage(&app, "GET", &config_path, &management_token).await;
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["client_id"], client_id);
+    assert_eq!(read["redirect_uris"], json!([LOOPBACK_CALLBACK]));
+    assert!(
+        read.get("registration_access_token").is_none(),
+        "a read never returns the token: {read}"
+    );
+
+    // ... restates it (RFC 7592 §2.2), which rotates the token under the same
+    // issuer-relative URI ...
+    let mut restated = read.clone();
+    for member in [
+        "registration_access_token",
+        "registration_client_uri",
+        "client_secret_expires_at",
+        "client_id_issued_at",
+    ] {
+        restated.as_object_mut().unwrap().remove(member);
+    }
+    let req = test::TestRequest::put()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&config_path)
+        .insert_header(("Authorization", format!("Bearer {management_token}")))
+        .set_json(restated)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let updated: Value = test::read_body_json(resp).await;
+    assert_eq!(updated["registration_client_uri"], registration_client_uri);
+    let management_token = updated["registration_access_token"]
+        .as_str()
+        .expect("an update returns the rotated token")
+        .to_owned();
+
+    // 9 — ... and, uninstalled, deletes it (RFC 7592 §2.3). The refresh token
+    // it was issued dies with it, and the registration is gone.
+    let (status, body) = manage(&app, "DELETE", &config_path, &management_token).await;
+    assert_eq!(status, 204, "{body}");
+    let (status, _) = manage(&app, "GET", &config_path, &management_token).await;
+    assert_eq!(
+        status, 401,
+        "a deleted registration reads as an invalid token"
+    );
+    let refresh = tokens["refresh_token"]
+        .as_str()
+        .expect("the client registered for the refresh_token grant");
+    let (status, refreshed) = post_form(
+        &app,
+        &mode.endpoint(f.a.id, "token", ""),
+        &format!(
+            "grant_type=refresh_token&refresh_token={}&client_id={}",
+            enc(refresh),
+            enc(&client_id)
+        ),
+    )
+    .await;
+    assert!(
+        refreshed.get("access_token").is_none() && status >= 400,
+        "a deregistered client cannot refresh: {status} {refreshed}"
+    );
+}
+
+/// An RFC 7592 client configuration request with the management token.
+async fn manage(app: &app_svc!(), method: &str, uri: &str, token: &str) -> (u16, Value) {
+    let req = match method {
+        "GET" => test::TestRequest::get(),
+        "DELETE" => test::TestRequest::delete(),
+        other => panic!("unexpected method {other}"),
+    }
+    .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+    .uri(uri)
+    .insert_header(("Authorization", format!("Bearer {token}")))
+    .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let body = test::read_body(resp).await;
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
 /// The same sequence, with a client ID metadata document instead of a

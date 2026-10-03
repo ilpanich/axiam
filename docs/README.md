@@ -55,6 +55,15 @@ Task-oriented guides for operators and integrators.
 - [`pki/README.md`](./pki/README.md) — certificate lifecycle: CA issuance,
   leaf cert issuance, mTLS binding, revocation
 
+## Guides
+
+Cross-cutting walkthroughs that follow one scenario across several pages.
+
+- [`guides/identity-for-agents.md`](./guides/identity-for-agents.md) — Identity
+  for agents: registering an agent, RFC 8693 delegation with `act`, RFC 8707
+  resource indicators, the MCP resource-server helpers (CONTRACT §28), and
+  revocation, with SDK snippets
+
 ## Compliance
 
 Detailed backing evidence for each standard, plus the top-level security

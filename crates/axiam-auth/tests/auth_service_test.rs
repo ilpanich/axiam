@@ -2014,3 +2014,323 @@ async fn ensure_can_sign_in_admits_a_user_whose_lockout_has_expired() {
 //
 // `LoginInput::lockout_policy` exists because it did not. `AuthService::login`
 // metered every failed attempt against `A
+
+// -----------------------------------------------------------------------
+// X7.2 — what each sign-in path records as the authentication event
+// (basic-op-gap-plan.md §4.3; T23.1.2 audit)
+// -----------------------------------------------------------------------
+//
+// `session_evidence_rotation_test` pins the password path and what rotation
+// does to the record. These pin the other paths that reach
+// `create_session_and_tokens` through `axiam-auth` itself: the TOTP second
+// step, the forced first-login enrolment, the OPAQUE tail, and the choke
+// point's own contract (the evidence it is handed is the evidence stored, and
+// the browser-session credential is stored only as a digest). The WebAuthn
+// and federation call sites live in `axiam-api-rest` and are pinned there.
+
+/// The password-then-TOTP path records `pwd`, `otp` **and** `mfa`, dated at the
+/// second factor — and the password step on its own mints no session at all,
+/// so there is no earlier, weaker record for it to be confused with.
+#[tokio::test]
+async fn x7_2_a_totp_second_step_records_pwd_otp_and_mfa() {
+    use axiam_core::models::session::Amr;
+    use axiam_core::repository::SessionRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let sessions = session_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let totp = enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+
+    let challenge_token = match svc
+        .login(LoginInput {
+            tenant_id,
+            org_id,
+            username_or_email: "alice".into(),
+            password: test_password(),
+            ip_address: None,
+            user_agent: None,
+            mfa_policy: None,
+            lockout_policy: None,
+        })
+        .await
+        .unwrap()
+    {
+        LoginResult::MfaRequired(mfa) => mfa.challenge_token,
+        _ => panic!("expected MfaRequired, got another login result"),
+    };
+    assert!(
+        sessions
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the password step of an MFA login must not create a session: the only \
+         authentication event is the completed one"
+    );
+
+    let before = Utc::now() - Duration::seconds(1);
+    let out = svc
+        .verify_mfa(VerifyMfaInput {
+            challenge_token,
+            totp_code: generate_next_step_code(&totp),
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .unwrap();
+
+    let session = sessions.get_by_id(tenant_id, out.session_id).await.unwrap();
+    assert_eq!(
+        session.amr,
+        vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
+        "TOTP after a password is two factors: pwd + otp, with mfa alongside"
+    );
+    assert!(
+        session.authenticated_at >= before
+            && session.authenticated_at <= Utc::now() + Duration::seconds(1),
+        "the event is dated when the second factor verified, not at epoch or \
+         at the password step's expense: {}",
+        session.authenticated_at
+    );
+}
+
+/// The forced first-login enrolment (a setup token, then a TOTP confirmation)
+/// records exactly what the ordinary TOTP path records: a session issued by
+/// one route is worth the same to every reader of `amr` as one issued by the
+/// other.
+#[tokio::test]
+async fn x7_2_a_forced_totp_enrolment_records_the_same_evidence_as_the_totp_step() {
+    use axiam_core::models::session::Amr;
+    use axiam_core::repository::SessionRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _user_id, _db) =
+        setup().await;
+    let sessions = session_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let setup_token = match svc
+        .login(LoginInput {
+            tenant_id,
+            org_id,
+            username_or_email: "alice".into(),
+            password: test_password(),
+            ip_address: None,
+            user_agent: None,
+            mfa_policy: mfa_enforced_policy(),
+            lockout_policy: None,
+        })
+        .await
+        .unwrap()
+    {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        _ => panic!("expected MfaSetupRequired, got another login result"),
+    };
+    let enrollment = svc.enroll_mfa_with_setup_token(&setup_token).await.unwrap();
+    let totp = totp_from_secret(&enrollment.secret_base32, "alice@example.com");
+    let out = svc
+        .confirm_mfa_with_setup_token(
+            &setup_token,
+            &totp.generate_current().to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let session = sessions
+        .get_by_id(tenant_id, out.session_id)
+        .await
+        .expect("the enrolment's session");
+    assert_eq!(session.amr, vec![Amr::Pwd, Amr::Otp, Amr::Mfa]);
+    assert!(
+        (Utc::now() - session.authenticated_at).num_seconds().abs() < 30,
+        "dated now, not at epoch: {}",
+        session.authenticated_at
+    );
+}
+
+/// `complete_authenticated_login` is the tail shared by the password path and
+/// the OPAQUE path (`handlers/opaque.rs` calls it after `login_finish`), so
+/// asserting it here is asserting what an OPAQUE sign-in records: `pwd`, the
+/// RFC 8176 value for "a password-authenticated key exchange proved knowledge
+/// of the password", and nothing stronger.
+#[tokio::test]
+async fn x7_2_the_opaque_tail_records_pwd_and_no_second_factor() {
+    use axiam_core::models::session::Amr;
+    use axiam_core::repository::SessionRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let user = user_repo.get_by_id(tenant_id, user_id).await.unwrap();
+    let sessions = session_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let out = match svc
+        .complete_authenticated_login(user, tenant_id, org_id, None, None, None)
+        .await
+        .unwrap()
+    {
+        LoginResult::Success(out) => out,
+        LoginResult::MfaRequired(_) => panic!("expected Success, got MfaRequired"),
+        LoginResult::MfaSetupRequired(_) => panic!("expected Success, got MfaSetupRequired"),
+    };
+
+    let session = sessions.get_by_id(tenant_id, out.session_id).await.unwrap();
+    assert_eq!(session.amr, vec![Amr::Pwd]);
+}
+
+/// D-10 (T23.1.2): a provider that dates its authentication in AXIAM's future
+/// is recorded as having authenticated when AXIAM verified the assertion — the
+/// stored `authenticated_at` is what `max_age` and the ID token's `auth_time`
+/// read, so it must never run ahead of the verification instant.
+#[tokio::test]
+async fn d10_a_far_future_upstream_instant_is_stored_as_the_verification_instant() {
+    use axiam_core::models::session::{Amr, AuthenticationEvidence};
+    use axiam_core::repository::SessionRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let sessions = session_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let verified_at = Utc::now();
+    let far_future = verified_at + Duration::days(365 * 70);
+    let out = svc
+        .create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::upstream(Some(far_future), verified_at, vec![Amr::Fed]),
+        )
+        .await
+        .unwrap();
+
+    let session = sessions.get_by_id(tenant_id, out.session_id).await.unwrap();
+    assert_eq!(
+        session.authenticated_at.timestamp(),
+        verified_at.timestamp(),
+        "the provider's future is not AXIAM's evidence"
+    );
+}
+
+/// The choke point records the evidence it is **given**, not a clock read and
+/// not a constant — which is the whole reason a federated login can be dated
+/// by the upstream provider — and it stores the OP browser-session credential
+/// as a SHA-256 digest only.
+#[tokio::test]
+async fn x7_2_create_session_and_tokens_stores_the_evidence_given_and_only_a_digest_of_the_cookie()
+{
+    use axiam_core::models::session::{Amr, AuthenticationEvidence};
+    use axiam_core::repository::SessionRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let sessions = session_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    // An upstream IdP replaying an SSO session it established nine hours ago.
+    let nine_hours_ago = Utc::now() - Duration::hours(9);
+    let out = svc
+        .create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::upstream(Some(nine_hours_ago), Utc::now(), vec![Amr::Fed]),
+        )
+        .await
+        .unwrap();
+
+    let session = sessions.get_by_id(tenant_id, out.session_id).await.unwrap();
+    assert_eq!(
+        session.authenticated_at.timestamp(),
+        nine_hours_ago.timestamp(),
+        "a federated login is dated by the upstream, not by AXIAM's clock"
+    );
+    assert_eq!(
+        session.amr,
+        vec![Amr::Fed],
+        "`fed` and nothing else: AXIAM did not verify a password or a factor"
+    );
+
+    // h. The browser-session credential: a digest at rest, never the value.
+    let stored = session
+        .browser_token_hash
+        .as_deref()
+        .expect("every browser sign-in records an OP browser-session digest");
+    assert_ne!(
+        stored, out.browser_session_token,
+        "the raw cookie value must never be what is stored"
+    );
+    assert_eq!(
+        stored,
+        token::hash_browser_session_token(&out.browser_session_token),
+        "what is stored is the digest the authorization endpoint will compute \
+         from the cookie it receives"
+    );
+    assert_eq!(stored.len(), 64, "a hex-encoded SHA-256");
+    assert!(stored.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_ne!(
+        stored,
+        token::hash_refresh_token(&out.refresh_token),
+        "the two credentials are independent: one is not derived from the other"
+    );
+    assert!(
+        sessions
+            .get_by_browser_token_hash(
+                tenant_id,
+                &token::hash_browser_session_token(&out.browser_session_token)
+            )
+            .await
+            .unwrap()
+            .is_some_and(|s| s.id == session.id),
+        "the digest resolves back to this session, and only by digest"
+    );
+    assert!(
+        sessions
+            .get_by_browser_token_hash(tenant_id, &out.browser_session_token)
+            .await
+            .unwrap()
+            .is_none(),
+        "presenting the raw value in place of its digest resolves nothing"
+    );
+}

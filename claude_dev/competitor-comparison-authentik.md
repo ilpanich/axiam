@@ -51,12 +51,12 @@ would turn it into an application-portal product.
 | OAuth2: code + PKCE, client credentials, refresh | Yes | Yes | [A11] |
 | Device authorization grant (RFC 8628) | Yes | Yes | [A11] |
 | Token exchange (RFC 8693), delegation with `act` | Yes (delegation, opt-in impersonation, depth-capped chains) | Yes since 2026.8 (`actor_token` on-behalf-of) | [A5][A12] |
-| Dynamic client registration (RFC 7591) | Yes | Yes since 2026.8 (no RFC 7592 management endpoints) | [A5][A13] |
+| Dynamic client registration (RFC 7591) | Yes, plus RFC 7592 management (Phase 23 W1) | Yes since 2026.8 (no RFC 7592 management endpoints) | [A5][A13] |
 | Client ID Metadata Document (CIMD) | **Yes** | No | — |
 | PAR / JAR / FAPI 2.0 | **Yes** — FAPI 2.0 conformance runs published | Not documented | [A11] |
 | DPoP | **Yes** — access tokens sender-constrained | Partial — binds ID tokens only; access tokens stay `Bearer` | [A14] |
 | RP-initiated / back-channel logout | Yes | Yes | [A15] |
-| Front-channel logout | No | Yes | [A15] |
+| Front-channel logout | No — declined by design (D-6); back-channel logout shipped | Yes | [A15] |
 | OpenID certification | Not yet (conformance suites run and published) | **OpenID Certified** for OP and logout profiles (2026.8) | [A5] |
 | SAML 2.0 | Service provider only | IdP **and** SP; WS-Federation (enterprise) | [A5][A16] |
 | SCIM 2.0 | Inbound endpoint (RFC 7643/7644) | Inbound SCIM source **and** outbound SCIM provider | [A17][A18] |
@@ -66,7 +66,7 @@ would turn it into an application-portal product.
 | Augmented PAKE (OPAQUE, RFC 9807) | **Yes** (opt-in per org/tenant) | No | — |
 | X.509 / mTLS user and device authentication | **Yes**, open source, with an integrated per-org CA | mTLS stage, **enterprise-only**; no CA | [A21] |
 | MCP authorization server profile | **Yes** (RFC 8414, 8707, 7591, CIMD, loopback clients) | No MCP-specific feature; third parties document it as an MCP AS | [A22] |
-| Delegated agent identities | Service accounts + RFC 8693 delegation | "Agent accounts" (enterprise, 2026.8) | [A5] |
+| Delegated agent identities | Service accounts + RFC 8693 delegation, documented as [*Identity for agents*](../docs/guides/identity-for-agents.md) | "Agent accounts" (enterprise, 2026.8) | [A5] |
 | Shared Signals Framework | No | Provider (enterprise) | [A3] |
 | Abuse rate limits | **On by default**, posture presets | Reputation scoring (opt-in policy), OTP throttling; no global limiter documented | [A23] |
 | gRPC / AMQP transports | **Yes** | No (REST + WebSocket to outposts) | [A2] |
@@ -108,9 +108,10 @@ not authentik's.
 
 7. **Identity-aware reverse proxy / forward auth** and **remote-access (RAC)**
    outposts [A2]: portal features outside AXIAM's API-first scope.
-8. **Front-channel logout** [A15]: browser-iframe based and increasingly
-   unreliable under third-party-cookie restrictions; back-channel logout,
-   which AXIAM has, is the robust variant.
+8. **Front-channel logout** [A15] — **declined (recorded 2026-10-02):**
+   browser-iframe based and increasingly unreliable under third-party-cookie
+   restrictions; back-channel logout, which AXIAM has, is the robust variant.
+   See [design-document.md §4.5](design-document.md#front-channel-logout--declined-d-6-2026-10-02) and the [remediation plan G-12](competitor-gap-remediation-plan-2026-10-02.md).
 9. **Visual flow designer**: AXIAM's extension point is Reactors; a designer
    is a UX investment, not a capability gap.
 10. **Privileged-access requests and offboarding workflows** (enterprise,
@@ -159,6 +160,8 @@ unreliable. Adding it as a benchmark target is the honest way to settle that.
 | Date | Change | Sources |
 |---|---|---|
 | 2026-10-02 | Baseline written. Recent authentik changes already folded in: 2026.8 adds token exchange with on-behalf-of, DCR, OpenID certification, agent accounts (enterprise) and the Rust server; the 2026.11 draft removes multi-tenancy. | [A5][A7] |
+| 2026-10-03 | G-15: AXIAM's agent-identity story documented (guide and website page), so the delegated-agent row links it. G-4: RFC 7592 shipped on the Phase 23 W1 branch; authentik 2026.8 has DCR without RFC 7592, so the dynamic-registration row is now an AXIAM advantage. | — |
+| 2026-10-02 | G-12 (front-channel logout) declined and recorded in the design document (D-6); row and gap list updated. Revisit only on an adopter request. | — |
 
 ## Sources
 

@@ -63,7 +63,7 @@ REGISTRY_PATH = REPO_ROOT / "sdks" / "management-registry.json"
 EXCLUDED_TAGS: dict[str, str] = {
     "auth": "§1 login/MFA/refresh/logout, §23 OPAQUE, §25 account lifecycle",
     "authz": "§1 check_access / batch_check",
-    "oauth2": "§12 RP helpers, §14 device grant, §15 token exchange, §26 PAR",
+    "oauth2": "§12 RP helpers, §14 device grant, §15 token exchange, §26 PAR, §28.12 RFC 7592 client configuration",
     "oidc": "§12 discovery/JWKS; /oauth2/userinfo is §1.1 gRPC-only by design; /oauth2/revocations is §10.4 route-guard machinery, polled by a guard rather than called by an administrator",
     "uma": "§20 UMA 2.0 protection API and ticket grant",
     "webauthn": "§24 WebAuthn ceremonies -- credential I/O, not administration",
@@ -502,6 +502,12 @@ SENSITIVE_FIELDS: frozenset[tuple[str, str]] = frozenset({
     ("GeneratedPgpKey", "private_key_armored"),
     ("CreateScimTokenResponse", "provisioning_token"),
     ("CreateRegistrationTokenResponse", "initial_access_token"),
+    # T23.4.1 / RFC 7592. `RegistrationResponse` answers protocol routes the
+    # `oauth2` tag exclusion keeps out of §27, so this entry generates nothing
+    # today; it is here so that the day any management operation returns the
+    # schema, the token is wrapped from the first build (#480's lesson). The
+    # binding statement is CONTRACT §28.12.
+    ("RegistrationResponse", "registration_access_token"),
     ("CreateUserRequest", "password"),
     ("CreateWebhookRequest", "secret"),
     ("UpdateWebhookRequest", "secret"),

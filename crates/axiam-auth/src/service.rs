@@ -1333,6 +1333,30 @@ impl<
     // See that method for why the eviction belongs in the same call as the
     // flag and the session revocation rather than beside it.
 
+    /// May an existing session still act for `user`? (T23.1.3)
+    ///
+    /// The account-status rule, exposed for a place a long-lived session
+    /// credential is accepted:
+    /// `/oauth2/authorize` resolving the `axiam_op_session` cookie. That cookie
+    /// lives as long as the session (`refresh_token_lifetime_secs`), and an
+    /// account status change — an administrator locking or deactivating the
+    /// user — does not revoke sessions; it relies on this check being made
+    /// wherever a session is turned back into a principal. Without it, a
+    /// suspended user's browser kept buying authorization codes for the rest
+    /// of the session's life.
+    ///
+    /// The statuses that suspend an account are refused; `PendingVerification`
+    /// is not, whatever the grace period says — see [`account_may_act`], which
+    /// this is, for why (F4 P23W1-03: every federated account is pending for
+    /// life).
+    ///
+    /// # Errors
+    ///
+    /// The [`AuthError`] a sign-in by this user would be refused with.
+    pub fn check_session_holder(&self, user: &User) -> Result<(), AuthError> {
+        account_may_act(user)
+    }
+
     // -------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------
@@ -1349,26 +1373,7 @@ impl<
         created_at: chrono::DateTime<Utc>,
         grace_period_hours: u32,
     ) -> Result<(), AuthError> {
-        match status {
-            UserStatus::Active => Ok(()),
-            UserStatus::Locked => Err(AuthError::AccountLocked),
-            UserStatus::Inactive => Err(AuthError::AccountInactive),
-            // Anonymized users cannot log in — treat as inactive.
-            UserStatus::Anonymized => Err(AuthError::AccountInactive),
-            // Administratively deleted. Deliberately the same error as
-            // `Inactive`: whether an account was suspended or removed is not
-            // something an unauthenticated caller gets to learn.
-            UserStatus::Deleted => Err(AuthError::AccountInactive),
-            UserStatus::PendingVerification => {
-                if grace_period_hours > 0 {
-                    let grace_end = created_at + Duration::hours(grace_period_hours as i64);
-                    if Utc::now() <= grace_end {
-                        return Ok(());
-                    }
-                }
-                Err(AuthError::AccountPendingVerification)
-            }
-        }
+        account_status_permits(status, created_at, grace_period_hours)
     }
 
     /// Create a session and issue access + refresh tokens.
@@ -1633,5 +1638,68 @@ impl<
             )
             .await?;
         Ok(())
+    }
+}
+
+/// May an already-issued credential still act for `user`? (F4 P23W1-01, -03)
+///
+/// The question every place that turns a long-lived credential back into a
+/// principal asks — `/oauth2/authorize` resolving the OP cookie
+/// ([`AuthService::check_session_holder`]), the OAuth2 `authorization_code`
+/// and `refresh_token` grants in `axiam-oauth2`, and a federated sign-in,
+/// whose identity provider vouches for the person and not for the account
+/// (F4 P23W1-04). An
+/// account status change revokes no credential (only deletion, SCIM
+/// deprovisioning and a credential reset do), so each of them must ask; one
+/// function answers, so no two of them can disagree about who may act.
+///
+/// **Refused:** `Locked`, `Inactive`, `Anonymized`, `Deleted` — the states
+/// that mean "this account must not be used".
+///
+/// **Not refused: `PendingVerification`, whatever its age.** The email
+/// verification grace period is a rule about *signing in with a password*,
+/// which [`AuthService::login`] still applies. It is not a suspension, and it
+/// cannot be one here: `UserRepository::create` writes `PendingVerification`
+/// for every new row and federation provisioning never moves a federated user
+/// off it, so every federated account is pending for life. Refusing it here
+/// ended browser sign-on and every OAuth2 grant for the whole federated
+/// population a day after each account was provisioned. This is the rule T-160
+/// already applies to the token-exchange path, for the same reason.
+///
+/// # Errors
+///
+/// The [`AuthError`] a sign-in by this user would be refused with.
+pub fn account_may_act(user: &User) -> Result<(), AuthError> {
+    match user.status {
+        UserStatus::PendingVerification => Ok(()),
+        ref status => account_status_permits(status, user.created_at, 0),
+    }
+}
+
+/// The status rule itself; see `AuthService::check_user_status`.
+fn account_status_permits(
+    status: &UserStatus,
+    created_at: chrono::DateTime<Utc>,
+    grace_period_hours: u32,
+) -> Result<(), AuthError> {
+    match status {
+        UserStatus::Active => Ok(()),
+        UserStatus::Locked => Err(AuthError::AccountLocked),
+        UserStatus::Inactive => Err(AuthError::AccountInactive),
+        // Anonymized users cannot log in — treat as inactive.
+        UserStatus::Anonymized => Err(AuthError::AccountInactive),
+        // Administratively deleted. Deliberately the same error as
+        // `Inactive`: whether an account was suspended or removed is not
+        // something an unauthenticated caller gets to learn.
+        UserStatus::Deleted => Err(AuthError::AccountInactive),
+        UserStatus::PendingVerification => {
+            if grace_period_hours > 0 {
+                let grace_end = created_at + Duration::hours(grace_period_hours as i64);
+                if Utc::now() <= grace_end {
+                    return Ok(());
+                }
+            }
+            Err(AuthError::AccountPendingVerification)
+        }
     }
 }

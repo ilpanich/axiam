@@ -211,6 +211,43 @@ impl ServiceAccountRepository for MockSaRepo {
 struct MockClientRepo(ClientOutcome, UpgradeLog);
 
 impl OAuth2ClientRepository for MockClientRepo {
+    async fn create_with_registration_access_token(
+        &self,
+        _: axiam_core::models::oauth2_client::CreateOAuth2Client,
+        _: &str,
+    ) -> axiam_core::error::AxiamResult<(axiam_core::models::oauth2_client::OAuth2Client, String)>
+    {
+        unimplemented!("RFC 7592 is not exercised by this double")
+    }
+    async fn get_by_registration_access_token(
+        &self,
+        _: uuid::Uuid,
+        _: &str,
+        _: &str,
+    ) -> axiam_core::error::AxiamResult<Option<axiam_core::models::oauth2_client::OAuth2Client>>
+    {
+        unimplemented!("RFC 7592 is not exercised by this double")
+    }
+    async fn replace_dcr_registration(
+        &self,
+        _: uuid::Uuid,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: axiam_core::models::oauth2_client::DcrRegistrationReplacement,
+    ) -> axiam_core::error::AxiamResult<Option<axiam_core::models::oauth2_client::OAuth2Client>>
+    {
+        unimplemented!("RFC 7592 is not exercised by this double")
+    }
+    async fn delete_by_registration_access_token(
+        &self,
+        _: uuid::Uuid,
+        _: &str,
+        _: &str,
+    ) -> axiam_core::error::AxiamResult<Option<axiam_core::models::oauth2_client::OAuth2Client>>
+    {
+        unimplemented!("RFC 7592 is not exercised by this double")
+    }
     async fn create(&self, _i: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
         unimplemented!()
     }
@@ -508,6 +545,9 @@ impl RefreshTokenRepository for MockRefreshRepo {
                 created_at: Utc::now(),
                 rotated_at: None,
                 resource: None,
+                auth_time: i.auth_time,
+                acr: i.acr,
+                amr: i.amr,
             })
         } else {
             Err(AxiamError::Database("create failed".into()))
@@ -583,18 +623,41 @@ impl RefreshTokenRepository for MockRefreshRepo {
 #[derive(Clone)]
 struct MockUserRepo;
 
+/// F4 P23W1-01 — user ids for which [`MockUserRepo`] answers an account that
+/// may no longer sign in, or no account at all. Every other id is an `Active`
+/// account, which is what every test written before the review expects.
+const LOCKED_USER: Uuid = Uuid::from_u128(0x0f4_0001);
+const INACTIVE_USER: Uuid = Uuid::from_u128(0x0f4_0002);
+const DELETED_USER: Uuid = Uuid::from_u128(0x0f4_0003);
+const LAPSED_PENDING_USER: Uuid = Uuid::from_u128(0x0f4_0004);
+const REMOVED_USER: Uuid = Uuid::from_u128(0x0f4_0005);
+
 impl UserRepository for MockUserRepo {
     async fn create(&self, _i: CreateUser) -> AxiamResult<User> {
         unimplemented!()
     }
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<User> {
+        let status = match id {
+            LOCKED_USER => UserStatus::Locked,
+            INACTIVE_USER => UserStatus::Inactive,
+            DELETED_USER => UserStatus::Deleted,
+            LAPSED_PENDING_USER => UserStatus::PendingVerification,
+            REMOVED_USER => return Err(not_found()),
+            _ => UserStatus::Active,
+        };
+        // A pending account created long before the grace period's end.
+        let created_at = if id == LAPSED_PENDING_USER {
+            Utc::now() - chrono::Duration::days(30)
+        } else {
+            Utc::now()
+        };
         Ok(User {
             id,
             tenant_id,
             username: "alice".into(),
             email: "alice@example.com".into(),
             password_hash: "x".into(),
-            status: UserStatus::Active,
+            status,
             mfa_enabled: false,
             mfa_secret: None,
             totp_last_used_step: None,
@@ -608,7 +671,7 @@ impl UserRepository for MockUserRepo {
             phone_number_verified_at: None,
             address: None,
             metadata: serde_json::Value::Null,
-            created_at: Utc::now(),
+            created_at,
             updated_at: Utc::now(),
         })
     }
@@ -755,6 +818,9 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
         created_at: Utc::now(),
         rotated_at: None,
         resource: None,
+        auth_time: None,
+        acr: None,
+        amr: Vec::new(),
     }
 }
 
@@ -4081,4 +4147,406 @@ async fn the_refresh_path_copies_a_claims_request_and_never_widens_it() {
     // the successor are the stored scopes, not the named claims. A refresh
     // that read the claims request as an authorization would show up here.
     assert_eq!(created.lock().unwrap()[0].scopes, vec!["openid".to_owned()]);
+}
+
+// ---------------------------------------------------------------------------
+// X7.2 / D-9 — the authentication evidence travels on the refresh token
+// ---------------------------------------------------------------------------
+//
+// The refreshed ID token used to read its `auth_time`/`acr`/`amr` from the
+// session row the authorization code was issued under. `AuthService::refresh`
+// deletes that row at every browser-session rotation, so after the first one
+// the honour lane's refreshed token silently lost the claims (T23.1.2, F-1;
+// OIDC Core §12.2 wants the original `auth_time`). These pin the replacement:
+// the code's snapshot is written onto the refresh token at code exchange, is
+// copied verbatim at rotation, and is what the refresh grant reads — with no
+// session row anywhere in sight, which is what `MockSessionRepo::default()`
+// is.
+
+const D9_AUTH_TIME: i64 = 1_764_500_000;
+
+fn d9_snapshot_instant() -> chrono::DateTime<Utc> {
+    chrono::DateTime::<Utc>::from_timestamp(D9_AUTH_TIME, 0).unwrap()
+}
+
+fn d9_honour_client() -> Box<OAuth2Client> {
+    let mut client = make_client(&["authorization_code", "refresh_token"], &["openid"]);
+    client.authn_request_params = AuthnRequestParamsMode::Honour;
+    client
+}
+
+/// A stored refresh token carrying the snapshot an MFA login would have left.
+fn d9_stored_with_snapshot() -> RefreshToken {
+    use axiam_core::models::session::Amr;
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["openid"]);
+    // A session id that no repository in this file can resolve: the browser
+    // session this grant came from has long since rotated away.
+    stored.session_id = Some(Uuid::new_v4());
+    stored.auth_time = Some(d9_snapshot_instant());
+    stored.acr = Some("urn:axiam:acr:mfa".into());
+    stored.amr = vec![Amr::Pwd, Amr::Otp, Amr::Mfa];
+    stored
+}
+
+/// The write path: the refresh token is stamped from the **code's** snapshot.
+/// The mock session repo holds nothing, so there is no live session it could
+/// have been read from instead.
+#[tokio::test]
+async fn d9_the_code_exchange_snapshots_the_codes_evidence_onto_the_refresh_token() {
+    use axiam_core::models::session::Amr;
+    let mut code = make_auth_code(&["openid"], Some(PKCE_CHALLENGE));
+    code.session_id = Some(Uuid::new_v4());
+    code.auth_time = Some(d9_snapshot_instant());
+    code.acr = Some("urn:axiam:acr:1fa".into());
+    code.amr = vec![Amr::Pwd];
+
+    let refresh = MockRefreshRepo::new();
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(d9_honour_client()),
+        MockCodeRepo::ok(code),
+        TenantOutcome::Found,
+        refresh,
+    );
+    svc.exchange(
+        Uuid::new_v4(),
+        auth_code_req(Some(PKCE_VERIFIER)),
+        &no_cert(),
+    )
+    .await
+    .unwrap();
+
+    let calls = created.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].auth_time, Some(d9_snapshot_instant()));
+    assert_eq!(calls[0].acr.as_deref(), Some("urn:axiam:acr:1fa"));
+    assert_eq!(calls[0].amr, vec![Amr::Pwd]);
+}
+
+/// The snapshot is recorded whatever the client's lane — emission is the gate,
+/// exactly as it is for the code — so an operator who later flips a client to
+/// `honour` does not find its existing grants without evidence.
+#[tokio::test]
+async fn d9_the_snapshot_is_stored_for_an_ignore_lane_client_too() {
+    let mut code = make_auth_code(&["openid"], Some(PKCE_CHALLENGE));
+    code.auth_time = Some(d9_snapshot_instant());
+    code.amr = vec![axiam_core::models::session::Amr::Pwd];
+
+    let refresh = MockRefreshRepo::new();
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(make_client(
+            &["authorization_code", "refresh_token"],
+            &["openid"],
+        )),
+        MockCodeRepo::ok(code),
+        TenantOutcome::Found,
+        refresh,
+    );
+    svc.exchange(
+        Uuid::new_v4(),
+        auth_code_req(Some(PKCE_VERIFIER)),
+        &no_cert(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        created.lock().unwrap()[0].auth_time,
+        Some(d9_snapshot_instant())
+    );
+}
+
+/// The read path: an honour-lane refresh carries the snapshot's `auth_time`,
+/// `acr` and `amr` although no session row exists behind the grant.
+#[tokio::test]
+async fn d9_a_refreshed_honour_lane_id_token_carries_the_snapshot_with_no_session_row() {
+    let svc = build(
+        ClientOutcome::Found(d9_honour_client()),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new().with_get(d9_stored_with_snapshot()),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("raw-token"), &no_cert())
+        .await
+        .unwrap();
+
+    let claims = decode_claims(&resp.id_token.expect("an ID token"));
+    assert_eq!(claims["auth_time"], serde_json::json!(D9_AUTH_TIME));
+    assert_eq!(claims["acr"], serde_json::json!("urn:axiam:acr:mfa"));
+    assert_eq!(claims["amr"], serde_json::json!(["pwd", "otp", "mfa"]));
+}
+
+/// Rotation copies the snapshot verbatim, across two refreshes: the successor
+/// of the successor still attests the original authentication.
+#[tokio::test]
+async fn d9_rotation_copies_the_snapshot_onto_the_successor_across_two_refreshes() {
+    let mut stored = d9_stored_with_snapshot();
+    let mut last_claims = None;
+    for hop in 1..=2 {
+        let refresh = MockRefreshRepo::new().with_get(stored.clone());
+        let created = refresh.created.clone();
+        let svc = build(
+            ClientOutcome::Found(d9_honour_client()),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let resp = svc
+            .exchange(Uuid::new_v4(), refresh_req("raw-token"), &no_cert())
+            .await
+            .unwrap();
+        last_claims = Some(decode_claims(&resp.id_token.expect("an ID token")));
+
+        let calls = created.lock().unwrap();
+        assert_eq!(calls.len(), 1, "hop {hop}: rotation creates one successor");
+        assert_eq!(calls[0].auth_time, stored.auth_time, "hop {hop}");
+        assert_eq!(calls[0].acr, stored.acr, "hop {hop}");
+        assert_eq!(calls[0].amr, stored.amr, "hop {hop}");
+
+        // The successor is what the next refresh presents.
+        stored.auth_time = calls[0].auth_time;
+        stored.acr = calls[0].acr.clone();
+        stored.amr = calls[0].amr.clone();
+    }
+    assert_eq!(
+        last_claims.unwrap()["auth_time"],
+        serde_json::json!(D9_AUTH_TIME),
+        "the second refresh's ID token still carries the original auth_time"
+    );
+}
+
+/// **I4 twin.** A client on the ignore lane gets the claim set it has always
+/// got — no `auth_time`, `acr` or `amr` — although its refresh token now
+/// carries the snapshot.
+#[tokio::test]
+async fn d9_an_ignore_lane_refresh_emits_no_evidence_though_the_snapshot_is_stored() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["openid"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new().with_get(d9_stored_with_snapshot()),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("raw-token"), &no_cert())
+        .await
+        .unwrap();
+    let claims = decode_claims(&resp.id_token.expect("an ID token"));
+    for absent in ["auth_time", "acr", "amr"] {
+        assert!(claims.get(absent).is_none(), "{absent} in {claims}");
+    }
+}
+
+/// A `fapi2` client gets no evidence claims, even if its row were forced onto
+/// the honour lane and its refresh token carries a snapshot: the lane predicate
+/// refuses it at the last place that could emit.
+#[tokio::test]
+async fn d9_a_fapi2_refresh_emits_no_evidence_even_with_a_snapshot_and_a_forced_honour_row() {
+    let (mut client, ctx) = fapi2_refresh_client();
+    client.scopes = vec!["openid".into()];
+    client.authn_request_params = AuthnRequestParamsMode::Honour;
+    let mut stored = d9_stored_with_snapshot();
+    stored.token_hash = hash_refresh_token("raw-token");
+
+    let svc = build(
+        ClientOutcome::Found(client),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new().with_get(stored),
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("raw-token"), &ctx)
+        .await
+        .unwrap();
+    let claims = decode_claims(&resp.id_token.expect("an ID token"));
+    for absent in ["auth_time", "acr", "amr"] {
+        assert!(claims.get(absent).is_none(), "{absent} in {claims}");
+    }
+}
+
+/// A grant written before schema v68 carries no snapshot. It falls back to the
+/// live-session lookup — today's behaviour — and that is no worse than before:
+/// with the session present the evidence is the session's, and with it gone
+/// there is none.
+#[tokio::test]
+async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing() {
+    use axiam_core::models::session::{Amr, Session};
+
+    let session_id = Uuid::new_v4();
+    let authenticated_at = d9_snapshot_instant();
+    let session = Session {
+        id: session_id,
+        tenant_id: Uuid::new_v4(),
+        user_id: Uuid::new_v4(),
+        token_hash: "t".into(),
+        ip_address: None,
+        user_agent: None,
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        created_at: Utc::now(),
+        authenticated_at,
+        amr: vec![Amr::Pwd],
+        browser_token_hash: None,
+        refresh_replay_at: None,
+        refresh_replay_grace_accepted: 0,
+        refresh_replay_refused: 0,
+    };
+
+    // The hand-built pre-migration row: the columns are simply absent.
+    let mut stored = make_refresh(Some(Uuid::new_v4()), "client-1", &["openid"]);
+    stored.session_id = Some(session_id);
+    assert!(stored.auth_time.is_none() && stored.acr.is_none() && stored.amr.is_empty());
+
+    let upgrade: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    let build_with = |session: Option<Session>, stored: RefreshToken| {
+        TokenService::new(
+            MockClientRepo(ClientOutcome::Found(d9_honour_client()), upgrade.clone()),
+            MockSaRepo(SaOutcome::NotFound, upgrade.clone()),
+            dummy_code_repo(),
+            MockTenantRepo(TenantOutcome::Found),
+            MockRefreshRepo::new().with_get(stored),
+            MockUserRepo,
+            MockSessionRepo(
+                session,
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Vec::new())),
+            ),
+            MockAuditRepo::default(),
+            test_config(),
+            2_592_000,
+        )
+    };
+
+    let resp = build_with(Some(session), stored.clone())
+        .exchange(Uuid::new_v4(), refresh_req("raw-token"), &no_cert())
+        .await
+        .unwrap();
+    let claims = decode_claims(&resp.id_token.expect("an ID token"));
+    assert_eq!(claims["auth_time"], serde_json::json!(D9_AUTH_TIME));
+    assert_eq!(claims["amr"], serde_json::json!(["pwd"]));
+    assert_eq!(claims["acr"], serde_json::json!("urn:axiam:acr:1fa"));
+
+    let resp = build_with(None, stored)
+        .exchange(Uuid::new_v4(), refresh_req("raw-token"), &no_cert())
+        .await
+        .unwrap();
+    let claims = decode_claims(&resp.id_token.expect("an ID token"));
+    for absent in ["auth_time", "acr", "amr"] {
+        assert!(claims.get(absent).is_none(), "{absent} in {claims}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F4 P23W1-01 — a user-bound grant re-reads the account it acts for
+// ---------------------------------------------------------------------------
+//
+// An administrator who locks or deactivates a user revokes no credential: the
+// session refresh path and (since T23.1.3) `/oauth2/authorize` re-read the
+// account instead. The OAuth2 refresh grant did not, and each rotation stamps
+// a fresh `expires_at`, so a relying party holding a suspended user's refresh
+// token kept minting access and ID tokens for as long as it kept refreshing.
+
+/// Every account state the sign-in rule refuses, with the id the mock answers
+/// it for.
+const REFUSED_ACCOUNTS: [(&str, Uuid); 4] = [
+    ("locked", LOCKED_USER),
+    ("inactive", INACTIVE_USER),
+    ("deleted", DELETED_USER),
+    ("removed", REMOVED_USER),
+];
+
+#[tokio::test]
+async fn p23w1_01_a_refresh_grant_for_an_account_that_may_no_longer_sign_in_mints_nothing() {
+    for (label, user_id) in REFUSED_ACCOUNTS {
+        let refresh =
+            MockRefreshRepo::new().with_get(make_refresh(Some(user_id), "client-1", &["openid"]));
+        let created = refresh.created.clone();
+        let svc = build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .expect_err(label);
+        assert_eq!(err.error_code(), "invalid_grant", "{label}: {err}");
+        assert!(
+            created.lock().unwrap().is_empty(),
+            "{label}: no successor refresh token may be written"
+        );
+    }
+}
+
+/// The other side of the line: an active account, a grant with no user behind
+/// it at all, and a `PendingVerification` account long past its grace period
+/// (F4 P23W1-03 — every federated account is pending for life, so the grace
+/// period is a password sign-in rule and never a reason to end a grant) all
+/// refresh exactly as before.
+#[tokio::test]
+async fn p23w1_01_a_refresh_grant_for_an_active_account_or_no_account_still_rotates() {
+    for (case, user_id) in [
+        ("an active account", Some(Uuid::new_v4())),
+        ("no account", None),
+        ("a lapsed pending account", Some(LAPSED_PENDING_USER)),
+    ] {
+        let refresh =
+            MockRefreshRepo::new().with_get(make_refresh(user_id, "client-1", &["openid"]));
+        let svc = build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let resp = svc
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .unwrap();
+        assert!(resp.refresh_token.is_some(), "{case}");
+    }
+}
+
+/// The code is redeemed within a minute of issuance, but it can be issued to
+/// an access token (the bearer and `axiam_access` path at `/oauth2/authorize`
+/// does not re-read the account), and redeeming it is what turns a 15-minute
+/// credential into a long-lived refresh token. Refused there too.
+#[tokio::test]
+async fn p23w1_01_a_code_for_an_account_that_may_no_longer_sign_in_mints_nothing() {
+    for (label, user_id) in REFUSED_ACCOUNTS {
+        let mut code = make_auth_code(&["profile"], None);
+        code.user_id = user_id;
+        let refresh = MockRefreshRepo::new();
+        let created = refresh.created.clone();
+        let svc = build(
+            ClientOutcome::Found(make_client(
+                &["authorization_code", "refresh_token"],
+                &["profile"],
+            )),
+            MockCodeRepo::ok(code),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+            .await
+            .expect_err(label);
+        assert_eq!(err.error_code(), "invalid_grant", "{label}: {err}");
+        assert!(created.lock().unwrap().is_empty(), "{label}");
+    }
+}
+
+/// F4 P23W1-03 — the code grant's twin of the pending row above.
+#[tokio::test]
+async fn p23w1_03_a_code_for_a_pending_account_past_its_grace_period_is_redeemed() {
+    let mut code = make_auth_code(&["profile"], None);
+    code.user_id = LAPSED_PENDING_USER;
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(code),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    svc.exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+        .await
+        .expect("a federated account is pending for life and must still be served");
 }

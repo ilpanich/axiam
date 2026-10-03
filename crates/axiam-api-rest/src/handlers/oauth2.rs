@@ -600,6 +600,49 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         None => None,
     };
 
+    // T23.1.3 — the account, re-read. A session row says who authenticated and
+    // when; it says nothing about whether that account may still act, and the
+    // cookie naming it lives as long as the session does. An administrator who
+    // locks or deactivates a user does not revoke their sessions — the refresh
+    // path re-reads the account instead (`check_user_status`) — so this is
+    // another place a session becomes a principal, and it applies the
+    // existing-credential rule (`axiam_auth::service::account_may_act`, shared
+    // with the OAuth2 grants and federated sign-in since F4 P23W1-01/-04):
+    // suspended statuses are refused, `PendingVerification` is not (P23W1-03 —
+    // every federated account holds it for life, so refusing it past the grace
+    // period ended browser sign-on for all of them a day after provisioning).
+    // A session whose account fails it is treated exactly as a session that no
+    // longer exists: the cookie is stale, the browser is asked to sign in, and
+    // the sign-in page is where the account's state is explained.
+    let resolved = match resolved {
+        Some(session) => match state.user_repo.get_by_id(tenant_id, session.user_id).await {
+            Ok(user) => match state.auth_service.check_session_holder(&user) {
+                Ok(()) => Some(session),
+                Err(reason) => {
+                    tracing::info!(
+                        %tenant_id,
+                        session_id = %session.id,
+                        reason = %reason,
+                        "an OP browser session names an account that may no longer \
+                         sign in; not resolving a principal from it"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    %tenant_id,
+                    session_id = %session.id,
+                    "could not read the account behind an OP browser session; \
+                     treating the request as anonymous"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
     if let Some(session) = resolved {
         return Ok(AuthorizePrincipal {
             tenant_id,
@@ -4808,9 +4851,11 @@ mod jwks_handler_tests {
 /// Form body accepted by `POST /oauth2/par`.
 ///
 /// These are the ordinary authorization-request parameters, plus the client
-/// credentials that make the push attributable. `request_uri` is deliberately
-/// absent: RFC 9126 §2.1 forbids pushing one, because a chained push would let
-/// the second request inherit the first's authentication.
+/// credentials that make the push attributable. `request_uri` and `request`
+/// are modelled only so that they can be refused: RFC 9126 §2.1 forbids
+/// pushing a `request_uri`, because a chained push would let the second
+/// request inherit the first's authentication, and AXIAM accepts no request
+/// object on any carrier (`request_not_supported`).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct PushedAuthorizationRequest {
     pub client_id: String,
@@ -4854,6 +4899,22 @@ pub struct PushedAuthorizationRequest {
     /// authenticated origin is a different request from the one finally
     /// presented at the authorization endpoint.
     pub request_uri: Option<String>,
+    /// RFC 9101 `request` — a request object by value. AXIAM does not accept
+    /// one on either carrier (X7 G12), and this field exists so that it can be
+    /// **refused** here with the code the authorization endpoint already gives
+    /// it, `request_not_supported`.
+    ///
+    /// Leaving it off the struct had serde drop it and the endpoint answer
+    /// `201`, which made the two carriers disagree about the same parameter —
+    /// and the disagreement was not cosmetic (T23.1.1). RFC 9126 §3 lets a
+    /// client push a request object, and RFC 9101 §6.3 tells it the server
+    /// will use only the object's parameters; a client that put `max_age=0`
+    /// or `prompt=login` inside one, beside the bare required fields, had
+    /// those security-bearing parameters silently discarded, so they never
+    /// reached the `fapi2` gate that refuses them or the honour lane that
+    /// acts on them. Refusing the object is the only answer that does not
+    /// tell the client a guarantee was applied when it was not.
+    pub request: Option<String>,
     /// RFC 9449 §10 — the JWK thumbprint of the key the client will prove
     /// possession of at the token endpoint.
     ///
@@ -5068,6 +5129,18 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
              (RFC 9126 §2.1)"
                 .into(),
         ));
+    }
+
+    // X7 G12 on the second carrier (T23.1.1). A request object by value gets
+    // the answer `/oauth2/authorize` gives it, and for the same reason: AXIAM
+    // reads no request object, so accepting one would mean serving the
+    // request without the parameters it carried. Decided by the same
+    // classifier the authorization endpoint uses, so a blank template value
+    // is "no object" on both carriers rather than on one. Before client
+    // authentication for the reason the `request_uri` refusal above is: it
+    // names a parameter the caller sent and nothing about the client.
+    if let Some(object) = classify_request_object(req.request.as_deref(), None) {
+        return build_oauth2_error_response(&object.into_error());
     }
 
     // T21.5 — before client authentication, as at the token endpoint.

@@ -309,6 +309,9 @@ async fn password_change_revokes_oauth2_refresh_tokens() {
             requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + Duration::hours(24),
             resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
         })
         .await
         .expect("create refresh token");
@@ -420,6 +423,9 @@ async fn password_reset_confirm_revokes_oauth2_refresh_tokens() {
             requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + Duration::hours(24),
             resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
         })
         .await
         .expect("create oauth2 refresh token");

@@ -870,6 +870,65 @@ pub struct UpdateOAuth2Client {
     pub allowed_resources: Option<Vec<String>>,
 }
 
+/// The fields an RFC 7592 `PUT /oauth2/register/{client_id}` may replace on a
+/// `dcr` client (T23.4.1).
+///
+/// A type of its own rather than an [`UpdateOAuth2Client`], because the
+/// property worth having is that the *repository* cannot write anything else.
+/// `UpdateOAuth2Client` can set `profile`, `authn_request_params`,
+/// `browser_sso`, the mTLS bindings and the DPoP flags; a self-service update
+/// carried in that type would be one forgotten `None` away from letting a
+/// stranger opt a client into the FAPI lane or the login hop. This type has no
+/// field for any of them, so `managed_by`, the tenant, the profile, the X7
+/// flags and everything else a registration cannot set are left exactly as
+/// they are by construction.
+///
+/// Every field is a whole-value replacement (RFC 7592 §2.2): the request is
+/// the client's complete metadata, not a patch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DcrRegistrationReplacement {
+    /// RFC 7591 §2 `client_name`, as `axiam_oauth2::dcr::validate` resolved it.
+    pub name: String,
+    /// The redirect URIs, already through the tenant's host allow-list.
+    pub redirect_uris: Vec<String>,
+    /// The grants, within `{authorization_code, refresh_token}`.
+    pub grant_types: Vec<String>,
+    /// The scopes, within `dcr_allowed_scopes`.
+    pub scopes: Vec<String>,
+    /// The client-authentication method. The handler refuses a change, so
+    /// this always equals what is stored; it is written so that the row and
+    /// the response cannot disagree.
+    pub token_endpoint_auth_method: ClientAuthMethod,
+    /// RFC 7591 `jwks`, for `private_key_jwt`. `None` clears.
+    pub jwks: Option<String>,
+    /// RFC 7591 `jwks_uri`, for `private_key_jwt`. `None` clears.
+    pub jwks_uri: Option<String>,
+    /// The tenant's `external_client_allowed_resources` **as of the update**
+    /// (D3). Never the request's.
+    pub allowed_resources: Vec<String>,
+}
+
+impl DcrRegistrationReplacement {
+    /// The replaceable subset of a validated registration.
+    ///
+    /// Taking a [`CreateOAuth2Client`] is what makes a `PUT` run through the
+    /// same `validate` a registration does: the handler has nothing else to
+    /// build this from.
+    #[must_use]
+    pub fn from_validated(create: &CreateOAuth2Client) -> Self {
+        Self {
+            name: create.name.clone(),
+            redirect_uris: create.redirect_uris.clone(),
+            grant_types: create.grant_types.clone(),
+            scopes: create.scopes.clone(),
+            token_endpoint_auth_method: create.token_endpoint_auth_method,
+            jwks: create.jwks.clone(),
+            jwks_uri: create.jwks_uri.clone(),
+            allowed_resources: create.allowed_resources.clone(),
+        }
+    }
+}
+
 /// Represents a stored OAuth2 authorization code (short-lived, single-use).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizationCode {
@@ -1057,6 +1116,30 @@ pub struct RefreshToken {
     /// value and today's behaviour: those grants named no resource.
     #[serde(default)]
     pub resource: Option<String>,
+    /// X7.2 / D-9 — when the end user authenticated, as the authorization code
+    /// this grant descends from recorded it. Never read from a live session.
+    ///
+    /// Carried so that a refreshed ID token on the honour lane asserts the
+    /// *same* `auth_time` the code-exchanged one did (OIDC Core §12.2). The
+    /// session row the code was issued under does not outlive the browser's
+    /// first session rotation — `AuthService::refresh` deletes it — so a refresh
+    /// that went looking for it there found nothing and silently dropped the
+    /// claim. The snapshot is taken once, at code exchange, from the **code's**
+    /// snapshot, and copied verbatim at every OAuth2 rotation.
+    ///
+    /// `None` for every row written before schema v68, which is the honest
+    /// value: the refresh grant then falls back to the live-session lookup it
+    /// used before, so a pre-migration grant is no worse off than it was.
+    #[serde(default)]
+    pub auth_time: Option<DateTime<Utc>>,
+    /// X7.2 / D-9 — see [`Self::auth_time`]. Whatever the code recorded, which
+    /// is nothing for a client off the honour lane.
+    #[serde(default)]
+    pub acr: Option<String>,
+    /// X7.2 / D-9 — see [`Self::auth_time`]. Empty for a pre-v68 row, and for a
+    /// grant with no browser session behind it.
+    #[serde(default)]
+    pub amr: Vec<Amr>,
 }
 
 /// Input for creating a new refresh token.
@@ -1075,6 +1158,12 @@ pub struct CreateRefreshToken {
     pub requested_userinfo_claims: Vec<String>,
     /// T21.3 / RFC 8707 — see [`RefreshToken::resource`].
     pub resource: Option<String>,
+    /// X7.2 / D-9 — see [`RefreshToken::auth_time`].
+    pub auth_time: Option<DateTime<Utc>>,
+    /// X7.2 / D-9 — see [`RefreshToken::acr`].
+    pub acr: Option<String>,
+    /// X7.2 / D-9 — see [`RefreshToken::amr`].
+    pub amr: Vec<Amr>,
     pub expires_at: DateTime<Utc>,
 }
 

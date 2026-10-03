@@ -76,6 +76,9 @@ async fn insert_token_expiring(
         requested_userinfo_claims: Vec::new(),
         expires_at,
         resource: None,
+        auth_time: None,
+        acr: None,
+        amr: Vec::new(),
     })
     .await
     .unwrap();

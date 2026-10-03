@@ -963,8 +963,10 @@ pub async fn oidc_form_callback_public<C: Connection + Clone>(
         &login_state.redirect_uri,
         // X7.2 — the ID token's `auth_time`, carried onto the handoff row so
         // that the session issued one redirect later is still dated by the
-        // provider.
-        result.upstream_auth_time,
+        // provider. Bounded by the verification moment (T23.1.2, D-10) here,
+        // before the hop, so the row never holds an instant later than the
+        // assertion was checked.
+        super::federation::verified_upstream_auth_time(&resolved.config, result.upstream_auth_time),
     )
     .await
 }
@@ -1094,7 +1096,10 @@ pub async fn saml_acs_form_public<C: Connection + Clone>(
         &callback_result.user,
         &login_state.redirect_uri,
         // X7.2 — the assertion's `AuthnInstant`, carried for the same reason.
-        callback_result.upstream_auth_time,
+        super::federation::verified_upstream_auth_time(
+            &resolved.config,
+            callback_result.upstream_auth_time,
+        ),
     )
     .await
 }

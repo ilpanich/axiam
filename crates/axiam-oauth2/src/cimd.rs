@@ -1143,6 +1143,33 @@ mod tests {
         );
     }
 
+    /// X7.1 (T23.1.1 audit): a metadata document cannot opt its client into
+    /// the honour lane, the login hop or a FAPI profile. The publisher is
+    /// whoever controls a URL; the two Basic-OP switches are forced to the
+    /// stricter default exactly as the DCR path forces them.
+    #[test]
+    fn a_document_cannot_opt_itself_into_the_honour_lane_or_the_login_hop() {
+        let id = "https://example.com/vscode.json";
+        let url = Url::parse(id).unwrap();
+        let mut doc = vscode_document(id);
+        doc["authn_request_params"] = serde_json::json!("honour");
+        doc["browser_sso"] = serde_json::json!(true);
+        doc["profile"] = serde_json::json!("fapi2");
+        let validated = validate(
+            Uuid::new_v4(),
+            &url,
+            &parse_doc(&doc),
+            &oidc_policy(cimd_policy()),
+        )
+        .expect("unknown metadata members are ignored, not refused");
+        assert_eq!(
+            validated.create.authn_request_params,
+            AuthnRequestParamsMode::Ignore
+        );
+        assert!(!validated.create.browser_sso);
+        assert_eq!(validated.create.profile, ClientProfile::Standard);
+    }
+
     #[test]
     fn a_claude_code_shaped_document_is_admitted_with_the_rfc_default_grant() {
         let id = "https://agent.example.com/metadata.json";

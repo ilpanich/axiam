@@ -43,7 +43,7 @@ support, LDAP as an external IdP and the polish of a mature hosted product.
 | Audit trail | Append-only audit; OpenPGP keys for audit signing (`crates/axiam-pki/src/pgp.rs`) | Event-sourced store; audit retention can be unlimited | [Z3] |
 | Device grant | Yes | Yes | [Z7] |
 | Token exchange (RFC 8693) | Delegation (`act`), opt-in impersonation, external-IdP exchange | Supported and on by default; impersonation via `actor_token` | [Z7][Z8] |
-| Dynamic client registration | RFC 7591 | RFC 7591 + RFC 7592 (since v4.17.0) | [Z9] |
+| Dynamic client registration | RFC 7591 + RFC 7592 (Phase 23 W1, T23.4.1) | RFC 7591 + RFC 7592 (since v4.17.0) | [Z9] |
 | Client ID Metadata Document | **Yes** | Not released (pull request open) | [Z10] |
 | PAR | **Yes** | No (issue #10239 open) | [Z6] |
 | DPoP | **Yes** | No (issue #5402 open since 2023) | [Z6] |
@@ -81,9 +81,11 @@ support, LDAP as an external IdP and the polish of a mature hosted product.
    PostgreSQL (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5, §10). A documented
    "AMQP-less" profile, or a smaller broker footprint, would remove the one
    efficiency cell Zitadel wins.
-4. **RFC 7592 client management.** Zitadel added it next to RFC 7591 in
-   v4.17.0 [Z9]. MCP clients increasingly expect to update or delete their
-   own registration.
+4. **RFC 7592 client management** — **closed (2026-10-03, G-4).** Zitadel
+   added it next to RFC 7591 in v4.17.0 [Z9]. AXIAM now serves `GET`/`PUT`/`DELETE
+   /oauth2/register/{client_id}` behind a per-client registration access
+   token ([`docs/admin/dynamic-client-registration.md`](../docs/admin/dynamic-client-registration.md),
+   contract §28.12). The row in §2 is now parity.
 5. **Hosted offering and operational maturity.** Zitadel sells a managed
    cloud [Z1]. This is a go-to-market gap rather than an engineering one,
    but buyers weigh it.
@@ -95,7 +97,8 @@ support, LDAP as an external IdP and the polish of a mature hosted product.
    ships an agent-friendly CLI and `/mcp` documentation endpoints, and is
    intended to become the next major version [Z19]. It is not released yet.
    Watch it for an agent-identity story that could compete with AXIAM's MCP
-   positioning.
+   positioning. AXIAM's own story is now written down: [*Identity for
+   agents*](../docs/guides/identity-for-agents.md) (G-15, 2026-10-02).
 
 ## 4. AXIAM advantages
 
@@ -134,6 +137,8 @@ support, LDAP as an external IdP and the polish of a mature hosted product.
 | Date | Change | Sources |
 |---|---|---|
 | 2026-10-02 | Baseline written. Since the run-5 baseline (v4.16.2): v4.17.0 added RFC 7591/7592 dynamic client registration, "Sign in with Zitadel" and native app links for passkeys. v4.17.2 fixed token-exchange downscoping. v4.18.0 was withdrawn ("skip this release"). v4.19.2 made session-cookie signing mandatory (breaking change). Several critical and high advisories were fixed. The CIMD pull request is still open. `zitadel/nextgen` appeared as the preview of the next major version. | [Z9][Z10][Z19][Z20] |
+| 2026-10-03 | G-4 (RFC 7592) shipped on the Phase 23 W1 branch: the dynamic-registration row is parity and P2 item 4 is closed. G-15: AXIAM's agent-identity story is documented, so the `zitadel/nextgen` watch item now has a named counterpart. | — |
+| 2026-10-02 | G-12 (front-channel logout) declined and recorded in the design document (D-6). This comparison has no front-channel row or gap-list entry, so none changed. Revisit only on an adopter request. | — |
 
 ## Sources
 

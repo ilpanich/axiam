@@ -843,6 +843,9 @@ mod single_use_serialisation {
             requested_userinfo_claims: Vec::new(),
             expires_at: Utc::now() + Duration::seconds(3600),
             resource: None,
+            auth_time: None,
+            acr: None,
+            amr: Vec::new(),
         })
         .await
         .unwrap();

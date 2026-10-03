@@ -1,5 +1,6 @@
 import type { DocPage } from "./types";
 import { DOCS_VERIFIED_RELEASE } from "../version";
+import { contractLink } from "../contractAnchors";
 
 /**
  * "OAuth2 & OIDC" — the authorization-server surface.
@@ -73,6 +74,9 @@ export const OAUTH2_PAGES: DocPage[] = [
           { method: "GET", path: "/oauth2/revocations", summary: "Hashed ids of recently revoked sessions. Optional, off by default.", public: true },
           { method: "POST", path: "/oauth2/device_authorization", summary: "Begin a device grant (RFC 8628).", public: true },
           { method: "POST", path: "/oauth2/register", summary: "Dynamic client registration (RFC 7591). Off by default on every tenant: `403` until enabled.", public: true },
+          { method: "GET", path: "/oauth2/register/{client_id}", summary: "RFC 7592: a self-registered client reads its registration, with its registration access token.", public: true },
+          { method: "PUT", path: "/oauth2/register/{client_id}", summary: "RFC 7592: replace the registration under the tenant's current policy; rotates the token.", public: true },
+          { method: "DELETE", path: "/oauth2/register/{client_id}", summary: "RFC 7592: deregister the client and revoke its refresh tokens.", public: true },
           { method: "GET", path: "/oauth2/end_session", summary: "RP-initiated logout.", public: true },
         ],
       },
@@ -269,7 +273,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         rows: [
           ["carries a valid `axiam_op_session` cookie for this tenant", "authorized as that user; the ordinary code redirect follows"],
           ["carries none", "`302` to `/login?return_to=…`, and back here afterwards"],
-          ["carries one that names no live session", "`302` to `/login?return_to=…&reauth=1`; the dead cookie is cleared"],
+          ["carries one that names no live session, or a session whose account has since been locked, deactivated or removed", "`302` to `/login?return_to=…&reauth=1`; the dead cookie is cleared. The account is re-read every time, so suspending a user ends their browser sign-on without a logout"],
         ],
       },
       {
@@ -306,8 +310,8 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one.",
-          "**Request objects are rejected, not half-implemented** — `request` gives `request_not_supported` and a non-PAR `request_uri` gives `request_uri_not_supported`.",
+          "**A FAPI 2.0 client is refused the lane outright**, on create and on update: the two settings are two answers to the same question, and a registration may hold at most one. Sending one of the security-bearing parameters — including a `claims` that asks for `id_token.acr` — is `invalid_request` for such a client, pushed or inline, rather than a parameter silently dropped.",
+          "**Request objects are rejected, not half-implemented** — `request` gives `request_not_supported`, at the authorization endpoint and at PAR alike, and a non-PAR `request_uri` gives `request_uri_not_supported`.",
           "**Authentication evidence is the provider's for a federated login** — `auth_time` comes from the upstream `auth_time` or `AuthnInstant`, never AXIAM's clock — and is copied, never restamped, across a refresh.",
           "**On the** `ignore` **lane none of the new refusals can occur**: a value AXIAM cannot parse is dropped, exactly as it always was.",
         ],
@@ -481,6 +485,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           "**What it may say is narrowed.** Redirect URIs pass the admin API's validator and then the tenant's `dcr_allowed_redirect_hosts` globs (the loopback hosts are always allowed); grants are limited to the authorization code and refresh; scopes to `dcr_allowed_scopes`, which may not contain `address` or `phone`; the profile is forced to `standard`; a `software_statement` is refused.",
           "**Every client records its provenance** in `managed_by`: `admin` for one an administrator created, `dcr` for a self-registered one, `cimd` for one resolved from a metadata document. It is set by the creating code path and absent from the update API. A client that is not `admin` is never on the FAPI profile, is always consent-gated, and is the only kind the sweeper touches.",
           "**Abuse controls**: a per-IP limit of 5 a minute (`AXIAM__RATE_LIMIT__DCR_PER_MIN`, the smallest in AXIAM), a per-tenant ceiling (`dcr_max_clients`, default 20; the next registration is `403`), a sweep of self-registered clients unused for `dcr_unused_client_ttl_days` (default 30; `0` disables it; reported at `/health/jobs` as `dcr_unused_clients`), and an audit event for every attempt, successful or not.",
+          "**A registered client manages itself** (RFC 7592, since T23.4.1). The registration also returns, once, a `registration_client_uri` and a `registration_access_token`; with them — and only them, in the `Authorization` header — the client can read, replace and delete its own registration. A replacement is validated as a registration under the tenant's current policy and rotates the token; a deletion revokes the client's refresh tokens and frees its quota slot. Unknown client and wrong token are the same `401`. Admin-created and CIMD clients have no such token ([T-289](#/security/diagram/2/T-289)).",
           "**A registration nobody authorized is reclaimed in an hour** in a tenant whose effective mode is `anonymous` — whatever the TTL says, and even with the TTL at `0`. In `anonymous` mode the ceiling is also an availability budget a stranger could fill in about four minutes; the T21.8 security review found it held for thirty days, and the hour closed that before release ([T-272](#/security/diagram/2/T-272)). A per-address share of the quota is not implemented — the accepted residual.",
         ],
       },
@@ -488,6 +493,8 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "links",
         links: [
           { label: "Dynamic client registration", href: "https://github.com/ilpanich/axiam/blob/main/docs/admin/dynamic-client-registration.md", note: "every policy field, the error codes, the sweeper and its second clock, MCP Inspector translated from Keycloak's guide" },
+          { label: "The client configuration endpoint (RFC 7592)", href: "https://github.com/ilpanich/axiam/blob/main/docs/admin/dynamic-client-registration.md#the-client-configuration-endpoint-rfc-7592", note: "read, update and delete with the registration access token; rotation, refusals, what deletion revokes" },
+          { label: "SDK contract §28.12", href: "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md#§2812-rfc-7592-client-configuration-operations-contract-153", note: "the three SDK operations and why the token is Sensitive" },
         ],
       },
       { type: "h", id: "client-id-metadata", text: "Client ID metadata documents" },
@@ -539,7 +546,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       { type: "h", id: "mcp-servers", text: "MCP servers" },
       {
         type: "p",
-        text: "AXIAM can front a Model Context Protocol server as its OAuth 2.0 authorization server — public clients with PKCE for desktop MCP clients (Claude Code, VS Code, MCP Inspector), RFC 8707 resource indicators so a token is addressed at the MCP server rather than at AXIAM, RFC 7591 dynamic client registration and Client ID Metadata Documents for clients nobody registered in advance, and an opt-in per-tenant issuer for a deployment fronting more than one tenant's MCP servers — each described in its section above. Publishing the RFC 9728 protected-resource document and checking `aud` is the MCP server's own job — built with the SDK's §28 resource-server helpers — not anything AXIAM the authorization server exposes.",
+        text: "AXIAM can front a Model Context Protocol server as its OAuth 2.0 authorization server — public clients with PKCE for desktop MCP clients (Claude Code, VS Code, MCP Inspector), RFC 8707 resource indicators so a token is addressed at the MCP server rather than at AXIAM, RFC 7591 dynamic client registration and Client ID Metadata Documents for clients nobody registered in advance, and an opt-in per-tenant issuer for a deployment fronting more than one tenant's MCP servers — each described in its section above. Publishing the RFC 9728 protected-resource document and checking `aud` is the MCP server's own job — built with the SDK's §28 resource-server helpers — not anything AXIAM the authorization server exposes. [Identity for agents](#/docs/agents) walks one agent through registration, delegation, resource indicators and revocation.",
       },
       {
         type: "links",
@@ -686,6 +693,178 @@ export const OAUTH2_PAGES: DocPage[] = [
             label: "Federated token exchange",
             href: "https://github.com/ilpanich/axiam/blob/main/docs/api/federated-token-exchange.md",
             note: "Accepting a partner IdP's token — Entra, Okta or Keycloak — and turning it into an AXIAM one.",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    slug: "agents",
+    section: "OAuth2 & OIDC",
+    navLabel: "Identity for agents",
+    title: "Identity for agents",
+    intro:
+      "AXIAM has no separate agent account type. It has the standard pieces an agent needs — a machine identity, delegated acting on behalf of a user, tokens addressed at one server, and revocation — and this page is the map between them.",
+    blocks: [
+      { type: "h", id: "map", text: "One agent, five questions" },
+      {
+        type: "p",
+        text: "An AI agent, an MCP client or an automation that acts for a person is a non-human caller that sometimes needs an identity of its own and sometimes needs to speak for a user. Each question below has a shipped, standard answer; none of it is a new protocol.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["The agent needs to", "AXIAM piece", "Standard"],
+        rows: [
+          ["Exist as a machine identity", "A service account, or a confidential OAuth2 client", "RFC 6749 client credentials, RFC 8705 mTLS"],
+          ["Arrive without an administrator registering it", "Dynamic client registration, or a Client ID Metadata Document", "RFC 7591, CIMD draft"],
+          ["Run on a user's machine", "A public client with a loopback redirect", "RFC 8252 §7.3, PKCE"],
+          ["Act on behalf of a user, visibly", "Token exchange with an `act` claim", "RFC 8693"],
+          ["Receive a token addressed at one server", "Resource indicators", "RFC 8707"],
+          ["Be the protected server an agent calls", "The SDK's MCP resource-server helpers", "RFC 9728, RFC 6750"],
+          ["Be cut off", "The revocation endpoint, the session revocation feed, short lifetimes", "RFC 7009"],
+        ],
+      },
+      { type: "h", id: "register", text: "Register: pick by what the agent is" },
+      {
+        type: "p",
+        text: "The registration path decides which grants a client may hold, and the server refuses the combinations that would let a stranger mint a token on the strength of an identity nobody vetted.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["The agent is", "Register it as", "May hold"],
+        rows: [
+          ["A backend acting as itself", "A [service account](#/docs/service-accounts), with a secret or a bound certificate", "`client_credentials`"],
+          ["A backend acting for users", "A confidential OAuth2 client, created by an administrator", "`authorization_code`, `refresh_token`, `client_credentials`, and token exchange when registered for it"],
+          ["A desktop or CLI agent (Claude Code, VS Code, MCP Inspector)", "A [public client](#/docs/oauth2) with a loopback redirect, or a CIMD client", "`authorization_code` with PKCE, `refresh_token`"],
+          ["An agent nobody registered in advance", "Dynamic registration or a Client ID Metadata Document", "`authorization_code`, `refresh_token` only"],
+        ],
+      },
+      {
+        type: "note",
+        text: "**A public client, a dynamically registered client and a CIMD client can never hold `client_credentials` or token exchange.** They present no credential, or one nobody vetted, so neither grant would be attributable. An agent that must exchange a user's token is a confidential client an administrator created.",
+      },
+      { type: "h", id: "delegate", text: "Act on behalf of a user" },
+      {
+        type: "p",
+        text: "A confidential client holding the user's access token exchanges it ([RFC 8693](#/docs/token-exchange)) for a narrower one, presenting its own token as the `actor_token`. The issued token keeps `sub` as the user and gains an `act` claim naming the agent, so a downstream service can see and log both parties. Leaving the actor token out asks for impersonation, which is refused unless the client holds an explicit grant.",
+      },
+      {
+        type: "list",
+        items: [
+          "**Narrowing only** — scopes are `requested ∩ subject ∩ client-registered`; a scope the subject lacks is `invalid_scope`, never silently dropped.",
+          "**Depth-capped** — an `act` chain holds at most three actors; a fourth exchange is `invalid_request`.",
+          "**Never outlives its subject** — and no refresh token comes back. Re-run the exchange.",
+          "**Audited** — every exchange, successful or not, records client, subject, actor, scopes, audience and outcome.",
+        ],
+      },
+      {
+        type: "codegroup",
+        caption: "the §15 token_exchange operation, delegation form",
+        tabs: [
+          {
+            label: "TypeScript",
+            code: "const exchanged = await client.tokenExchange({\n  subjectToken: userAccessToken,\n  subjectTokenType: 'urn:ietf:params:oauth:token-type:access_token',\n  actorToken: agentAccessToken,   // present => delegation\n  scopes: ['read:orders'],\n  resource: 'https://mcp.example.com/mcp',\n});",
+          },
+          {
+            label: "Python",
+            code: "exchanged = client.token_exchange(\n    user_access_token,\n    \"urn:ietf:params:oauth:token-type:access_token\",\n    actor_token=agent_access_token,   # present => delegation\n    scopes=[\"read:orders\"],\n    resource=\"https://mcp.example.com/mcp\",\n)",
+          },
+          {
+            label: "Rust",
+            code: "// one parameters value (TokenExchangeParams) carrying the canonical fields\nlet exchanged = client.token_exchange(params).await?;",
+          },
+        ],
+      },
+      {
+        type: "note",
+        text: "The contract pins the operation name and the parameter names and order; each SDK packages the arguments in its own idiom, so its API reference is the authority on exact type names. The other SDKs mirror these three under the names in the contract's per-language table.",
+      },
+      {
+        type: "warn",
+        text: "AXIAM does not implement RFC 8693's `may_act` claim. Who may exchange is decided by which clients carry the exchange grant, by their registered scopes and `allowed_resources`, and by the subject's own privileges. Hand the exchange grant out like any capability that lets a client speak for your users.",
+      },
+      { type: "h", id: "audience", text: "Address the token at one server" },
+      {
+        type: "p",
+        text: "Send `resource=<absolute URI>` (RFC 8707) and the token's `aud` is that URI, so the receiving server can check the token was minted for it. The client may only name resources in its `allowed_resources` — compared exactly, never by prefix — and one resource per request. The same field is the allow-list for a token exchange's `audience`. A resource-bound token is not a token for AXIAM: AXIAM's own APIs reject it, so an agent that calls both holds two tokens.",
+      },
+      { type: "h", id: "server", text: "Be the server the agent calls" },
+      {
+        type: "p",
+        text: "An MCP server is an OAuth 2.0 resource server, a role AXIAM does not play. The SDK's §28 helpers do three things, all pure local computation: `protected_resource_metadata` builds and validates the RFC 9728 document, `serve_protected_resource_metadata` serves it unauthenticated at the path RFC 9728 derives, and `bearer_challenge` builds the `WWW-Authenticate` value that starts a client's discovery. One middleware option, `resource_metadata_url`, turns the challenge on; it requires the guard's expected audience to be set and equal to the document's `resource`, and the SDK refuses the configuration at startup otherwise.",
+      },
+      {
+        type: "codegroup",
+        caption: "§28 helpers — publish the document and name it to the guard",
+        tabs: [
+          {
+            label: "TypeScript",
+            code: "const metadata = protectedResourceMetadata(\n  'https://mcp.example.com/mcp',   // resource\n  ['https://axiam.example.com'],   // authorization_servers\n  ['mcp:read', 'mcp:tools'],       // scopes_supported\n);\nserveProtectedResourceMetadata(app, metadata);\n// guard: expectedAudience = the resource, resourceMetadataUrl = metadata.metadataUrl",
+          },
+          {
+            label: "Python",
+            code: "metadata = protected_resource_metadata(\n    \"https://mcp.example.com/mcp\",\n    [\"https://axiam.example.com\"],\n    [\"mcp:read\", \"mcp:tools\"],\n)\nserve_protected_resource_metadata(app, metadata)\n# guard: resource_metadata_url = metadata.metadata_url",
+          },
+          {
+            label: "Rust",
+            code: "let metadata = protected_resource_metadata(RESOURCE, AUTHORIZATION_SERVERS, SCOPES_SUPPORTED)?;\nserve_protected_resource_metadata(app, metadata);\n// guard: resource_metadata_url comes from the metadata value's metadata_url",
+          },
+        ],
+      },
+      { type: "h", id: "revoke", text: "Revoke" },
+      {
+        type: "p",
+        text: "An agent can hold several credentials at once and each ends differently, so plan around what is actually revocable.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["The agent holds", "Ended by", "Stops working"],
+        rows: [
+          ["A service account's secret", "`rotate-secret`, a non-active status, or deletion", "No new token is issued; one in hand lives to its `exp`"],
+          ["A refresh token", "RFC 7009 `POST /oauth2/revoke`, by the confidential client that owns it", "The refresh token, at once. An access token is **not** revoked and expires on its own"],
+          ["An access token with a `sid`", "The user's session ending", "At the next poll of the revocation feed, if the resource server polls it; otherwise at `exp`"],
+          ["An exchanged token", "Nothing — short-lived by construction", "At `exp`, never later than its subject token's"],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**A resource server learns by polling the feed, or not at all.** `AXIAM__AUTH__REVOCATION_FEED_ENABLED` publishes `GET /oauth2/revocations`; an SDK guard that opts in (contract §10.4) rejects a revoked `sid` within one poll interval. It never fails closed on the feed, and it can only turn an accept into a reject.",
+          "**Exchanged tokens carry no `sid`**, so the feed never matches them, and the exchange does not consult session revocation. Exchange immediately before the call rather than caching the result, and shorten the access-token lifetime if 15 minutes is too long.",
+          "**`/oauth2/revoke` and `/oauth2/introspect` are for confidential clients.** A loopback agent registered as a public client has no RFC 7009 path.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Identity for agents (the guide)",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/guides/identity-for-agents.md",
+            note: "the end-to-end walkthrough: registration, delegation, resource indicators, the resource-server half, revocation, and what AXIAM does not do",
+          },
+          {
+            label: "Token exchange reference",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/api/token-exchange.md",
+            note: "every parameter and error, the audience rule, the lifetime cap",
+          },
+          {
+            label: "Fronting an MCP server with AXIAM",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/api/mcp.md",
+            note: "the three parties, the RFC 9728 document, tenant settings",
+          },
+          {
+            label: "SDK contract §15 — token exchange",
+            href: contractLink("15"),
+            note: "the normative `token_exchange` operation and its per-language names",
+          },
+          {
+            label: "SDK contract §28 — MCP resource-server helpers",
+            href: contractLink("28"),
+            note: "the normative document, challenge and middleware-option rules",
           },
         ],
       },

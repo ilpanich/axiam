@@ -749,6 +749,33 @@ fn setup_registration_amr(
     amr
 }
 
+/// X7.2 — the evidence a completed username-bound WebAuthn ceremony records
+/// (`finish_authentication`).
+///
+/// The ceremony is reachable only with an MFA challenge token, which only the
+/// password step mints: a password and a security key, two distinct factors,
+/// hence `mfa`. `user` is **not** claimed — this ceremony's user-verification
+/// policy is the tenant's (`preferred` by default), so a PIN-less key proves
+/// presence only and saying otherwise would overstate it.
+///
+/// A function rather than an inline literal so the value can be pinned without
+/// an authenticator: the ceremony itself cannot be driven in-process.
+fn authentication_amr() -> Vec<Amr> {
+    vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]
+}
+
+/// X7.2 — the evidence a completed usernameless (discoverable-credential)
+/// ceremony records (`finish_discoverable_authentication`).
+///
+/// The credential is the only factor, so `mfa` is **not** claimed. `user` is,
+/// and truthfully: this ceremony requires user verification unconditionally
+/// (`WebauthnUserVerification` does not relax it here), so a PIN or biometric
+/// was performed rather than mere presence. `hwk` + `user` is what
+/// `acr_for` reads as multi-factor.
+fn discoverable_authentication_amr() -> Vec<Amr> {
+    vec![Amr::Hwk, Amr::User]
+}
+
 /// `POST /api/v1/auth/webauthn/authenticate/start`
 ///
 /// Begin a WebAuthn passkey authentication ceremony.  Requires a
@@ -1009,12 +1036,8 @@ pub async fn finish_discoverable_authentication<C: Connection + Clone>(
             org_id,
             client_ip(&req),
             user_agent(&req),
-            // X7.2 — a usernameless sign-in: the credential is the only
-            // factor, so `mfa` is *not* claimed. `user` is, and truthfully:
-            // this ceremony requires user verification unconditionally
-            // (`WebauthnUserVerification` does not relax it here), so a PIN or
-            // biometric was performed rather than mere presence.
-            AuthenticationEvidence::now(vec![Amr::Hwk, Amr::User]),
+            // X7.2 — see `discoverable_authentication_amr`.
+            AuthenticationEvidence::now(discoverable_authentication_amr()),
         )
         .await?;
 
@@ -1064,13 +1087,8 @@ pub async fn finish_authentication<C: Connection + Clone>(
             org_id,
             client_ip(&req),
             user_agent(&req),
-            // X7.2 — the username-bound ceremony is reachable only with an MFA
-            // challenge token, which only the password step mints: a password
-            // and a security key, two distinct factors, hence `mfa`. `user` is
-            // not claimed here — this ceremony's user-verification policy is
-            // the tenant's (`preferred` by default), so a PIN-less key proves
-            // presence only and saying otherwise would overstate it.
-            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
+            // X7.2 — see `authentication_amr`.
+            AuthenticationEvidence::now(authentication_amr()),
         )
         .await?;
 
@@ -1185,7 +1203,41 @@ mod setup_registration_evidence_tests {
                 WebauthnCredentialType::SecurityKey,
                 WebauthnUserVerification::Preferred
             ),
-            vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]
+            authentication_amr()
+        );
+        assert_eq!(
+            authentication_amr(),
+            vec![Amr::Pwd, Amr::Hwk, Amr::Mfa],
+            "RFC 8176: a password and a hardware key, `mfa` alongside"
+        );
+    }
+
+    /// T23.1.2 audit, spec §4.3: `["pwd","hwk","mfa"]` for the username-bound
+    /// ceremony, `["hwk","user"]` for the usernameless one. The two differ in
+    /// exactly the way the assurance differs, and both land in the
+    /// multi-factor class.
+    #[test]
+    fn the_two_authentication_ceremonies_record_what_each_actually_proved() {
+        let bound = authentication_amr();
+        assert_eq!(acr_for(&bound), Acr::MultiFactor);
+        assert!(bound.contains(&Amr::Pwd), "reached only after a password");
+        assert!(bound.contains(&Amr::Mfa));
+        assert!(
+            !bound.contains(&Amr::User),
+            "user verification is the tenant's `preferred` policy here, not a \
+             guarantee, so it must not be claimed"
+        );
+
+        let usernameless = discoverable_authentication_amr();
+        assert_eq!(usernameless, vec![Amr::Hwk, Amr::User]);
+        assert_eq!(acr_for(&usernameless), Acr::MultiFactor);
+        assert!(
+            !usernameless.contains(&Amr::Pwd),
+            "no password was presented, so none may be claimed"
+        );
+        assert!(
+            !usernameless.contains(&Amr::Mfa),
+            "one credential is one factor; multi-factor comes from `hwk` + `user`"
         );
     }
 }

@@ -93,14 +93,18 @@ CLIENT_ID=$(echo "$REGISTERED" | jq -r '.client_id')
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],
   "token_endpoint_auth_method": "none",
-  "scope": "openid profile"
+  "scope": "openid profile",
+  "registration_client_uri": "https://…/oauth2/register/oa_…?tenant_id=…",
+  "registration_access_token": "…"
 }
 ```
 
 No `client_secret`: a `none` registration mints none, so the member is absent
-rather than empty. No `registration_access_token` or `registration_client_uri`
-either — RFC 7592's configuration endpoint is deferred, and promising an
-endpoint that does not exist is worse than not promising one.
+rather than empty. `registration_client_uri` and `registration_access_token` are
+RFC 7592's: keep both, and the client can later read, update and delete its own
+registration — see
+[the client configuration endpoint](../../docs/admin/dynamic-client-registration.md#the-client-configuration-endpoint-rfc-7592).
+The token is shown once and rotates on every update.
 
 Note what the response does **not** echo back, because the request did not get
 to decide it: the client's `allowed_resources` is `["$MCP"]`, from step 1.

@@ -377,6 +377,16 @@ static MIGRATIONS: &[Migration] = &[
         name: "server_certificates",
         sql: SCHEMA_V67,
     },
+    Migration {
+        version: 68,
+        name: "refresh_token_authentication_evidence",
+        sql: SCHEMA_V68,
+    },
+    Migration {
+        version: 69,
+        name: "oauth2_client_registration_access_token",
+        sql: SCHEMA_V69,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3613,9 +3623,116 @@ DEFINE FIELD IF NOT EXISTS cert_server_allowed_names ON TABLE security_settings 
     TYPE option<array<string>>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v68 — X7.2 / D-9: the authentication evidence survives an OAuth2
+// refresh
+// -----------------------------------------------------------------------
+//
+// Three optional columns on `oauth2_refresh_token`, no backfill, no index —
+// v55's shape on the authorization code, and v61's reasons for putting a
+// per-grant fact on the refresh token: rotation copies it forward verbatim.
+//
+// v55 snapshotted `auth_time`, `acr` and `amr` on the authorization code
+// because the session behind a code may be gone before the code is redeemed.
+// The refresh grant did not inherit the snapshot: it re-read the session the
+// code was issued under, and `AuthService::refresh` *deletes* that row on
+// every browser-session rotation (about every fifteen minutes for the admin
+// SPA). After the first rotation a refreshed ID token on the honour lane
+// carried no `auth_time` at all, where OIDC Core §12.2 wants the original.
+// These columns carry the code's snapshot onto the refresh token instead —
+// written at code exchange from the **code**, never from the live session, and
+// copied verbatim at each OAuth2 rotation.
+//
+// `option<…>` throughout, and **no `UPDATE` backfill**: nothing recorded what
+// a pre-v68 grant authenticated with, and inventing it would be a claim about
+// an authentication nobody observed. An absent `auth_time` is how the refresh
+// grant recognises such a row and falls back to the live-session lookup it
+// used before, so a grant issued before the migration is no worse off.
+//
+// **No index.** None of the three is a search key: the row is located by
+// `token_hash` and its unique index.
+const SCHEMA_V68: &str = "\
+DEFINE FIELD IF NOT EXISTS auth_time ON TABLE oauth2_refresh_token TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS acr ON TABLE oauth2_refresh_token TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS amr ON TABLE oauth2_refresh_token TYPE option<array<string>>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v69 — T23.4.1 / RFC 7592: the client configuration endpoint's
+// management token
+// -----------------------------------------------------------------------
+//
+// One optional column on `oauth2_client`, no backfill, no index.
+//
+// **`registration_access_token_hash`** is the SHA-256 (hex) of the RFC 7592
+// registration access token `POST /oauth2/register` mints for a `dcr` client
+// — the same digest `hash_refresh_token` computes for refresh tokens and for
+// RFC 7591 initial access tokens. The plaintext is returned once, in the 201,
+// and exists nowhere else.
+//
+// `option<string>`, and **absent is the answer for every row that exists
+// today**: an administrator's client, a CIMD shadow row and a `dcr` client
+// registered before this migration were never issued a management token, and
+// inventing one at migration time would mint a credential nobody holds. Every
+// RFC 7592 route answers such a row exactly as it answers an unknown
+// `client_id` — `401 invalid_token` — so the absence is fail-closed rather
+// than a gap.
+//
+// **No index.** The row is located by the `(tenant_id, client_id)` unique
+// index v1 defines; the digest is then compared in the same `WHERE`, so the
+// lookup can never be by hash alone and a token cannot name a row in another
+// tenant or under another `client_id`.
+const SCHEMA_V69: &str = "\
+DEFINE FIELD IF NOT EXISTS registration_access_token_hash ON TABLE oauth2_client \
+    TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.4.1 — v69 adds one optional column to `oauth2_client` and rewrites no
+    /// row: an absent hash is how a client with no management token (admin,
+    /// CIMD, pre-v69 DCR) is recognised, so a backfill would mint credentials
+    /// nobody holds.
+    #[test]
+    fn v69_adds_the_registration_access_token_hash_and_backfills_nothing() {
+        assert!(SCHEMA_V69.contains(
+            "registration_access_token_hash ON TABLE oauth2_client \
+    TYPE option<string>"
+        ));
+        assert_eq!(SCHEMA_V69.matches("DEFINE FIELD").count(), 1);
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "DEFINE INDEX", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V69.contains(forbidden),
+                "v69 must not contain {forbidden}: it is additive, optional DDL only"
+            );
+        }
+    }
+
+    /// X7.2 / D-9 — v68 adds three optional columns to one table and rewrites
+    /// no row: an absent `auth_time` is how a pre-v68 refresh token is
+    /// recognised, so a backfill would destroy the signal.
+    #[test]
+    fn v68_adds_three_optional_columns_and_backfills_nothing() {
+        for definition in [
+            "auth_time ON TABLE oauth2_refresh_token TYPE option<datetime>",
+            "acr ON TABLE oauth2_refresh_token TYPE option<string>",
+            "amr ON TABLE oauth2_refresh_token TYPE option<array<string>>",
+        ] {
+            assert!(
+                SCHEMA_V68.contains(definition),
+                "v68 must define {definition}"
+            );
+        }
+        assert_eq!(SCHEMA_V68.matches("DEFINE FIELD").count(), 3);
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "DEFINE INDEX", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V68.contains(forbidden),
+                "v68 must not contain {forbidden}: it is additive, optional DDL only"
+            );
+        }
+    }
 
     /// T22.14 — v67 widens one assertion and adds one optional column; it
     /// rewrites no row, and the widened assertion still names the three
@@ -4081,9 +4198,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&67),
-            "v67 is the newest migration (T22.14 — `Server` in the cert_type \
-             assertion and the organization's server-name allow-list). This assertion is a \
+            Some(&69),
+            "v69 is the newest migration (T23.4.1 — the RFC 7592 registration access \
+             token hash on `oauth2_client`; v68 was X7.2 / D-9's authentication evidence \
+             on the OAuth2 refresh token). \
+             This assertion is a \
              tripwire, not bookkeeping: bumping it is how a new migration is declared \
              deliberate rather than merged in by accident. It caught this phase doing \
              exactly what it is for: T21.4 (v64) and T21.5 (v65) were written on branches \

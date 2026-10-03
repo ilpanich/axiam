@@ -921,6 +921,84 @@ async fn refresh_token_grant() {
     );
 }
 
+/// **F4 P23W1-01.** Locking a user revokes no credential, so the refresh grant
+/// re-reads the account, as the session refresh path does: a suspended
+/// account's refresh token mints nothing, is not consumed by the refusal, and
+/// works again once the account is reactivated. Before the review it kept
+/// rotating — each rotation stamping a fresh `expires_at` — for as long as the
+/// relying party kept refreshing.
+#[actix_rt::test]
+async fn p23w1_01_a_suspended_accounts_refresh_token_mints_nothing_until_reactivated() {
+    use axiam_core::models::user::{UpdateUser, UserStatus};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let refresh_token = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let set_status = |status: UserStatus| {
+        let repo = SurrealUserRepository::new(db.clone());
+        async move {
+            repo.update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let refresh = |token: String| {
+        let form = format!(
+            "grant_type=refresh_token&refresh_token={token}\
+             &client_id={client_id}&client_secret={client_secret}"
+        );
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+            .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+            .set_payload(form)
+            .to_request()
+    };
+
+    for status in [UserStatus::Locked, UserStatus::Inactive] {
+        set_status(status.clone()).await;
+        let resp = test::call_service(&app, refresh(refresh_token.clone())).await;
+        assert_eq!(resp.status().as_u16(), 400, "{status:?}");
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"], "invalid_grant", "{status:?}: {body}");
+        assert!(body.get("access_token").is_none(), "{status:?}");
+    }
+
+    set_status(UserStatus::Active).await;
+    let resp = test::call_service(&app, refresh(refresh_token.clone())).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "the refusal consumed nothing: a reactivated account's grant still works"
+    );
+}
+
 /// **T-254, invariant 4.** After rotation, a `standard` client's old refresh
 /// token is gone: a second presentation is refused, and the refusal says the
 /// token was consumed.
@@ -2272,14 +2350,13 @@ async fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
 /// listener for. The refusal's *wire* shape is covered by the handler's
 /// existing error-response tests, which all of them reach by the same path.
 ///
-/// `claims` was a fifth case here and is deliberately no longer one. It is
-/// refused when AXIAM would *drop* it, and AXIAM now honours its `userinfo`
-/// member (OIDC Core §5.5, `axiam_oauth2::claims_request`), so there is no
-/// silent downgrade left for the refusal to prevent. The decision and its
-/// boundaries — including that a `claims` carrying `id_token.acr` is also
-/// allowed through — are stated and tested in
-/// `axiam_oauth2::fapi::tests::a_fapi2_client_may_send_claims_because_it_is_honoured`,
-/// which is where a change to it belongs.
+/// `claims` is a fifth case **only in its `id_token.acr` form** (T23.1.1). It
+/// is refused when AXIAM would *drop* it: the `userinfo` member is honoured on
+/// every lane (OIDC Core §5.5, `axiam_oauth2::claims_request`) and is not
+/// refused, but `id_token.acr` is read on the honour lane only, which a `fapi2`
+/// client is never on. The boundary is stated and tested in
+/// `axiam_oauth2::fapi::tests::a_fapi2_client_may_send_claims_for_userinfo_but_not_for_id_token_acr`;
+/// the pushed-request carrier is `par_test.rs::a_fapi2_client_is_refused_what_it_pushed_exactly_as_what_it_sent_inline`.
 #[actix_rt::test]
 async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
     use axiam_core::models::oauth2_client::{
@@ -2320,7 +2397,7 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
         last_authorized_at: None,
     };
 
-    let cases: [(&str, RawAuthnParams<'_>); 4] = [
+    let cases: [(&str, RawAuthnParams<'_>); 5] = [
         (
             "prompt",
             RawAuthnParams {
@@ -2346,6 +2423,13 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
             "id_token_hint",
             RawAuthnParams {
                 id_token_hint: Some("ey.header.payload"),
+                ..Default::default()
+            },
+        ),
+        (
+            "claims",
+            RawAuthnParams {
+                claims: Some(r#"{"id_token":{"acr":{"essential":true}}}"#),
                 ..Default::default()
             },
         ),

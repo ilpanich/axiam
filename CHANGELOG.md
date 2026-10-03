@@ -7,6 +7,178 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Verifiable-credentials design (OID4VCI issuer, OID4VP verifier, SD-JWT VC) — design only, no code (T23.9.1)
+
+- *Identity for agents* guide and website page (T23.15.1)
+
+- **RFC 7592 client configuration endpoint (T23.4.1).** A dynamically
+  registered client can now read, replace and delete its own registration at
+  `GET`/`PUT`/`DELETE /oauth2/register/{client_id}`. `POST /oauth2/register`
+  returns, once, a `registration_access_token` (32 random bytes, stored only as
+  a SHA-256 on the client row, schema v69) and a `registration_client_uri`
+  under the issuer the registration used. The token is accepted only as
+  `Authorization: Bearer`, only for its own client in its own tenant; unknown
+  client, wrong token, other tenant and a client with no token (admin, CIMD,
+  older DCR) are all `401 invalid_token`. A `PUT` is a full replacement held to
+  the registration's own validation under the tenant's current policy, cannot
+  touch the profile, the X7 flags or the provenance, and rotates the token as
+  one compare-and-swap. A `DELETE` revokes the client's refresh tokens and
+  frees its `dcr_max_clients` slot. The routes share the registration limiter's
+  preset in their own bucket, and every request is audited without the token.
+  CONTRACT 1.53 adds §28.12 (`read_client_registration`,
+  `update_client_registration`, `delete_client_registration`, token
+  `Sensitive`); threat T-289, model 2.18.0.
+
+### Changed
+
+- Front-channel logout declined by design and recorded (T23.12.1, D-6)
+
+### Fixed
+
+- **A refreshed ID token on the honour lane no longer loses `auth_time`, `acr`
+  and `amr` once the browser session has rotated (T23.1.2, D-9).** The refresh
+  grant read its evidence from the session row the authorization code was
+  issued under, and `AuthService::refresh` deletes that row at every
+  browser-session rotation — about every fifteen minutes for the admin SPA — so
+  after the first rotation the claims vanished, where OIDC Core §12.2 wants the
+  original `auth_time`. The evidence is now snapshotted on the OAuth2 refresh
+  token (schema v68: three optional columns, no backfill, no index), written at
+  code exchange from the code's snapshot and copied verbatim at every OAuth2
+  rotation. A grant issued before the migration falls back to the old
+  live-session lookup, so nothing gets worse. Emission is unchanged: honour
+  lane only, never `fapi2` or `ignore`. Amends T-240.
+
+- **`Authorization: bearer <token>` is accepted at `/oauth2/register` and the
+  RFC 7592 client configuration endpoint (F4 P23W1-02).** The scheme was
+  matched as the literal `Bearer `, so a lower-case or upper-case scheme was
+  read as no token at all and answered with the bare `WWW-Authenticate: Bearer`
+  challenge, which a client follows by discarding a token that was good. The
+  scheme is now case-insensitive, as RFC 9110 §11.1 requires; a scheme with no
+  token after it, and any other scheme, are still no token. A pin was added
+  for the 16 KiB body limit on `PUT /oauth2/register/{client_id}`.
+
+### Security
+
+- **A federated login's recorded authentication instant is never later than the
+  moment AXIAM verified the assertion (T23.1.2, D-10).** X7.2 dated a federated
+  session by what the upstream provider said — OIDC `auth_time`, SAML
+  `AuthnInstant` — which is right for a provider replaying a session it
+  established hours ago, and had no upper bound for one whose clock runs ahead
+  of AXIAM's, or which asserts an instant in the future. Such a session was
+  recorded as authenticated after the assertion that produced it, so `max_age`
+  was satisfied by an authentication that had not happened yet by AXIAM's
+  clock, and the ID token's `auth_time` post-dated its own `iat`. The instant is
+  now `min(upstream, verification)`. `AuthenticationEvidence::upstream` takes
+  the verification instant as an argument rather than reading the clock, and
+  the SSO callbacks apply the same bound when they verify the assertion, before
+  it crosses the 60-second handoff hop. A past instant is kept; an instant
+  within the federation path's existing 60-second clock-skew allowance is
+  clamped silently; one further ahead is clamped and logged at `warn`, naming
+  the identity provider. No configuration was added. Amends T-240.
+
+- **A FAPI 2.0 client's essential ACR request is refused instead of dropped,
+  and a request object pushed to PAR is refused instead of ignored (T23.1.1).**
+  An independent audit of the X7.1 profile-confusion matrix
+  ([`basic-op-gap-plan.md`](claude_dev/basic-op-gap-plan.md) §7) found two
+  places where a `fapi2` client's security-bearing request parameter was
+  silently discarded — the downgrade the matrix exists to prevent. Both are
+  amendments to T-239; neither changes anything for a `standard` client.
+
+  *`claims.id_token.acr` on `fapi2`.* `claims` left the refused list when its
+  `userinfo` member began to be honoured, and took the `id_token.acr` member
+  with it — but that member is read only on the honour lane, which a `fapi2`
+  client can never be on. A `fapi2` client asking for an **essential**
+  `urn:axiam:acr:mfa` therefore received a token minted from whatever the
+  session was, with no `acr` and no error, where OIDC Core §5.5.1.1 says to
+  treat the outcome as a failed authentication. `claims` is now
+  security-bearing exactly when it asks for `id_token.acr` (or cannot be read
+  well enough to rule that out), so the gate answers `invalid_request` naming
+  it, on both carriers; a `claims` asking only for `userinfo` members is
+  served as before. Plan row M3 is restored to the matrix tests.
+
+  *`request` at `/oauth2/par`.* The authorization endpoint refuses a request
+  object with `request_not_supported`, but the PAR body had no `request`
+  member, so serde dropped it and the push answered `201`. RFC 9101 §6.3 tells
+  a client the server uses only the object's parameters, so a `prompt=login`
+  or `max_age=0` inside one never reached the `fapi2` gate or the honour lane.
+  The push now answers `400 request_not_supported`, before client
+  authentication, and a blank value is still a template on both carriers.
+  `sdks/openapi.json` gains the refused member; no SDK sends it.
+
+  The audit also added tests the matrix named and did not have: the gate on
+  the pushed carrier over HTTP (every refused parameter, plus the
+  `standard`/`ignore` twin, the `userinfo`-only twin and P2), a `fapi2` row
+  edited to `honour` in the database refused at `/oauth2/authorize`, a
+  repeated parameter refused on both carriers, a strong-method client's secret
+  in an `Authorization: Basic` header refused at all five client-authenticating
+  endpoints (M9), DCR and CIMD forcing `authn_request_params: ignore` and
+  `browser_sso: false` whatever the request says, and the stored-mode decode
+  failing closed.
+
+- **A suspended account's OP browser session no longer buys authorization
+  codes (T23.1.3).** The `axiam_op_session` cookie names a session row, and it
+  lives as long as the session does (`refresh_token_lifetime_secs`). Locking or
+  deactivating a user through `PUT /api/v1/users/{id}`, or a
+  `PendingVerification` account's grace period running out, revokes no
+  session: the refresh path re-reads the account's status instead. Until now
+  `/oauth2/authorize` was the one place a session became a principal without
+  that read. A suspended user's browser therefore kept obtaining codes, and
+  with them access, ID and refresh tokens, at every `browser_sso` relying
+  party for the rest of the session. The endpoint now re-reads the account
+  behind a resolved OP session and applies the sign-in rule (the refresh
+  path's `check_user_status`, grace period included, exposed as
+  `AuthService::check_session_holder`). An account that fails it is treated as
+  a revoked session: the browser is sent to sign in with `reauth=1`, the
+  cookie is cleared, and the return leg answers `login_required`. Nothing
+  changes for an active account or for a request carrying an access token.
+  The same independent audit of X7.3 added tests for the open-redirect
+  validator on both sides (one 56-candidate list refused by the server and by
+  the SPA), session fixation, the MFA-pending password step, cross-tenant and
+  cross-user cookie use, `POST /oauth2/authorize`, the decline path's delivery
+  rule and plan row M7's end-to-end half, and found no other defect. Amends
+  T-237 and T-238.
+
+- **An OAuth2 grant stops minting tokens once its account is suspended (F4
+  P23W1-01).** Locking or deactivating a user through `PUT
+  /api/v1/users/{id}` revokes no credential; the session refresh path and,
+  since T23.1.3, `/oauth2/authorize` re-read the account instead. The OAuth2
+  `refresh_token` grant did not, and every rotation stamps a fresh
+  `expires_at`, so a relying party holding a suspended user's refresh token
+  kept minting access and ID tokens for as long as it kept refreshing. The
+  `refresh_token` and `authorization_code` grants now re-read the account and
+  refuse a locked, inactive, deleted, anonymised or removed one through one
+  function (`axiam_auth::service::account_may_act`, which
+  `AuthService::check_session_holder` now calls too). A refused account is
+  `400 invalid_grant`; nothing is minted, rotated or revoked, so reactivating
+  the account restores the grant. Found by the Phase 23 W1 security review as
+  a sibling the T23.1.3 fix missed. Amends T-39 and T-237.
+
+- **Browser sign-on works again for federated accounts more than a day old (F4
+  P23W1-03).** The T23.1.3 fix above held the OP cookie to the password
+  sign-in rule *including the email-verification grace period*. Every new
+  account is created `PendingVerification` and federation provisioning never
+  moves a federated user off it, so every federated account is pending for
+  life: once its grace period ended, `/oauth2/authorize` refused its cookie and
+  the login hop sent it round the sign-in page to `login_required`. The
+  existing-credential rule (`account_may_act`, used by the cookie and by the
+  OAuth2 grants) now refuses only `Locked`, `Inactive`, `Anonymized` and
+  `Deleted` — the rule T-160 already applies to token exchange — and leaves the
+  grace period to password sign-in, where it belongs. Amends T-237.
+
+- **A suspended account is no longer signed back in by its identity provider
+  (F4 P23W1-04).** Every federated callback — OIDC, SAML and plain OAuth2
+  "Sign in with …" — loaded the linked AXIAM user and issued a full session
+  without reading its status. Locking or deactivating the account in AXIAM, by
+  hand or through SCIM `active: false`, left the upstream account untouched,
+  so the user's next federated sign-in undid the suspension. Token exchange
+  already refused this (T-160); the browser path did not. Every federated
+  sign-in now applies `account_may_act` before a session or a handoff code
+  exists: a locked, inactive, deleted or anonymised account is refused with
+  the sign-in error a password login gets, and a pending one — every
+  federated account is — signs in as before. Amends T-160.
+
 ## [1.0.0-beta17] - 2026-09-25
 
 ### Added

@@ -311,6 +311,16 @@ struct OidcOutcome {
 /// Drive a complete public OIDC SSO round trip — config, `/oidc/start`, mock
 /// IdP token exchange, `/oidc/callback` — with `outcome` as the gate's verdict.
 async fn run_oidc_sso(outcome: ReactorOutcome) -> OidcOutcome {
+    run_oidc_sso_for(outcome, None).await
+}
+
+/// [`run_oidc_sso`], with the IdP's subject already linked to an AXIAM account
+/// in `linked_status` when it is `Some` (F4 P23W1-04) — the returning user,
+/// rather than the first-time one JIT provisioning creates.
+async fn run_oidc_sso_for(
+    outcome: ReactorOutcome,
+    linked_status: Option<axiam_core::models::user::UserStatus>,
+) -> OidcOutcome {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
 
@@ -365,6 +375,44 @@ async fn run_oidc_sso(outcome: ReactorOutcome) -> OidcOutcome {
     .expect("insert federation_config")
     .check()
     .expect("check insert");
+
+    if let Some(status) = linked_status {
+        use axiam_core::models::federation::CreateFederationLink;
+        use axiam_core::models::user::{CreateUser, UpdateUser};
+        use axiam_core::repository::{FederationLinkRepository, UserRepository};
+        let users = axiam_db::repository::SurrealUserRepository::new(db.clone());
+        let user = users
+            .create(CreateUser {
+                tenant_id,
+                username: "sec095-returning".into(),
+                email: "sec095-user@example.com".into(),
+                password: Uuid::new_v4().to_string(),
+                metadata: None,
+            })
+            .await
+            .expect("create the linked user");
+        users
+            .update(
+                tenant_id,
+                user.id,
+                UpdateUser {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("set the linked user's status");
+        axiam_db::repository::SurrealFederationLinkRepository::new(db.clone())
+            .create(CreateFederationLink {
+                tenant_id,
+                user_id: user.id,
+                federation_config_id: config_id,
+                external_subject: "sec095-subject-001".into(),
+                external_email: Some("sec095-user@example.com".into()),
+            })
+            .await
+            .expect("link the IdP subject to the user");
+    }
 
     let app = app_for!(auth, state);
 
@@ -500,6 +548,36 @@ async fn an_allowing_reactor_leaves_an_oidc_sso_sign_in_unchanged() {
         "the federated payload must carry the real client address — the SSO handlers \
          previously did not look at the request at all: {payload}"
     );
+}
+
+/// **F4 P23W1-04.** A suspended account is not signed back in by its identity
+/// provider. Locking or deactivating a user in AXIAM — by hand, or through
+/// SCIM `active: false` — leaves the upstream account untouched, and the
+/// federated callback loaded the linked user and issued a full session without
+/// ever reading its status: "Sign in with Okta" undid the suspension. The
+/// rule is the one `/oauth2/authorize` and the OAuth2 grants apply
+/// (`account_may_act`), and T-160 applies to token exchange.
+#[actix_rt::test]
+async fn p23w1_04_a_suspended_account_is_not_signed_back_in_by_its_identity_provider() {
+    use axiam_core::models::user::UserStatus;
+    for status in [
+        UserStatus::Locked,
+        UserStatus::Inactive,
+        UserStatus::Deleted,
+        UserStatus::Anonymized,
+    ] {
+        let out = run_oidc_sso_for(ReactorOutcome::Allow, Some(status.clone())).await;
+        assert_ne!(out.status, 200, "{status:?}");
+        assert!(!out.has_access_cookie, "{status:?}");
+        assert_eq!(out.sessions, 0, "{status:?}: no session may be written");
+    }
+    // The returning user whose account is merely pending — every federated
+    // account is, for life — signs in exactly as before.
+    for status in [UserStatus::Active, UserStatus::PendingVerification] {
+        let out = run_oidc_sso_for(ReactorOutcome::Allow, Some(status.clone())).await;
+        assert_eq!(out.status, 200, "{status:?}");
+        assert_eq!(out.sessions, 1, "{status:?}");
+    }
 }
 
 /// A federated sign-in has no `MfaRequired` / `MfaSetupRequired` branch, so a

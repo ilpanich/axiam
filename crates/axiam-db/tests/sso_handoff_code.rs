@@ -185,3 +185,49 @@ async fn cleanup_on_an_empty_table_reports_nothing_removed() {
     let repo = SurrealSsoHandoffCodeRepository::new(db);
     assert_eq!(repo.cleanup_expired().await.unwrap(), 0);
 }
+
+/// **X7.2 (plan §4.3).** The upstream authentication instant crosses the
+/// 60-second handoff hop intact, and a row that carries none comes back
+/// carrying none.
+///
+/// Without this a federated login whose session is issued on the *next*
+/// request would be dated by AXIAM's clock at redemption, which is the
+/// overstatement of freshness the plan names: an IdP replaying a morning's SSO
+/// session would present as having authenticated just now. `None` must stay
+/// `None` rather than be coerced to a value here, because the fallback ("the
+/// moment AXIAM verified the assertion") is applied by the caller, once, with
+/// the right clock.
+#[tokio::test]
+async fn the_upstream_authentication_instant_survives_the_handoff_or_stays_absent() {
+    let db = setup().await;
+    let repo = SurrealSsoHandoffCodeRepository::new(db);
+
+    let upstream = Utc::now() - Duration::hours(7);
+    let mut dated = fresh_row();
+    dated.authenticated_at = Some(upstream);
+    repo.insert(&dated).await.unwrap();
+
+    let undated = fresh_row();
+    repo.insert(&undated).await.unwrap();
+
+    let got = repo
+        .consume_by_hash(&dated.code_hash)
+        .await
+        .unwrap()
+        .expect("a live code");
+    assert_eq!(
+        got.authenticated_at.map(|t| t.timestamp()),
+        Some(upstream.timestamp()),
+        "the provider's instant, not the redemption moment"
+    );
+
+    let got = repo
+        .consume_by_hash(&undated.code_hash)
+        .await
+        .unwrap()
+        .expect("a live code");
+    assert_eq!(
+        got.authenticated_at, None,
+        "an assertion that carried no instant must not acquire one in storage"
+    );
+}

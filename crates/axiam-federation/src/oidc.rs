@@ -137,6 +137,14 @@ pub struct FederationCallbackResult {
     pub upstream_auth_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// The clock-skew allowance on the federation path, in seconds (D-05 / REQ-5).
+///
+/// What an upstream provider's `exp`/`iat` may be off by before its ID token is
+/// refused, and — T23.1.2, D-10 — how far ahead of AXIAM's clock an asserted
+/// authentication instant may be before the caller logs it. One number for the
+/// path, named once; the token-exchange verifier reuses it.
+pub const CLOCK_SKEW_LEEWAY_SECS: u64 = 60;
+
 /// Read an upstream NumericDate as an instant, dropping a value that is not
 /// one.
 ///
@@ -685,7 +693,7 @@ where
         validation.set_issuer(&[&expected_issuer]);
         validation.set_audience(&[client_id]);
         validation.set_required_spec_claims(&["iss", "aud", "exp", "iat"]);
-        validation.leeway = 60; // REQ-5 clock-skew tolerance
+        validation.leeway = CLOCK_SKEW_LEEWAY_SECS; // REQ-5 clock-skew tolerance
 
         // Decoded as an open object, then narrowed. One `decode` call, so the
         // typed claims and the raw map are the same verified bytes — decoding
@@ -1057,6 +1065,13 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    /// D-10 reads its skew allowance from here; the OIDC login path's own
+    /// leeway is the same constant, so the two cannot drift apart.
+    #[test]
+    fn the_federation_clock_skew_allowance_is_sixty_seconds() {
+        assert_eq!(CLOCK_SKEW_LEEWAY_SECS, 60);
+    }
+
     /// X7.2 — an upstream `auth_time` is read as the NumericDate OIDC Core §2
     /// defines, and an unrepresentable one is dropped rather than guessed at.
     ///
@@ -1208,7 +1223,7 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
         v.set_issuer(&[&discovery.issuer]);
         v.set_audience(&[client_id]);
         v.set_required_spec_claims(&["iss", "aud", "exp", "iat"]);
-        v.leeway = 60;
+        v.leeway = CLOCK_SKEW_LEEWAY_SECS;
         decode::<IdTokenClaims>(token, &dk, &v)
             .map(|d| d.claims)
             .map_err(|e| {

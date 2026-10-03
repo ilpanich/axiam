@@ -42,7 +42,7 @@ use crate::oidc::{
 };
 
 /// Clock-skew tolerance, matching the OIDC login path (D-05 / REQ-5).
-const LEEWAY_SECS: u64 = 60;
+const LEEWAY_SECS: u64 = crate::oidc::CLOCK_SKEW_LEEWAY_SECS;
 
 /// Claims read out of an external subject token.
 ///

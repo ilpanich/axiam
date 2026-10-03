@@ -730,6 +730,129 @@ mod tests {
         }
     }
 
+    /// **T23.1.3** — the audit's list, refused on the server too.
+    ///
+    /// Row for row the list `frontend/src/lib/returnTo.test.ts` ("the T23.1.3
+    /// audit list") refuses, so "validated on both sides" is a claim about two
+    /// test lists that agree rather than about two implementations someone
+    /// read side by side. The variant is not asserted: several of these could
+    /// honestly be refused by more than one rule, and what matters is that no
+    /// rule lets them through.
+    #[test]
+    fn the_audit_list_is_refused_on_the_server_too() {
+        for candidate in [
+            // Absolute and scheme-relative forms.
+            "https://evil.example/oauth2/authorize?x=1",
+            "https://iam.example.com/oauth2/authorize?x=1",
+            "//evil.example/oauth2/authorize?x=1",
+            "///evil.example/oauth2/authorize?x=1",
+            "//user@evil.example/oauth2/authorize?x=1",
+            // Backslash spellings.
+            "/\\evil.example/oauth2/authorize?x=1",
+            "\\\\evil.example/oauth2/authorize?x=1",
+            "\\/evil.example/oauth2/authorize?x=1",
+            "/oauth2\\authorize?x=1",
+            "/oauth2/authorize?x=1\\",
+            // Encoded slashes and double encoding: never decoded.
+            "/%2f%2fevil.example/oauth2/authorize?x=1",
+            "/%2F%2Fevil.example?x=1",
+            "/oauth2%2fauthorize?x=1",
+            "/%5cevil.example?x=1",
+            "/%252f%252fevil.example?x=1",
+            "%2Foauth2%2Fauthorize%3Fx%3D1",
+            // Scripting schemes, in any case.
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "/javascript:alert(1)?x=1",
+            "data:text/html,<script>alert(1)</script>",
+            "DATA:text/html;base64,PHNjcmlwdD4=",
+            "vbscript:msgbox(1)",
+            "VBScript:msgbox(1)",
+            // Whitespace and control characters.
+            " /oauth2/authorize?x=1",
+            "/oauth2/authorize?x=1 ",
+            "\t/oauth2/authorize?x=1",
+            "/oauth2/authorize?x=\t1",
+            "/oauth2/authorize?x=1\rSet-Cookie:a=b",
+            "/oauth2/authorize?x=1\nSet-Cookie:a=b",
+            "/oauth2/authorize?x=1\u{0}",
+            "/oauth2/authorize?x=1\u{7f}",
+            "/oauth2/authorize?x=1\u{85}",
+            "\u{2028}/oauth2/authorize?x=1",
+            "/oauth2/authorize?x=\u{a0}1",
+            "\u{feff}/oauth2/authorize?x=1",
+            "/\t/evil.example?x=1",
+            // Traversal and other paths.
+            "/oauth2/authorize/../../admin?x=1",
+            "/oauth2/./authorize?x=1",
+            "/oauth2/authorize/.?x=1",
+            "/oauth2/authorize/%2e%2e/%2e%2e/admin?x=1",
+            "/oauth2/authorize/%2E%2E?x=1",
+            "/oauth2/authorize/?x=1",
+            "/OAuth2/Authorize?x=1",
+            "/oauth2/token?x=1",
+            "/oauth2?x=1",
+            "/?x=1",
+            // `@` userinfo tricks.
+            "/@evil.example/oauth2/authorize?x=1",
+            "/oauth2/authorize@evil.example?x=1",
+            "https://iam.example.com@evil.example/oauth2/authorize?x=1",
+            // Unicode look-alikes.
+            "\u{ff0f}oauth2/authorize?x=1",
+            "\u{ff0f}\u{ff0f}evil.example?x=1",
+            "/\u{2215}evil.example?x=1",
+            "\u{2044}\u{2044}evil.example?x=1",
+            "/oauth2/author\u{456}ze?x=1",
+            "/oauth2/authorize\u{200b}?x=1",
+            "/oauth2/authorize\u{ff1f}x=1",
+        ] {
+            assert!(
+                validate_return_to(candidate).is_err(),
+                "must refuse {candidate:?}"
+            );
+        }
+    }
+
+    /// The bound is inclusive: a value of exactly [`MAX_RETURN_TO_LEN`] bytes
+    /// is accepted and one byte more is not — the same edge the SPA's test
+    /// pins, so the two sides cannot disagree about a value at the limit.
+    #[test]
+    fn the_length_bound_is_inclusive() {
+        let prefix = "/oauth2/authorize?x=";
+        let at_bound = format!("{prefix}{}", "a".repeat(MAX_RETURN_TO_LEN - prefix.len()));
+        assert_eq!(at_bound.len(), MAX_RETURN_TO_LEN);
+        assert_eq!(validate_return_to(&at_bound), Ok(()));
+        assert_eq!(
+            validate_return_to(&format!("{at_bound}a")),
+            Err(ReturnToError::TooLong)
+        );
+    }
+
+    /// What the server builds is the authorization endpoint whatever the
+    /// incoming query says. The query is the relying party's and the browser's
+    /// to fill — a `redirect_uri` is an absolute URL by definition, and an
+    /// attacker can append `return_to=` or `next=//evil` to it — and none of it
+    /// reaches the path, which is the only part a browser navigates by.
+    #[test]
+    fn the_builder_never_lets_the_query_choose_the_path() {
+        for query in [
+            "redirect_uri=https%3A%2F%2Frp.example%2Fcb",
+            "next=//evil.example",
+            "return_to=https%3A%2F%2Fevil.example%2F",
+            "x=../../admin",
+            "x=%0d%0aSet-Cookie:a=b",
+        ] {
+            let built = build_return_to(query).expect("a return_to");
+            let (path, rest) = built.split_once('?').expect("a query");
+            assert_eq!(path, AUTHORIZE_PATH, "{built}");
+            assert!(rest.starts_with(query), "{built}");
+            assert!(rest.ends_with(&format!("&{LOGIN_HOP_MARKER}=1")), "{built}");
+        }
+        // A raw CR/LF cannot be carried at all, which is what keeps it out of
+        // the `Location` header.
+        assert_eq!(build_return_to("x=1\r\nSet-Cookie:a=b"), None);
+    }
+
     #[test]
     fn an_oversized_return_to_is_refused_before_anything_else_is_read() {
         let long = format!("/oauth2/authorize?x={}", "a".repeat(MAX_RETURN_TO_LEN));

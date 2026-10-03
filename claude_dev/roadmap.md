@@ -1049,6 +1049,73 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
 
 ---
 
+## Phase 23: Competitor gap closure — IN PROGRESS (W1 2026-10-02)
+
+Close the gaps the three competitor comparisons
+([Keycloak](competitor-comparison-keycloak.md),
+[Zitadel](competitor-comparison-zitadel.md),
+[authentik](competitor-comparison-authentik.md)) agree on, in the ranked order,
+waves and model assignment of
+[`competitor-gap-remediation-plan-2026-10-02.md`](competitor-gap-remediation-plan-2026-10-02.md)
+(decisions D-1 … D-8 accepted as recommended; D-9 and D-10 taken during W1).
+Task ids are the plan's §6 ids, `T23.<item>.<step>`, where item *n* is gap
+G-*n*. Each wave is one branch `claude/phase23-w<N>` and one PR, and each ends
+with an F4 security review of the wave's diff against
+[`threat-model-stride.md`](threat-model-stride.md).
+
+| Task | Scope | Model | Wave | Status |
+|---|---|---|---|---|
+| T23.1.1 | X7.1 gates and profile-confusion matrix M1–M9 — audited against the shipped code | Opus 5.5 | W1 | ✓ |
+| T23.1.2 | X7.2 session evidence — audited; D-9 (evidence on the refresh token), D-10 (upstream instant bounded) | Sonnet 5.5 | W1 | ✓ |
+| T23.1.3 | X7.3 OP-session cookie, `return_to` hop, `reauth` — audited | Opus 5.5 | W1 | ✓ |
+| T23.1.4 | X7.4–X7.6 honour lane (`prompt`, `max_age`, `id_token_hint`, ACR) | Sonnet 5.5 | W2 | |
+| T23.1.5 | X7.7 sensitive scopes, X7.8 `client_secret_basic` | Sonnet 5.5 | W2 | |
+| T23.1.6 | X7.9 Basic OP harness, final runs, `docs/conformance/REVIEW-JUDGEMENTS.md` | Sonnet 5.5 | W2 | |
+| T23.1.7 | FAPI `WARNING`/`REVIEW` judgements, X5.3 submission, website mark | Sonnet 5.5 | W2 | |
+| T23.2.1 | `SamlServiceProvider` model and repository, `CertificateType::SamlSigning`, encrypted key storage | Sonnet 5.5 | W3 | |
+| T23.2.2 | `saml_idp`: assertion builder, `NameID` policy, attribute mapping, signing | Opus 5.5 | W3 | |
+| T23.2.3 | SSO endpoint: `AuthnRequest` bindings, `InResponseTo` single use, ACS allow-list, `Destination` | Opus 5.5 | W3 | |
+| T23.2.4 | SLO wired to session revocation and the revocation feed | Sonnet 5.5 | W4 | |
+| T23.2.5 | IdP metadata endpoint; SP metadata import | Sonnet 5.5 | W4 | |
+| T23.2.6 | Console *SAML Service Providers* page | Sonnet 5.5 | W4 | |
+| T23.2.7 | e2e: `samael` test SP and Keycloak round trip, refusals, feature-off 404 | Sonnet 5.5 | W4 | |
+| T23.2.8 | Contract §29, threat-model elements, design-document federation chapter | Opus 5.5 | W4 | |
+| T23.2.9 | OpenAPI, website *Integrate*, eleven SDK ports of §29 | Sonnet 5.5 | W4 | |
+| T23.3.1 | `axiam-directory` crate at layer 3, `DirectoryConfig` with the secret provider | Sonnet 5.5 | W2 | |
+| T23.3.2 | LDAP client over `rustls`, RFC 4515 escaping, bind-as-user path, refusals for directory users | Opus 5.5 | W2 | |
+| T23.3.3 | JIT provisioning | Sonnet 5.5 | W3 | |
+| T23.3.4 | Group mapping (`memberOf`, reverse `member`, nested) | Sonnet 5.5 | W3 | |
+| T23.3.5 | Sync job: incremental, nightly full, soft-delete | Sonnet 5.5 | W3 | |
+| T23.3.6 | OpenLDAP and Samba AD containers; e2e acceptance list | Sonnet 5.5 | W3 | |
+| T23.3.7 | Threat-model elements; contract §30 | Opus 5.5 | W3 | |
+| T23.3.8 | CRUD routes, console *Directory* page, OpenAPI, website, design chapter | Sonnet 5.5 | W3 | |
+| T23.4.1 | RFC 7592 client configuration endpoint; contract §28 addition; threat entry | Opus 5.5 | W1 | ✓ |
+| T23.5.1 | Shared outbound dispatcher extracted from the webhook engine | Sonnet 5.5 | W4 | |
+| T23.5.2 | SSF: streams, SET issuance, stream API authentication, discovery | Opus 5.5 | W4 | |
+| T23.5.3 | Push (RFC 8935) and poll (RFC 8936) delivery, event sources, test receiver | Sonnet 5.5 | W4 | |
+| T23.5.4 | Website, optional receiver helper (seven SDKs); threat entries on Opus 5.5 | Sonnet 5.5 / Opus 5.5 | W4 | |
+| T23.6.1 | `ScimTarget` model and credentials | Sonnet 5.5 | W5 | |
+| T23.6.2 | Lifecycle-event to SCIM translation on the shared dispatcher | Sonnet 5.5 | W5 | |
+| T23.6.3 | Reconciliation, dead-letter, GDPR erasure propagation | Sonnet 5.5 | W5 | |
+| T23.6.4 | CRUD, console, contract §31, OpenAPI, website, threat entries | Sonnet 5.5 | W5 | |
+| T23.7.1 | CIBA: `bc-authorize`, `auth_req_id` lifecycle, single-use redemption, polling back-off | Opus 5.5 | W5 | |
+| T23.7.2 | Approval on the identity pages, email notification, ping mode | Sonnet 5.5 | W5 | |
+| T23.7.3 | e2e poll and ping, contract §32, SDK helper (seven SDKs), website | Sonnet 5.5 | W5 | |
+| T23.8.1 | `AXIAM__AMQP__ENABLED=false` minimal profile | Sonnet 5.5 | W5 | |
+| T23.8.2 | Review of the direct audit-write path against T19.27 | Opus 5.5 | W5 | |
+| T23.8.3 | `docker-compose.minimal.yml`, docs, resting-RSS measurement | Sonnet 5.5 | W5 | |
+| T23.9.1 | [`verifiable-credentials-design.md`](verifiable-credentials-design.md), design only | Opus 5.5 | W1 | ✓ |
+| T23.10.1 | `benchmarks/targets/authentik/` profile | Sonnet 5.5 | W6 | |
+| T23.10.2 | Run 6, `PUBLIC_BENCH_ANALYSIS.md` seventh draft, comparison rows | Sonnet 5.5 | W6 | |
+| T23.11.1 | RADIUS / EAP-TLS spike, decision record | Sonnet 5.5 | W6 | |
+| T23.12.1 | Front-channel logout declined and recorded (D-6) | Sonnet 5.5 | W1 | ✓ |
+| T23.15.1 | *Identity for agents* guide and website page | Sonnet 5.5 | W1 | ✓ |
+| F4 | Per-wave security review of the wave diff | Opus 5.5 | every wave | W1 ✓ |
+
+G-13 (social presets, on demand) and G-14 (portal features, watch only) carry
+no scheduled task. Wave order follows the plan's §5; W2 waits for W1 to merge
+where §5 says it depends on it.
+
 ---
 
 ## Summary
@@ -1078,7 +1145,8 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
 | Phase 22 | 20 | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates, gRPC client auth, service accounts on management, non-inheritable assignments, contracts 1.51/1.52 and the eleven SDK ports) |
+| Phase 23 | 46 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **in progress**, W1 executed |
 
-**Total: 132 tasks across 23 complete phases**
+**Total: 132 tasks across 23 complete phases, plus Phase 23 (46 tasks) in progress**
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

@@ -54,14 +54,14 @@ question.
 | RP-initiated / back-channel logout | Yes | Yes | [K3] |
 | Front-channel logout | No — declined by design (D-6); back-channel logout shipped | Yes | [K3] |
 | Token exchange (RFC 8693) | Internal + external-IdP, delegation (`act`), opt-in impersonation | Standard v2 supported (internal-to-internal); **delegation preview in 26.8** | [K14][K15] |
-| Dynamic client registration | Yes (RFC 7591) | Yes | [K16] |
+| Dynamic client registration | Yes (RFC 7591 + RFC 7592) | Yes | [K16] |
 | Client ID Metadata Document | **Yes** | Experimental | [K3] |
 | MCP authorization server | **Yes**, end to end | Documentation for MCP integration; CIMD experimental | [K15] |
 | SCIM 2.0 server | Yes | Yes — promoted to supported in 26.8 (the specification table still reads "Tech Preview") | [K3][K15] |
 | SAML 2.0 | SP only | IdP and broker | [K3][K17] |
 | LDAP/AD, Kerberos federation | No | Yes | [K18] |
 | Social login | Google, GitHub, Microsoft, Apple, generic OIDC/OAuth2 | Large catalogue (Google, GitHub, Microsoft, LinkedIn, …) | [K17] |
-| Verifiable credentials | No | OID4VCI **preview**, OID4VP **experimental** (26.8) | [K15] |
+| Verifiable credentials | No — design written, implementation gated on a go/no-go (G-9) | OID4VCI **preview**, OID4VP **experimental** (26.8) | [K15] |
 | Shared Signals (CAEP/RISC) | No | Experimental | [K15] |
 | Extension model | **Reactors**: external AMQP actors in any SDK language; webhooks | In-process Java SPIs | [K4] |
 | Brute-force / abuse protection | Rate limits **on by default**, posture presets | Brute-force detection **disabled by default** | [K19] |
@@ -91,6 +91,10 @@ question.
    experimental in 26.8 [K15]. EU digital-identity wallets make this
    strategic for an IAM that names GDPR and the CyberSecurity Act among its
    targets. It is still early enough to design rather than chase.
+   **Design written (2026-10-02, G-9):**
+   [`verifiable-credentials-design.md`](verifiable-credentials-design.md) —
+   verifier first, SD-JWT VC first, implementation gated on specification
+   stability and one concrete adopter.
 5. **Shared Signals Framework.** Keycloak has it as experimental [K15]. It
    would extend AXIAM's revocation story (webhooks, AMQP) to relying parties
    in a standard way.
@@ -151,6 +155,7 @@ all shipped. They now appear in §2 as parity or advantage.
 | Date | Change | Sources |
 |---|---|---|
 | 2026-10-02 | Baseline written. Since the run-5 baseline (26.7.0): SCIM promoted to supported, so the Track B premise "Keycloak only via extensions" is obsolete and SCIM is now parity. Token-exchange delegation is preview, and impersonation tokens carry `act`. OID4VCI is preview and OID4VP experimental. Stateless multi-cluster is supported. Login failures are persisted by default. 26.7.1–26.7.5 shipped about 56 CVE fixes. | [K15][K20] |
+| 2026-10-03 | G-9: verifiable-credentials design written (design only, go/no-go in its §13); the row and P2 item 4 point at it. G-4: RFC 7592 shipped on the Phase 23 W1 branch, so the dynamic-registration cell names both RFCs. | — |
 | 2026-10-02 | G-12 (front-channel logout) declined and recorded in the design document (D-6); row and gap list updated. Revisit only on an adopter request. | — |
 
 ## Sources

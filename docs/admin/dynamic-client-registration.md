@@ -1,4 +1,4 @@
-# Dynamic client registration (RFC 7591)
+# Dynamic client registration (RFC 7591, RFC 7592)
 
 AXIAM can let a client **register itself** at `POST /oauth2/register`, without
 an administrator creating it first. This is what MCP Inspector, Claude Code and
@@ -197,9 +197,16 @@ curl -X POST "https://id.example.com/oauth2/register?tenant_id=$TENANT_ID" \
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],
   "token_endpoint_auth_method": "none",
-  "scope": "openid profile"
+  "scope": "openid profile",
+  "registration_client_uri": "https://id.example.com/oauth2/register/oa_…?tenant_id=…",
+  "registration_access_token": "…"
 }
 ```
+
+`registration_client_uri` and `registration_access_token` are RFC 7592's: where
+and how the client later reads, updates and deletes its own registration — see
+[The client configuration endpoint](#the-client-configuration-endpoint-rfc-7592).
+The token is shown **once**, like a secret, and the client must store it.
 
 No `client_secret`, and no `client_secret_expires_at`: a `none` registration
 mints no secret at all, so the members are **absent** rather than empty. A
@@ -245,6 +252,92 @@ Outstanding and spent tokens are listed — metadata only, never a handle — at
 
 The mint endpoint refuses while the tenant is not in `initial_access_token`
 mode, rather than issuing a credential that would authorise nothing.
+
+---
+
+## The client configuration endpoint (RFC 7592)
+
+A self-registered client can read, replace and delete **its own** registration
+at the `registration_client_uri` it was given, by presenting the
+`registration_access_token` it was given:
+
+| Request | Does | Answers |
+| --- | --- | --- |
+| `GET {registration_client_uri}` | read the registration as stored | `200` — never the token, never a secret |
+| `PUT {registration_client_uri}` | replace it (full replacement) and **rotate the token** | `200` with the new `registration_access_token`, once |
+| `DELETE {registration_client_uri}` | deregister the client | `204` |
+
+```bash
+curl "$REGISTRATION_CLIENT_URI" -H "Authorization: Bearer $REGISTRATION_ACCESS_TOKEN"
+```
+
+The URI is `{issuer}/oauth2/register/{client_id}` under the issuer the
+registration used: `https://id.example.com/t/{tenant_id}/oauth2/register/…` on
+a [per-tenant path issuer](../deployment/README.md), and
+`https://id.example.com/oauth2/register/…?tenant_id=…` at the root. A client
+uses it as given. Nothing about it is advertised in discovery: RFC 8414 defines
+no member for it, because the URI is per client and arrives in the registration
+response.
+
+**What authenticates.** Only the registration access token, and only in the
+`Authorization: Bearer` header. A user's access token, a service account's, the
+client secret and another client's registration token are all refused, and so
+is a token in the query string (`400 invalid_request` — a token in a URL has
+already been written to an access log). The token is 256 random bits; AXIAM
+stores its SHA-256 on the client row, compared in the same lookup as the tenant
+and the `client_id`, so it works for that client in that tenant and nowhere
+else.
+
+**Who has one.** Only clients registered through `POST /oauth2/register` after
+this feature shipped. An administrator's client, a
+[client ID metadata document](client-id-metadata-documents.md) client and an
+older self-registered client have none — manage those through
+`/api/v1/oauth2-clients` as before.
+
+**Refusals.** An unknown client, a wrong token, another tenant's client and a
+client that has no token are the same `401 invalid_token`, with
+`WWW-Authenticate: Bearer error="invalid_token"` (RFC 7592 §2.1: the server
+does not reveal whether a client exists). There is no `404`.
+
+**An update is a registration again.** A `PUT` body is the client's complete
+metadata (RFC 7592 §2.2): a member it omits is a member it deletes, so start
+from what `GET` returned. It must carry its own `client_id` and must **not**
+carry `registration_access_token`, `registration_client_uri`,
+`client_secret_expires_at` or `client_id_issued_at` (`400 invalid_request`). It
+is then validated by exactly the rules of [What a registration may and may not
+say](#what-a-registration-may-and-may-not-say), against the tenant's policy **as
+it is now** — so a `PUT` cannot keep a scope the tenant has since withdrawn,
+widen its grants, leave the redirect-host list, or name an audience; the
+audiences are reset to the tenant's current `external_client_allowed_resources`.
+Two further limits: `token_endpoint_auth_method` cannot change (register a new
+client instead), and a `client_secret` in the body must match the issued one —
+a client never chooses its own. Members a registration cannot set — the FAPI
+profile, `authn_request_params`, `browser_sso`, `managed_by` — are not touched
+by an update, whatever the body says. While the tenant's `dynamic_registration`
+is `disabled`, `PUT` is refused `403`; `GET` and `DELETE` keep working, so a
+client can always see and remove itself.
+
+**Rotation.** A successful `PUT` returns a new token and the old one stops
+working in the same database statement. Of two concurrent updates with one
+token, one succeeds and the other gets `401`. A refused update rotates nothing.
+A client that loses the `PUT` response has lost its token; it cannot recover
+it, and an administrator deletes the client through the admin API.
+
+**Deletion.** `DELETE` removes the client, revokes its refresh tokens, and
+frees its place under `dcr_max_clients`. Authorization codes and pushed
+requests for it can no longer be redeemed. Access tokens already issued keep
+working until they expire (the access-token lifetime, 15 minutes by default),
+exactly as when an administrator deletes a client. The end user's own sessions
+are not touched, and the consent records users gave the client stay theirs to
+withdraw. The token dies with the client; a second `DELETE` is `401`.
+
+**Limits and audit.** The three routes share one per-IP rate limit at the
+registration preset, `AXIAM__RATE_LIMIT__DCR_PER_MIN` (5/minute), in a bucket
+separate from `POST /oauth2/register`'s. Every request, served or refused, is
+audited as `oauth2.client_configuration_read`, `…_updated`, `…_deleted` or
+`…_refused`, with the operation and the error code; the `client_id` is
+recorded only when it has the shape AXIAM mints, and the token is never
+recorded in any form.
 
 ---
 
@@ -354,6 +447,7 @@ Everything an unrelated party can reach without a credential is bounded:
 | Unused-client sweep | 30 days | `dcr_unused_client_ttl_days` |
 | Never-authorized sweep (`anonymous` only) | 1 hour | not configurable — see [the sweeper](#the-sweeper) |
 | Audit | every attempt | — |
+| [Client configuration](#the-client-configuration-endpoint-rfc-7592) rate limit | 5 requests/minute, own bucket | `AXIAM__RATE_LIMIT__DCR_PER_MIN` |
 
 **Both numbers govern client ID metadata documents too**, counted separately
 and against the same value: a tenant running both mechanisms gets
@@ -479,3 +573,5 @@ to add. And Keycloak's open registration has no ceiling and no sweep.
   can obtain.
 - [The FAPI 2.0 profile](fapi2-profile.md) — why a self-registered client can
   never carry it.
+- [`sdks/CONTRACT.md` §28.12](../../sdks/CONTRACT.md) — the SDK operations for
+  the client configuration endpoint, and why the token is `Sensitive`.

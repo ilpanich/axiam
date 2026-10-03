@@ -46,6 +46,7 @@ authorization server usable for MCP". AXIAM implements every item on it:
 | Loopback redirect with a random port (RFC 8252 §7.3) | Same page |
 | RFC 8707 resource indicators, `aud` bound to the MCP server | [`resource-indicators.md`](resource-indicators.md) — AXIAM implements this properly; Keycloak's own guide documents a scope-and-audience-mapper workaround because it does not |
 | RFC 7591 dynamic client registration | [`../admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md) |
+| RFC 7592 client configuration (a registered client reads, updates and deletes itself) | [Same page](../admin/dynamic-client-registration.md#the-client-configuration-endpoint-rfc-7592) |
 | OAuth Client ID Metadata Document (CIMD) | [`../admin/client-id-metadata-documents.md`](../admin/client-id-metadata-documents.md) |
 | An issuer an MCP client can discover for the right tenant | [Per-tenant path issuers](../deployment/README.md#the-issuer-and-per-tenant-path-issuers-optional-t216) |
 
@@ -260,6 +261,11 @@ Use this when you already have an out-of-band way to hand each MCP client a
    [`../../examples/b7-mcp-server/requests-dynamic-registration.md`](../../examples/b7-mcp-server/requests-dynamic-registration.md).
 2. The client discovers `registration_endpoint`, registers itself, passes the
    forced consent screen once, and completes the same PKCE + `resource` flow.
+3. It keeps the `registration_client_uri` and `registration_access_token` the
+   registration returned. With them it can read its registration, replace it
+   (new redirect URIs, a new name — the token rotates on every update) and
+   delete it when it is uninstalled (RFC 7592). See [the client configuration
+   endpoint](../admin/dynamic-client-registration.md#the-client-configuration-endpoint-rfc-7592).
 
 Use this when clients arrive without any admin action at all — the MCP
 Inspector case Keycloak's guide is built around.
@@ -315,7 +321,8 @@ copy-paste configuration for MCP Inspector, Claude Code and VS Code.
 - [Token exchange § Audience](token-exchange.md#audience) — the RFC 8693
   grant's own audience rule, rewritten for `allowed_resources`
 - [Dynamic client registration](../admin/dynamic-client-registration.md) —
-  RFC 7591, the three modes, the D3 warning
+  RFC 7591, the three modes, the D3 warning, and RFC 7592's client
+  configuration endpoint
 - [Client ID metadata documents](../admin/client-id-metadata-documents.md) —
   the draft this implements, the URL and document rules, the two profiles
 - [Per-tenant path issuers](../deployment/README.md#the-issuer-and-per-tenant-path-issuers-optional-t216) —

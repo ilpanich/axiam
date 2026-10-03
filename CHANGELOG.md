@@ -13,6 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *Identity for agents* guide and website page (T23.15.1)
 
+- **RFC 7592 client configuration endpoint (T23.4.1).** A dynamically
+  registered client can now read, replace and delete its own registration at
+  `GET`/`PUT`/`DELETE /oauth2/register/{client_id}`. `POST /oauth2/register`
+  returns, once, a `registration_access_token` (32 random bytes, stored only as
+  a SHA-256 on the client row, schema v69) and a `registration_client_uri`
+  under the issuer the registration used. The token is accepted only as
+  `Authorization: Bearer`, only for its own client in its own tenant; unknown
+  client, wrong token, other tenant and a client with no token (admin, CIMD,
+  older DCR) are all `401 invalid_token`. A `PUT` is a full replacement held to
+  the registration's own validation under the tenant's current policy, cannot
+  touch the profile, the X7 flags or the provenance, and rotates the token as
+  one compare-and-swap. A `DELETE` revokes the client's refresh tokens and
+  frees its `dcr_max_clients` slot. The routes share the registration limiter's
+  preset in their own bucket, and every request is audited without the token.
+  CONTRACT 1.53 adds §28.12 (`read_client_registration`,
+  `update_client_registration`, `delete_client_registration`, token
+  `Sensitive`); threat T-289, model 2.18.0.
+
 ### Changed
 
 - Front-channel logout declined by design and recorded (T23.12.1, D-6)

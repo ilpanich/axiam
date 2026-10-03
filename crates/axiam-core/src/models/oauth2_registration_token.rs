@@ -90,13 +90,14 @@ pub struct OAuth2RegistrationToken {
     /// The `client_id` the spending registration produced — **reserved, and
     /// always `None` in this build.**
     ///
-    /// The column exists because the shape is right and RFC 7592 (deferred)
-    /// will want it, and it is left unwritten because nothing can write it
-    /// truthfully: the token must be spent *before* the client is created (the
+    /// The column exists because the shape is right, and it is left unwritten
+    /// because nothing can write it truthfully: the token must be spent *before* the client is created (the
     /// single-use guarantee depends on that order), so no `client_id` exists at
     /// the moment there is a row to put it in. Writing a placeholder and
     /// replacing it afterwards would leave the placeholder behind on any
-    /// failure, in a list an operator reads.
+    /// failure, in a list an operator reads. RFC 7592 (T23.4.1) turned out not
+    /// to need it: the client's management token lives on the client row, not
+    /// on the initial access token that admitted it.
     ///
     /// The link a person actually needs is in the audit log, which records
     /// `oauth2.client_registered` with the `client_id`, the source address and

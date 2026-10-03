@@ -132,6 +132,19 @@ The end user's consent for such a client is recorded as an OIDC-scope consent
 and withdrawn with
 `DELETE /api/v1/account/consents/oidc-scopes/{client_id}`.
 
+#### Managing its own registration (RFC 7592)
+
+A dynamically registered agent also receives, once, a `registration_client_uri`
+and a `registration_access_token`. Store the token like a secret. With it the
+agent can `GET` its registration, `PUT` a full replacement (new redirect URIs,
+a new name; the token rotates every time, so keep the new one) and `DELETE` it
+when it is uninstalled, which also revokes its refresh tokens. An update is held
+to the same tenant policy as the registration, so it can never widen what the
+agent may ask for. The token works only in the `Authorization` header, only for
+that client, in that tenant. See
+[the client configuration endpoint](../admin/dynamic-client-registration.md#the-client-configuration-endpoint-rfc-7592)
+and, for SDK authors, `sdks/CONTRACT.md` §28.12.
+
 ---
 
 ## 2. Act on behalf of a user
@@ -398,6 +411,7 @@ the table; the last column is the honest one.
 | A service account's secret | `rotate-secret`, disabling the account (`PUT /api/v1/service-accounts/{sa_id}` with a non-active status), or deleting it | No new token is issued; a token already in hand lives to its `exp` |
 | A bound certificate | `POST /api/v1/certificates/{id}/revoke` | See [PKI](../pki/README.md) for what certificate revocation covers |
 | A refresh token (user-authorized agent) | RFC 7009 `POST /oauth2/revoke?tenant_id=<uuid>` by the confidential client that owns it | The refresh token, immediately. **An access token is not revoked** (the endpoint treats it as a no-op) and expires on its own |
+| A dynamically registered client's registration | The client itself, `DELETE` on its `registration_client_uri` with its registration access token (RFC 7592); or an administrator, through `/api/v1/oauth2-clients` | The client and its refresh tokens, immediately. Access tokens already issued live to their `exp` |
 | A user's consent to a DCR or CIMD client | The user, `DELETE /api/v1/account/consents/oidc-scopes/{client_id}` | The next authorization asks again. This guide does not claim it recalls tokens already issued |
 | An access token carrying `sid` (issued by the code and refresh grants) | The user's session ending | At the next poll of the revocation feed, if the resource server polls it; otherwise at `exp` |
 | An **exchanged** token | Nothing: it is short-lived by construction | At `exp`, which is never later than the subject token's |

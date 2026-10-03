@@ -1088,7 +1088,7 @@ with an F4 security review of the wave's diff against
 | T23.3.2 | LDAP client over `rustls`, RFC 4515 escaping, bind-as-user path, refusals for directory users | Opus 5.5 | W2 | ✓ |
 | T23.3.3 | JIT provisioning | Sonnet 5.5 | W3 |✓ |
 | T23.3.4 | Group mapping (`memberOf`, reverse `member`, nested) | Sonnet 5.5 | W3 |✓ |
-| T23.3.5 | Sync job: incremental, nightly full, soft-delete | Sonnet 5.5 | W3 | |
+| T23.3.5 | Sync job: incremental, nightly full, soft-delete | Sonnet 5.5 | W3 |✓ |
 | T23.3.6 | OpenLDAP and Samba AD containers; e2e acceptance list | Sonnet 5.5 | W3 | |
 | T23.3.7 | Threat-model elements; contract §30 | Opus 5.5 | W3 | |
 | T23.3.8 | CRUD routes, console *Directory* page, OpenAPI, website, design chapter | Sonnet 5.5 | W3 | |

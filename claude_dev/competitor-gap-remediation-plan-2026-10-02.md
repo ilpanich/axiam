@@ -742,6 +742,44 @@ fan-out.
 > not promote the edge to manual, so the membership leaves with the directory
 > (the safe direction). AD's primary group (`primaryGroupID`) is not resolved.
 > A stale schema tripwire (`Some(&72)` with v73 registered) is corrected.
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.5, 2026-10-03** (`02680a7`,
+> `9f2e87f`, `29a8529`, `eb6bd89`, `fe97d9a`, `b6ef483`; Sonnet 5.5). The sync
+> job per **D-31**, last in each cleanup tick, recorded in job health as
+> `directory_sync`. A full run (first, then every 24 h, and after any skipped
+> account, bound hit or untrusted watermark) reads every answer before it
+> writes anything, so an error part-way changes nothing; it looks up each
+> marked account by `entryUUID` or the little-endian `objectGUID` octets,
+> escaped through the escape module's new binary escaper. An incremental run
+> searches `(<attr> >= <watermark>)`, acts only on entries owned by a marked
+> account, never concludes "vanished", and on AD takes `highestCommittedUSN`
+> from the rootDSE and falls back to full on a `dsServiceName` change.
+> Deactivation revokes sessions and refresh tokens, then removes the
+> directory's memberships (with the decision-cache flush), then flips the
+> status to `Inactive` by compare-and-set from a live status only; nothing
+> re-enables, creates, links, writes `Deleted` or removes a row. The safety
+> valve (> 10 % and ≥ 5) applies nothing and fails the job. Attribute changes
+> follow the entry through T23.3.3's cleaners, now in
+> `axiam-core::models::directory_profile`; a colliding change is skipped and
+> audited. State is the per-tenant `directory_sync_state` row, schema **v75**,
+> deleted with its tenant. Tests: 40 sync and 26 lookup tests against the
+> in-process TLS directory and real repositories (every D-31 clause), 16
+> repository, 20 unit, 4 sweep tests in `axiam-server`. The operator
+> *Sync* section is in `docs/deployment/README.md`.
+>
+> What the plan did not anticipate. D-31 first read any
+> `pwdAccountLockedTime` as disabled, which turned a temporary failed-bind
+> lockout into a permanent deactivation; amended to ppolicy's permanent-lock
+> value only (`b6ef483`, tests for both runs). No sweep in the tree has a
+> multi-replica guard, so every replica runs the job (writes are idempotent or
+> compare-and-set; reads and refresh audit rows are duplicated). Reappeared or
+> re-enabled accounts are reported once (deduplicated in the state row); the
+> first full run reports every already-`Inactive` account whose entry is
+> present, including administrator suspensions. The valve has no override yet
+> (a candidate for T23.3.8). Incremental disables have no valve, by D-31.
+> Observed and carried to F4: in JIT's lost-race branch the group mapping runs
+> before the status check, so it can re-add directory memberships to an
+> `Inactive` account (they grant nothing while it is `Inactive`).
 
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned

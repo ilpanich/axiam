@@ -1077,7 +1077,7 @@ with an F4 security review of the wave's diff against
 | T23.1.8 | D-11: per-tenant-prefix OP-session cookie; tenant-path principal resolution; every minted cookie cleared on logout, `end_session`, revocation (P23W1-10) | Opus 5.5 | W2 | ✓ |
 | T23.2.1 | `SamlServiceProvider` model and repository, `CertificateType::SamlSigning`, encrypted key storage | Sonnet 5.5 | W3 |✓ |
 | T23.2.2 | `saml_idp`: assertion builder, `NameID` policy, attribute mapping, signing | Opus 5.5 | W3 |✓ |
-| T23.2.3 | SSO endpoint: `AuthnRequest` bindings, `InResponseTo` single use, ACS allow-list, `Destination` | Opus 5.5 | W3 | |
+| T23.2.3 | SSO endpoint: `AuthnRequest` bindings, `InResponseTo` single use, ACS allow-list, `Destination` | Opus 5.5 | W3 |✓ |
 | T23.2.4 | SLO wired to session revocation and the revocation feed | Sonnet 5.5 | W4 | |
 | T23.2.5 | IdP metadata endpoint; SP metadata import | Sonnet 5.5 | W4 | |
 | T23.2.6 | Console *SAML Service Providers* page | Sonnet 5.5 | W4 | |

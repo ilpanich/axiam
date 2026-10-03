@@ -462,6 +462,56 @@ security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 > embedded; the `pem` crate keeps copies of the key text, so it is decoded by
 > hand into `Zeroizing` buffers.
 
+> **EXECUTED (partly) — G-2, W3: T23.2.3, 2026-10-03** (`7f1d324`, `9b49d18`,
+> `d6e9961`, `e7f7845`; Opus 5.5). The SSO endpoint, `/saml/v2/{tenant}/sso`,
+> on both bindings, with IdP-initiated sign-on (`/sso/idp-initiated`, D-3) and a
+> second leg (`/sso/continue`). **D-24**: the first leg refuses everything
+> decidable without a principal — with an error page that posts nowhere, or, once
+> the ACS is a registered POST endpoint, a posted unsigned failure — and holds the
+> checked request in `saml_authn_request` (schema **v73**) under an opaque handle
+> bound to the browser by a per-handle `SameSite=Lax` cookie; the second leg
+> resolves the OP cookie (now minted at `/saml/v2/{t}/sso` too, pinned in the same
+> commit) through the tenant-keyed lookup, applies `account_may_act`, runs the
+> login hop with the SAML arm of `return_to` (server and SPA, the T23.1.3 list
+> re-run against it), binds `ForceAuthn` to the request's outbound instant (a
+> forged marker yields `AuthnFailed`), never hops under `IsPassive`, and consumes
+> the handle on the X6 arbiter before issuing. Request IDs are single-use per SP
+> for longer than the `IssueInstant` window. Receiving
+> (`saml_idp::request`): DTDs refused on the bytes, NUL and non-UTF-8 declarations
+> refused, a 64 KiB inflate cap, the Redirect signature over the exact query
+> octets (`samael`'s `UrlVerifier` re-encodes), the POST signature under D-23's
+> placement rule. **D-25** closes T-313: an email is asserted only when verified or
+> the account is `Active`. **D-26**: the IdP-initiated trigger and what a refusal
+> looks like. **D-27**: a handler may set a stricter CSP (the auto-post page:
+> nonce, `form-action` = the ACS origin), the `end_session_per_min` preset with
+> buckets of its own, the D-20 `404` before the body is read and on every method.
+> Composition: the pairwise key is read in `axiam-server`, documented in the
+> deployment guide and the website configuration page; the pending rows are swept.
+> Threat model **2.22.0**: **T-317 … T-330** (13 mitigated; T-325, the query string
+> in request logs, Low, open), T-313 closed — 330 threats, 312 / 18. No OpenAPI
+> or contract change: browser routes, compiled out of the spec build.
+> Tests: 18 over HTTP (`saml_idp_sso_test.rs`), 17 receiving unit tests, 7 + 1
+> repository/schema tests (100 rounds of 8 concurrent consumes on surrealkv), the
+> D-25 unit test, the cookie-list pins and the suites that count the copies.
+>
+> What the plan did not anticipate. The global security-headers middleware
+> overwrote every response's CSP, so the auto-post page could not run its one
+> script or post cross-origin without D-27. The `/oauth2/authorize` preset the
+> task names does not exist (that route has no limiter). The OP cookie cannot
+> reach a cross-site POST at all, which is what forces two legs for every
+> binding. `tracing-actix-web` records every route's query string, `RelayState`
+> and the handle included (T-325, for the F4 review). Chrome applies
+> `form-action` to post-submission redirects, so an SP whose ACS redirects
+> cross-origin before rendering will need its ACS on that origin. An HTTP-level
+> race test on `kv-mem` would be flaky by design (`tests/common`), so the
+> single-use race is pinned at the repository on surrealkv and sequentially over
+> HTTP. Left for T23.2.4: `SessionIndex` per SP (T-312) and SLO signing (T-316's
+> constraint). For T23.2.5: the metadata's `SingleSignOnService` locations are
+> `idp_sso_url` for both bindings; the SP write path should refuse
+> `encrypt_assertions` and validate that a signing SP's certificate parses (the
+> endpoint answers `sp_certificate` otherwise). For T23.2.7: `test_support` in
+> `saml_idp` (doc-hidden) signs requests the way an SP library does.
+
 **Target.** AXIAM issues SAML 2.0 assertions to registered service providers,
 per tenant: IdP metadata, Web Browser SSO profile with HTTP-Redirect and
 HTTP-POST bindings, SP-initiated and IdP-initiated flows, signed assertions

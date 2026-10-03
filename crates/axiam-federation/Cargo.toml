@@ -51,6 +51,12 @@ pem = { workspace = true }
 # (no new crate enters the dependency graph). Gated behind the `saml` feature
 # like samael itself.
 libxml = { workspace = true, optional = true }
+# SAML IdP SSO endpoint (T23.2.3): the HTTP-Redirect binding's query signature
+# is verified over the exact octets received (SAML Bindings §3.4.4.1), which
+# samael's `UrlVerifier` does not do (it re-encodes). Already in Cargo.lock
+# through samael's `xmlsec` feature, so no crate enters the graph; gated behind
+# `saml` like samael itself.
+openssl = { version = "0.10", optional = true }
 
 [features]
 # SAML Service Provider support. Pulls in `samael` (and transitively its
@@ -61,7 +67,7 @@ libxml = { workspace = true, optional = true }
 # whose system libxml2 is too new for samael's pinned bindings (e.g. Arch's
 # libxml2 2.15.x). OIDC federation is unaffected; SAML simply isn't compiled.
 default = ["saml"]
-saml = ["dep:samael", "dep:libxml"]
+saml = ["dep:samael", "dep:libxml", "dep:openssl"]
 
 [dev-dependencies]
 rcgen = { workspace = true }

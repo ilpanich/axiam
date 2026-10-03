@@ -64,6 +64,7 @@
 //! ([`SamlIdpError::EncryptionUnsupported`]) — never silently sent plaintext.
 
 mod pairwise;
+pub mod request;
 mod sign;
 pub mod xml;
 

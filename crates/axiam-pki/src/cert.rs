@@ -371,7 +371,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     /// the signature, under whichever custodian holds the CA's key.
     ///
     /// `input.subject` must already be normalised.
-    async fn issue_leaf_material(
+    pub(crate) async fn issue_leaf_material(
         &self,
         org_id: Uuid,
         scope: IssuingScope,

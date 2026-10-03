@@ -25,6 +25,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently accepted one. Leaf issuance is split so the SAML credential can reuse
   the whole issuing path without writing an inventory row.
 
+- **The SAML IdP signing credential (T23.2.1, G-2, D-21): an RSA-4096 leaf
+  with its key sealed at rest.** A new per-tenant `saml_idp_credential` table
+  (schema v72) holds the certificate PEM, issuing CA, serial, SHA-256
+  fingerprint, `not_after`, a status of `active`, `next` or `retired`, and the
+  private key sealed AES-256-GCM under `pki_encryption_key` by
+  `DatabaseCaKeyStore`, with the custody recorded on the row so a later custodian
+  needs no migration. It is deliberately **not a `certificate` row**, so no
+  certificate list or get can return it. At most one `active` and one `next` per
+  tenant is a unique index over a computed `slot` field, so the database refuses a
+  second one whichever caller wrote it. `SamlIdpCredentialService` in `axiam-pki`
+  issues a credential from a caller-named active signing CA of the tenant's
+  organization (another organization's CA, another tenant's, a non-signing or an
+  expired one is refused), valid at most 730 days and never past its CA, through
+  the same issuing path as `CertService::generate` (stopped before the inventory
+  write); returns the active credential with its key in a `Zeroizing` buffer for
+  the assertion signer; lists credentials without key material; and retires one,
+  which destroys its sealed key in the same write. Only one repository method
+  selects the key columns, and every `Debug` redacts them. The row is deleted
+  with its tenant inside the tenant-delete transaction. Creation is explicit: no
+  lazy issuance, no automatic rotation and no REST route yet (the admin route is
+  T23.2.5).
+
 - **The SAML service-provider registry (T23.2.1, G-2): model, validation,
   repository, schema v72.** `SamlServiceProvider` in `axiam-core` — entity id
   (unique per tenant), an ACS allow-list (`url`, `binding`, `index`,

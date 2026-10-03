@@ -633,6 +633,13 @@ one profile both leaf paths and both custodians share:
 | `User`, `Service`, `Device` | RSA | digitalSignature, keyEncipherment | clientAuth |
 | `Server` | Ed25519 | digitalSignature | serverAuth |
 | `Server` | RSA | digitalSignature, keyEncipherment | serverAuth |
+| `SamlSigning` (internal) | RSA-4096 | digitalSignature | documentSigning |
+
+`SamlSigning` is the tenant SAML identity provider's assertion-signing leaf
+(`id-kp-documentSigning`, RFC 9336, so no TLS verifier accepts it; no SANs). It is
+internal-only: it is not a value of the API's `cert_type`, it is never a
+certificate row, and it is issued, sealed under `pki_encryption_key` and stored by
+the SAML IdP credential service rather than through `POST /certificates`.
 
 **Upgrading.** Before 1.0.0-beta17 leaves carried neither extension, which
 X.509 reads as "any usage" (and, under `vault_pki` custody, generated leaves

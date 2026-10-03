@@ -32,6 +32,10 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 aes-gcm = { workspace = true }
 base64 = { workspace = true }
+# `Zeroizing<String>` for the bind secret on the write input and on the one
+# decrypt path (T23.3.1); already a workspace dependency of axiam-core and
+# axiam-auth.
+zeroize = { workspace = true }
 
 [dev-dependencies]
 axiam-test-support = { workspace = true }

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `axiam-directory` crate and the encrypted directory configuration store
+  (T23.3.1, G-3).** The first piece of the LDAP / Active Directory identity
+  source: a new crate at layer 3, beside `axiam-federation`, that opts into
+  `missing_docs` from its first commit, and a per-tenant `directory_config` table
+  (schema v70) with a repository. `axiam_directory::config::validate` refuses, at
+  configuration time, a plaintext `ldap://` URL without StartTLS, any other
+  scheme, `ldaps://` combined with StartTLS, a URL carrying userinfo, a path, a
+  query or a fragment, an empty or control-character DN, a user-filter template
+  that is not a single balanced filter with exactly one `{username}` placeholder
+  in value position, an empty bind secret, out-of-bounds nesting depth or sync
+  interval, and a trust anchor that is not a parseable CA certificate. The bind
+  secret is encrypted at rest with AES-256-GCM under a fresh nonce, with a key the
+  secret provider holds as the new **optional** `directory_encryption_key`
+  (`AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY`); without it the feature is unavailable
+  and saving a configuration is refused with an error naming the key, while the
+  server still starts. The secret is write-only: never returned, never in `Debug`,
+  decrypted only by the one repository method the bind path will call. A tenant's
+  configuration is deleted with the tenant. There is no user-visible surface yet:
+  no LDAP client, no sign-in path and no REST route, which arrive in the following
+  tasks of the same item.
+
 - **Basic OP `REVIEW` judgements and the maintainer's run checklist (T23.1.6, X7.9).**
   `docs/conformance/REVIEW-JUDGEMENTS.md` records, for each of the four Basic OP
   modules the 2026-09-25 run left in `REVIEW` (`oidcc-prompt-login`,

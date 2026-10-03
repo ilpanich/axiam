@@ -319,9 +319,19 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     }
 
     async fn delete(&self, id: Uuid) -> AxiamResult<()> {
+        // The tenant's directory configuration goes with it (T23.3.1, G-3). It
+        // is the one row this delete removes besides the tenant itself: it holds
+        // an encrypted service-account credential for the tenant's directory,
+        // and a deleted tenant must not leave that ciphertext behind. It is a
+        // single query, so the two deletes commit or roll back together.
         self.db
             .current()
-            .query("DELETE type::record('tenant', $id)")
+            .query(
+                "BEGIN TRANSACTION; \
+                 DELETE directory_config WHERE tenant_id = $id; \
+                 DELETE type::record('tenant', $id); \
+                 COMMIT TRANSACTION;",
+            )
             .bind(("id", id.to_string()))
             .await
             .map_err(DbError::from)?;

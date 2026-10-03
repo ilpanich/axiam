@@ -387,6 +387,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "oauth2_client_registration_access_token",
         sql: SCHEMA_V69,
     },
+    Migration {
+        version: 70,
+        name: "directory_config",
+        sql: SCHEMA_V70,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3687,9 +3692,116 @@ DEFINE FIELD IF NOT EXISTS registration_access_token_hash ON TABLE oauth2_client
     TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v70 — T23.3.1 / G-3: the directory (LDAP / Active Directory)
+// configuration
+// -----------------------------------------------------------------------
+//
+// One new table, `directory_config`, one row per tenant. Purely additive: no
+// existing table is touched and nothing is backfilled, because no tenant has a
+// directory until an administrator configures one.
+//
+// **One row per tenant is the datastore's rule, not the application's.**
+// `idx_directory_config_tenant` is UNIQUE on `tenant_id`, which is what decides
+// the race between two concurrent creates and what turns the second one into an
+// `AlreadyExists` instead of two configurations the bind path would have to
+// choose between.
+//
+// **The bind secret is encrypted at rest** (decision D-15), exactly as the
+// per-tenant SMTP password in `email_config` is: `bind_secret_ciphertext` and
+// `bind_secret_nonce` are the split base64 columns of AES-256-GCM with a fresh
+// nonce per write, and `secret_key_version` is the column a future key rotation
+// will key off (it is `1` today, as in `email_config`). The 256-bit key is held
+// by the secret provider under `directory_encryption_key` and is never in the
+// database. Both secret columns are required (not `option<string>`): a row
+// without a secret is not a half-configured directory, it is a row the bind
+// path could only fail on, so the datastore refuses to hold one.
+//
+// `kind` is asserted against the two spellings `DirectoryKind::as_str` writes.
+// The attribute map is four flat `attr_*` columns rather than a nested object so
+// that every column is a typed, `SCHEMAFULL` field. The URL, the filter template
+// and the trust anchors are validated by `axiam-directory::config::validate`
+// *before* they reach this table; the schema deliberately does not restate those
+// rules, because two copies of "what is a plaintext URL" is how they drift.
+//
+// A tenant's row is removed with the tenant (`SurrealTenantRepository::delete`),
+// so a deleted tenant leaves no ciphertext behind. It is not user data and is
+// excluded from the GDPR user export.
+const SCHEMA_V70: &str = "\
+DEFINE TABLE IF NOT EXISTS directory_config SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE directory_config TYPE bool;
+DEFINE FIELD IF NOT EXISTS kind ON TABLE directory_config TYPE string
+    ASSERT $value IN ['open_ldap', 'active_directory'];
+DEFINE FIELD IF NOT EXISTS url ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS start_tls ON TABLE directory_config TYPE bool;
+DEFINE FIELD IF NOT EXISTS bind_dn ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS bind_secret_ciphertext ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS bind_secret_nonce ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS secret_key_version ON TABLE directory_config TYPE int;
+DEFINE FIELD IF NOT EXISTS base_dn ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS user_filter ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS attr_username ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS attr_email ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS attr_display_name ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS attr_external_id ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS group_base_dn ON TABLE directory_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS group_filter ON TABLE directory_config TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS group_member_attribute ON TABLE directory_config TYPE string;
+DEFINE FIELD IF NOT EXISTS group_nesting_depth ON TABLE directory_config TYPE int;
+DEFINE FIELD IF NOT EXISTS sync_interval_secs ON TABLE directory_config TYPE int;
+DEFINE FIELD IF NOT EXISTS jit_provisioning ON TABLE directory_config TYPE bool;
+DEFINE FIELD IF NOT EXISTS trust_anchors_pem ON TABLE directory_config TYPE array<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE directory_config TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE directory_config TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_directory_config_tenant ON TABLE directory_config \
+    COLUMNS tenant_id UNIQUE;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.3.1 — v70 adds one table and one unique index and touches nothing
+    /// that exists: no tenant has a directory until an administrator makes one,
+    /// so there is nothing to backfill, and the bind secret has no plaintext
+    /// column at all.
+    #[test]
+    fn v70_adds_the_directory_config_table_additively() {
+        assert!(SCHEMA_V70.contains("DEFINE TABLE IF NOT EXISTS directory_config SCHEMAFULL"));
+        assert!(SCHEMA_V70.contains(
+            "idx_directory_config_tenant ON TABLE directory_config \
+    COLUMNS tenant_id UNIQUE"
+        ));
+        for secret in ["bind_secret_ciphertext", "bind_secret_nonce"] {
+            assert!(
+                SCHEMA_V70.contains(&format!("{secret} ON TABLE directory_config TYPE string")),
+                "v70 must define {secret} as a required string"
+            );
+        }
+        assert!(
+            !SCHEMA_V70.contains("bind_secret ON") && !SCHEMA_V70.contains("bind_password"),
+            "v70 must not define a plaintext bind secret column"
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V70.contains(forbidden),
+                "v70 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        // Every statement is either the table, a field or the index, and every
+        // one of them is `IF NOT EXISTS`, so the migration is re-runnable.
+        for statement in SCHEMA_V70
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE") && statement.contains("IF NOT EXISTS"),
+                "v70 statements must be idempotent DEFINEs"
+            );
+        }
+    }
 
     /// T23.4.1 — v69 adds one optional column to `oauth2_client` and rewrites no
     /// row: an absent hash is how a client with no management token (admin,
@@ -4198,10 +4310,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&69),
-            "v69 is the newest migration (T23.4.1 — the RFC 7592 registration access \
-             token hash on `oauth2_client`; v68 was X7.2 / D-9's authentication evidence \
-             on the OAuth2 refresh token). \
+            Some(&70),
+            "v70 is the newest migration (T23.3.1 — the `directory_config` table for the \
+             LDAP / Active Directory identity source; v69 was T23.4.1's RFC 7592 \
+             registration access token hash on `oauth2_client`, and v68 was X7.2 / D-9's \
+             authentication evidence on the OAuth2 refresh token). \
              This assertion is a \
              tripwire, not bookkeeping: bumping it is how a new migration is declared \
              deliberate rather than merged in by accident. It caught this phase doing \

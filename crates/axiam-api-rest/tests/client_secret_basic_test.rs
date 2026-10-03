@@ -1312,3 +1312,89 @@ async fn t23_1_5_a_basic_clients_wrong_secrets_share_the_same_bucket() {
         "a header-carried client_id must select the same client bucket"
     );
 }
+
+// --- T9.4 on the other three endpoints --------------------------------------
+
+#[actix_rt::test]
+async fn t23_1_5_a_basic_attempt_at_par_revoke_and_introspect_logs_nothing_either() {
+    // T9.4 captured the token endpoint. The header is parsed by one function
+    // for all four, but "one function" is an argument and this is the
+    // measurement: a wrong secret and a refused duplicate at each of the other
+    // three, at TRACE, grepped for the secret, the blob and the header.
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(BufWriter(captured.clone()))
+        .with_ansi(false)
+        .finish();
+
+    let secret_marker = "wrong-but-still-a-secret-t23-1-5";
+    let blob;
+    {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let f = setup().await;
+        let app = test_app!(f);
+        blob = base64::engine::general_purpose::STANDARD
+            .encode(basic_blob(&f.basic_client_id, secret_marker));
+        let header = format!("Basic {blob}");
+        let good = good_basic_value(&f);
+
+        for (name, path, body) in [
+            (
+                "par",
+                "/oauth2/par",
+                format!(
+                    "client_id={}&response_type=code&redirect_uri={REDIRECT_URI}",
+                    f.basic_client_id
+                ),
+            ),
+            (
+                "introspect",
+                "/oauth2/introspect",
+                format!("client_id={}&token=x", f.basic_client_id),
+            ),
+            (
+                "revoke",
+                "/oauth2/revoke",
+                format!("client_id={}&token=x", f.basic_client_id),
+            ),
+        ] {
+            // A wrong secret: reaches the hash comparison.
+            let req = test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&format!("{path}?tenant_id={}", f.tenant_id))
+                .insert_header(("content-type", "application/x-www-form-urlencoded"))
+                .insert_header(("Authorization", header.clone()))
+                .set_payload(body.clone())
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status().as_u16(), 401, "{name}: wrong secret");
+
+            // Two headers: refused at the edge, before any comparison.
+            let req = test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&format!("{path}?tenant_id={}", f.tenant_id))
+                .insert_header(("content-type", "application/x-www-form-urlencoded"))
+                .append_header(("Authorization", good.clone()))
+                .append_header(("Authorization", header.clone()))
+                .set_payload(body)
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status().as_u16(), 401, "{name}: duplicate headers");
+        }
+    }
+
+    let log = String::from_utf8(captured.lock().unwrap().clone()).expect("utf-8 log");
+    assert!(
+        !log.contains(secret_marker),
+        "a rejected secret reached the log"
+    );
+    assert!(
+        !log.contains(&blob),
+        "a base64 credentials blob reached the log"
+    );
+    assert!(
+        !log.contains(AWKWARD_SECRET_ENCODED),
+        "the correct secret, encoded, reached the log"
+    );
+}

@@ -2172,3 +2172,79 @@ async fn rfc7592_a_tenant_that_disabled_registration_refuses_updates_but_not_rea
     let (status, _, _) = manage!(app, delete, &uri, bearer(&token));
     assert_eq!(status, 204);
 }
+
+/// **T23.1.5 (X7.8).** The RFC 7591 §2 default is `client_secret_basic`, and the
+/// audience for that default is a third-party relying party that has read the
+/// RFC and nothing of AXIAM. So the whole path is walked: register with no
+/// `token_endpoint_auth_method`, take the secret the response returns, and
+/// authenticate at an authenticating endpoint with an RFC 6749 §2.3.1 header.
+/// The registered method then decides, in the other direction too: the same
+/// secret in the form body of that client is refused.
+#[actix_rt::test]
+async fn a_default_registered_client_authenticates_with_its_basic_header() {
+    let f = setup().await;
+    set_org_settings(&f, anonymous_policy()).await.unwrap();
+    let app = test_app!(f);
+
+    let (status, registered) = register!(
+        app,
+        f,
+        json!({ "redirect_uris": ["http://127.0.0.1:1234/cb"] })
+    );
+    assert_eq!(status, 201, "registration");
+    assert_eq!(
+        registered["token_endpoint_auth_method"],
+        "client_secret_basic"
+    );
+    let client_id = registered["client_id"].as_str().unwrap().to_owned();
+    let secret = registered["client_secret"].as_str().unwrap().to_owned();
+
+    // The §2.3.1 spelling: each half form-urlencoded, then base64.
+    let encode = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+    let header = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!(
+            "{}:{}",
+            encode(&client_id),
+            encode(&secret)
+        ))
+    );
+
+    let post = |authorization: Option<String>, body: String| {
+        let app = &app;
+        let tenant_id = f.tenant_id;
+        async move {
+            let mut req = test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
+                .insert_header(("content-type", "application/x-www-form-urlencoded"));
+            if let Some(value) = authorization {
+                req = req.insert_header(("Authorization", value));
+            }
+            let resp = test::call_service(app, req.set_payload(body).to_request()).await;
+            resp.status().as_u16()
+        }
+    };
+
+    assert_eq!(
+        post(
+            Some(header),
+            format!("client_id={client_id}&token=not-a-token")
+        )
+        .await,
+        200,
+        "the header authenticates the client its registration says it is"
+    );
+    assert_eq!(
+        post(
+            None,
+            format!(
+                "client_id={client_id}&client_secret={}&token=not-a-token",
+                encode(&secret)
+            )
+        )
+        .await,
+        401,
+        "the same secret in the body of a client_secret_basic client authenticates nothing"
+    );
+}

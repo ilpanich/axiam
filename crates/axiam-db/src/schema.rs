@@ -397,6 +397,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "user_directory_external_id",
         sql: SCHEMA_V71,
     },
+    Migration {
+        version: 72,
+        name: "saml_identity_provider",
+        sql: SCHEMA_V72,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3793,9 +3798,52 @@ DEFINE INDEX IF NOT EXISTS idx_user_tenant_directory_external_id ON TABLE user \
     COLUMNS tenant_id, directory_external_id UNIQUE;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v72 — T23.2.1 / G-2: the SAML 2.0 identity provider's storage
+// -----------------------------------------------------------------------
+//
+// Additive DDL only. Nothing is backfilled: no tenant is a SAML identity
+// provider until an organization turns the switch on and an administrator
+// registers a service provider.
+//
+// **`security_settings.oidc_saml_idp_enabled`** (D-20) is the layered
+// `saml_idp_enabled` switch, with the shape of `oidc_sensitive_scopes_enabled`
+// (v57): `option<bool> DEFAULT false`, so a row written before this migration
+// reads as *off* and there is no shape of stored data that turns the IdP on by
+// accident.
+//
+const SCHEMA_V72: &str = "\
+DEFINE FIELD IF NOT EXISTS oidc_saml_idp_enabled ON TABLE security_settings
+    TYPE option<bool> DEFAULT false;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.2.1 — v72 is additive DDL only and defaults the IdP switch to off.
+    #[test]
+    fn v72_is_additive_and_defaults_the_saml_idp_to_off() {
+        assert!(SCHEMA_V72.contains(
+            "oidc_saml_idp_enabled ON TABLE security_settings\n    TYPE option<bool> DEFAULT false"
+        ));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V72.contains(forbidden),
+                "v72 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V72
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE") && statement.contains("IF NOT EXISTS"),
+                "v72 statements must be idempotent DEFINEs"
+            );
+        }
+    }
 
     /// T23.3.2 — v71 adds one optional column and one unique index to `user`
     /// and rewrites no row: an absent marker is how every existing account is
@@ -4373,9 +4421,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&71),
-            "v71 is the newest migration (T23.3.2 — the directory marker \
-             `user.directory_external_id`; v70 was T23.3.1's `directory_config` table for \
+            Some(&72),
+            "v72 is the newest migration (T23.2.1 — the SAML identity provider's storage; \
+             v71 was T23.3.2's directory marker `user.directory_external_id`; v70 was T23.3.1's `directory_config` table for \
              the LDAP / Active Directory identity source, v69 was T23.4.1's RFC 7592 \
              registration access token hash on `oauth2_client`, and v68 was X7.2 / D-9's \
              authentication evidence on the OAuth2 refresh token). \

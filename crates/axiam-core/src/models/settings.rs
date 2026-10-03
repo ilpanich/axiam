@@ -328,6 +328,9 @@ pub const DCR_UNAUTHORIZED_CLIENT_TTL_SECS: u32 = 3_600;
 ///   mirror image of `mfa_enforced`, because releasing personal data is the
 ///   less-restrictive direction, so a tenant can turn its organization's
 ///   decision off but never on.
+/// * [`Self::saml_idp_enabled`], validated **disable-only** exactly like
+///   [`Self::sensitive_scopes_enabled`] (D-20): a tenant may turn its
+///   organization's `true` off and never its `false` on.
 /// * [`Self::dynamic_registration`], on the ladder
 ///   `disabled` → `initial_access_token` → `anonymous`: a tenant may move down
 ///   it and never up.
@@ -466,6 +469,29 @@ pub struct OidcPolicy {
     /// organization nor the tenant wrote.
     #[serde(default)]
     pub cimd: CimdPolicy,
+    /// G-2 / D-20 — whether this tenant may act as a SAML 2.0 identity
+    /// provider: publish IdP metadata and accept `AuthnRequest`s on
+    /// `/saml/v2/{tenant}/{metadata,sso,slo}`.
+    ///
+    /// **Off unless an organization turns it on.** A SAML IdP issues
+    /// assertions that other systems accept as proof of identity, so a
+    /// deployment that has never decided to be one issues none, and the
+    /// three endpoints answer `404` as if they did not exist. The switch
+    /// lives on this policy, beside the other OpenID Provider surface
+    /// controls, because the SSO endpoint is the same browser login hop and
+    /// OP session with a different wire format.
+    ///
+    /// **Disable-only**, with the shape of [`Self::sensitive_scopes_enabled`]:
+    /// a tenant may turn its organization's `true` off but never its `false`
+    /// on, because the decision to issue identity assertions on behalf of
+    /// the organization's tenants is the organization's.
+    ///
+    /// A deployment built without the `saml` feature answers `404` whatever
+    /// this says; the setting is a capability, not a grant (each SP must
+    /// still be registered, and `allow_idp_initiated` is its own opt-in).
+    #[serde(default)]
+    #[schema(example = false)]
+    pub saml_idp_enabled: bool,
 }
 
 /// See [`DEFAULT_DCR_MAX_CLIENTS`]. A function because `serde(default = ..)`
@@ -1113,6 +1139,10 @@ pub struct TenantSettingsOverride {
     /// T21.5 — the whole CIMD posture, or nothing. Only `enabled` and
     /// `allow_http` are ordered against the organization's; see [`CimdPolicy`].
     pub cimd: Option<CimdPolicy>,
+    /// G-2 / D-20 — disable-only, like `sensitive_scopes_enabled`; see
+    /// [`OidcPolicy::saml_idp_enabled`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saml_idp_enabled: Option<bool>,
 }
 
 impl TenantSettingsOverride {
@@ -1213,6 +1243,12 @@ pub struct SetOrgSettings {
     /// metadata documents existed (I1).
     #[serde(default)]
     pub cimd: CimdPolicy,
+    /// G-2 / D-20 — defaulted, so an API client written before the SAML
+    /// identity provider existed lands on `false`, which is what every
+    /// deployment did before (I1).
+    #[serde(default)]
+    #[schema(example = false)]
+    pub saml_idp_enabled: bool,
 }
 
 /// The erasure grace window a deployment gets when nothing says otherwise.
@@ -1309,6 +1345,9 @@ pub fn system_defaults() -> SetOrgSettings {
         // values rather than zero so that turning the switch on is one
         // decision rather than four.
         cimd: CimdPolicy::default(),
+        // G-2 / D-20 — no tenant is a SAML identity provider until an
+        // organization says so (I1).
+        saml_idp_enabled: false,
     }
 }
 
@@ -1385,6 +1424,7 @@ pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
         dcr_max_clients: input.dcr_max_clients,
         dcr_unused_client_ttl_days: input.dcr_unused_client_ttl_days,
         cimd: input.cimd.clone(),
+        saml_idp_enabled: input.saml_idp_enabled,
     };
     violations.extend(validate_dcr_policy(&oidc));
     // T21.5 — the same argument, for the mechanism that reaches further: a
@@ -1528,6 +1568,9 @@ pub fn effective_settings(
             sensitive_scopes_enabled: tenant_override
                 .sensitive_scopes_enabled
                 .unwrap_or(org.oidc.sensitive_scopes_enabled),
+            saml_idp_enabled: tenant_override
+                .saml_idp_enabled
+                .unwrap_or(org.oidc.saml_idp_enabled),
             default_locale: tenant_override
                 .default_locale
                 .clone()
@@ -1775,6 +1818,15 @@ pub fn clamp_overrides_to_org(
     if !org.oidc.sensitive_scopes_enabled && overrides.sensitive_scopes_enabled == Some(true) {
         overrides.sensitive_scopes_enabled = None;
         cleared.push("sensitive_scopes_enabled");
+    }
+
+    // G-2 / D-20 — the same direction and the same reason: `Some(false)` is
+    // the tightening and is kept; `Some(true)` against an organization
+    // baseline of `false` is a tenant turning itself into an identity
+    // provider its organization never authorised.
+    if !org.oidc.saml_idp_enabled && overrides.saml_idp_enabled == Some(true) {
+        overrides.saml_idp_enabled = None;
+        cleared.push("saml_idp_enabled");
     }
 
     // T21.4 — the three ordered dynamic-registration controls, on the same
@@ -2062,6 +2114,20 @@ pub fn validate_tenant_override(
     if overrides.sensitive_scopes_enabled == Some(true) && !org.oidc.sensitive_scopes_enabled {
         violations.push(
             "sensitive_scopes_enabled: cannot enable at tenant level when disabled at org level              (the address and phone scopes release personal data under the organization's              lawful basis, not the tenant's)"
+                .into(),
+        );
+    }
+
+    // --- G-2 / D-20 SAML identity provider: disable-only ---
+    //
+    // Same direction as `sensitive_scopes_enabled` above, for the same
+    // reason: `true` is the permissive value, so a tenant may refuse to be an
+    // identity provider its organization allows and may not decide on its own
+    // to become one.
+    if overrides.saml_idp_enabled == Some(true) && !org.oidc.saml_idp_enabled {
+        violations.push(
+            "saml_idp_enabled: cannot enable at tenant level when disabled at org level \
+             (issuing SAML assertions is the organization's decision, not the tenant's)"
                 .into(),
         );
     }
@@ -2420,6 +2486,11 @@ pub fn diff_against_org(
         } else {
             None
         },
+        saml_idp_enabled: diff!(
+            saml_idp_enabled,
+            org.oidc.saml_idp_enabled,
+            tenant.oidc.saml_idp_enabled
+        ),
         default_locale: if tenant.oidc.default_locale != org.oidc.default_locale {
             tenant.oidc.default_locale.clone()
         } else {
@@ -2491,6 +2562,7 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
             dcr_max_clients: input.dcr_max_clients,
             dcr_unused_client_ttl_days: input.dcr_unused_client_ttl_days,
             cimd: input.cimd.clone(),
+            saml_idp_enabled: input.saml_idp_enabled,
         },
         created_at: now,
         updated_at: now,
@@ -3766,6 +3838,147 @@ mod tests {
         let diff = diff_against_org(&org, &merged);
         assert_eq!(diff.sensitive_scopes_enabled, Some(false));
         assert_eq!(diff.default_locale.as_deref(), Some("fr"));
+    }
+
+    // -------------------------------------------------------------------
+    // G-2 / D-20 — the SAML identity provider switch
+    // -------------------------------------------------------------------
+
+    /// I1: a deployment that has configured nothing is not a SAML IdP.
+    #[test]
+    fn the_saml_idp_is_off_in_the_system_defaults() {
+        assert!(!system_defaults().saml_idp_enabled);
+        assert!(!org_settings().oidc.saml_idp_enabled);
+        let merged = effective_settings(
+            &org_settings(),
+            &TenantSettingsOverride::default(),
+            Uuid::nil(),
+            Uuid::nil(),
+        );
+        assert!(!merged.oidc.saml_idp_enabled);
+    }
+
+    /// Disable-only, refusal side: a tenant may not make itself an identity
+    /// provider its organization did not authorise.
+    #[test]
+    fn a_tenant_may_not_enable_the_saml_idp_its_org_disabled() {
+        let org = org_settings();
+        assert!(!org.oidc.saml_idp_enabled);
+        let overrides = TenantSettingsOverride {
+            saml_idp_enabled: Some(true),
+            ..Default::default()
+        };
+        let err = validate_tenant_override(&org, &overrides)
+            .expect_err("enabling the IdP the org disabled must be refused");
+        assert!(
+            err.to_string().contains("saml_idp_enabled"),
+            "the violation must name the field: {err}"
+        );
+    }
+
+    /// Disable-only, accepted side: a tenant may turn its organization's
+    /// `true` off, and the resolved policy reflects it.
+    #[test]
+    fn a_tenant_may_disable_the_saml_idp_its_org_enabled() {
+        let mut org = org_settings();
+        org.oidc.saml_idp_enabled = true;
+        let overrides = TenantSettingsOverride {
+            saml_idp_enabled: Some(false),
+            ..Default::default()
+        };
+        validate_tenant_override(&org, &overrides).expect("turning the IdP off must be allowed");
+        let merged = effective_settings(&org, &overrides, Uuid::nil(), Uuid::nil());
+        assert!(!merged.oidc.saml_idp_enabled);
+        // No override inherits the organization's `true`.
+        let inherited = effective_settings(
+            &org,
+            &TenantSettingsOverride::default(),
+            Uuid::nil(),
+            Uuid::nil(),
+        );
+        assert!(inherited.oidc.saml_idp_enabled);
+    }
+
+    /// Equal values validate: `Some(true)` under an organization `true` is not
+    /// an escalation.
+    #[test]
+    fn a_tenant_saml_idp_optin_under_an_enabled_org_is_not_an_escalation() {
+        let mut org = org_settings();
+        org.oidc.saml_idp_enabled = true;
+        let overrides = TenantSettingsOverride {
+            saml_idp_enabled: Some(true),
+            ..Default::default()
+        };
+        validate_tenant_override(&org, &overrides)
+            .expect("restating the organization's value is not a violation");
+    }
+
+    /// The clamp drops a tenant opt-in the organization has since withdrawn,
+    /// and keeps an opt-out.
+    #[test]
+    fn clamping_drops_a_saml_idp_optin_the_org_has_withdrawn_and_keeps_an_optout() {
+        let org = org_settings();
+        let mut optin = TenantSettingsOverride {
+            saml_idp_enabled: Some(true),
+            ..Default::default()
+        };
+        let cleared = clamp_overrides_to_org(&org, &mut optin);
+        assert!(cleared.contains(&"saml_idp_enabled"));
+        assert_eq!(optin.saml_idp_enabled, None);
+        assert!(
+            !effective_settings(&org, &optin, Uuid::nil(), Uuid::nil())
+                .oidc
+                .saml_idp_enabled
+        );
+
+        let mut optout = TenantSettingsOverride {
+            saml_idp_enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(clamp_overrides_to_org(&org, &mut optout).is_empty());
+        assert_eq!(optout.saml_idp_enabled, Some(false));
+    }
+
+    /// An override or an organization input written before G-2 carries no
+    /// such field and decodes to the off state.
+    #[test]
+    fn pre_g2_payloads_decode_with_the_saml_idp_off() {
+        let legacy: TenantSettingsOverride =
+            serde_json::from_str(r#"{"min_length": 16}"#).expect("a pre-G-2 override must decode");
+        assert_eq!(legacy.saml_idp_enabled, None);
+
+        let mut value = serde_json::to_value(system_defaults()).expect("serialise the defaults");
+        value
+            .as_object_mut()
+            .expect("the defaults serialise as an object")
+            .remove("saml_idp_enabled");
+        let input: SetOrgSettings =
+            serde_json::from_value(value).expect("a pre-G-2 org input must decode");
+        assert!(!input.saml_idp_enabled);
+    }
+
+    /// `diff_against_org` round-trips the field, so the admin view of what a
+    /// tenant changed does not lose it, and `validate_org_settings` accepts
+    /// the organization-level `true`.
+    #[test]
+    fn diff_against_org_reports_the_saml_idp_switch() {
+        let mut org = org_settings();
+        org.oidc.saml_idp_enabled = true;
+        let overrides = TenantSettingsOverride {
+            saml_idp_enabled: Some(false),
+            ..Default::default()
+        };
+        let merged = effective_settings(&org, &overrides, Uuid::nil(), Uuid::nil());
+        assert_eq!(
+            diff_against_org(&org, &merged).saml_idp_enabled,
+            Some(false)
+        );
+
+        let mut input = system_defaults();
+        input.saml_idp_enabled = true;
+        validate_org_settings(&input).expect("an organization may turn the IdP on");
+        let built = settings_from_org_input(Uuid::nil(), Uuid::nil(), &input);
+        assert!(built.oidc.saml_idp_enabled);
     }
 
     // -----------------------------------------------------------------------

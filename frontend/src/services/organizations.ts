@@ -290,6 +290,8 @@ export interface SetOrgSettings {
   // to make the round trip.
   sensitive_scopes_enabled: boolean;
   default_locale: string | null;
+  // G-2 / D-20 — carried through unedited, for the same reason.
+  saml_idp_enabled: boolean;
   dynamic_registration: DynamicRegistrationMode;
   dcr_allowed_scopes: string[];
   dcr_allowed_redirect_hosts: string[];

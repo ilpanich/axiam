@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`saml_idp_enabled`: the layered switch for the SAML identity provider
+  (T23.2.1, G-2, D-20).** A new setting on the OIDC policy block, default
+  `false`, with exactly the shape of `sensitive_scopes_enabled`: an
+  organization baseline, a tenant override that may only turn an organization's
+  `true` off (never its `false` on), the same `validate_tenant_override` /
+  `clamp_overrides_to_org` treatment, and a clamp that drops a tenant opt-in the
+  organization later withdraws. Stored in `security_settings.oidc_saml_idp_enabled`
+  (schema v72, `option<bool> DEFAULT false`, so a pre-v72 row reads as off).
+  Appears in the settings API (`OidcPolicy`, `SetOrgSettings`,
+  `TenantSettingsOverride`; OpenAPI regenerated) and is carried through the
+  admin console's whole-row organization save so a save cannot reset it. Nothing
+  reads it yet: the SAML endpoints that answer `404` when it is off arrive with
+  T23.2.3.
+
 - **Directory sign-in: the LDAP client and the bind-as-user path (T23.3.2,
   G-3).** A tenant's LDAP or Active Directory server can now authenticate its
   accounts. `axiam-directory` gains the client — `ldap3` over rustls only (no

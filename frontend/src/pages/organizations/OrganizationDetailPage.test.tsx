@@ -38,6 +38,7 @@ const baseSettings: SetOrgSettings = {
   webauthn_user_verification: "preferred",
   sensitive_scopes_enabled: false,
   default_locale: null,
+  saml_idp_enabled: false,
   dynamic_registration: "disabled",
   dcr_allowed_scopes: [],
   dcr_allowed_redirect_hosts: [],

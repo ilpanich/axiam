@@ -234,3 +234,70 @@ async fn get_tenant_override_for_unknown_tenant_id_is_not_found() {
         "a tenant_id with no tenant row must not resolve an org_id"
     );
 }
+
+/// G-2 / D-20 (schema v72): the layered `saml_idp_enabled` switch survives the
+/// round trip through the `security_settings` column and the tenant's sparse
+/// override, and a tenant can turn its organization's `true` off.
+#[tokio::test]
+async fn saml_idp_enabled_round_trips_and_is_overridable_downwards() {
+    let (db, org_id, tenant_id) = setup().await;
+    let repo = SurrealSettingsRepository::new(db);
+
+    // Never configured: off.
+    let unset = repo
+        .get_effective_settings(org_id, tenant_id)
+        .await
+        .unwrap();
+    assert!(!unset.oidc.saml_idp_enabled);
+
+    repo.set_org_settings(
+        org_id,
+        SetOrgSettings {
+            saml_idp_enabled: true,
+            ..system_defaults()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        repo.get_org_settings(org_id)
+            .await
+            .unwrap()
+            .oidc
+            .saml_idp_enabled
+    );
+    // No tenant row: inherits the organization.
+    assert!(
+        repo.get_effective_settings(org_id, tenant_id)
+            .await
+            .unwrap()
+            .oidc
+            .saml_idp_enabled
+    );
+
+    repo.set_tenant_override(
+        tenant_id,
+        SetTenantOverride {
+            saml_idp_enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.get_tenant_override(tenant_id)
+            .await
+            .unwrap()
+            .expect("override row")
+            .saml_idp_enabled,
+        Some(false)
+    );
+    assert!(
+        !repo
+            .get_effective_settings(org_id, tenant_id)
+            .await
+            .unwrap()
+            .oidc
+            .saml_idp_enabled
+    );
+}

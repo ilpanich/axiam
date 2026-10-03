@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:abe4aa50936704320439183bdd7bcd0201667093609ab0263f8e3d60b65c5670"
+    "x-axiam-spec-digest": "sha256:47d55f0b4865ab65dc5deb9dffbc7ff0750774246c0442de5faa6405b10af47b"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -17136,7 +17136,7 @@
       },
       "OidcPolicy": {
         "type": "object",
-        "description": "OpenID Connect surface controls (X7 G8, plan §4.6/§4.8; T21.4).\n\nSettings that are not password rules, here because this is the\norg-baseline-plus-tenant-override surface every other per-tenant control\nlives on. They are not all of the same kind as each other, and which is\nwhich is the whole of what [`validate_tenant_override`] and\n[`clamp_overrides_to_org`] read, so it is set out rather than inferred.\n\n**Ordered** — a tenant may be stricter than its organization and never more\npermissive:\n\n* [`Self::sensitive_scopes_enabled`], validated **disable-only** — the\n  mirror image of `mfa_enforced`, because releasing personal data is the\n  less-restrictive direction, so a tenant can turn its organization's\n  decision off but never on.\n* [`Self::dynamic_registration`], on the ladder\n  `disabled` → `initial_access_token` → `anonymous`: a tenant may move down\n  it and never up.\n* [`Self::dcr_max_clients`] and [`Self::dcr_unused_client_ttl_days`], on the\n  ordinary `tenant <= org` rule — with the wrinkle that `0` on the second\n  means *never sweep*, which is the longest window of all and is handled by\n  [`dcr_ttl_strictness`].\n\n**Not ordered**, therefore never validated against the baseline and never\nclamped:\n\n* [`Self::default_locale`]. A language is a presentation preference; there\n  is no sense in which Italian is stricter than French.\n* [`Self::dcr_allowed_scopes`], [`Self::dcr_allowed_redirect_hosts`] and\n  [`Self::external_client_allowed_resources`]. Each names per-tenant\n  resources — *this* tenant's MCP servers, *this* tenant's callback hosts —\n  and there is no sense in which one such list is stricter than another. A\n  subset rule would force an organization to enumerate every tenant's\n  resource servers in its own baseline before any tenant could name one.\n\nThe model's rule is \"a tenant may only be more restrictive\", which binds\nevery field that *has* a restrictiveness; a field that has none cannot\nviolate it.\n\nOne cross-field interlock spans both groups and is checked on the resolved\npolicy rather than on either input: see [`validate_dcr_policy`].",
+        "description": "OpenID Connect surface controls (X7 G8, plan §4.6/§4.8; T21.4).\n\nSettings that are not password rules, here because this is the\norg-baseline-plus-tenant-override surface every other per-tenant control\nlives on. They are not all of the same kind as each other, and which is\nwhich is the whole of what [`validate_tenant_override`] and\n[`clamp_overrides_to_org`] read, so it is set out rather than inferred.\n\n**Ordered** — a tenant may be stricter than its organization and never more\npermissive:\n\n* [`Self::sensitive_scopes_enabled`], validated **disable-only** — the\n  mirror image of `mfa_enforced`, because releasing personal data is the\n  less-restrictive direction, so a tenant can turn its organization's\n  decision off but never on.\n* [`Self::saml_idp_enabled`], validated **disable-only** exactly like\n  [`Self::sensitive_scopes_enabled`] (D-20): a tenant may turn its\n  organization's `true` off and never its `false` on.\n* [`Self::dynamic_registration`], on the ladder\n  `disabled` → `initial_access_token` → `anonymous`: a tenant may move down\n  it and never up.\n* [`Self::dcr_max_clients`] and [`Self::dcr_unused_client_ttl_days`], on the\n  ordinary `tenant <= org` rule — with the wrinkle that `0` on the second\n  means *never sweep*, which is the longest window of all and is handled by\n  [`dcr_ttl_strictness`].\n\n**Not ordered**, therefore never validated against the baseline and never\nclamped:\n\n* [`Self::default_locale`]. A language is a presentation preference; there\n  is no sense in which Italian is stricter than French.\n* [`Self::dcr_allowed_scopes`], [`Self::dcr_allowed_redirect_hosts`] and\n  [`Self::external_client_allowed_resources`]. Each names per-tenant\n  resources — *this* tenant's MCP servers, *this* tenant's callback hosts —\n  and there is no sense in which one such list is stricter than another. A\n  subset rule would force an organization to enumerate every tenant's\n  resource servers in its own baseline before any tenant could name one.\n\nThe model's rule is \"a tenant may only be more restrictive\", which binds\nevery field that *has* a restrictiveness; a field that has none cannot\nviolate it.\n\nOne cross-field interlock spans both groups and is checked on the resolved\npolicy rather than on either input: see [`validate_dcr_policy`].",
         "required": [
           "sensitive_scopes_enabled"
         ],
@@ -17191,6 +17191,11 @@
               "type": "string"
             },
             "description": "**D3** — the audiences an externally registered client may address.\n\nThe single most important field on this policy, and the reason the\nsettings handler refuses `dynamic_registration: anonymous` while it is\nempty. A client an unrelated party registered cannot declare its own\n`allowed_resources`; it inherits this list verbatim, so what a stranger\ncan mint a token *for* is a decision the tenant took in advance rather\nthan one the registration request makes.\n\nEmpty means an externally registered client can obtain only today's\n`axiam:user` tokens — which AXIAM's own APIs accept. That is why the\ninterlock exists: the empty list is not a safe default for an *open*\nregistration endpoint, it is the most dangerous one.\n\nShared with T5 (CIMD), which inherits the same list for the same\nreason."
+          },
+          "saml_idp_enabled": {
+            "type": "boolean",
+            "description": "G-2 / D-20 — whether this tenant may act as a SAML 2.0 identity\nprovider: publish IdP metadata and accept `AuthnRequest`s on\n`/saml/v2/{tenant}/{metadata,sso,slo}`.\n\n**Off unless an organization turns it on.** A SAML IdP issues\nassertions that other systems accept as proof of identity, so a\ndeployment that has never decided to be one issues none, and the\nthree endpoints answer `404` as if they did not exist. The switch\nlives on this policy, beside the other OpenID Provider surface\ncontrols, because the SSO endpoint is the same browser login hop and\nOP session with a different wire format.\n\n**Disable-only**, with the shape of [`Self::sensitive_scopes_enabled`]:\na tenant may turn its organization's `true` off but never its `false`\non, because the decision to issue identity assertions on behalf of\nthe organization's tenants is the organization's.\n\nA deployment built without the `saml` feature answers `404` whatever\nthis says; the setting is a capability, not a grant (each SP must\nstill be registered, and `allow_idp_initiated` is its own opt-in).",
+            "example": false
           },
           "sensitive_scopes_enabled": {
             "type": "boolean",
@@ -19803,6 +19808,11 @@
           "require_uppercase": {
             "type": "boolean"
           },
+          "saml_idp_enabled": {
+            "type": "boolean",
+            "description": "G-2 / D-20 — defaulted, so an API client written before the SAML\nidentity provider existed lands on `false`, which is what every\ndeployment did before (I1).",
+            "example": false
+          },
           "sensitive_scopes_enabled": {
             "type": "boolean",
             "example": false
@@ -20539,6 +20549,13 @@
               "boolean",
               "null"
             ]
+          },
+          "saml_idp_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "G-2 / D-20 — disable-only, like `sensitive_scopes_enabled`; see\n[`OidcPolicy::saml_idp_enabled`]."
           },
           "sensitive_scopes_enabled": {
             "type": [

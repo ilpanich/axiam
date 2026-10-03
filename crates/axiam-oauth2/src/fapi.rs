@@ -835,18 +835,7 @@ pub fn enforce_token_request(
         return Ok(());
     }
 
-    if !client.token_endpoint_auth_method.is_strong() {
-        tracing::error!(
-            client_id = %client.client_id,
-            method = client.token_endpoint_auth_method.as_str(),
-            "a client on the fapi2 profile is registered with a shared-secret authentication \
-             method; this registration cannot have passed validate_registration and the row \
-             should be investigated"
-        );
-        return Err(OAuth2Error::InvalidClient(
-            crate::mtls::MTLS_AUTH_FAILED.into(),
-        ));
-    }
+    enforce_client_authentication(client)?;
 
     if !client.is_sender_constrained() {
         tracing::error!(
@@ -887,6 +876,40 @@ pub fn enforce_token_request(
     }
 
     Ok(())
+}
+
+/// Request-time check of the profile's client-authentication rule alone
+/// (FAPI 2.0 §5.3.1.1; D-17, T23.1.5).
+///
+/// A `fapi2` client whose row names a shared-secret method — which
+/// [`validate_registration`] can never have admitted, so the row was edited
+/// past it — is refused `invalid_client`, with the same error and the same
+/// `error!` at every endpoint that authenticates a client. A no-op for a
+/// `standard` client.
+///
+/// This is the rule [`enforce_token_request`] applies first, extracted rather
+/// than copied so the endpoints cannot drift. It is the whole of the gate at
+/// PAR, introspection and revocation, because the rest of
+/// [`enforce_token_request`] asks for evidence those endpoints do not
+/// establish before a client authenticates (a DPoP proof is verified after
+/// authentication at PAR and not at all at the other two), and a legitimate
+/// DPoP-bound client would be refused by it. Call it **after** the client has
+/// authenticated: the refusal then reveals a fact about the row only to a
+/// caller holding the row's credential.
+pub fn enforce_client_authentication(client: &OAuth2Client) -> Result<(), OAuth2Error> {
+    if !client.profile.is_fapi2() || client.token_endpoint_auth_method.is_strong() {
+        return Ok(());
+    }
+    tracing::error!(
+        client_id = %client.client_id,
+        method = client.token_endpoint_auth_method.as_str(),
+        "a client on the fapi2 profile is registered with a shared-secret authentication \
+         method; this registration cannot have passed validate_registration and the row \
+         should be investigated"
+    );
+    Err(OAuth2Error::InvalidClient(
+        crate::mtls::MTLS_AUTH_FAILED.into(),
+    ))
 }
 
 /// What a token request actually carried, as opposed to what its body claimed.
@@ -1259,6 +1282,43 @@ mod tests {
                 method.as_str()
             );
         }
+    }
+
+    /// D-17 — the narrow rule PAR, introspection and revocation apply. It asks
+    /// `is_strong()` and nothing else: a strong `fapi2` client passes with no
+    /// evidence at all (it presents none at those endpoints), and a `standard`
+    /// client passes whatever its method.
+    #[test]
+    fn the_client_authentication_rule_asks_is_strong_and_nothing_else() {
+        for method in [
+            ClientAuthMethod::ClientSecretPost,
+            ClientAuthMethod::ClientSecretBasic,
+        ] {
+            let mut weak = fapi_client();
+            weak.token_endpoint_auth_method = method;
+            let err = enforce_client_authentication(&weak).expect_err("a weak fapi2 row");
+            assert_eq!(err.error_code(), "invalid_client", "{}", method.as_str());
+
+            // The token-endpoint gate gives the same answer for the same row.
+            let token_err = enforce_token_request(
+                &weak,
+                TokenRequestEvidence {
+                    presented_certificate: true,
+                    verified_dpop_proof: false,
+                },
+            )
+            .expect_err("the token gate also refuses it");
+            assert_eq!(token_err.to_string(), err.to_string());
+
+            let mut standard = weak.clone();
+            standard.profile = ClientProfile::Standard;
+            assert!(enforce_client_authentication(&standard).is_ok());
+        }
+
+        assert!(
+            enforce_client_authentication(&fapi_client()).is_ok(),
+            "a strong fapi2 client is not asked for any evidence here"
+        );
     }
 
     #[test]

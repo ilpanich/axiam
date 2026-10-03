@@ -2801,13 +2801,22 @@ where
             req.client_assertion.as_deref(),
             req.client_assertion_type.as_deref(),
         );
-        self.authenticate_client(
-            tenant_id,
-            &req.client_id,
-            req.client_secret.as_deref(),
-            &ctx,
-        )
-        .await?;
+        let client = self
+            .authenticate_client(
+                tenant_id,
+                &req.client_id,
+                req.client_secret.as_deref(),
+                &ctx,
+            )
+            .await?;
+
+        // D-17 (T23.1.5) — the profile's client-authentication rule, at
+        // request time, after the client has authenticated and before anything
+        // is revoked. A `fapi2` row edited to a shared-secret method is
+        // refused here as it is at the token endpoint. RFC 7009 §2.2's "an
+        // invalid token is a 200" is untouched: this fires on the client, never
+        // on the token, and never for a strong `fapi2` client.
+        crate::fapi::enforce_client_authentication(&client)?;
 
         // Try revoking as a refresh token (hash-based lookup).
         // For access tokens (short-lived JWTs), revocation is a no-op —
@@ -2853,6 +2862,10 @@ where
                 &ctx,
             )
             .await?;
+
+        // D-17 (T23.1.5) — as at revoke: the profile's client-authentication
+        // rule, after authentication and before anything is revealed.
+        crate::fapi::enforce_client_authentication(&client)?;
 
         // T21.2 — a public client may not introspect.
         //

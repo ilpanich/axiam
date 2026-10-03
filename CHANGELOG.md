@@ -159,6 +159,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A `fapi2` client's authentication method is re-checked at request time at
+  PAR, introspection and revocation, as it already was at the token endpoint
+  (T23.1.5, D-17).** A `fapi2` row edited in the database to
+  `client_secret_basic` or `client_secret_post` — which registration validation
+  refuses, so only a direct edit produces it — still authenticated at those
+  three endpoints with a correct secret (PAR answered `201`, introspection and
+  revocation `200`). The `is_strong()` rule is now one function,
+  `fapi::enforce_client_authentication`, extracted from `enforce_token_request`
+  and called by all of them after the client authenticates and before anything
+  is pushed, revealed or revoked, with the same `invalid_client` as the token
+  endpoint. A caller without the secret sees nothing new, RFC 7009 §2.2's "an
+  invalid token is a 200" is untouched, and no client registered today changes.
+  Amends T-253 (its residual is removed).
+
 - **`max_age=0` on the honour lane is now handled as `prompt=login`, so a
   relying party sending it can sign in (T23.1.4, D-14).** The honour lane
   re-authenticated when `elapsed >= max_age`, which for `0` made the

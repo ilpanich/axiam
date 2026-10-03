@@ -1398,3 +1398,189 @@ async fn t23_1_5_a_basic_attempt_at_par_revoke_and_introspect_logs_nothing_eithe
         "the correct secret, encoded, reached the log"
     );
 }
+
+// --- D-17: the request-time FAPI client-authentication rule at PAR, ---------
+// --- introspection and revocation ------------------------------------------
+
+/// The three endpoints D-17 adds to the token endpoint's request-time gate,
+/// each as `(name, path, body without the secret, status of a success)`.
+fn d17_endpoints(client_id: &str) -> [(&'static str, &'static str, String, u16); 3] {
+    [
+        (
+            "par",
+            "/oauth2/par",
+            format!("client_id={client_id}&response_type=code&redirect_uri={REDIRECT_URI}"),
+            201,
+        ),
+        (
+            "introspect",
+            "/oauth2/introspect",
+            format!("client_id={client_id}&token=x"),
+            200,
+        ),
+        (
+            "revoke",
+            "/oauth2/revoke",
+            format!("client_id={client_id}&token=x"),
+            200,
+        ),
+    ]
+}
+
+/// Present the fixture's correct credential at one endpoint, in the channel the
+/// client's registration names: the header for the Basic client, the body for
+/// the post client.
+async fn present_credential(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    f: &Fixture,
+    basic: bool,
+    path: &str,
+    body: &str,
+) -> (u16, Option<String>) {
+    let mut req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("{path}?tenant_id={}", f.tenant_id))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"));
+    let body = if basic {
+        req = req.insert_header(("Authorization", good_basic_value(f)));
+        body.to_owned()
+    } else {
+        format!("{body}&client_secret={AWKWARD_SECRET_ENCODED}")
+    };
+    let resp = test::call_service(app, req.set_payload(body).to_request()).await;
+    let status = resp.status().as_u16();
+    let raw = test::read_body(resp).await;
+    let error = serde_json::from_slice::<Value>(&raw)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_owned));
+    (status, error)
+}
+
+/// **D-17.** A `fapi2` row whose method is a shared secret — one only a
+/// database edit can produce — is refused at PAR, introspection and
+/// revocation after its correct credential authenticates, in both channels.
+/// The standard-profile control, run first against the same row and the same
+/// credential, succeeds, so the refusal is the profile's.
+#[actix_rt::test]
+async fn d17_a_tampered_fapi2_row_is_refused_at_par_introspection_and_revocation() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let repo = SurrealOAuth2ClientRepository::new(f.db.clone());
+
+    for basic in [true, false] {
+        let client_id = if basic {
+            &f.basic_client_id
+        } else {
+            &f.post_client_id
+        };
+        let channel = if basic {
+            "client_secret_basic"
+        } else {
+            "client_secret_post"
+        };
+
+        // Control: the standard profile, same credential.
+        for (name, path, body, success) in d17_endpoints(client_id) {
+            let (status, _) = present_credential(&app, &f, basic, path, &body).await;
+            assert_eq!(
+                status, success,
+                "control {name}/{channel}: standard profile"
+            );
+        }
+
+        // Tamper: the profile only, as a database edit would.
+        let row = repo.get_by_client_id(f.tenant_id, client_id).await.unwrap();
+        repo.update(
+            f.tenant_id,
+            row.id,
+            UpdateOAuth2Client {
+                profile: Some(ClientProfile::Fapi2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        for (name, path, body, _) in d17_endpoints(client_id) {
+            let (status, error) = present_credential(&app, &f, basic, path, &body).await;
+            assert_eq!(
+                (status, error.as_deref()),
+                (401, Some("invalid_client")),
+                "{name}/{channel}: a fapi2 row holding a shared-secret method must be refused"
+            );
+        }
+    }
+}
+
+/// The refusal comes **after** authentication, so it tells a caller with the
+/// wrong secret nothing: a tampered `fapi2` row and a standard row answer a
+/// wrong credential identically, and so does an unknown client.
+#[actix_rt::test]
+async fn d17_a_wrong_secret_learns_nothing_from_the_gate() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let repo = SurrealOAuth2ClientRepository::new(f.db.clone());
+    let row = repo
+        .get_by_client_id(f.tenant_id, &f.post_client_id)
+        .await
+        .unwrap();
+    repo.update(
+        f.tenant_id,
+        row.id,
+        UpdateOAuth2Client {
+            profile: Some(ClientProfile::Fapi2),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    for (name, path, body, _) in d17_endpoints(&f.post_client_id) {
+        let wrong = format!("{body}&client_secret=wrong");
+        let unknown = format!(
+            "{}&client_secret=wrong",
+            body.replace(&f.post_client_id, "oa_nobody")
+        );
+        let tampered = present_wrong(&app, &f, path, &wrong).await;
+        let missing = present_wrong(&app, &f, path, &unknown).await;
+        assert_eq!(
+            tampered, missing,
+            "{name}: a wrong secret must see the same answer whether or not the row is a tampered fapi2 one"
+        );
+        assert_eq!(tampered.0, 401, "{name}");
+    }
+}
+
+async fn present_wrong(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    f: &Fixture,
+    path: &str,
+    body: &str,
+) -> (u16, Option<String>) {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("{path}?tenant_id={}", f.tenant_id))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(body.to_owned())
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let raw = test::read_body(resp).await;
+    let json = serde_json::from_slice::<Value>(&raw).unwrap_or(Value::Null);
+    (
+        status,
+        Some(format!(
+            "{}|{}",
+            json["error"].as_str().unwrap_or(""),
+            json["error_description"].as_str().unwrap_or("")
+        )),
+    )
+}

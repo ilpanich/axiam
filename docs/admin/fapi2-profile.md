@@ -533,7 +533,11 @@ registered for (`sdks/CONTRACT.md` §5 rule 3).
 
 **A FAPI 2.0 client cannot use it.** `client_secret_basic` is a shared secret,
 so §5.3.1.1 refuses it exactly as it refuses `client_secret_post` — at
-registration, with `WeakClientAuth`, and again at request time.
+registration, with `WeakClientAuth`, and again at request time at every endpoint
+that authenticates a client: the token endpoint (including token exchange and
+the UMA ticket grant), PAR, introspection and revocation. A row edited in the
+database to a shared-secret method is refused `invalid_client` at all of them,
+after its credential authenticates.
 
 **The registration decides, and only the registration.** A client registered
 for `client_secret_post` that sends an `Authorization: Basic` header has it

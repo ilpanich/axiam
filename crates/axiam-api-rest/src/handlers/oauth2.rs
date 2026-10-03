@@ -5198,6 +5198,14 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
         Ok(client) => client,
         Err(e) => return build_oauth2_error_response(&e),
     };
+    // D-17 (T23.1.5) — the profile's client-authentication rule at request
+    // time, after authentication and before anything is pushed: a `fapi2` row
+    // edited to a shared-secret method is refused here as at the token
+    // endpoint. Only this rule, not `enforce_token_request` whole: the DPoP
+    // proof that would ask for is verified further down, after this point.
+    if let Err(e) = axiam_oauth2::fapi::enforce_client_authentication(&client) {
+        return build_oauth2_error_response(&e);
+    }
     // Cloned because `client.client_id` is moved into the pushed request
     // below, and the §10.1 refusal between here and there wants to name the
     // client it is refusing.

@@ -377,6 +377,46 @@ security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 
 ### G-2 — SAML 2.0 identity provider — **P1**
 
+> **EXECUTED (partly) — G-2, W3: T23.2.1, 2026-10-03** (`8d0d875`, `5f4129c`,
+> `9932129`, `e1397b6`, `bfb2961`; Sonnet 5.5 for the registry and the
+> credential store, Opus 5.5 in the hand-over session for `9932129`). The
+> data layer of the SAML IdP; nothing serves SAML yet. **D-20** shipped as the
+> layered, disable-only setting `saml_idp_enabled` (organization default,
+> tenant may only turn it off, default `false`). `SamlServiceProvider` lives
+> in `axiam-core` with its write-time validator in `axiam-federation`
+> (`saml_sp::validate_saml_service_provider`): the ACS list is refused exactly
+> where an OAuth2 redirect URI would be, plus a `*`; certificates are one
+> `CERTIFICATE` block and a private key is refused by name; there is **no
+> `sign_assertions` field**, so assertions cannot be configured unsigned; D-2
+> (encryption off) and D-3 (IdP-initiated per SP, off) are the defaults. The
+> redirect rule now exists once and the admin OAuth2 client API calls it.
+> **D-21** shipped: `CertificateType::SamlSigning` (keyUsage
+> `digitalSignature`, EKU `id-kp-documentSigning` only, no SAN, RSA-4096) is
+> `serde`-skipped, so the OpenAPI enum is byte-identical, and it is refused by
+> certificate generation, CSR signing, the bind endpoint, device login and
+> mTLS. The IdP credential is a `saml_idp_credential` row (one `active` and
+> one `next` per tenant, enforced by a computed `slot` under a UNIQUE index),
+> never a `certificate` row; its key is sealed through the database custodian
+> explicitly, only `get_active_sealed` selects it, `retire` destroys it in the
+> same write, and both tables go with their tenant in the tenant-delete
+> transaction. Schema **v72** (registry, setting, credential). Tests: 12 + 12
+> repository tests, 6 PKI tests (profile parsed back from the DER, chain, the
+> sealed bytes hold no PEM and decrypt to the certificate's key, refusals of
+> another organization's, an imported, an expired and a revoked CA, the
+> 730-day cap), the refusal tests in `cert_test`, `mtls_test` and
+> `device_auth_test`, 28 validator unit tests, the v72 schema tests.
+>
+> What the plan did not anticipate. The model has no "signing CA" flag; a CA
+> AXIAM cannot sign with is one whose custody is `External`, refused by the
+> custodian. The issuing scope is a caller parameter: a tenant principal gets
+> only its tenant's CA; T23.2.5 passes it from the principal. A retired
+> credential's key is destroyed, so rotation must publish `next` before
+> promoting, and there is no promote verb yet (T23.2.5). The service returns an
+> expired active credential; the signer (T23.2.2) decides. RSA-4096 key
+> generation makes the PKI tests ~3 minutes in a debug build. No threat entry:
+> the signing-key-at-rest threat is T23.2.2's (§7 rule 2, pulled forward to the
+> Opus task that first signs with it).
+
 **Target.** AXIAM issues SAML 2.0 assertions to registered service providers,
 per tenant: IdP metadata, Web Browser SSO profile with HTTP-Redirect and
 HTTP-POST bindings, SP-initiated and IdP-initiated flows, signed assertions

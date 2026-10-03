@@ -16,6 +16,7 @@ use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
     directory::{DirectoryConfig, NewDirectoryConfig},
+    directory_sync::DirectorySyncState,
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
     email_template::{EmailTemplate, SetEmailTemplate, TemplateKind},
     email_verification::{CreateEmailVerificationToken, EmailVerificationToken},
@@ -405,6 +406,71 @@ pub trait UserRepository: Send + Sync {
         _tenant_id: Uuid,
         _names: &[String],
     ) -> impl Future<Output = AxiamResult<Option<IdentityCollision>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// [`Self::find_identity_collision`] with one account left out: the sync
+    /// job (T23.3.5) asks whether a directory account's **new** username or
+    /// email would collide with *another* account, and the account itself
+    /// holding the name — in another case, or in its other column — is not a
+    /// collision. A name held by several other accounts is reported once, for
+    /// any one of them.
+    ///
+    /// The default implementation refuses, as for the method above.
+    fn find_identity_collision_excluding(
+        &self,
+        _tenant_id: Uuid,
+        _names: &[String],
+        _exclude_user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<IdentityCollision>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// One page of the tenant's **directory accounts** — those carrying
+    /// [`User::directory_external_id`] — in id order, strictly after `after`
+    /// (the id of the last row of the previous page; `None` for the first),
+    /// for the sync job (T23.3.5). At most `limit` rows. Credential columns are
+    /// never hydrated.
+    ///
+    /// The default implementation refuses.
+    fn list_directory_accounts(
+        &self,
+        _tenant_id: Uuid,
+        _after: Option<Uuid>,
+        _limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<User>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// Set a directory account `Inactive` — the sync job's soft-delete (D-31) —
+    /// **as one compare-and-set**: the write applies only while the row still
+    /// carries a directory marker and is `Active`, `PendingVerification` or
+    /// `Locked`. `Some(user)` is the account after the change; `None` means it
+    /// did not apply (the account is already `Inactive`, was deleted or
+    /// anonymised meanwhile, or lost its marker), which is never an error and
+    /// never overwrites a state an administrator chose.
+    ///
+    /// This is the only status the directory path can write: there is no
+    /// directory-driven way to `Deleted`, and none to re-enable.
+    ///
+    /// The default implementation refuses.
+    fn deactivate_directory_account(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<User>>> + Send {
         async {
             Err(AxiamError::Internal(
                 "this user repository does not support directory accounts".into(),
@@ -3112,6 +3178,22 @@ pub trait DirectoryConfigRepository: Send + Sync {
 
     /// Every enabled configuration across all tenants, for the sync job.
     fn list_enabled(&self) -> impl Future<Output = AxiamResult<Vec<DirectoryConfig>>> + Send;
+}
+
+/// Storage for what the directory sync job remembers about a tenant between
+/// runs (G-3, T23.3.5, D-31): one row per tenant, deleted with the tenant.
+pub trait DirectorySyncStateRepository: Send + Sync {
+    /// The tenant's state, or `None` when it has never been synced.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<DirectorySyncState>>> + Send;
+
+    /// Replace the tenant's state (creating it on the first run).
+    fn save(&self, state: &DirectorySyncState) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete the tenant's state. Succeeds when there is none.
+    fn delete(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
 // ---------------------------------------------------------------------------

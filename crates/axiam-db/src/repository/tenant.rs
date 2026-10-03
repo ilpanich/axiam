@@ -334,7 +334,11 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // The tenant's directory configuration goes with it (T23.3.1, G-3): it
         // holds an encrypted service-account credential for the tenant's
         // directory, and a deleted tenant must not leave that ciphertext
-        // behind. Everything is one query, so the deletes commit or roll back
+        // behind. Its sync state (T23.3.5, schema v75: a watermark, a server
+        // identity, account ids) goes in the same transaction: the job must not
+        // find a deleted tenant's state, and a row naming accounts of a tenant
+        // that no longer exists has no business surviving it. Everything is one
+        // query, so the deletes commit or roll back
         // together. (The broader cascade is issue #523.)
         //
         // F4 P23W2-02: and a transaction that rolled back is an error. The
@@ -347,6 +351,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .query(
                 "BEGIN TRANSACTION; \
                  DELETE directory_config WHERE tenant_id = $id; \
+                 DELETE directory_sync_state WHERE tenant_id = $id; \
                  DELETE saml_service_provider WHERE tenant_id = $id; \
                  DELETE saml_idp_credential WHERE tenant_id = $id; \
                  DELETE saml_authn_request WHERE tenant_id = $id; \

@@ -593,6 +593,23 @@ pub trait DirectoryGroupMapper: Send + Sync {
         user_id: Uuid,
         user_dn: &'a str,
     ) -> DirectoryFuture<'a, Result<GroupMappingOutcome, DirectoryAuthError>>;
+
+    /// Remove **every directory-sourced membership** of `user_id`, asking the
+    /// directory nothing (T23.3.5, D-31): what the sync job does for an account
+    /// it deactivates, whose entry has vanished or been disabled and so backs
+    /// no group. Memberships an administrator made by hand are never touched,
+    /// and a changed membership set flushes the decision cache exactly as
+    /// [`Self::apply_for_user`] does.
+    ///
+    /// The default refuses (`Unavailable`), so an implementation that cannot do
+    /// it is never mistaken for one that did.
+    fn remove_directory_memberships<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> DirectoryFuture<'a, Result<GroupMappingOutcome, DirectoryAuthError>> {
+        Box::pin(async { Err(DirectoryAuthError::Unavailable) })
+    }
 }
 
 /// What `AuthService` holds: a shared, type-erased group mapper.

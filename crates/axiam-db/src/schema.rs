@@ -412,6 +412,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "directory_group_mapping",
         sql: SCHEMA_V74,
     },
+    Migration {
+        version: 75,
+        name: "directory_sync_state",
+        sql: SCHEMA_V75,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4001,9 +4006,114 @@ DEFINE FIELD IF NOT EXISTS source ON TABLE member_of TYPE option<string> \
     ASSERT $value = NONE OR $value = 'directory';
 ";
 
+// -----------------------------------------------------------------------
+// Schema v75 — T23.3.5 / G-3 / D-31: the directory sync job's state
+// -----------------------------------------------------------------------
+//
+// One new table, `directory_sync_state`, one row per tenant. Purely additive:
+// nothing existing is touched and nothing is backfilled — a tenant with no row
+// has simply never been synced, which the job reads as "run a full
+// reconciliation first".
+//
+// **One row per tenant is the key's doing.** The repository writes the row
+// under `type::record('directory_sync_state', <tenant id>)`, and the UNIQUE
+// index on `tenant_id` restates it for anything that writes another way.
+//
+// The row holds what the next run needs and nothing that names a person: the
+// `watermark` the incremental run resumes from (a generalized-time value or a
+// decimal USN — an opaque string to the datastore), the `server_identity` the
+// watermark belongs to (AD's `dsServiceName`; USNs are per domain controller,
+// so a watermark is meaningless against another one), whether the next run
+// must be a full one, when the last attempt and the last complete full run
+// were, how the last attempt ended, and the bounded list of accounts already
+// reported as `Inactive` while the directory shows them present and enabled
+// (so the audit log says it once, not nightly). `last_result` is asserted
+// against the four spellings `DirectorySyncResult::as_str` writes; the list is
+// capped at 5 000, the same constant the repository trims to.
+//
+// The row is removed with its tenant, in the same transaction as the tenant
+// (`SurrealTenantRepository::delete`).
+const SCHEMA_V75: &str = "\
+DEFINE TABLE IF NOT EXISTS directory_sync_state SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE directory_sync_state TYPE string;
+DEFINE FIELD IF NOT EXISTS watermark ON TABLE directory_sync_state TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS server_identity ON TABLE directory_sync_state TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS full_required ON TABLE directory_sync_state TYPE bool;
+DEFINE FIELD IF NOT EXISTS last_attempt_at ON TABLE directory_sync_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_full_run_at ON TABLE directory_sync_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_result ON TABLE directory_sync_state TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['ok', 'partial', 'failed', 'safety_valve'];
+DEFINE FIELD IF NOT EXISTS reported_user_ids ON TABLE directory_sync_state TYPE array<string>
+    ASSERT array::len($value) <= 5000;
+DEFINE FIELD IF NOT EXISTS reported_user_ids.* ON TABLE directory_sync_state TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE directory_sync_state TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_directory_sync_state_tenant ON TABLE directory_sync_state \
+    COLUMNS tenant_id UNIQUE;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.3.5 / D-31 — v75 adds one table, additively, one row per tenant, with
+    /// no personal data column and the last result held to the four spellings.
+    #[test]
+    fn v75_defines_the_directory_sync_state_table_additively() {
+        assert!(SCHEMA_V75.contains("DEFINE TABLE IF NOT EXISTS directory_sync_state SCHEMAFULL"));
+        assert!(SCHEMA_V75.contains(
+            "idx_directory_sync_state_tenant ON TABLE directory_sync_state \
+    COLUMNS tenant_id UNIQUE"
+        ));
+        assert!(
+            SCHEMA_V75.contains("$value IN ['ok', 'partial', 'failed', 'safety_valve']"),
+            "last_result must be held to DirectorySyncResult's spellings"
+        );
+        assert!(SCHEMA_V75.contains("array::len($value) <= 5000"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V75.contains(forbidden),
+                "v75 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        // Nothing but the new table: every statement is about it.
+        for statement in SCHEMA_V75
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v75 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("directory_sync_state"),
+                "v75 defined something outside its own table: {statement}"
+            );
+        }
+        // No column that could hold a name, an address or a DN.
+        for column in ["username", "email", "display", "dn "] {
+            assert!(!SCHEMA_V75.contains(column), "v75 must hold no {column}");
+        }
+    }
+
+    /// v75 takes the next number and keeps the three before it as they were.
+    #[test]
+    fn v75_follows_v74_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| m.version >= 74)
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                (74, "directory_group_mapping"),
+                (75, "directory_sync_state")
+            ]
+        );
+    }
 
     /// T23.3.4 / D-30 — v74 adds the mapping table to the directory row and the
     /// owner marker to the membership edge, both optional so that every row and
@@ -4071,6 +4181,7 @@ mod tests {
                 (72, "saml_identity_provider"),
                 (73, "saml_pending_authn_request"),
                 (74, "directory_group_mapping"),
+                (75, "directory_sync_state"),
             ]
         );
     }
@@ -4780,8 +4891,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&74),
-            "v74 is the newest migration (T23.3.4 — directory group mapping: \
+            Some(&75),
+            "v75 is the newest migration (T23.3.5 — the directory sync job's per-tenant state, \
+             `directory_sync_state`; v74 was T23.3.4 — directory group mapping: \
              `directory_config.group_mappings` and `member_of.source`; v73 was T23.2.3's \
              pending SAML AuthnRequests, v72 was T23.2.1 — the SAML identity provider's storage; \
              v71 was T23.3.2's directory marker `user.directory_external_id`; v70 was T23.3.1's `directory_config` table for \

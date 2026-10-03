@@ -21,6 +21,11 @@ use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::directory::{
     DirectoryAuditSink, DirectoryAuthError, DirectoryFuture, DirectoryIdentity,
 };
+// The cleaning rules are shared with the sync job (T23.3.5), so they live in
+// `axiam-core` and this module only applies them.
+use axiam_core::models::directory_profile::{
+    MAX_EMAIL_CHARS, MAX_NAME_CHARS, clean_display_name, clean_identifier, plausible_email,
+};
 use axiam_core::models::user::{CreateDirectoryAccount, User, UserStatus};
 use axiam_core::repository::{
     AuditLogRepository, CertificateRepository, FederationLinkRepository, RefreshTokenRepository,
@@ -44,17 +49,12 @@ pub const AUDIT_ACCOUNT_LINKED: &str = "directory.account_linked";
 /// Audit action (T23.3.4): applying the directory group mapping changed a
 /// user's memberships. Identifiers and counts only: the AXIAM groups added and
 /// removed, and how many directory groups were resolved and mapped.
-pub const AUDIT_GROUPS_MAPPED: &str = "directory.groups_mapped";
+pub const AUDIT_GROUPS_MAPPED: &str = axiam_core::models::directory_sync::AUDIT_GROUPS_MAPPED;
 /// Audit action (T23.3.4): a sign-in the directory vouched for was refused
 /// because the group mapping could not be applied — the directory could not be
 /// asked, or the user is in more groups than the cap allows. Nothing was
 /// changed.
 pub const AUDIT_GROUP_MAPPING_REFUSED: &str = "directory.group_mapping_refused";
-
-/// Longest username or display name taken from a directory, in characters.
-const MAX_NAME_CHARS: usize = 255;
-/// Longest e-mail address taken from a directory (RFC 5321 §4.5.3.1.3).
-const MAX_EMAIL_CHARS: usize = 254;
 
 /// The [`DirectoryAuditSink`] that appends to an [`AuditLogRepository`].
 ///
@@ -132,52 +132,6 @@ impl JitProfile {
             display_name,
         })
     }
-}
-
-/// A username or an address: trimmed, non-empty, bounded, and with no control
-/// or whitespace characters at all. Refused rather than repaired — a repaired
-/// name is a different name.
-fn clean_identifier(raw: &str, max_chars: usize) -> Option<String> {
-    let trimmed = raw.trim();
-    let valid = !trimmed.is_empty()
-        && trimmed.chars().count() <= max_chars
-        && !trimmed
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace() || is_bidi_control(c));
-    valid.then(|| trimmed.to_string())
-}
-
-/// One `@`, something on each side, a dot in the domain.
-fn plausible_email(email: &str) -> bool {
-    let mut parts = email.splitn(2, '@');
-    let local = parts.next().unwrap_or("");
-    let domain = parts.next().unwrap_or("");
-    !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.contains('@')
-}
-
-/// A display name: control and bidirectional-override characters removed (a
-/// right-to-left override makes a name render as something else), whitespace
-/// runs collapsed, bounded. Dropped when nothing is left.
-fn clean_display_name(raw: &str) -> Option<String> {
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| !is_bidi_control(*c) && (!c.is_control() || c.is_whitespace()))
-        .map(|c| if c.is_whitespace() { ' ' } else { c })
-        .collect();
-    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() {
-        return None;
-    }
-    Some(collapsed.chars().take(MAX_NAME_CHARS).collect())
-}
-
-/// The Unicode directional formatting characters (UAX #9): embeddings,
-/// overrides, isolates and the marks.
-fn is_bidi_control(c: char) -> bool {
-    matches!(
-        c,
-        '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-    )
 }
 
 impl<

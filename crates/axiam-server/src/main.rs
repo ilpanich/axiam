@@ -2694,21 +2694,9 @@ async fn main() -> std::io::Result<()> {
     // silence this is meant to break.
     let job_health =
         axiam_server::job_health::JobHealth::new(Duration::from_secs(config.cleanup_interval_secs));
-    for job in [
-        "saml_assertion_replay",
-        "federation_login_state",
-        "saml_authn_request",
-        // G-2 (T23.2.4): the single-logout stores.
-        "saml_sp_session",
-        "saml_logout_run",
-        // G-3 (T23.3.5): the directory sync job. Registered like the others, so a
-        // deployment where it has never run once still lists it.
-        "directory_sync",
-        "amqp_nonce_replay",
-        "gdpr_purge",
-        "gdpr_export",
-        "audit_retention",
-    ] {
+    // The list is `job_health::SWEEP_JOBS`, which a test checks against what the
+    // cleanup loop records.
+    for job in axiam_server::job_health::SWEEP_JOBS {
         job_health.register(job);
     }
 

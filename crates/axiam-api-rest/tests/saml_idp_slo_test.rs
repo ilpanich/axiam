@@ -843,6 +843,8 @@ struct LogoutReq {
     not_on_or_after: Option<String>,
     /// Replaces the `NameID` element altogether.
     principal_xml: Option<String>,
+    /// An `Extensions` element, between the signature and the principal.
+    extensions: Option<String>,
     place: Place,
 }
 
@@ -859,6 +861,7 @@ impl LogoutReq {
             indexes: vec![on.index.clone()],
             not_on_or_after: None,
             principal_xml: None,
+            extensions: None,
             place: Place::AfterIssuer,
         }
     }
@@ -912,10 +915,11 @@ impl LogoutReq {
                     String::new()
                 };
                 format!(
-                    r#"<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{}" Version="2.0" IssueInstant="{}"{attrs}><saml:Issuer>{}</saml:Issuer>{after_issuer}{principal}{indexes}</samlp:LogoutRequest>"#,
+                    r#"<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{}" Version="2.0" IssueInstant="{}"{attrs}><saml:Issuer>{}</saml:Issuer>{after_issuer}{}{principal}{indexes}</samlp:LogoutRequest>"#,
                     this.id,
                     at(this.issued_offset),
-                    this.issuer
+                    this.issuer,
+                    this.extensions.clone().unwrap_or_default(),
                 )
             }),
         }
@@ -1992,6 +1996,89 @@ async fn an_sp_without_a_certificate_a_disabled_sp_and_an_unknown_issuer_cannot_
     assert_eq!(alice.me(&app).await, 200, "nothing ended");
     assert_eq!(participants(&w).await.len(), 2);
     assert!(runs(&w).await.is_empty());
+}
+
+/// **T-375, acceptance.** A message that names another location — in its
+/// extensions, in its `RelayState`, in a query parameter of the trigger — is
+/// answered at the SP's registered `slo_url` on its registered binding, and the
+/// trigger ends on AXIAM's own page with no redirect to anywhere: the destination
+/// is never read from a message.
+#[actix_rt::test]
+async fn a_message_naming_another_location_is_answered_at_the_registered_one() {
+    let evil = "https://evil.example.test";
+    for binding in [SamlBinding::HttpRedirect, SamlBinding::HttpPost] {
+        let w = world().await;
+        register(&w, Sp::new("a", Some(binding))).await;
+        let app = app!(w);
+        let mut alice = Browser::default();
+        alice.sign_in(&app, &w, "alice").await;
+        let on = sign_on(&app, &mut alice, &w, "a").await;
+        let mut req = LogoutReq::new(&w, "a", &on);
+        req.extensions = Some(format!(
+            r#"<samlp:Extensions><x:ReplyTo xmlns:x="urn:evil">{evil}/steal</x:ReplyTo></samlp:Extensions>"#
+        ));
+        let relay = format!("{evil}/redirect");
+        let resp = request_from(&app, &w, "a", binding, &req, Some(&relay)).await;
+        let out = outbound(resp, w.tenant_id).await;
+        assert_eq!(out.destination, sp_slo("a"), "the registered endpoint");
+        assert_eq!(out.binding, binding, "the registered binding");
+        assert!(!out.xml.contains("evil.example.test"));
+        if binding == SamlBinding::HttpPost {
+            assert!(
+                out.policy
+                    .contains("form-action https://sp-a.example.test;")
+                    && !out.policy.contains("evil.example.test"),
+                "the form can post to the registered origin only"
+            );
+        }
+    }
+}
+
+/// **T-375, the trigger.** Query parameters that name a place to go are not read:
+/// the first hop goes to the registered endpoint and the chain ends on AXIAM's own
+/// page, with no redirect anywhere.
+#[actix_rt::test]
+async fn the_trigger_reads_no_destination_from_its_query() {
+    let evil = "https://evil.example.test";
+    let w = world().await;
+    register(&w, Sp::new("a", Some(SamlBinding::HttpRedirect))).await;
+    let app = app!(w);
+    let mut alice = Browser::default();
+    alice.sign_in(&app, &w, "alice").await;
+    let _on = sign_on(&app, &mut alice, &w, "a").await;
+    let uri = format!(
+        "{}?post_logout_redirect_uri={}&RelayState={}&redirect_uri={}",
+        trigger_uri(&w),
+        enc(&format!("{evil}/x")),
+        enc(&format!("{evil}/y")),
+        enc(&format!("{evil}/z"))
+    );
+    let resp = alice.get(&app, &uri).await;
+    let to_a = outbound(resp, w.tenant_id).await;
+    assert_eq!(
+        to_a.destination,
+        sp_slo("a"),
+        "only the registered endpoint"
+    );
+    assert!(
+        to_a.relay.is_none(),
+        "no RelayState is made up from a parameter"
+    );
+    let answered = answer(
+        &app,
+        &w,
+        &to_a,
+        "a",
+        SUCCESS,
+        None,
+        Sig::Sha256(sp_a_material()),
+        SamlBinding::HttpRedirect,
+    )
+    .await;
+    assert_eq!(answered.status().as_u16(), 200, "AXIAM's own page");
+    assert!(answered.headers().get("location").is_none());
+    let page = body_of(answered).await;
+    assert!(page.contains("You are signed out") && !page.contains("evil.example.test"));
 }
 
 /// **T-372.** A DTD, an entity and a decompression bomb are refused before any

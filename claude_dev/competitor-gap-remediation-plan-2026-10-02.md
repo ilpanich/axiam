@@ -1381,6 +1381,35 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > `ldap3`'s missing frame cap (both latent with no writer, and **binding
 > preconditions on T23.3.8**), the directory timing residual, and the
 > evidence script. The T23.1.8 and T23.3.2 surfaces held.
+>
+> **W3 F4, 2026-10-04:** [`security-review-phase23-w3-2026-10-04.md`](security-review-phase23-w3-2026-10-04.md).
+> Fourteen findings, no merge blocker after fixes. Fixed on the branch, all
+> wave-introduced or missed siblings of the wave's own fixes: directory linking
+> left the account's **federation links** in place, a sign-in the directory never
+> sees (**P23W3-01**, Medium, T-336 amended); **T-332 closed** with a
+> per-(tenant, login name) failure counter for names AXIAM holds no account for,
+> on the tenant's lockout policy (**P23W3-02**, Medium); **T-325 closed** by a
+> request tracer that redacts every non-structural query value — the SAML handle
+> and `RelayState`, and the pre-existing `state`, reset tokens and search terms
+> (P23W3-03, Low); the §30 address guard's answers to a host name unified so they
+> cannot map internal DNS (P23W3-04, Low, new **T-356**); JIT's lost race checks
+> status before mapping (P23W3-05); CodeQL hygiene and two CSP pins (D-27
+> confirmed: one setter, strictly narrower). The wave's own **D-23 fix of the
+> Critical SP signature-confusion defect holds** under adversarial review
+> (P23W3-06); its issue is filed only after the fix is on `main`, the maintainer
+> deciding on a patch release and advisory first. To file: the tenant email
+> provider held to no outbound address policy (P23W3-11, Medium), unsigned and
+> uncached IdP metadata (P23W3-07), SHA-1 and DTDs accepted by the SP verifier
+> (P23W3-08), no limiter on `/oauth2/authorize` (P23W3-09), certificates bound to
+> users (P23W3-10, D-29). Accepted with reasons: directory delete/disable leaving
+> sessions and passkeys (documented, confirmed, audited), the missing
+> multi-replica sweep guard, D-25 trusting directory-supplied addresses. Threat
+> model **2.24.0 — 356 threats, 340 mitigated / 16 open**. **Binding on W4:**
+> SLO (T23.2.4) verifies SP logout messages per node with the receiver's
+> placement rule and SHA-2 only — never `verify_signed_xml` — and its routes are
+> rate-limited; T23.2.5 refuses `encrypt_assertions` and an unparseable SP
+> certificate and fetches SP metadata only through `guarded_fetch`; a second
+> CSP-setting page must pass the D-27 pin; new ids start at T-357.
 
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This

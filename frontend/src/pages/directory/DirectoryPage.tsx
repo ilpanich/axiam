@@ -222,7 +222,7 @@ function DirectoryEditor({
         label="Enabled"
         checked={form.enabled}
         onChange={(v) => onChange("enabled", v)}
-        description="A disabled directory serves no sign-in and is not synced. Directory accounts then cannot sign in with a password at all — there is no fallback to a local hash — but sessions and passkeys they already hold keep working until they expire."
+        description="A disabled directory serves no sign-in and is not synced. Directory accounts then cannot sign in with a password at all — there is no fallback to a local hash — but sessions they already hold keep working until they expire, and passkeys until you deactivate the accounts."
       />
 
       <div className="grid gap-4 sm:grid-cols-2">

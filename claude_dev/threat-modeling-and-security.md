@@ -22,7 +22,8 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
-> **The 2026-10-04 W3 F4 security review entry (Phase 23, model 2.24.0).** One threat
+> **The 2026-10-04 W3 F4 security review entry (Phase 23, model 2.24.0;
+> [`security-review-phase23-w3-2026-10-04.md`](security-review-phase23-w3-2026-10-04.md)).** One threat
 > enters, Mitigated on arrival, and two close. **T-332 closes**: a sign-in for a name
 > AXIAM holds no account for, which with just-in-time provisioning on reaches the
 > directory, is now counted per tenant and login name under the tenant's lockout

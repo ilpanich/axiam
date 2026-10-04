@@ -524,7 +524,7 @@ pub struct RateLimitConfig {
     /// Framework **receiver** surface — the stream management API
     /// (`/ssf/v1/stream`, `/ssf/v1/status`, `/ssf/v1/verify`) and the two
     /// `/.well-known/ssf-configuration` forms (default: 60 — G-5, T23.5.2,
-    /// plan §7 rule 6, CONTRACT §31). Deliberately **not** part of
+    /// plan §7 rule 6, CONTRACT §32). Deliberately **not** part of
     /// [`MachineLimitPreset`]: a receiver reconfigures a stream at deploy time
     /// and asks for a verification event rarely (every stream also has its own
     /// `min_verification_interval`), so the honest traffic is small and a
@@ -536,7 +536,7 @@ pub struct RateLimitConfig {
     pub ssf_per_min: u32,
     /// Max writes per minute per IP to the SSF stream registry's management
     /// routes — create, update and delete a stream (default: 30 — G-5,
-    /// T23.5.2, CONTRACT §31). Reads are not in it. Each write can repoint
+    /// T23.5.2, CONTRACT §32). Reads are not in it. Each write can repoint
     /// where a tenant's security events are pushed, and the credential sent
     /// there; thirty a minute is far more than a person administering streams
     /// produces. One bucket per route; per-IP; never preset.

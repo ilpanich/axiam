@@ -1506,7 +1506,7 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::post().to(handlers::saml_admin::retire_idp_credential::<C>)),
             )
-            // --- SSF stream registry (G-5, T23.5.2, CONTRACT §31). Works
+            // --- SSF stream registry (G-5, T23.5.2, CONTRACT §32). Works
             // whatever the tenant's `ssf_enabled` says (D-45). Reads are
             // unlimited; each of the three writes has a bucket of its own under
             // `ssf_admin_per_min`. `.to()` first, then `.wrap()`.

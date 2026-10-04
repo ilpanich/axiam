@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:67cae880de57ea056f8924f7ba2b4f246444a1468ddd4646d00c2b0f16244e59"
+    "x-axiam-spec-digest": "sha256:0e9c77675ca459fdf677585bdb2f27629d775977076db0e26deab11e95548430"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -26326,11 +26326,11 @@
     },
     {
       "name": "ssf",
-      "description": "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §31)"
+      "description": "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"
     },
     {
       "name": "ssf-receiver",
-      "description": "Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §31.6)"
+      "description": "Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §32.6)"
     },
     {
       "name": "directory",

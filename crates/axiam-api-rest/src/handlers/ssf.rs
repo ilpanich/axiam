@@ -1,5 +1,5 @@
 //! The Shared Signals Framework transmitter's protocol surface (G-5, T23.5.2,
-//! SSF 1.0 §7 and §8, contract §31.6): transmitter metadata and the stream
+//! SSF 1.0 §7 and §8, contract §32.6): transmitter metadata and the stream
 //! management API a receiver calls.
 //!
 //! # Discovery (D-45)

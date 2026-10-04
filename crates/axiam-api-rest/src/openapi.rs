@@ -315,14 +315,14 @@ use crate::handlers;
         handlers::saml_admin::issue_idp_credential,
         handlers::saml_admin::promote_idp_credential,
         handlers::saml_admin::retire_idp_credential,
-        // SSF stream registry (G-5, T23.5.2, CONTRACT §31).
+        // SSF stream registry (G-5, T23.5.2, CONTRACT §32).
         handlers::ssf_admin::list_streams,
         handlers::ssf_admin::create_stream,
         handlers::ssf_admin::get_stream,
         handlers::ssf_admin::update_stream,
         handlers::ssf_admin::delete_stream,
         // SSF 1.0 transmitter metadata and stream management API — the
-        // receiver's protocol surface (G-5, T23.5.2, CONTRACT §31.6).
+        // receiver's protocol surface (G-5, T23.5.2, CONTRACT §32.6).
         handlers::ssf::ssf_configuration,
         handlers::ssf::ssf_configuration_tenant_path,
         handlers::ssf::get_stream_configuration,
@@ -672,7 +672,7 @@ use crate::handlers;
         handlers::saml_admin::IssueSamlIdpCredential,
         handlers::saml_admin::ParseSamlSpMetadata,
         handlers::saml_admin::SamlSpMetadataDraft,
-        // SSF (G-5, T23.5.2). The component names are the ones CONTRACT §31
+        // SSF (G-5, T23.5.2). The component names are the ones CONTRACT §32
         // pins.
         handlers::ssf_admin::SsfStream,
         handlers::ssf_admin::SsfStreamInput,
@@ -759,8 +759,8 @@ use crate::handlers;
         (name = "settings", description = "Organization and tenant security settings"),
         (name = "email-config", description = "Organization and tenant email provider configuration"),
         (name = "saml", description = "SAML 2.0 identity provider — service-provider registry, SP metadata import and the IdP signing credential (CONTRACT §29)"),
-        (name = "ssf", description = "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §31)"),
-        (name = "ssf-receiver", description = "Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §31.6)"),
+        (name = "ssf", description = "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"),
+        (name = "ssf-receiver", description = "Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §32.6)"),
         (name = "directory", description = "Tenant LDAP / Active Directory identity source — configuration, account linking and sync status (CONTRACT §30)"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),
         (name = "federation-sso", description = "First-time SSO — public OIDC/SAML start and callback endpoints"),

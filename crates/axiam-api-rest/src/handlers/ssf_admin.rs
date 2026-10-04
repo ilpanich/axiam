@@ -1,4 +1,4 @@
-//! The SSF stream registry's management routes (G-5, T23.5.2, contract §31).
+//! The SSF stream registry's management routes (G-5, T23.5.2, contract §32).
 //!
 //! Five routes under `/api/v1/tenants/{tenant_id}/ssf/streams`, in the `ssf`
 //! OpenAPI tag and the management registry. A stream is **registered by an
@@ -64,7 +64,7 @@ pub const AUDIT_STREAM_DELETED: &str = "ssf_stream.deleted";
 const BODY_LIMIT: usize = 32_768;
 
 // ---------------------------------------------------------------------------
-// Shapes (CONTRACT §31.2)
+// Shapes (CONTRACT §32.2)
 // ---------------------------------------------------------------------------
 
 /// A registered SSF stream, as the management API returns it. **The push

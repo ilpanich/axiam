@@ -1,4 +1,4 @@
-//! **T23.5.2** — the SSF transmitter over HTTP (G-5, contract §31, D-45 …
+//! **T23.5.2** — the SSF transmitter over HTTP (G-5, contract §32, D-45 …
 //! D-51): the stream registry's management routes, the receiver's stream
 //! management API, and `/.well-known/ssf-configuration`.
 //!
@@ -528,7 +528,7 @@ async fn named_client(w: &World, tenant_id: Uuid, name: &str, scopes: &[&str]) {
 }
 
 // ---------------------------------------------------------------------------
-// The management API (contract §31.1 – §31.3)
+// The management API (contract §32.1 – §32.3)
 // ---------------------------------------------------------------------------
 
 #[actix_rt::test]
@@ -988,7 +988,7 @@ async fn an_admin_status_change_announces_the_new_status() {
 }
 
 // ---------------------------------------------------------------------------
-// The receiver's stream management API (contract §31.6)
+// The receiver's stream management API (contract §32.6)
 // ---------------------------------------------------------------------------
 
 #[actix_rt::test]

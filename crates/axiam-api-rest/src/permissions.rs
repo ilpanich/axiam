@@ -205,7 +205,7 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "Issue, promote or retire the tenant's SAML IdP signing credential (retiring the active one stops SAML sign-on at once)",
     ),
     // Shared Signals Framework transmitter — the stream registry (G-5,
-    // T23.5.2, CONTRACT §31). A stream decides which third party receives
+    // T23.5.2, CONTRACT §32). A stream decides which third party receives
     // security events about the tenant's users and where they are pushed.
     (
         "ssf_streams:read",
@@ -374,7 +374,7 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
     "saml_idp",
     // G-5: deciding which third party receives security events about the
     // tenant's users, and the credential they are pushed with, is a human
-    // administrator's act (§31.3).
+    // administrator's act (§32.3).
     "ssf_streams",
     "tenants",
     "organizations",
@@ -1241,7 +1241,7 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire",
         "saml_idp:credential",
     ),
-    // SSF stream registry (G-5, T23.5.2, CONTRACT §31)
+    // SSF stream registry (G-5, T23.5.2, CONTRACT §32)
     (
         "GET",
         "/api/v1/tenants/{tenant_id}/ssf/streams",

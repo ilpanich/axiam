@@ -49,8 +49,8 @@ const DOMAINS = [
   {
     label: "Federation",
     blurb:
-      "SAML service provider and OIDC relying-party configuration, the SSO entry points, and a tenant's LDAP / Active Directory identity source.",
-    tags: ["federation", "federation-sso", "directory"],
+      "SAML service provider and OIDC relying-party configuration, the SSO entry points, a tenant's LDAP / Active Directory identity source, and the registry of service providers for AXIAM's own SAML identity provider.",
+    tags: ["federation", "federation-sso", "directory", "saml"],
   },
   {
     label: "Identity",
@@ -89,6 +89,12 @@ const DOMAINS = [
     label: "Provisioning",
     blurb: "SCIM provisioning tokens. The SCIM 2.0 endpoints themselves are served under `/scim/v2`.",
     tags: ["scim-tokens"],
+  },
+  {
+    label: "Shared signals",
+    blurb:
+      "Shared Signals Framework streams: the management API that registers a receiver, and the receiver protocol the receiver itself calls.",
+    tags: ["ssf", "ssf-receiver"],
   },
   {
     label: "Audit & operations",

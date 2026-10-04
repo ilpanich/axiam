@@ -1036,6 +1036,237 @@ export const INTEGRATE_PAGES: DocPage[] = [
   },
 
   {
+    slug: "saml-idp",
+    section: "APIs & integration",
+    navLabel: "SAML identity provider",
+    title: "AXIAM as a SAML identity provider",
+    intro:
+      "Let the applications your tenant already runs sign people in with AXIAM over SAML 2.0. Each tenant is its own identity provider with its own signing certificate, issued by the tenant's own CA, and every assertion it issues is signed.",
+    blocks: [
+      { type: "h", id: "what", text: "What it does" },
+      {
+        type: "p",
+        text: "The other direction of [Federation](#/docs/federation): there AXIAM is the *service provider* and trusts an external identity provider; here AXIAM is the **identity provider** and a service provider you register trusts AXIAM. A service provider (SP) is any application with a SAML library — a wiki, a ticketing system, a vendor's hosted product. The person signs in to AXIAM exactly as anywhere else, so multi-factor, passkeys, OPAQUE and the session policy all apply unchanged, and AXIAM tells the SP who they are in a signed assertion.",
+      },
+      {
+        type: "list",
+        items: [
+          "**One identity provider per tenant.** Its entity id, metadata and endpoints are all under the tenant's own path, so a tenant's service providers never see another tenant's identity or key.",
+          "**Web Browser SSO, both ways in.** SP-initiated sign-on takes the SP's `AuthnRequest` on the HTTP-Redirect or the HTTP-POST binding. IdP-initiated sign-on is a per-SP opt-in that is off by default.",
+          "**Assertions are always signed.** There is no setting that turns that off, and no way to register an SP that would receive an unsigned one. Signing the surrounding `Response` too is a per-SP choice, on by default. The assertion is delivered to the SP's registered HTTP-POST consumer endpoint.",
+          "**A pairwise, persistent `NameID` by default.** The identifier an SP sees is derived from the user *and that SP*, so two SPs cannot tell they are talking about the same person. An e-mail `NameID` is available per SP, and is released only for an address AXIAM has verified (or an active account).",
+          "**A signing credential AXIAM issues for you.** The certificate is issued by the tenant's signing CA and its private key is generated and sealed on the server, never shown and destroyed when the credential is retired. You do not export a key from somewhere else and import it.",
+          "**Rotation without a flag day.** Issue the next credential, let SPs pick up the metadata that now publishes both, then promote it.",
+          "**Single logout.** Each SP gets its own random `SessionIndex`; a signed logout request from an SP ends the AXIAM session, and the other SPs that registered a logout endpoint are told one at a time through the browser.",
+        ],
+      },
+      { type: "h", id: "enable", text: "Switch it on" },
+      {
+        type: "p",
+        text: "Two things have to be true before a tenant answers a single SAML request, and until they are every SAML route replies with the same empty `404` — so nobody can tell from outside whether a tenant exists, or serves SAML at all.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Requirement", "Detail"],
+        rows: [
+          [
+            "A server built with the `saml` feature",
+            "It is on by default and links `libxml`; a build made with `--no-default-features` (CI's *Build (SAML off)* job) serves no SAML. The registry and credential API below are compiled into every build, so an administrator can prepare everything on such a server and read the answer to *is SAML available here* from `GET …/saml/idp`.",
+          ],
+          [
+            "`saml_idp_enabled` is on for the tenant",
+            "A layered setting, **off by default**, with the shape of `sensitive_scopes_enabled`: the organization turns it on and a tenant may only turn it *off* again. Set it through the settings API (see [Settings](#/docs/settings)); the console explains the setting but has no control for it yet.",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "Registering service providers and issuing the credential do **not** depend on the setting, so you can finish the whole configuration first and switch the identity provider on last. The metadata endpoint additionally answers `404` until the tenant has an active or a next credential, because metadata without a key is of no use to an SP.",
+      },
+      { type: "h", id: "endpoints", text: "The SAML endpoints" },
+      {
+        type: "p",
+        text: "These are browser and SP-to-IdP routes, not API calls: an SP's own SAML library speaks to them, none takes a bearer token, and they are not in the OpenAPI document. `{tenant}` is the tenant's id in its canonical form, and the base is the deployment's public URL.",
+      },
+      {
+        type: "table",
+        headers: ["Path under `/saml/v2/{tenant}`", "What it is"],
+        rows: [
+          ["`/metadata`", "The identity provider's metadata (`GET` and `HEAD`), and its entity id — the entity id **is** the metadata URL. Paste this one URL into the SP."],
+          ["`/sso`", "Single sign-on: the SP's `AuthnRequest` by `GET` (HTTP-Redirect) or `POST` (HTTP-POST)."],
+          ["`/sso/idp-initiated?sp=<entity id>`", "IdP-initiated sign-on, for an SP registered with `allow_idp_initiated`. It is meant for AXIAM's own pages and bookmarks, and refuses a cross-site request."],
+          ["`/sso/continue`", "The second leg of every sign-on, where the browser's session is resolved. Never called by an SP."],
+          ["`/slo`", "Single logout on both bindings: a signed `LogoutRequest` or `LogoutResponse` from an SP."],
+          ["`/sso/logout`", "IdP-initiated logout: ends the signed-in browser's session and walks it through the SPs that hold one."],
+        ],
+      },
+      {
+        type: "p",
+        text: "The metadata is unsigned: it is served from your deployment's origin, so TLS to that origin is the trust anchor, and an SP administrator who wants more can compare the credential's SHA-256 fingerprint, which the console and the API both show. It advertises the signing certificate or certificates, both `NameID` formats, and the sign-on and logout locations — never a route that does not exist — and is cacheable for an hour with an `ETag`.",
+      },
+      { type: "h", id: "register", text: "Register a service provider" },
+      {
+        type: "p",
+        text: "In the admin console, **SAML Service Providers** (`/saml`, in the *Identity* group of the sidebar, visible with `saml_sp:read`) lists, creates, edits and deletes registrations and shows the identity provider's entity id, metadata URL and endpoints with whether it is currently serving. The same operations are a REST API under `/api/v1/tenants/{tenant_id}/saml`, which is also what the SDKs' `saml` namespace calls.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Import the SP's metadata, or enter it by hand",
+            body: "`parse-sp-metadata` takes either an uploaded document or an `https` URL and returns a **draft** registration with the certificate fingerprints and a list of warnings. It stores nothing. AXIAM fetches a URL only through its outbound address guard, refuses any document that declares a DTD or entity, and takes nothing as trusted from an unsigned document — a signature in it is reported, not evaluated. You review the draft, then save it.",
+            code: 'POST /api/v1/tenants/{tenant_id}/saml/parse-sp-metadata\n{ "metadata_url": "https://wiki.example.com/saml/metadata" }',
+          },
+          {
+            title: "Save the registration",
+            body: "Every write is validated before anything is stored. The `entity_id` is unique within the tenant and **cannot be changed later** — the pairwise `NameID` is keyed on it, so a different id would give every user a new account at that SP; register a new SP instead. The consumer-endpoint list is an allow-list held to the rules of an OAuth2 redirect URI (absolute, `https` — `http` only for loopback — no `*`, no fragment), checked byte for byte against the request.",
+            code: 'POST /api/v1/tenants/{tenant_id}/saml/service-providers\n{\n  "display_name": "Team wiki",\n  "entity_id": "https://wiki.example.com/saml/metadata",\n  "acs_urls": [\n    { "url": "https://wiki.example.com/saml/acs", "binding": "http_post", "index": 0, "is_default": true }\n  ],\n  "name_id_format": "persistent",\n  "sp_signing_cert_pem": "<PEM certificate>",\n  "attribute_mappings": [\n    { "saml_name": "mail", "source": "email" }\n  ],\n  "allowed_groups": []\n}',
+          },
+          {
+            title: "Decide who may sign in",
+            body: "`allowed_groups` limits the SP to members of those groups. **An empty list means every active user of the tenant.** A disabled SP is refused at every sign-on; logout keeps working for it.",
+          },
+          {
+            title: "Give the SP the metadata URL",
+            body: "Hand the SP `GET …/saml/v2/{tenant}/metadata`, or the entity id, sign-on and logout locations shown on the console page, and have it trust the credential below.",
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "`PUT` is a **replacement**: any member you leave out takes its default, it is not kept. Read the registration, change what you need, and send the whole thing back. The attribute table maps AXIAM's `username`, `email`, `display_name`, `given_name`, `family_name`, `groups` and `roles` onto the attribute names the SP expects. If an SP signs its requests, register its certificate; with `want_authn_requests_signed` an unsigned request is refused, and a logout request from an SP is accepted only when it is signed by that certificate.",
+      },
+      { type: "h", id: "credential", text: "The signing credential" },
+      {
+        type: "p",
+        text: "A tenant holds at most one `active` and one `next` credential; a `retired` one has had its key destroyed. All three states are listed by `GET …/saml/idp-credentials`, which returns public facts only — the certificate, serial, fingerprint, validity and status, and no key of any kind. It needs one of the tenant's active signing CAs to issue from, and key generation takes a few seconds.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Issue the first credential",
+            body: "Into the empty `active` slot. `validity_days` is 1 to 730 (default 365) and never beyond the CA's own expiry.",
+            code: 'POST /api/v1/tenants/{tenant_id}/saml/idp-credentials\n{ "issuer_ca_id": "<signing CA id>", "slot": "active" }',
+          },
+          {
+            title: "To rotate, issue the next one",
+            body: "Into the `next` slot. Metadata now publishes **both** certificates, active first. Wait at least the metadata's one-hour cache and your SPs' own refresh interval.",
+            code: '{ "issuer_ca_id": "<signing CA id>", "slot": "next" }',
+          },
+          {
+            title: "Promote it",
+            body: "`POST …/idp-credentials/{credential_id}/promote` names the current `next` credential; in one transaction the old `active` is retired and its key destroyed and `next` becomes `active`. Naming anything else, or a credential outside its validity window, is a `409`.",
+          },
+        ],
+      },
+      {
+        type: "warn",
+        text: "**Retiring the active credential with no successor stops SAML sign-on for the whole tenant at once.** That is deliberate — it is the response to a leaked key — and the console says so before it asks. Retiring is also the only way to stop a key you no longer trust from signing.",
+      },
+      {
+        type: "p",
+        text: "Issuing, promoting and retiring need `saml_idp:credential`, kept apart from `saml_sp:write` because one call can change sign-on for every SP of the tenant. These credentials are not certificates in the PKI sense: they never appear in the certificate list, and certificate issuance, CSR signing, the bind endpoint, device login and mTLS all refuse them.",
+      },
+      { type: "h", id: "keys", text: "The pairwise key — never change it" },
+      {
+        type: "p",
+        text: "The persistent `NameID` is an HMAC under a deployment secret, `AXIAM__AUTH__SAML_PAIRWISE_KEY`, deliberately independent of the signing credential so that rotating the credential never changes anyone's identifier. It is optional, and **without it a sign-on to an SP that uses the persistent format fails** with a SAML `Responder` status.",
+      },
+      {
+        type: "warn",
+        text: "Set it once and keep it for the life of the deployment. Changing it, losing it or restoring a backup without it gives every user a new, unknown account at every SP that uses persistent identifiers. It is read from the environment or from your secret provider, like the other deployment keys; see [Configuration](#/docs/configuration).",
+      },
+      { type: "h", id: "limits", text: "Rate limits" },
+      {
+        type: "p",
+        text: "Every route is rate limited per client address. The six browser routes each have a bucket of their own — `saml_idp_sso`, `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`, `saml_idp_metadata`, `saml_idp_slo` and `saml_idp_sso_logout` — all sized by `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` (default 30 a minute), so a flood on one cannot spend another's allowance, or `/oauth2/end_session`'s. The seven administrative writes have one bucket per route under `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` (default 30); reads are not limited. See the [configuration reference](#/docs/configuration).",
+      },
+      { type: "h", id: "logout", text: "Single logout" },
+      {
+        type: "p",
+        text: "AXIAM records, for each sign-on, which SP was given which `NameID` and `SessionIndex`. A `LogoutRequest` is honoured only if it is signed by the certificate registered for that SP and names a session that SP really holds. AXIAM then **revokes the whole AXIAM session first** — back-channel logout to its OIDC clients, then the ordinary revocation, which also reaches the revocation feed — and only then walks the browser through the other SPs, each with a signed request, one at a time. A chain that stalls midway never leaves an AXIAM session alive; the initiating SP is told `Success`, or `PartialLogout` if some SP could not be reached.",
+      },
+      {
+        type: "warn",
+        text: "SAML logout runs only when the logout starts at a SAML endpoint. `/oauth2/end_session`, an administrator revoking a session, a password reset and an account being disabled all end the AXIAM session but do not walk the SPs — those SPs learn nothing until their own session expires or their next sign-on request is refused. An API call cannot lead a browser through other sites. This is a recorded, accepted limit in the threat model.",
+      },
+      { type: "h", id: "unsupported", text: "What it does not do" },
+      {
+        type: "list",
+        items: [
+          "**Assertion encryption.** Not implemented. An SP registered with `encrypt_assertions` is refused when you save it, and AXIAM never falls back to sending a plaintext assertion to an SP that asked for encryption. The metadata advertises no encryption key.",
+          "**Unsigned assertions.** There is no such mode.",
+          "**Signed metadata.** AXIAM's own metadata is unsigned (see above), and a signature on an SP's imported metadata is not evaluated, because there is nothing independent to evaluate it against.",
+          "**Artifact and SOAP bindings.** Sign-on and logout use HTTP-Redirect and HTTP-POST only, and an SP's consumer endpoint must be HTTP-POST.",
+          "**Refreshing an SP's metadata on its own.** Metadata import is a person's act; AXIAM never re-reads a URL later, so a compromised SP host cannot quietly swap its certificate and endpoints.",
+          "**A SAML logout chain from other logouts**, as above.",
+          "**Anything in the SDKs' browser path.** The SDKs administer the registry and the credential; no SDK builds an `AuthnRequest` or consumes an assertion. That is the SP's SAML library's job.",
+        ],
+      },
+      { type: "h", id: "api", text: "Management endpoints" },
+      {
+        type: "api",
+        endpoints: [
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/saml/idp", summary: "The identity provider as the tenant sees it: entity id, metadata, sign-on and logout URLs, whether SAML is available and enabled, and the active and next credential ids." },
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/saml/service-providers", summary: "List registered service providers (paged, searchable)." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/service-providers", summary: "Register one (`201`)." },
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}", summary: "Read one." },
+          { method: "PUT", path: "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}", summary: "Replace it. `entity_id` cannot change." },
+          { method: "DELETE", path: "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}", summary: "Remove it and its session records. Ends no session at the SP." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/parse-sp-metadata", summary: "Turn SP metadata (upload or `https` URL) into a draft. Stores nothing; `503` on a server built without SAML." },
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/saml/idp-credentials", summary: "List the signing credentials, public facts only." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/idp-credentials", summary: "Issue a credential into an empty `active` or `next` slot (`201`)." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote", summary: "Make the `next` credential `active`; retire and destroy the old one." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire", summary: "Retire a `next` or `active` credential and destroy its key." },
+        ],
+      },
+      {
+        type: "p",
+        text: "Three permissions, seeded per tenant: `saml_sp:read`, `saml_sp:write` and `saml_idp:credential`. Only a human administrator may call these — a service-account token is refused with `401` — and only for the caller's own tenant. Changes write `saml_sp.created`, `saml_sp.updated`, `saml_sp.deleted`, `saml_sp.metadata_parsed`, `saml_idp.credential_issued`, `saml_idp.credential_promoted` and `saml_idp.credential_retired` audit rows that name ids, changed fields and fingerprints and never a certificate or a document. Sign-ons and logouts are audited too, without the `NameID`.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "CONTRACT §29 — SAML service provider registration",
+            href: contractLink("29"),
+            note: "The normative text for the eleven operations: shapes, every server rule an SDK can observe, error mapping, and the tests an SDK port owes.",
+          },
+          {
+            label: "Design document §8e — SAML 2.0 Identity Provider",
+            href: `${GH_BLOB}/claude_dev/design-document.md`,
+            note: "Assertion contents, the two-leg sign-on, signing rules and the threat reasoning behind each refusal.",
+          },
+          {
+            label: "Deployment guide — environment variables",
+            href: `${GH_BLOB}/docs/deployment/README.md`,
+            note: "The operator's side: the pairwise key and the rate-limit variables.",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Federation (SAML & OIDC) →",
+            body: "The other direction: trusting an external identity provider instead of being one.",
+            to: "docs",
+            doc: "federation",
+          },
+          {
+            title: "Settings →",
+            body: "Where `saml_idp_enabled` is set, and how organization and tenant values combine.",
+            to: "docs",
+            doc: "settings",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
     slug: "webhooks",
     section: "APIs & integration",
     navLabel: "Webhooks",

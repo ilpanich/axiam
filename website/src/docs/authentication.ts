@@ -966,13 +966,13 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
     navLabel: "Federation & SSO",
     title: "Federation — SAML & OIDC",
     intro:
-      "Delegate authentication to an external identity provider, and map what it asserts onto tenant identities, groups and roles.",
+      "Delegate authentication to an external identity provider, and map what it asserts onto tenant identities, groups and roles. AXIAM can also be the SAML identity provider for your own applications — that direction has its own page.",
     verifiedRelease: DOCS_VERIFIED_RELEASE,
     blocks: [
       { type: "h", id: "why", text: "Why federate" },
       {
         type: "p",
-        text: "Federation lets a user from an external identity provider sign in to an AXIAM tenant without a separate local credential. AXIAM acts as a **SAML service provider** and as an **OIDC relying party**, so it slots into existing enterprise SSO rather than asking an organization to move its directory.",
+        text: "Federation lets a user from an external identity provider sign in to an AXIAM tenant without a separate local credential. AXIAM acts as a **SAML service provider** and as an **OIDC relying party**, so it slots into existing enterprise SSO rather than asking an organization to move its directory. This page covers that direction. The reverse — AXIAM as the SAML *identity provider* that your applications trust — is described under [AXIAM as a SAML identity provider](#/docs/saml-idp).",
       },
       {
         type: "p",
@@ -985,7 +985,11 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       },
       {
         type: "note",
-        text: "SAML support is behind a default-on `saml` build feature that links `libxml`. A build made with `--no-default-features` — which is what CI's *Build (SAML off)* job produces — has every other capability and no SAML service provider.",
+        text: "SAML support is behind a default-on `saml` build feature that links `libxml`. A build made with `--no-default-features` — which is what CI's *Build (SAML off)* job produces — has every other capability and neither the SAML service provider nor the [SAML identity provider](#/docs/saml-idp) (whose service-provider registry API is the one part compiled into every build).",
+      },
+      {
+        type: "note",
+        text: "Everything on this page is AXIAM **consuming** an external identity provider's assertions. AXIAM **issuing** signed assertions to the applications a tenant registers — SP-initiated and IdP-initiated sign-on, a per-tenant signing certificate from the tenant's CA, single logout — is a separate surface with its own endpoints under `/saml/v2/{tenant}`; see [AXIAM as a SAML identity provider](#/docs/saml-idp).",
       },
       { type: "h", id: "oidc", text: "OIDC federation" },
       {

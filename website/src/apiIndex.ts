@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta17";
-export const API_OPERATION_COUNT = 265;
-export const API_PATH_COUNT = 181;
+export const API_OPERATION_COUNT = 266;
+export const API_PATH_COUNT = 182;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -1409,6 +1409,11 @@ export const API_INDEX: ApiGroup[] = [
     "method": "DELETE",
     "path": "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}",
     "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/ssf/v1/poll/{stream_id}",
+    "summary": "The receiver's token, as on the stream API, and the same single `404` for a stream that is not its own."
    },
    {
     "method": "GET",

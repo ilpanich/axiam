@@ -22,6 +22,20 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-04 W3 F4 security review entry (Phase 23, model 2.24.0).** One threat
+> enters, Mitigated on arrival, and two close. **T-332 closes**: a sign-in for a name
+> AXIAM holds no account for, which with just-in-time provisioning on reaches the
+> directory, is now counted per tenant and login name under the tenant's lockout
+> policy, and a locked name is answered as an unknown user without asking the
+> directory. **T-325 closes**: the request tracer records query values only for a
+> short list of structural parameters, so a SAML `RelayState` or sign-on handle, an
+> OAuth2 `state`, a reset token or a search term no longer reaches the request log.
+> **T-336** is amended: linking an account to its directory entry deletes its
+> federation links as well. **T-356**: the directory management routes answer every
+> refusal that depends on what a host name resolved to with one message, so they
+> cannot be used to map the deployment's internal DNS. The model is **356
+> threats, 340 mitigated / 16 open**.
+>
 > **The 2026-10-04 directory connector guards and directory threats entry (Phase 23
 > T23.3.7, model 2.23.0).** Twenty-five threats enter, twenty-four Mitigated on
 > arrival and one open, and one closes. **T-300 closes**: the connector resolves a
@@ -825,7 +839,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 355 threats** and a
+The system is verified against a **STRIDE threat model of 356 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -848,8 +862,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 355 |
-| Mitigated / Open | 339 / 16 |
+| Threats identified | 356 |
+| Mitigated / Open | 340 / 16 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -865,7 +879,7 @@ optimistic closed one.
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 60 | 0 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 96 | 4 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 97 | 4 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
@@ -916,7 +930,7 @@ the category recorded against it in the model.
 | Spoofing | 84 | 4 |
 | Tampering | 70 | 1 |
 | Repudiation | 8 | 0 |
-| Information disclosure | 80 | 7 |
+| Information disclosure | 81 | 7 |
 | Denial of service | 39 | 3 |
 | Elevation of privilege | 74 | 1 |
 
@@ -927,7 +941,7 @@ the category recorded against it in the model.
 | Critical | 41 | 2 |
 | High | 161 | 8 |
 | Medium | 137 | 5 |
-| Low | 16 | 1 |
+| Low | 17 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
@@ -2163,7 +2177,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 16 of
-355. On the website this table is generated from the Threat Dragon model, so it
+356. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind

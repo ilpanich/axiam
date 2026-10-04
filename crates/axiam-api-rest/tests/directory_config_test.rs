@@ -1083,8 +1083,8 @@ async fn the_address_guard_refuses_each_class_as_a_400_naming_the_rule() {
         (
             "a name that resolves to loopback",
             "ldaps://loopback.example.com",
-            "loopback",
-            "address_guard.loopback",
+            "does not resolve to an address this deployment permits",
+            "address_guard.not_permitted",
         ),
         (
             "the loopback address itself",
@@ -1101,8 +1101,8 @@ async fn the_address_guard_refuses_each_class_as_a_400_naming_the_rule() {
         (
             "a name that resolves to the metadata address",
             "ldaps://metadata.example.com",
-            "link-local",
-            "address_guard.link_local",
+            "does not resolve to an address this deployment permits",
+            "address_guard.not_permitted",
         ),
         (
             "an IPv6 literal",
@@ -1117,10 +1117,10 @@ async fn the_address_guard_refuses_each_class_as_a_400_naming_the_rule() {
             "address_guard.ipv6_literal",
         ),
         (
-            "a private address with no allow-list",
+            "a private name with no allow-list",
             "ldaps://private.example.com",
-            "private address",
-            "address_guard.private_not_allowed",
+            "does not resolve to an address this deployment permits",
+            "address_guard.not_permitted",
         ),
         (
             "a private literal with no allow-list",
@@ -1131,8 +1131,8 @@ async fn the_address_guard_refuses_each_class_as_a_400_naming_the_rule() {
         (
             "a name that does not resolve",
             "ldaps://nowhere.example.com",
-            "could not be resolved",
-            "address_guard.unresolvable",
+            "does not resolve to an address this deployment permits",
+            "address_guard.not_permitted",
         ),
     ] {
         let mut body = config_body(Some(&bind_value()));
@@ -1164,6 +1164,54 @@ async fn the_address_guard_refuses_each_class_as_a_400_naming_the_rule() {
     )
     .await;
     assert_eq!(status, 400, "PATCH to a loopback name");
+    assert!(
+        message_of(&refusal).contains("does not resolve to an address this deployment permits")
+    );
+}
+
+/// **F4 P23W3-04** — the guard's answers to a host *name* must not tell a
+/// tenant administrator what the deployment's resolver knows: a name that does
+/// not resolve, one that resolves into a private range outside the allow-list,
+/// to loopback or to the metadata service, are one message and one audit rule.
+/// Otherwise the `400` is an oracle for internal DNS (which names exist, and
+/// into which range), bounded only by the bucket. An IP literal names its class:
+/// the administrator typed the address, so the answer reveals nothing.
+#[actix_rt::test]
+async fn p23w3_04_a_refused_host_name_gets_one_answer_whatever_it_resolves_to() {
+    let w = world().await;
+    let app = app!(w.state(true), w.auth, w.authz);
+    let mut answers = Vec::new();
+    for url in [
+        "ldaps://nowhere.example.com",
+        "ldaps://private.example.com",
+        "ldaps://loopback.example.com",
+        "ldaps://metadata.example.com",
+    ] {
+        let mut body = config_body(Some(&bind_value()));
+        body["url"] = url.into();
+        let (status, refusal, _) = put_config(&app, &w, body).await;
+        assert_eq!(status, 400, "{url}");
+        let rows = w.audit_rows("directory.config_created").await;
+        let rule = rows.first().expect("audited").metadata["rule"].clone();
+        answers.push((message_of(&refusal).to_owned(), rule));
+    }
+    for (message, rule) in &answers {
+        assert_eq!((message, rule), (&answers[0].0, &answers[0].1));
+        for revealing in ["resolve", "private", "loopback", "link-local", "metadata"] {
+            assert!(
+                !message.contains(&format!("resolves to a {revealing}"))
+                    && !message.contains("could not be resolved"),
+                "the answer to a name must not name what it resolved to"
+            );
+        }
+    }
+    assert_eq!(answers[0].1, "address_guard.not_permitted");
+
+    // A literal keeps its specific answer.
+    let mut body = config_body(Some(&bind_value()));
+    body["url"] = "ldaps://127.0.0.1:636".into();
+    let (status, refusal, _) = put_config(&app, &w, body).await;
+    assert_eq!(status, 400);
     assert!(message_of(&refusal).contains("loopback"));
 }
 
@@ -1182,7 +1230,9 @@ async fn a_write_that_leaves_the_directory_enabled_re_checks_the_url_even_if_it_
         status, 400,
         "an unrelated enabled PATCH is caught by the guard"
     );
-    assert!(message_of(&refusal).contains("loopback"));
+    assert!(
+        message_of(&refusal).contains("does not resolve to an address this deployment permits")
+    );
     let (status, _, _) = put_config(&app, &w, config_body(None)).await;
     assert_eq!(status, 400, "and so is an unrelated enabled PUT");
 }
@@ -1214,10 +1264,12 @@ async fn a_directory_whose_name_was_re_pointed_can_be_switched_off_and_not_back_
     assert_eq!(status, 400);
     assert!(message_of(&refusal).contains("{username}"));
 
-    // Re-enabling runs the guard and names the rule.
+    // Re-enabling runs the guard (one answer for a name, P23W3-04).
     let (status, refusal, _) = patch_config(&app, &w, serde_json::json!({ "enabled": true })).await;
     assert_eq!(status, 400, "PATCH enabled=true runs the guard");
-    assert!(message_of(&refusal).contains("loopback"));
+    assert!(
+        message_of(&refusal).contains("does not resolve to an address this deployment permits")
+    );
     let (_, stored) = get_json(&app, &w, "").await;
     assert_eq!(stored["enabled"], false, "and changed nothing");
     let mut enabled = config_body(None);

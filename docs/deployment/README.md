@@ -312,7 +312,15 @@ can always switch a directory off without deleting it; validation and the
 secret-again rule still apply, and re-enabling runs the guard.
 Each refusal is a `400` that names the rule and never echoes the secret. An
 IPv6-literal URL is one of them: it can never be certificate-checked, so name the
-directory by host name. `DELETE` resolves nothing and always works.
+directory by host name. One exception keeps the route from mapping your internal
+DNS: for a host **name**, every refusal that depends on what the name resolved to —
+it does not resolve, or resolves to loopback, link-local, the metadata service,
+AXIAM's own listener or a private address outside
+`AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` — is the same message ("does not
+resolve to an address this deployment permits") and the same audit rule,
+`address_guard.not_permitted`. The specific reason is in AXIAM's log, as `a
+directory write was refused by the address guard` with its `rule`. An IP literal's
+refusal names its class. `DELETE` resolves nothing and always works.
 
 **Moving the connection needs the secret again.** A write that changes `url`,
 `start_tls`, `bind_dn` or `trust_anchors_pem` without a `bind_secret` is a `400`

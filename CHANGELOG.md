@@ -601,6 +601,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Directory management: the address guard's answer to a host name no longer
+  maps internal DNS (F4 P23W3-04, adds T-356).** A `PUT` or `PATCH` on
+  `/api/v1/tenants/{tenant_id}/directory` told the tenant administrator whether a
+  host name did not resolve, resolved into a private range outside the
+  allow-list, to loopback, to the metadata service or to an AXIAM listener — at
+  30 writes a minute, a way to enumerate the deployment's internal names. For a
+  host name, every refusal that depends on what it resolved to is now one `400`
+  message ("the directory host does not resolve to an address this deployment
+  permits…") and one audit rule, `address_guard.not_permitted`; the specific
+  rule goes to the operator's log. An IP literal, an IPv6 literal and an
+  unparseable URL keep their specific answers. Contract §30.3 rule 1 amended in
+  place (1.54 is unreleased). Threat model 2.24.0: T-356 added (Low,
+  Mitigated). Tests: `p23w3_04_a_refused_host_name_gets_one_answer_whatever_it_resolves_to`,
+  and `the_address_guard_refuses_each_class_as_a_400_naming_the_rule` updated.
+
 - **Request logs no longer carry credentials from the query string (F4
   P23W3-03, closes T-325).** The request tracer (`tracing-actix-web`'s default
   root span) recorded every request's full target, so the SAML SSO endpoint's

@@ -22,7 +22,10 @@
 //!    that leaves it disabled opens no connection and skips it.
 //!    An IPv6 literal, an unresolvable host, loopback, link-local, the metadata
 //!    service, AXIAM's own listener and an unlisted private address are each a
-//!    `400` naming the rule.
+//!    `400`. An IP literal's answer names the rule; a host **name**'s answer is
+//!    one message and one audit rule whatever the name resolved to, so the
+//!    route is not an oracle for internal DNS (F4 P23W3-04); the specific rule
+//!    is in the operator's log.
 //! 4. **P23W2-01**: moving `url`, `start_tls`, `bind_dn` or `trust_anchors_pem`
 //!    without a `bind_secret` is a `400` naming the rule. Checked here first so
 //!    the refusal can be audited, and enforced again by the repository in the
@@ -443,6 +446,53 @@ const fn guard_rule(error: &GuardError) -> &'static str {
     }
 }
 
+/// The one audit rule every resolution-dependent refusal of a host **name**
+/// is recorded under (F4 P23W3-04).
+const RULE_NOT_PERMITTED: &str = "address_guard.not_permitted";
+
+/// The one answer every resolution-dependent refusal of a host **name** gets
+/// (F4 P23W3-04).
+const HOST_NOT_PERMITTED: &str = "directory url: the directory host does not resolve to an \
+     address this deployment permits a directory connection to; check the name, or ask the \
+     deployment's operator whether its network is allowed";
+
+/// Whether the URL's host is an IP literal (bracketed IPv6 included), so a
+/// refusal that names the address's class reveals nothing the administrator did
+/// not type.
+fn host_is_ip_literal(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok()
+        })
+}
+
+/// What a tenant administrator is told about an address-guard refusal: the
+/// `400` message and the audit rule (F4 P23W3-04).
+///
+/// For a host **name**, every refusal that depends on what the name resolved to
+/// — it did not resolve, it resolved to too many addresses, to loopback,
+/// link-local or the metadata service, unspecified, multicast or
+/// special-purpose space, AXIAM's own listener, or a private range outside the
+/// operator's allow-list — is **one** message and **one** rule, so the answer
+/// cannot be used to map the deployment's internal DNS (which names exist, and
+/// into which range they point). The specific rule goes to the operator's log
+/// only. For an IP literal, and for a URL that is refused for its own text
+/// (unparseable, IPv6 literal), the specific rule is the answer: it reveals
+/// nothing the administrator did not type.
+fn guard_refusal(error: &GuardError, url: &str) -> (&'static str, String) {
+    let about_the_text = matches!(error, GuardError::InvalidUrl | GuardError::Ipv6Literal);
+    if about_the_text || host_is_ip_literal(url) {
+        (guard_rule(error), format!("directory url: {error}"))
+    } else {
+        (RULE_NOT_PERMITTED, HOST_NOT_PERMITTED.to_owned())
+    }
+}
+
 /// The audit rule name of the P23W2-01 refusal.
 const RULE_CONNECTION_MOVED: &str = "connection_moved_without_secret";
 
@@ -646,6 +696,15 @@ async fn write_config<C: Connection + Clone>(
         Ok(())
     };
     if let Err(error) = guarded {
+        let (rule, message) = guard_refusal(&error, &input.url);
+        // The specific rule, for the operator; the administrator's answer and
+        // audit row carry `rule` (P23W3-04).
+        tracing::info!(
+            target: "axiam::directory",
+            %tenant_id,
+            rule = guard_rule(&error),
+            "a directory write was refused by the address guard"
+        );
         audit(
             state,
             http_req,
@@ -655,16 +714,14 @@ async fn write_config<C: Connection + Clone>(
             resource_id,
             AuditOutcome::Failure,
             serde_json::json!({
-                "rule": guard_rule(&error),
+                "rule": rule,
                 "connection_moved": moved,
                 "changed_fields": changed,
                 "secret_replaced": secret_replaced,
             }),
         )
         .await;
-        return Err(AxiamApiError(AxiamError::Validation {
-            message: format!("directory url: {error}"),
-        }));
+        return Err(AxiamApiError(AxiamError::Validation { message }));
     }
 
     // 4. P23W2-01. A configuration that does not exist yet needs its secret

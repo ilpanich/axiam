@@ -9500,7 +9500,11 @@ point. Counts of what a run did are in its audit rows (`directory.sync_run`,
    (loopback, link-local and the cloud metadata service, unspecified, multicast,
    special-purpose, AXIAM's own listener, or a private address outside the operator's
    allowed networks) are each `400 validation_error`, whose `message` names the field and
-   the rule — and never echoes the secret. The guard runs on `url` as written, so a write
+   the rule — and never echoes the secret. **For a host name**, every refusal that depends
+   on what the name resolved to (it does not resolve, too many addresses, or any refused
+   address) is **one** `message` and one audit rule, `address_guard.not_permitted`, so the
+   answer cannot tell a name that does not resolve from one that resolves into a refused
+   range (W3 F4 P23W3-04, T-356); an IP literal's answer names its class. The guard runs on `url` as written, so a write
    that does not change `url` still re-checks it: a name re-pointed since the last save is
    caught on the next one. **One exception (D-33):** the address guard — not `validate` —
    is skipped for a write whose resulting configuration is **disabled** (`enabled: false`),

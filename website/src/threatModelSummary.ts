@@ -55,9 +55,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.24.0",
  "diagramCount": 9,
- "total": 355,
+ "total": 356,
  "open": 16,
- "mitigated": 339,
+ "mitigated": 340,
  "areas": [
   {
    "id": 0,
@@ -80,7 +80,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 96,
+   "total": 97,
    "open": 4
   },
   {
@@ -132,7 +132,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 80,
+   "total": 81,
    "open": 7
   },
   {
@@ -164,7 +164,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Low",
-   "total": 16,
+   "total": 17,
    "open": 1
   }
  ],

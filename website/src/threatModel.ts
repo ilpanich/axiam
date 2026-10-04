@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
  "version": "2.24.0",
  "diagramCount": 9,
- "total": 355,
+ "total": 356,
  "open": 16,
- "mitigated": 339,
+ "mitigated": 340,
  "diagrams": [
   {
    "id": 0,
@@ -3943,7 +3943,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "The directory host and port are whatever a tenant administrator saves. Pointed at an internal address, each directory sign-in makes AXIAM open a TCP connection and begin a TLS handshake there, and how long the failure takes distinguishes an open port from a closed one.",
-       "mitigation": "**Closed 2026-10-04 (T23.3.7, D-19, D-32): the address guard.** `axiam_directory::address::guard` resolves the directory host once and judges every address it resolves to with the classifier `guarded_fetch` uses (`axiam_core::ip_class`, moved below both so they cannot disagree): loopback, unspecified, link-local (`169.254.169.254`, `fe80::/10`), multicast and special-purpose addresses are always refused; IPv4-mapped forms are judged as the IPv4 address they carry; a metadata endpoint inside a private range (`fd00:ec2::254`, `100.100.100.200`) is refused whatever the configuration says; an address of this host on AXIAM's REST or gRPC port is refused; and a private address (RFC 1918, CGNAT, ULA) is admitted only inside a network the operator listed in `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` — deployment configuration, unset admits none. An IPv6-literal URL is refused. `DirectoryClient::connect` runs the guard at **every** connection — the pool, the user bind, group lookup, the sync job — and opens its TCP socket to a vetted `SocketAddr`, so nothing resolves the name a second time; the TLS server name stays the URL's host. The management routes (T23.3.8) call the same guard before a configuration is saved. Tests (`connector_guard_test.rs`): `each_refused_class_is_refused_at_guard_and_at_connect_with_no_connection`, `a_hostname_that_resolves_to_loopback_is_refused`, `an_own_listener_port_is_refused_and_another_port_is_not`, `a_private_address_is_refused_without_the_allow_list_and_admitted_with_it`, `dns_rebinding_between_check_and_connect_never_reaches_loopback`, `the_connection_uses_the_pinned_address_and_resolves_once_per_connection`, `the_tls_name_checked_is_the_hostname_over_a_pinned_address`, plus the classifier's table test in `axiam-core`. Residual, stated: inside the networks the operator lists, any tenant administrator can aim the connector at any host and port, and what that buys is a TCP connect and a TLS ClientHello (after a 31-byte StartTLS request on `ldap://`) toward a host that must present a certificate chaining to that tenant's anchors before anything else is sent, answered to the user as the generic failure. The listener rule recognises this host's own addresses only — not another replica's pod address, nor a Service that forwards back to AXIAM — so the operator note says not to list AXIAM's own networks."
+       "mitigation": "**Closed 2026-10-04 (T23.3.7, D-19, D-32): the address guard.** `axiam_directory::address::guard` resolves the directory host once and judges every address it resolves to with the classifier `guarded_fetch` uses (`axiam_core::ip_class`, moved below both so they cannot disagree): loopback, unspecified, link-local (`169.254.169.254`, `fe80::/10`), multicast and special-purpose addresses are always refused; IPv4-mapped forms are judged as the IPv4 address they carry; a metadata endpoint inside a private range (`fd00:ec2::254`, `100.100.100.200`) is refused whatever the configuration says; an address of this host on AXIAM's REST or gRPC port is refused; and a private address (RFC 1918, CGNAT, ULA) is admitted only inside a network the operator listed in `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` — deployment configuration, unset admits none. An IPv6-literal URL is refused. `DirectoryClient::connect` runs the guard at **every** connection — the pool, the user bind, group lookup, the sync job — and opens its TCP socket to a vetted `SocketAddr`, so nothing resolves the name a second time; the TLS server name stays the URL's host. The management routes (T23.3.8) call the same guard before a configuration is saved, and answer every resolution-dependent refusal of a host name with one message (T-356). Tests (`connector_guard_test.rs`): `each_refused_class_is_refused_at_guard_and_at_connect_with_no_connection`, `a_hostname_that_resolves_to_loopback_is_refused`, `an_own_listener_port_is_refused_and_another_port_is_not`, `a_private_address_is_refused_without_the_allow_list_and_admitted_with_it`, `dns_rebinding_between_check_and_connect_never_reaches_loopback`, `the_connection_uses_the_pinned_address_and_resolves_once_per_connection`, `the_tls_name_checked_is_the_hostname_over_a_pinned_address`, plus the classifier's table test in `axiam-core`. Residual, stated: inside the networks the operator lists, any tenant administrator can aim the connector at any host and port, and what that buys is a TCP connect and a TLS ClientHello (after a 31-byte StartTLS request on `ldap://`) toward a host that must present a certificate chaining to that tenant's anchors before anything else is sent, answered to the user as the generic failure. The listener rule recognises this host's own addresses only — not another replica's pod address, nor a Service that forwards back to AXIAM — so the operator note says not to list AXIAM's own networks."
       },
       {
        "number": 301,
@@ -4079,6 +4079,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Authorization decisions are cached. A membership the mapping removes but whose cached allow survives keeps granting the role until the entry expires — on every replica.",
        "mitigation": "Mapping writes go through `RepositoryGroupMapper`, whose `MembershipChangeHook` (installed by `axiam-server`) flushes the decision cache for the user, locally and by broadcast, whenever a membership changes — as the group-membership routes do. Tests: `a_membership_change_flushes_the_decision_cache_through_the_hook`, `a_role_through_a_mapped_group_is_effective_and_gone_after_removal`. Residual: a broadcast that fails is logged, and the other replicas' entries then live out the cache TTL."
+      },
+      {
+       "number": 356,
+       "title": "The directory management routes' address-guard answers map the deployment's internal DNS",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "A tenant administrator saving a directory URL with a host name learned from the `400` whether the name did not resolve, resolved into a private range outside the allow-list, to loopback, to the metadata service or to one of AXIAM's own listeners — so the write route answered, thirty times a minute, which names exist in the deployment's DNS and into which range they point: reconnaissance of an operator's network that a tenant in a multi-tenant deployment has no business seeing.",
+       "mitigation": "Decided in the W3 F4 review (P23W3-04, 2026-10-04): for a host **name**, every refusal that depends on what the name resolved to — it did not resolve, it resolved to too many addresses, to loopback, link-local or the metadata service, unspecified, multicast or special-purpose space, an own listener, or a private range outside the allow-list — is one `400` message and one audit rule, `address_guard.not_permitted`; the specific rule goes to the operator's log only. An IP literal, an IPv6 literal and an unparseable URL keep their specific answers, which reveal nothing the administrator did not type. The writes stay on the `directory_admin` bucket (30 a minute) and every refusal is audited. Tests: `p23w3_04_a_refused_host_name_gets_one_answer_whatever_it_resolves_to`, `the_address_guard_refuses_each_class_as_a_400_naming_the_rule`. Residual: a write that succeeds still tells the administrator that the name resolved into a permitted range — inherent in saving it, and confined to networks the operator listed for directories."
       }
      ],
      "open": 0
@@ -5292,13 +5301,13 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 96,
+   "total": 97,
    "open": 4,
    "bySeverity": {
     "High": 37,
     "Medium": 38,
     "Critical": 13,
-    "Low": 8
+    "Low": 9
    }
   },
   {

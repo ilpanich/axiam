@@ -347,9 +347,26 @@ fn signing_sp() -> SamlServiceProviderInput {
     }
 }
 
+/// The limits every test but the rate-limit one runs under.
+///
+/// The shared rate-limit counter back-fills a key it first sees part-way
+/// through a window pro rata (the sliding window's cold seed), so a test that
+/// sends a dozen requests to the SSO routes or the login route from one address
+/// can be refused with `429` depending on the second of the minute it started
+/// in — seen as a flaky `an_acs_outside_the_registry_…` in CI. The limiter's own
+/// behaviour stays pinned, deterministically, by
+/// `the_sso_routes_are_rate_limited`, which sets the preset to 1.
+fn permissive_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        end_session_per_min: 100_000,
+        login_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 macro_rules! app {
     ($w:expr) => {
-        app!($w, RateLimitConfig::default())
+        app!($w, permissive_limits())
     };
     ($w:expr, $limits:expr) => {{
         let auth = auth_config();

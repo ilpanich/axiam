@@ -76,7 +76,7 @@ issuance held against token confusion at every verifier AXIAM runs, now pinned
 | **P23W4-08** | The server's consumer supervisor loop is copied per outbound kind (webhook, `ssf_push`); G-6 would add a third copy. | Informational | `axiam-server` `main.rs`; D-36 | **Reported** (ilpanich/axiam#537) (maintainability) |
 | **P23W4-09** | Untested: a Keycloak-initiated logout towards AXIAM, and AXIAM's front-channel SLO towards a real SP's `SingleLogoutService`. All SLO tests use a synthetic SP or samael. | Informational | SLO; T-370 … T-380 | **Reported** (ilpanich/axiam#538) (coverage) |
 | **P23W4-10** | SSF residuals: an erased subject can stay in the buffer or the push DLQ up to seven days (T-402); a receiver token outlives its OAuth2 client's deletion by up to 15 minutes; the primary and retry `ssf_push` queues have no TTL. | Low | SSF; T-402, T-385 | **Accepted** (§10) |
-| **P23W4-11** | Audience squatting is not harmless everywhere D-47 says it is: without per-tenant issuers every tenant's SETs share `iss` and the key, so a receiver that adopts a conventional audience before its stream exists and accepts unauthenticated pushes would accept SETs a squatting tenant pushes, about subjects it chooses (an email subject included). | Low | SSF; T-390, D-45, D-47 | **Fixed** — `D55FIXCOMMIT` (D-55, maintainer decision on ilpanich/axiam#539) — reported as ilpanich/axiam#539, the maintainer chose option (b): SSF requires per-tenant issuers in a deployment of more than one tenant (T-390 amended, model 2.31.0) |
+| **P23W4-11** | Audience squatting is not harmless everywhere D-47 says it is: without per-tenant issuers every tenant's SETs share `iss` and the key, so a receiver that adopts a conventional audience before its stream exists and accepts unauthenticated pushes would accept SETs a squatting tenant pushes, about subjects it chooses (an email subject included). | Low | SSF; T-390, D-45, D-47 | **Fixed** — `f4bdaad` (D-55, maintainer decision on ilpanich/axiam#539) — reported as ilpanich/axiam#539, the maintainer chose option (b): SSF requires per-tenant issuers in a deployment of more than one tenant (T-390 amended, model 2.31.0) |
 
 **Verdict on merge.** Nothing open blocks W4. The six fixes are in and pinned —
 P23W4-11 the sixth, after the maintainer's decision on ilpanich/axiam#539 (D-55) —
@@ -589,7 +589,7 @@ open)*, no diff left):
 | Renamed redirect test | **T-392** amended (citation) | `96a2c6b` |
 | `SigAlg` rule and log wording | **T-370**, **T-377** amended | documentation commit |
 | Audience squatting without per-tenant issuers | **T-390** amended (residual corrected) | documentation commit |
-| SSF requires per-tenant issuers in a multi-tenant deployment (D-55) | **T-390** amended again (Mitigated with the D-55 tests; residual: the cross-replica delay of up to 60 s; a single-tenant deployment needs no gate), model **2.31.0** | `D55FIXCOMMIT` |
+| SSF requires per-tenant issuers in a multi-tenant deployment (D-55) | **T-390** amended again (Mitigated with the D-55 tests; residual: the cross-replica delay of up to 60 s; a single-tenant deployment needs no gate), model **2.31.0** | `f4bdaad` |
 
 Model **2.31.0** (P23W4-11's fix, D-55) changes no count: T-390 stays
 Mitigated and cites the new tests; `gen-threat-model.mjs` still prints *406
@@ -744,7 +744,7 @@ Keycloak's session gone.
 
 ### P23W4-11 (Low) — SSF audience squatting where SETs share one issuer (decision first)
 
-**Fixed** — `D55FIXCOMMIT` (D-55, maintainer decision on ilpanich/axiam#539). The maintainer chose option (b) below: while `AXIAM__AUTH__TENANT_ISSUER_PATHS` is off and the deployment holds more than one tenant, SSF behaves for every tenant as with `ssf_enabled` off — checked at production, at signing and at discovery — and turning `ssf_enabled` on is `400`. Tests: `crates/axiam-api-rest/tests/ssf_shared_issuer_test.rs`, `ssf_shared_issuer_log_test.rs`, `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `while_tenants_share_one_issuer_a_queued_push_is_dead_lettered_unsigned`, `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_shared_issuer_count_spans_organizations_and_moves_the_generation`, and the gate's unit tests in `crates/axiam-oauth2/src/ssf.rs`. The issue body as filed follows.
+**Fixed** — `f4bdaad` (D-55, maintainer decision on ilpanich/axiam#539). The maintainer chose option (b) below: while `AXIAM__AUTH__TENANT_ISSUER_PATHS` is off and the deployment holds more than one tenant, SSF behaves for every tenant as with `ssf_enabled` off — checked at production, at signing and at discovery — and turning `ssf_enabled` on is `400`. Tests: `crates/axiam-api-rest/tests/ssf_shared_issuer_test.rs`, `ssf_shared_issuer_log_test.rs`, `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `while_tenants_share_one_issuer_a_queued_push_is_dead_lettered_unsigned`, `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_shared_issuer_count_spans_organizations_and_moves_the_generation`, and the gate's unit tests in `crates/axiam-oauth2/src/ssf.rs`. The issue body as filed follows.
 
 D-47 makes a stream's audience unique across the deployment so that one tenant
 cannot collect SETs addressed to another tenant's receiver. It does not stop a

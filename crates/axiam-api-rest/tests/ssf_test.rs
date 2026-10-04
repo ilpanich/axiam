@@ -3999,3 +3999,81 @@ async fn the_address_guard_refuses_a_private_endpoint_at_delivery_end_to_end() {
     assert!(matches!(outcomes[0], DeliveryOutcome::Retry { .. }));
     assert!(receiver.requests().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// F4 W4 P23W4-03: a held event that cannot be signed during a long poll
+// ---------------------------------------------------------------------------
+
+/// A writer the test reads back: what the subscriber printed.
+#[derive(Clone, Default)]
+struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The deployment key failing to sign a held event is the operator's to fix,
+/// and the event stays for the next poll — but a long poll looks at the buffer
+/// every 500 ms for 30 s, and before F4 W4 it wrote an `ERROR` line on every
+/// look: about sixty lines per waiting receiver per half minute, a log flood a
+/// receiver could keep up by polling. One line per request now. And a long poll
+/// the receiver abandons gives its wait slot back (D-53 (11)).
+#[actix_rt::test]
+async fn an_unsignable_held_event_is_logged_once_per_poll_and_an_abandoned_poll_frees_its_slot() {
+    let capture = CapturedLog::default();
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let w = world().await;
+    named_client(&w, w.tenant_id, RECEIVER, &["ssf.manage"]).await;
+    let stream = w
+        .stream(
+            w.tenant_id,
+            RECEIVER,
+            SsfDeliveryMethod::Poll,
+            SsfStreamStatus::Enabled,
+        )
+        .await;
+    hold(&w, &stream, 1).await;
+
+    // The receiver's token verifies (the public key is sound); signing a SET
+    // fails (the private key the state signs with is not a key).
+    let mut state = w.state();
+    state.auth_config.jwt_encoding_key = None;
+    state.auth_config.jwt_private_key_pem = "unusable".into();
+    let waiters = state.ssf.poll_waiters.clone();
+    let app = app!(state, w);
+    let token = w.receiver_token();
+
+    let call = test::call_service(
+        &app,
+        request(Method::POST, &poll_uri(stream.id), Some(&token))
+            .set_json(json!({}))
+            .to_request(),
+    );
+    // Abandoned after about four looks at the buffer.
+    let abandoned = tokio::time::timeout(std::time::Duration::from_millis(1_700), call).await;
+    assert!(abandoned.is_err(), "the long poll was still waiting");
+    assert_eq!(
+        waiters.waiting(),
+        0,
+        "an abandoned long poll frees its slot"
+    );
+
+    let printed = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    let lines = printed
+        .lines()
+        .filter(|l| l.contains("ERROR") && l.contains("could not be signed"))
+        .count();
+    assert_eq!(lines, 1, "one line per poll request, not one per look");
+}

@@ -1005,6 +1005,10 @@ pub async fn poll_events<C: Connection + Clone>(
     // taken the first time this request would wait, and released when it
     // returns or is dropped; a request that finds it taken answers at once.
     let mut wait_slot: Option<crate::state::bundles::PollWaitGuard> = None;
+    // A key that cannot sign stays unusable for the rest of a long poll, which
+    // looks at the buffer every half second: it is reported once per request,
+    // not once per look (F4 W4 P23W4-03).
+    let mut signing_failure_logged = false;
     loop {
         let held = state
             .ssf
@@ -1023,7 +1027,10 @@ pub async fn poll_events<C: Connection + Clone>(
                     // A key that cannot sign is the operator's to fix; the event
                     // stays for the next poll.
                     Err(SsfError::Signing(_)) => {
-                        tracing::error!(target: "axiam::ssf", stream_id = %stream.id, "a held SSF event could not be signed");
+                        if !signing_failure_logged {
+                            signing_failure_logged = true;
+                            tracing::error!(target: "axiam::ssf", stream_id = %stream.id, "a held SSF event could not be signed");
+                        }
                     }
                     // The stream no longer carries it (narrowed meanwhile) or it
                     // can never be signed for this stream: drop it.
@@ -1053,7 +1060,12 @@ pub async fn poll_events<C: Connection + Clone>(
                 return Ok(empty_poll_response());
             }
         }
-        tokio::time::sleep(POLL_WAIT_STEP.min(POLL_LONG_POLL_MAX - started.elapsed())).await;
+        // `saturating_sub`: the 30 s may have run out since the check above, and
+        // a `Duration` subtraction that underflows panics.
+        tokio::time::sleep(
+            POLL_WAIT_STEP.min(POLL_LONG_POLL_MAX.saturating_sub(started.elapsed())),
+        )
+        .await;
         // The stream as it is now: paused, disabled or gone while waiting.
         stream = owned_stream(&state, &receiver, Some(&raw_id)).await?;
         if stream.status != SsfStreamStatus::Enabled {

@@ -967,6 +967,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A long poll logs an unsignable held event once (F4 W4 P23W4-03).** When the
+  deployment key could not sign a held SSF event, `POST /ssf/v1/poll/{id}`
+  logged it at `ERROR` on every half-second look of a long poll — about sixty
+  lines per waiting receiver per half minute. Once per request now; the
+  long-poll wait can no longer underflow its 30-second cap and panic.
+
 - **A page can no longer spend a user's step-up record (F4 W4 P23W4-02, closes
   T-404's residual).** `/oauth2/authorize` consumed the `ssf_step_up` row on the
   return-leg marker alone, before validating the client and `redirect_uri`, and

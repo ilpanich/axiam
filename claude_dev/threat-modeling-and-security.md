@@ -33,7 +33,9 @@
 > deliverer reads the stream again before it sends. **T-404**'s residual closes:
 > the step-up record is consumed only after the authorization request is
 > validated, and never in the session that was asked to step up, so no page can
-> spend it. The model is **406 threats, 389 mitigated / 17 open**.
+> spend it. **T-403** and **T-405** are amended: an unsignable held event is
+> logged once per poll, not on every look of a long poll. The model is **406
+> threats, 389 mitigated / 17 open**.
 >
 > **The 2026-10-04 SSF delivery threat entries (Phase 23 T23.5.4, model
 > 2.29.0 — T-402 … T-405 enter).** T23.5.3 built what **D-53** decided and

@@ -6,8 +6,10 @@
 //! (T23.2.3) resolves the tenant from the request path, parses and checks the
 //! `AuthnRequest`, runs the login hop, loads the user's groups and roles and the
 //! tenant's active signing credential, and then calls
-//! [`SamlIdpIssuer::issue`]; SLO (T23.2.4) relies on the `SessionIndex` written
-//! here being the AXIAM session id.
+//! [`SamlIdpIssuer::issue`]. The `SessionIndex` it writes is the **per-SP random
+//! index** the endpoint recorded in `saml_sp_session` just before (D-37, T23.2.4),
+//! never the AXIAM session id: single logout ([`logout`]) maps it back through
+//! that record.
 //!
 //! # What is issued
 //!
@@ -22,7 +24,7 @@
 //! | `Conditions/@NotBefore` | now − [`crate::oidc::CLOCK_SKEW_LEEWAY_SECS`] (the existing skew allowance, 60 s) |
 //! | `AudienceRestriction/Audience` | the SP's entity id |
 //! | `AuthnStatement/@AuthnInstant` | the session's `authenticated_at` |
-//! | `AuthnStatement/@SessionIndex` | the AXIAM session id |
+//! | `AuthnStatement/@SessionIndex` | the per-SP random index recorded in `saml_sp_session` (D-37); **not** the AXIAM session id, so SPs that compare notes cannot correlate a person's sessions (T-312) |
 //! | `AuthnContextClassRef` | [`authn_context_class_ref`] of the session's `amr` |
 //! | `AttributeStatement` | the SP's attribute mapping over user fields, group names and role names |
 //!
@@ -64,6 +66,7 @@
 //! ([`SamlIdpError::EncryptionUnsupported`]) — never silently sent plaintext.
 
 pub mod idp_metadata;
+pub mod logout;
 mod pairwise;
 pub mod request;
 mod sign;
@@ -239,6 +242,13 @@ pub enum SamlIdpError {
     /// The SP asks for encrypted assertions, which this build cannot produce.
     #[error("assertion encryption is not supported")]
     EncryptionUnsupported,
+    /// The `SessionIndex` is empty, too long or not the opaque token the
+    /// participant record mints (D-37).
+    #[error("the SessionIndex is not a valid opaque token")]
+    SessionIndexInvalid,
+    /// The SP registered no single-logout endpoint to deliver a logout message to.
+    #[error("the service provider registered no single-logout endpoint")]
+    SloNotRegistered,
     /// The tenant has no active signing credential.
     #[error("the tenant has no active SAML signing credential")]
     NoActiveCredential,
@@ -270,6 +280,8 @@ impl SamlIdpError {
             Self::TenantMismatch
             | Self::PairwiseKeyMissing
             | Self::EncryptionUnsupported
+            | Self::SessionIndexInvalid
+            | Self::SloNotRegistered
             | Self::NoActiveCredential
             | Self::CredentialNotActive
             | Self::CredentialNotValid
@@ -351,6 +363,32 @@ pub fn check_relay_state(relay_state: Option<&str>) -> Result<(), SamlIdpError> 
     }
 }
 
+/// The longest `SessionIndex` this IdP asserts or accepts back, in bytes. The
+/// ones it mints are 43 (32 bytes, base64url without padding); the bound is
+/// there so a caller cannot put an arbitrary string under the tenant's
+/// signature.
+pub const MAX_SESSION_INDEX_BYTES: usize = 256;
+
+/// Check a `SessionIndex` before it is signed: non-empty, at most
+/// [`MAX_SESSION_INDEX_BYTES`], and only the characters of the opaque token
+/// (ASCII letters and digits, `-` and `_`).
+///
+/// # Errors
+///
+/// [`SamlIdpError::SessionIndexInvalid`] (`Responder`).
+pub fn check_session_index(index: &str) -> Result<(), SamlIdpError> {
+    if !index.is_empty()
+        && index.len() <= MAX_SESSION_INDEX_BYTES
+        && index
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        Ok(())
+    } else {
+        Err(SamlIdpError::SessionIndexInvalid)
+    }
+}
+
 /// The `AuthnContextClassRef` an authentication achieved, from its evidence
 /// and nothing else.
 ///
@@ -408,6 +446,11 @@ pub struct SsoIssuance<'a> {
     pub relay_state: Option<&'a str>,
     /// The AXIAM session that authenticated the user.
     pub session: &'a Session,
+    /// The `SessionIndex` to assert: the per-SP random token the endpoint
+    /// recorded in `saml_sp_session` for this (session, SP) **before** calling
+    /// [`SamlIdpIssuer::issue`] (D-37). The session id itself never reaches the
+    /// XML. A caller that has not recorded one has no assertion to sign.
+    pub session_index: &'a str,
     /// The user.
     pub user: &'a User,
     /// The user's groups (for `allowed_groups` and the `groups` attribute).
@@ -445,8 +488,8 @@ pub struct IssuedResponse {
     pub assertion_id: String,
     /// The `NameID` issued (pairwise identifier or email address).
     pub name_id: String,
-    /// The `SessionIndex`: the AXIAM session id.
-    pub session_index: Uuid,
+    /// The `SessionIndex` asserted: [`SsoIssuance::session_index`].
+    pub session_index: String,
     /// When the assertion stops being usable.
     pub not_on_or_after: DateTime<Utc>,
 }
@@ -577,7 +620,7 @@ impl SamlIdpIssuer {
             response_id,
             assertion_id,
             name_id,
-            session_index: req.session.id,
+            session_index: req.session_index.to_owned(),
             not_on_or_after,
         })
     }
@@ -657,6 +700,7 @@ impl SamlIdpIssuer {
             None => {}
         }
         check_relay_state(req.relay_state)?;
+        check_session_index(req.session_index)?;
         check_allowed_groups(req.sp, req.groups)?;
         if req.sp.encrypt_assertions {
             return Err(SamlIdpError::EncryptionUnsupported);
@@ -664,29 +708,51 @@ impl SamlIdpIssuer {
         Ok(())
     }
 
-    /// The `NameID` value under the SP's policy.
-    fn name_id(&self, req: &SsoIssuance<'_>) -> Result<String, SamlIdpError> {
-        match req.sp.name_id_format {
+    /// The `NameID` the SP is given for this user, and its format, under the SP's
+    /// policy — the value [`Self::issue`] will assert.
+    ///
+    /// The SSO endpoint asks it **before** signing, because the participant
+    /// record (D-37) must hold the `NameID` the SP is about to be given, and
+    /// compares it with [`IssuedResponse::name_id`] afterwards. Same function,
+    /// same inputs: they agree unless the user's address changed between the two
+    /// calls, which the comparison catches.
+    ///
+    /// # Errors
+    ///
+    /// [`SamlIdpError::TenantMismatch`], [`SamlIdpError::PairwiseKeyMissing`],
+    /// [`SamlIdpError::NameIdUnavailable`], [`SamlIdpError::NameIdUnverified`].
+    pub fn name_id_for(
+        &self,
+        tenant_id: Uuid,
+        sp: &SamlServiceProvider,
+        user: &User,
+    ) -> Result<(String, NameIdFormat), SamlIdpError> {
+        if sp.tenant_id != tenant_id || user.tenant_id != tenant_id {
+            return Err(SamlIdpError::TenantMismatch);
+        }
+        let value = match sp.name_id_format {
             NameIdFormat::Persistent => {
                 let pairwise_key = self
                     .pairwise_key
                     .as_ref()
                     .ok_or(SamlIdpError::PairwiseKeyMissing)?;
-                Ok(pairwise_name_id(
-                    pairwise_key,
-                    req.tenant_id,
-                    &req.sp.entity_id,
-                    req.user.id,
-                ))
+                pairwise_name_id(pairwise_key, tenant_id, &sp.entity_id, user.id)
             }
             NameIdFormat::EmailAddress => {
-                let email = user_email(req.user).ok_or(SamlIdpError::NameIdUnavailable)?;
-                if !email_is_vouched_for(req.user) {
+                let email = user_email(user).ok_or(SamlIdpError::NameIdUnavailable)?;
+                if !email_is_vouched_for(user) {
                     return Err(SamlIdpError::NameIdUnverified);
                 }
-                Ok(email.to_owned())
+                email.to_owned()
             }
-        }
+        };
+        Ok((value, sp.name_id_format))
+    }
+
+    /// The `NameID` value under the SP's policy.
+    fn name_id(&self, req: &SsoIssuance<'_>) -> Result<String, SamlIdpError> {
+        self.name_id_for(req.tenant_id, req.sp, req.user)
+            .map(|(value, _)| value)
     }
 }
 
@@ -820,7 +886,7 @@ fn assertion_template(p: &AssertionParts<'_>) -> String {
     out.push_str(&format!(
         r#"<saml:AuthnStatement AuthnInstant="{}" SessionIndex="{}"><saml:AuthnContext><saml:AuthnContextClassRef>{}</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>"#,
         instant(req.session.authenticated_at),
-        req.session.id,
+        escape(req.session_index),
         authn_context_class_ref(&req.session.amr)
     ));
 
@@ -997,8 +1063,8 @@ pub mod test_support {
         pub single_sign_on: Vec<(String, String)>,
         /// The `NameIDFormat`s.
         pub name_id_formats: Vec<String>,
-        /// How many `SingleLogoutService` elements the descriptor carries.
-        pub single_logout_services: usize,
+        /// Each `SingleLogoutService` as `(binding, location)`.
+        pub single_logout: Vec<(String, String)>,
         /// Whether the descriptor carries a `validUntil`, a `cacheDuration` or a
         /// `ds:Signature`.
         pub has_validity_or_signature: bool,
@@ -1046,7 +1112,11 @@ pub mod test_support {
                 .map(|e| (e.binding.clone(), e.location.clone()))
                 .collect(),
             name_id_formats: idp.name_id_formats.clone(),
-            single_logout_services: idp.single_logout_services.len(),
+            single_logout: idp
+                .single_logout_services
+                .iter()
+                .map(|e| (e.binding.clone(), e.location.clone()))
+                .collect(),
             has_validity_or_signature: entity.valid_until.is_some()
                 || entity.cache_duration.is_some()
                 || entity.signature.is_some()

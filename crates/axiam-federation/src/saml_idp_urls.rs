@@ -36,8 +36,8 @@ pub fn idp_sso_url(public_base_url: &str, tenant_id: Uuid) -> String {
 }
 
 /// The tenant's SLO endpoint, `{public_base_url}/saml/v2/{tenant_id}/slo`, for
-/// the metadata `SingleLogoutService` locations (T23.2.4 publishes them, in the
-/// commit that adds the route).
+/// the metadata `SingleLogoutService` locations (T23.2.4) and the `Destination`
+/// every logout message sent to it must carry.
 #[must_use]
 pub fn idp_slo_url(public_base_url: &str, tenant_id: Uuid) -> String {
     idp_endpoint(public_base_url, tenant_id, "slo")

@@ -518,7 +518,7 @@ fn a_signed_redirect_query_verifies_over_the_octets_received() {
     assert_eq!(parsed.verify_signature(&sp_key().cert_der), Ok(()));
     assert_eq!(parsed.relay_state().as_deref(), Some("relay/1+2"));
     assert_eq!(
-        decode_redirect(&parsed.saml_request()).expect("decodes"),
+        decode_redirect(&parsed.message()).expect("decodes"),
         request("_q1")
     );
     assert_eq!(

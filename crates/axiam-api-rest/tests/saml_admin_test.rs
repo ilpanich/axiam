@@ -2920,9 +2920,9 @@ mod metadata {
                 "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
             ]
         );
-        assert_eq!(
-            summary.single_logout_services, 0,
-            "no SLO until T23.2.4 adds the route"
+        assert!(
+            summary.single_logout.is_empty(),
+            "no SLO until the route exists"
         );
         assert!(
             !summary.has_validity_or_signature,

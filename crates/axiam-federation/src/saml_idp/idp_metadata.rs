@@ -9,10 +9,12 @@
 //!
 //! # What it carries
 //!
-//! * `entityID` and the two `SingleSignOnService` locations (HTTP-Redirect and
-//!   HTTP-POST, both at the SSO endpoint) — passed in by the caller from
-//!   [`idp_entity_id`](super::idp_entity_id) and
-//!   [`idp_sso_url`](super::idp_sso_url) of the **path** tenant, never from a
+//! * `entityID`, the two `SingleSignOnService` locations (HTTP-Redirect and
+//!   HTTP-POST, both at the SSO endpoint) and the two `SingleLogoutService`
+//!   locations (both at the SLO endpoint, T23.2.4) — passed in by the caller from
+//!   [`idp_entity_id`](super::idp_entity_id),
+//!   [`idp_sso_url`](super::idp_sso_url) and
+//!   [`idp_slo_url`](super::idp_slo_url) of the **path** tenant, never from a
 //!   stored row (T-307, T-367);
 //! * one `KeyDescriptor use="signing"` per publishable credential, **`active`
 //!   first and then `next`**, each an `X509Certificate` and nothing else, so an
@@ -23,10 +25,10 @@
 //!
 //! # What it does not carry
 //!
-//! No encryption key (AXIAM decrypts nothing), no `SingleLogoutService` until
-//! the route exists (**T23.2.4 adds those two elements in the commit that adds
-//! the route**: the document never advertises a route that is not there), no
-//! `validUntil`, `cacheDuration`, `Organization` or `ContactPerson`.
+//! No encryption key (AXIAM decrypts nothing), no `validUntil`,
+//! `cacheDuration`, `Organization` or `ContactPerson`. The `SingleLogoutService`
+//! elements arrived in the commit that added the `/slo` route (T23.2.4): the
+//! document never advertises a route that is not there.
 //!
 //! # Unsigned, on purpose
 //!
@@ -100,6 +102,10 @@ fn publishable(credentials: &[SamlIdpCredential]) -> Vec<(&SamlIdpCredential, Ve
 /// answers that with the D-20 `404`, the same as a tenant that serves no SAML
 /// (a `503` would tell anyone the tenant exists, T-368).
 ///
+/// `slo_url` is the tenant's SLO endpoint when this deployment serves one —
+/// always, since T23.2.4 — and `None` for a document that must not advertise a
+/// logout route.
+///
 /// `credentials` is the tenant's keyless list ([`SamlIdpCredentialRepository::list`],
 /// never `get_active_sealed`): at most one credential per status is published.
 ///
@@ -108,6 +114,7 @@ fn publishable(credentials: &[SamlIdpCredential]) -> Vec<(&SamlIdpCredential, Ve
 pub fn build_idp_metadata(
     entity_id: &str,
     sso_url: &str,
+    slo_url: Option<&str>,
     credentials: &[SamlIdpCredential],
 ) -> Option<IdpMetadataDocument> {
     let keys = publishable(credentials);
@@ -134,6 +141,17 @@ pub fn build_idp_metadata(
         );
         xml.push_str(&STANDARD.encode(der));
         xml.push_str("</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor>\n");
+    }
+    // Schema order (SAML Metadata §2.4.3): the key descriptors, then the logout
+    // services, then the `NameIDFormat`s, then the sign-on services.
+    if let Some(slo_url) = slo_url {
+        for binding in [BINDING_REDIRECT, BINDING_POST] {
+            xml.push_str("    <md:SingleLogoutService Binding=\"");
+            xml.push_str(binding);
+            xml.push_str("\" Location=\"");
+            xml.push_str(&escape(slo_url));
+            xml.push_str("\"/>\n");
+        }
     }
     for format in [NAME_ID_PERSISTENT, NAME_ID_EMAIL] {
         xml.push_str("    <md:NameIDFormat>");
@@ -203,6 +221,7 @@ mod tests {
         build_idp_metadata(
             "https://iam.example.test/saml/v2/t/metadata",
             "https://iam.example.test/saml/v2/t/sso",
+            Some("https://iam.example.test/saml/v2/t/slo"),
             credentials,
         )
     }
@@ -279,12 +298,15 @@ mod tests {
              Location=\"https://iam.example.test/saml/v2/t/sso\"",
             "Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\" \
              Location=\"https://iam.example.test/saml/v2/t/sso\"",
+            "<md:SingleLogoutService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect\" \
+             Location=\"https://iam.example.test/saml/v2/t/slo\"",
+            "<md:SingleLogoutService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\" \
+             Location=\"https://iam.example.test/saml/v2/t/slo\"",
         ] {
             assert!(xml.contains(needed), "missing {needed}");
         }
         for absent in [
             "use=\"encryption\"",
-            "SingleLogoutService",
             "validUntil",
             "cacheDuration",
             "Organization",
@@ -302,12 +324,37 @@ mod tests {
         let doc = build_idp_metadata(
             "https://x.test/a\"><evil/>&",
             "https://x.test/s?a=1&b=\"2\"<",
+            Some("https://x.test/l?c=3&d=\"4\"<"),
             &[credential(SamlIdpCredentialStatus::Active, cert_pem())],
         )
         .unwrap();
         assert!(!doc.xml.contains("<evil/>"));
         assert!(doc.xml.contains("&quot;&gt;&lt;evil/&gt;&amp;"));
         assert!(doc.xml.contains("a=1&amp;b=&quot;2&quot;&lt;"));
+        assert!(doc.xml.contains("c=3&amp;d=&quot;4&quot;&lt;"));
+    }
+
+    #[test]
+    fn a_document_built_without_a_logout_url_advertises_no_logout_service() {
+        let doc = build_idp_metadata(
+            "https://iam.example.test/saml/v2/t/metadata",
+            "https://iam.example.test/saml/v2/t/sso",
+            None,
+            &[credential(SamlIdpCredentialStatus::Active, cert_pem())],
+        )
+        .unwrap();
+        assert!(!doc.xml.contains("SingleLogoutService"));
+    }
+
+    #[test]
+    fn the_logout_services_sit_where_the_metadata_schema_puts_them() {
+        let doc = body(&[credential(SamlIdpCredentialStatus::Active, cert_pem())]).unwrap();
+        let key = doc.xml.find("<md:KeyDescriptor").unwrap();
+        let slo = doc.xml.find("<md:SingleLogoutService").unwrap();
+        let name_id = doc.xml.find("<md:NameIDFormat").unwrap();
+        let sso = doc.xml.find("<md:SingleSignOnService").unwrap();
+        assert!(key < slo && slo < name_id && name_id < sso);
+        assert_eq!(doc.xml.matches("<md:SingleLogoutService").count(), 2);
     }
 
     #[test]
@@ -316,6 +363,7 @@ mod tests {
         let again = build_idp_metadata(
             "https://iam.example.test/saml/v2/t/metadata",
             "https://iam.example.test/saml/v2/t/sso",
+            Some("https://iam.example.test/saml/v2/t/slo"),
             &[credential(SamlIdpCredentialStatus::Active, cert_pem())],
         )
         .unwrap();

@@ -172,7 +172,10 @@ impl World {
     }
 
     async fn set_status(&self, stream: &SsfStream, status: SsfStreamStatus) -> SsfStream {
-        let mut update = SsfStreamUpdate::from_stream(stream);
+        // From the stream as it is now: an update carries the version it was
+        // prepared from (F4 W4 P23W4-01).
+        let current = self.streams.get(stream.tenant_id, stream.id).await.unwrap();
+        let mut update = SsfStreamUpdate::from_stream(&current);
         update.status = status;
         self.streams
             .update(stream.tenant_id, stream.id, update)
@@ -1176,4 +1179,123 @@ async fn a_poll_stream_releases_nothing_on_resume() {
     assert_eq!(outbox.resume(&poll).await.unwrap(), 0);
     assert_eq!(w.buffer.count(w.tenant, poll.id).await.unwrap(), 1);
     assert!(publisher.sent.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// F4 W4 P23W4-01: the endpoint and its credential come from one version
+// ---------------------------------------------------------------------------
+
+/// The real stream repository, except that between the deliverer's read of the
+/// stream and its read of the credential, the endpoint moves to another origin
+/// with a credential of its own — the move D-49 allows when the header is
+/// supplied again.
+struct MovingStreams {
+    inner: Streams,
+    moved_to: String,
+    new_header: String,
+}
+
+impl SsfStreamRepository for MovingStreams {
+    async fn create(&self, input: NewSsfStream) -> axiam_core::error::AxiamResult<SsfStream> {
+        self.inner.create(input).await
+    }
+    async fn get(&self, tenant_id: Uuid, id: Uuid) -> axiam_core::error::AxiamResult<SsfStream> {
+        self.inner.get(tenant_id, id).await
+    }
+    async fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: axiam_core::repository::Pagination,
+    ) -> axiam_core::error::AxiamResult<axiam_core::repository::PaginatedResult<SsfStream>> {
+        self.inner.list_page(tenant_id, pagination).await
+    }
+    async fn list_for_receiver(
+        &self,
+        tenant_id: Uuid,
+        receiver_client_id: &str,
+    ) -> axiam_core::error::AxiamResult<Vec<SsfStream>> {
+        self.inner
+            .list_for_receiver(tenant_id, receiver_client_id)
+            .await
+    }
+    async fn list_for_event(
+        &self,
+        tenant_id: Uuid,
+        event: SsfEventType,
+    ) -> axiam_core::error::AxiamResult<Vec<SsfStream>> {
+        self.inner.list_for_event(tenant_id, event).await
+    }
+    async fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        update: SsfStreamUpdate,
+    ) -> axiam_core::error::AxiamResult<SsfStream> {
+        self.inner.update(tenant_id, id, update).await
+    }
+    async fn claim_verification(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        now: chrono::DateTime<Utc>,
+        min_interval_secs: i64,
+    ) -> axiam_core::error::AxiamResult<bool> {
+        self.inner
+            .claim_verification(tenant_id, id, now, min_interval_secs)
+            .await
+    }
+    async fn decrypt_authorization_header(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> axiam_core::error::AxiamResult<Option<Zeroizing<String>>> {
+        let current = self.inner.get(tenant_id, id).await?;
+        if current.endpoint_url.as_deref() != Some(self.moved_to.as_str()) {
+            let mut moved = SsfStreamUpdate::from_stream(&current);
+            moved.endpoint_url = Some(self.moved_to.clone());
+            moved.authorization_header = SecretChange::Set(Zeroizing::new(self.new_header.clone()));
+            self.inner.update(tenant_id, id, moved).await?;
+        }
+        self.inner.decrypt_authorization_header(tenant_id, id).await
+    }
+    async fn delete(&self, tenant_id: Uuid, id: Uuid) -> axiam_core::error::AxiamResult<()> {
+        self.inner.delete(tenant_id, id).await
+    }
+}
+
+/// D-49: a credential is sent only to the endpoint it was supplied for. When
+/// the endpoint moves between the deliverer's two reads, the credential it
+/// opens is the new endpoint's, and must not be sent to the old one: the
+/// attempt is retried against the stream as it now is.
+#[tokio::test]
+async fn a_credential_supplied_for_a_new_endpoint_never_reaches_the_old_one() {
+    let w = world().await;
+    let old = Receiver::start(202).await;
+    let new = Receiver::start(202).await;
+    let stream = w.push_stream(&old, Some(credential())).await;
+    let pending = w.pending(&stream, &revoked());
+    let new_header = credential();
+    let moving = MovingStreams {
+        inner: w.streams.clone(),
+        moved_to: new.url(),
+        new_header: new_header.clone(),
+    };
+    let deliverer = SsfPushDeliverer::new(moving, w.buffer.clone(), w.auth.clone())
+        .admitting_private_networks_for_tests();
+
+    let outcome = deliverer
+        .deliver_attempt(&w.message(&stream, &pending))
+        .await
+        .unwrap();
+
+    assert!(
+        old.requests()
+            .iter()
+            .all(|r| r.headers.get("authorization") != Some(&new_header)),
+        "the new endpoint's credential reached the old endpoint"
+    );
+    assert!(
+        matches!(outcome, DeliveryOutcome::Retry { .. }),
+        "a stream that changed during the attempt is retried"
+    );
 }

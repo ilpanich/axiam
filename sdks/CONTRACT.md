@@ -10272,7 +10272,10 @@ together with `authorization_header` and on create.
 3. **The audience is unique across the deployment** (D-47): a create or update that reuses
    one — in any tenant — is `409 conflict`, without saying where.
 4. **Update is a replacement** (`update_style: replace`), with `authorization_header`'s
-   exception (§32.2).
+   exception (§32.2). It replaces the stream **as the server read it for this request**: if
+   another write — the receiver's (§32.6) — lands between that read and this write, the
+   update is refused with `409 conflict` rather than putting back what the other write
+   changed, and the administrator reads the stream again (F4 W4, T-406).
 5. **A stored header never follows the endpoint to another origin** (D-49): an update that
    moves `endpoint_url` to another scheme, host or port while a header is stored must carry
    `authorization_header` again or `clear_authorization_header: true`, else `400`.
@@ -10337,9 +10340,14 @@ token issued to the receiver's OAuth2 client by the client-credentials grant wit
 one in a tenant whose transmitter is off answers the same `404`. A receiver may narrow its
 `events_requested` (never beyond `events_allowed`), change its `description`, repoint a push
 endpoint under §32.3 rules 1 and 5 and supply the push `authorization_header`; the method, the
-audience and the subject format are the administrator's. Verification is limited to one
-request per `min_verification_interval` (60 s) per stream (`429`). Each route has a per-IP
-bucket, `AXIAM__RATE_LIMIT__SSF_PER_MIN` (default 60).
+audience and the subject format are the administrator's. A receiver's `PATCH`, `PUT` and
+status `POST` are each decided against the stream as read for the request and written only
+if no other write — an administrator's — landed in between; when one did, the server decides
+again from a fresh read (so an administrator's `disabled` is never undone by a receiver's
+write that overlapped it), and answers `409` only if the stream kept changing over three
+attempts (F4 W4, T-406). Verification is limited to one request per
+`min_verification_interval` (60 s) per stream (`429`). Each route has a per-IP bucket,
+`AXIAM__RATE_LIMIT__SSF_PER_MIN` (default 60).
 
 **The SET** (D-45, D-46). JOSE header `{"alg": "EdDSA", "typ": "secevent+jwt", "kid": …}`.
 Claims: `iss` (the tenant's issuer, identical to the discovery `issuer`), `aud` (the stream's
@@ -10380,8 +10388,11 @@ endpoint resolves to *now* (every address must be globally routable, and the con
 pinned to the one validated; `https` is required) — an endpoint that was acceptable when it was
 registered and resolves to an internal address later is refused at delivery. **A redirect is
 never followed**: the one hop is made and a `3xx` is returned as the answer, so neither the SET
-nor the `Authorization` header can reach a host the administrator did not name. The response
-body is read to at most 64 KiB and never logged or audited. What the answer means:
+nor the `Authorization` header can reach a host the administrator did not name. The header and
+the endpoint come from **one version** of the stream: an attempt that finds the stream changed
+between reading its endpoint and opening its header is retried, so a header supplied with a new
+endpoint is never sent to the old one (F4 W4, T-406). The response body is read to at most
+64 KiB and never logged or audited. What the answer means:
 
 | The receiver answers | Outcome |
 |---|---|

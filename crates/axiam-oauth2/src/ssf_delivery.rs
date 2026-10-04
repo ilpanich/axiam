@@ -28,7 +28,7 @@
 //! | `disabled` | dead-letter — nothing is signed or sent |
 //! | `paused`, or now a poll stream | the event goes to the buffer; the message is acknowledged |
 //! | `enabled`, event no longer carried | dead-letter |
-//! | `enabled` | sign with [`sign_set`], then push |
+//! | `enabled` | sign with [`sign_set`], open the credential, read the stream again — a different version is a retry (F4 W4 P23W4-01) — then push |
 //!
 //! The one exception is a **stream-updated** announcement (SSF §8.1.5), whose
 //! whole point is to follow a status change: it is not refused for the status
@@ -377,6 +377,21 @@ where
                 ));
             }
         };
+        // F4 W4 P23W4-01 (D-49, T-406): the stream and its credential are two
+        // reads. A credential opened after the endpoint moved is the *new*
+        // endpoint's, and must not go to the one read above, so the stream is
+        // read once more and the push goes out only if it is the same version
+        // that was signed against and whose endpoint is about to be used.
+        match self.streams.get(msg.tenant_id, msg.target_id).await {
+            Ok(again) if again.updated_at == stream.updated_at => {}
+            Ok(_) => return Ok(retry("the stream changed during the attempt")),
+            Err(AxiamError::NotFound { .. }) => return Ok(dead("the stream no longer exists")),
+            Err(_) => {
+                return Err(OutboundError::Delivery(
+                    "the stream could not be read".into(),
+                ));
+            }
+        }
         let authorization = match authorization {
             None => None,
             Some(value) => match HeaderValue::from_str(&value) {

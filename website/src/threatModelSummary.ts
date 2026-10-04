@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.29.0",
+ "version": "2.30.0",
  "diagramCount": 9,
- "total": 405,
+ "total": 406,
  "open": 17,
- "mitigated": 388,
+ "mitigated": 389,
  "areas": [
   {
    "id": 0,
@@ -98,7 +98,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "total": 39,
+   "total": 40,
    "open": 3
   },
   {
@@ -122,7 +122,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Tampering",
-   "total": 80,
+   "total": 81,
    "open": 2
   },
   {
@@ -164,7 +164,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Low",
-   "total": 28,
+   "total": 29,
    "open": 1
   }
  ],

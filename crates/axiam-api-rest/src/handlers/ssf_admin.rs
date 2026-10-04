@@ -668,7 +668,8 @@ pub async fn get_stream<C: Connection + Clone>(
                                       endpoint to another origin without the authorization header"),
         (status = 403, description = "Another tenant's registry"),
         (status = 404, description = "No such stream in this tenant"),
-        (status = 409, description = "The audience is already used by another SSF stream"),
+        (status = 409, description = "The audience is already used by another SSF stream, or the \
+                                      stream changed since it was read (reload it and retry)"),
         (status = 429, description = "Rate limit"),
         (status = 503, description = "A push authorization header was given and the deployment \
                                       cannot seal it"),
@@ -733,6 +734,10 @@ pub async fn update_stream<C: Connection + Clone>(
         status: input.status,
         status_reason: input.status_reason,
         status_actor,
+        // F4 W4 P23W4-01: the replacement was checked against `old` (the origin
+        // rule above, the binding, the status actor); it lands only if `old` is
+        // still the stream's version, else `409` and the administrator reloads.
+        expected_updated_at: Some(old.updated_at),
     };
     let changed = changed_fields(&old, &update);
     let updated = state

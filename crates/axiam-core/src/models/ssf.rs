@@ -523,11 +523,20 @@ pub struct SsfStreamUpdate {
     pub status_reason: Option<String>,
     /// See [`SsfStream::status_actor`].
     pub status_actor: SsfStatusActor,
+    /// The [`SsfStream::updated_at`] of the read this update was prepared from:
+    /// the write lands only if the stream has not been written since, and is
+    /// otherwise refused with `Conflict` (F4 W4 P23W4-01, T-406). Every writer
+    /// replaces the whole configuration it read, so without this a receiver's
+    /// write racing an administrator's would put back the status, allowance,
+    /// binding or subject format the administrator had just changed (D-51).
+    /// `None` writes unconditionally; nothing in the server does that.
+    pub expected_updated_at: Option<DateTime<Utc>>,
 }
 
 impl SsfStreamUpdate {
     /// The update that writes `stream` back unchanged (header kept), for a
-    /// caller that changes a few members.
+    /// caller that changes a few members — conditional on `stream` still being
+    /// the stream's current version ([`Self::expected_updated_at`]).
     #[must_use]
     pub fn from_stream(stream: &SsfStream) -> Self {
         Self {
@@ -543,6 +552,7 @@ impl SsfStreamUpdate {
             status: stream.status,
             status_reason: stream.status_reason.clone(),
             status_actor: stream.status_actor,
+            expected_updated_at: Some(stream.updated_at),
         }
     }
 }
@@ -560,6 +570,7 @@ impl fmt::Debug for SsfStreamUpdate {
             .field("subject_format", &self.subject_format)
             .field("status", &self.status)
             .field("status_actor", &self.status_actor)
+            .field("expected_updated_at", &self.expected_updated_at)
             .finish_non_exhaustive()
     }
 }

@@ -390,16 +390,27 @@ impl<C: Connection> SsfStreamRepository for SurrealSsfStreamRepository<C> {
             ),
         };
         // The tenant guard is in the `WHERE`, so another tenant's row matches
-        // nothing and reads back as `NotFound`.
+        // nothing and reads back as `NotFound`. So is the version guard (F4 W4
+        // P23W4-01, T-406): a write prepared from a read another write has since
+        // overtaken matches nothing either, and is told apart from a missing
+        // stream below.
+        let expected = update.expected_updated_at;
+        let version_clause = if expected.is_some() {
+            " AND updated_at = $expected_updated_at"
+        } else {
+            ""
+        };
         let result = self
             .db
             .current()
             .query(format!(
                 "UPDATE type::record('ssf_stream', $id) SET {SET_CLAUSE}{secret_clause}, \
-                 updated_at = time::now() WHERE tenant_id = $tenant_id"
+                 updated_at = time::now() WHERE tenant_id = $tenant_id{version_clause} \
+                 RETURN VALUE meta::id(id)"
             ))
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("expected_updated_at", expected))
             .bind(("receiver_client_id", update.receiver_client_id))
             .bind(("audience", update.audience))
             .bind(("description", update.description))
@@ -422,9 +433,18 @@ impl<C: Connection> SsfStreamRepository for SurrealSsfStreamRepository<C> {
             .bind(("key_version", SECRET_KEY_VERSION))
             .await
             .map_err(DbError::from)?;
-        result
+        let mut result = result
             .check()
             .map_err(|e| classify_write_error(e, ENTITY))?;
+        let written: Vec<String> = result.take(0).map_err(DbError::from)?;
+        if written.is_empty() {
+            // Missing (or another tenant's): `NotFound` from the read. Present:
+            // it changed since the caller read it.
+            self.get(tenant_id, id).await?;
+            return Err(AxiamError::Conflict {
+                reason: "the stream changed since it was read; read it again and retry".into(),
+            });
+        }
         self.get(tenant_id, id).await
     }
 

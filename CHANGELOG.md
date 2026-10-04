@@ -967,6 +967,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **SSF stream writes no longer undo each other (F4 W4 P23W4-01, adds T-406;
+  threat model 2.30.0).** Every stream write was read-modify-write, so a
+  receiver's `PATCH`, `PUT` or status write that overlapped an administrator's
+  change put back the status, allowance, receiver binding or subject format the
+  administrator had just set — a `disabled` included — and the push deliverer
+  could send a header supplied for a new endpoint to the old one. Writes are now
+  conditional on the version they were prepared from: a receiver's write decides
+  again from a fresh read (and answers `409` only if the stream keeps changing),
+  an administrator's `PUT /api/v1/tenants/{t}/ssf/streams/{s}` answers `409`
+  when the stream changed since it was read, and the deliverer reads the stream
+  again before it sends. Contract §32.3 rule 4 and §32.6 amended in place (1.56
+  is unreleased). 406 threats, 389 mitigated / 17 open.
+
 - **SSF delivery threats T-402 … T-405 (T23.5.4, threat model 2.29.0).** Held
   and dead-lettered events keeping a person's subject (T-402: seven-day TTL on
   `axiam.ssf_push.dlq` and the buffer; an erased subject can outlive the erasure

@@ -309,7 +309,7 @@ async fn an_update_keeps_replaces_or_clears_the_header() {
     let replacement = header_value();
     let mut set = SsfStreamUpdate::from_stream(&kept);
     set.authorization_header = SecretChange::Set(replacement.clone());
-    repo.update(tenant, stream.id, set).await.unwrap();
+    let replaced = repo.update(tenant, stream.id, set).await.unwrap();
     let opened = repo
         .decrypt_authorization_header(tenant, stream.id)
         .await
@@ -321,7 +321,7 @@ async fn an_update_keeps_replaces_or_clears_the_header() {
     );
 
     // Clear: gone.
-    let mut clear = SsfStreamUpdate::from_stream(&kept);
+    let mut clear = SsfStreamUpdate::from_stream(&replaced);
     clear.authorization_header = SecretChange::Clear;
     let cleared = repo.update(tenant, stream.id, clear).await.unwrap();
     assert!(!cleared.authorization_header_set);
@@ -640,4 +640,66 @@ async fn ssf_enabled_is_off_by_default_and_disable_only() {
             .oidc
             .ssf_enabled
     );
+}
+
+/// F4 W4 P23W4-01 (D-49, D-51, T-406): every write of a stream is
+/// read-modify-write — a receiver's `PATCH`, `PUT` and status write, and an
+/// administrator's replacement, all carry the whole configuration they read. A
+/// write prepared from a read that another write has since overtaken must not
+/// land: if it did, a receiver racing an administrator would put back the
+/// status, the allowance, the binding or the subject format the administrator
+/// had just changed — undoing a `disabled` that D-51 says only an administrator
+/// may lift.
+#[tokio::test]
+async fn a_write_prepared_from_an_overtaken_read_does_not_land() {
+    let db = setup().await;
+    let repo = repo(&db);
+    let tenant = Uuid::new_v4();
+    let stream = repo
+        .create(push_input(tenant, "https://rp.example.com/aud-race"))
+        .await
+        .unwrap();
+    // The receiver's read, before the administrator acts.
+    let receivers_read = repo.get(tenant, stream.id).await.unwrap();
+
+    // The administrator disables the stream and narrows it.
+    let mut stop = SsfStreamUpdate::from_stream(&receivers_read);
+    stop.status = SsfStreamStatus::Disabled;
+    stop.status_actor = SsfStatusActor::Admin;
+    stop.events_allowed = vec![SsfEventType::AccountPurged];
+    stop.events_requested = vec![SsfEventType::AccountPurged];
+    stop.subject_format = SsfSubjectFormat::IssSub;
+    repo.update(tenant, stream.id, stop).await.unwrap();
+
+    // The receiver's write, built from its earlier read, arrives after.
+    let mut late = SsfStreamUpdate::from_stream(&receivers_read);
+    late.description = Some("renamed by the receiver".into());
+    let refused = repo.update(tenant, stream.id, late).await;
+    assert!(
+        matches!(refused, Err(AxiamError::Conflict { .. })),
+        "a write from an overtaken read is refused as a conflict"
+    );
+
+    let now = repo.get(tenant, stream.id).await.unwrap();
+    assert_eq!(now.status, SsfStreamStatus::Disabled, "still disabled");
+    assert_eq!(now.status_actor, SsfStatusActor::Admin);
+    assert_eq!(now.events_allowed, vec![SsfEventType::AccountPurged]);
+    assert_eq!(now.subject_format, SsfSubjectFormat::IssSub);
+    assert_eq!(now.description.as_deref(), Some("Payroll receiver"));
+
+    // A write from a fresh read lands, and a missing stream is still NotFound.
+    let mut fresh = SsfStreamUpdate::from_stream(&now);
+    fresh.description = Some("renamed".into());
+    assert_eq!(
+        repo.update(tenant, stream.id, fresh.clone())
+            .await
+            .unwrap()
+            .description
+            .as_deref(),
+        Some("renamed")
+    );
+    assert!(matches!(
+        repo.update(tenant, Uuid::new_v4(), fresh).await,
+        Err(AxiamError::NotFound { .. })
+    ));
 }

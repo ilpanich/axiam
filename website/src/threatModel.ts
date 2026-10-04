@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.29.0",
+ "version": "2.30.0",
  "diagramCount": 9,
- "total": 405,
+ "total": 406,
  "open": 17,
- "mitigated": 388,
+ "mitigated": 389,
  "diagrams": [
   {
    "id": 0,
@@ -8132,6 +8132,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "CAEP `assurance-level-change` tells receivers that a user's authentication level moved, and a receiver may relax a restriction on an increase. AXIAM learns of a step-up across a browser round trip: the honour lane sends the user to sign in again, and a later authorization request comes back with the new session. If what links the two legs travelled with the browser (a marker in `return_to`, a parameter a relying party sets), a relying party or whoever controls the browser could forge a level change for a user who never stepped up, replay one, attach it to another user, or suppress a real one.",
        "mitigation": "Built (T23.5.3, 2026-10-04; D-53 (1)). The link is **server-side**. When the honour lane interacts for a step-up (`AcrUnsatisfied`) and the request carries a valid OP session, the authorization endpoint writes an `ssf_step_up` row `{tenant, user, previous_session_id, previous_acr}`: one per `(tenant, user)`, the latest replacing the earlier, ten minutes, `previous_acr` held by the datastore to the two published values. Nothing travels in `return_to`. The return leg consumes the row of **the user the request authenticates as**, in one `DELETE … RETURN BEFORE`, so a row is used once however many legs race for it, and emits only for a **new** session of that user whose `acr` differs from the recorded one, with `previous_level` the recorded value and `initiating_entity: user`. Nothing is written for a request with no readable session, an interaction that is not a step-up (`prompt=login`), or a tenant with SSF off or no stream carrying the event; nothing is emitted for another user's sign-in, the same session returning, an equal `acr`, or a row that expired or was already consumed. The row holds ids and an `acr` URN, no credential and no address; it is swept on `/health/jobs` (`ssf_step_up`) and removed with its tenant and by both erasure paths. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `a_step_up_upgrade_emits_assurance_level_change_with_previous_level_and_direction`, `a_return_with_the_same_acr_emits_nothing`, `the_same_session_returning_emits_nothing`, `a_different_users_return_leg_emits_nothing_and_leaves_the_record`, `an_expired_record_emits_nothing`, `a_step_up_record_is_consumed_once`, `the_latest_step_up_replaces_the_earlier_one`, `without_a_valid_op_session_no_step_up_record_is_written`, `an_interaction_that_is_not_a_step_up_writes_no_record`, `with_ssf_off_for_the_tenant_no_step_up_record_is_written`; `crates/axiam-db/tests/ssf_step_up_test.rs` `a_record_is_taken_once_and_then_it_is_gone`, `the_latest_record_replaces_the_earlier_one_for_a_user`, `a_record_is_one_users_in_one_tenant_only`, `an_expired_record_is_consumed_and_returns_nothing`, `the_sweep_removes_only_expired_records_in_every_tenant`, `the_datastore_refuses_an_acr_outside_the_vocabulary`, `deleting_a_tenant_removes_its_records_and_only_its_own`, `both_erasure_paths_remove_the_persons_record`; `crates/axiam-server/tests/cleanup_task.rs` `an_erasure_removes_the_persons_ssf_step_up_record`; `crates/axiam-server/src/job_health.rs` `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (extended to `ssf_step_up`). Residual: the return-leg marker is a query parameter, and the handler consumes the row before it validates the rest of the request, so a relying party, or any page that sends the user's browser to the authorization endpoint with the marker while it holds the session, can spend the row early with the session that started the step-up. That emits nothing (`the_same_session_returning_emits_nothing`) and costs the one event the real return leg would have sent. It cannot create one: an emission needs a step-up the user's own session started and a new session of the same user at another level, and the only party that can present such a session is the user."
+      },
+      {
+       "number": 406,
+       "title": "A stream write that overlaps another puts back what the other changed",
+       "type": "Tampering",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Every write of an SSF stream is read-modify-write: the receiver's `PATCH`, `PUT` and status write and the administrator's replacement each read the stream, decide, and write back the whole configuration they read. Two writes that overlap lose one: a receiver's write prepared before an administrator disabled, narrowed, re-bound or switched the subject format of its stream, landing after, puts the old status, allowance, binding and subject format back — undoing a `disabled` that D-51 says only an administrator may lift, without the administrator's page or audit row showing it, and a receiver can widen the window by writing at its rate limit. The push deliverer has the same shape across two reads: it reads the stream's endpoint, then opens its `Authorization` header, so a header supplied with a new endpoint in between is sent to the old one, against D-49's rule that a credential never follows an endpoint to another origin.",
+       "mitigation": "Decided in the W4 F4 review (P23W4-01, 2026-10-04). Every stream write is conditional on the version it was prepared from: `SsfStreamUpdate::from_stream` carries the stream's `updated_at` and `SsfStreamRepository::update` writes `WHERE updated_at = $expected`, answering `Conflict` (not `NotFound`) when the stream exists but changed. The receiver's `PATCH`, `PUT` and status `POST` decide again from a fresh read when overtaken — so the D-51 check always judges the status the write would replace, and an administrator's `disabled` makes the retry a `403` — and answer `409` only if the stream kept changing over three attempts; the administrator's `PUT` answers `409` and the console reloads. The deliverer reads the stream again after opening the header and pushes only if it is still the version it signed against and whose endpoint it holds; otherwise the attempt is a retry. Contract §32.3 rule 4 and §32.6 say so (1.56, amended in place). Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `a_write_prepared_from_an_overtaken_read_does_not_land`; `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `a_credential_supplied_for_a_new_endpoint_never_reaches_the_old_one`. Residual: the deliverer's second read and the send are not one step, so an endpoint moved after that read is used for one attempt with the header that was stored for it — the header and the endpoint still belong together."
       }
      ],
      "open": 0
@@ -8478,12 +8487,12 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 39,
+   "total": 40,
    "open": 3,
    "bySeverity": {
     "Medium": 26,
     "High": 8,
-    "Low": 5
+    "Low": 6
    }
   },
   {

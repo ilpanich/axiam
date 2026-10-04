@@ -409,6 +409,17 @@ pub async fn create_stream_refused(
     ))
 }
 
+/// How many times a receiver's write is prepared again from a fresh read when
+/// another write overtook the read it was prepared from (F4 W4 P23W4-01). Past
+/// that the answer is `409`.
+const RECEIVER_WRITE_ATTEMPTS: usize = 3;
+
+/// Whether a failed write lost a race to another write of the same stream and
+/// should be prepared again from a fresh read.
+fn overtaken(error: &AxiamError, attempt: usize) -> bool {
+    matches!(error, AxiamError::Conflict { .. }) && attempt + 1 < RECEIVER_WRITE_ATTEMPTS
+}
+
 async fn update_with<C: Connection + Clone>(
     receiver: SsfReceiverToken,
     state: web::Data<AppState<C>>,
@@ -421,34 +432,46 @@ async fn update_with<C: Connection + Clone>(
             message: "stream_id is required".into(),
         }));
     };
-    let stream = owned_stream(&state, &receiver, Some(&raw_id)).await?;
-    let update = apply_receiver_update(&state.auth_config, &stream, &body, mode)
-        .map_err(|message| AxiamApiError(AxiamError::Validation { message }))?;
-    if matches!(update.authorization_header, SecretChange::Set(_))
-        && !state.ssf.stream_repo.has_encryption_key()
-    {
-        return Err(AxiamApiError(AxiamError::ServiceUnavailable(
-            "the push authorization header cannot be stored on this deployment".into(),
-        )));
-    }
-    let mut changed: Vec<&str> = Vec::new();
-    if update.events_requested != stream.events_requested {
-        changed.push("events_requested");
-    }
-    if update.description != stream.description {
-        changed.push("description");
-    }
-    if update.endpoint_url != stream.endpoint_url {
-        changed.push("endpoint_url");
-    }
-    if !matches!(update.authorization_header, SecretChange::Keep) {
-        changed.push("authorization_header");
-    }
-    let updated = state
-        .ssf
-        .stream_repo
-        .update(receiver.tenant_id, stream.id, update)
-        .await?;
+    // Read, decide, write — and if another write (an administrator's) landed
+    // between the read and the write, decide again against what it left: the
+    // update carries the version it was prepared from, so it never puts back
+    // what that write changed (D-51, T-406).
+    let mut attempt = 0;
+    let (stream, updated, changed) = loop {
+        let stream = owned_stream(&state, &receiver, Some(&raw_id)).await?;
+        let update = apply_receiver_update(&state.auth_config, &stream, &body, mode)
+            .map_err(|message| AxiamApiError(AxiamError::Validation { message }))?;
+        if matches!(update.authorization_header, SecretChange::Set(_))
+            && !state.ssf.stream_repo.has_encryption_key()
+        {
+            return Err(AxiamApiError(AxiamError::ServiceUnavailable(
+                "the push authorization header cannot be stored on this deployment".into(),
+            )));
+        }
+        let mut changed: Vec<&str> = Vec::new();
+        if update.events_requested != stream.events_requested {
+            changed.push("events_requested");
+        }
+        if update.description != stream.description {
+            changed.push("description");
+        }
+        if update.endpoint_url != stream.endpoint_url {
+            changed.push("endpoint_url");
+        }
+        if !matches!(update.authorization_header, SecretChange::Keep) {
+            changed.push("authorization_header");
+        }
+        match state
+            .ssf
+            .stream_repo
+            .update(receiver.tenant_id, stream.id, update)
+            .await
+        {
+            Ok(updated) => break (stream, updated, changed),
+            Err(error) if overtaken(&error, attempt) => attempt += 1,
+            Err(error) => return Err(AxiamApiError(error)),
+        }
+    };
     audit_receiver(
         &state,
         &http_req,
@@ -476,6 +499,7 @@ async fn update_with<C: Connection + Clone>(
         (status = 401, description = "No valid token"),
         (status = 403, description = "Not an OAuth2 client token with the ssf.manage scope"),
         (status = 404, description = "No such stream for this receiver"),
+        (status = 409, description = "The stream kept changing under this write; read it again and retry"),
         (status = 429, description = "Rate limit"),
         (status = 503, description = "The header cannot be stored on this deployment"),
     ),
@@ -510,6 +534,7 @@ pub async fn patch_stream_configuration<C: Connection + Clone>(
         (status = 401, description = "No valid token"),
         (status = 403, description = "Not an OAuth2 client token with the ssf.manage scope"),
         (status = 404, description = "No such stream for this receiver"),
+        (status = 409, description = "The stream kept changing under this write; read it again and retry"),
         (status = 429, description = "Rate limit"),
         (status = 503, description = "The header cannot be stored on this deployment"),
     ),
@@ -630,6 +655,7 @@ pub async fn get_stream_status<C: Connection + Clone>(
         (status = 401, description = "No valid token"),
         (status = 403, description = "Not a receiver token, or an administrator set this status"),
         (status = 404, description = "No such stream for this receiver"),
+        (status = 409, description = "The stream kept changing under this write; read it again and retry"),
         (status = 429, description = "Rate limit"),
     ),
     security(("bearer" = []))
@@ -641,7 +667,6 @@ pub async fn update_stream_status<C: Connection + Clone>(
     body: web::Json<SsfStatusUpdate>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let body = body.into_inner();
-    let stream = owned_stream(&state, &receiver, Some(&body.stream_id)).await?;
     let status = SsfStreamStatus::from_wire(&body.status).ok_or_else(|| {
         AxiamApiError(AxiamError::Validation {
             message: "status must be enabled, paused or disabled".into(),
@@ -651,22 +676,36 @@ pub async fn update_stream_status<C: Connection + Clone>(
         validate_status_reason(reason)
             .map_err(|message| AxiamApiError(AxiamError::Validation { message }))?;
     }
-    // D-51: what an administrator stopped, only an administrator restarts.
-    if stream.status_actor == SsfStatusActor::Admin && stream.status != SsfStreamStatus::Enabled {
-        return Err(forbidden(
-            "an administrator set this stream's status; only an administrator can change it",
-        ));
-    }
+    let reason = body.reason.filter(|r| !r.is_empty());
+    // Read, decide, write; decided again from a fresh read when an
+    // administrator's write landed in between (F4 W4 P23W4-01, T-406), so the
+    // D-51 check below always judges the status the write would replace.
+    let mut attempt = 0;
+    let (stream, updated) = loop {
+        let stream = owned_stream(&state, &receiver, Some(&body.stream_id)).await?;
+        // D-51: what an administrator stopped, only an administrator restarts.
+        if stream.status_actor == SsfStatusActor::Admin && stream.status != SsfStreamStatus::Enabled
+        {
+            return Err(forbidden(
+                "an administrator set this stream's status; only an administrator can change it",
+            ));
+        }
+        let mut update = SsfStreamUpdate::from_stream(&stream);
+        update.status = status;
+        update.status_reason = reason.clone();
+        update.status_actor = SsfStatusActor::Receiver;
+        match state
+            .ssf
+            .stream_repo
+            .update(receiver.tenant_id, stream.id, update)
+            .await
+        {
+            Ok(updated) => break (stream, updated),
+            Err(error) if overtaken(&error, attempt) => attempt += 1,
+            Err(error) => return Err(AxiamApiError(error)),
+        }
+    };
     let previous = stream.status;
-    let mut update = SsfStreamUpdate::from_stream(&stream);
-    update.status = status;
-    update.status_reason = body.reason.filter(|r| !r.is_empty());
-    update.status_actor = SsfStatusActor::Receiver;
-    let updated = state
-        .ssf
-        .stream_repo
-        .update(receiver.tenant_id, stream.id, update)
-        .await?;
     audit_receiver(
         &state,
         &http_req,

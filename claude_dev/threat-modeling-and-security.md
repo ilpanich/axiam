@@ -22,6 +22,17 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-04 W4 F4 security review entry (Phase 23, model 2.30.0).** One
+> threat enters, Mitigated on arrival. **T-406**: every SSF stream write was
+> read-modify-write, so a receiver's write that overlapped an administrator's put
+> back the status, allowance, receiver binding or subject format the administrator
+> had just changed — undoing a `disabled` only an administrator may lift — and the
+> push deliverer could send a header supplied for a new endpoint to the old one.
+> Writes are now conditional on the version they were prepared from (a receiver's
+> write decides again from a fresh read, an administrator's answers `409`), and the
+> deliverer reads the stream again before it sends. The model is **406 threats,
+> 389 mitigated / 17 open**.
+>
 > **The 2026-10-04 SSF delivery threat entries (Phase 23 T23.5.4, model
 > 2.29.0 — T-402 … T-405 enter).** T23.5.3 built what **D-53** decided and
 > entered none of it; this pass does, against the tests T23.5.3 landed. The
@@ -945,7 +956,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 405 threats** and a
+The system is verified against a **STRIDE threat model of 406 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -968,8 +979,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 405 |
-| Mitigated / Open | 388 / 17 |
+| Threats identified | 406 |
+| Mitigated / Open | 389 / 17 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -2315,7 +2326,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 17 of
-405. On the website this table is generated from the Threat Dragon model, so it
+406. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind

@@ -2252,7 +2252,10 @@ async fn hold(w: &World, stream: &SsfStream, n: usize) -> Vec<SsfPendingEvent> {
 }
 
 async fn set_status_via_repo(w: &World, stream: &SsfStream, status: SsfStreamStatus) {
-    let mut update = SsfStreamUpdate::from_stream(stream);
+    // From the stream as it is now: an update carries the version it was
+    // prepared from (F4 W4 P23W4-01).
+    let current = w.repo().get(stream.tenant_id, stream.id).await.unwrap();
+    let mut update = SsfStreamUpdate::from_stream(&current);
     update.status = status;
     w.repo()
         .update(stream.tenant_id, stream.id, update)

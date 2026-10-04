@@ -995,6 +995,14 @@ pub mod test_support {
     use base64::engine::general_purpose::STANDARD;
     use samael::crypto::{CryptoProvider, XmlSec};
 
+    /// The two libraries a reference service provider is built from, so the
+    /// e2e harness (T23.2.7) drives `samael`'s SP-side API itself — it
+    /// builds and signs the `AuthnRequest`, parses and validates the
+    /// `Response` — without `axiam-api-rest` taking a dev-dependency on a
+    /// crate that needs system libxml2 in a build that has none.
+    pub use openssl;
+    pub use samael;
+
     /// A key pair and a self-signed certificate over it.
     pub struct Material {
         /// PKCS#8 DER of the private key.

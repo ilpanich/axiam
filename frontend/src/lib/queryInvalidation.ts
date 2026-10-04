@@ -126,6 +126,11 @@ export const INVALIDATION_GRAPH: Record<string, readonly string[]> = {
     "webauthn-compliance-report",
   ],
 
+  // The sync status is the job's verdict on the configuration beside it: saving
+  // a configuration (enabling it, moving the base DN) changes what the next run
+  // does, and deleting it removes the status altogether.
+  "directory-config": ["directory-config", "directory-sync-status"],
+
   // MFA state is shown both on the user's own profile and on their admin page.
   mfaMethods: ["mfaMethods", "user-mfa", "currentUser"],
   "user-mfa": ["user-mfa", "mfaMethods", "user"],

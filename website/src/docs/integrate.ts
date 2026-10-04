@@ -1463,6 +1463,31 @@ w.WriteHeader(http.StatusOK)`,
         text: "The delay is `base × 2^(attempt − 1)`, clamped to the ceiling — 5 s, 10 s, 20 s, 40 s on the defaults. The multiplier is fixed at 2 and is not configurable.",
       },
       {
+        type: "p",
+        text: "Shared Signals Framework push delivery runs on the same dispatcher with queues of its own (`axiam.ssf_push`, `.retry`, `.dlq`) and the same schedule, read from the kind's own variables so tuning one never moves the other. Its dead-letter queue discards a message after seven days, because a dead-lettered event still names a person.",
+      },
+      {
+        type: "table",
+        headers: ["Config key", "Default", "Meaning"],
+        rows: [
+          [
+            "AXIAM__SSF_PUSH__MAX_ATTEMPTS",
+            "`5`",
+            "Total push attempts per event before it is dead-lettered; the first attempt counts as one.",
+          ],
+          [
+            "AXIAM__SSF_PUSH__BACKOFF_BASE_MS",
+            "`5000`",
+            "Delay before the first retry of a push.",
+          ],
+          [
+            "AXIAM__SSF_PUSH__BACKOFF_CEILING_MS",
+            "`3600000`",
+            "Upper bound on any single push retry delay — one hour.",
+          ],
+        ],
+      },
+      {
         type: "warn",
         text: "A webhook also carries a per-endpoint `retry_policy` (`max_retries`, `initial_delay_secs`, `backoff_multiplier`), which is validated and stored — `max_retries` at most 10, `initial_delay_secs` between 1 and 3600, `backoff_multiplier` between 0 and 10. The delivery consumer does **not** read it: the schedule that runs is the deployment-wide one above. Treat the field as recorded intent, not as a per-endpoint control.",
       },

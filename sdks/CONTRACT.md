@@ -3875,6 +3875,26 @@ recorded here until one exists.
     `proto/` is unchanged. Implementing §32 is the post-merge fan-out (D-35); T23.5.4 opens the
     tracking issue. Per-SDK tests: §32.8.
 
+  - **Amended before 1.56 shipped (T23.5.3, G-5; D-53).** No version bump: no SDK has ported §32
+    and 1.56 is unreleased, so the text is corrected in place (the T23.2.9 precedent for §29
+    under 1.55). (a) The status paragraph no longer says delivery "follows in T23.5.3": it has
+    landed, with `openapi.json` regenerated for the poll route. (b) §32.6 states the poll
+    endpoint's details the first text left to the code: `400` on a push stream, a negative
+    `maxEvents`, a malformed body or more than 1 000 `ack` / 100 `setErrs` entries; `413` over
+    32 KiB; an empty `sets` for a paused or disabled stream; the `ssf_stream.poll_set_error` audit
+    row; the 30-second long poll and the rule that **one long poll waits per stream per
+    instance**, a second answering at once. (c) §32.6 states the **push response mapping** (D-49,
+    completed by D-53): every `4xx` other than `404`, `408` and `429` is dead-lettered (a `400`
+    with a known RFC 8935 code keeping its code, the rest `HTTP <status>`), `3xx` and anything
+    else retry, and **redirects are not followed**, by construction. (d) §32.6 states the
+    **event sources**: `x509` is not emitted (no user-certificate binding), the directory sync
+    never re-enables an account, an administrator's password write is SCIM's, SCIM `DELETE` is an
+    `account-purged`, WebAuthn kinds map to `fido2-platform` / `fido2-roaming`, and
+    `assurance-level-change` follows a step-up through a server-side record. (e) §32.6 names the
+    retry variables `AXIAM__SSF_PUSH__MAX_ATTEMPTS`, `…__BACKOFF_BASE_MS` and
+    `…__BACKOFF_CEILING_MS` and the seven-day lifetime of the push dead-letter queue. None of it
+    changes a management shape, an operation or a required test.
+
 - **2026-10-04 (T23.2.8, G-2, contract 1.55)** — **non-breaking / additive.** A new
   section, [§29](#§29-saml-service-provider-registration-management-api-contract-155): the
   management surface for AXIAM as a SAML 2.0 identity provider, as a §27 namespace `saml`
@@ -10172,10 +10192,12 @@ namespace. A **relying party** that *receives* events uses the SSF protocol (§3
 not management surface and is not in the registry; what an SDK offers it is the optional
 receiver helper (§32.7), which verifies a SET and polls. An SDK never *transmits*.
 
-**Status: the routes exist.** T23.5.2 added the five management routes, the receiver protocol
-routes and discovery, and regenerated `openapi.json` and `management-registry.json`; push and
-poll delivery and the event sources follow in T23.5.3. An SDK implements §32 from the merge
-commit (§7 rule 1 of the plan; the 1.49 rule), in the post-merge fan-out (D-35).
+**Status: the routes and the delivery exist.** T23.5.2 added the five management routes, the
+receiver protocol routes and discovery, and regenerated `openapi.json` and
+`management-registry.json`; T23.5.3 added push and poll delivery and the event sources (§32.6),
+and regenerated `openapi.json` for the poll route (the registry is unchanged). An SDK implements
+§32 from the merge commit (§7 rule 1 of the plan; the 1.49 rule), in the post-merge fan-out
+(D-35).
 
 ### §32.1 Canonical operation set
 
@@ -10309,7 +10331,7 @@ empty `404`.
 **The stream management API** — `{root}/ssf/v1/stream` (`GET` one stream by `stream_id` or the
 receiver's list, `PATCH`, `PUT`; `POST` and `DELETE` are `403`: streams are an administrator's),
 `{root}/ssf/v1/status` (`GET`, `POST`) and `{root}/ssf/v1/verify` (`POST`, `204`) — and the
-poll endpoint `{root}/ssf/v1/poll/{stream_id}` (RFC 8936, T23.5.3). Each takes a bearer access
+poll endpoint `{root}/ssf/v1/poll/{stream_id}` (RFC 8936). Each takes a bearer access
 token issued to the receiver's OAuth2 client by the client-credentials grant with the
 `ssf.manage` scope (`403` otherwise); a stream bound to another client, another tenant's, or
 one in a tenant whose transmitter is off answers the same `404`. A receiver may narrow its
@@ -10352,6 +10374,64 @@ answers `202`. **Poll** (RFC 8936): `POST` `{ "maxEvents", "returnImmediately", 
 "setErrs" }` to the stream's poll endpoint; the answer is `{ "sets": { <jti>: <SET> },
 "moreAvailable" }`. An event stays in the stream's buffer — at most 1 000, the oldest dropped,
 seven days at most — until its `jti` is acknowledged (D-48).
+
+**The push response mapping** (D-49, D-53). Each attempt is one request, made to the address the
+endpoint resolves to *now* (every address must be globally routable, and the connection is
+pinned to the one validated; `https` is required) — an endpoint that was acceptable when it was
+registered and resolves to an internal address later is refused at delivery. **A redirect is
+never followed**: the one hop is made and a `3xx` is returned as the answer, so neither the SET
+nor the `Authorization` header can reach a host the administrator did not name. The response
+body is read to at most 64 KiB and never logged or audited. What the answer means:
+
+| The receiver answers | Outcome |
+|---|---|
+| any `2xx` (RFC 8935: `202`) | delivered |
+| `400` with an RFC 8935 §2.4 `err` code (`invalid_request`, `invalid_key`, `invalid_issuer`, `invalid_audience`, `authentication_failed`, `access_denied`) | dead-lettered; the code is in the `ssf_push.delivery_failed` audit row |
+| `401`, `403` | dead-lettered: the credential is wrong until someone changes it |
+| any other `4xx` — a `400` without a known code, `410`, `422`, … | dead-lettered with the reason `HTTP <status>`: it will not change on retry — except `404`, `408` and `429` below |
+| `404`, `408`, `429`, any `5xx`, a timeout, no connection | retried |
+| a `3xx` (not followed), and anything else | retried |
+
+Retrying follows the shared outbound dispatcher's schedule, `base × 2^(attempt − 1)` clamped to a
+ceiling, set by `AXIAM__SSF_PUSH__MAX_ATTEMPTS` (default `5`, the first attempt counting as one),
+`AXIAM__SSF_PUSH__BACKOFF_BASE_MS` (`5000`) and `AXIAM__SSF_PUSH__BACKOFF_CEILING_MS`
+(`3600000`) — the webhook variables' names with the kind's prefix, read independently of them.
+A message that is dead-lettered waits in `axiam.ssf_push.dlq`, which discards it after **seven
+days** (`x-message-ttl`, D-53): it holds an unsigned event and so a subject. A retried push
+carries the byte-identical SET, one `jti`; the attempt re-reads the stream and signs against it as
+it is then (D-51), so a stream disabled meanwhile sends nothing and a paused one holds the event.
+
+**The poll endpoint in detail** (RFC 8936; every reply here is `200` with the body above unless a
+status is named). A request body is optional — an empty one is `{}` — and at most 32 KiB
+(`413` beyond it). `400` for a body that is not the RFC 8936 JSON, a **negative `maxEvents`**,
+more than **1 000** `ack` entries or more than **100** `setErrs` entries, and for a **push**
+stream (there is nothing to poll). `maxEvents` is clamped to 100; `0` acknowledges and returns
+nothing. `ack` deletes exactly the named rows of *this* stream (an unknown `jti`, or another
+stream's, is ignored). Each `setErrs` entry deletes its row — the receiver will not accept that
+SET, so it is not offered again — and writes an audit row `ssf_stream.poll_set_error` carrying
+the `jti`, whether the event was still held, and the `err` code if it is one of RFC 8935's (else
+`unrecognized`); the receiver's free-text `description` is never stored. SETs are signed at poll
+time against the stream as it is then. **A paused or disabled stream answers an empty `sets`**
+and keeps what it holds (a disabled stream's held events stay until they expire). Without
+`returnImmediately` a poll *long-polls*: it waits up to **30 seconds** for an event. **At most one
+long poll waits per stream per server instance** (D-53): a second concurrent request on the same
+stream is answered at once, as if `returnImmediately` were true. A receiver that polls in a loop
+therefore keeps one connection open, not many.
+
+**What is emitted, and from where** (D-52, D-53). One emitter, a no-op while the tenant's
+`ssf_enabled` is off, one `txn` for every SET one operation produces:
+
+| Event | Emitted by |
+|---|---|
+| `session-revoked` | every revocation of a session — logout, an administrator's revoke, a password change or reset, an erasure — never an expiry or a refresh redemption |
+| `credential-change` | a password change or reset; the SCIM password write; creating a user with an OPAQUE record; TOTP confirmation; an MFA reset or method deletion; a WebAuthn registration (`Passkey` → `fido2-platform`, `SecurityKey` → `fido2-roaming`). An administrator's password write has no REST route, so the SCIM write is the source. **`x509` is never emitted:** certificates bind only to service accounts, and an SSF subject is a user — the member shapes stay for the day a user-certificate binding exists |
+| `assurance-level-change` | the honour lane's **step-up**: when an authorization request needs a higher `acr` and the browser presents a valid OP session, the server remembers (ten minutes, one record per user, the latest replacing) the session and its `acr`; the return leg that arrives with a **new** session of the same user consumes the record once and emits **only when the `acr` differs** — `previous_level` the old one, `change_direction` from the published order (`1fa` < `mfa`), `initiating_entity` `user`. No marker travels in `return_to`, so there is nothing for a relying party to forge or replay; no earlier session, another user, an expired record or the same session emit nothing |
+| `account-disabled`, `account-enabled` | an administrator's status write, SCIM `active`, and — for `account-disabled` only — a directory deactivation. **The directory sync never re-enables an account** (D-31), so `account-enabled` comes from the administrator and SCIM alone |
+| `account-purged` | `DELETE /api/v1/users/{id}`, SCIM `DELETE /Users/{id}` (the same tombstone) and the GDPR erasure; the subject is the account as it was **before** the write |
+| `stream-updated` | an administrator's or receiver's status change, announced only while the tenant's `ssf_enabled` is on |
+
+A lock-out is not an `account-disabled`; an unchanged status, a no-op patch and an equal `acr`
+tell nobody anything.
 
 ### §32.7 The receiver helper (SHOULD, seven SDKs)
 

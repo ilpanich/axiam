@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:ba38450f2a47a689e602133558a0c241ded53ed9699a350917d7d6fb1044ce3e"
+    "x-axiam-spec-digest": "sha256:04ac83c1af7d7a2eda89250f36a7a6a6890f0a92c43cf0553ea6ae049fe55fed"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -13860,7 +13860,7 @@
           "ssf-receiver"
         ],
         "summary": "`POST /ssf/v1/poll/{stream_id}` — RFC 8936 poll delivery (D-48).",
-        "description": "The receiver's token, as on the stream API, and the same single `404` for a\nstream that is not its own. In this order: the acknowledgements, then the\nreported errors, then the next SETs — so an event acknowledged here is not\nreturned by this same call. An unacknowledged event comes back on the next\npoll (at-least-once); a SET is **signed now**, against the stream as it is\nnow, so a stream paused or disabled meanwhile answers an empty `sets`.",
+        "description": "The receiver's token, as on the stream API, and the same single `404` for a\nstream that is not its own. In this order: the acknowledgements, then the\nreported errors, then the next SETs — so an event acknowledged here is not\nreturned by this same call. An unacknowledged event comes back on the next\npoll (at-least-once); a SET is **signed now**, against the stream as it is\nnow, so a stream paused or disabled meanwhile answers an empty `sets`.\n\nWithout `returnImmediately` the call long-polls for up to 30 seconds; at most\none long poll waits per stream per server instance, and a second concurrent\nrequest on the same stream is answered at once as if `returnImmediately` were\ntrue (D-53).",
         "operationId": "poll_events",
         "parameters": [
           {

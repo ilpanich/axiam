@@ -10,41 +10,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Shared Signals Framework transmitter: push and poll delivery and the event
-  sources (T23.5.3, G-5, D-48, D-49, D-51, D-52, contract §32.6).** AXIAM now
+  sources (T23.5.3, G-5, D-48, D-49, D-51, D-52, D-53, contract §32.6).** AXIAM now
   transmits. **Push (RFC 8935)**: the `SsfPush` deliverer
   (`axiam_oauth2::ssf_delivery`) runs on the shared outbound dispatcher with
   queues of its own (`axiam.ssf_push`, `.retry`, `.dlq`; retry variables
   `AXIAM__SSF_PUSH__MAX_ATTEMPTS`, `…__BACKOFF_BASE_MS`,
-  `…__BACKOFF_CEILING_MS`). Each attempt re-reads the stream and signs against it
-  as it is then — gone or disabled dead-letters, paused or now poll goes to the
-  buffer — and POSTs `application/secevent+jwt` with the stored `Authorization`
-  header **only through `guarded_fetch` with `allow_private = false`**, no
-  redirect followed, a 64 KiB response cap. `2xx` is delivered; a `400` with an
-  RFC 8935 `err` (the code in the `ssf_push.delivery_failed` audit row), `401` and
-  `403` dead-letter; `404`, `408`, `429`, `5xx`, timeouts and connection failures
-  retry. **Poll (RFC 8936)**: `POST /ssf/v1/poll/{stream_id}` with the receiver's
+  `…__BACKOFF_CEILING_MS`, documented beside the webhook ones). Each attempt
+  re-reads the stream and signs against it as it is then — gone or disabled
+  dead-letters, paused or now poll goes to the buffer — and POSTs
+  `application/secevent+jwt` with the stored `Authorization` header **only through
+  `axiam_pki::ssrf::guarded_fetch_no_redirect` with `allow_private = false`**: one
+  resolved, address-pinned hop, a `3xx` returned as the answer and **never
+  followed** (so neither the SET nor the credential can reach a host nobody named),
+  a 64 KiB response cap. **Response mapping (D-49, D-53)**: `2xx` is delivered; a
+  `400` with an RFC 8935 `err` dead-letters with the code in the
+  `ssf_push.delivery_failed` audit row, `401` and `403` dead-letter, **any other
+  `4xx` except `404`, `408` and `429` dead-letters with the reason
+  `HTTP <status>`** (it will not change on retry); `404`, `408`, `429`, `5xx`,
+  timeouts, connection failures, a `3xx` and anything else retry. The push
+  dead-letter queue carries a **seven-day `x-message-ttl`** (a dead-lettered
+  message holds an unsigned subject); the webhook queues' arguments are unchanged.
+  **Poll (RFC 8936)**: `POST /ssf/v1/poll/{stream_id}` with the receiver's
   `ssf.manage` token (the same one `404` for a stream that is not its own):
   `maxEvents` clamped to 100, `returnImmediately` honoured (a long poll waits at
-  most 30 s), `ack` deletes exactly that stream's rows, each `setErrs` entry
-  deletes its row and writes an `ssf_stream.poll_set_error` audit row with the
-  RFC 8935 code, SETs are signed at poll time, a paused or disabled stream answers
-  an empty `sets`; bucket `ssf_poll` under `AXIAM__RATE_LIMIT__SSF_PER_MIN`. The
-  **buffer** keeps at most 1 000 events per stream (the oldest dropped), seven
-  days at most, one row per `jti`; its expiry sweep `ssf_event_buffer` is on
-  `/health/jobs`. Resuming a paused push stream releases its held events oldest
-  first. **Event sources** are emitted where the change happens, through one
-  emitter (a no-op with `ssf_enabled` off, one `txn` per operation):
-  `session-revoked` from the session repository's `invalidate`,
-  `invalidate_user_sessions` and `invalidate_user_sessions_except` (never from a
-  redemption or expiry, whether or not the revocation feed is on);
-  `credential-change` from a password change and reset, a SCIM password write, an
-  OPAQUE registration, TOTP confirmation, an MFA reset or method deletion and a
-  WebAuthn registration; `account-disabled` and `account-enabled` from an
-  administrator's status write, SCIM `active` and a directory deactivation;
-  `account-purged` from `DELETE /api/v1/users/{id}` and the GDPR erasure, with the
-  subject captured before the write. `openapi.json` regenerated (the poll route,
-  tag `ssf-receiver`); the management registry is unchanged apart from its spec
-  digest.
+  most 30 s, and **at most one long poll waits per stream per instance** — a
+  second concurrent one answers at once), `400` on a push stream, a negative
+  `maxEvents` or more than 1 000 `ack` / 100 `setErrs` entries, `413` over 32 KiB,
+  `ack` deletes exactly that stream's rows, each `setErrs` entry deletes its row
+  and writes an `ssf_stream.poll_set_error` audit row with the RFC 8935 code, SETs
+  are signed at poll time, a paused or disabled stream answers an empty `sets`;
+  bucket `ssf_poll` under `AXIAM__RATE_LIMIT__SSF_PER_MIN`. The **buffer** keeps at
+  most 1 000 events per stream (the oldest dropped), seven days at most, one row
+  per `jti`; its expiry sweep `ssf_event_buffer` is on `/health/jobs`. Resuming a
+  paused push stream releases its held events oldest first. **Event sources** are
+  emitted where the change happens, through one emitter (a no-op with
+  `ssf_enabled` off, one `txn` per operation): `session-revoked` from the session
+  repository's `invalidate`, `invalidate_user_sessions` and
+  `invalidate_user_sessions_except` (never from a redemption or expiry, whether or
+  not the revocation feed is on); `credential-change` from a password change and
+  reset, a SCIM password write, an OPAQUE registration, TOTP confirmation, an MFA
+  reset or method deletion and a WebAuthn registration (`Passkey` →
+  `fido2-platform`, `SecurityKey` → `fido2-roaming`) — **never `x509`**, because
+  certificates bind only to service accounts and an SSF subject is a user;
+  `account-disabled` and `account-enabled` from an administrator's status write,
+  SCIM `active` and (disable only) a directory deactivation — the directory sync
+  never re-enables an account; `account-purged` from `DELETE /api/v1/users/{id}`,
+  **SCIM `DELETE /Users/{id}`** and the GDPR erasure, with the subject captured
+  before the write; and **`assurance-level-change`** from the honour lane's
+  step-up: schema **v78** adds `ssf_step_up`, a ten-minute record (one per tenant
+  and user, the latest replacing) of the session the user held and its `acr`,
+  written when an authorization request interacts for a step-up with a valid OP
+  session and consumed once by the return leg that arrives with a new session of
+  the same user, which emits only when the `acr` differs (`previous_level`,
+  `change_direction`, `initiating_entity: user`); nothing travels in `return_to`.
+  The record's expiry sweep `ssf_step_up` is on `/health/jobs`; the row goes with
+  its tenant and with both user-erasure paths. The stream-updated announcement of
+  a status change obeys the tenant's `ssf_enabled` like every other producer.
+  `openapi.json` regenerated (the poll route, tag `ssf-receiver`); the management
+  registry is unchanged apart from its spec digest. **Contract §32 amended in
+  place before 1.56 ships (no version bump)** to say all of the above; the
+  `axiam.ssf_push` queues are in `docs/api/asyncapi.yml`.
 - **The SAML identity provider in the documentation: website page, contract
   amendment (T23.2.9, G-2, contract 1.55).** The website's *Integrate* section
   gains **AXIAM as a SAML identity provider**: what a per-tenant IdP offers

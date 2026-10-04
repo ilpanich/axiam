@@ -4,7 +4,7 @@ info:
   version: "0.1.0"
   description: |
     AMQP message contracts for AXIAM's async authorization, audit ingestion,
-    mail delivery, webhook delivery, and notification queues.
+    mail delivery, webhook delivery, SSF push delivery, and notification queues.
 
     **Hand-authored, not generated.** Derived by field-for-field transcription
     from `crates/axiam-amqp/src/messages.rs` and
@@ -242,6 +242,74 @@ channels:
       message:
         $ref: '#/components/messages/WebhookMessage'
 
+  axiam.ssf_push:
+    description: >-
+      Primary Shared Signals Framework push delivery queue (G-5, T23.5.3, D-36,
+      D-49) (queue: `axiam.ssf_push`, durable). The same shared outbound
+      dispatcher that serves `axiam.webhook`, with queues of its own so one kind's
+      backlog never delays the other's. Consumed by the `SsfPush` deliverer, which
+      makes **one** push attempt per (re)delivery: it re-reads the stream, signs
+      the event against it as it is then, and POSTs the compact SET
+      (`application/secevent+jwt`, RFC 8935) with the stored `Authorization`
+      header, never following a redirect. A terminal outcome (a `400` with an
+      RFC 8935 `err`, `401`, `403`, any other `4xx` but `404`/`408`/`429`, or
+      `attempt` exhausted against `AXIAM__SSF_PUSH__MAX_ATTEMPTS`) dead-letters to
+      `axiam.ssf_push.dlq`; a retryable one republishes to `axiam.ssf_push.retry`
+      with an incremented `attempt`. The message carries the **unsigned** event;
+      no signed token is ever queued.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.ssf_push
+          durable: true
+          autoDelete: false
+    subscribe:
+      summary: AXIAM's SSF push consumer makes one delivery attempt.
+      message:
+        $ref: '#/components/messages/SsfPushMessage'
+
+  axiam.ssf_push.retry:
+    description: >-
+      SSF push retry-delay queue (queue: `axiam.ssf_push.retry`, durable). No
+      consumer is ever attached: AXIAM publishes a `SsfPushMessage` here with a
+      per-message TTL (`base x 2^(attempt-1)` clamped to a ceiling, from
+      `AXIAM__SSF_PUSH__BACKOFF_BASE_MS` and `AXIAM__SSF_PUSH__BACKOFF_CEILING_MS`),
+      and when it expires RabbitMQ dead-letters it back to `axiam.ssf_push` via the
+      default exchange.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.ssf_push.retry
+          durable: true
+          autoDelete: false
+    publish:
+      summary: >-
+        AXIAM publishes a `SsfPushMessage` here (with TTL) to delay the next push
+        attempt; no application ever subscribes to this queue.
+      message:
+        $ref: '#/components/messages/SsfPushMessage'
+
+  axiam.ssf_push.dlq:
+    description: >-
+      Terminal dead-letter queue for SSF push deliveries that cannot or did not
+      succeed (queue: `axiam.ssf_push.dlq`, durable, `x-message-ttl` of seven days,
+      D-53). Unlike `axiam.webhook.dlq` it is **bounded**: a dead-lettered message
+      holds an unsigned event and so a subject (possibly an address), and the
+      broker discards it after seven days. Replayable until then.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.ssf_push.dlq
+          durable: true
+          autoDelete: false
+    publish:
+      summary: An SSF push delivery was dead-lettered here; it is discarded after seven days.
+      message:
+        $ref: '#/components/messages/SsfPushMessage'
+
 components:
   messages:
     AuthzRequest:
@@ -297,6 +365,17 @@ components:
       contentType: application/json
       payload:
         $ref: '#/components/schemas/OutboundMailMessage'
+
+    SsfPushMessage:
+      name: SsfPushMessage
+      title: SSF push delivery attempt
+      summary: >-
+        The shared outbound envelope (`axiam_core::outbound::OutboundMessage`)
+        for `kind` `ssf_push`, carried on `axiam.ssf_push` /
+        `axiam.ssf_push.retry` / `axiam.ssf_push.dlq` (T23.5.3, D-36).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/SsfPushMessage'
 
     WebhookMessage:
       name: WebhookMessage
@@ -560,6 +639,48 @@ components:
         enqueued_at:
           type: string
           format: date-time
+
+    SsfPushMessage:
+      type: object
+      description: >-
+        The shared outbound envelope for the SSF push kind. `target_id` is the
+        stream id and `delivery_id` is the event's `jti` read as a UUID, so a
+        retried push carries the identical SET. `payload` is an **unsigned**
+        pending event (`jti`, `iat`, `event_uri`, `event`, `sub_id`, `txn`);
+        the SET is signed at each attempt, against the stream as it is then.
+        `attempt` is incremented on each republish to `axiam.ssf_push.retry`
+        and checked against `AXIAM__SSF_PUSH__MAX_ATTEMPTS`.
+      required:
+        - kind
+        - tenant_id
+        - target_id
+        - delivery_id
+        - event_type
+        - payload
+        - attempt
+      properties:
+        kind:
+          type: string
+          enum: [ssf_push]
+        tenant_id:
+          type: string
+          format: uuid
+        target_id:
+          type: string
+          format: uuid
+          description: The stream id.
+        delivery_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          description: The event-type URI.
+        payload:
+          type: object
+          additionalProperties: true
+        attempt:
+          type: integer
+          minimum: 0
 
     WebhookMessage:
       type: object

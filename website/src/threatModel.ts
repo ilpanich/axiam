@@ -15,7 +15,7 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.23.0",
+ "version": "2.24.0",
  "diagramCount": 9,
  "total": 355,
  "open": 18,
@@ -4023,8 +4023,8 @@ export const THREAT_MODEL: ThreatModel = {
        "type": "Elevation of privilege",
        "severity": "High",
        "status": "Mitigated",
-       "description": "Linking turns a local account into a directory account. Marking it retires the local password and the OPAQUE record (D-18), but its sessions, refresh tokens, passkeys and certificates were issued on the old basis; any one left alive is a way in that disabling the person in the directory does not close.",
-       "mitigation": "`AuthService::link_local_account_to_directory` (D-28) marks the account, then deletes its WebAuthn credentials, revokes its still-active `User`-type certificates, and revokes its sessions and OAuth2 refresh tokens last — through the repositories, so the session validation cache and the revocation feed see it. TOTP is kept: it is a second factor behind the directory password. A link interrupted part-way is completed by calling it again. Tests: `linking_marks_the_account_and_retires_what_the_directory_does_not_decide`, `an_interrupted_link_is_retryable_and_the_retry_completes_it`. Residual (D-29): no certificate carries a user binding, so certificates are found by convention — `metadata.user_id`, or a subject CN equal to the username or email, ignoring case — with over-matching the accepted side, and a real binding is a filed follow-up; a certificate authenticates only as the service account it is bound to, which limits what a missed one could do."
+       "description": "Linking turns a local account into a directory account. Marking it retires the local password and the OPAQUE record (D-18), but its sessions, refresh tokens, passkeys, federation links and certificates were issued on the old basis; any one left alive is a way in that disabling the person in the directory does not close.",
+       "mitigation": "`AuthService::link_local_account_to_directory` (D-28) marks the account, then deletes its WebAuthn credentials and its federation links, revokes its still-active `User`-type certificates, and revokes its sessions and OAuth2 refresh tokens last — through the repositories, so the session validation cache and the revocation feed see it. TOTP is kept: it is a second factor behind the directory password. A link interrupted part-way is completed by calling it again. **Amended 2026-10-04 (W3 F4 review, P23W3-01):** federation links were missing from the set — an upstream OIDC or SAML identity bound to the account resolved its link and opened a session without the directory deciding, exactly as a passkey does; linking now deletes every link the account holds and counts them in the audit row (`federation_links_deleted`), and a deleted link is not re-made, because federated provisioning never links by name or address. Tests: `linking_marks_the_account_and_retires_what_the_directory_does_not_decide`, `p23w3_01_linking_removes_the_accounts_federation_links`, `an_interrupted_link_is_retryable_and_the_retry_completes_it`. Residual (D-29): no certificate carries a user binding, so certificates are found by convention — `metadata.user_id`, or a subject CN equal to the username or email, ignoring case — with over-matching the accepted side, and a real binding is a filed follow-up; a certificate authenticates only as the service account it is bound to, which limits what a missed one could do."
       },
       {
        "number": 337,

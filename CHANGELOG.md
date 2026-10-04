@@ -592,6 +592,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Directory linking also removes the account's federation links (F4 P23W3-01,
+  T-336).** `POST /api/v1/tenants/{tenant_id}/directory/links` (D-28) retired
+  the passkeys, `User` certificates, sessions and refresh tokens of the account
+  it linked, but not its federation links: a social or upstream-IdP identity
+  bound to the account kept signing it in without the directory deciding — the
+  same way in that deleting its passkeys closes. Linking now deletes every
+  federation link the account holds, before the sessions are revoked, and counts
+  them in the `directory.account_linked` audit row (`federation_links_deleted`);
+  a deleted link is not re-made at the next upstream sign-in, because federated
+  provisioning never links by name or address. The response shape is unchanged.
+  Contract §30.3 rule 6 amended in place. Test:
+  `p23w3_01_linking_removes_the_accounts_federation_links`.
+
 - **Directory sources: the address guard and the frame cap beneath the LDAP
   client (T23.3.7, G-3, D-19, D-32; closes T-300, amends T-295, adds T-331).**
   A tenant administrator chooses the directory URL, so the connector now holds

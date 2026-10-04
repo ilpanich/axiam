@@ -9540,19 +9540,19 @@ point. Counts of what a run did are in its audit rows (`directory.sync_run`,
    accounts; the audit row records how many live directory accounts the tenant had. There
    is no unlink: an account linked to a directory stays a directory account. An SDK MUST
    say so at the `delete` call site.
-6. **Linking is explicit, resolved by the directory, and revokes.** `link_account`
-   (D-28) finds the account's entry by the account's **own username** through the tenant's
+6. **Linking is explicit, resolved by the directory, and revokes.** `link_account` (D-28)
+   finds the account's entry by the account's **own username** through the tenant's
    directory — the caller supplies only `user_id` — marks the account, deletes its WebAuthn
-   credentials, revokes its `User`-type certificates (by the D-29 convention) and then all
-   its sessions and OAuth2 refresh tokens; TOTP is kept. Answers: `404 not_found` for an
-   unknown `user_id` or when the directory has no single entry for that username; `409
-   conflict` when the tenant has no enabled directory, the entry is already linked to
-   another account, or the account is linked to a different entry; `400 validation_error`
-   for a deleted account; `503 service_unavailable` when the directory cannot be asked. A
-   call on an account already linked to that entry is `200` with `was_already_linked:
-   true` and repeats the revocations — the way an interrupted link is completed. The
-   owner of the account is signed out everywhere by a successful link; an SDK MUST say so
-   at the call site.
+   credentials and its federation links, revokes its `User`-type certificates (by the D-29
+   convention) and then all its sessions and OAuth2 refresh tokens; TOTP is kept. Answers:
+   `404 not_found` for an unknown `user_id` or when the directory has no single entry for
+   that username; `409 conflict` when the tenant has no enabled directory, the entry is
+   already linked to another account, or the account is linked to a different entry; `400
+   validation_error` for a deleted account; `503 service_unavailable` when the directory
+   cannot be asked. A call on an account already linked to that entry is `200` with
+   `was_already_linked: true` and repeats the revocations — the way an interrupted link is
+   completed. The owner of the account is signed out everywhere by a successful link; an SDK
+   MUST say so at the call site.
 7. **No safety-valve override in this revision.** A full sync run that would deactivate
    more than 10 % of the tenant's directory accounts (and at least 5) applies nothing and
    reports `last_result: "safety_valve"` (D-31). This contract deliberately offers no

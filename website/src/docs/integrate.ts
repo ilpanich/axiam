@@ -936,7 +936,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "Linking signs the owner out **everywhere**: their passkeys and security keys are deleted, their user certificates revoked, and every session and refresh token revoked. Their authenticator-app (TOTP) enrolment is kept. There is no unlink. Repeating the call on an account already linked to that entry is a `200` that runs the revocations again — the way an interrupted link is completed.",
+        text: "Linking signs the owner out **everywhere**: their passkeys and security keys are deleted, so is any social or upstream-IdP identity linked to the account, their user certificates are revoked, and every session and refresh token revoked. Their authenticator-app (TOTP) enrolment is kept. There is no unlink. Repeating the call on an account already linked to that entry is a `200` that runs the revocations again — the way an interrupted link is completed.",
       },
       { type: "h", id: "sync", text: "Sync, disabling and deleting" },
       {

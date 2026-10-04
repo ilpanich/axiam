@@ -30,6 +30,7 @@ use axiam_core::models::directory::{
     DirectoryAccountRestriction, DirectoryAuthError, DirectoryAuthenticator, DirectoryFuture,
     DirectoryIdentity,
 };
+use axiam_core::models::federation::CreateFederationLink;
 use axiam_core::models::oauth2_client::CreateRefreshToken;
 use axiam_core::models::opaque::{CreateOpaqueCredential, OpaqueKsf, OpaqueKsfParams, OpaqueSuite};
 use axiam_core::models::session::Amr;
@@ -37,9 +38,9 @@ use axiam_core::models::settings::MfaPolicy;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredentialType};
 use axiam_core::repository::{
-    AuditLogFilter, AuditLogRepository, CertificateRepository, OpaqueCredentialRepository,
-    Pagination, RefreshTokenRepository, SessionRepository, UserRepository,
-    WebauthnCredentialRepository,
+    AuditLogFilter, AuditLogRepository, CertificateRepository, FederationLinkRepository,
+    OpaqueCredentialRepository, Pagination, RefreshTokenRepository, SessionRepository,
+    UserRepository, WebauthnCredentialRepository,
 };
 use axiam_db::repository::{
     SurrealAuditLogRepository, SurrealCertificateRepository, SurrealFederationLinkRepository,
@@ -1040,6 +1041,69 @@ async fn linking_marks_the_account_and_retires_what_the_directory_does_not_decid
         svc.login(input(&h, "bob", &directory_credential)).await,
         Ok(LoginResult::MfaRequired(_)),
     ));
+}
+
+/// **F4 P23W3-01** — a federation link is a way in the directory never sees,
+/// exactly like a passkey: a social or upstream-IdP sign-in resolves the link
+/// to the account and opens a session without the directory deciding. Linking
+/// must remove every link the account holds, count it in the audit row, and
+/// leave other accounts' links alone; a retry finds nothing left to remove.
+#[tokio::test]
+async fn p23w3_01_linking_removes_the_accounts_federation_links() {
+    let h = harness().await;
+    let links = SurrealFederationLinkRepository::new(h.db.clone());
+    let link_for = |user_id: Uuid, subject: &str| CreateFederationLink {
+        tenant_id: h.tenant_id,
+        user_id,
+        federation_config_id: Uuid::new_v4(),
+        external_subject: subject.into(),
+        external_email: None,
+    };
+    links
+        .create(link_for(h.local_user, "google-subject-of-bob"))
+        .await
+        .unwrap();
+    links
+        .create(link_for(h.local_user, "okta-subject-of-bob"))
+        .await
+        .unwrap();
+    let someone_else = Uuid::new_v4();
+    links
+        .create(link_for(someone_else, "google-subject-of-carol"))
+        .await
+        .unwrap();
+
+    let directory = StubDirectory::arc(
+        identity(OTHER_ENTRY, "bob", "bob@example.com"),
+        &fresh_credential(),
+    );
+    let svc = service(&h, Some(directory));
+    let outcome = link(&h, &svc).await.expect("linking must succeed");
+    assert_eq!(outcome.federation_links_deleted, 2);
+
+    assert!(
+        links
+            .get_by_user_id(h.tenant_id, h.local_user)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no federation link may outlive linking"
+    );
+    assert_eq!(
+        links
+            .get_by_user_id(h.tenant_id, someone_else)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "another account's link is untouched"
+    );
+    let rows = audit_rows(&h, AUDIT_ACCOUNT_LINKED).await;
+    assert_eq!(rows[0].metadata["federation_links_deleted"], 2);
+
+    let retried = link(&h, &svc).await.expect("the retry completes");
+    assert!(retried.was_already_linked);
+    assert_eq!(retried.federation_links_deleted, 0);
 }
 
 /// An entry already linked to another account is refused, and nothing the

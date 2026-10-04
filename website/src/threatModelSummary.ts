@@ -53,7 +53,7 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.23.0",
+ "version": "2.24.0",
  "diagramCount": 9,
  "total": 355,
  "open": 18,

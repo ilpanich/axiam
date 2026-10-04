@@ -86,6 +86,9 @@ pub struct DirectoryLinkOutcome {
     pub user: User,
     /// WebAuthn credentials (passkeys, security keys) deleted.
     pub webauthn_credentials_deleted: u64,
+    /// Federation links (an upstream OIDC or SAML identity bound to the
+    /// account) deleted (F4 P23W3-01).
+    pub federation_links_deleted: u64,
     /// `User`-type certificates revoked.
     pub certificates_revoked: u64,
     /// `true` when the account was already linked to this very entry and the
@@ -393,8 +396,10 @@ impl<
     ///   marker set, local hash replaced with an unusable one, OPAQUE record
     ///   deleted), and then everything it holds that **authenticates without
     ///   the directory deciding** is retired: its WebAuthn credentials are
-    ///   deleted, its `User`-type certificates revoked, and every session and
-    ///   OAuth2 refresh token revoked. TOTP is kept: it is a second factor
+    ///   deleted, its federation links deleted (an upstream OIDC or SAML
+    ///   identity signs in through the link without the directory deciding,
+    ///   F4 P23W3-01), its `User`-type certificates revoked, and every session
+    ///   and OAuth2 refresh token revoked. TOTP is kept: it is a second factor
     ///   *behind* the directory password.
     ///
     /// # One unit of work, by order rather than by transaction
@@ -503,36 +508,37 @@ impl<
         let retired = self
             .retire_local_credentials(tenant_id, &marked, webauthn_repo, certificate_repo)
             .await;
-        let (webauthn_credentials_deleted, certificates_revoked) = match retired {
-            Ok(counts) => counts,
-            Err((stage, error)) => {
-                tracing::error!(
-                    target: "axiam::directory",
-                    %tenant_id,
-                    user_id = %marked.id,
-                    stage,
-                    %error,
-                    "linking is incomplete: the account is marked but a revocation failed; \
-                     repeat the call"
-                );
-                self.audit_directory_raw(
-                    tenant_id,
-                    ip_address,
-                    AUDIT_ACCOUNT_LINKED,
-                    ActorType::User,
-                    actor_id,
-                    marked.id,
-                    serde_json::json!({
-                        "stage": stage,
-                        "directory_external_id": identity.external_id,
-                        "marked": true,
-                    }),
-                    AuditOutcome::Failure,
-                )
-                .await;
-                return Err(error);
-            }
-        };
+        let (webauthn_credentials_deleted, federation_links_deleted, certificates_revoked) =
+            match retired {
+                Ok(counts) => counts,
+                Err((stage, error)) => {
+                    tracing::error!(
+                        target: "axiam::directory",
+                        %tenant_id,
+                        user_id = %marked.id,
+                        stage,
+                        %error,
+                        "linking is incomplete: the account is marked but a revocation failed; \
+                         repeat the call"
+                    );
+                    self.audit_directory_raw(
+                        tenant_id,
+                        ip_address,
+                        AUDIT_ACCOUNT_LINKED,
+                        ActorType::User,
+                        actor_id,
+                        marked.id,
+                        serde_json::json!({
+                            "stage": stage,
+                            "directory_external_id": identity.external_id,
+                            "marked": true,
+                        }),
+                        AuditOutcome::Failure,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
 
         self.audit_directory_raw(
             tenant_id,
@@ -544,6 +550,7 @@ impl<
             serde_json::json!({
                 "directory_external_id": identity.external_id,
                 "webauthn_credentials_deleted": webauthn_credentials_deleted,
+                "federation_links_deleted": federation_links_deleted,
                 "certificates_revoked": certificates_revoked,
                 "sessions_and_refresh_tokens_revoked": true,
                 "retry_of_interrupted_link": was_already_linked,
@@ -555,21 +562,23 @@ impl<
         Ok(DirectoryLinkOutcome {
             user: marked,
             webauthn_credentials_deleted,
+            federation_links_deleted,
             certificates_revoked,
             was_already_linked,
         })
     }
 
-    /// Steps 2–4 of linking, in the order that matters: the two credential
-    /// kinds that outlive a session, then the sessions and refresh tokens last.
-    /// The error names the stage that failed.
+    /// Steps 2–4 of linking, in the order that matters: the credential kinds
+    /// that outlive a session — passkeys, federation links, `User` certificates
+    /// — then the sessions and refresh tokens last. The error names the stage
+    /// that failed. Returns `(passkeys, federation links, certificates)`.
     async fn retire_local_credentials<W, C>(
         &self,
         tenant_id: Uuid,
         user: &User,
         webauthn_repo: &W,
         certificate_repo: &C,
-    ) -> Result<(u64, u64), (&'static str, AxiamError)>
+    ) -> Result<(u64, u64, u64), (&'static str, AxiamError)>
     where
         W: WebauthnCredentialRepository,
         C: CertificateRepository,
@@ -578,6 +587,22 @@ impl<
             .delete_by_user(tenant_id, user.id)
             .await
             .map_err(|error| ("webauthn_credentials", error))?;
+        // F4 P23W3-01: a federation link is a sign-in the directory never
+        // sees, exactly as a passkey is. Federated provisioning never links by
+        // name or address, so a deleted link is not re-made at the next
+        // upstream sign-in: that sign-in would try to create a new account and
+        // collide with this one.
+        let links = self
+            .federation_repo
+            .get_by_user_id(tenant_id, user.id)
+            .await
+            .map_err(|error| ("federation_links", error))?;
+        for link in &links {
+            self.federation_repo
+                .delete(tenant_id, link.id)
+                .await
+                .map_err(|error| ("federation_links", error))?;
+        }
         let certificates = certificate_repo
             .revoke_user_certificates(tenant_id, user.id, &user.username, &user.email)
             .await
@@ -585,7 +610,7 @@ impl<
         self.revoke_all_sessions(tenant_id, user.id)
             .await
             .map_err(|error| ("sessions_and_refresh_tokens", error))?;
-        Ok((passkeys, certificates))
+        Ok((passkeys, links.len() as u64, certificates))
     }
 
     /// One audit row, written through the injected sink, if there is one.

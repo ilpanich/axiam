@@ -350,7 +350,8 @@ entry. Linking is the explicit act that does: the directory finds the entry from
 the account's *own* username (you name only the account), the account is marked,
 its password hash is replaced by one nobody holds, and everything it held that
 authenticates without the directory deciding is retired — its passkeys and
-security keys are deleted, its `User`-type certificates revoked, and all its
+security keys are deleted, its federation links (a social or upstream-IdP
+identity bound to it) deleted, its `User`-type certificates revoked, and all its
 sessions and OAuth2 refresh tokens revoked. TOTP is kept. **The owner is signed
 out everywhere.** Linking an account that is already linked to that entry is `200`
 with `was_already_linked: true` and repeats the revocations (the way an

@@ -988,7 +988,8 @@ pub async fn delete_directory<C: Connection + Clone>(
 ///
 /// The directory resolves the entry from the account's own username; the caller
 /// supplies only the account. Marks the account, deletes its WebAuthn
-/// credentials, revokes its `User`-type certificates and then all its sessions
+/// credentials and federation links, revokes its `User`-type certificates and
+/// then all its sessions
 /// and OAuth2 refresh tokens (TOTP is kept): **the owner is signed out
 /// everywhere**. Idempotent: an account already linked to that entry gets `200`
 /// with `was_already_linked: true` and the revocations run again.

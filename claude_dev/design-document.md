@@ -748,7 +748,7 @@ With `jit_provisioning` on, a first successful sign-in for a name that matches *
 
 ### 8d.5 Linking an existing account
 
-Linking is the explicit administrator act (`POST …/directory/links`, permission `directory:link`): the directory resolves the entry from the account's own username, the account is marked, and everything it held that authenticates without the directory deciding is retired — passkeys deleted, `User`-type certificates revoked (by the D-29 convention, since no certificate is bound to a user), then all sessions and OAuth2 refresh tokens, last, so anything issued before the mark is swept. TOTP is kept. The order is safe to stop in and to retry; a repeat on an account already linked to that entry is `200` with `was_already_linked`. There is no unlink.
+Linking is the explicit administrator act (`POST …/directory/links`, permission `directory:link`): the directory resolves the entry from the account's own username, the account is marked, and everything it held that authenticates without the directory deciding is retired — passkeys deleted, federation links deleted (F4 P23W3-01), `User`-type certificates revoked (by the D-29 convention, since no certificate is bound to a user), then all sessions and OAuth2 refresh tokens, last, so anything issued before the mark is swept. TOTP is kept. The order is safe to stop in and to retry; a repeat on an account already linked to that entry is `200` with `was_already_linked`. There is no unlink.
 
 ### 8d.6 Group mapping
 

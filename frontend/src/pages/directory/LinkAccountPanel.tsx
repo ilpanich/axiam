@@ -77,8 +77,9 @@ export function LinkAccountPanel({
       </p>
       <p className="mt-2 text-sm text-amber-300">
         <strong>The owner is signed out everywhere.</strong> Their passkeys and security
-        keys are deleted, their user certificates revoked, and every session and refresh
-        token revoked. Their authenticator-app (TOTP) enrolment is kept. There is no
+        keys are deleted, so are any social or upstream-IdP identities linked to the
+        account, their user certificates are revoked, and every session and refresh token
+        revoked. Their authenticator-app (TOTP) enrolment is kept. There is no
         unlink.
       </p>
       {!directoryEnabled && (
@@ -118,7 +119,7 @@ export function LinkAccountPanel({
         title="Link this account?"
         description={
           pending
-            ? `${pending.username} will be signed out everywhere, lose their passkeys and have their user certificates revoked, and from now on can sign in only with their directory password. This cannot be undone from here.`
+            ? `${pending.username} will be signed out everywhere, lose their passkeys and linked social or upstream-IdP identities, and have their user certificates revoked, and from now on can sign in only with their directory password. This cannot be undone from here.`
             : ""
         }
         confirmLabel="Link account"

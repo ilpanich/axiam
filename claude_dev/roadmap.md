@@ -1083,7 +1083,7 @@ with an F4 security review of the wave's diff against
 | T23.2.6 | Console *SAML Service Providers* page | Sonnet 5.5 | W4 |✓ |
 | T23.2.7 | e2e: `samael` test SP and Keycloak round trip, refusals, feature-off 404 | Sonnet 5.5 | W4 | |
 | T23.2.8 | Contract §29, threat-model elements, design-document federation chapter | Opus 5.5 | W4 |✓ |
-| T23.2.9 | OpenAPI, website *Integrate*, eleven SDK ports of §29 | Sonnet 5.5 | W4 | |
+| T23.2.9 | OpenAPI, website *Integrate*, eleven SDK ports of §29 | Sonnet 5.5 | W4 |✓ |
 | T23.3.1 | `axiam-directory` crate at layer 3, `DirectoryConfig` with the secret provider | Sonnet 5.5 | W2 | ✓ |
 | T23.3.2 | LDAP client over `rustls`, RFC 4515 escaping, bind-as-user path, refusals for directory users | Opus 5.5 | W2 | ✓ |
 | T23.3.3 | JIT provisioning | Sonnet 5.5 | W3 |✓ |
@@ -1095,8 +1095,8 @@ with an F4 security review of the wave's diff against
 | T23.4.1 | RFC 7592 client configuration endpoint; contract §28 addition; threat entry | Opus 5.5 | W1 | ✓ |
 | T23.5.1 | Shared outbound dispatcher extracted from the webhook engine | Sonnet 5.5 | W4 |✓ |
 | T23.5.2 | SSF: streams, SET issuance, stream API authentication, discovery | Opus 5.5 | W4 |✓ |
-| T23.5.3 | Push (RFC 8935) and poll (RFC 8936) delivery, event sources, test receiver | Sonnet 5.5 | W4 | |
-| T23.5.4 | Website, optional receiver helper (seven SDKs); threat entries on Opus 5.5 | Sonnet 5.5 / Opus 5.5 | W4 | |
+| T23.5.3 | Push (RFC 8935) and poll (RFC 8936) delivery, event sources, test receiver | Sonnet 5.5 | W4 |✓ |
+| T23.5.4 | Website, optional receiver helper (seven SDKs); threat entries on Opus 5.5 | Sonnet 5.5 / Opus 5.5 | W4 |✓ |
 | T23.6.1 | `ScimTarget` model and credentials | Sonnet 5.5 | W5 | |
 | T23.6.2 | Lifecycle-event to SCIM translation on the shared dispatcher | Sonnet 5.5 | W5 | |
 | T23.6.3 | Reconciliation, dead-letter, GDPR erasure propagation | Sonnet 5.5 | W5 | |

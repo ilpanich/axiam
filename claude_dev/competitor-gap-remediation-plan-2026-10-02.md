@@ -629,6 +629,28 @@ security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 > What the plan did not anticipate. Nothing in the console turns
 > `saml_idp_enabled` on: the panel explains the setting, but the layered
 > setting has no form control yet (carried to F4).
+>
+> **EXECUTED (partly) — G-2, W4: T23.2.9, 2026-10-04** (`8810c9f`, `e5bec8f`,
+> `cf07a17`, `172141e`; Sonnet 5.5; documentation only, in a worktree). Per
+> **D-35** the eleven SDK ports are the post-merge fan-out, so the task did the
+> in-repository part. OpenAPI and the registry already carried the eleven §29
+> operations (T23.2.5); verified, not regenerated. **Contract §29 amended in
+> place before 1.55 ships** (no bump): the status text says the routes landed,
+> §29.8 gains an eighth required test (`get_idp` decoding, no caching, the
+> implicit tenant), §29.10 puts all eleven SDKs in scope (management REST, so
+> Kotlin, Swift, C and C++ too). Website: a new *Integrate* page **AXIAM as a
+> SAML identity provider** (endpoints, switch, SP registration, credential
+> rotation, pairwise key, buckets, SLO, what is not supported), the
+> *Federation* page no longer reads as SP-only, `saml_idp_enabled` in the
+> settings table, the API index regenerated with the `saml` tag. The tracking
+> issue for contract 1.53 (§28.12), 1.54 (§30) and 1.55 (§29) is drafted for the
+> wave PR.
+>
+> What the plan did not anticipate. §29 already carried its naming map, tests
+> and posture, so this was an amendment, not a section. The OpenAPI types
+> `AcsEndpoint.index` as `int32` without a maximum where the model is `u16`
+> (carried to F4). The API-index generator refused the unplaced `ssf` tags; a
+> *Shared signals* domain was added.
 
 **Target.** AXIAM issues SAML 2.0 assertions to registered service providers,
 per tenant: IdP metadata, Web Browser SSO profile with HTTP-Redirect and
@@ -1214,6 +1236,70 @@ the authorization server, the same class as T-272 to T-280).
 > an erased user's subject member can outlive the erasure in the buffer for up
 > to seven days; a receiver token is not re-checked against a deleted OAuth2
 > client within its 15-minute life.
+>
+> **EXECUTED (partly) — G-5, W4: T23.5.3, 2026-10-04** (`a81dcf2`, `48b75a0`,
+> `3696ee5`, `dbbb05a`, `0e50b47`, `9aad4e6`, `eab59e3`, `5add425`; after
+> D-53: `d9cd627`, `e24434c`, `a64ae58`, `b827883`; Sonnet 5.5). Delivery and
+> the event sources per **D-48, D-49, D-51, D-52 as amended by D-53**. **Push**:
+> `SsfPushDeliverer` (`axiam_oauth2::ssf_delivery`) on the D-36 dispatcher with
+> queues of its own (`axiam.ssf_push`, `.retry`, `.dlq`, the DLQ with a 7-day
+> `x-message-ttl`), the stream re-read and the SET signed at each attempt, sent
+> only through the new `axiam_pki::ssrf::guarded_fetch_no_redirect` with
+> `allow_private = false` (a `3xx` is returned, never followed, so the sealed
+> `Authorization` header never reaches another origin), the D-49/D-53 status
+> mapping. **Poll**: `POST /ssf/v1/poll/{stream_id}` (RFC 8936) over the bounded
+> buffer (1 000 per stream, oldest dropped, 7 days, swept on `/health/jobs`),
+> one waiting long poll per stream per instance, bucket `ssf_poll`. The
+> **outbox** routes by status and method; resuming releases held events oldest
+> first. **Sources**: one `SsfEmitter` with a per-operation `txn`;
+> `session-revoked` through a core port the session repository calls from its
+> three revocation paths only; `credential-change`, `account-disabled` /
+> `-enabled` / `-purged` from the D-52 call sites, SCIM `DELETE` included;
+> `assurance-level-change` through a server-side step-up record (schema
+> **v78**, `ssf_step_up`, ten minutes, single use, cascaded and swept); a
+> directory deactivation through a sink. Contract §32 amended in place before
+> 1.56 ships; `AXIAM__SSF_PUSH__*` documented; `axiam.ssf_push` in AsyncAPI.
+> Threat model **2.28.0**: T-392, T-394, T-395 Mitigated with their tests.
+> Tests: about 100 new — 30 delivery tests, 54 `ssf_test` (both feature sets,
+> five end-to-end against a loopback receiver, among them a SET within one
+> second of a logout verified against `/oauth2/jwks`), 8 step-up repository
+> tests, 5 buffer, 8 session-sink, 5 no-redirect fetch, 6 SCIM, 4 + 1 cleanup,
+> topology pins for the DLQ.
+>
+> What the plan did not anticipate. The first pass met four sources D-52 named
+> that the code cannot reach as written (no step-up linkage, no user
+> certificate binding, no administrator password route, no directory
+> re-enable) and transport questions D-49 left open; **D-53** settled them.
+> `guarded_fetch` re-sends the request closure on a redirect, which would have
+> carried the push credential to the `Location`; hence the no-redirect fetch.
+> The disk filled once during verification (a full `target/` with both feature
+> sets of the server); nothing failed on the code. Carried to F4: the step-up
+> record is consumed before the client is validated (costs one event, cannot
+> forge one, T-404's residual); an unsignable held event logs at `ERROR` every
+> 500 ms during a long poll; two stale test descriptions.
+>
+> **EXECUTED (partly) — G-5, W4: T23.5.4, 2026-10-04** (`c8ff664` Sonnet 5.5,
+> website, in a worktree; `9278086` Opus 5.5, threat entries, in a worktree).
+> Website: an *Integrate* page **Shared Signals (SSF) transmitter** (events,
+> switch, discovery, registering a receiver, the receiver's API, poll and push
+> behaviour, what triggers each event, delivery limits, privacy, what is not
+> supported), cross-links from the revocation feed, back-channel logout and
+> *Federation* pages, `ssf_enabled` in the settings table. Threat model
+> **2.29.0** (405 threats, 388 mitigated, 17 open): **T-402** (the push DLQ's
+> personal data, 7-day bound, Mitigated with the erasure residual), **T-403**
+> (long-poll exhaustion, Mitigated), **T-404** (the step-up record, Mitigated;
+> store renamed `ssf_stream + ssf_event_buffer + ssf_step_up`), **T-405**
+> (events lost by the best-effort emitter, an accepted Open like T-380),
+> T-391 and T-392 amended for the no-redirect fetch; `threat-modeling-and-
+> security.md`'s stale counts recomputed. The optional receiver helper is the
+> post-merge fan-out (D-35); its tracking issue (contract 1.56, §32) is drafted
+> for the wave PR. T-388 stays Open until that helper ships. **G-5 is complete
+> in the server.**
+>
+> What the plan did not anticipate. The threat entries came one task after
+> their code (T23.5.3 is a Sonnet task), inside the same PR. The console has
+> no SSF page and no `ssf_enabled` control; no task in §6 asks for one
+> (carried to F4 and the wave report).
 
 **Target.** AXIAM transmits CAEP `session-revoked`,
 `credential-change`, `assurance-level-change` and RISC `account-disabled`,

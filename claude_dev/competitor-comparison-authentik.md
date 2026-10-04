@@ -67,7 +67,7 @@ would turn it into an application-portal product.
 | X.509 / mTLS user and device authentication | **Yes**, open source, with an integrated per-org CA | mTLS stage, **enterprise-only**; no CA | [A21] |
 | MCP authorization server profile | **Yes** (RFC 8414, 8707, 7591, CIMD, loopback clients) | No MCP-specific feature; third parties document it as an MCP AS | [A22] |
 | Delegated agent identities | Service accounts + RFC 8693 delegation, documented as [*Identity for agents*](../docs/guides/identity-for-agents.md) | "Agent accounts" (enterprise, 2026.8) | [A5] |
-| Shared Signals Framework | No | Provider (enterprise) | [A3] |
+| Shared Signals Framework | Yes (G-5, Phase 23; transmitter, push and poll; not licence-gated) | Provider (enterprise) | [A3] |
 | Abuse rate limits | **On by default**, posture presets | Reputation scoring (opt-in policy), OTP throttling; no global limiter documented | [A23] |
 | gRPC / AMQP transports | **Yes** | No (REST + WebSocket to outposts) | [A2] |
 | Official SDKs | 11 languages | Generated API clients | — |
@@ -100,7 +100,9 @@ not authentik's.
    downstream applications [A18]; AXIAM only receives SCIM.
 5. **Shared Signals Framework (CAEP/RISC).** Offered by authentik (enterprise)
    and Keycloak (experimental). It fits AXIAM's event story (webhooks, AMQP)
-   and would let relying parties revoke sessions in near real time.
+   and would let relying parties revoke sessions in near real time. *Closed
+   by G-5 (Phase 23, W4): AXIAM is an SSF 1.0 transmitter (CAEP and RISC
+   events, push and poll, contract §32), with no licence gate.*
 6. **RADIUS interface.** Relevant to AXIAM's IoT and network-device audience;
    authentik ships it as an outpost [A2].
 
@@ -159,6 +161,7 @@ unreliable. Adding it as a benchmark target is the honest way to settle that.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-04 | G-5 (Shared Signals Framework transmitter) complete on the Phase 23 W4 branch: SSF 1.0 with CAEP `session-revoked`, `credential-change`, `assurance-level-change` and RISC `account-disabled` / `account-enabled` / `account-purged` as EdDSA-signed SETs, push (RFC 8935) through the outbound address guard and poll (RFC 8936), the receiver's stream management API under an `ssf.manage` client credential, discovery, administrator-registered streams (contract §32). The optional SDK receiver helper follows the merge (D-35). | — |
 | 2026-10-04 | G-3 (LDAP / Active Directory identity source) complete on the Phase 23 W3 branch: bind-as-user over mandatory TLS, JIT provisioning, explicit group mapping with nesting, incremental and nightly sync with soft-delete, the address guard, the management API (contract §30) and the console page; tested against a real OpenLDAP and a real Samba AD DC. Kerberos stays out of scope (D-1), so the row reads LDAP/AD yes, Kerberos no. | — |
 | 2026-10-02 | Baseline written. Recent authentik changes already folded in: 2026.8 adds token exchange with on-behalf-of, DCR, OpenID certification, agent accounts (enterprise) and the Rust server; the 2026.11 draft removes multi-tenancy. | [A5][A7] |
 | 2026-10-03 | G-15: AXIAM's agent-identity story documented (guide and website page), so the delegated-agent row links it. G-4: RFC 7592 shipped on the Phase 23 W1 branch; authentik 2026.8 has DCR without RFC 7592, so the dynamic-registration row is now an AXIAM advantage. | — |

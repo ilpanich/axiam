@@ -1,5 +1,5 @@
 {
-  "version": "2.24.0",
+  "version": "2.25.0",
   "summary": {
     "title": "Axiam",
     "owner": "ilpanich",
@@ -6853,7 +6853,7 @@
       {
         "id": 3,
         "title": "Federation \u2014 SAML SP & OIDC relying party",
-        "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface \u2014 the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization\u2192tenant inheritance of a federation config. Since Phase 23 (G-2) it also covers AXIAM as a SAML identity provider: the assertion issuer (`axiam_federation::saml_idp`, T23.2.2), the tenant's sealed signing credential (`saml_idp_credential`, D-21) and the trust boundary to the service providers it issues to. T23.2.3 adds the SSO endpoint (`/saml/v2/{tenant}/sso`, both bindings, IdP-initiated, the continue leg) and the `saml_authn_request` store that holds a request across the login hop.",
+        "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface \u2014 the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization\u2192tenant inheritance of a federation config. Since Phase 23 (G-2) it also covers AXIAM as a SAML identity provider: the assertion issuer (`axiam_federation::saml_idp`, T23.2.2), the tenant's sealed signing credential (`saml_idp_credential`, D-21) and the trust boundary to the service providers it issues to. T23.2.3 adds the SSO endpoint (`/saml/v2/{tenant}/sso`, both bindings, IdP-initiated, the continue leg) and the `saml_authn_request` store that holds a request across the login hop. T23.2.8 (model 2.25.0) specifies the rest of the IdP ahead of its code: the SP registry store (`saml_service_provider`) and its management routes (contract \u00a729, with SP metadata import as an SSRF and XXE surface), the IdP metadata endpoint, and the SLO endpoint with the per-SP `saml_sp_session` and `saml_logout_run` stores it needs (D-37 \u2026 D-42); its threats are Open until T23.2.5 and T23.2.4 build the controls they name.",
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
@@ -6899,7 +6899,7 @@
             },
             "size": {
               "width": 660,
-              "height": 980
+              "height": 1240
             },
             "attrs": {
               "label": {
@@ -6932,7 +6932,7 @@
             },
             "size": {
               "width": 420,
-              "height": 920
+              "height": 1180
             },
             "attrs": {
               "label": {
@@ -9565,7 +9565,7 @@
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "description": "A `NameID` that is the same at every SP, or derivable from the user id, lets SPs that compare notes \u2014 or an attacker who breaches two of them \u2014 follow a person across services the person kept apart, and hands every SP an AXIAM internal identifier.",
-                  "mitigation": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. Open because `SessionIndex` is the AXIAM session id (plan \u00a74 G-2, so that SLO and the revocation feed revoke the same thing): it is identical at every SP of one sign-on, as is `AuthnInstant`, so SPs that collude can correlate concurrent sessions despite pairwise identifiers. T23.2.4 decides whether SLO can map a per-SP index back to the session.",
+                  "mitigation": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. Open because `SessionIndex` is still the AXIAM session id at every SP of one sign-on. Decided (T23.2.8, 2026-10-04, D-37): a per-SP random `SessionIndex` recorded in `saml_sp_session` before signing and mapped back by the SLO endpoint by (tenant, SP, index) and then `NameID`, so SLO and the revocation feed still revoke the same session. Closes when T23.2.4 lands; the residual then is `AuthnInstant`, the session's authentication time at every SP, which colluding SPs can compare (T-314 forbids misstating it).",
                   "modelType": "STRIDE",
                   "number": 312
                 },
@@ -9609,7 +9609,7 @@
                   "severity": "High",
                   "type": "Spoofing",
                   "description": "Some SP verifiers check only the first signature in a document, or treat a signature as covering an assertion because a reference names it. Against them, any document the tenant's key signed that carries no assertion \u2014 an error response echoing a request id an attacker chose, for instance \u2014 can be placed ahead of a forged assertion and vouch for it. Anyone who can send an `AuthnRequest` could collect one.",
-                  "mitigation": "The tenant's key signs one shape of document only: a response carrying exactly one assertion (T-311). Failure responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`, `RequestDenied`, `InvalidNameIDPolicy`) carry no assertion and are never signed, which SAML Profiles \u00a74.1.3.5 permits, and they have no status message or detail. Tests: `failure_responses_are_status_only_unsigned_and_echo_what_can_be_echoed`, `axiam_own_sp_refuses_a_failure_response`. Constraint for T23.2.4: a signed `LogoutRequest` or `LogoutResponse` is exactly such a document, so SLO signing needs its own decision rather than reusing this key by default.",
+                  "mitigation": "The tenant's key signs one shape of document only: a response carrying exactly one assertion (T-311). Failure responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`, `RequestDenied`, `InvalidNameIDPolicy`) carry no assertion and are never signed, which SAML Profiles \u00a74.1.3.5 permits, and they have no status message or detail. Tests: `failure_responses_are_status_only_unsigned_and_echo_what_can_be_echoed`, `axiam_own_sp_refuses_a_failure_response`. Constraint for T23.2.4: a signed `LogoutRequest` or `LogoutResponse` is exactly such a document, so SLO signing needs its own decision rather than reusing this key by default. Decided for SLO (T23.2.8, 2026-10-04, D-38): AXIAM signs a logout message only for a session holder or in reply to a verified SP request, detached over the query on HTTP-Redirect so no XML signature exists to harvest; recorded as T-373.",
                   "modelType": "STRIDE",
                   "number": 316
                 }
@@ -9676,7 +9676,7 @@
                   "severity": "Medium",
                   "type": "Denial of service",
                   "description": "Because the signer refuses an expired credential (T-308), a tenant whose credential reaches `not_after` stops issuing assertions to every SP, and so does one whose administrator retires the active credential. SPs pin the certificate, so a successor must be published in metadata before it signs, or every SP rejects its first assertion.",
-                  "mitigation": "Open until rotation exists. The `next` slot is in the schema (at most one per tenant, enforced by the database), so a successor can be issued ahead of time, but there is no promote verb and the metadata endpoint does not yet publish `next` (T23.2.5). Until then an administrator issues the successor early and coordinates the switch with each SP. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion.",
+                  "mitigation": "Open until rotation exists in code. Decided (T23.2.8, 2026-10-04): contract \u00a729 and D-42 give T23.2.5 an `issue_idp_credential` into the `next` slot and a `promote_idp_credential` that, in one transaction, retires the old `active` and activates `next`, refused unless the id is the current `next` and inside its validity window; D-40 makes the metadata endpoint publish `active` and then `next`, so an SP has the successor before it signs, with `Cache-Control: max-age=3600`; \u00a729 `get_idp` and `list_idp_credentials` show `not_after` so an administrator sees expiry coming. Closes when T23.2.5 lands with the promote and metadata tests. Residual after that: a tenant that never rotates stops at `not_after`, and retiring the active credential without a successor stops sign-on at once \u2014 deliberate, as the incident response to T-306. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion.",
                   "modelType": "STRIDE",
                   "number": 309
                 }
@@ -10818,6 +10818,1580 @@
               "type": "tm.Flow",
               "name": "sign-in: provision, link, map groups",
               "description": "",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "position": {
+              "x": 20,
+              "y": 1080
+            },
+            "visible": true,
+            "id": "cbed75da-f7cb-52ab-bf3c-dd9a6e542bde",
+            "size": {
+              "width": 260,
+              "height": 190
+            },
+            "attrs": {
+              "label": {
+                "text": "Tenant administrators"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 3,
+                "strokeDasharray": "10 5"
+              }
+            },
+            "shape": "trust-boundary-box",
+            "zIndex": -50,
+            "data": {
+              "type": "tm.BoundaryBox",
+              "name": "Tenant administrators",
+              "description": "AXIAM \u2194 tenant administrator for the SAML IdP (T23.2.8): the people who register service providers and manage the tenant's signing credential through the \u00a729 management routes, from the admin console or an SDK. What crosses is an authenticated API call; the routes trust it only as far as its permission, its tenant and its human principal.",
+              "isTrustBoundary": true,
+              "hasOpenThreats": false,
+              "crossingFlows": [],
+              "containedElements": []
+            }
+          },
+          {
+            "position": {
+              "x": 45,
+              "y": 1140
+            },
+            "visible": true,
+            "id": "2c859601-e642-5294-8142-a9ed10a36135",
+            "size": {
+              "width": 150,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "Tenant administrator\n(console / SDK, \u00a729)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "shape": "actor",
+            "zIndex": 1,
+            "data": {
+              "type": "tm.Actor",
+              "name": "Tenant administrator\n(console / SDK, \u00a729)",
+              "description": "A human administrator of one tenant holding `saml_sp:read`, `saml_sp:write` or `saml_idp:credential`. Service-account tokens are refused on the `saml` namespace in this revision (D-42).",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "providesAuthentication": false,
+              "threats": []
+            }
+          },
+          {
+            "position": {
+              "x": 370,
+              "y": 1040
+            },
+            "visible": true,
+            "id": "de15bf38-6ec2-5998-a6c9-a20a44ae1780",
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "SAML registry management\n(/api/v1/tenants/{t}/saml)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "shape": "process",
+            "zIndex": 1,
+            "data": {
+              "type": "tm.Process",
+              "name": "SAML registry management\n(/api/v1/tenants/{t}/saml)",
+              "description": "Contract \u00a729 (T23.2.8, built by T23.2.5): the eleven `saml` management routes \u2014 the SP registry (CRUD, `update` a replacement), `parse_sp_metadata` (upload or URL through `guarded_fetch`, a draft only) and the IdP credential lifecycle (`issue`, `promote` in one transaction, `retire`) plus `get_idp`. Compiled in every build and independent of `saml_idp_enabled` (D-42); every SP write through `validate_saml_service_provider` and \u00a729.3's refusals.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": true,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "44d2cd4f-feb4-5420-a1a5-7cdc7c96a105",
+                  "title": "A principal registers, edits or deletes service providers it should not, or another tenant's",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "The SP registry decides where a tenant's signed assertions may be delivered and which users each SP receives. A caller who could write it for a tenant it does not administer, or with a weaker permission than registration deserves, could register an SP of its own and receive assertions for the tenant's users, or delete a production SP.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Contract \u00a729.3 rule 9 and D-42: the routes live under `/api/v1/tenants/{tenant_id}/saml` and the path tenant must be the caller's (another tenant's id is `403`); reads need `saml_sp:read`, SP writes and `parse_sp_metadata` `saml_sp:write`, the credential writes `saml_idp:credential`; service-account tokens are refused on the whole namespace in this revision, so registering where assertions go stays a human administrator's act; every repository call is tenant-keyed. Closes when T23.2.5 lands with route tests for another tenant's id, each missing permission and a service-account token.",
+                  "modelType": "STRIDE",
+                  "number": 357
+                },
+                {
+                  "id": "a60a35db-5de8-5684-b6a8-6202aa84a32b",
+                  "title": "A registration admits a delivery target, certificate or option the IdP cannot hold to its rules",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "Every later SSO and SLO decision trusts the registry. A write path that skipped the validator, accepted an ACS or SLO URL that is a glob, plaintext or fragment-bearing, stored a certificate the SSO endpoint cannot use, or accepted `encrypt_assertions` while encryption is unimplemented would turn into ACS redirection (T-318), a signing SP whose requests can never verify, or an SP refused at every sign-on.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Contract \u00a729.3 rules 1\u20133 and D-42: every create and update runs `validate_saml_service_provider` (the redirect-URI rule shared with OAuth2 clients, no `*`, unique URLs and indexes, one default, exactly one `CERTIFICATE` block that parses, a private key refused by name) and then four refusals of its own \u2014 `encrypt_assertions: true` (D-2), an `sp_signing_cert_pem` the SSO endpoint's decoder (`pem_cert_to_der`) refuses or whose key is not RSA \u2265 2048 or ECDSA P-256/384/521, an `allowed_groups` entry outside the tenant, and a changed `entity_id` (the pairwise `NameID` is keyed on it, D-22). The SSO endpoint still re-checks the ACS on every use (`check_acs_url`). Closes when T23.2.5 lands with a refusal test per rule on create and on update.",
+                  "modelType": "STRIDE",
+                  "number": 358
+                },
+                {
+                  "id": "6f7f84ec-0e7c-5098-aa9e-a8896b737bc8",
+                  "title": "SP metadata import makes the server fetch an internal or metadata-service address",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "`parse_sp_metadata` accepts a URL chosen by an administrator, or by whoever holds an administrator's token. Fetched naively, it would reach cloud-metadata credentials, internal admin interfaces or AXIAM itself from the server's network position, and an error that echoed the response would read them back.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-41: `https` only, fetched only through `axiam_pki::ssrf::guarded_fetch` with `allow_private = false` \u2014 the name resolved once and the connection pinned to the vetted address, loopback, private, link-local and metadata addresses refused, every redirect hop re-validated, the transport cap and timeout \u2014 then the 512 KiB document cap; one fetch per call, no credentials sent, and no periodic refresh. A failure answers one of three generic messages and never the body, status line or resolved address (T-356's lesson), so the route cannot read an internal response; refusals are audited by category. Permission `saml_sp:write` and the `SAML_ADMIN_PER_MIN` bucket bound who and how often. Closes when T23.2.5 lands with tests for a loopback, a private, a link-local and an `http` URL, a redirect to loopback, and an error body never echoed.",
+                  "modelType": "STRIDE",
+                  "number": 359
+                },
+                {
+                  "id": "6e5b200d-0d3f-50bf-ad9a-7ac7869ff781",
+                  "title": "XML external entities, entity expansion or a parser differential in imported SP metadata",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "An SP metadata document is attacker-influenced XML (an upload, or whatever a URL serves). A DTD with external entities reads local files or makes requests; nested internal entities exhaust memory; a non-UTF-8 encoding can hide a declaration from a byte-level check.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-41: the receiver's rule, unchanged \u2014 `refuse_markup_declarations` (any `<!` other than a comment or CDATA) and `refuse_other_encodings` (a NUL, or a declared encoding other than UTF-8) on the bytes before any parser sees them, so there is no entity to expand; a 512 KiB cap; then `samael`'s metadata types, which open no network. Exactly one `EntityDescriptor` with one SAML 2.0 `SPSSODescriptor` is accepted; an aggregate is refused. Closes when T23.2.5 lands with tests for a `<!DOCTYPE>`, an `<!ENTITY>`, a UTF-16 document, an oversized one and an `EntitiesDescriptor`.",
+                  "modelType": "STRIDE",
+                  "number": 360
+                },
+                {
+                  "id": "db22a9f2-95de-5332-8f7a-99fcc9a1b493",
+                  "title": "Unsigned SP metadata decides what the IdP trusts",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "SP metadata is usually unsigned and fetched over a path the administrator does not control. If its ACS endpoints and certificates were stored as fetched \u2014 or refreshed from the URL later \u2014 whoever could alter the document in transit or on the SP's host would redirect assertions or substitute the key AXIAM verifies the SP's requests with.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-41: import is a parse to a draft, never a write; nothing is stored until an administrator submits the draft through `create_service_provider` or `update_service_provider`, where the validator and \u00a729's refusals apply as to a manual entry. The document's own signature is not evaluated (there is no anchor, and its own certificate would be circular) and the draft warns so; the certificates' SHA-256 fingerprints are returned for out-of-band comparison; `validUntil` and `cacheDuration` are ignored; `encrypt_assertions` is never set; and AXIAM never re-reads an SP's metadata on its own. Closes when T23.2.5 lands with tests that parsing stores nothing and that a signed document is reported unverified.",
+                  "modelType": "STRIDE",
+                  "number": 361
+                },
+                {
+                  "id": "2a3069f2-c38b-59ef-a049-1cc8d24d399f",
+                  "title": "Registry and credential changes cannot be traced to an administrator",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Repudiation",
+                  "description": "A changed ACS list, a new SP certificate or a promoted, retired or newly issued signing credential changes who receives assertions and which key SPs must trust. Without a record, a malicious or mistaken change cannot be attributed or reconstructed.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Contract \u00a729.3 rule 11 and D-42: `saml_sp.created`, `saml_sp.updated` (the names of the changed fields, `acs_changed`, `certificate_changed`), `saml_sp.deleted`, `saml_sp.metadata_parsed` (source, URL host, outcome), `saml_idp.credential_issued`, `saml_idp.credential_promoted` and `saml_idp.credential_retired` (ids, slot, fingerprint), each with the actor, on the append-only audit trail; never a certificate's or a document's content. Closes when T23.2.5 lands with a test per audit action.",
+                  "modelType": "STRIDE",
+                  "number": 362
+                },
+                {
+                  "id": "4ca8a807-ca28-5edc-8e0b-ff05f496b9e8",
+                  "title": "The management routes are used to burn CPU or to amplify outbound requests",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "`issue_idp_credential` generates an RSA-4096 key (seconds of CPU) and `parse_sp_metadata` makes an outbound request per call. A loop with a stolen administrator token could exhaust the shared process or use AXIAM to hammer an external host.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-42: every write has a per-IP bucket of its own (`AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN`, default 30 per route); issuance checks the slot before generating a key, so an occupied slot costs no key generation (T23.2.1), and a free slot can only be refilled by retiring \u2014 which is audited and destroys a key; a metadata fetch is one request with `guarded_fetch`'s timeout and caps and no retry. Closes when T23.2.5 lands with the bucket wired and a test that an occupied slot answers `409` without generating.",
+                  "modelType": "STRIDE",
+                  "number": 363
+                },
+                {
+                  "id": "512629a8-df76-5031-b092-793e60fd1be7",
+                  "title": "A credential write races, half-applies or is made by a principal who may only edit SPs",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "Rotation is two moves \u2014 the old active out, the next in. Done as two calls it leaves a moment with no signer (every sign-on fails) or, done in the other order, a database that briefly holds two active keys; a stale console could promote a credential other than the one its operator saw; and a permission shared with ordinary SP edits would let whoever may rename an SP stop sign-on at every SP of the tenant.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-42: `promote_idp_credential/{credential_id}` requires that the id is the tenant's current `next` and inside its validity window (`409` otherwise) and retires the old `active` (destroying its key) and activates `next` in one transaction, a repository method of its own; the slots stay enforced by the UNIQUE index (D-21); issue writes only into an empty slot; the three credential writes need `saml_idp:credential`, separate from `saml_sp:write`. Retiring the active credential without a successor is allowed on purpose (the incident response to T-306) and the console must warn. Closes when T23.2.5 lands with tests for a promote of a non-`next` id, an expired `next`, the transaction (no state with two or zero signers observable), and the permission split.",
+                  "modelType": "STRIDE",
+                  "number": 364
+                },
+                {
+                  "id": "e088b9a2-d24a-594b-b859-e485f7d29aa5",
+                  "title": "A management response or error carries the IdP signing key or its sealed form",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "The credential routes are the first API to expose the `saml_idp_credential` table. A response type derived from the stored row, or an error that formatted it, could hand the tenant's signing key \u2014 or its ciphertext and custody \u2014 to anyone with read access, and with it the ability to sign as the tenant at every SP.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Contract \u00a729.2 and D-42: `SamlIdpCredential` on the wire is a response type of its own with the public facts only (certificate, serial, fingerprint, dates, status, issuer CA) \u2014 no key, no ciphertext, no custody \u2014 built from `SamlIdpCredential`, which carries no key field, and never from `SealedSamlIdpCredential`; only the signer calls `get_active_sealed`. The core type derives no `Serialize`, so a route cannot expose the row by accident. SDKs must drop an undeclared key member (\u00a729.5). Closes when T23.2.5 lands with a test that no credential response or error contains `PRIVATE KEY` or the ciphertext.",
+                  "modelType": "STRIDE",
+                  "number": 365
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 1265,
+              "y": 830
+            },
+            "visible": true,
+            "id": "2d150b0e-0535-5769-8bdc-0c75f7669c8e",
+            "size": {
+              "width": 170,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "saml_service_provider\n(SP registry)"
+              },
+              "topLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              },
+              "bottomLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "shape": "store",
+            "zIndex": 1,
+            "data": {
+              "type": "tm.Store",
+              "name": "saml_service_provider\n(SP registry)",
+              "description": "Schema v72 (T23.2.1): one row per registered SP \u2014 entity id (unique per tenant), ACS allow-list, SLO endpoint, NameID policy, response signing, certificates (public), attribute mappings, allowed groups. No secret. Written only by the \u00a729 routes after validation; read by the SSO and SLO endpoints, which re-check what they use.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "isALog": false,
+              "isEncrypted": false,
+              "isSigned": false,
+              "storesCredentials": false,
+              "storesInventory": false,
+              "threats": [
+                {
+                  "id": "d9ef4add-9a9b-53e6-b3c8-49b5a290dbf3",
+                  "title": "A registry row is read or written across tenants, or outlives the SP it described",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "The `saml_service_provider` table holds every tenant's SP registrations side by side. A query that lost its tenant key would let one tenant's SSO request match another tenant's SP; a delete that left the SP's session records behind would let a stale participation drive a logout.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Every repository method is tenant-keyed and `entity_id` is unique per tenant (T23.2.1, Mitigated at the repository); rows go with their tenant in the tenant-delete transaction. D-37 and \u00a729.3 rule 5: deleting an SP deletes its `saml_sp_session` rows in the same transaction. The registry holds no secret (certificates are public), so a read discloses configuration, not credentials. Closes when T23.2.5 lands with the delete cascade test (T23.2.4 adds the table it cascades to).",
+                  "modelType": "STRIDE",
+                  "number": 366
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 620,
+              "y": 1040
+            },
+            "visible": true,
+            "id": "e7c6d16d-b27f-5884-b98a-d3b974004b47",
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "SAML IdP metadata\n(/saml/v2/{tenant}/metadata)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "shape": "process",
+            "zIndex": 1,
+            "data": {
+              "type": "tm.Process",
+              "name": "SAML IdP metadata\n(/saml/v2/{tenant}/metadata)",
+              "description": "D-40 (built by T23.2.5, behind `saml`): GET/HEAD, unauthenticated; one EntityDescriptor from fixed templates \u2014 signing keys of the `active` and `next` credentials, SSO (and, from T23.2.4, SLO) locations from the one URL function per tenant; unsigned; the D-20 404 when SAML is unavailable, off or without a publishable credential; cached for an hour with an ETag.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": true,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "5757caa6-6728-5d0f-b8d7-f8a9d7d76e29",
+                  "title": "An SP pins a key or endpoints that are not the tenant's",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "SPs trust whatever certificate the IdP metadata carries. A document built from request input, served for the wrong tenant, or with stale or extra keys would make an SP trust an attacker's key or send users somewhere else.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-40: one fixed template, every value escaped; `entityID` and every location from `idp_entity_id`/`idp_sso_url`/`idp_slo_url` of the path tenant only (T-307); one `KeyDescriptor use=\"signing\"` per publishable credential \u2014 `active`, then `next` \u2014 read through the keyless `list`; no encryption key; `SingleLogoutService` only once the route exists. Unsigned by decision: signing with the published key anchors nothing and would mint another signed document (T-316); trust comes from TLS to the deployment's origin and the fingerprint \u00a729 shows. Residual: an SP that fetches metadata over a path an attacker controls is outside AXIAM's reach. Closes when T23.2.5 lands with a test pinning the document (both keys, no retired one, no encryption key, URLs per tenant).",
+                  "modelType": "STRIDE",
+                  "number": 367
+                },
+                {
+                  "id": "3565a3ca-825c-54ab-955c-6f1d8727cc40",
+                  "title": "The metadata endpoint reveals whether a tenant exists, serves SAML or has a credential",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Information disclosure",
+                  "description": "The metadata route is unauthenticated. Different answers for an unknown tenant, a tenant with SAML off, a build without SAML and a tenant without a credential would let anyone enumerate tenants and their SAML posture.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-40 with D-20/D-27: the same empty `404` for every one of those cases and for a non-canonical tenant id, decided before anything is read, on every method and sub-path (`default_service`); no `503` for a missing credential. Readiness is visible only to the tenant's administrator through \u00a729 `get_idp`. Residual as T-326: a flood tells a build with SAML from one without (429 against 404). Closes when T23.2.5 lands with the 404 matrix.",
+                  "modelType": "STRIDE",
+                  "number": 368
+                },
+                {
+                  "id": "b2fe289d-9d05-520a-ae05-75e419acf6e8",
+                  "title": "A metadata request flood loads the database and the process",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Denial of service",
+                  "description": "Every metadata request reads the tenant's settings and credentials and renders XML, unauthenticated.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-40: a per-route governor with the `end_session_per_min` preset and the shared bucket `saml_idp_metadata`; at most two certificates per document; `Cache-Control: public, max-age=3600` and a strong `ETag` so SPs and caches revalidate cheaply (`304`). Closes when T23.2.5 lands with the limiter wired.",
+                  "modelType": "STRIDE",
+                  "number": 369
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 820,
+              "y": 790
+            },
+            "visible": true,
+            "id": "98615ed3-7338-5a0e-a46a-c202a2371450",
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "SAML SLO endpoint\n(/saml/v2/{tenant}/slo)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "shape": "process",
+            "zIndex": 1,
+            "data": {
+              "type": "tm.Process",
+              "name": "SAML SLO endpoint\n(/saml/v2/{tenant}/slo)",
+              "description": "D-38/D-39 (built by T23.2.4, behind `saml`): GET/POST `/slo` for SP LogoutRequests and LogoutResponses on both bindings, and the IdP-initiated trigger `/sso/logout`. Receives with T23.2.3's receiver, requires every SP message signed (per node, SHA-2, never verify_signed_xml), resolves sessions through `saml_sp_session`, revokes them (back-channel to OIDC clients, invalidate \u2192 revocation feed) before propagating a signed LogoutRequest to each other SP through the browser, clears the OP cookies, and answers the initiating SP.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": true,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "51c53121-aae3-5a8c-a776-5d56b651260b",
+                  "title": "A forged LogoutRequest ends another user's sessions",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "Whoever can make a browser deliver a `LogoutRequest` naming a user's `NameID` and `SessionIndex` could sign that user out everywhere; done across a tenant, it is a mass sign-out.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38: every `LogoutRequest` must be signed by the issuing SP's registered certificate \u2014 HTTP-Redirect over the exact octets received, RSA-SHA-2 only; HTTP-POST as the one enveloped signature of the root, verified on that node by xmlsec with SHA-1 refused; `verify_signed_xml` is never used \u2014 and an SP without a certificate cannot start a logout; `Destination` must be the tenant's SLO URL and `IssueInstant` fresh. D-37: the request resolves only sessions recorded for that SP whose `NameID` matches. Closes when T23.2.4 lands with tests for an unsigned, a wrongly signed, a misplaced-signature, a SHA-1, a wrong-`Destination` and a stale request, each ending nothing.",
+                  "modelType": "STRIDE",
+                  "number": 370
+                },
+                {
+                  "id": "baab88fa-cf0f-5caf-b765-1cb2c5d4c7da",
+                  "title": "A captured logout message is replayed",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "Logout messages travel through the browser and can be captured. A replayed `LogoutRequest` could end a session created after it; a replayed `LogoutResponse` could advance or confuse a logout chain.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38: a `LogoutRequest` `ID` is single-use per SP (`replay_key` `{sp_id}:{ID}`, UNIQUE per tenant) for longer than the five-minute `IssueInstant` window; D-39: each outbound request `ID` is 256 random bits, stored as a digest and consumed once on the X6 arbiter when its response arrives, from the SP it was sent to. Closes when T23.2.4 lands with replay tests for both message kinds.",
+                  "modelType": "STRIDE",
+                  "number": 371
+                },
+                {
+                  "id": "2bc4dee8-5147-554d-a188-a052dc614177",
+                  "title": "XML external entities, entity expansion or a decompression bomb in a logout message",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "The SLO endpoint parses SP-supplied XML, DEFLATE-compressed on the Redirect binding, before it knows who sent it.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38: T23.2.3's receiver, unchanged \u2014 96 KiB encoded and 64 KiB decoded caps, inflating stopped one byte past the cap, any markup declaration and any non-UTF-8 encoding refused on the bytes, libxml without recovery or network \u2014 before any lookup. Closes when T23.2.4 lands with the receiver's refusal tests run against `/slo`.",
+                  "modelType": "STRIDE",
+                  "number": 372
+                },
+                {
+                  "id": "591df0bf-52b4-5946-b727-ca96b3ad5ec6",
+                  "title": "A logout message signed by the tenant's key is harvested as a signature-wrapping gadget",
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "T-316's constraint: an SP verifier that checks only the first signature, or binds a reference by name, can be fed any document the tenant's key signed, placed ahead of a forged assertion. Signed logout messages are such documents, and SLO exists to produce them.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38: AXIAM signs a `LogoutRequest` only for a session its holder ended or a verified SP request ended, and a `LogoutResponse` only in reply to a verified request \u2014 never for an unauthenticated party, so obtaining one needs a session (whose holder can already obtain signed responses for their own account) or an SP's key. On HTTP-Redirect the signature is the detached query signature, so no XML signature exists to harvest, and import prefers Redirect (D-41); on HTTP-POST it is enveloped like the assertion's (root child, one reference to the root `ID`) and re-verified before sending. AXIAM's own SP verifier refuses misplaced signatures (D-23). Closes when T23.2.4 lands with tests that no logout message is signed for an unverified request and that a Redirect-binding message carries no `ds:Signature`.",
+                  "modelType": "STRIDE",
+                  "number": 373
+                },
+                {
+                  "id": "141eeade-2bce-5a85-b5f8-f847010fc212",
+                  "title": "A flood or an endless chain exhausts the SLO endpoint",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "`/slo` and the logout trigger are unauthenticated, parse XML and verify signatures; a logout chain could be driven through many SPs.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38/D-39: the tenant check and D-20 `404` before the body is read; per-route governors with the `end_session_per_min` preset and the buckets `saml_idp_slo` and `saml_idp_sso_logout`; the receiver's size caps; at most 32 `SessionIndex` elements per request and 32 SPs per chain, then `PartialLogout`; runs expire after ten minutes. Closes when T23.2.4 lands with the limiters wired and the caps tested.",
+                  "modelType": "STRIDE",
+                  "number": 374
+                },
+                {
+                  "id": "1a48edf3-58bf-502f-8e1f-5593f74c962d",
+                  "title": "The SLO endpoint delivers messages or the browser to a location an SP never registered",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "A logout endpoint that took its destination from a message \u2014 a response location, a `RelayState`, a post-logout parameter \u2014 would be an open redirector and could post signed logout messages to an attacker.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38/D-39: outbound messages go only to the SP's registered `slo_url` on its registered `slo_binding`, the final response only to the initiating SP's registered `slo_url`; an SP's `RelayState` (\u2264 80 bytes) is echoed to that SP only; the IdP-initiated trigger ends on AXIAM's own page with no redirect parameter; the POST binding renders through the D-27 auto-post page (`form-action` = the `slo_url` origin), so no second CSP setter appears. Closes when T23.2.4 lands with tests that a request naming another location is answered at the registered one.",
+                  "modelType": "STRIDE",
+                  "number": 375
+                },
+                {
+                  "id": "5f035db8-de8d-5859-8bdf-9e8c25a71777",
+                  "title": "A logout cannot be traced to the SP, the sessions and the outcome",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Repudiation",
+                  "description": "A user disputing that they were signed out, or an administrator investigating a mass sign-out, needs to know which SP asked, which sessions ended and which SPs were told.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-39: an audit row `saml_idp.logout` per logout (initiator, SP, outcome, sessions ended, SPs told, partial), never a `NameID`; session revocation itself is recorded as every logout is. Closes when T23.2.4 lands with an audit test.",
+                  "modelType": "STRIDE",
+                  "number": 376
+                },
+                {
+                  "id": "e9411d8d-20a8-5899-9aa6-5f93ce942349",
+                  "title": "A third-party page signs the visitor out of AXIAM and every SP",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Spoofing",
+                  "description": "The IdP-initiated trigger acts on the browser's own OP cookie; a cross-site page that could navigate a visitor to it would end the visitor's session and their SP sessions \u2014 a nuisance, at scale a denial of service.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-39: `GET /saml/v2/{t}/sso/logout` is refused with `403` for `Sec-Fetch-Site: cross-site` (D-26's rule) and acts only on the session the browser's own OP cookie names, resolved through the tenant-keyed lookup; `/slo` itself acts only on signed SP requests. Residual as D-26: a browser that sends no fetch metadata is admitted. Closes when T23.2.4 lands with the cross-site refusal test.",
+                  "modelType": "STRIDE",
+                  "number": 378
+                },
+                {
+                  "id": "032ac099-c372-5421-827a-403c0a198ad6",
+                  "title": "An SP's logout reaches sessions it never took part in, or another tenant's",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "description": "SLO ends whole sessions. If an SP could name any session \u2014 by a guessed index, by another SP's index, by a `NameID` alone or across tenants \u2014 one compromised SP could sign anyone out of everything.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-37/D-39: sessions are resolved by (path tenant, the verified issuer's SP, `SessionIndex`) in `saml_sp_session`, and the row's `NameID` value and format must equal the request's; with no index, only the sessions recorded for that SP and that `NameID`. Indexes are 256-bit random per SP. Closes when T23.2.4 lands with tests for another SP's index, a mismatched `NameID` and another tenant's path.",
+                  "modelType": "STRIDE",
+                  "number": 379
+                },
+                {
+                  "id": "20d70909-07f1-52e8-aa50-0069d27cf57a",
+                  "title": "SP sessions outlive the AXIAM session they came from",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "description": "An SP keeps its own session after the assertion. When the AXIAM session ends by anything but a SAML logout chain \u2014 an administrator's revocation, a password reset, an account disable, `/oauth2/end_session`, expiry \u2014 or a chain stops at an SP that never answers, the remaining SPs are not told and the user stays signed in there.",
+                  "mitigation": "Accepted design trade-off (D-38, D-39). SAML has no back channel through the browser; the SOAP binding that would provide one is not implemented. What bounds it: SLO revokes the AXIAM session first, so a broken chain never keeps an AXIAM session alive; assertions are valid for five minutes and single-use; a revoked session or a suspended account obtains no new assertion (T-328), so the SP session cannot be renewed through AXIAM; and the SP's own session lifetime is the SP administrator's to set. A later decision may add SOAP back-channel logout or drive a chain from `end_session`.",
+                  "modelType": "STRIDE",
+                  "number": 380
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 1075,
+              "y": 960
+            },
+            "visible": true,
+            "id": "a2a0c721-f0d1-5524-a648-bf8002e851f5",
+            "size": {
+              "width": 170,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "saml_sp_session\n(per-SP SessionIndex)"
+              },
+              "topLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              },
+              "bottomLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "shape": "store",
+            "zIndex": 1,
+            "data": {
+              "type": "tm.Store",
+              "name": "saml_sp_session\n(per-SP SessionIndex)",
+              "description": "D-37 (T23.2.4, next schema version): one row per (tenant, session, SP) \u2014 user, SP entity id, the asserted NameID and format, the per-SP random SessionIndex, expiry. Written by the SSO continue leg before signing; read by SLO to map an index back to a session and to find the SPs to tell.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "isALog": false,
+              "isEncrypted": false,
+              "isSigned": false,
+              "storesCredentials": false,
+              "storesInventory": false,
+              "threats": [
+                {
+                  "id": "23280bc5-3b7a-5f87-a165-e9b4cd61e22e",
+                  "title": "The participant table links a person's sessions to the SPs they use",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "`saml_sp_session` records, per live session, which SPs the user signed in to and the `NameID` each received \u2014 an email address at an `emailAddress` SP. A dump, or rows kept after the session or the person is gone, would disclose that history.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-37: rows are tenant-scoped, deleted when SLO revokes their session, swept once the session has expired or is gone, deleted with their SP and their tenant, and removed by both erasure paths by `user_id`; they hold no credential (a `SessionIndex` alone ends nothing, since a logout request must be signed). Closes when T23.2.4 lands with the sweep, cascade and erasure tests.",
+                  "modelType": "STRIDE",
+                  "number": 381
+                },
+                {
+                  "id": "f4fc5514-6581-5ff1-ae89-d8f206c7bf7f",
+                  "title": "An assertion is issued whose session SLO cannot find",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "If the SSO leg signed before recording which SP got which `SessionIndex`, a failed or lost write would leave an SP holding a session no logout can reach.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-37: the continue leg writes (or reads back) the participant row after consuming the handle and before signing; the issuer takes its `SessionIndex` from the row; a failed write answers `Responder` and issues nothing. Closes when T23.2.4 lands with a test that a failed participant write yields no assertion.",
+                  "modelType": "STRIDE",
+                  "number": 382
+                },
+                {
+                  "id": "dac3c636-84fb-5b14-8904-71ef2c9a12ba",
+                  "title": "Participant and logout-chain rows accumulate without bound",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Denial of service",
+                  "description": "Every sign-on to an SP writes a row and every logout a run; without expiry the tables grow with traffic.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-37/D-39: one participant row per (session, SP), refreshed rather than duplicated; runs expire after ten minutes; both tables are swept by the cleanup scheduler and reported on `/health/jobs`. Closes when T23.2.4 lands with the sweep tests.",
+                  "modelType": "STRIDE",
+                  "number": 384
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 1265,
+              "y": 960
+            },
+            "visible": true,
+            "id": "ba9784ec-399d-526d-8530-f9541a09249a",
+            "size": {
+              "width": 170,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "saml_logout_run\n(logout chains)"
+              },
+              "topLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              },
+              "bottomLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "shape": "store",
+            "zIndex": 1,
+            "data": {
+              "type": "tm.Store",
+              "name": "saml_logout_run\n(logout chains)",
+              "description": "D-38/D-39 (T23.2.4): a logout in progress \u2014 initiator, the queue of participant rows still to tell, the digest of the current outbound request ID, the partial flag and the inbound LogoutRequest replay key; ten-minute rows, consumed on the X6 arbiter.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "isALog": false,
+              "isEncrypted": false,
+              "isSigned": false,
+              "storesCredentials": false,
+              "storesInventory": false,
+              "threats": [
+                {
+                  "id": "7096535f-06a2-5067-8637-f42557ee5e0c",
+                  "title": "A database read yields a usable logout-chain identifier",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Information disclosure",
+                  "description": "A logout run names the next SP's outbound request. If the store kept the raw request `ID`, someone who could read it could forge the matching `LogoutResponse` and steer the chain.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-39: the outbound request `ID` is stored as its SHA-256 digest, consumed once, and accepted only from the SP it was sent to (with its signature when it registered a certificate); runs are tenant-scoped, expire after ten minutes and go with their tenant. A forged response could at most continue a logout already under way. Closes when T23.2.4 lands with a test that the table holds no raw `ID`.",
+                  "modelType": "STRIDE",
+                  "number": 383
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 1075,
+              "y": 1090
+            },
+            "visible": true,
+            "id": "84aeaa23-2930-5ea3-8269-d1e7fd183781",
+            "size": {
+              "width": 170,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "session /\nrevoked_session (feed)"
+              },
+              "topLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              },
+              "bottomLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "shape": "store",
+            "zIndex": 1,
+            "data": {
+              "type": "tm.Store",
+              "name": "session /\nrevoked_session (feed)",
+              "description": "The AXIAM session rows and, when the feed is on, the revocation feed's `revoked_session` entries (shown in full on the authentication diagram). SLO revokes through `SessionRepository::invalidate`, which publishes the revoked session's hash.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isALog": false,
+              "isEncrypted": false,
+              "isSigned": false,
+              "storesCredentials": true,
+              "storesInventory": false,
+              "threats": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "838d668f-79a3-5423-9b67-3a6cab44d25b",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "\u00a729 management calls (bearer)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "2c859601-e642-5294-8142-a9ed10a36135"
+            },
+            "target": {
+              "cell": "de15bf38-6ec2-5998-a6c9-a20a44ae1780"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "\u00a729 management calls (bearer)",
+              "description": "Authenticated administrator calls to the `saml` namespace: SP CRUD, metadata parse, credential lifecycle.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS (REST)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "7a016eb8-b689-5611-8e99-4c70624d8222",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "validated SP write / read"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "de15bf38-6ec2-5998-a6c9-a20a44ae1780"
+            },
+            "target": {
+              "cell": "2d150b0e-0535-5769-8bdc-0c75f7669c8e"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "validated SP write / read",
+              "description": "Create, replace, delete and read SP rows after `validate_saml_service_provider` and \u00a729.3's refusals; delete cascades to the SP's participant rows.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "da053c41-980b-5812-930d-c75174de5ed2",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "issue / promote / retire (one transaction)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "de15bf38-6ec2-5998-a6c9-a20a44ae1780"
+            },
+            "target": {
+              "cell": "2a2a1983-07c2-5847-a3d0-7de61be737f2"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "issue / promote / retire (one transaction)",
+              "description": "Key generation and sealing on issue; promote retires the old active and activates next in one transaction; retire destroys the key. No key ever returned.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "aecc212e-9e49-5c1a-87f9-aedc40961889",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "SP metadata_url fetch request"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "de15bf38-6ec2-5998-a6c9-a20a44ae1780"
+            },
+            "target": {
+              "cell": "ec39c350-7067-521d-a682-8283e1487344"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "SP metadata_url fetch request",
+              "description": "parse_sp_metadata with a URL: handed to guarded_fetch only (https, resolve once and pin, private/loopback/link-local refused, redirects re-validated, capped).",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "b2044a54-8193-5743-bbd3-5e8ea2c42a5e",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "SP metadata fetch (guarded)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "ec39c350-7067-521d-a682-8283e1487344"
+            },
+            "target": {
+              "cell": "0650fae0-6076-575a-82ea-efbb5f39ab39"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "SP metadata fetch (guarded)",
+              "description": "The single outbound GET for an SP's metadata, to the address the guard vetted.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "fe16fedf-59bb-5766-bb45-b05c50734f1b",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "IdP metadata fetch (unauthenticated)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "0650fae0-6076-575a-82ea-efbb5f39ab39"
+            },
+            "target": {
+              "cell": "e7c6d16d-b27f-5884-b98a-d3b974004b47"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "IdP metadata fetch (unauthenticated)",
+              "description": "An SP (or its administrator) reads the tenant's IdP metadata to pin the signing certificates and locations.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "3e31b42d-3cf5-5187-af38-eb02cf56ae4c",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "read active + next certificates (no key)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "e7c6d16d-b27f-5884-b98a-d3b974004b47"
+            },
+            "target": {
+              "cell": "2a2a1983-07c2-5847-a3d0-7de61be737f2"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "read active + next certificates (no key)",
+              "description": "SamlIdpCredentialRepository::list \u2014 public facts only; never get_active_sealed.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "4673f45b-efb4-5d72-893b-47935b6e0e14",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "LogoutRequest / LogoutResponse (Redirect / POST, via the browser)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "0650fae0-6076-575a-82ea-efbb5f39ab39"
+            },
+            "target": {
+              "cell": "98615ed3-7338-5a0e-a46a-c202a2371450"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "LogoutRequest / LogoutResponse (Redirect / POST, via the browser)",
+              "description": "An SP's signed logout request, or its answer to AXIAM's, delivered by the user's browser on either binding.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": true,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS (front channel)",
+              "threats": [
+                {
+                  "id": "4b270736-5e3d-584d-80b0-52b44217c40a",
+                  "title": "Logout messages, NameIDs and RelayState are recorded in request logs",
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Information disclosure",
+                  "description": "On the HTTP-Redirect binding a `LogoutRequest` \u2014 with its `NameID`, possibly an email address \u2014 and `RelayState` travel in the query string, which request tracing records.",
+                  "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** The W3 F4 request tracer (`RedactingRootSpanBuilder`) already redacts every query value not on `KEPT_QUERY_PARAMETERS`; D-38 adds no SLO parameter to that list, and the handlers log no message, `NameID`, `RelayState` or cookie. Closes when T23.2.4 lands with a test that `/slo`'s recorded target carries `[redacted]` for `SAMLRequest`, `SAMLResponse`, `RelayState`, `SigAlg` and `Signature`.",
+                  "modelType": "STRIDE",
+                  "number": 377
+                }
+              ],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "4eb779bc-f741-50dc-898c-4cd860b2cab4",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "signed LogoutRequest / LogoutResponse (SP's slo_binding)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "98615ed3-7338-5a0e-a46a-c202a2371450"
+            },
+            "target": {
+              "cell": "0650fae0-6076-575a-82ea-efbb5f39ab39"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "signed LogoutRequest / LogoutResponse (SP's slo_binding)",
+              "description": "AXIAM's logout messages to each SP of the session, and the final response to the initiating SP \u2014 only to registered slo_url values; detached signature on Redirect, enveloped on POST.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS (front channel)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "8d529853-83b0-5696-9f8a-d0872c14e3a8",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "IdP-initiated logout (/sso/logout, OP cookie)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "31b120a0-2b7e-5174-a1a1-d2f04c2a6038"
+            },
+            "target": {
+              "cell": "98615ed3-7338-5a0e-a46a-c202a2371450"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "IdP-initiated logout (/sso/logout, OP cookie)",
+              "description": "The browser's own sign-out at AXIAM: same-site only, acting on the session its OP cookie names.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "10587f12-ae62-5b32-aa7c-bb4acb8c4d4a",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "resolve sessions by (SP, SessionIndex, NameID)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "98615ed3-7338-5a0e-a46a-c202a2371450"
+            },
+            "target": {
+              "cell": "a2a0c721-f0d1-5524-a648-bf8002e851f5"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "resolve sessions by (SP, SessionIndex, NameID)",
+              "description": "Map a verified request back to sessions; list the other SPs of those sessions; delete the rows when the run ends.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "3dc774a1-2785-5cb6-afe9-73808f2fd5a0",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "hold / consume logout chain (X6)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "98615ed3-7338-5a0e-a46a-c202a2371450"
+            },
+            "target": {
+              "cell": "ba9784ec-399d-526d-8530-f9541a09249a"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "hold / consume logout chain (X6)",
+              "description": "Create the run with the request's replay key; consume each outbound request ID once when its response arrives.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "b77f0d5a-cdda-595a-9403-4517d88a7573",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "invalidate session + publish to revocation feed"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "98615ed3-7338-5a0e-a46a-c202a2371450"
+            },
+            "target": {
+              "cell": "84aeaa23-2930-5ea3-8269-d1e7fd183781"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "invalidate session + publish to revocation feed",
+              "description": "AuthService::logout \u2192 SessionRepository::invalidate, after OIDC back-channel logout; the feed entry is written when the feed is enabled.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "7919cd3f-7265-50a2-a0e3-85f4f52f24f1",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "unseal active key (logout signing)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "98615ed3-7338-5a0e-a46a-c202a2371450"
+            },
+            "target": {
+              "cell": "2a2a1983-07c2-5847-a3d0-7de61be737f2"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "unseal active key (logout signing)",
+              "description": "get_active_sealed for the two signing cases D-38 allows; the key decrypted into a zeroizing buffer only.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "b8fa4fa2-ba50-57fa-a281-9aeaca24d89c",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "read SP (certificate, slo_url)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "98615ed3-7338-5a0e-a46a-c202a2371450"
+            },
+            "target": {
+              "cell": "2d150b0e-0535-5769-8bdc-0c75f7669c8e"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "read SP (certificate, slo_url)",
+              "description": "The verified issuer's registration: the certificate to verify with and the registered slo_url/slo_binding to send to.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "edf438c0-318e-5508-8865-782c1cecda5e",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "record participant + per-SP SessionIndex"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "7443c8b5-68b4-5ac9-bd3d-f39cdb1d21be"
+            },
+            "target": {
+              "cell": "a2a0c721-f0d1-5524-a648-bf8002e851f5"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "record participant + per-SP SessionIndex",
+              "description": "Written after the handle is consumed and before the assertion is signed (D-37); a failure issues nothing.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB (private network)",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": null
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "5dad8923-1903-5abd-afa5-748f475447bc",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "read SP registration"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "7443c8b5-68b4-5ac9-bd3d-f39cdb1d21be"
+            },
+            "target": {
+              "cell": "2d150b0e-0535-5769-8bdc-0c75f7669c8e"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "read SP registration",
+              "description": "Find the SP by Issuer within the path tenant; ACS allow-list, certificate and policy.",
               "isTrustBoundary": false,
               "outOfScope": false,
               "reasonOutOfScope": "",
@@ -18246,6 +19820,6 @@
     ],
     "diagramTop": 9,
     "reviewer": "",
-    "threatTop": 355
+    "threatTop": 384
   }
 }

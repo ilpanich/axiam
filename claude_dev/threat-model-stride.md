@@ -8,8 +8,8 @@ Threat model for AXIAM (Access eXtended Identity and Authorization Management), 
 | **Methodology** | STRIDE (per-element) |
 | **Tool** | OWASP Threat Dragon, model schema v2 |
 | **Diagrams** | 9 |
-| **Threats identified** | 384 |
-| **Mitigated / Open** | 369 / 15 |
+| **Threats identified** | 401 |
+| **Mitigated / Open** | 382 / 19 |
 | **Owner** | ilpanich |
 
 ---
@@ -75,7 +75,7 @@ The schema lives at `td.vue/src/assets/schema/threat-dragon-v2.schema.json` in t
 
 ## 4. Decomposition and trust boundaries
 
-Seven trust boundaries recur across the diagrams. A flow that crosses one is where authentication, authorization, validation and transport protection have to be re-established — nothing may be assumed across a boundary.
+Eight trust boundaries recur across the diagrams. A flow that crosses one is where authentication, authorization, validation and transport protection have to be re-established — nothing may be assumed across a boundary.
 
 | Boundary | Separates | What must hold on every crossing |
 |---|---|---|
@@ -85,6 +85,7 @@ Seven trust boundaries recur across the diagrams. A flow that crosses one is whe
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, https enforcement, response size caps, HMAC signatures on webhook deliveries |
 | **AXIAM ↔ tenant directory** | AXIAM ↔ a tenant's own LDAP or Active Directory server (G-3) | TLS before any bind or search — `ldaps://`, or StartTLS that fails closed — verified against the tenant's anchors and the URL's host; referrals never followed; filters built only through RFC 4515 escaping; no DN ever constructed; a bounded per-tenant pool; a read-only bind account |
 | **AXIAM ↔ SAML service providers** | AXIAM's SAML identity provider ↔ the applications a tenant registered to receive assertions (G-2) | Assertions always signed with the tenant's own credential and posted only to a registered ACS URL; an SP's requests and logout messages trusted only as far as its registered certificate verifies them, per node and SHA-2 only; logout messages signed by AXIAM only for a session holder or a verified SP (D-38); every browser route the same `404` when SAML is unavailable or off (D-20) |
+| **AXIAM ↔ SSF receivers** | AXIAM's Shared Signals Framework transmitter ↔ the relying parties a tenant administrator registered a stream for (G-5) | Every SET signed with the deployment key, `typ: secevent+jwt`, the tenant issuer and the stream's audience, unique across the deployment (D-47); signed only at delivery for an enabled stream that carries the event (D-48, D-51); pushed only to an endpoint under the webhook outbound address policy, with a sealed credential that never follows the endpoint to another origin (D-49); inbound stream management and polling only with an OAuth2 client-credentials token carrying `ssf.manage`, and only for the streams bound to that `client_id` (D-50) |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | `sdks/CONTRACT.md` clauses — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and buf gates |
 
 ### Principal assets
@@ -100,6 +101,7 @@ Seven trust boundaries recur across the diagrams. A flow that crosses one is whe
 | Refresh tokens and sessions | `session`, hashed | Sustained impersonation |
 | SAML IdP signing key (RSA-4096) | `saml_idp_credential`, AES-256-GCM under `pki_encryption_key` through the database custodian (D-21) | Assertions for any user of the tenant, accepted by every SP that pinned the certificate (T-304, T-306) |
 | Directory bind secret | `directory_config`, AES-256-GCM under `directory_encryption_key` (D-15) | The tenant's directory readable — every user, every group |
+| SSF push credentials | `ssf_stream`, AES-256-GCM under `pki_encryption_key` (D-49) | A receiver's push endpoint accepts forged event deliveries from whoever holds it (T-391) |
 | Client and webhook secrets | hashed / encrypted | Service-account impersonation; forged events |
 | Authorization graph | `role`, `permission`, `resource` edges | Silent privilege grant across the estate |
 | Audit log | `audit_log`, append-only, PGP-signed | Loss of accountability and non-repudiation |
@@ -2894,9 +2896,11 @@ AXIAM could not issue a certificate a TLS server can present (DF-001). Leaves ca
 
 ### 5.7 Audit, webhooks, email & notifications
 
-The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules.
+The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules. Since Phase 23 (G-5, T23.5.2, model 2.27.0) it also covers the Shared Signals Framework transmitter: the SSF stream registry and its per-stream event buffer (`ssf_stream`, `ssf_event_buffer`), SET issuance with the deployment key, the stream management API and transmitter metadata a receiver calls with its own client credentials, and the push and poll flows to the receiver, across a boundary of their own (D-44 … D-52).
 
-*18 threats — 2 high, 14 medium, 2 low; 1 open.*
+The 2026-10-04 pass (T23.5.2, model 2.27.0) adds the **SSF receiver** (an external entity in its own boundary box), the **SSF transmitter** process, the **ssf_stream + ssf_event_buffer** store and the flows between them, and their threats T-385 … T-401: receiver impersonation (T-385), cross-tenant or cross-receiver stream access (T-386), a forged SET (T-387), a replayed one (T-388), token confusion (T-389), a misaddressed SET through an audience shared across tenants (T-390), the push credential (T-391), the push endpoint as an SSRF surface (T-392), flooding the inbound API (T-393), event flooding of a receiver (T-394), poll-buffer exhaustion (T-395), subject-identifier linkability (T-396), a receiver widening its events or overriding the administrator (T-397), an event delivered after its stream was disabled or narrowed (T-398), attribution (T-399), the receiver binding (T-400) and discovery as an oracle (T-401). Thirteen are Mitigated by the code and tests T23.5.2 lands; **four are Open**: T-392, T-394 and T-395 until T23.5.3 builds the push deliverer, the event sources and the poll buffer on the controls D-48, D-49 and D-52 specify, and T-388 because de-duplicating `jti` is the receiver's control, shipped in the SDK receiver helper only after the post-merge fan-out (D-35).
+
+*35 threats — 8 high, 23 medium, 4 low; 5 open.*
 
 | # | Element | STRIDE | Threat | Severity | Status |
 |---|---|:-:|---|---|---|
@@ -2918,6 +2922,23 @@ The append-only audit trail and its OpenPGP batch signing, webhook delivery with
 | T-121 | outbound mail queue (RabbitMQ) <br/>*Store* | I | Queued messages readable on the broker | Medium | Mitigated |
 | T-122 | event delivery <br/>*Flow* | I | Event payload discloses more than the receiver needs | Medium | Mitigated |
 | T-123 | deliver mail <br/>*Flow* | I | Final mail hop is not confidential | Medium | Open |
+| T-385 | SSF receiver (relying party) <br/>*Actor* | S | Receiver impersonation on the stream management API | High | Mitigated |
+| T-386 | SSF transmitter (SET issuance, stream API, discovery) <br/>*Process* | E | Cross-tenant or cross-receiver stream access | High | Mitigated |
+| T-387 | SET push / poll response <br/>*Flow* | T | A forged SET is accepted by a receiver | High | Mitigated |
+| T-388 | SET push / poll response <br/>*Flow* | T | A captured SET is replayed to its receiver | Medium | Open |
+| T-389 | SSF transmitter (SET issuance, stream API, discovery) <br/>*Process* | S | A SET is mistaken for another kind of JWT | Medium | Mitigated |
+| T-390 | SET push / poll response <br/>*Flow* | I | A SET is addressed to the wrong receiver | High | Mitigated |
+| T-391 | ssf_stream + ssf_event_buffer <br/>*Store* | I | The push credential is disclosed or carried to another host | High | Mitigated |
+| T-392 | SSF transmitter (SET issuance, stream API, discovery) <br/>*Process* | I | The push endpoint is used to reach internal services | High | Open |
+| T-393 | SSF transmitter (SET issuance, stream API, discovery) <br/>*Process* | D | Flooding the stream management API or discovery | Medium | Mitigated |
+| T-394 | SET push / poll response <br/>*Flow* | D | A receiver is flooded with events | Medium | Open |
+| T-395 | ssf_stream + ssf_event_buffer <br/>*Store* | D | The poll buffer grows without bound | Medium | Open |
+| T-396 | SET push / poll response <br/>*Flow* | I | Subject identifiers disclose or link personal data | Medium | Mitigated |
+| T-397 | SSF transmitter (SET issuance, stream API, discovery) <br/>*Process* | E | A receiver widens its events or overrides the administrator | Medium | Mitigated |
+| T-398 | SET push / poll response <br/>*Flow* | I | An event is delivered on a stream that was disabled or narrowed | Medium | Mitigated |
+| T-399 | SSF transmitter (SET issuance, stream API, discovery) <br/>*Process* | R | Stream changes are not attributable | Low | Mitigated |
+| T-400 | SSF transmitter (SET issuance, stream API, discovery) <br/>*Process* | E | A stream is bound to a client that is not the tenant's receiver | Medium | Mitigated |
+| T-401 | SSF transmitter (SET issuance, stream API, discovery) <br/>*Process* | I | Transmitter metadata as a tenant oracle | Low | Mitigated |
 
 <details>
 <summary>Threat detail and mitigations</summary>
@@ -3047,6 +3068,125 @@ Webhook payloads carry tenant context and event data across an organizational bo
 AXIAM enforces TLS to the provider, but the provider-to-recipient hop is outside its control and may be opportunistic or plaintext.
 
 > Inherent to email. Bounded by making the tokens carried in mail single-use and short-lived, so interception has a narrow window. Deploy MTA-STS and DANE on the sending domain to harden the onward hops.
+
+**T-385 — Receiver impersonation on the stream management API**  
+`SSF receiver (relying party)` (Actor) · Spoofing · High · Mitigated
+
+The SSF stream management API lets a receiver read its stream, repoint its push endpoint, change the push credential, change the stream's status and ask for verification events. A party that can pass for a receiver — a user session, a service account, a client token minted for another purpose, or another receiver's client — could redirect a tenant's security events, silence them, or learn which events and subjects a relying party watches.
+
+> `SsfReceiverToken` (`handlers::ssf`, D-50): only an access token issued to an OAuth2 client by the client-credentials grant (`sub_kind` `OAuth2Client`) **and** carrying the dedicated scope `ssf.manage` is accepted; a user token (even an administrator's), a service-account token or a client token without the scope is `403`, no token `401`. A stream is the receiver's only when its administrator-set `receiver_client_id` is the token's `client_id`; every other stream answers the same `404` as one that does not exist. The scope reaches a client only through its registration (`OAuth2Client::scopes`, refused by the token endpoint otherwise) and the binding only through an administrator (§31). Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `the_receiver_api_needs_a_client_token_with_the_scope`, `another_receivers_or_another_tenants_stream_is_not_found`.
+
+**T-386 — Cross-tenant or cross-receiver stream access**  
+`SSF transmitter (SET issuance, stream API, discovery)` (Process) · Elevation of privilege · High · Mitigated
+
+Streams of every tenant live in one table. A tenant administrator, or a receiver of one tenant, who can name another tenant's stream id — in a path, a `stream_id` query or a body — could read where that tenant's events go or change it.
+
+> The tenant is never taken from the request: the management routes refuse a `{tenant_id}` that is not the caller's (`403`) and require `ssf_streams:read` / `ssf_streams:write` (a human-only family: a service-account token is `401`); the receiver API takes the tenant from the token. Every repository verb is tenant-scoped in its `WHERE` (`SurrealSsfStreamRepository`), so another tenant's id reads, updates, verifies, decrypts and deletes as `NotFound`. Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `tenants_cannot_read_update_verify_open_or_delete_each_others_streams`; `crates/axiam-api-rest/tests/ssf_test.rs` `another_receivers_or_another_tenants_stream_is_not_found`, `each_operation_needs_its_permission_its_tenant_and_a_human`.
+
+**T-387 — A forged SET is accepted by a receiver**  
+`SET push / poll response` (Flow) · Tampering · High · Mitigated
+
+A receiver acts on a session-revoked, account-disabled or credential-change event by logging users out or locking accounts. Anyone who can make a receiver accept a SET AXIAM did not sign — an unsigned token, `alg: none`, a key the attacker chose, or a token for a different issuer — can log out or lock out any user of the relying party.
+
+> Every SET is a JWS signed with the deployment's Ed25519 key (D-13), `alg: EdDSA`, `typ: secevent+jwt` and the `kid` the tenant's `jwks_uri` publishes; `sign_set` is the only signer and nothing unsigned is ever sent. `iss` is the tenant's issuer, identical to the transmitter metadata's `issuer` (SSF §4.1.6), which a receiver pins. Verification is the receiver's: contract §31.7 makes the optional receiver helper verify the signature against the JWKS, `typ`, `iss` and `aud` before anything else. Tests: `crates/axiam-oauth2/src/ssf.rs` `a_set_verifies_against_the_published_jwks_with_the_pinned_header_and_claims`, `a_set_does_not_verify_for_another_audience_or_issuer`, `the_issuer_follows_the_tenant_issuer_mode`. Forging still needs the deployment key, a principal asset.
+
+**T-388 — A captured SET is replayed to its receiver**  
+`SET push / poll response` (Flow) · Tampering · Medium · Open
+
+A SET carries no `exp` (SSF §4.1.7 forbids it), so a SET captured in transit, from a receiver's logs or from a misrouted push stays valid forever. Replayed later, a session-revoked or account-disabled SET logs out or locks out its subject again.
+
+> AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Open because the control is the receiver's: RFC 8417 §4.1 / contract §31.7 require it to remember the `jti`s it processed and refuse a repeat, and the receiver helper that does so ships in the SDKs only after the post-merge fan-out (D-35); a receiver that does not de-duplicate stays exposed for as long as it treats an old SET as news.
+
+**T-389 — A SET is mistaken for another kind of JWT**  
+`SSF transmitter (SET issuance, stream API, discovery)` (Process) · Spoofing · Medium · Mitigated
+
+SETs, ID tokens, logout tokens and access tokens are all signed with the same deployment key (D-13). A SET presented where an access token or an ID token is expected could be accepted as one if the verifier checks only the signature.
+
+> Explicit typing and shape (SSF §4.1.1–§4.1.3, RFC 8417 §4.5–§4.7): `typ: secevent+jwt`, no `sub` and no `exp` (`SetClaims` has no field for either), an `events` claim, and an `aud` that is a receiver audience, never an AXIAM audience. AXIAM's own access-token validation therefore refuses a SET (no `exp`, wrong audience). Tests: `crates/axiam-oauth2/src/ssf.rs` `a_set_is_never_accepted_as_an_axiam_access_token`, `a_set_verifies_against_the_published_jwks_with_the_pinned_header_and_claims`.
+
+**T-390 — A SET is addressed to the wrong receiver**  
+`SET push / poll response` (Flow) · Information disclosure · High · Mitigated
+
+On a deployment without per-tenant issuer paths every tenant's SETs carry the same `iss` and are signed with the same key. If two streams — in two tenants — could share an audience, a tenant administrator could register a stream with another tenant's receiver audience, collect SETs about users they created (an email subject a victim also uses, say) and replay them to that receiver, which would accept them: right key, right issuer, right audience.
+
+> The audience is unique **across the deployment**, enforced by the datastore (`idx_ssf_stream_audience` UNIQUE on `audience` alone, D-47): a second registration in any tenant is `409` without saying where. `aud` is the stream's audience, one string, never a list; with tenant issuer paths `iss` is the tenant's own issuer too. Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_audience_is_unique_across_every_tenant`; `crates/axiam-api-rest/tests/ssf_test.rs` `an_audience_is_unique_across_tenants_and_a_header_needs_the_sealing_key`; `crates/axiam-oauth2/src/ssf.rs` `a_set_does_not_verify_for_another_audience_or_issuer`. Residual: an administrator can squat an audience another tenant has not registered yet; it buys them nothing a receiver accepts, because the receiver configures the audience its own stream was given.
+
+**T-391 — The push credential is disclosed or carried to another host**  
+`ssf_stream + ssf_event_buffer` (Store) · Information disclosure · High · Mitigated
+
+A receiver may require an `Authorization` header on its push endpoint. AXIAM stores it and presents it on every push, so it is a credential to a third party: readable from a response, a log or the database it is a key to the receiver's endpoint, and if the endpoint could be moved without it, AXIAM itself would hand it to whatever host the endpoint was moved to.
+
+> Sealed with AES-256-GCM under `pki_encryption_key` (the key webhook secrets use), nonce and ciphertext in their own columns; no read projects them and the single path to the plaintext is `decrypt_authorization_header`, for the push deliverer (D-49). No response carries it (`authorization_header_set` says whether one is stored), `Debug` redacts it, audit rows name the field and never the value, and without the key a write that sets one is `503`. A stored header never follows the endpoint to another origin: moving it — by the administrator or the receiver — requires the header again or its removal (`400`). Contract §31.5 makes it `Sensitive<T>`. Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `create_round_trips_every_field_and_never_reads_the_header_back`, `without_the_key_a_header_cannot_be_stored_and_everything_else_works`, `an_update_keeps_replaces_or_clears_the_header`; `crates/axiam-api-rest/tests/ssf_test.rs` `an_administrator_registers_reads_lists_replaces_and_deletes_a_stream`, `moving_the_endpoint_to_another_origin_needs_the_header_again`, `a_receiver_cannot_repoint_its_endpoint_to_a_refused_address`; `crates/axiam-oauth2/src/ssf.rs` `repointing_the_endpoint_is_held_to_the_address_policy_and_the_credential_rule`, `debug_never_prints_a_subjects_address_or_a_receivers_header`; schema `v77_stores_the_push_header_sealed_and_no_signed_token`.
+
+**T-392 — The push endpoint is used to reach internal services**  
+`SSF transmitter (SET issuance, stream API, discovery)` (Process) · Information disclosure · High · Open
+
+The push endpoint is chosen by a tenant administrator and, since SSF lets a receiver update its delivery, by the receiver. AXIAM POSTs to it from inside the deployment. Pointed at a metadata service, a loopback admin port or a private address, it turns the transmitter into a request forger with a credential attached.
+
+> Write time is built: every endpoint an administrator or a receiver supplies is held to the webhook outbound address policy (D-49, `validate_push_endpoint`): `https` only, no credentials or fragment, no IP literal that is not globally routable (loopback, private, link-local, the metadata address, IPv4-mapped forms), no `localhost`, `*.local` or `*.internal`. Tests: `crates/axiam-oauth2/src/ssf.rs` `the_push_endpoint_policy_is_the_webhook_one`; `crates/axiam-api-rest/tests/ssf_test.rs` `every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule`, `a_receiver_cannot_repoint_its_endpoint_to_a_refused_address`. Open until T23.5.3's `SsfPush` deliverer sends every push only through `axiam_pki::ssrf::guarded_fetch` with `allow_private = false` (resolve, refuse, pin; no redirect followed; a capped response), with its test — a name that resolves to an internal address is only caught there.
+
+**T-393 — Flooding the stream management API or discovery**  
+`SSF transmitter (SET issuance, stream API, discovery)` (Process) · Denial of service · Medium · Mitigated
+
+The stream management API, the verification endpoint and the unauthenticated transmitter metadata are new inbound surfaces. A loop against them costs a datastore read per request, and verification additionally makes AXIAM sign and send an event, so it amplifies towards the receiver.
+
+> Every route has its own bucket (plan §7 rule 6): `AXIAM__RATE_LIMIT__SSF_PER_MIN` (60 per minute per IP) on each receiver route and each discovery form, `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` (30) on each management write, never moved by a profile preset. Each stream also enforces `min_verification_interval` (60 s) atomically in the datastore, `429` inside it. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `every_ssf_route_has_its_own_bucket`, `the_verification_event_is_submitted_signed_on_delivery_and_rate_limited_per_stream`; `crates/axiam-db/tests/ssf_stream_repository_test.rs` `a_verification_is_claimed_once_per_interval`.
+
+**T-394 — A receiver is flooded with events**  
+`SET push / poll response` (Flow) · Denial of service · Medium · Open
+
+One administrative act can produce many SETs — revoking every session of a user, disabling accounts in bulk, a directory sync that deactivates hundreds. Pushed without a bound, or retried without a ceiling against a receiver that is slow or down, they overload the receiver and the dispatcher's queue.
+
+> Specified (D-48, D-52): one SET per event per stream, only for the events the stream carries; push goes through the shared outbound dispatcher (D-36), which bounds retries per kind (`max_attempts`, exponential backoff with a ceiling, then the dead-letter queue) and delivers one attempt per message, so a receiver that is down receives a bounded number of attempts per event and never a retry storm; a paused stream receives nothing. Open until T23.5.3 lands the `SsfPush` deliverer and the event sources on that dispatcher with the retry, dead-letter and pause tests; the residual then is that a mass revocation is as many SETs as sessions, by design (SSF has no batching).
+
+**T-395 — The poll buffer grows without bound**  
+`ssf_stream + ssf_event_buffer` (Store) · Denial of service · Medium · Open
+
+Events for a poll stream, and for any paused stream, wait in `ssf_event_buffer` until they are acknowledged or the stream resumes. A receiver that never polls, or a stream paused and forgotten, would accumulate rows for ever and grow the datastore.
+
+> Specified (D-48): at most 1 000 events per stream, the oldest dropped to admit the newest (SSF §8.1.2 permits dropping held events), a seven-day `expires_at` enforced by the sweeper, one row per `(tenant, stream, jti)` in the datastore, and the rows deleted with their stream and their tenant. Built so far: the table, its unique index and both cascades — `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_buffer_holds_one_row_per_jti`, `deleting_a_stream_removes_its_buffer_and_nothing_else`, `a_tenant_delete_removes_its_streams_and_buffers`. Open until T23.5.3 writes the buffer (bound, drop-oldest, expiry, acknowledgement) and registers its sweep in `/health/jobs`, with their tests.
+
+**T-396 — Subject identifiers disclose or link personal data**  
+`SET push / poll response` (Flow) · Information disclosure · Medium · Mitigated
+
+A SET names a person. An identifier that is an email address, or one that is the same at every receiver, lets receivers that compare notes follow a user across relying parties, and an address AXIAM never checked lets an attacker who registered it pass as its owner at an email-keyed receiver.
+
+> D-46: `iss_sub` by default — the tenant issuer and the user id, which is the `sub` AXIAM's ID tokens already give every relying party (`subject_types_supported: public`), so SSF discloses no linkage a receiver did not hold. `email` only when an administrator chose it for the stream (a receiver cannot), and only for an address something vouched for — D-25's rule, `email_verified_at` set or the account `Active`; for any other account the event is not sent on that stream, never with another identifier. No event carries free text (`reason_admin`, `reason_user`, `friendly_name` are never sent), and the queue and the buffer hold only the subject member that will be sent. Tests: `crates/axiam-oauth2/src/ssf.rs` `both_subject_formats_are_rfc_9493_and_the_session_is_named`, `an_unvouched_address_is_never_sent_and_nothing_else_replaces_it`, `the_vouching_rule_is_d25s`, `each_of_the_six_events_has_its_pinned_shape`. Residual: a buffered event for an erased user keeps its subject member until it is acknowledged or expires (seven days).
+
+**T-397 — A receiver widens its events or overrides the administrator**  
+`SSF transmitter (SET issuance, stream API, discovery)` (Process) · Elevation of privilege · Medium · Mitigated
+
+SSF lets a receiver update its stream configuration and status. A receiver that could add event types beyond what the administrator allowed, change the delivery method, the audience or the subject format, or restart a stream the administrator stopped would receive personal data the tenant never agreed to send it.
+
+> `apply_receiver_update` (D-50): `events_requested` may only narrow within the administrator's `events_allowed` (an allowed-but-unknown URI is ignored, a known one outside the allowance is `400`); transmitter-supplied members must match; the method is the administrator's; the audience, the subject format and the allowance are never receiver-writable. A status the administrator set to anything but `enabled` cannot be changed by the receiver (`403`, D-51); POST and DELETE on the configuration endpoint are `403`. Tests: `crates/axiam-oauth2/src/ssf.rs` `a_receiver_may_narrow_but_not_widen_its_events`, `transmitter_supplied_members_must_match`, `replace_deletes_what_it_omits_and_needs_a_delivery`; `crates/axiam-api-rest/tests/ssf_test.rs` `a_receiver_narrows_its_events_and_cannot_widen_them`, `the_receiver_sets_its_status_unless_an_administrator_stopped_the_stream`.
+
+**T-398 — An event is delivered on a stream that was disabled or narrowed**  
+`SET push / poll response` (Flow) · Information disclosure · Medium · Mitigated
+
+Delivery is asynchronous: an event can wait in the queue or the buffer while an administrator disables the stream, the receiver narrows its events, or the stream is deleted. Delivering it anyway sends personal data to a receiver that is no longer meant to have it.
+
+> What travels is the **unsigned** pending event (D-48); the SET is signed by `sign_set` at the moment of delivery against the stream as it is then, and it refuses a stream that is not enabled or no longer carries the event — a disabled stream delivers nothing, a paused one holds, a narrowed one drops (D-51). The only event a non-enabled stream can sign is the stream-updated announcement of the status it is in (SSF §8.1.5). Tests: `crates/axiam-oauth2/src/ssf.rs` `no_set_for_a_disabled_or_paused_stream_or_an_event_it_does_not_carry`, `a_stream_updated_event_may_only_announce_the_current_status`; `crates/axiam-api-rest/tests/ssf_test.rs` `verification_needs_a_live_stream_and_a_wired_outbox`, `an_admin_status_change_announces_the_new_status`. T23.5.3's e2e test (a disabled stream delivers nothing) re-proves it end to end.
+
+**T-399 — Stream changes are not attributable**  
+`SSF transmitter (SET issuance, stream API, discovery)` (Process) · Repudiation · Low · Mitigated
+
+Where a tenant's security events go is a security decision. Without a record, a stream repointed to a collection endpoint, or a verification storm, cannot be traced to the administrator or the receiver that caused it.
+
+> One audit row per write: `ssf_stream.created`, `ssf_stream.updated` (the **names** of the changed members), `ssf_stream.deleted` with the administrator as actor; `ssf_stream.receiver_updated`, `ssf_stream.receiver_status_changed` and `ssf_stream.verification_requested` with the receiver's `client_id`. Never the header, never a subject. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `an_administrator_registers_reads_lists_replaces_and_deletes_a_stream`, `a_receiver_narrows_its_events_and_cannot_widen_them`, `the_verification_event_is_submitted_signed_on_delivery_and_rate_limited_per_stream`.
+
+**T-400 — A stream is bound to a client that is not the tenant's receiver**  
+`SSF transmitter (SET issuance, stream API, discovery)` (Process) · Elevation of privilege · Medium · Mitigated
+
+The receiver binding decides who may manage the stream and poll its events. Bound to a client of another tenant, to a client that cannot obtain a client-credentials token, or to a name no client has yet (to be registered later by someone else), it hands the stream to the wrong party.
+
+> The administrator's write refuses (`400`, naming the rule) a `receiver_client_id` that is not an OAuth2 client of the tenant, not registered for the `client_credentials` grant, or not registered with the `ssf.manage` scope; a client of another tenant is not found in this tenant's lookup. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule`.
+
+**T-401 — Transmitter metadata as a tenant oracle**  
+`SSF transmitter (SET issuance, stream API, discovery)` (Process) · Information disclosure · Low · Mitigated
+
+`/.well-known/ssf-configuration` is unauthenticated by specification. Answers that differ between an unknown tenant, a tenant with the transmitter off and a malformed id tell anyone which tenants exist and which send security events.
+
+> One empty `404` for every way of having nothing to say — no or a malformed tenant id, an unknown tenant, a tenant whose effective `ssf_enabled` is off (the D-20 shape, D-45) — on both the root and the tenant-path form; the receiver API likewise answers a stream of a tenant whose transmitter is off as not found. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `discovery_answers_one_empty_404_for_every_way_of_having_nothing_to_say`, `with_the_transmitter_off_the_receiver_sees_no_stream`, `discovery_on_the_root_issuer_lists_the_endpoints_and_events`, `discovery_on_a_tenant_path_issuer_names_the_tenant_issuer`.
 
 </details>
 
@@ -3685,7 +3825,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 ## 6. Open risk register
 
-15 of 384 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. Thirteen of those that remain are the ones that were always here. The directory added and then closed two: T-300 (a tenant-chosen directory host was not held to an outbound address policy) entered with the directory connector in Phase 23, the W2 F4 review ([`security-review-phase23-w2-2026-10-03.md`](security-review-phase23-w2-2026-10-03.md)) made closing it a precondition of the management routes, and the address guard closed it at model 2.23.0 (T23.3.7); the same pass opened T-332 — with just-in-time provisioning on, an unknown login name reached the directory with no AXIAM counter in front of it — which the W3 F4 review ([`security-review-phase23-w3-2026-10-04.md`](security-review-phase23-w3-2026-10-04.md)) closed with a failure counter per tenant and login name. Four more entered with the SAML identity provider's issuer (T23.2.2, model 2.21.0), while nothing yet serves SAML: a leaked signing key that SPs keep trusting because they pin the certificate (T-306), the rotation window until a promote verb exists (T-309, T23.2.5), cross-SP correlation through a `SessionIndex` that is the session id at every SP (T-312, T23.2.4) and an email `NameID` for an address AXIAM never verified (T-313, T23.2.3). Each named the task that decides it. The SSO endpoint (T23.2.3, model 2.22.0) decided T-313 — an address is asserted only when it was verified or the account activated (D-25) — and added one Low item of its own — `RelayState` and the pending sign-on handle reaching the request log through the request tracer's record of the query string (T-325) — which the W3 F4 review closed by redacting query values from the tracer's span. Twenty-eight more entered at model 2.25.0 (T23.2.8), and they are a different kind of open: the SAML IdP's registry routes, metadata endpoint and single logout were specified before they were built (D-34), so T-370 … T-379 and T-381 … T-384 are open only until T23.2.4 lands the controls their mitigations name — no route they describe exists yet — while T-380 (SP sessions that outlive the AXIAM session) is an accepted trade-off that stays. T23.2.5 (2026-10-04) landed the registry routes, SP metadata import and the IdP metadata endpoint, and closed T-357 … T-365, T-367 … T-369 and the rotation window T-309, each with the tests its mitigation names; T23.2.4 (2026-10-04, model 2.26.0) landed single logout and its two stores and closed T-366 (the cascade now takes the `saml_sp_session` rows), T-370 … T-379, T-381 … T-384 and the per-SP `SessionIndex`, T-312, each with the tests its mitigation names; T-380, the accepted trade-off, stays.
+19 of 401 threats remain open, and **none of them is an unhandled defect in AXIAM's own request path**: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. For two revisions of this document that sentence carried a qualification, and it is worth recording why it is gone rather than simply deleting it. Phase 21 brought four entries from [`security-review-mcp-2026-09-17.md`](security-review-mcp-2026-09-17.md) that **did** sit on the request path — T-272, T-275, T-276 and T-280: filed defects with named fixes rather than trade-offs, open because each needed a settings field, a migration, a sweep or a change to a handler its own task did not touch. All four closed on 2026-09-17 and are recorded below. The qualification retires with them, which is what the previous revision said would happen, because its whole point was that the group existed. Thirteen of those that remain are the ones that were always here. The directory added and then closed two: T-300 (a tenant-chosen directory host was not held to an outbound address policy) entered with the directory connector in Phase 23, the W2 F4 review ([`security-review-phase23-w2-2026-10-03.md`](security-review-phase23-w2-2026-10-03.md)) made closing it a precondition of the management routes, and the address guard closed it at model 2.23.0 (T23.3.7); the same pass opened T-332 — with just-in-time provisioning on, an unknown login name reached the directory with no AXIAM counter in front of it — which the W3 F4 review ([`security-review-phase23-w3-2026-10-04.md`](security-review-phase23-w3-2026-10-04.md)) closed with a failure counter per tenant and login name. Four more entered with the SAML identity provider's issuer (T23.2.2, model 2.21.0), while nothing yet serves SAML: a leaked signing key that SPs keep trusting because they pin the certificate (T-306), the rotation window until a promote verb exists (T-309, T23.2.5), cross-SP correlation through a `SessionIndex` that is the session id at every SP (T-312, T23.2.4) and an email `NameID` for an address AXIAM never verified (T-313, T23.2.3). Each named the task that decides it. The SSO endpoint (T23.2.3, model 2.22.0) decided T-313 — an address is asserted only when it was verified or the account activated (D-25) — and added one Low item of its own — `RelayState` and the pending sign-on handle reaching the request log through the request tracer's record of the query string (T-325) — which the W3 F4 review closed by redacting query values from the tracer's span. Twenty-eight more entered at model 2.25.0 (T23.2.8), and they are a different kind of open: the SAML IdP's registry routes, metadata endpoint and single logout were specified before they were built (D-34), so T-370 … T-379 and T-381 … T-384 are open only until T23.2.4 lands the controls their mitigations name — no route they describe exists yet — while T-380 (SP sessions that outlive the AXIAM session) is an accepted trade-off that stays. T23.2.5 (2026-10-04) landed the registry routes, SP metadata import and the IdP metadata endpoint, and closed T-357 … T-365, T-367 … T-369 and the rotation window T-309, each with the tests its mitigation names; T23.2.4 (2026-10-04, model 2.26.0) landed single logout and its two stores and closed T-366 (the cascade now takes the `saml_sp_session` rows), T-370 … T-379, T-381 … T-384 and the per-SP `SessionIndex`, T-312, each with the tests its mitigation names; T-380, the accepted trade-off, stays. Four more entered with the Shared Signals Framework transmitter (T23.5.2, model 2.27.0), and they are of the same specified-ahead kind: T-392 (the push endpoint as an SSRF surface, guarded at write time and still to be guarded at delivery), T-394 (event flooding of a receiver) and T-395 (the poll buffer) close when T23.5.3 lands push and poll on the controls D-48, D-49 and D-52 name — no event is transmitted before then — and T-388 (a replayed SET) when the receiver helper that de-duplicates `jti` ships in the SDKs.
 
 
 | # | Severity | Threat | Element | Why it is open |
@@ -3700,10 +3840,14 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | T-146 | High | Long-lived client secret committed to a repository | SDK configuration (client secrets, CA bundles) <br/>*Client SDKs & admin UI integration surface* | Outside AXIAM's control. Mitigate by preferring mTLS or short-lived workload identity over static secrets, rotating regularly through the client-rotation endpoint, and enabling… |
 | T-216 | High | The unseal key sits on the same disk as the sealed data | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Deployment & platform (Kubernetes)* | Narrowed at beta08: the server now holds a read-only token scoped to one path rather than root, seeding uses its own short-lived credential, and both Vault deployments moved to Raft. Open because **auto-unseal cannot be closed from inside AXIAM** — every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option. A deployment that configures none of them needs a human with three shares after every restart… |
 | T-180 | High | Vault concentrates every long-lived secret behind one credential | Secrets (Vault / K8s Secrets / ConfigMap) <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility — a token AXIAM is handed is a token AXIAM must use. Narrowed by H-4: `just vault-status` now reports the token's actual capabilities and flags anything beyond `read`, so the documented read-only policy is checkable rather than merely stated… |
+| T-392 | High | The push endpoint is used to reach internal services | SSF transmitter (SET issuance, stream API, discovery) <br/>*Audit, webhooks, email & notifications* | Specified ahead of its delivery code (T23.5.2, model 2.27.0): every push endpoint is already held to the webhook outbound address policy when an administrator or a receiver writes it; open until T23.5.3's `SsfPush` deliverer sends each push only through `guarded_fetch` with `allow_private = false`, which is what catches a name that resolves to an internal address. |
 | T-9 | Medium | Connection flood exhausts ingress capacity | Ingress / TLS 1.3 termination <br/>*System diagram* | Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is… |
 | T-123 | Medium | Final mail hop is not confidential | deliver mail <br/>*Audit, webhooks, email & notifications* | Inherent to email. Bounded by making the tokens carried in mail single-use and short-lived, so interception has a narrow window. Deploy MTA-STS and DANE on the sending domain to… |
 | T-134 | Medium | Backup stream unencrypted in transit | scheduled backup <br/>*Deployment & platform (Kubernetes)* | Deployment responsibility: use an encrypted transport and server-side encryption on the backup target. |
 | T-380 | Medium | SP sessions outlive the AXIAM session they came from | SAML SLO endpoint (/saml/v2/{tenant}/slo) <br/>*Federation — SAML SP & OIDC relying party* | Accepted: SAML has no browser back channel and the SOAP binding is not implemented. SLO revokes the AXIAM session first, assertions live five minutes, and a revoked session or suspended account obtains no new assertion (T-328). |
+| T-388 | Medium | A captured SET is replayed to its receiver | SET push / poll response <br/>*Audit, webhooks, email & notifications* | SSF forbids `exp`, so de-duplicating `jti` is the receiver's control (RFC 8417, contract §31.7). AXIAM's half is built: a 128-bit CSPRNG `jti` per event and byte-identical SETs on retry. Open until the §31 receiver helper ships in the seven full-surface SDKs (post-merge fan-out, D-35); a receiver that does not de-duplicate stays exposed. |
+| T-394 | Medium | A receiver is flooded with events | SET push / poll response <br/>*Audit, webhooks, email & notifications* | Specified (D-48, D-52): one SET per event per stream, push on the D-36 dispatcher with its per-kind retry ceiling and dead-letter queue, nothing to a paused stream. Open until T23.5.3 lands the deliverer and the event sources with those tests. |
+| T-395 | Medium | The poll buffer grows without bound | ssf_stream + ssf_event_buffer <br/>*Audit, webhooks, email & notifications* | Specified (D-48): 1 000 events per stream, oldest dropped, seven-day expiry with a sweep, one row per `jti` (built: the table, the index and both cascades). Open until T23.5.3 writes the buffer and registers its sweep. |
 | T-161 | Low | A partner's IdP silently populates the AXIAM user table (X4) | Attribute mapping & JIT provisioning <br/>*Federation — SAML SP & OIDC relying party* | Off by default (`linked_only` refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit. |
 
 ### Grouping
@@ -3724,6 +3868,11 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 - **~~SAML registry management, SP metadata import and the IdP metadata endpoint (T-357 … T-365, T-367 … T-369)~~ — closed (T23.2.5, 2026-10-04).** Contract §29, D-40, D-41, D-42: the routes, the import and the endpoint exist, and each mitigation names its tests. **T-366** (a registry row that outlives its SP) closed with single logout, below: the cascade now takes the `saml_sp_session` rows too.
 - **~~SAML single logout and its stores (T-366, T-370 … T-379, T-381 … T-384)~~ — closed (T23.2.4, 2026-10-04).** D-37, D-38, D-39: the `/slo` endpoint on both bindings, the IdP-initiated trigger, the participant record and the logout chain exist, and each mitigation names its tests. **T-380** is the one that stays, above: a service provider's own session outliving the AXIAM session is accepted.
+
+**Specified ahead of the code (model 2.27.0)** — the SSF transmitter's delivery half, which T23.5.3 builds on the decisions T23.5.2 took.
+
+- **The push endpoint as an SSRF surface (T-392)**, **event flooding of a receiver (T-394)** and **poll-buffer exhaustion (T-395).** D-48, D-49 and D-52 specify the controls — `guarded_fetch` for every push, the D-36 dispatcher's retry ceiling and dead-letter queue, a 1 000-event bound with drop-oldest and a seven-day expiry — and T23.5.3 closes each with the tests its mitigation names. Nothing transmits before then: no outbox is wired, so verification answers `503` and no event is produced.
+- **A replayed SET (T-388)** is the receiver's to refuse, by remembering the `jti`s it processed; it closes with the §31 receiver helper in the SDKs.
 
 **Deployment responsibilities** — AXIAM cannot close these from inside the application; they belong in a hardening checklist.
 
@@ -3776,21 +3925,21 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 
 | Category | Threats |
 |---|---|
-| Spoofing | 90 |
-| Tampering | 77 |
-| Repudiation | 10 |
-| Information disclosure | 86 |
-| Denial of service | 43 |
-| Elevation of privilege | 78 |
+| Spoofing | 92 |
+| Tampering | 79 |
+| Repudiation | 11 |
+| Information disclosure | 92 |
+| Denial of service | 46 |
+| Elevation of privilege | 81 |
 
 **By severity**
 
 | Severity | Total | Open |
 |---|---|---|
 | Critical | 41 | 2 |
-| High | 168 | 8 |
-| Medium | 150 | 4 |
-| Low | 25 | 1 |
+| High | 174 | 9 |
+| Medium | 159 | 7 |
+| Low | 27 | 1 |
 
 **By diagram**
 
@@ -3802,7 +3951,7 @@ Once discovery can name a separate mTLS host (T-245), an SDK that ignores `mtls_
 | Federation — SAML SP & OIDC relying party | 125 | 3 |
 | Authorization engine — RBAC, hierarchy & scopes | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
-| Audit, webhooks, email & notifications | 18 | 1 |
+| Audit, webhooks, email & notifications | 35 | 5 |
 | Deployment & platform (Kubernetes) | 28 | 5 |
 | Client SDKs & admin UI integration surface | 28 | 3 |
 
@@ -3829,7 +3978,7 @@ Revisit the model when any of the following happens, and re-run the generator so
 - The SDK contract gains or relaxes a security clause (contract 1.28's WebAuthn, account-lifecycle and PAR sections and the Swift/C/C++ reactor protocol core are the 2026-08-22 examples — T-183…T-186 record them; contract 1.37 and 1.38 added the login-provider operations and the handoff-origin rule — T-218…T-225)
 - A conformance module moves from `REVIEW` to `PASSED` because the code changed, not because the evidence was re-read — the 2026-09-14 early-refusal pass is the example: a dead `request_uri` refused before the login hop and a `fapi2` client's `state` and `nonce` bounded at push entered as T-270 and T-271, and four existing entries (T-163, T-238, T-255, T-256) gained the clause that says what moved. And the reverse discipline, which the same week supplied: a fix that names a status *over REST* is not whole until every crate that renders a status carries it — T-262 was recorded Mitigated with `503` on two of three surfaces while `axiam-scim`'s own error type still answered `500`, and the entry now says so rather than absorbing the correction
 - A fix changes what a grant, a policy or a credential *means* even when no surface moves (the beta09 authorization-reach fixes T-226…T-228 and the WebAuthn user-verification policy T-229…T-230 are the examples: nothing new was exposed, but what existing data authorises changed) — and the reverse case, a fix that *weakens* a property the model records, which is written down as an open item rather than absorbed: the beta13 refresh-rotation grace window amended T-37 and opened T-254 — and was then closed by a decision rather than by a further fix, which is the other half of the same discipline
-- A wave writes its entries here — which puts them in the model only once they are in all three artifacts: this document, `ThreatDragonModels/Axiam/Axiam.json`, and [`threat-modeling-and-security.md`](threat-modeling-and-security.md). The generator's one-line summary is the check: `node website/scripts/gen-threat-model.mjs` must print the total §7 carries, on every commit that touches either this document or the JSON. The 2026-09-17 MCP entries (T-272…T-280) are the example: they lived eight days in this document alone, the dogfooding wave allocated T-281…T-288 past them, and the website would have rendered 279 threats against a text saying 288 — until they entered the JSON at 2.17.0. T-289 (RFC 7592, T23.4.1) is the counter-example: it entered all three artifacts in the commit that added its routes, at 2.18.0; so did T-291…T-300, the LDAP / Active Directory connector (T23.3.2), at 2.20.0, in the commit that added its network path, and T-301…T-303 in the commits that put the login path and the refusals around it; T-304…T-316, the SAML identity provider's issuer (T23.2.2), entered all three at 2.21.0 in the commit that adds the issuer; and T-317…T-330, the SAML SSO endpoint (T23.2.3), at 2.22.0 in the commit that adds the endpoint; T-331…T-355, the directory connector's guards, its provisioning, mapping and sync job (T23.3.7), at 2.23.0 in the commit that adds the address and frame guards and closes T-300; and T-356, from the W3 F4 review, at 2.24.0 in the commit that fixes it (the same review closed T-332 and T-325 in their fixing commits). T-357…T-384 (T23.2.8, 2.25.0) are the one deliberate exception to "with the code": W4 writes the SAML IdP's normative text before the Sonnet tasks build it (D-34), so the entries enter first, Open, each naming the task and tests that close it — the reverse of the 2026-09-17 MCP entries' failure, where the code existed and the JSON did not.
+- A wave writes its entries here — which puts them in the model only once they are in all three artifacts: this document, `ThreatDragonModels/Axiam/Axiam.json`, and [`threat-modeling-and-security.md`](threat-modeling-and-security.md). The generator's one-line summary is the check: `node website/scripts/gen-threat-model.mjs` must print the total §7 carries, on every commit that touches either this document or the JSON. The 2026-09-17 MCP entries (T-272…T-280) are the example: they lived eight days in this document alone, the dogfooding wave allocated T-281…T-288 past them, and the website would have rendered 279 threats against a text saying 288 — until they entered the JSON at 2.17.0. T-289 (RFC 7592, T23.4.1) is the counter-example: it entered all three artifacts in the commit that added its routes, at 2.18.0; so did T-291…T-300, the LDAP / Active Directory connector (T23.3.2), at 2.20.0, in the commit that added its network path, and T-301…T-303 in the commits that put the login path and the refusals around it; T-304…T-316, the SAML identity provider's issuer (T23.2.2), entered all three at 2.21.0 in the commit that adds the issuer; and T-317…T-330, the SAML SSO endpoint (T23.2.3), at 2.22.0 in the commit that adds the endpoint; T-331…T-355, the directory connector's guards, its provisioning, mapping and sync job (T23.3.7), at 2.23.0 in the commit that adds the address and frame guards and closes T-300; and T-356, from the W3 F4 review, at 2.24.0 in the commit that fixes it (the same review closed T-332 and T-325 in their fixing commits). T-357…T-384 (T23.2.8, 2.25.0) are the one deliberate exception to "with the code": W4 writes the SAML IdP's normative text before the Sonnet tasks build it (D-34), so the entries enter first, Open, each naming the task and tests that close it — the reverse of the 2026-09-17 MCP entries' failure, where the code existed and the JSON did not. T-385…T-401, the SSF transmitter (T23.5.2, 2.27.0), entered all three in the commit series that adds its security core: thirteen Mitigated with their tests, and the four whose controls T23.5.3 builds (or the SDK receiver helper carries) Open, each naming what closes it.
 
 Threat numbers are stable: add new threats with new numbers and raise `threatTop` rather than renumbering, so review comments and issues keep pointing at the right thing. Allocate them from `threatTop`, never from the last number in a section — the login-provider threats were first published as T-163…T-170, continuing §5.4's own sequence, and collided with numbers the model already held for §5.3's single-use credentials and §5.9's `cnf` threats. They were renumbered T-218…T-225 when they entered the model at 2.11.0 (they had lived only in this document until then, so nothing on the website pointed at them), and the four code comments that cite them moved with them.
 

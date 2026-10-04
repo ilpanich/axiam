@@ -22,6 +22,24 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-04 SSF transmitter entry (Phase 23 T23.5.2, model 2.27.0 —
+> T-385 … T-401 enter).** AXIAM becomes a Shared Signals Framework transmitter
+> (G-5): a new external entity (the **SSF receiver**, in a boundary of its own),
+> the **SSF transmitter** process and the **ssf_stream + ssf_event_buffer**
+> store, on the *Audit, webhooks, email & notifications* diagram. Seventeen
+> threats enter: receiver impersonation (T-385), cross-tenant stream access
+> (T-386), forged, replayed and confused SETs (T-387 … T-389), a SET misaddressed
+> through an audience shared across tenants (T-390), the push credential (T-391),
+> push-endpoint SSRF (T-392), API and event flooding (T-393, T-394), poll-buffer
+> exhaustion (T-395), subject-identifier linkability (T-396), a receiver widening
+> its events (T-397), delivery after a stream was disabled (T-398), attribution
+> (T-399), the receiver binding (T-400) and discovery as an oracle (T-401).
+> Thirteen are mitigated by the code and tests of T23.5.2; **T-392, T-394 and
+> T-395** stay open until T23.5.3 builds push, poll and the event sources on the
+> controls D-48, D-49 and D-52 specify, and **T-388** until the SDK receiver
+> helper that de-duplicates `jti` ships (D-35). The model is **401 threats, 382
+> mitigated / 19 open**.
+>
 > **The 2026-10-04 SAML IdP single-logout entry (Phase 23 T23.2.4, model
 > 2.26.0 — no threat enters).** Sixteen threats close, each with the test files
 > and names its mitigation now carries: **T-366** (the SP delete cascade now also
@@ -890,7 +908,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 384 threats** and a
+The system is verified against a **STRIDE threat model of 401 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -913,8 +931,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 384 |
-| Mitigated / Open | 353 / 31 |
+| Threats identified | 401 |
+| Mitigated / Open | 382 / 19 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -975,7 +993,12 @@ registry routes, SP metadata import and the metadata endpoint have landed
 (T23.2.5): T-357 … T-365 and T-367 … T-369 are mitigated, and so is the rotation
 window, T-309. Single logout has landed too (T23.2.4): T-366, T-370 … T-379,
 T-381 … T-384 and the per-SP `SessionIndex`, T-312, are mitigated, leaving only the
-accepted T-380.
+accepted T-380. The seventeen Shared Signals Framework entries of model 2.27.0
+(T-385 … T-401) entered with the transmitter's security core: thirteen mitigated
+with their tests, and four open — the push endpoint at delivery time, event
+flooding and the poll buffer until the delivery task lands (T-392, T-394, T-395),
+and SET replay until the SDK receiver helper that de-duplicates `jti` ships
+(T-388).
 
 ### Coverage by STRIDE category
 
@@ -987,25 +1010,25 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 90 | 4 |
-| Tampering | 77 | 1 |
-| Repudiation | 10 | 0 |
-| Information disclosure | 86 | 6 |
-| Denial of service | 43 | 2 |
-| Elevation of privilege | 78 | 2 |
+| Spoofing | 92 | 4 |
+| Tampering | 79 | 2 |
+| Repudiation | 11 | 0 |
+| Information disclosure | 92 | 7 |
+| Denial of service | 46 | 4 |
+| Elevation of privilege | 81 | 2 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
 | Critical | 41 | 2 |
-| High | 168 | 8 |
-| Medium | 150 | 4 |
-| Low | 25 | 1 |
+| High | 174 | 9 |
+| Medium | 159 | 7 |
+| Low | 27 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 15 still-open items are listed one by one in
+the weight the control carries. The 19 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -1013,7 +1036,7 @@ with the element it sits on and where responsibility for it lands.
 
 ## Trust boundaries
 
-Seven trust boundaries recur across the system. A data flow that crosses one is a
+Eight trust boundaries recur across the system. A data flow that crosses one is a
 place where authentication, authorization, validation and transport protection all
 have to be re-established — nothing is assumed across a boundary.
 
@@ -1025,6 +1048,7 @@ have to be re-established — nothing is assumed across a boundary.
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries |
 | **AXIAM ↔ tenant directory** | AXIAM ↔ a tenant's own LDAP or Active Directory server | TLS before any bind or search — `ldaps://`, or StartTLS that fails closed — verified against the tenant's own anchors and the URL's host; referrals never followed; login names enter filters only through RFC 4515 escaping; a bounded per-tenant pool; a read-only bind account; the host resolved once and held to the deployment's address rule, the connection pinned to the vetted address; every message from the directory measured and checked before it is parsed |
 | **AXIAM ↔ SAML service provider** | AXIAM's SAML identity provider ↔ the applications a tenant registered to receive assertions | Assertions always signed with the tenant's own credential, inside its validity window, under the `Issuer` of the tenant in the request path; delivered only to a registered ACS URL; five-minute validity; a pairwise `NameID` by default; failure responses never signed; once single logout lands (D-38), an SP's logout messages accepted only signed by its registered certificate and verified per node, and AXIAM's own signed only for a session holder or a verified SP |
+| **AXIAM ↔ SSF receiver** | AXIAM's Shared Signals Framework transmitter ↔ the relying parties a tenant registered a stream for | Every SET signed with the deployment key, explicitly typed, under the tenant issuer and an audience unique across the deployment; signed only when delivered, for an enabled stream that carries the event; pushed only to an endpoint held to the outbound address policy, with a sealed credential that never follows the endpoint to another origin; stream management and polling only with the receiver's own client-credentials token carrying `ssf.manage`, for its own streams |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
 
 ### The assets worth protecting
@@ -2248,8 +2272,8 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 31 of
-384. On the website this table is generated from the Threat Dragon model, so it
+Every threat the model does not record as mitigated, most severe first — 19 of
+401. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -2267,10 +2291,14 @@ each.
 | T-146 — Long-lived client secret committed to a repository | High | SDK configuration (client secrets, CA bundles) · *Client SDKs & admin UI integration surface* |
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
+| T-392 — The push endpoint is used to reach internal services | High | SSF transmitter (SET issuance, stream API, discovery) · *Audit, webhooks, email & notifications* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
+| T-388 — A captured SET is replayed to its receiver | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
+| T-394 — A receiver is flooded with events | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
+| T-395 — The poll buffer grows without bound | Medium | ssf_stream + ssf_event_buffer · *Audit, webhooks, email & notifications* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are

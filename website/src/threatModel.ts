@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.26.0",
+ "version": "2.27.0",
  "diagramCount": 9,
- "total": 384,
- "open": 15,
- "mitigated": 369,
+ "total": 401,
+ "open": 19,
+ "mitigated": 382,
  "diagrams": [
   {
    "id": 0,
@@ -7545,16 +7545,16 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules.",
+   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules. Since Phase 23 (G-5, T23.5.2, model 2.27.0) it also covers the Shared Signals Framework transmitter: the SSF stream registry and its per-stream event buffer (`ssf_stream`, `ssf_event_buffer`), SET issuance with the deployment key, the stream management API and transmitter metadata a receiver calls with its own client credentials, and the push and poll flows to the receiver, across a boundary of their own (D-44 … D-52).",
    "width": 1438,
-   "height": 848,
+   "height": 1088,
    "boundaries": [
     {
      "id": "c0d71a54-aac0-5a7f-84bf-d3ac20259104",
      "x": 324,
      "y": 24,
      "w": 660,
-     "h": 800,
+     "h": 1040,
      "label": "AXIAM eventing & audit services"
     },
     {
@@ -7570,8 +7570,16 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 1034,
      "y": 84,
      "w": 380,
-     "h": 660,
+     "h": 900,
      "label": "Data tier"
+    },
+    {
+     "id": "22ad7639-84f9-58e1-9d96-5ddd89f8a00c",
+     "x": 24,
+     "y": 784,
+     "w": 260,
+     "h": 220,
+     "label": "SSF receivers"
     }
    ],
    "nodes": [
@@ -7942,6 +7950,163 @@ export const THREAT_MODEL: ThreatModel = {
       }
      ],
      "open": 0
+    },
+    {
+     "id": "ca5dcc2e-8c77-530c-b35e-5fa3aac86bc9",
+     "kind": "actor",
+     "x": 49,
+     "y": 864,
+     "w": 150,
+     "h": 80,
+     "name": "SSF receiver (relying party)",
+     "lines": [
+      "SSF receiver",
+      "(relying party)"
+     ],
+     "description": "A relying party that consumes CAEP and RISC events from AXIAM: receives SETs on its push endpoint (RFC 8935) or polls for them (RFC 8936), and manages its stream through the SSF 1.0 stream management API.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 385,
+       "title": "Receiver impersonation on the stream management API",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The SSF stream management API lets a receiver read its stream, repoint its push endpoint, change the push credential, change the stream's status and ask for verification events. A party that can pass for a receiver — a user session, a service account, a client token minted for another purpose, or another receiver's client — could redirect a tenant's security events, silence them, or learn which events and subjects a relying party watches.",
+       "mitigation": "`SsfReceiverToken` (`handlers::ssf`, D-50): only an access token issued to an OAuth2 client by the client-credentials grant (`sub_kind` `OAuth2Client`) **and** carrying the dedicated scope `ssf.manage` is accepted; a user token (even an administrator's), a service-account token or a client token without the scope is `403`, no token `401`. A stream is the receiver's only when its administrator-set `receiver_client_id` is the token's `client_id`; every other stream answers the same `404` as one that does not exist. The scope reaches a client only through its registration (`OAuth2Client::scopes`, refused by the token endpoint otherwise) and the binding only through an administrator (§31). Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `the_receiver_api_needs_a_client_token_with_the_scope`, `another_receivers_or_another_tenants_stream_is_not_found`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "2cb70f89-99d6-5c6b-8862-a03dea020ff9",
+     "kind": "process",
+     "x": 374,
+     "y": 784,
+     "w": 140,
+     "h": 160,
+     "name": "SSF transmitter (SET issuance, stream API, discovery)",
+     "lines": [
+      "SSF",
+      "transmitter",
+      "(SET",
+      "issuance,",
+      "stream API,",
+      "discovery)"
+     ],
+     "description": "`axiam_oauth2::ssf` and `handlers::ssf` / `handlers::ssf_admin` (T23.5.2): the stream registry's management routes (contract §31), the receiver's stream management API under `/ssf/v1`, `/.well-known/ssf-configuration`, and `sign_set`, the only SET signer, run at delivery by the push deliverer and the poll endpoint T23.5.3 builds.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 386,
+       "title": "Cross-tenant or cross-receiver stream access",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Streams of every tenant live in one table. A tenant administrator, or a receiver of one tenant, who can name another tenant's stream id — in a path, a `stream_id` query or a body — could read where that tenant's events go or change it.",
+       "mitigation": "The tenant is never taken from the request: the management routes refuse a `{tenant_id}` that is not the caller's (`403`) and require `ssf_streams:read` / `ssf_streams:write` (a human-only family: a service-account token is `401`); the receiver API takes the tenant from the token. Every repository verb is tenant-scoped in its `WHERE` (`SurrealSsfStreamRepository`), so another tenant's id reads, updates, verifies, decrypts and deletes as `NotFound`. Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `tenants_cannot_read_update_verify_open_or_delete_each_others_streams`; `crates/axiam-api-rest/tests/ssf_test.rs` `another_receivers_or_another_tenants_stream_is_not_found`, `each_operation_needs_its_permission_its_tenant_and_a_human`."
+      },
+      {
+       "number": 389,
+       "title": "A SET is mistaken for another kind of JWT",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "SETs, ID tokens, logout tokens and access tokens are all signed with the same deployment key (D-13). A SET presented where an access token or an ID token is expected could be accepted as one if the verifier checks only the signature.",
+       "mitigation": "Explicit typing and shape (SSF §4.1.1–§4.1.3, RFC 8417 §4.5–§4.7): `typ: secevent+jwt`, no `sub` and no `exp` (`SetClaims` has no field for either), an `events` claim, and an `aud` that is a receiver audience, never an AXIAM audience. AXIAM's own access-token validation therefore refuses a SET (no `exp`, wrong audience). Tests: `crates/axiam-oauth2/src/ssf.rs` `a_set_is_never_accepted_as_an_axiam_access_token`, `a_set_verifies_against_the_published_jwks_with_the_pinned_header_and_claims`."
+      },
+      {
+       "number": 392,
+       "title": "The push endpoint is used to reach internal services",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Open",
+       "description": "The push endpoint is chosen by a tenant administrator and, since SSF lets a receiver update its delivery, by the receiver. AXIAM POSTs to it from inside the deployment. Pointed at a metadata service, a loopback admin port or a private address, it turns the transmitter into a request forger with a credential attached.",
+       "mitigation": "Write time is built: every endpoint an administrator or a receiver supplies is held to the webhook outbound address policy (D-49, `validate_push_endpoint`): `https` only, no credentials or fragment, no IP literal that is not globally routable (loopback, private, link-local, the metadata address, IPv4-mapped forms), no `localhost`, `*.local` or `*.internal`. Tests: `crates/axiam-oauth2/src/ssf.rs` `the_push_endpoint_policy_is_the_webhook_one`; `crates/axiam-api-rest/tests/ssf_test.rs` `every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule`, `a_receiver_cannot_repoint_its_endpoint_to_a_refused_address`. Open until T23.5.3's `SsfPush` deliverer sends every push only through `axiam_pki::ssrf::guarded_fetch` with `allow_private = false` (resolve, refuse, pin; no redirect followed; a capped response), with its test — a name that resolves to an internal address is only caught there."
+      },
+      {
+       "number": 393,
+       "title": "Flooding the stream management API or discovery",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The stream management API, the verification endpoint and the unauthenticated transmitter metadata are new inbound surfaces. A loop against them costs a datastore read per request, and verification additionally makes AXIAM sign and send an event, so it amplifies towards the receiver.",
+       "mitigation": "Every route has its own bucket (plan §7 rule 6): `AXIAM__RATE_LIMIT__SSF_PER_MIN` (60 per minute per IP) on each receiver route and each discovery form, `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` (30) on each management write, never moved by a profile preset. Each stream also enforces `min_verification_interval` (60 s) atomically in the datastore, `429` inside it. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `every_ssf_route_has_its_own_bucket`, `the_verification_event_is_submitted_signed_on_delivery_and_rate_limited_per_stream`; `crates/axiam-db/tests/ssf_stream_repository_test.rs` `a_verification_is_claimed_once_per_interval`."
+      },
+      {
+       "number": 397,
+       "title": "A receiver widens its events or overrides the administrator",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "SSF lets a receiver update its stream configuration and status. A receiver that could add event types beyond what the administrator allowed, change the delivery method, the audience or the subject format, or restart a stream the administrator stopped would receive personal data the tenant never agreed to send it.",
+       "mitigation": "`apply_receiver_update` (D-50): `events_requested` may only narrow within the administrator's `events_allowed` (an allowed-but-unknown URI is ignored, a known one outside the allowance is `400`); transmitter-supplied members must match; the method is the administrator's; the audience, the subject format and the allowance are never receiver-writable. A status the administrator set to anything but `enabled` cannot be changed by the receiver (`403`, D-51); POST and DELETE on the configuration endpoint are `403`. Tests: `crates/axiam-oauth2/src/ssf.rs` `a_receiver_may_narrow_but_not_widen_its_events`, `transmitter_supplied_members_must_match`, `replace_deletes_what_it_omits_and_needs_a_delivery`; `crates/axiam-api-rest/tests/ssf_test.rs` `a_receiver_narrows_its_events_and_cannot_widen_them`, `the_receiver_sets_its_status_unless_an_administrator_stopped_the_stream`."
+      },
+      {
+       "number": 399,
+       "title": "Stream changes are not attributable",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Where a tenant's security events go is a security decision. Without a record, a stream repointed to a collection endpoint, or a verification storm, cannot be traced to the administrator or the receiver that caused it.",
+       "mitigation": "One audit row per write: `ssf_stream.created`, `ssf_stream.updated` (the **names** of the changed members), `ssf_stream.deleted` with the administrator as actor; `ssf_stream.receiver_updated`, `ssf_stream.receiver_status_changed` and `ssf_stream.verification_requested` with the receiver's `client_id`. Never the header, never a subject. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `an_administrator_registers_reads_lists_replaces_and_deletes_a_stream`, `a_receiver_narrows_its_events_and_cannot_widen_them`, `the_verification_event_is_submitted_signed_on_delivery_and_rate_limited_per_stream`."
+      },
+      {
+       "number": 400,
+       "title": "A stream is bound to a client that is not the tenant's receiver",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The receiver binding decides who may manage the stream and poll its events. Bound to a client of another tenant, to a client that cannot obtain a client-credentials token, or to a name no client has yet (to be registered later by someone else), it hands the stream to the wrong party.",
+       "mitigation": "The administrator's write refuses (`400`, naming the rule) a `receiver_client_id` that is not an OAuth2 client of the tenant, not registered for the `client_credentials` grant, or not registered with the `ssf.manage` scope; a client of another tenant is not found in this tenant's lookup. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule`."
+      },
+      {
+       "number": 401,
+       "title": "Transmitter metadata as a tenant oracle",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "`/.well-known/ssf-configuration` is unauthenticated by specification. Answers that differ between an unknown tenant, a tenant with the transmitter off and a malformed id tell anyone which tenants exist and which send security events.",
+       "mitigation": "One empty `404` for every way of having nothing to say — no or a malformed tenant id, an unknown tenant, a tenant whose effective `ssf_enabled` is off (the D-20 shape, D-45) — on both the root and the tenant-path form; the receiver API likewise answers a stream of a tenant whose transmitter is off as not found. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `discovery_answers_one_empty_404_for_every_way_of_having_nothing_to_say`, `with_the_transmitter_off_the_receiver_sees_no_stream`, `discovery_on_the_root_issuer_lists_the_endpoints_and_events`, `discovery_on_a_tenant_path_issuer_names_the_tenant_issuer`."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "380feb66-2da4-5fd3-aa96-231aa7263516",
+     "kind": "store",
+     "x": 1079,
+     "y": 784,
+     "w": 170,
+     "h": 80,
+     "name": "ssf_stream + ssf_event_buffer",
+     "lines": [
+      "ssf_stream +",
+      "ssf_event_buffer"
+     ],
+     "description": "Schema v77: the stream registry (receiver binding, audience unique across the deployment, sealed push header) and the per-stream bounded buffer of unsigned pending events.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 391,
+       "title": "The push credential is disclosed or carried to another host",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A receiver may require an `Authorization` header on its push endpoint. AXIAM stores it and presents it on every push, so it is a credential to a third party: readable from a response, a log or the database it is a key to the receiver's endpoint, and if the endpoint could be moved without it, AXIAM itself would hand it to whatever host the endpoint was moved to.",
+       "mitigation": "Sealed with AES-256-GCM under `pki_encryption_key` (the key webhook secrets use), nonce and ciphertext in their own columns; no read projects them and the single path to the plaintext is `decrypt_authorization_header`, for the push deliverer (D-49). No response carries it (`authorization_header_set` says whether one is stored), `Debug` redacts it, audit rows name the field and never the value, and without the key a write that sets one is `503`. A stored header never follows the endpoint to another origin: moving it — by the administrator or the receiver — requires the header again or its removal (`400`). Contract §31.5 makes it `Sensitive<T>`. Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `create_round_trips_every_field_and_never_reads_the_header_back`, `without_the_key_a_header_cannot_be_stored_and_everything_else_works`, `an_update_keeps_replaces_or_clears_the_header`; `crates/axiam-api-rest/tests/ssf_test.rs` `an_administrator_registers_reads_lists_replaces_and_deletes_a_stream`, `moving_the_endpoint_to_another_origin_needs_the_header_again`, `a_receiver_cannot_repoint_its_endpoint_to_a_refused_address`; `crates/axiam-oauth2/src/ssf.rs` `repointing_the_endpoint_is_held_to_the_address_policy_and_the_credential_rule`, `debug_never_prints_a_subjects_address_or_a_receivers_header`; schema `v77_stores_the_push_header_sealed_and_no_signed_token`."
+      },
+      {
+       "number": 395,
+       "title": "The poll buffer grows without bound",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "Events for a poll stream, and for any paused stream, wait in `ssf_event_buffer` until they are acknowledged or the stream resumes. A receiver that never polls, or a stream paused and forgotten, would accumulate rows for ever and grow the datastore.",
+       "mitigation": "Specified (D-48): at most 1 000 events per stream, the oldest dropped to admit the newest (SSF §8.1.2 permits dropping held events), a seven-day `expires_at` enforced by the sweeper, one row per `(tenant, stream, jti)` in the datastore, and the rows deleted with their stream and their tenant. Built so far: the table, its unique index and both cascades — `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_buffer_holds_one_row_per_jti`, `deleting_a_stream_removes_its_buffer_and_nothing_else`, `a_tenant_delete_removes_its_streams_and_buffers`. Open until T23.5.3 writes the buffer (bound, drop-oldest, expiry, acknowledgement) and registers its sweep in `/health/jobs`, with their tests."
+      }
+     ],
+     "open": 1
     }
    ],
    "edges": [
@@ -8162,14 +8327,126 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "email",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "c5f29b0a-ce93-5eed-b6fa-46dc9d9ba5b2",
+     "path": "M374.5,872.7 L199,894.6",
+     "name": "SET push / poll response",
+     "description": "",
+     "label": "SET push / poll response (HTTPS, RFC 8935 / 8936)",
+     "labelLines": [
+      "SET push / poll response (HTTPS, RFC",
+      "8935 / 8936)"
+     ],
+     "lx": 286.8,
+     "ly": 883.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS, RFC 8935 / 8936",
+     "threats": [
+      {
+       "number": 387,
+       "title": "A forged SET is accepted by a receiver",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A receiver acts on a session-revoked, account-disabled or credential-change event by logging users out or locking accounts. Anyone who can make a receiver accept a SET AXIAM did not sign — an unsigned token, `alg: none`, a key the attacker chose, or a token for a different issuer — can log out or lock out any user of the relying party.",
+       "mitigation": "Every SET is a JWS signed with the deployment's Ed25519 key (D-13), `alg: EdDSA`, `typ: secevent+jwt` and the `kid` the tenant's `jwks_uri` publishes; `sign_set` is the only signer and nothing unsigned is ever sent. `iss` is the tenant's issuer, identical to the transmitter metadata's `issuer` (SSF §4.1.6), which a receiver pins. Verification is the receiver's: contract §31.7 makes the optional receiver helper verify the signature against the JWKS, `typ`, `iss` and `aud` before anything else. Tests: `crates/axiam-oauth2/src/ssf.rs` `a_set_verifies_against_the_published_jwks_with_the_pinned_header_and_claims`, `a_set_does_not_verify_for_another_audience_or_issuer`, `the_issuer_follows_the_tenant_issuer_mode`. Forging still needs the deployment key, a principal asset."
+      },
+      {
+       "number": 388,
+       "title": "A captured SET is replayed to its receiver",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "A SET carries no `exp` (SSF §4.1.7 forbids it), so a SET captured in transit, from a receiver's logs or from a misrouted push stays valid forever. Replayed later, a session-revoked or account-disabled SET logs out or locks out its subject again.",
+       "mitigation": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Open because the control is the receiver's: RFC 8417 §4.1 / contract §31.7 require it to remember the `jti`s it processed and refuse a repeat, and the receiver helper that does so ships in the SDKs only after the post-merge fan-out (D-35); a receiver that does not de-duplicate stays exposed for as long as it treats an old SET as news."
+      },
+      {
+       "number": 390,
+       "title": "A SET is addressed to the wrong receiver",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "On a deployment without per-tenant issuer paths every tenant's SETs carry the same `iss` and are signed with the same key. If two streams — in two tenants — could share an audience, a tenant administrator could register a stream with another tenant's receiver audience, collect SETs about users they created (an email subject a victim also uses, say) and replay them to that receiver, which would accept them: right key, right issuer, right audience.",
+       "mitigation": "The audience is unique **across the deployment**, enforced by the datastore (`idx_ssf_stream_audience` UNIQUE on `audience` alone, D-47): a second registration in any tenant is `409` without saying where. `aud` is the stream's audience, one string, never a list; with tenant issuer paths `iss` is the tenant's own issuer too. Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_audience_is_unique_across_every_tenant`; `crates/axiam-api-rest/tests/ssf_test.rs` `an_audience_is_unique_across_tenants_and_a_header_needs_the_sealing_key`; `crates/axiam-oauth2/src/ssf.rs` `a_set_does_not_verify_for_another_audience_or_issuer`. Residual: an administrator can squat an audience another tenant has not registered yet; it buys them nothing a receiver accepts, because the receiver configures the audience its own stream was given."
+      },
+      {
+       "number": 394,
+       "title": "A receiver is flooded with events",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "One administrative act can produce many SETs — revoking every session of a user, disabling accounts in bulk, a directory sync that deactivates hundreds. Pushed without a bound, or retried without a ceiling against a receiver that is slow or down, they overload the receiver and the dispatcher's queue.",
+       "mitigation": "Specified (D-48, D-52): one SET per event per stream, only for the events the stream carries; push goes through the shared outbound dispatcher (D-36), which bounds retries per kind (`max_attempts`, exponential backoff with a ceiling, then the dead-letter queue) and delivers one attempt per message, so a receiver that is down receives a bounded number of attempts per event and never a retry storm; a paused stream receives nothing. Open until T23.5.3 lands the `SsfPush` deliverer and the event sources on that dispatcher with the retry, dead-letter and pause tests; the residual then is that a mass revocation is as many SETs as sessions, by design (SSF has no batching)."
+      },
+      {
+       "number": 396,
+       "title": "Subject identifiers disclose or link personal data",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A SET names a person. An identifier that is an email address, or one that is the same at every receiver, lets receivers that compare notes follow a user across relying parties, and an address AXIAM never checked lets an attacker who registered it pass as its owner at an email-keyed receiver.",
+       "mitigation": "D-46: `iss_sub` by default — the tenant issuer and the user id, which is the `sub` AXIAM's ID tokens already give every relying party (`subject_types_supported: public`), so SSF discloses no linkage a receiver did not hold. `email` only when an administrator chose it for the stream (a receiver cannot), and only for an address something vouched for — D-25's rule, `email_verified_at` set or the account `Active`; for any other account the event is not sent on that stream, never with another identifier. No event carries free text (`reason_admin`, `reason_user`, `friendly_name` are never sent), and the queue and the buffer hold only the subject member that will be sent. Tests: `crates/axiam-oauth2/src/ssf.rs` `both_subject_formats_are_rfc_9493_and_the_session_is_named`, `an_unvouched_address_is_never_sent_and_nothing_else_replaces_it`, `the_vouching_rule_is_d25s`, `each_of_the_six_events_has_its_pinned_shape`. Residual: a buffered event for an erased user keeps its subject member until it is acknowledged or expires (seven days)."
+      },
+      {
+       "number": 398,
+       "title": "An event is delivered on a stream that was disabled or narrowed",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Delivery is asynchronous: an event can wait in the queue or the buffer while an administrator disables the stream, the receiver narrows its events, or the stream is deleted. Delivering it anyway sends personal data to a receiver that is no longer meant to have it.",
+       "mitigation": "What travels is the **unsigned** pending event (D-48); the SET is signed by `sign_set` at the moment of delivery against the stream as it is then, and it refuses a stream that is not enabled or no longer carries the event — a disabled stream delivers nothing, a paused one holds, a narrowed one drops (D-51). The only event a non-enabled stream can sign is the stream-updated announcement of the status it is in (SSF §8.1.5). Tests: `crates/axiam-oauth2/src/ssf.rs` `no_set_for_a_disabled_or_paused_stream_or_an_event_it_does_not_carry`, `a_stream_updated_event_may_only_announce_the_current_status`; `crates/axiam-api-rest/tests/ssf_test.rs` `verification_needs_a_live_stream_and_a_wired_outbox`, `an_admin_status_change_announces_the_new_status`. T23.5.3's e2e test (a disabled stream delivers nothing) re-proves it end to end."
+      }
+     ],
+     "open": 2
+    },
+    {
+     "id": "c18a02c4-5509-5935-9f28-9e14d95c1a2d",
+     "path": "M199,894.6 L374.5,872.7",
+     "name": "stream management + poll",
+     "description": "",
+     "label": "stream management + poll (HTTPS, client credentials)",
+     "labelLines": [
+      "stream management + poll (HTTPS,",
+      "client credentials)"
+     ],
+     "lx": 286.8,
+     "ly": 883.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS, client credentials",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "fa7ee1e5-990d-5faa-9f82-f7c132011459",
+     "path": "M513.9,860.1 L1079,828.7",
+     "name": "read / write streams, buffer",
+     "description": "",
+     "label": "read / write streams, buffer (SurrealQL)",
+     "labelLines": [
+      "read / write streams, buffer",
+      "(SurrealQL)"
+     ],
+     "lx": 796.4,
+     "ly": 844.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealQL",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 18,
-   "open": 1,
+   "total": 35,
+   "open": 5,
    "bySeverity": {
-    "Medium": 14,
-    "High": 2,
-    "Low": 2
+    "Medium": 23,
+    "High": 8,
+    "Low": 4
    }
   },
   {

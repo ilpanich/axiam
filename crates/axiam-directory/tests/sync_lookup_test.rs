@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axiam_core::models::directory::{DirectoryAuthError, DirectoryConfig, DirectoryKind};
-use axiam_directory::client::{ClientLimits, DirectoryClient, DirectoryTarget};
+use axiam_directory::client::{ClientLimits, DirectoryTarget};
 use axiam_directory::sync_lookup::{DirectorySession, EntryLookup};
 use axiam_directory::tls::client_config;
 use chrono::Utc;
@@ -91,7 +91,7 @@ fn session_with(
         config,
         target,
         Zeroizing::new(service_secret()),
-        Arc::new(DirectoryClient::new(limits)),
+        Arc::new(support::loopback_client(limits)),
     )
 }
 

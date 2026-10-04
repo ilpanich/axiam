@@ -89,6 +89,25 @@ impl<R: DirectoryConfigRepository> RepositoryDirectoryAuthenticator<R> {
         }
     }
 
+    /// The shared client (its pool, bounds, address policy and frame cap).
+    #[must_use]
+    pub fn client(&self) -> &Arc<DirectoryClient> {
+        &self.client
+    }
+
+    /// The address guard every connection runs, for a URL about to be saved
+    /// (T23.3.8 calls this on every write, beside `config::validate`).
+    ///
+    /// # Errors
+    ///
+    /// The [`GuardError`](crate::address::GuardError) naming the refusal.
+    pub async fn guard_url(
+        &self,
+        url: &str,
+    ) -> Result<crate::address::GuardedTarget, crate::address::GuardError> {
+        self.client.guard(url).await
+    }
+
     async fn run(
         &self,
         tenant_id: Uuid,

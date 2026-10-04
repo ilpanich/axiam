@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.22.0",
+ "version": "2.23.0",
  "diagramCount": 9,
- "total": 330,
+ "total": 355,
  "open": 18,
- "mitigated": 312,
+ "mitigated": 337,
  "diagrams": [
   {
    "id": 0,
@@ -3314,7 +3314,7 @@ export const THREAT_MODEL: ThreatModel = {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
    "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config. Since Phase 23 (G-2) it also covers AXIAM as a SAML identity provider: the assertion issuer (`axiam_federation::saml_idp`, T23.2.2), the tenant's sealed signing credential (`saml_idp_credential`, D-21) and the trust boundary to the service providers it issues to. T23.2.3 adds the SSO endpoint (`/saml/v2/{tenant}/sso`, both bindings, IdP-initiated, the continue leg) and the `saml_authn_request` store that holds a request across the login hop.",
-   "width": 1438,
+   "width": 1478,
    "height": 1068,
    "boundaries": [
     {
@@ -3337,7 +3337,7 @@ export const THREAT_MODEL: ThreatModel = {
      "id": "4915d4de-0462-5843-a09e-77c433fcf2ac",
      "x": 1034,
      "y": 84,
-     "w": 380,
+     "w": 420,
      "h": 920,
      "label": "Data tier"
     },
@@ -3888,7 +3888,7 @@ export const THREAT_MODEL: ThreatModel = {
       "bounded",
       "pool)"
      ],
-     "description": "axiam-directory's LDAP client (ldap3 over rustls) and its injection into the login path through the DirectoryAuthenticator port (T23.3.2).",
+     "description": "axiam-directory's LDAP client (ldap3 over rustls) and its injection into the login path through the DirectoryAuthenticator port (T23.3.2); just-in-time provisioning and explicit linking (T23.3.3, D-28); group mapping through the explicit table (T23.3.4, D-30). Every connection passes the address guard and is pinned to the vetted address, and every message from the directory passes the frame guard (T23.3.7, D-19).",
      "outOfScope": false,
      "threats": [
       {
@@ -3916,7 +3916,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "The directory is an external server a tenant administrator chooses. One that accepts and never answers, stalls on every bind, or streams entries without end could hold a task and a socket per sign-in attempt, and an attacker hammering one tenant's login could exhaust AXIAM's file descriptors for every tenant.",
-       "mitigation": "A bounded pool: at most 8 connections in use per tenant (`MAX_CONNECTIONS_PER_TENANT`) and 256 across tenants, each permit acquired within 2 s or answered `Unavailable` at once, so the overflow is refused rather than queued; at most 4 idle connections per tenant, closed after 60 s idle or 300 s of age. A permit is held until its socket is actually closed, so the bound counts real sockets. Connecting (TCP, StartTLS and the handshake together) is bounded at 5 s, each operation at 5 s, and the whole authentication at 15 s; the user search reads at most two entries. Tests: `the_pool_bounds_concurrent_connections_per_tenant` (a burst against a slow server never exceeds the per-tenant bound plus the idle cap in open sockets, and the overflow fails fast), `pools_are_partitioned_by_tenant`, `a_silent_directory_times_out_at_connect`, `a_stalling_directory_times_out_per_operation`, `the_authentication_deadline_bounds_the_whole_flow`. Residual: `ldap3`'s codec has no per-message size cap, so a hostile server can make one connection buffer whatever it sends before the deadline; memory is bounded by the deadline and the pool, not by a frame limit."
+       "mitigation": "A bounded pool: at most 8 connections in use per tenant (`MAX_CONNECTIONS_PER_TENANT`) and 256 across tenants, each permit acquired within 2 s or answered `Unavailable` at once, so the overflow is refused rather than queued; at most 4 idle connections per tenant, closed after 60 s idle or 300 s of age. A permit is held until its socket is actually closed, so the bound counts real sockets. Connecting (TCP, StartTLS and the handshake together) is bounded at 5 s, each operation at 5 s, and the whole authentication at 15 s; the user search reads at most two entries. Tests: `the_pool_bounds_concurrent_connections_per_tenant` (a burst against a slow server never exceeds the per-tenant bound plus the idle cap in open sockets, and the overflow fails fast), `pools_are_partitioned_by_tenant`, `a_silent_directory_times_out_at_connect`, `a_stalling_directory_times_out_per_operation`, `the_authentication_deadline_bounds_the_whole_flow`. **Amended 2026-10-04 (T23.3.7, P23W2-10): the frame cap.** That residual is closed. AXIAM now performs StartTLS and the TLS handshake itself and hands `ldap3` one end of a private Unix socket pair; a relay task forwards the directory's messages only after `axiam_directory::frame` has read each one whole — and the declared length is checked against the cap (default 2 MiB, `AXIAM__DIRECTORY__MAX_MESSAGE_BYTES`, clamped to 64 KiB … 16 MiB) from the header alone, before a byte of content is reserved; within the cap the buffer grows only as bytes arrive. A longer declaration ends the connection at once instead of after the operation timeout. Memory is now bounded by the cap twice (the relay's message and `ldap3`'s buffer) per connection, times the pool bounds. Tests: `an_over_long_declared_length_aborts_the_connection_without_waiting_for_it`, `the_cap_is_configurable_and_ordinary_traffic_passes_under_the_default` (`connector_guard_test.rs`), and the unit test `a_declared_length_over_the_cap_is_refused_from_the_header_alone`, which feeds the reader the six header octets only and gets the refusal, not a wait for content."
       },
       {
        "number": 296,
@@ -3941,9 +3941,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network",
        "type": "Information disclosure",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The directory host and port are whatever a tenant administrator saves. Pointed at an internal address, each directory sign-in makes AXIAM open a TCP connection and begin a TLS handshake there, and how long the failure takes distinguishes an open port from a closed one.",
-       "mitigation": "Partly mitigated. TLS is mandatory and nothing is sent before a verified handshake, so no LDAP request reaches a host that cannot present a certificate chaining to the tenant's anchors; every outcome reaches the user as the same generic failure and the reason is logged for the operator only; connecting is bounded at 5 s and pooled per tenant. Open because the directory connector does not apply the `guarded_fetch` address policy (no refusal of private, loopback or link-local addresses): directories are usually on private networks, so a blanket refusal would break the feature it serves. Tenant administrators are trusted within their own tenant (assumption 7). Follow-up for the management routes (T23.3.8): an operator-level allow-list of directory hosts."
+       "mitigation": "**Closed 2026-10-04 (T23.3.7, D-19, D-32): the address guard.** `axiam_directory::address::guard` resolves the directory host once and judges every address it resolves to with the classifier `guarded_fetch` uses (`axiam_core::ip_class`, moved below both so they cannot disagree): loopback, unspecified, link-local (`169.254.169.254`, `fe80::/10`), multicast and special-purpose addresses are always refused; IPv4-mapped forms are judged as the IPv4 address they carry; a metadata endpoint inside a private range (`fd00:ec2::254`, `100.100.100.200`) is refused whatever the configuration says; an address of this host on AXIAM's REST or gRPC port is refused; and a private address (RFC 1918, CGNAT, ULA) is admitted only inside a network the operator listed in `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` — deployment configuration, unset admits none. An IPv6-literal URL is refused. `DirectoryClient::connect` runs the guard at **every** connection — the pool, the user bind, group lookup, the sync job — and opens its TCP socket to a vetted `SocketAddr`, so nothing resolves the name a second time; the TLS server name stays the URL's host. The management routes (T23.3.8) call the same guard before a configuration is saved. Tests (`connector_guard_test.rs`): `each_refused_class_is_refused_at_guard_and_at_connect_with_no_connection`, `a_hostname_that_resolves_to_loopback_is_refused`, `an_own_listener_port_is_refused_and_another_port_is_not`, `a_private_address_is_refused_without_the_allow_list_and_admitted_with_it`, `dns_rebinding_between_check_and_connect_never_reaches_loopback`, `the_connection_uses_the_pinned_address_and_resolves_once_per_connection`, `the_tls_name_checked_is_the_hostname_over_a_pinned_address`, plus the classifier's table test in `axiam-core`. Residual, stated: inside the networks the operator lists, any tenant administrator can aim the connector at any host and port, and what that buys is a TCP connect and a TLS ClientHello (after a 31-byte StartTLS request on `ldap://`) toward a host that must present a certificate chaining to that tenant's anchors before anything else is sent, answered to the user as the generic failure. The listener rule recognises this host's own addresses only — not another replica's pod address, nor a Service that forwards back to AXIAM — so the operator note says not to list AXIAM's own networks."
       },
       {
        "number": 301,
@@ -3961,7 +3961,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "Active Directory and many OpenLDAP deployments lock an account after a number of failed binds. An attacker who sprays passwords at AXIAM's login endpoint could make AXIAM perform those failed binds, locking real users out of their corporate accounts — mail, VPN, workstation — not just out of AXIAM; and the directory's own lockout may be absent altogether, leaving AXIAM's as the only brake.",
-       "mitigation": "AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`."
+       "mitigation": "AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`. **Widened 2026-10-04 (T23.3.7): names AXIAM holds no account for.** With `jit_provisioning` on, an unknown login name reaches the directory too (T23.3.3), and there is no AXIAM account whose counter could stop it; that case is T-332, which is open."
       },
       {
        "number": 303,
@@ -3971,6 +3971,114 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A directory account's password belongs to the directory, where the customer's own policy, rotation and offboarding apply. A local credential beside it — a reset link mailed to the account's address, a self-service change, an administrator's or a SCIM provisioner's password write, an OPAQUE record, or simply the local hash it was created with — is a second way in that the directory never sees: disabling the person in Active Directory would leave it working, and whoever controls the mailbox or the provisioning token owns the account.",
        "mitigation": "Every local door is refused, and the account holds nothing a door could open. **The hash.** `mark_directory_account`, the marker's only writer, replaces `password_hash` with an Argon2id hash of 32 random bytes nobody holds and deletes any OPAQUE record, in the same transaction; and no sign-in path verifies a directory account's hash at all (`AuthService::login` binds to the directory, gRPC `ValidateCredentials` answers `valid: false`). **Change.** `AuthService::change_password` refuses before verifying or writing anything (`400 validation_error`, an existing code). **Reset.** The request answers a directory account exactly as an unknown address — the same `200`, the same dummy Argon2id verify, no token — so it reveals no more than existence does today; a confirm with a token that predates the marking spends it and writes nothing. **Administrators.** The native admin API has no password write; SCIM `PATCH` refuses `password` for a directory account with RFC 7644's `mutability`. **OPAQUE.** `login/start` serves a directory account the decoy whatever the table holds, `login/finish` refuses one with the generic `401`, and `store_credential` — the one place a record is written — refuses one too. **The marker itself** cannot be set or cleared by the admin API or SCIM (neither `CreateUser` nor `UpdateUser` carries it). Tests: `directory_account_test.rs` in `axiam-auth` (change, reset request, reset confirm), in `axiam-api-rest` (the change, reset and confirm routes, both OPAQUE doors, the admin API), in `axiam-scim` (password write, marker), `grpc_units.rs::validate_credentials_refuses_a_directory_account`, and `user_directory_marker_test.rs` (the transaction). Residual: a passkey enrolled by the account keeps working until the account is disabled in AXIAM (the sync job, T23.3.5, carries directory disablement over)."
+      },
+      {
+       "number": 331,
+       "title": "A hostile directory's malformed message crashes or panics the connector every tenant shares",
+       "type": "Denial of service",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`ldap3 0.12` hands every message to `lber`, whose parser recurses once per nested constructed element with no bound: a few tens of kilobytes of nesting overflow a worker's stack, and a stack overflow aborts the process — every tenant's sign-ins with it. Its envelope decoder `expect`s a message id and an operation, so a short message panics the connection's task. The directory is a tenant administrator's choice.",
+       "mitigation": "The frame guard beneath `ldap3` (`axiam_directory::frame`, through the crate's relay): AXIAM performs StartTLS and the TLS handshake itself and gives `ldap3` one end of a private Unix socket pair; a relay task reads each message from the decrypted stream and forwards it only after checking it whole — an outer `SEQUENCE`, definite lengths of at most four octets, single-octet tags, every element inside its parent, constructed nesting at most 16 deep (walked iteratively, so the check cannot itself be driven into the stack it protects), and an envelope of a one-to-four-octet message id followed by an operation. The first message refused closes both sockets, the operation in flight fails as `Unavailable`, and the reason is logged at `warn`. On a platform without Unix sockets the connector refuses to connect rather than run without the guard. Tests: `nesting_past_any_stack_is_refused_and_the_process_survives` (20 000 levels), `an_envelope_ldap3_would_panic_on_is_refused`, and the unit tests `nesting_is_bounded_without_recursion` (100 000 levels), `envelopes_ldap3_would_panic_on_are_refused`, `an_element_that_overruns_its_parent_is_malformed`. Residual: what `ldap3` does with a well-formed operation is still `ldap3`'s code; a panic there unwinds that connection's task only (the release profile keeps `panic = \"unwind\"`), and search entries are read by AXIAM's own fallible parser (T23.3.2), never `SearchEntry::construct`."
+      },
+      {
+       "number": 332,
+       "title": "With just-in-time provisioning on, an unknown name costs a directory bind that no AXIAM lockout counts",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "T-302's brake is the per-account counter, and an unknown name has no account. With `jit_provisioning` on, every sign-in for a name AXIAM does not hold is a directory search and, when the directory knows the name, a bind with the presented password: AXIAM can be used to spray passwords at directory accounts that have never signed in to AXIAM — guessing them, or tripping the directory's own lockout for them — at whatever rate the login endpoint admits.",
+       "mitigation": "Bounded, not closed. The provisioning gate answers a tenant without an enabled directory, or without `jit_provisioning`, before the bind secret is decrypted or a socket opens; the hash permit is taken first, so saturation is the ordinary `503` before the directory hears anything; the per-IP login rate limits apply; and every outcome is the unknown-user answer at its cost (T-333). Nothing counts failures per unknown name, so a spray spread across addresses is limited only by the directory's own policy. Open until a failure counter keyed by (tenant, login name) covers names AXIAM holds no account for — a follow-up for the F4 review. Until then: keep `jit_provisioning` off where the directory has no lockout of its own. Tests that pin the bounds (`axiam-auth/tests/directory_provisioning_test.rs`): `every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify`, `saturation_answers_the_same_503_before_the_directory_is_contacted`, `a_tenant_without_a_directory_observes_nothing_new`."
+      },
+      {
+       "number": 333,
+       "title": "Just-in-time provisioning tells an outsider which names the directory holds",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "If a name the directory knows answered differently, or later, than one it does not — or a refused provisioning looked unlike a wrong password — the login endpoint would enumerate the corporate directory for anyone, and the account's creation would itself be a signal.",
+       "mitigation": "Every non-success branch of `AuthService::login_unknown_user` — no directory, provisioning off, no entry, a wrong password, an ambiguous entry, an unusable attribute, a collision (T-334), a directory that cannot be reached — is the unknown-user `InvalidCredentials`, and the dummy Argon2id verify runs beside the directory call under a hash permit taken first, so each costs at least what an unknown name costs. Success creates the account only after the bind succeeded; administrators and the audit log see it, the caller sees an ordinary sign-in. Residual, as for T-301: a bind usually costs more than a verify, so a name the directory knows can answer measurably later; the per-IP login limits bound the sampling. Tests: `every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify` (each branch timed against the unknown-user cost), `a_first_login_creates_an_active_marked_account_and_signs_in`."
+      },
+      {
+       "number": 334,
+       "title": "A directory administrator takes over a local AXIAM account by creating an entry with its name or address",
+       "type": "Elevation of privilege",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "Whoever administers the tenant's directory can create an entry called `admin`, or one carrying a local administrator's email address. Linking by name — at sign-in or in the sync job — would make that entry's password the local account's.",
+       "mitigation": "D-28: just-in-time provisioning never links, and the sync job never creates or links; both act only on accounts already carrying `directory_external_id`, whose only writers are on the directory path (D-18, D-29). Before creating, a collision probe compares the entry's username and email, lowercased, with both columns of every account of the tenant — every status, tombstones included — and the v71 unique indexes decide a concurrent race; a collision is the generic failure plus a `directory.jit_refused` audit row naming the collision, never the password. Linking an existing account is an explicit administrator act (T-336, T-337). Tests: `an_entry_that_collides_with_a_local_account_is_refused_and_audited` (five collision variants), `two_concurrent_first_logins_yield_exactly_one_account`, `a_local_account_is_never_touched` (sync). Residual: the comparison is Unicode lowercasing, not compatibility normalisation or confusable detection, so a fullwidth or look-alike spelling of `admin` is a distinct account — a phishing aid in a list of users, not a takeover."
+      },
+      {
+       "number": 335,
+       "title": "Directory-supplied attributes inject control characters, bidirectional overrides or oversize values into AXIAM's records",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A provisioned account's username, email and display name are whatever the directory says. Control characters, `U+202E`-style overrides or a megabyte of display name would reach every log line, administrator list, token claim and email that renders them.",
+       "mitigation": "One set of cleaners, `axiam_core::models::directory_profile`, used by provisioning and by the sync job: a username or email holding a control, whitespace or bidirectional-control character, or longer than its bound, is refused rather than repaired (the sign-in fails with the generic answer and an `unusable_attributes` audit row, and an entry without a plausible email is refused too, D-29); a display name loses its overrides and controls, has its whitespace collapsed and its length capped. The client drops any attribute value over 1 024 bytes rather than truncating it — a truncated address is another address. Tests: `directory_supplied_attributes_are_cleaned_before_they_are_stored`, `an_entry_without_a_usable_address_is_refused_and_audited`, `a_value_that_cannot_be_cleaned_leaves_the_account_alone` (sync), and the cleaners' unit tests."
+      },
+      {
+       "number": 336,
+       "title": "A linked account keeps a credential that signs in without the directory deciding",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Linking turns a local account into a directory account. Marking it retires the local password and the OPAQUE record (D-18), but its sessions, refresh tokens, passkeys and certificates were issued on the old basis; any one left alive is a way in that disabling the person in the directory does not close.",
+       "mitigation": "`AuthService::link_local_account_to_directory` (D-28) marks the account, then deletes its WebAuthn credentials, revokes its still-active `User`-type certificates, and revokes its sessions and OAuth2 refresh tokens last — through the repositories, so the session validation cache and the revocation feed see it. TOTP is kept: it is a second factor behind the directory password. A link interrupted part-way is completed by calling it again. Tests: `linking_marks_the_account_and_retires_what_the_directory_does_not_decide`, `an_interrupted_link_is_retryable_and_the_retry_completes_it`. Residual (D-29): no certificate carries a user binding, so certificates are found by convention — `metadata.user_id`, or a subject CN equal to the username or email, ignoring case — with over-matching the accepted side, and a real binding is a filed follow-up; a certificate authenticates only as the service account it is bound to, which limits what a missed one could do."
+      },
+      {
+       "number": 337,
+       "title": "An administrator links a colleague's account to a directory entry they control",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Linking hands an account's password to the directory. A tenant administrator who can also create directory entries could create one with a colleague's username, link the colleague's account, and sign in with a password of their own choosing.",
+       "mitigation": "Linking resolves the entry by the account's own username through the tenant's directory — never an identifier the caller supplies — refuses an entry already linked to another account and an account linked to a different entry, stays inside the path's tenant, revokes everything the account held (T-336), which its owner notices as being signed out everywhere, and writes a `directory.account_linked` row with the actor and the counts. Contract §30 puts the route behind a permission of its own, `directory:link`, apart from `directory:write`. It adds no capability a tenant administrator lacks: `users:update` already changes an account's email, and with it where the reset mail goes. Tests: `an_entry_already_linked_elsewhere_is_refused_and_nothing_is_revoked`, `an_account_linked_to_a_different_entry_is_refused`, `a_deleted_account_cannot_be_linked`, `an_entry_that_cannot_be_resolved_refuses_the_link_and_revokes_nothing`."
+      },
+      {
+       "number": 338,
+       "title": "A directory administrator grants AXIAM roles by naming or nesting a group",
+       "type": "Elevation of privilege",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "Group mapping turns directory membership into AXIAM group membership, and so into roles. Matching by name or DN prefix, or creating AXIAM groups from directory ones, would let whoever administers the directory create `admins` — or nest any group inside a mapped one — and grant themselves privileges no tenant administrator assigned.",
+       "mitigation": "D-30: an explicit table only. `DirectoryConfig.group_mappings` maps a directory group DN, compared after RFC 4514 normalisation (`axiam_directory::dn`), to an AXIAM group of the same tenant; at most 500 rows, written only through the configuration; no match by name, no prefix or wildcard, and no AXIAM group is ever created. Nesting is followed to the configured depth, and only groups the table names count. Tests: `unmapped_directory_groups_grant_nothing_including_one_named_like_an_axiam_group`, `a_mapping_matches_whatever_the_spelling_of_the_dn`, `a_role_through_a_mapped_group_is_effective_and_gone_after_removal`, `the_table_holds_at_most_five_hundred_rows`."
+      },
+      {
+       "number": 339,
+       "title": "A deep, cyclic or enormous group graph exhausts the connector during sign-in",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Nested groups are resolved on the sign-in path. A directory whose groups nest without end, loop, or number in the tens of thousands could make one sign-in issue unbounded searches and hold a pooled connection while it does.",
+       "mitigation": "Resolution follows at most `group_nesting_depth` levels (0–10, default 5), terminates cycles on the normalised DN, and refuses — rather than truncates — at the 1 001st group; a ranged `memberOf` (Active Directory's answer past 1 500 values) counts as the cap. Every search runs under the per-operation deadline on the pooled service connection, inside the per-tenant bounds, and every message passes the frame cap (T-295). A refused resolution refuses the sign-in (T-340). Tests: `nesting_is_followed_to_depth_n_and_n_plus_one_is_not_asked`, `a_cycle_terminates`, `the_hard_cap_of_one_thousand_groups_refuses`, `member_of_beyond_the_cap_or_in_ranged_form_refuses`, `a_slow_directory_is_unavailable_within_the_deadline`."
+      },
+      {
+       "number": 340,
+       "title": "Memberships the directory revoked survive while the directory cannot be asked",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A user removed from a mapped group in the directory should lose the AXIAM group. A sign-in that kept the old memberships whenever the directory could not answer — an outage, a timeout, the cap — would keep access the directory had taken away.",
+       "mitigation": "Fail closed (D-30): the mapping runs on every successful directory sign-in before any session or MFA challenge, and a lookup that fails or hits a cap refuses the sign-in with the generic answer, changes nothing and does not count against the account; a provisioned account whose lookup fails holds no memberships. The sync job applies the same mapping on every run, and a failed run changes nothing. Tests: `a_failed_group_lookup_refuses_the_sign_in_and_changes_nothing`, `a_provisioned_account_whose_group_lookup_fails_is_refused_and_holds_nothing`, `the_group_mapping_follows_the_directory_on_every_run`. Residual: a session already open keeps the memberships until the next sign-in or the next successful sync run applies the removal (the decision cache is then flushed, T-343); deactivation, not mapping, revokes sessions."
+      },
+      {
+       "number": 342,
+       "title": "A mapping row or a mapped edge places a user in another tenant's group",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The mapping table names AXIAM groups by id, and one process serves every tenant. A row naming another tenant's group, or an edge written without the tenant, would grant one tenant's directory users another tenant's roles.",
+       "mitigation": "Every `group_id` in the table is checked, at write and before anything is written, to be a group of the configuration's own tenant; membership writes and removals are scoped by tenant; a row whose group has since been deleted is skipped, never re-pointed. Tests: `a_mapping_naming_another_tenants_group_is_refused_and_writes_nothing`, `a_mapping_naming_no_group_at_all_is_refused`, `directory_memberships_are_tenant_scoped`, `a_mapping_row_whose_group_was_deleted_is_skipped`."
+      },
+      {
+       "number": 343,
+       "title": "A cached authorization decision outlives the directory's removal of a membership",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Authorization decisions are cached. A membership the mapping removes but whose cached allow survives keeps granting the role until the entry expires — on every replica.",
+       "mitigation": "Mapping writes go through `RepositoryGroupMapper`, whose `MembershipChangeHook` (installed by `axiam-server`) flushes the decision cache for the user, locally and by broadcast, whenever a membership changes — as the group-membership routes do. Tests: `a_membership_change_flushes_the_decision_cache_through_the_hook`, `a_role_through_a_mapped_group_is_effective_and_gone_after_removal`. Residual: a broadcast that fails is logged, and the other replicas' entries then live out the cache TTL."
       }
      ],
      "open": 1
@@ -4336,6 +4444,181 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Pending rows name a user's SP, ACS URL and `RelayState` for ten minutes. If they stored the handle or the binding value, anyone who could read the table could complete another person's sign-on.",
        "mitigation": "Only SHA-256 digests of the handle and of the binding value are stored, as `sso_handoff_code` stores its codes; a digest cannot be presented. Rows are tenant-scoped on every query, removed with their tenant in the tenant-delete transaction, and swept when expired (`saml_authn_request` on `/health/jobs`). Tests: `saml_authn_request_test` (cross-tenant read and consume refused, expiry and sweep, the tenant cascade); `v73_defines_the_pending_authn_request_table_additively` (no raw column)."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "53ad9895-e646-51e4-88b4-fc1e675e7cbc",
+     "kind": "process",
+     "x": 374,
+     "y": 794,
+     "w": 140,
+     "h": 140,
+     "name": "Directory sync job (full / incremental, safety valve)",
+     "lines": [
+      "Directory",
+      "sync job",
+      "(full /",
+      "incremental,",
+      "safety",
+      "valve)"
+     ],
+     "description": "axiam-directory's sync job (T23.3.5, D-31), last in each cleanup tick: incremental runs by modifyTimestamp / uSNChanged, a full reconciliation every 24 h, Inactive as the soft-delete, the safety valve. Reads the directory through the same pool, address guard and frame guard as sign-in; never creates, links, re-enables or deletes an account.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 344,
+       "title": "A directory that empties or disables at once deactivates the whole tenant",
+       "type": "Denial of service",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The sync job sets `Inactive` every account whose entry vanished or was disabled. A wrong `base_dn`, an outage that answers empty, a bind account stripped of rights, or a hostile directory administrator could make every entry look gone in one run.",
+       "mitigation": "D-31: a full run reads every answer before it writes anything, and the safety valve refuses to apply a run that would deactivate more than 10 % of the tenant's directory accounts and at least 5 of them — nothing is applied, `directory.sync_safety_valve` is audited once, and the job shows as failed in `GET /health/jobs` until the directory is fixed or the accounts really gone are deactivated by hand. A deactivated account keeps its row, marker and audit trail, and an administrator can re-enable it. Tests: `the_valve_trips_and_applies_nothing`, `the_valve_does_not_trip_under_its_floor`, `the_valve_does_not_trip_at_or_under_its_percentage`, `an_empty_directory_does_not_disable_the_tenant`, `a_failure_part_way_through_the_reads_applies_nothing`. Residual (D-31): incremental runs have no valve, so a directory that disables many accounts through changes the incremental search sees deactivates them run by run — the directory is the authority for those accounts' standing, and every deactivation is audited and reversible. The valve has no override in this cut; contract §30 says why."
+      },
+      {
+       "number": 345,
+       "title": "An incomplete or access-filtered answer is read as an entry having vanished",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Absence is an inference. A search that hit a size or time limit, was referred elsewhere, failed part-way or matched two entries — or was answered by a bind account that can no longer read part of the tree — looks, to a careless reader, like \"not there\".",
+       "mitigation": "Only a completed full run concludes \"vanished\", and only from an exactly-one lookup by the account's immutable identifier under `base_dn` that the directory answered with success and no entry; an error, a referral, a bound, an ambiguous answer or an identifier that cannot be asked for skips that account and owes a full run, and an incremental run never concludes it at all. Tests: `an_incremental_run_never_concludes_that_an_entry_vanished`, `a_service_account_without_read_rights_is_a_failure_not_a_vanishing`, `an_ambiguous_identifier_skips_the_account_and_is_not_a_vanishing`, `an_identifier_that_cannot_be_asked_for_is_skipped_not_vanished`, `an_unreachable_directory_changes_nothing_and_is_a_reported_failure`. Residual: an access-control change that hides entries from the bind account answers \"no such entry\" exactly as a deletion does; the valve catches it at scale (T-344), and below the valve those accounts are deactivated, audited, and re-enabled by an administrator."
+      },
+      {
+       "number": 346,
+       "title": "The sync job creates, links or re-enables accounts on the directory's say",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A job that acted on whatever the directory reports could revive an account an administrator disabled, create accounts nobody signed in with, or link a local account by name (T-334).",
+       "mitigation": "No such code path exists (D-31). The job reads only accounts already carrying `directory_external_id`, writes `Inactive` by compare-and-set from a live status and nothing else, never writes `Deleted` and never removes a row. An account the directory re-enables, or whose entry reappears, stays `Inactive`, and one `directory.account_reappeared` row says an administrator must act (deduplicated in the state row). Tests: `a_reappearing_entry_leaves_the_account_inactive_and_says_so_once`, `an_account_an_administrator_made_inactive_is_reported_never_reactivated`, `a_local_account_is_never_touched`, `no_row_is_removed_and_no_account_is_deleted`, `deactivating_sets_inactive_and_only_inactive`."
+      },
+      {
+       "number": 347,
+       "title": "A stored identifier or watermark carries filter syntax into the sync job's searches",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The sync job builds filters from values AXIAM stored — an account's directory identifier, the watermark — that first came from the directory. Formatted raw, a crafted `entryUUID` or watermark would widen a lookup into a match on many entries.",
+       "mitigation": "Values enter a filter only through the escape module: an `entryUUID` through RFC 4515 escaping, an `objectGUID` as its little-endian octets through the binary escaper (every byte `\\xx`), and a watermark only when it parses as a generalized time or a decimal USN — `changed_since_filter` refuses anything else and the run falls back to full; attribute names are fixed by the directory kind. Tests: `an_object_guid_lookup_reaches_the_server_as_little_endian_octets` (asserted on the filter the server parsed), `an_identifier_that_cannot_be_asked_for_is_skipped_not_vanished`, and the escape module's unit tests."
+      },
+      {
+       "number": 348,
+       "title": "A stale or foreign watermark makes incremental runs miss changes",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Active Directory's `uSNChanged` counts per domain controller, so a watermark taken from one server means nothing on another, and a load-balanced URL can reach a different one each time. A missed change is a disable that never arrives.",
+       "mitigation": "On Active Directory the watermark is `highestCommittedUSN` read from the rootDSE of the same connection and stored with its `dsServiceName`; a different server, a missing watermark or an unreadable rootDSE falls back to a full run. A full run happens every 24 hours regardless, and after any skipped account, bound hit or untrusted watermark. Tests: `the_active_directory_watermark_is_the_root_dse_usn_of_the_same_server`, `a_different_directory_server_falls_back_to_a_full_run`, `a_root_dse_without_a_usn_falls_back_to_a_full_run_and_keeps_doing_so`, `an_unreadable_root_dse_falls_back_to_a_full_run`, `an_incremental_run_over_the_bound_applies_the_prefix_and_owes_a_full_run`."
+      },
+      {
+       "number": 349,
+       "title": "The sync job exhausts the connector or the database, and every replica runs it",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A background job that walks every directory account of every tenant can crowd out sign-ins for the shared connector, and a deployment of several replicas runs every sweep once per replica.",
+       "mitigation": "The job runs last in each cleanup tick, one tenant at a time, only for tenants with an enabled directory that are due, on the same bounded pool, deadlines, address guard and frame cap as sign-in, with incremental searches bounded; an error ends that tenant's run and the others still run. Tests: `a_tenant_without_a_directory_or_with_it_disabled_is_skipped_without_a_connection`, `a_tenant_that_is_not_yet_due_is_left_alone`, `an_incremental_run_over_the_bound_applies_the_prefix_and_owes_a_full_run`. Residual: no sweep in the tree has a multi-replica guard, so every replica runs the job; its writes are idempotent or compare-and-set, but directory reads and attribute-refresh audit rows multiply by the replica count."
+      },
+      {
+       "number": 350,
+       "title": "A deactivation stopped part-way leaves the account able to act",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Deactivating is several writes: sessions, refresh tokens, memberships, the status. Done in the wrong order, a crash between them leaves an account marked `Inactive` that still holds a live session, or memberships that still grant roles.",
+       "mitigation": "Deactivation revokes sessions and refresh tokens first, through the repositories (so the validation cache and the revocation feed see it), then removes the directory's memberships with the decision-cache flush, then sets `Inactive`; `account_may_act` refuses `Inactive` on every path, passkeys and the OP cookie included. Stopped part-way, the account holds less than before, and the next run repeats what remains. Tests: `a_vanished_entry_deactivates_the_account_and_takes_back_what_the_directory_gave`, `a_second_run_changes_and_audits_nothing_more`."
+      },
+      {
+       "number": 351,
+       "title": "The sync job overwrites a decision an administrator made during the run",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A run reads first and writes later. An administrator who suspends, deactivates or erases an account in between could have that decision overwritten by a write based on the earlier read.",
+       "mitigation": "The status write is a compare-and-set from a live status to `Inactive`: an account an administrator changed in the meantime to a status that is not live is left as the administrator left it, an erased account is never touched, and nothing the job does re-enables. Tests: `deactivating_does_not_overwrite_a_deleted_account`, `pending_and_locked_accounts_are_deactivated_when_their_entry_vanishes`, `an_account_an_administrator_made_inactive_is_reported_never_reactivated`."
+      },
+      {
+       "number": 352,
+       "title": "A directory rename takes over another account's username or email",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The job keeps a directory account's username and email in step with its entry. A directory administrator who renames an entry to a colleague's name or address would, applied blindly, collide with — or capture the reset mail of — another account.",
+       "mitigation": "Changes pass the same cleaners as provisioning (T-335) and the same lowercased collision probe over both columns of every other account of the tenant, tombstones included; a colliding change is skipped and audited (`directory.sync_attribute_skipped`) while the rest is applied, and a case-only change to the account's own name is allowed. Tests: `a_colliding_change_is_skipped_and_audited_and_the_rest_is_applied`, `a_case_only_change_to_ones_own_name_is_applied`, `the_collision_probe_can_leave_one_account_out`. Residual: a name no account holds is free, so the directory can rename an account to any unused name — as it could have named the entry in the first place."
+      },
+      {
+       "number": 353,
+       "title": "An outsider's failed binds become a permanent deactivation through the sync job",
+       "type": "Denial of service",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "OpenLDAP's `ppolicy` writes `pwdAccountLockedTime` when failed binds pass its threshold — something anyone guessing at the directory can provoke. Read as \"disabled\", that turns a temporary lockout into a permanent `Inactive`, because sync never re-enables (T-346): a denial of service on any account an outsider can name.",
+       "mitigation": "D-31 as amended after T23.3.5: on OpenLDAP only ppolicy's permanent-lock value `000001010000Z` is a disable, and any other value is a temporary lockout that leaves the account alone; on Active Directory only `userAccountControl` bit `0x2` is a disable, and `lockoutTime` is not read. An unreadable value never deactivates. Tests: `a_temporary_lockout_leaves_the_account_active_in_a_full_run`, `a_temporary_lockout_leaves_the_account_active_in_an_incremental_run`, `an_open_ldap_locked_time_deactivates_the_account_the_same_way`, `an_active_directory_account_with_the_disabled_bit_is_deactivated`, `an_unreadable_disabled_attribute_never_deactivates`."
+      },
+      {
+       "number": 355,
+       "title": "A deactivation cannot be traced to the run and the reason that caused it",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "An account that stops working because a background job decided so needs an answer to \"why, and when\" that does not depend on the directory still showing what it showed then.",
+       "mitigation": "Every change the job makes is a row on the append-only audit log carrying identifiers and reasons, never names or values: `directory.account_deactivated` (`reason` vanished or disabled, `run` full or incremental), `directory.account_updated` (the fields, not their values), `directory.sync_attribute_skipped`, `directory.sync_user_skipped`, `directory.groups_mapped`, `directory.sync_safety_valve`, and one `directory.sync_run` row of counts per full run; job health records each run. Tests: `a_full_run_writes_one_summary_row_of_counts`, `a_vanished_entry_deactivates_the_account_and_takes_back_what_the_directory_gave`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "2994dd70-ce2c-50ac-b49f-72d1f7dfd235",
+     "kind": "store",
+     "x": 1269,
+     "y": 604,
+     "w": 170,
+     "h": 80,
+     "name": "directory_sync_state (watermark, last run)",
+     "lines": [
+      "directory_sync_state",
+      "(watermark, last run)"
+     ],
+     "description": "Schema v75, one row per tenant, deleted with the tenant: the watermark and the server it belongs to, the last full run and attempt, the last result, and the account ids already reported as reappeared. No personal data.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 354,
+       "title": "The sync state row exposes personal data or another tenant's directory",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "The job keeps state between runs. A row that held names, addresses or DNs of people, or that one tenant's reads could reach, would be a second copy of directory data with its own exposure.",
+       "mitigation": "One row per tenant (schema v75) holding a watermark, the identity of the server it belongs to, timestamps, the last result and account ids — no name, address or person's DN; read and written by tenant id only, and deleted in the tenant's delete transaction. Tests: `tenants_cannot_read_each_others_state`, `a_tenants_state_goes_with_the_tenant`, `the_reported_list_is_trimmed_to_its_cap_keeping_the_newest`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "6c7796cb-edff-5c81-aa70-06e97fe3ee19",
+     "kind": "store",
+     "x": 1269,
+     "y": 719,
+     "w": 170,
+     "h": 80,
+     "name": "user accounts & member_of (source)",
+     "lines": [
+      "user accounts &",
+      "member_of (source)"
+     ],
+     "description": "The user rows the directory path writes — a just-in-time account created marked (D-29), the linking marker (D-18), the sync job's Inactive status and refreshed attributes — and member_of edges, where source = directory marks the memberships the group mapping owns (schema v74).",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 341,
+       "title": "A manual membership is removed by the directory, or a directory one is mistaken for manual",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Administrators add members by hand and the mapping adds them from the directory, on the same edges. A mapping that removed whatever it no longer saw would delete hand-made memberships; one that could not tell the two apart would sweep a manual edge, or let a directory edge outlive the directory's say.",
+       "mitigation": "Every edge the mapping writes carries `member_of.source = directory` (schema v74; the datastore admits no other owner value, and an edge without the field reads as manual). The mapping removes only directory-sourced edges the directory no longer backs, never touches or duplicates a manual edge, and leaves a manual edge of the same pair as it is; removals run before additions, so a stop part-way leaves less access. Tests: `a_manual_membership_is_untouched_by_every_application`, `a_manual_membership_of_the_same_pair_is_left_alone_and_never_removed`, `removing_a_directory_membership_removes_only_that_edge`, `the_datastore_admits_no_owner_but_directory`, `apply_backed_groups_reports_what_it_did_and_leaves_manual_edges`. Residual: an administrator's `add_member` on a pair the directory already owns is a conflict, not a promotion to manual, so that membership leaves with the directory — the safe direction (`add_member_on_a_directory_edge_is_still_a_conflict`)."
       }
      ],
      "open": 0
@@ -4895,15 +5178,127 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "in-process",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "fc29364c-ec65-5863-ba0e-8bdb23ac0f36",
+     "path": "M379.9,835.9 L199,756.8",
+     "name": "sync searches",
+     "description": "",
+     "label": "sync searches: by identifier, by watermark, rootDSE (LDAPS / StartTLS)",
+     "labelLines": [
+      "sync searches: by identifier, by",
+      "watermark, rootDSE (LDAPS /",
+      "StartTLS)"
+     ],
+     "lx": 289.4,
+     "ly": 796.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "LDAP over TLS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "3cab2c3b-a0e3-527b-8d9c-f6c4702469e0",
+     "path": "M199,756.8 L379.9,835.9",
+     "name": "sync entries + watermark",
+     "description": "",
+     "label": "entries + watermark",
+     "labelLines": [
+      "entries + watermark"
+     ],
+     "lx": 289.4,
+     "ly": 796.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "LDAP over TLS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "7ad160e9-27fe-5fe7-973a-d9bb6ed74961",
+     "path": "M510.9,843.5 L1079,670",
+     "name": "sync: read config + decrypt bind secret",
+     "description": "",
+     "label": "read config + decrypt bind secret",
+     "labelLines": [
+      "read config + decrypt bind secret"
+     ],
+     "lx": 795,
+     "ly": 756.8,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "61f7d0d2-6d12-56e2-a2c0-484166cfd156",
+     "path": "M512,847.6 L1269,664.5",
+     "name": "sync: read / write run state",
+     "description": "",
+     "label": "read / write run state",
+     "labelLines": [
+      "read / write run state"
+     ],
+     "lx": 890.5,
+     "ly": 756.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "7e78b413-27fd-5738-b8b9-ffc1bd9485be",
+     "path": "M513.5,856 L1269,768.8",
+     "name": "sync: deactivate, revoke, unmap, refresh",
+     "description": "",
+     "label": "deactivate (compare-and-set), revoke, unmap, refresh attributes",
+     "labelLines": [
+      "deactivate (compare-and-set),",
+      "revoke, unmap, refresh attributes"
+     ],
+     "lx": 891.3,
+     "ly": 812.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "7d593dc0-6b7f-53bd-82bb-0dd4a569a55d",
+     "path": "M761.7,601.9 L1269,736.5",
+     "name": "sign-in: provision, link, map groups",
+     "description": "",
+     "label": "JIT create, link, apply group mapping",
+     "labelLines": [
+      "JIT create, link, apply group",
+      "mapping"
+     ],
+     "lx": 1015.3,
+     "ly": 669.2,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 71,
+   "total": 96,
    "open": 6,
    "bySeverity": {
-    "High": 28,
-    "Medium": 26,
-    "Critical": 11,
-    "Low": 6
+    "High": 37,
+    "Medium": 38,
+    "Critical": 13,
+    "Low": 8
    }
   },
   {

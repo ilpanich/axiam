@@ -28,7 +28,16 @@
 //!   runs that turn the answers into `Inactive` accounts, refreshed attributes
 //!   and group mappings — and never into a re-enabled, created or linked one.
 //!
-//! The management routes are a later task of the same item.
+//! * [`address`] and [`frame`] guard the connector itself (T23.3.7, D-19):
+//!   the address guard resolves a directory host once, refuses loopback,
+//!   link-local, metadata, multicast and AXIAM's own listeners — and private
+//!   ranges outside the operator's allow-list — and the connection is pinned
+//!   to the vetted address (T-300); the frame guard measures and checks every
+//!   message a directory sends before `ldap3` sees it (P23W2-10, T-295,
+//!   T-331), through a relay beneath `ldap3`.
+//!
+//! The management routes are a later task of the same item (T23.3.8); they
+//! call `config::validate` and [`DirectoryClient::guard`] on every write.
 //!
 //! # Boundaries that bind every later task
 //!
@@ -51,18 +60,22 @@
 //! `claude_dev/crate-layering.md` for why, and
 //! `scripts/check-crate-layering.py` for the gate that holds it.
 
+pub mod address;
 pub mod authenticator;
 pub mod client;
 pub mod config;
 pub mod dn;
 pub mod escape;
+pub mod frame;
 pub mod group_lookup;
 pub mod groups;
 pub mod mapper;
+mod relay;
 pub mod sync;
 pub mod sync_lookup;
 pub mod tls;
 
+pub use address::{AddressPolicy, GuardError, GuardedTarget, Resolver, SystemResolver};
 pub use authenticator::{MappedGroups, RepositoryDirectoryAuthenticator};
 pub use client::{ClientLimits, DirectoryClient, DirectoryTarget};
 pub use mapper::{MembershipChangeHook, MembershipChangeSlot, RepositoryGroupMapper};

@@ -55,7 +55,7 @@ use axiam_db::repository::{
     SurrealSessionRepository, SurrealUserRepository,
 };
 use axiam_directory::config::validate;
-use axiam_directory::{ClientLimits, DirectoryClient, RepositoryDirectoryAuthenticator};
+use axiam_directory::{ClientLimits, RepositoryDirectoryAuthenticator};
 use axiam_directory::{MembershipChangeSlot, RepositoryGroupMapper, mapper::apply_backed_groups};
 use ldap3_proto::proto::LdapResultCode;
 use support::{
@@ -266,7 +266,7 @@ async fn harness_with(
 
     let authenticator = Arc::new(RepositoryDirectoryAuthenticator::with_client(
         config_repo.clone(),
-        Arc::new(DirectoryClient::new(limits())),
+        Arc::new(support::loopback_client(limits())),
     ));
     let slot = MembershipChangeSlot::new();
     let mapper = RepositoryGroupMapper::new(Arc::clone(&authenticator), groups.clone())
@@ -971,7 +971,7 @@ async fn the_mapper_is_callable_without_a_sign_in_and_fails_closed_the_same_way(
 
     let authenticator = Arc::new(RepositoryDirectoryAuthenticator::with_client(
         h.config_repo.clone(),
-        Arc::new(DirectoryClient::new(limits())),
+        Arc::new(support::loopback_client(limits())),
     ));
     let mapper = RepositoryGroupMapper::new(authenticator, h.groups.clone());
 

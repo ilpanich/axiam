@@ -727,6 +727,27 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         type: "note",
         text: "Tune the mounts. A PKI mount's `max_lease_ttl` defaults to 30 days and Vault silently caps a longer request to it rather than failing, so an untuned mount turns a ten-year root into a month-long one. AXIAM records the certificate that came back rather than the one it asked for, and logs Vault's warning — neither is a substitute for `vault secrets tune -max-lease-ttl=87600h pki`.",
       },
+      { type: "h", id: "directory-connector", text: "LDAP / Active Directory connector" },
+      {
+        type: "p",
+        text: "A tenant administrator chooses the directory a tenant signs in through, so the connector holds every directory host to a deployment rule before it opens a socket. The host is resolved and **every** address must pass: loopback, link-local (including the cloud metadata service at `169.254.169.254`), unspecified, multicast and special-purpose addresses are always refused, as is any address of this host on AXIAM's own REST or gRPC port; a private address (RFC 1918, CGNAT `100.64.0.0/10`, IPv6 unique-local) only inside a network listed below. The connection is then pinned to the vetted address, with the certificate still checked against the URL's host name, and the check runs again at every connection, so a name re-pointed after it was saved is caught. An IPv6-literal URL is refused, because no certificate can be checked against it.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS",
+            "Comma-separated CIDR blocks (or single addresses) a tenant's directory may resolve into. Unset — the default — admits no private address, so only a directory on a public address works. Corporate directories live on private networks, so most deployments that offer the directory feature set this: list the networks the domain controllers or LDAP servers are in, and **not** the network AXIAM's own pods or services are in. Inside a listed network any tenant administrator can aim the connector at any host and port, though nothing beyond a TLS handshake reaches a host that cannot present a certificate chaining to that tenant's anchors. A metadata endpoint inside a private range (`fd00:ec2::254`, `100.100.100.200`) stays refused whatever the list says. An entry that is not a valid block is ignored and logged at error, so a typo admits nothing.",
+            "10.20.0.0/16,fd12:3456::/48",
+          ],
+          [
+            "AXIAM__DIRECTORY__MAX_MESSAGE_BYTES",
+            "Largest LDAP message accepted from a directory, in bytes; clamped to 64 KiB … 16 MiB, default 2 MiB. A longer declared length — or a malformed or too deeply nested message — ends the connection before anything is buffered, so a hostile directory cannot make the shared connector hold unbounded memory or crash its parser. Raise it only if an ordinary answer is refused (the log line says so); one entry of an Active Directory `memberOf` read is a few hundred kilobytes.",
+            "2097152",
+          ],
+        ],
+      },
       { type: "h", id: "audit-retention", text: "Audit retention" },
       {
         type: "table",

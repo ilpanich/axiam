@@ -42,7 +42,7 @@ fn target_for(server: &TestServer) -> DirectoryTarget {
 }
 
 fn client() -> DirectoryClient {
-    DirectoryClient::new(ClientLimits {
+    support::loopback_client(ClientLimits {
         acquire_timeout: Duration::from_millis(300),
         connect_timeout: Duration::from_millis(500),
         operation_timeout: Duration::from_millis(500),

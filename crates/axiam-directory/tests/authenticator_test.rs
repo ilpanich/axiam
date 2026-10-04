@@ -85,7 +85,7 @@ fn config_for(server: &TestServer, tenant_id: Uuid) -> DirectoryConfig {
 }
 
 fn client() -> Arc<DirectoryClient> {
-    Arc::new(DirectoryClient::new(ClientLimits {
+    Arc::new(support::loopback_client(ClientLimits {
         connect_timeout: Duration::from_millis(500),
         operation_timeout: Duration::from_millis(500),
         authentication_deadline: Duration::from_secs(3),

@@ -61,15 +61,14 @@ use axiam_core::models::directory::{
     DirectoryAccountRestriction, DirectoryAuthError, DirectoryIdentity, UserAttributeMap,
 };
 use ldap3::asn1::StructureTag;
-use ldap3::{
-    DerefAliases, Ldap, LdapConnAsync, LdapConnSettings, LdapError, LdapResult, Scope,
-    SearchOptions,
-};
+use ldap3::{DerefAliases, Ldap, LdapError, LdapResult, Scope, SearchOptions};
 use rustls::ClientConfig;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
+use crate::address::{AddressPolicy, GuardError, GuardedTarget, NetworkGuard, Resolver};
 use crate::escape::{UserFilterError, user_filter_for};
+use crate::frame::DEFAULT_MAX_MESSAGE_BYTES;
 
 /// Server-side size limit on the user search. Two, not one: a limit of one
 /// would make an ambiguous filter look like a unique match on servers that
@@ -170,9 +169,30 @@ pub struct DirectoryTarget {
     pub tls: Arc<ClientConfig>,
 }
 
+/// An open directory connection: the `ldap3` handle, and the relay task that
+/// carries its traffic through the frame guard ([`crate::frame`]) and owns the
+/// TCP socket. Dereferences to the handle.
+pub(crate) struct Connection {
+    ldap: Ldap,
+    relay: tokio::task::JoinHandle<()>,
+}
+
+impl std::ops::Deref for Connection {
+    type Target = Ldap;
+    fn deref(&self) -> &Ldap {
+        &self.ldap
+    }
+}
+
+impl std::ops::DerefMut for Connection {
+    fn deref_mut(&mut self) -> &mut Ldap {
+        &mut self.ldap
+    }
+}
+
 /// A connection bound as the service account, idle in the pool.
 struct IdleConnection {
-    ldap: Ldap,
+    ldap: Connection,
     generation: String,
     opened: Instant,
     idle_since: Instant,
@@ -186,7 +206,7 @@ struct TenantPool {
 
 /// A connection in use, holding the permits it was opened under.
 pub(crate) struct Lease {
-    pub(crate) ldap: Ldap,
+    pub(crate) ldap: Connection,
     opened: Instant,
     pub(crate) reused: bool,
     _tenant: OwnedSemaphorePermit,
@@ -212,6 +232,10 @@ pub struct DirectoryClient {
     limits: ClientLimits,
     global: Arc<Semaphore>,
     tenants: Mutex<HashMap<Uuid, Arc<TenantPool>>>,
+    /// Where a directory may be ([`crate::address`]), applied at every connect.
+    network: NetworkGuard,
+    /// The per-message cap of the frame guard ([`crate::frame`]).
+    max_message_bytes: usize,
 }
 
 impl Default for DirectoryClient {
@@ -221,14 +245,64 @@ impl Default for DirectoryClient {
 }
 
 impl DirectoryClient {
-    /// A client with the given bounds.
+    /// A client with the given bounds, the **strict** address policy (no
+    /// private network admitted, no listener known), the system resolver and
+    /// the default frame cap. The composition root replaces the policy with the
+    /// deployment's ([`Self::with_address_policy`]).
     #[must_use]
     pub fn new(limits: ClientLimits) -> Self {
         Self {
             global: Arc::new(Semaphore::new(limits.max_connections_total)),
             limits,
             tenants: Mutex::new(HashMap::new()),
+            network: NetworkGuard::default(),
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
         }
+    }
+
+    /// Apply `policy` to every address this client connects to.
+    #[must_use]
+    pub fn with_address_policy(mut self, policy: Arc<AddressPolicy>) -> Self {
+        self.network.policy = policy;
+        self
+    }
+
+    /// Resolve directory host names with `resolver` (tests script answers).
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
+        self.network.resolver = resolver;
+        self
+    }
+
+    /// Refuse any LDAP message from a directory longer than `bytes`, clamped
+    /// to [`crate::frame::MIN_MAX_MESSAGE_BYTES`]`..=`[`crate::frame::MAX_MAX_MESSAGE_BYTES`].
+    #[must_use]
+    pub fn with_max_message_bytes(mut self, bytes: usize) -> Self {
+        self.max_message_bytes = crate::frame::clamp_max_message_bytes(bytes);
+        self
+    }
+
+    /// The address policy this client applies.
+    #[must_use]
+    pub fn address_policy(&self) -> &Arc<AddressPolicy> {
+        &self.network.policy
+    }
+
+    /// The frame cap this client applies.
+    #[must_use]
+    pub fn max_message_bytes(&self) -> usize {
+        self.max_message_bytes
+    }
+
+    /// Run the address guard on `url` exactly as a connection would — the
+    /// same policy, the same resolver — without opening anything. The
+    /// management routes (T23.3.8) call this before saving a configuration.
+    ///
+    /// # Errors
+    ///
+    /// The [`GuardError`] naming the refusal.
+    pub async fn guard(&self, url: &str) -> Result<GuardedTarget, GuardError> {
+        self.network.guard(url).await
     }
 
     /// The bounds this client enforces.
@@ -586,65 +660,105 @@ impl DirectoryClient {
             .with_timeout(self.limits.operation_timeout)
             .simple_bind(dn, password)
             .await;
-        // Never pooled: unbind (best effort, bounded) and let it drop.
-        let _ = tokio::time::timeout(self.limits.operation_timeout, ldap.unbind()).await;
+        // Never pooled: unbind (best effort, bounded) and close the socket
+        // before the permits drop.
+        self.close(ldap).await;
         let result = outcome.map_err(transport_failure)?;
         user_bind_outcome(&result)
     }
 
     /// Open a connection. The only place a socket is opened, and it refuses
     /// any URL that would not be encrypted before the first bind.
-    async fn connect(&self, target: &DirectoryTarget) -> Result<Ldap, Failure> {
+    ///
+    /// Everything up to a usable `ldap3` handle — resolution, the TCP connect,
+    /// StartTLS and the TLS handshake — runs under
+    /// [`ClientLimits::connect_timeout`], in this order:
+    ///
+    /// 1. **The address guard** ([`crate::address`]) resolves the host once and
+    ///    judges every address; a refused one ends here, before any socket.
+    /// 2. **TCP to a vetted address.** The socket is opened to one of the
+    ///    `SocketAddr`s the guard returned, so nothing resolves the name again
+    ///    and DNS rebinding cannot move the connection after the check.
+    /// 3. **StartTLS**, for `ldap://`: the extended request is the first and
+    ///    only plaintext AXIAM sends, and anything but `success` ends the
+    ///    connection with no bind sent.
+    /// 4. **TLS**, under the tenant's verified rustls configuration, with the
+    ///    **URL's host** as the server name — the pinned address changes where
+    ///    the socket goes, never which certificate is acceptable.
+    /// 5. **The frame guard** ([`crate::frame`]): `ldap3` is handed one end of a
+    ///    local socket pair, and a relay task forwards the directory's messages
+    ///    to it only after measuring and checking each one.
+    async fn connect(&self, target: &DirectoryTarget) -> Result<Connection, Failure> {
         if !transport_is_encrypted(&target.url, target.start_tls) {
             return Err(Failure::new(
                 DirectoryAuthError::Misconfigured,
                 "the stored URL is not ldaps:// or ldap:// with StartTLS",
             ));
         }
-        // `set_no_tls_verify` is never called: verification is the default and
-        // stays on. `set_starttls` only has effect on `ldap://`; ldap3 refuses
-        // to continue when the server rejects the StartTLS request, and the
-        // first bind is sent only after `with_settings` returns, i.e. after the
-        // handshake completed against `target.tls`.
-        let settings = LdapConnSettings::new()
-            .set_conn_timeout(self.limits.connect_timeout)
-            .set_config(Arc::clone(&target.tls))
-            .set_starttls(target.start_tls);
-        let (conn, ldap) = LdapConnAsync::with_settings(settings, &target.url)
+        match tokio::time::timeout(self.limits.connect_timeout, self.open(target)).await {
+            Ok(opened) => opened,
+            Err(_) => Err(Failure::new(
+                DirectoryAuthError::Unavailable,
+                "connecting to the directory timed out",
+            )),
+        }
+    }
+
+    async fn open(&self, target: &DirectoryTarget) -> Result<Connection, Failure> {
+        // 1. The address guard, at every connect: a name re-pointed since the
+        //    configuration was saved is caught here.
+        let guarded = self.network.guard(&target.url).await.map_err(|refusal| {
+            Failure::new(
+                if refusal.is_policy() {
+                    DirectoryAuthError::Misconfigured
+                } else {
+                    DirectoryAuthError::Unavailable
+                },
+                refusal.reason(),
+            )
+        })?;
+        // 2. TCP to a vetted address, and nothing else.
+        let mut tcp = connect_pinned(&guarded.addresses).await?;
+        // 3. StartTLS before anything else is sent.
+        if target.start_tls {
+            starttls(&mut tcp, self.max_message_bytes).await?;
+        }
+        // 4. TLS, checked against the URL's host.
+        let server_name =
+            rustls_pki_types::ServerName::try_from(guarded.host.clone()).map_err(|_| {
+                Failure::new(
+                    DirectoryAuthError::Unavailable,
+                    "TLS verification of the directory failed (the URL's host is not a valid \
+                     server name)",
+                )
+            })?;
+        let tls = tokio_rustls::TlsConnector::from(Arc::clone(&target.tls))
+            .connect(server_name, tcp)
             .await
             .map_err(|error| {
                 tracing::debug!(
                     target: "axiam::directory",
                     tenant_id = %target.tenant_id,
                     error = %error,
-                    "directory connection failed"
+                    "directory TLS handshake failed"
                 );
-                match error {
-                    LdapError::LdapResult { .. } => Failure::new(
-                        DirectoryAuthError::Unavailable,
-                        "the directory refused StartTLS; no bind was sent",
-                    ),
-                    LdapError::Rustls { .. } | LdapError::DNSName { .. } => Failure::new(
-                        DirectoryAuthError::Unavailable,
+                let verification = error
+                    .get_ref()
+                    .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some());
+                Failure::new(
+                    DirectoryAuthError::Unavailable,
+                    if verification {
                         "TLS verification of the directory failed (certificate not trusted, \
-                         or not issued for the URL's host)",
-                    ),
-                    LdapError::Timeout { .. } => Failure::new(
-                        DirectoryAuthError::Unavailable,
-                        "connecting to the directory timed out",
-                    ),
-                    _ => Failure::new(
-                        DirectoryAuthError::Unavailable,
-                        "the directory could not be reached",
-                    ),
-                }
+                         or not issued for the URL's host)"
+                    } else {
+                        "the directory could not be reached"
+                    },
+                )
             })?;
-        tokio::spawn(async move {
-            if let Err(error) = conn.drive().await {
-                tracing::debug!(target: "axiam::directory", error = %error, "directory connection closed");
-            }
-        });
-        Ok(ldap)
+        // 5. The frame guard between the directory and ldap3.
+        let (ldap, relay) =
+            crate::relay::attach(tls, self.max_message_bytes, target.tenant_id).await?;
+        Ok(Connection { ldap, relay })
     }
 
     async fn permits(
@@ -721,7 +835,14 @@ impl DirectoryClient {
     /// Return a service-bound connection to the pool, or close it when the
     /// pool is full or the connection too old. The lease's permits are held
     /// until the socket is closed, so the bound counts real sockets.
-    pub(crate) async fn release(&self, target: &DirectoryTarget, mut lease: Lease) {
+    pub(crate) async fn release(&self, target: &DirectoryTarget, lease: Lease) {
+        let Lease {
+            mut ldap,
+            opened,
+            reused: _,
+            _tenant,
+            _global,
+        } = lease;
         let pool = self.pool_for(target.tenant_id);
         let leftover = {
             let mut idle = pool
@@ -730,35 +851,55 @@ impl DirectoryClient {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let now = Instant::now();
             if idle.len() < self.limits.max_idle_per_tenant
-                && now.duration_since(lease.opened) < self.limits.max_connection_age
-                && !lease.ldap.is_closed()
+                && now.duration_since(opened) < self.limits.max_connection_age
+                && !ldap.is_closed()
             {
                 idle.push(IdleConnection {
-                    ldap: lease.ldap.clone(),
+                    ldap,
                     generation: target.generation.clone(),
-                    opened: lease.opened,
+                    opened,
                     idle_since: now,
                 });
-                false
+                None
             } else {
-                true
+                Some(ldap)
             }
         };
-        if leftover {
-            self.close(lease.ldap.clone()).await;
+        if let Some(ldap) = leftover {
+            self.close(ldap).await;
         }
-        // The permits drop with `lease` here.
+        // The permits drop here, after any close.
+        drop((_tenant, _global));
     }
 
     /// Close a lease's connection, then release its permits.
     pub(crate) async fn discard(&self, lease: Lease) {
-        self.close(lease.ldap.clone()).await;
+        let Lease {
+            ldap,
+            _tenant,
+            _global,
+            ..
+        } = lease;
+        self.close(ldap).await;
+        drop((_tenant, _global));
     }
 
-    /// Unbind and close, bounded. `ldap3` shuts the socket down before
-    /// `unbind` returns.
-    async fn close(&self, mut ldap: Ldap) {
+    /// Unbind and close, bounded: `ldap3` shuts its end down before `unbind`
+    /// returns, and the relay then closes the TCP socket, which is awaited
+    /// here, so a permit released after `close` never counts a socket that is
+    /// still open. A relay that does not finish in time is aborted, which
+    /// drops the socket.
+    async fn close(&self, conn: Connection) {
+        let Connection { mut ldap, relay } = conn;
         let _ = tokio::time::timeout(self.limits.operation_timeout, ldap.unbind()).await;
+        drop(ldap);
+        let abort = relay.abort_handle();
+        if tokio::time::timeout(self.limits.operation_timeout, relay)
+            .await
+            .is_err()
+        {
+            abort.abort();
+        }
     }
 
     /// Log a failure for the operator — fixed text and the tenant, nothing the
@@ -800,6 +941,52 @@ pub fn transport_is_encrypted(url: &str, start_tls: bool) -> bool {
             _ => false,
         },
         Err(_) => false,
+    }
+}
+
+/// Connect to the first of `addresses` that answers. Every one of them passed
+/// the address guard; no name is resolved here.
+async fn connect_pinned(
+    addresses: &[std::net::SocketAddr],
+) -> Result<tokio::net::TcpStream, Failure> {
+    for address in addresses {
+        if let Ok(stream) = tokio::net::TcpStream::connect(address).await {
+            let _ = stream.set_nodelay(true);
+            return Ok(stream);
+        }
+    }
+    Err(Failure::new(
+        DirectoryAuthError::Unavailable,
+        "the directory could not be reached",
+    ))
+}
+
+/// The StartTLS exchange (RFC 4511 §4.14), on the plain socket: the request is
+/// the only plaintext AXIAM ever sends a directory, and the answer passes the
+/// frame guard like every other message.
+async fn starttls(
+    tcp: &mut tokio::net::TcpStream,
+    max_message_bytes: usize,
+) -> Result<(), Failure> {
+    use tokio::io::AsyncWriteExt;
+    tcp.write_all(&crate::frame::STARTTLS_REQUEST)
+        .await
+        .map_err(|_| {
+            Failure::new(
+                DirectoryAuthError::Unavailable,
+                "the directory could not be reached",
+            )
+        })?;
+    match crate::frame::read_message(tcp, max_message_bytes).await {
+        Ok(Some(response)) if crate::frame::is_starttls_success(&response) => Ok(()),
+        Ok(Some(_)) => Err(Failure::new(
+            DirectoryAuthError::Unavailable,
+            "the directory refused StartTLS; no bind was sent",
+        )),
+        Ok(None) | Err(_) => Err(Failure::new(
+            DirectoryAuthError::Unavailable,
+            "the directory did not answer StartTLS with an LDAP response; no bind was sent",
+        )),
     }
 }
 

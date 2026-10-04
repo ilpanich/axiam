@@ -202,6 +202,74 @@ struct AppConfig {
     gdpr_pseudonym_pepper: Option<[u8; 32]>,
 }
 
+/// The one LDAP client every directory path shares (G-3), with the
+/// deployment's connector guards (T23.3.7, D-19, D-32):
+///
+/// * the **address policy** — loopback, link-local (the metadata service),
+///   unspecified, multicast and special-purpose addresses are always refused,
+///   private ranges only inside `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS`,
+///   and this host's addresses on AXIAM's own REST and gRPC ports never — applied
+///   to every directory connection, with the resolved address pinned;
+/// * the **frame cap** on every LDAP message a directory sends
+///   (`AXIAM__DIRECTORY__MAX_MESSAGE_BYTES`, default 2 MiB).
+///
+/// Both are deployment configuration a tenant administrator cannot change, and
+/// both are logged here, once, at startup.
+fn directory_client(config: &AppConfig) -> Arc<axiam_directory::DirectoryClient> {
+    use axiam_directory::address::{ALLOWED_PRIVATE_NETWORKS_ENV, parse_allowed_networks};
+    use axiam_directory::frame::{MAX_MESSAGE_BYTES_ENV, max_message_bytes_from};
+
+    let raw_networks = std::env::var(ALLOWED_PRIVATE_NETWORKS_ENV).unwrap_or_default();
+    let (networks, rejected) = parse_allowed_networks(&raw_networks);
+    if !rejected.is_empty() {
+        // A typo admits nothing (fail closed), but it must not pass silently.
+        tracing::error!(
+            setting = ALLOWED_PRIVATE_NETWORKS_ENV,
+            rejected = %rejected.join(","),
+            "directory allow-list entries that are not CIDR blocks or addresses were ignored"
+        );
+    }
+    if networks.is_empty() {
+        tracing::info!(
+            "directory address guard: no private network admitted ({} unset) — a tenant's \
+             directory must resolve to a globally routable address",
+            ALLOWED_PRIVATE_NETWORKS_ENV
+        );
+    } else {
+        tracing::warn!(
+            networks = %networks.iter().map(ToString::to_string).collect::<Vec<_>>().join(","),
+            "directory address guard: tenant directories may resolve into these private \
+             networks ({}); loopback, link-local, metadata and AXIAM's own listeners stay \
+             refused",
+            ALLOWED_PRIVATE_NETWORKS_ENV
+        );
+    }
+    let policy = axiam_directory::AddressPolicy::new()
+        .with_allowed_private_networks(networks)
+        .with_listener_ports([config.server.port, config.grpc.port]);
+
+    let (max_message_bytes, adjusted) =
+        max_message_bytes_from(std::env::var(MAX_MESSAGE_BYTES_ENV).ok().as_deref());
+    if adjusted {
+        tracing::warn!(
+            setting = MAX_MESSAGE_BYTES_ENV,
+            effective = max_message_bytes,
+            "directory frame cap: the configured value was not usable or out of range; \
+             using the effective value"
+        );
+    }
+    tracing::info!(
+        max_message_bytes,
+        "directory frame guard: LDAP messages from a directory above this size end the connection"
+    );
+
+    Arc::new(
+        axiam_directory::DirectoryClient::new(axiam_directory::ClientLimits::default())
+            .with_address_policy(Arc::new(policy))
+            .with_max_message_bytes(max_message_bytes),
+    )
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     // Subcommands. All of them run before tracing init and before the async
@@ -1083,9 +1151,12 @@ async fn main() -> std::io::Result<()> {
         pool.handle_for_repo(),
         config.directory_encryption_key,
     );
-    let directory_authenticator = Arc::new(axiam_directory::RepositoryDirectoryAuthenticator::new(
-        directory_config_repo.clone(),
-    ));
+    let directory_authenticator = Arc::new(
+        axiam_directory::RepositoryDirectoryAuthenticator::with_client(
+            directory_config_repo.clone(),
+            directory_client(&config),
+        ),
+    );
     // The mapper flushes the authorization decision cache for a user whose
     // memberships it changed, as the group-membership routes do. The cache does
     // not exist yet, so the hook is set below, once `rest_authz` is built.

@@ -502,6 +502,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Directory sources: the address guard and the frame cap beneath the LDAP
+  client (T23.3.7, G-3, D-19, D-32; closes T-300, amends T-295, adds T-331).**
+  A tenant administrator chooses the directory URL, so the connector now holds
+  every directory host to a deployment rule before it opens a socket.
+  `axiam_directory::address::guard` resolves the host once and judges **every**
+  address: loopback, unspecified, link-local (`169.254.169.254`, `fe80::/10`),
+  multicast and special-purpose addresses are always refused, IPv4-mapped forms
+  as the IPv4 address they carry; a private address (RFC 1918, CGNAT
+  `100.64/10`, ULA `fc00::/7`) only inside a network listed in the new
+  **`AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS`** (comma-separated CIDR blocks;
+  unset admits none — a deployment whose directories are on private networks
+  must set it); a metadata endpoint inside a private range whatever the list
+  says; and an address of this host on AXIAM's REST or gRPC port. IPv6-literal
+  URLs are refused (they could never be certificate-checked). The TCP socket is
+  opened to a vetted address and handed to `ldap3`, so nothing resolves the name
+  again — DNS rebinding between the check and the connect is impossible — and
+  the certificate is still verified against the URL's host, for `ldaps://` and
+  StartTLS alike; the guard runs at every connection (pool, user bind, group
+  lookup, sync). `DirectoryClient::guard` / `RepositoryDirectoryAuthenticator::guard_url`
+  is the call the management routes (T23.3.8) make before saving. The
+  classification is `guarded_fetch`'s, moved to `axiam_core::ip_class` so the two
+  guards cannot disagree. **Frame cap (P23W2-10):** AXIAM now performs StartTLS
+  and the TLS handshake itself and gives `ldap3` one end of a private Unix socket
+  pair; a relay forwards each LDAP message from the directory only after
+  `axiam_directory::frame` has measured it — a declared length above
+  **`AXIAM__DIRECTORY__MAX_MESSAGE_BYTES`** (default 2 MiB, clamped to
+  64 KiB … 16 MiB) ends the connection from the header alone — and checked it
+  whole: definite lengths, single-octet tags, nesting at most 16 deep, a message
+  id and an operation. Before this, a hostile directory could make the shared
+  connector buffer whatever it sent until the operation timeout, abort the
+  process through `lber`'s unbounded recursion (a few tens of kilobytes of
+  nesting), or panic a connection task with a short envelope (T-331). Latent
+  until now — no route writes a directory configuration — and closed before
+  T23.3.8 adds one. Threat model **2.23.0**: T-300 closed, T-295 amended, T-302
+  widened, and **T-331 … T-355** added — the frame guard, just-in-time
+  provisioning and linking (T-332 open: an unknown name under
+  `jit_provisioning` reaches the directory with no AXIAM counter in front of it),
+  group mapping, a new **Directory sync job** process with its
+  `directory_sync_state` and `user accounts & member_of` stores, and the sync
+  job's threats; 355 threats, 337 mitigated / 18 open. Tests: 13 in
+  `connector_guard_test.rs` (every refused class at `guard` and at connect, a
+  name resolving to loopback, the listener port, the allow-list both ways, DNS
+  rebinding, one resolution per connection, the hostname TLS check over a pinned
+  address for ldaps and StartTLS, an IP-only certificate refused, an over-long
+  length, 20 000 levels of nesting and a short envelope each aborted at once,
+  the configurable cap), 19 unit tests for the guard and the frame reader, 5
+  classifier tests in `axiam-core`; every existing directory suite unchanged
+  and green.
+
 - **SAML SP: a signed document without an assertion can no longer vouch for a
   forged one (T23.2.2, D-23, T-67).** The SAML assertion consumer verified only
   the *first* `ds:Signature` in a response and bound the assertion to *any*

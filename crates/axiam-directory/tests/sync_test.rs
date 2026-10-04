@@ -57,8 +57,7 @@ use axiam_db::repository::{
 use axiam_directory::config::validate;
 use axiam_directory::sync::{DirectorySync, RunKind, SyncError, SyncLimits, SyncSummary};
 use axiam_directory::{
-    ClientLimits, DirectoryClient, MembershipChangeSlot, RepositoryDirectoryAuthenticator,
-    RepositoryGroupMapper,
+    ClientLimits, MembershipChangeSlot, RepositoryDirectoryAuthenticator, RepositoryGroupMapper,
 };
 use chrono::{Duration as Age, Utc};
 use ldap3_proto::proto::{LdapFilter, LdapResultCode, LdapSearchScope};
@@ -238,7 +237,7 @@ async fn build(setup: Setup) -> Harness {
 
     let authenticator = Arc::new(RepositoryDirectoryAuthenticator::with_client(
         config_repo.clone(),
-        Arc::new(DirectoryClient::new(client_limits())),
+        Arc::new(support::loopback_client(client_limits())),
     ));
     let flushes = Arc::new(Mutex::new(Vec::new()));
     let slot = MembershipChangeSlot::new();

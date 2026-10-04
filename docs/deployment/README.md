@@ -271,6 +271,56 @@ AXIAM's lockout applies in front of the directory, so set the tenant's
 `max_failed_login_attempts` **below** the directory's own lockout threshold:
 AXIAM then stops binding before the directory would lock the account.
 
+#### Where a directory may be: the address guard and the frame cap
+
+A tenant administrator chooses the directory URL, so the connector holds every
+directory host to a rule **you** set, before it opens a socket (T23.3.7, closes
+T-300). The host is resolved and **every** address it resolves to must pass:
+
+| Address | Answer |
+|---|---|
+| globally routable | admitted |
+| loopback (`127.0.0.0/8`, `::1`), unspecified (`0.0.0.0/8`, `::`), link-local (`169.254.0.0/16` — the cloud metadata service — and `fe80::/10`), multicast, documentation / benchmarking / reserved and the other special-purpose blocks | **always refused** |
+| private — RFC 1918, CGNAT `100.64.0.0/10`, IPv6 unique-local `fc00::/7` | refused **unless** inside a network in `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` |
+| a metadata endpoint inside a private range (`fd00:ec2::254`, `100.100.100.200`) | refused whatever the list says |
+| an address of this host on AXIAM's REST or gRPC port | refused |
+
+IPv4-mapped IPv6 answers are judged as the IPv4 address they carry. An
+IPv6-literal URL is refused (no certificate can be checked against it); name
+the directory by a host name. The connection is then **pinned**: the TCP socket
+goes to the address that was checked, nothing resolves the name a second time,
+and the certificate is still verified against the URL's host name. The check
+runs again at every connection — sign-in, group lookup, the sync job — so a
+name re-pointed after the configuration was saved is caught at the next one.
+
+- **`AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS`** — comma-separated CIDR blocks
+  (or single addresses). Unset, no private address is admitted and only a
+  directory on a public address works. Corporate directories live on private
+  networks, so a deployment offering the feature normally sets this to the
+  networks its domain controllers or LDAP servers are in. **Do not list the
+  network AXIAM's own pods, services or load balancers are in**: the listener
+  rule recognises this host's own addresses only, not another replica's pod IP
+  or a Service address that forwards back to AXIAM. Inside a listed network any
+  tenant administrator can aim the connector at any host and port; what that
+  buys is a TLS handshake (or one StartTLS request) toward a host that must then
+  present a certificate chaining to that tenant's anchors before anything else
+  is sent, answered to the user as the generic sign-in failure. An entry that
+  does not parse is ignored and logged at `error` — a typo admits nothing.
+- **`AXIAM__DIRECTORY__MAX_MESSAGE_BYTES`** — the frame cap: the largest LDAP
+  message accepted from a directory, default 2 MiB, clamped to 64 KiB … 16 MiB.
+  Every message a directory sends is measured and its structure checked before
+  the LDAP library sees it; a longer declared length, an indefinite length,
+  nesting deeper than 16 levels or a message without an id and an operation ends
+  the connection on the spot, with a `warn` line naming the reason. Without it a
+  hostile directory could make the connector — which every tenant shares —
+  buffer whatever it sent, or crash its parser. Raise the cap only if an
+  ordinary answer is refused.
+
+A refused address shows up as the generic sign-in failure for the user and a
+`warn` line for you (`directory authentication could not be performed`, with
+the rule in `reason`); once the management routes ship, saving such a URL is
+refused with a `400` naming the rule.
+
 #### Sync: what the job disables, and what it never does
 
 A background job on the server's cleanup scheduler (job name `directory_sync` in

@@ -38,6 +38,15 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::Framed;
 
 pub const STARTTLS_OID: &str = "1.3.6.1.4.1.1466.20037";
+
+/// A client at `limits` whose address policy admits loopback — the in-process
+/// directory listens on `127.0.0.1` — and applies every other rule unchanged
+/// (T23.3.7). Production builds its policy without this seam.
+pub fn loopback_client(limits: axiam_directory::ClientLimits) -> axiam_directory::DirectoryClient {
+    axiam_directory::DirectoryClient::new(limits).with_address_policy(std::sync::Arc::new(
+        axiam_directory::AddressPolicy::new().admitting_loopback_for_tests(),
+    ))
+}
 pub const BASE_DN: &str = "dc=example,dc=com";
 pub const SERVICE_DN: &str = "cn=axiam-reader,dc=example,dc=com";
 
@@ -261,6 +270,12 @@ pub struct Script {
     /// Answer `busy` to every group search whose parsed filter mentions this
     /// text (T23.3.5): one user's group lookup fails, another's does not.
     pub fail_group_searches_matching: Option<String>,
+    /// Answer every **user** search with these raw bytes instead of LDAP
+    /// messages (T23.3.7, the frame guard): an over-long length header, a
+    /// message nested past any stack, an envelope `ldap3` would panic on. The
+    /// connection is then held open, sending nothing more, until the client
+    /// closes it.
+    pub raw_user_search_reply: Option<Vec<u8>>,
 }
 
 impl Default for Script {
@@ -280,6 +295,7 @@ impl Default for Script {
             enforce_sizelimit: false,
             fail_user_searches_from: None,
             fail_group_searches_matching: None,
+            raw_user_search_reply: None,
         }
     }
 }
@@ -306,6 +322,10 @@ pub enum Event {
         encrypted: bool,
     },
     Unbind,
+    /// The scripted raw reply was written.
+    RawReplySent,
+    /// After a raw reply, the client closed the connection.
+    ClosedByClient,
 }
 
 /// What a test can change while the server runs: the directory's contents and
@@ -481,6 +501,11 @@ impl TestServer {
             .collect()
     }
 
+    /// Connections open right now.
+    pub fn open_connections(&self) -> usize {
+        self.open_now.load(Ordering::SeqCst)
+    }
+
     /// Most connections that were open at the same moment.
     pub fn max_concurrent_connections(&self) -> usize {
         self.open_max.load(Ordering::SeqCst)
@@ -617,6 +642,24 @@ impl Session {
                         attrs: req.attrs.clone(),
                         encrypted,
                     });
+                    if !is_group_search(&req)
+                        && !is_root_dse(&req)
+                        && let Some(raw) = self.script.raw_user_search_reply.clone()
+                    {
+                        use tokio::io::AsyncWriteExt;
+                        let io = framed.get_mut();
+                        let _ = io.write_all(&raw).await;
+                        let _ = io.flush().await;
+                        self.record(Event::RawReplySent);
+                        // Send nothing more; wait for the client to give up.
+                        while let Some(item) = framed.next().await {
+                            if item.is_err() {
+                                break;
+                            }
+                        }
+                        self.record(Event::ClosedByClient);
+                        return Next::Close;
+                    }
                     if is_group_search(&req)
                         && let Some(delay) = self.script.group_search_delay
                     {
@@ -899,5 +942,55 @@ fn extended(code: LdapResultCode) -> LdapExtendedResponse {
         res: result(code, "", vec![]),
         name: None,
         value: None,
+    }
+}
+
+/// A resolver that answers one host name from a script — the `n`th question
+/// gets the `n`th answer, the last one repeating — and counts the questions
+/// (T23.3.7). Any other name is unknown. The names it serves (`*.test`) are
+/// ones the system resolver cannot answer, so a connection that reached a
+/// server through one of them used the address this resolver gave, and nothing
+/// else resolved it.
+pub struct ScriptedResolver {
+    host: String,
+    answers: Vec<Vec<std::net::IpAddr>>,
+    asked: AtomicUsize,
+}
+
+impl ScriptedResolver {
+    pub fn new(host: &str, answers: Vec<Vec<std::net::IpAddr>>) -> Arc<Self> {
+        Arc::new(Self {
+            host: host.to_string(),
+            answers,
+            asked: AtomicUsize::new(0),
+        })
+    }
+
+    pub fn questions(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
+}
+
+impl axiam_directory::Resolver for ScriptedResolver {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> axiam_directory::address::ResolveFuture<'a> {
+        let index = self.asked.fetch_add(1, Ordering::SeqCst);
+        let answer = (host == self.host).then(|| {
+            let ips = self
+                .answers
+                .get(index)
+                .or_else(|| self.answers.last())
+                .cloned()
+                .unwrap_or_default();
+            ips.into_iter()
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect::<Vec<_>>()
+        });
+        Box::pin(async move {
+            answer.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "unknown name"))
+        })
     }
 }

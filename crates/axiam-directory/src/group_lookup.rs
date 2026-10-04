@@ -288,10 +288,11 @@ impl LdapParents<'_> {
     async fn member_of(&mut self, dn: &str, must_exist: bool) -> Result<Vec<String>, ResolveError> {
         let attribute = self.lookup.member_attribute.clone();
         let limits = self.client.limits();
+        let options = self.options(2);
         let mut stream = self
             .lease
             .ldap
-            .with_search_options(self.options(2))
+            .with_search_options(options)
             .with_timeout(limits.operation_timeout)
             .streaming_search(dn, Scope::Base, "(objectClass=*)", vec![attribute.clone()])
             .await
@@ -360,10 +361,11 @@ impl LdapParents<'_> {
         };
         let limits = self.client.limits();
         let sizelimit = i32::try_from(self.cap.saturating_add(1)).unwrap_or(i32::MAX);
+        let options = self.options(sizelimit);
         let mut stream = self
             .lease
             .ldap
-            .with_search_options(self.options(sizelimit))
+            .with_search_options(options)
             .with_timeout(limits.operation_timeout)
             // `1.1`: no attributes, only the DNs.
             .streaming_search(&base, Scope::Subtree, &filter, vec!["1.1"])

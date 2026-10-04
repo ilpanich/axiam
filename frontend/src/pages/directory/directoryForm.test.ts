@@ -17,8 +17,11 @@ import { directoryErrorMessage } from "./directoryErrors";
 const PEM = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
 const PEM_TWO = "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----\n";
 
+/** A fresh value per call, from a CSPRNG: nothing here is a literal credential. */
 function bindValue(): string {
-  return `Bv${Math.random().toString(36).slice(2)}7`;
+  const bytes = new Uint8Array(12);
+  globalThis.crypto.getRandomValues(bytes);
+  return `Bv${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}7`;
 }
 
 function stored(overrides: Partial<DirectoryConfig> = {}): DirectoryConfig {

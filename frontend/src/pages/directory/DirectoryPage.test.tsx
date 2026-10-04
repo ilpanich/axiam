@@ -23,8 +23,11 @@ const adminUser: AuthUser = {
   orgSlug: "acme-org",
 };
 
+/** A fresh value per call, from a CSPRNG: nothing here is a literal credential. */
 function bindValue(): string {
-  return `Bv${Math.random().toString(36).slice(2)}7`;
+  const bytes = new Uint8Array(12);
+  globalThis.crypto.getRandomValues(bytes);
+  return `Bv${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}7`;
 }
 
 function config(overrides: Partial<DirectoryConfig> = {}): DirectoryConfig {

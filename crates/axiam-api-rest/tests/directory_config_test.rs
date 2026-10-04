@@ -522,9 +522,24 @@ impl World {
     }
 }
 
+/// The limits every test but the rate-limit one runs under.
+///
+/// The shipped 30 a minute is not what these tests are about, and a shared
+/// counter that first sees a key part-way through a window back-fills it
+/// pro rata (`axiam_db::rate_limit_counter`, the sliding window's cold seed), so
+/// a test that sends a dozen writes can be refused with `429` depending on the
+/// second of the minute it started in. The bucket's own behaviour is pinned,
+/// deterministically, by `the_write_bucket_is_pinned_at_30_and_fires_per_route`.
+fn permissive_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        directory_admin_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 macro_rules! app {
     ($state:expr, $auth:expr, $authz:expr) => {
-        app!($state, $auth, $authz, RateLimitConfig::default())
+        app!($state, $auth, $authz, permissive_limits())
     };
     ($state:expr, $auth:expr, $authz:expr, $limits:expr) => {
         test::init_service(
@@ -1122,8 +1137,8 @@ async fn the_address_guard_refuses_each_class_as_a_400_naming_the_rule() {
     ] {
         let mut body = config_body(Some(&bind_value()));
         body["url"] = url.into();
-        let (status, refusal, _) = put_config(&app, &w, body).await;
-        assert_eq!(status, 400, "{label}");
+        let (status, refusal, text) = put_config(&app, &w, body).await;
+        assert_eq!(status, 400, "{label}: {text}");
         assert_eq!(refusal["error"], "validation_error", "{label}");
         assert!(
             message_of(&refusal).contains(expect),

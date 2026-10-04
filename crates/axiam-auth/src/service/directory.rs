@@ -715,6 +715,22 @@ impl<
                 return Ok(None);
             }
         };
+        // F4 P23W3-02 (T-332): a name that has failed the tenant's threshold
+        // is answered as an unknown user without asking the directory — the
+        // brake an account's own counter is for a name that has one.
+        if self.unknown_name_lockout.is_locked(
+            input.tenant_id,
+            &input.username_or_email,
+            std::time::Instant::now(),
+        ) {
+            tracing::info!(
+                target: "axiam::directory",
+                tenant_id = %input.tenant_id,
+                "unknown login name refused without asking the directory: too many failures"
+            );
+            self.equalising_dummy_verify().await?;
+            return Ok(None);
+        }
         // The same shape `login_directory_account` uses: a hash permit first,
         // so saturation answers `503` exactly where every other branch does and
         // before the directory is contacted, then the dummy verify and the
@@ -735,7 +751,11 @@ impl<
             ),
         );
         match outcome {
-            Ok(identity) => Ok(Some(identity)),
+            Ok(identity) => {
+                self.unknown_name_lockout
+                    .clear(input.tenant_id, &input.username_or_email);
+                Ok(Some(identity))
+            }
             Err(DirectoryAuthError::NotConfigured) => {
                 tracing::debug!(
                     target: "axiam::directory",
@@ -751,6 +771,25 @@ impl<
                     outcome = ?other,
                     "unknown login name refused by the directory"
                 );
+                // Only a failure the directory decided counts — a wrong
+                // password or no such entry; an unusable directory counts
+                // against nobody, as for accounts (T-302).
+                if other == DirectoryAuthError::InvalidCredentials {
+                    let fallback;
+                    let policy = match input.lockout_policy.as_ref() {
+                        Some(policy) => policy,
+                        None => {
+                            fallback = crate::lockout::policy_from_config(&self.config);
+                            &fallback
+                        }
+                    };
+                    self.unknown_name_lockout.record_failure(
+                        input.tenant_id,
+                        &input.username_or_email,
+                        policy,
+                        std::time::Instant::now(),
+                    );
+                }
                 Ok(None)
             }
         }

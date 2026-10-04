@@ -18,6 +18,7 @@ pub mod secrets;
 pub mod service;
 pub mod token;
 pub mod totp;
+pub mod unknown_name_lockout;
 pub mod verification;
 pub mod webauthn;
 

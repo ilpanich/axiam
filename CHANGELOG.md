@@ -601,6 +601,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Directory sources: a lockout for login names AXIAM holds no account for (F4
+  P23W3-02, closes T-332).** With just-in-time provisioning on, a sign-in for an
+  unknown name is answered by the tenant's directory, and no AXIAM counter stood
+  in front of it — the per-account lockout has no account to count against — so
+  the login endpoint could spray passwords at directory users who had never
+  signed in to AXIAM, limited only by the per-IP limits and the directory's own
+  lockout. Failures the directory decides for an unknown name (a wrong password
+  or no such entry; an unusable directory counts against nobody) are now counted
+  per tenant and login name, trimmed and case-folded, under the tenant's lockout
+  policy (`max_failed_login_attempts`, `lockout_duration_secs`, the backoff and
+  its cap). Over the threshold, the name is answered as an unknown user — dummy
+  verify included — without asking the directory, even with the right password,
+  until the lockout expires; a successful sign-in clears it. The counter is per
+  process (with N replicas a name gets at most N times the attempts per window)
+  and tracks at most 50 000 names. Threat model 2.24.0: T-332 closed. Tests:
+  `p23w3_02_guessing_at_an_unknown_name_stops_reaching_the_directory`,
+  `p23w3_02_failures_below_the_threshold_still_provision`, and four unit tests
+  in `axiam_auth::unknown_name_lockout`.
+
 - **Directory linking also removes the account's federation links (F4 P23W3-01,
   T-336).** `POST /api/v1/tenants/{tenant_id}/directory/links` (D-28) retired
   the passkeys, `User` certificates, sessions and refresh tokens of the account

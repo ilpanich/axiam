@@ -18,8 +18,8 @@ export const THREAT_MODEL: ThreatModel = {
  "version": "2.24.0",
  "diagramCount": 9,
  "total": 355,
- "open": 18,
- "mitigated": 337,
+ "open": 17,
+ "mitigated": 338,
  "diagrams": [
   {
    "id": 0,
@@ -3961,7 +3961,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "Active Directory and many OpenLDAP deployments lock an account after a number of failed binds. An attacker who sprays passwords at AXIAM's login endpoint could make AXIAM perform those failed binds, locking real users out of their corporate accounts — mail, VPN, workstation — not just out of AXIAM; and the directory's own lockout may be absent altogether, leaving AXIAM's as the only brake.",
-       "mitigation": "AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`. **Widened 2026-10-04 (T23.3.7): names AXIAM holds no account for.** With `jit_provisioning` on, an unknown login name reaches the directory too (T23.3.3), and there is no AXIAM account whose counter could stop it; that case is T-332, which is open."
+       "mitigation": "AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`. **Widened 2026-10-04 (T23.3.7): names AXIAM holds no account for.** With `jit_provisioning` on, an unknown login name reaches the directory too (T23.3.3), and there is no AXIAM account whose counter could stop it; that case is T-332, closed by the W3 F4 review with a failure counter for names AXIAM holds no account for."
       },
       {
        "number": 303,
@@ -3986,9 +3986,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "With just-in-time provisioning on, an unknown name costs a directory bind that no AXIAM lockout counts",
        "type": "Denial of service",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "T-302's brake is the per-account counter, and an unknown name has no account. With `jit_provisioning` on, every sign-in for a name AXIAM does not hold is a directory search and, when the directory knows the name, a bind with the presented password: AXIAM can be used to spray passwords at directory accounts that have never signed in to AXIAM — guessing them, or tripping the directory's own lockout for them — at whatever rate the login endpoint admits.",
-       "mitigation": "Bounded, not closed. The provisioning gate answers a tenant without an enabled directory, or without `jit_provisioning`, before the bind secret is decrypted or a socket opens; the hash permit is taken first, so saturation is the ordinary `503` before the directory hears anything; the per-IP login rate limits apply; and every outcome is the unknown-user answer at its cost (T-333). Nothing counts failures per unknown name, so a spray spread across addresses is limited only by the directory's own policy. Open until a failure counter keyed by (tenant, login name) covers names AXIAM holds no account for — a follow-up for the F4 review. Until then: keep `jit_provisioning` off where the directory has no lockout of its own. Tests that pin the bounds (`axiam-auth/tests/directory_provisioning_test.rs`): `every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify`, `saturation_answers_the_same_503_before_the_directory_is_contacted`, `a_tenant_without_a_directory_observes_nothing_new`."
+       "mitigation": "**Closed 2026-10-04 (W3 F4 review, P23W3-02).** A failure counter for names AXIAM holds no account for: `axiam_auth::unknown_name_lockout`, keyed by tenant and the login name as typed, trimmed and lower-cased (directories compare names without regard to case), applying the tenant's own lockout policy — after `max_failed_login_attempts` failures the directory decided (a wrong password or no such entry; an unusable directory counts against nobody, as for accounts) the name is locked for `lockout_duration_secs`, growing by the backoff to `max_lockout_duration_secs`. A locked name is answered as an unknown user, dummy verify included, **without asking the directory**, even with the right password; a successful sign-in clears it. The provisioning gate, the hash permit taken first, the per-IP login limits and the unknown-user answer (T-333) still stand in front of it. Tests (`axiam-auth/tests/directory_provisioning_test.rs`): `p23w3_02_guessing_at_an_unknown_name_stops_reaching_the_directory`, `p23w3_02_failures_below_the_threshold_still_provision`, the counter's unit tests (`unknown_name_lockout::tests`), and the three that pinned the bounds before: `every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify`, `saturation_answers_the_same_503_before_the_directory_is_contacted`, `a_tenant_without_a_directory_observes_nothing_new`. Residual: the counter lives in each process's memory, so with N replicas a name gets at most N times the policy's attempts per lockout window (the bound the in-memory rate-limit governor has) and a restart forgets it; at most 50 000 names are tracked per process, and a full table makes room from the least recently failed name that is not locked, so a spray of other names cannot free a locked one; whoever guesses at a name can lock it out of its first sign-in for the lockout window — the account lockout's own trade-off."
       },
       {
        "number": 333,
@@ -4081,7 +4081,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Mapping writes go through `RepositoryGroupMapper`, whose `MembershipChangeHook` (installed by `axiam-server`) flushes the decision cache for the user, locally and by broadcast, whenever a membership changes — as the group-membership routes do. Tests: `a_membership_change_flushes_the_decision_cache_through_the_hook`, `a_role_through_a_mapped_group_is_effective_and_gone_after_removal`. Residual: a broadcast that fails is logged, and the other replicas' entries then live out the cache TTL."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "5ecdb607-7d05-50ee-867f-13653e64219b",
@@ -5293,7 +5293,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 96,
-   "open": 6,
+   "open": 5,
    "bySeverity": {
     "High": 37,
     "Medium": 38,

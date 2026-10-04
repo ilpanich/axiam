@@ -56,8 +56,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.24.0",
  "diagramCount": 9,
  "total": 355,
- "open": 18,
- "mitigated": 337,
+ "open": 17,
+ "mitigated": 338,
  "areas": [
   {
    "id": 0,
@@ -81,7 +81,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
    "total": 96,
-   "open": 6
+   "open": 5
   },
   {
    "id": 4,
@@ -138,7 +138,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Denial of service",
    "total": 39,
-   "open": 4
+   "open": 3
   },
   {
    "name": "Elevation of privilege",
@@ -160,7 +160,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Medium",
    "total": 137,
-   "open": 6
+   "open": 5
   },
   {
    "name": "Low",
@@ -318,16 +318,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Federation — SAML SP & OIDC relying party",
    "element": "SAML assertion issuer (saml_idp)",
    "residualRisk": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. Open because `SessionIndex` is the AXIAM session id (plan §4 G-2, so that SLO and the revocation feed revoke the same thing): it is identical at every SP of one sign-on, as is `AuthnInstant`, so SPs that collude can correlate concurrent sessions despite pairwise identifiers. T23.2.4 decides whether SLO can map a per-SP index back to the session."
-  },
-  {
-   "number": 332,
-   "title": "With just-in-time provisioning on, an unknown name costs a directory bind that no AXIAM lockout counts",
-   "category": "Denial of service",
-   "severity": "Medium",
-   "diagramId": 3,
-   "area": "Federation — SAML SP & OIDC relying party",
-   "element": "Directory sign-in (bind-as-user, bounded pool)",
-   "residualRisk": "Bounded, not closed. The provisioning gate answers a tenant without an enabled directory, or without `jit_provisioning`, before the bind secret is decrypted or a socket opens; the hash permit is taken first, so saturation is the ordinary `503` before the directory hears anything; the per-IP login rate limits apply; and every outcome is the unknown-user answer at its cost (T-333). Nothing counts failures per unknown name, so a spray spread across addresses is limited only by the directory's own policy. Open until a failure counter keyed by (tenant, login name) covers names AXIAM holds no account for — a follow-up for the F4 review. Until then: keep `jit_provisioning` off where the directory has no lockout of its own. Tests that pin the bounds (`axiam-auth/tests/directory_provisioning_test.rs`): `every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify`, `saturation_answers_the_same_503_before_the_directory_is_contacted`, `a_tenant_without_a_directory_observes_nothing_new`."
   },
   {
    "number": 161,

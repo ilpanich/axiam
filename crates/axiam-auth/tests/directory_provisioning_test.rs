@@ -1108,6 +1108,80 @@ async fn p23w3_01_linking_removes_the_accounts_federation_links() {
     assert_eq!(retried.federation_links_deleted, 0);
 }
 
+/// **F4 P23W3-02 (T-332)** — with just-in-time provisioning on, a name AXIAM
+/// holds no account for reached the directory on every attempt: no account, so
+/// no counter. Failures for an unknown name now count per (tenant, login name),
+/// case-folded, under the tenant's lockout policy; at the threshold the name
+/// stops reaching the directory — even with the right password — and is
+/// answered exactly as an unknown user. Another name is unaffected.
+#[tokio::test]
+async fn p23w3_02_guessing_at_an_unknown_name_stops_reaching_the_directory() {
+    let h = harness().await;
+    let directory_credential = fresh_credential();
+    let directory = StubDirectory::arc(
+        identity(ENTRY, "newcomer", "newcomer@example.com"),
+        &directory_credential,
+    );
+    let svc = service(&h, Some(Arc::clone(&directory)));
+    let accounts_before = account_count(&h).await;
+
+    // The test configuration's threshold is three.
+    for spelled in ["newcomer", "NewComer", "NEWCOMER"] {
+        assert!(is_invalid_credentials(
+            &svc.login(input(&h, spelled, &fresh_credential())).await
+        ));
+    }
+    assert_eq!(directory.provision_calls(), 3);
+
+    let outcome = svc
+        .login(input(&h, "newcomer", &directory_credential))
+        .await;
+    assert!(
+        is_invalid_credentials(&outcome),
+        "a locked unknown name is answered as an unknown user"
+    );
+    assert_eq!(
+        directory.provision_calls(),
+        3,
+        "a locked unknown name never reaches the directory"
+    );
+    assert_eq!(
+        account_count(&h).await,
+        accounts_before,
+        "nothing provisioned"
+    );
+
+    // Another name still reaches the directory.
+    let _ = svc
+        .login(input(&h, "someone-else", &fresh_credential()))
+        .await;
+    assert_eq!(directory.provision_calls(), 4);
+}
+
+/// Below the threshold nothing changes: failures, then the right password,
+/// provisions the account as before.
+#[tokio::test]
+async fn p23w3_02_failures_below_the_threshold_still_provision() {
+    let h = harness().await;
+    let directory_credential = fresh_credential();
+    let directory = StubDirectory::arc(
+        identity(ENTRY, "newcomer", "newcomer@example.com"),
+        &directory_credential,
+    );
+    let svc = service(&h, Some(Arc::clone(&directory)));
+    for _ in 0..2 {
+        assert!(is_invalid_credentials(
+            &svc.login(input(&h, "newcomer", &fresh_credential())).await
+        ));
+    }
+    assert!(matches!(
+        svc.login(input(&h, "newcomer", &directory_credential))
+            .await,
+        Ok(LoginResult::Success(_))
+    ));
+    assert_eq!(directory.provision_calls(), 3);
+}
+
 /// A user repository that plants, between the collision probe and the create,
 /// the account a concurrent first login would have made — already `Inactive`,
 /// as if the sync job had deactivated it in between — so JIT's lost-race branch

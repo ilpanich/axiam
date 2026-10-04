@@ -342,6 +342,18 @@ case: fill the attribute in the directory, or map `user_attribute_map.email` to
 an attribute every entry has. The same applies to a username that is missing, too
 long, or holds control or bidirectional-override characters.
 
+**Guessing at names that have no account yet is locked out too.** With
+`jit_provisioning` on, a sign-in for a name that matches no AXIAM account is
+answered by the directory, so AXIAM counts the failures the directory decides (a
+wrong password, or no such entry) per tenant and login name, ignoring case, with
+the tenant's own lockout policy — the same threshold, duration and backoff an
+account gets. Past the threshold the name is answered as an unknown user without
+asking the directory, even with the right password, until the lockout expires; a
+successful sign-in clears it. The count is kept in each server process's memory,
+so with several replicas a name gets at most that many times the attempts per
+window, and a restart forgets it. Set the tenant threshold below the directory's
+own, as for accounts, so AXIAM's lockout engages first.
+
 **Linking an existing local account** (`directory:link`). Just-in-time
 provisioning only ever creates accounts, for login names that match no local
 account — it never turns an existing account into a directory account, so a

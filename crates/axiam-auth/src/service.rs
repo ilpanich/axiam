@@ -243,6 +243,12 @@ pub struct AuthService<
     /// With one attached, a mapping that cannot be applied **refuses the
     /// sign-in** (fail closed); see [`Self::apply_directory_group_mapping`].
     directory_group_mapper: Option<SharedDirectoryGroupMapper>,
+    /// F4 P23W3-02 (T-332) — the failed-attempt counter for login names AXIAM
+    /// holds no account for, which with just-in-time provisioning on reach the
+    /// directory. Shared by every clone of the service (one per process), and
+    /// consulted before the directory is asked; see
+    /// [`crate::unknown_name_lockout`].
+    unknown_name_lockout: Arc<crate::unknown_name_lockout::UnknownNameLockout>,
 }
 
 impl<
@@ -271,6 +277,7 @@ impl<
             directory_authenticator: None,
             directory_audit: None,
             directory_group_mapper: None,
+            unknown_name_lockout: Arc::default(),
         }
     }
 

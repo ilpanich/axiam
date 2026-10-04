@@ -293,6 +293,17 @@ impl<
             Err(other) => return Err(other),
         };
 
+        // F4 P23W3-05: the account's standing before its memberships. In the
+        // lost-race branch above `created` is another login's account, which
+        // may since have been deactivated (the sync job) or suspended; such an
+        // account is refused here — the same answer `complete_authenticated_login`
+        // gives — before the mapping could re-add directory memberships to it.
+        Self::check_user_status(
+            &created.status,
+            created.created_at,
+            self.config.email_verification_grace_period_hours,
+        )?;
+
         // T23.3.4: the new account holds no membership yet, so a lookup that
         // fails here leaves it granting nothing; the sign-in is refused and the
         // next one maps the groups.

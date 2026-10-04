@@ -528,6 +528,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Directory just-in-time provisioning: a lost race checks the winner's status
+  before mapping groups (F4 P23W3-05).** When two first sign-ins for one
+  directory entry race, the loser continues with the winner's account. It now
+  refuses an account that may not sign in — deactivated by the sync job in
+  between, or suspended — *before* the group mapping runs, instead of re-adding
+  directory memberships to it and refusing afterwards. The memberships granted
+  nothing while the account was not active, and the answer is unchanged. Test:
+  `p23w3_05_a_lost_race_to_an_inactive_account_maps_no_groups`.
+
 - **A tenant delete that fails is reported as a failure (F4 P23W2-02).**
   Since T23.3.1 the tenant delete removes the tenant's directory configuration
   in the same transaction, but the repository never checked the response: a

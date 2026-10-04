@@ -28,14 +28,16 @@ use axiam_core::models::audit::{AuditLogEntry, AuditOutcome};
 use axiam_core::models::certificate::{CertificateStatus, CertificateType, KeyAlgorithm};
 use axiam_core::models::directory::{
     DirectoryAccountRestriction, DirectoryAuthError, DirectoryAuthenticator, DirectoryFuture,
-    DirectoryIdentity,
+    DirectoryGroupMapper, DirectoryIdentity, GroupMappingOutcome,
 };
 use axiam_core::models::federation::CreateFederationLink;
 use axiam_core::models::oauth2_client::CreateRefreshToken;
 use axiam_core::models::opaque::{CreateOpaqueCredential, OpaqueKsf, OpaqueKsfParams, OpaqueSuite};
 use axiam_core::models::session::Amr;
 use axiam_core::models::settings::MfaPolicy;
-use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
+use axiam_core::models::user::{
+    CreateDirectoryAccount, CreateUser, IdentityCollision, UpdateUser, User, UserStatus,
+};
 use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredentialType};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, CertificateRepository, FederationLinkRepository,
@@ -1104,6 +1106,164 @@ async fn p23w3_01_linking_removes_the_accounts_federation_links() {
     let retried = link(&h, &svc).await.expect("the retry completes");
     assert!(retried.was_already_linked);
     assert_eq!(retried.federation_links_deleted, 0);
+}
+
+/// A user repository that plants, between the collision probe and the create,
+/// the account a concurrent first login would have made — already `Inactive`,
+/// as if the sync job had deactivated it in between — so JIT's lost-race branch
+/// is reached deterministically. Every other call delegates.
+struct RacingUsers {
+    inner: SurrealUserRepository<Db>,
+    plant: Mutex<Option<CreateDirectoryAccount>>,
+}
+
+impl UserRepository for RacingUsers {
+    async fn create(&self, input: CreateUser) -> AxiamResult<User> {
+        self.inner.create(input).await
+    }
+    async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<User> {
+        self.inner.get_by_id(tenant_id, id).await
+    }
+    async fn get_by_username(&self, tenant_id: Uuid, username: &str) -> AxiamResult<User> {
+        self.inner.get_by_username(tenant_id, username).await
+    }
+    async fn get_by_email(&self, tenant_id: Uuid, email: &str) -> AxiamResult<User> {
+        self.inner.get_by_email(tenant_id, email).await
+    }
+    async fn update(&self, tenant_id: Uuid, id: Uuid, input: UpdateUser) -> AxiamResult<User> {
+        self.inner.update(tenant_id, id, input).await
+    }
+    async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
+        self.inner.delete(tenant_id, id).await
+    }
+    async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<bool> {
+        self.inner.update_totp_step(tenant_id, id, step).await
+    }
+    async fn list(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> AxiamResult<axiam_core::repository::PaginatedResult<User>> {
+        self.inner.list(tenant_id, pagination).await
+    }
+    async fn increment_failed_logins(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        lockout_threshold: u32,
+        base_lockout_secs: i64,
+        backoff_multiplier: f64,
+        max_lockout_secs: i64,
+    ) -> AxiamResult<()> {
+        self.inner
+            .increment_failed_logins(
+                tenant_id,
+                user_id,
+                lockout_threshold,
+                base_lockout_secs,
+                backoff_multiplier,
+                max_lockout_secs,
+            )
+            .await
+    }
+    async fn anonymize_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        email_hash: &str,
+        pseudonym: &str,
+    ) -> AxiamResult<()> {
+        self.inner
+            .anonymize_user(tenant_id, user_id, email_hash, pseudonym)
+            .await
+    }
+    async fn create_directory_account(&self, input: CreateDirectoryAccount) -> AxiamResult<User> {
+        self.inner.create_directory_account(input).await
+    }
+    async fn find_identity_collision(
+        &self,
+        tenant_id: Uuid,
+        names: &[String],
+    ) -> AxiamResult<Option<IdentityCollision>> {
+        let probed = self.inner.find_identity_collision(tenant_id, names).await;
+        let planted = self.plant.lock().unwrap().take();
+        if let Some(account) = planted {
+            let winner = self.inner.create_directory_account(account).await?;
+            self.inner
+                .update(
+                    tenant_id,
+                    winner.id,
+                    UpdateUser {
+                        status: Some(UserStatus::Inactive),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+        probed
+    }
+}
+
+/// A group mapper that only counts how often it is asked to apply.
+struct CountingMapper(AtomicUsize);
+
+impl DirectoryGroupMapper for CountingMapper {
+    fn apply_for_user<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _user_dn: &'a str,
+    ) -> DirectoryFuture<'a, Result<GroupMappingOutcome, DirectoryAuthError>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(GroupMappingOutcome::default()) })
+    }
+}
+
+/// **F4 P23W3-05** — in JIT's lost-race branch the winner's status is checked
+/// *before* the group mapping runs: an account that is not allowed to sign in
+/// (here `Inactive`) is refused without its directory memberships being
+/// re-added. Before the fix the mapping ran first, and only the status check
+/// inside `complete_authenticated_login` refused the sign-in.
+#[tokio::test]
+async fn p23w3_05_a_lost_race_to_an_inactive_account_maps_no_groups() {
+    let h = harness().await;
+    let directory_credential = fresh_credential();
+    let directory = StubDirectory::arc(
+        identity(ENTRY, "newcomer", "newcomer@example.com"),
+        &directory_credential,
+    );
+    let mapper = Arc::new(CountingMapper(AtomicUsize::new(0)));
+    let users = RacingUsers {
+        inner: h.users.clone(),
+        plant: Mutex::new(Some(CreateDirectoryAccount {
+            tenant_id: h.tenant_id,
+            username: "newcomer".into(),
+            email: "newcomer@example.com".into(),
+            external_id: ENTRY.into(),
+            metadata: serde_json::json!({}),
+        })),
+    };
+    let svc = AuthService::new(
+        users,
+        h.sessions.clone(),
+        SurrealFederationLinkRepository::new(h.db.clone()),
+        SurrealRefreshTokenRepository::new(h.db.clone()),
+        config(5),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    )
+    .with_directory_audit(Arc::new(RepositoryDirectoryAuditSink(h.audit.clone())))
+    .with_directory_authenticator(directory)
+    .with_directory_group_mapper(Arc::clone(&mapper) as _);
+
+    let outcome = svc
+        .login(input(&h, "newcomer", &directory_credential))
+        .await;
+    assert!(outcome.is_err(), "an Inactive winner does not sign in");
+    assert_eq!(
+        mapper.0.load(Ordering::SeqCst),
+        0,
+        "no directory membership is re-added to an account that may not sign in"
+    );
 }
 
 /// An entry already linked to another account is refused, and nothing the

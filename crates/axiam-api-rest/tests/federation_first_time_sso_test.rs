@@ -448,7 +448,15 @@ async fn first_time_oidc_sso_sets_cookies_and_me_succeeds() {
         .collect();
     let paths: Vec<&str> = ops.iter().filter_map(|c| c.path()).collect();
     let tenant_path = format!("/t/{tenant_id}/oauth2/authorize");
-    assert_eq!(paths, vec!["/oauth2/authorize", tenant_path.as_str()]);
+    let saml_path = format!("/saml/v2/{tenant_id}/sso");
+    assert_eq!(
+        paths,
+        vec![
+            "/oauth2/authorize",
+            tenant_path.as_str(),
+            saml_path.as_str()
+        ]
+    );
     for c in &ops {
         assert!(c.value() == ops[0].value() && !c.value().is_empty());
         assert!(c.http_only().unwrap_or(false));

@@ -26,8 +26,8 @@ use futures_util::{SinkExt, StreamExt};
 use ldap3_proto::LdapCodec;
 use ldap3_proto::proto::{
     LdapBindCred, LdapBindResponse, LdapDerefAliases, LdapExtendedResponse, LdapFilter, LdapMsg,
-    LdapOp, LdapPartialAttribute, LdapResult, LdapResultCode, LdapSearchResultEntry,
-    LdapSearchResultReference,
+    LdapOp, LdapPartialAttribute, LdapResult, LdapResultCode, LdapSearchRequest,
+    LdapSearchResultEntry, LdapSearchResultReference, LdapSearchScope,
 };
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use rustls::ServerConfig;
@@ -38,6 +38,15 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::Framed;
 
 pub const STARTTLS_OID: &str = "1.3.6.1.4.1.1466.20037";
+
+/// A client at `limits` whose address policy admits loopback — the in-process
+/// directory listens on `127.0.0.1` — and applies every other rule unchanged
+/// (T23.3.7). Production builds its policy without this seam.
+pub fn loopback_client(limits: axiam_directory::ClientLimits) -> axiam_directory::DirectoryClient {
+    axiam_directory::DirectoryClient::new(limits).with_address_policy(std::sync::Arc::new(
+        axiam_directory::AddressPolicy::new().admitting_loopback_for_tests(),
+    ))
+}
 pub const BASE_DN: &str = "dc=example,dc=com";
 pub const SERVICE_DN: &str = "cn=axiam-reader,dc=example,dc=com";
 
@@ -91,12 +100,15 @@ impl TestCa {
     }
 }
 
+/// One attribute of an entry: its name and its values.
+pub type EntryAttr = (String, Vec<Vec<u8>>);
+
 /// A directory entry the server holds.
 #[derive(Clone)]
 pub struct Entry {
     pub dn: String,
     pub password: String,
-    pub attrs: Vec<(String, Vec<Vec<u8>>)>,
+    pub attrs: Vec<EntryAttr>,
 }
 
 impl Entry {
@@ -120,6 +132,91 @@ impl Entry {
             ],
         }
     }
+}
+
+impl Entry {
+    /// A group (`groupOfNames`) under `ou=groups`, with `member` values.
+    pub fn group(cn: &str, members: &[&str]) -> Self {
+        Self {
+            dn: group_dn(cn),
+            password: String::new(),
+            attrs: vec![
+                ("objectClass".into(), vec![b"groupOfNames".to_vec()]),
+                ("cn".into(), vec![cn.as_bytes().to_vec()]),
+                (
+                    "member".into(),
+                    members.iter().map(|m| m.as_bytes().to_vec()).collect(),
+                ),
+            ],
+        }
+    }
+
+    /// An Active Directory-shaped group: no `member` list that matters here,
+    /// `memberOf` naming the groups that contain it.
+    pub fn ad_group(cn: &str, member_of: &[&str]) -> Self {
+        Self {
+            dn: group_dn(cn),
+            password: String::new(),
+            attrs: vec![
+                ("objectClass".into(), vec![b"group".to_vec()]),
+                ("cn".into(), vec![cn.as_bytes().to_vec()]),
+                (
+                    "memberOf".into(),
+                    member_of.iter().map(|m| m.as_bytes().to_vec()).collect(),
+                ),
+            ],
+        }
+    }
+
+    /// An Active Directory-shaped person: `sAMAccountName`, a binary
+    /// `objectGUID` (the raw bytes, as a directory sends them),
+    /// `userAccountControl` 512 (a normal, enabled account) and a `uSNChanged`.
+    pub fn ad_person(sam: &str, password: &str, object_guid: [u8; 16], usn: u64) -> Self {
+        Self {
+            dn: format!("cn={sam},cn=Users,{BASE_DN}"),
+            password: password.into(),
+            attrs: vec![
+                ("objectClass".into(), vec![b"user".to_vec()]),
+                ("sAMAccountName".into(), vec![sam.as_bytes().to_vec()]),
+                (
+                    "mail".into(),
+                    vec![format!("{sam}@example.com").into_bytes()],
+                ),
+                (
+                    "displayName".into(),
+                    vec![format!("Test {sam}").into_bytes()],
+                ),
+                ("objectGUID".into(), vec![object_guid.to_vec()]),
+                ("userAccountControl".into(), vec![b"512".to_vec()]),
+                ("uSNChanged".into(), vec![usn.to_string().into_bytes()]),
+            ],
+        }
+    }
+
+    /// This entry with `attribute` removed.
+    pub fn without(mut self, attribute: &str) -> Self {
+        self.attrs
+            .retain(|(name, _)| !name.eq_ignore_ascii_case(attribute));
+        self
+    }
+
+    /// This entry with `attribute` set to `values` (replacing any earlier one).
+    pub fn with_values(mut self, attribute: &str, values: &[&str]) -> Self {
+        self.attrs
+            .retain(|(name, _)| !name.eq_ignore_ascii_case(attribute));
+        self.attrs.push((
+            attribute.into(),
+            values.iter().map(|v| v.as_bytes().to_vec()).collect(),
+        ));
+        self
+    }
+}
+
+pub const GROUP_BASE_DN: &str = "ou=groups,dc=example,dc=com";
+
+/// The DN of a fixture group.
+pub fn group_dn(cn: &str) -> String {
+    format!("cn={cn},{GROUP_BASE_DN}")
 }
 
 /// How the server's transport behaves.
@@ -153,6 +250,32 @@ pub struct Script {
     pub user_bind_result: Option<(LdapResultCode, String)>,
     /// Delay before answering any bind.
     pub bind_delay: Option<Duration>,
+    /// Replaces the final result of every **group** search (a base-object read
+    /// or a search under a base other than [`BASE_DN`]), e.g. a referral.
+    pub group_search_done: Option<(LdapResultCode, Vec<String>)>,
+    /// Delay before answering a group search.
+    pub group_search_delay: Option<Duration>,
+    /// From this (zero-based) group search on, on one connection, answer
+    /// `busy`: level 0 of a lookup works and a later level fails.
+    pub fail_group_searches_from: Option<usize>,
+    /// Honour the request's size limit the way a real server does: stop and say
+    /// `sizeLimitExceeded` once it is reached. Off by default, so the older
+    /// tests keep the server that does not.
+    pub enforce_sizelimit: bool,
+    /// From this (zero-based) **user** search on, **across all connections**,
+    /// answer `busy` (T23.3.5): a directory that fails part-way through a run
+    /// and stays failed (a retry on a fresh connection fails too). The rootDSE
+    /// and group searches are not counted.
+    pub fail_user_searches_from: Option<usize>,
+    /// Answer `busy` to every group search whose parsed filter mentions this
+    /// text (T23.3.5): one user's group lookup fails, another's does not.
+    pub fail_group_searches_matching: Option<String>,
+    /// Answer every **user** search with these raw bytes instead of LDAP
+    /// messages (T23.3.7, the frame guard): an over-long length header, a
+    /// message nested past any stack, an envelope `ldap3` would panic on. The
+    /// connection is then held open, sending nothing more, until the client
+    /// closes it.
+    pub raw_user_search_reply: Option<Vec<u8>>,
 }
 
 impl Default for Script {
@@ -166,6 +289,13 @@ impl Default for Script {
             search_done: None,
             user_bind_result: None,
             bind_delay: None,
+            group_search_done: None,
+            group_search_delay: None,
+            fail_group_searches_from: None,
+            enforce_sizelimit: false,
+            fail_user_searches_from: None,
+            fail_group_searches_matching: None,
+            raw_user_search_reply: None,
         }
     }
 }
@@ -184,6 +314,7 @@ pub enum Event {
     },
     Search {
         base: String,
+        scope: LdapSearchScope,
         filter: LdapFilter,
         sizelimit: i32,
         deref: LdapDerefAliases,
@@ -191,11 +322,28 @@ pub enum Event {
         encrypted: bool,
     },
     Unbind,
+    /// The scripted raw reply was written.
+    RawReplySent,
+    /// After a raw reply, the client closed the connection.
+    ClosedByClient,
+}
+
+/// What a test can change while the server runs: the directory's contents and
+/// the scripted outcome of group searches. Everything else is fixed at start.
+struct Live {
+    entries: Mutex<Vec<Entry>>,
+    group_search_done: Mutex<Option<(LdapResultCode, Vec<String>)>>,
+    /// The attributes the rootDSE (a base-object search of the empty DN) answers
+    /// with. `None`: the server answers `noSuchObject`, as one that hides it.
+    root_dse: Mutex<Option<Vec<EntryAttr>>>,
+    /// User searches answered so far, across connections.
+    user_searches: AtomicUsize,
 }
 
 pub struct TestServer {
     pub addr: SocketAddr,
     pub ca: Arc<TestCa>,
+    live: Arc<Live>,
     events: Arc<Mutex<Vec<Event>>>,
     open_now: Arc<AtomicUsize>,
     open_max: Arc<AtomicUsize>,
@@ -235,9 +383,16 @@ impl TestServer {
         let events = Arc::new(Mutex::new(Vec::new()));
         let open_now = Arc::new(AtomicUsize::new(0));
         let open_max = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(Live {
+            entries: Mutex::new(script.entries.clone()),
+            group_search_done: Mutex::new(script.group_search_done.clone()),
+            root_dse: Mutex::new(None),
+            user_searches: AtomicUsize::new(0),
+        });
         let script = Arc::new(script);
 
         let task = {
+            let live = Arc::clone(&live);
             let events = Arc::clone(&events);
             let open_now = Arc::clone(&open_now);
             let open_max = Arc::clone(&open_max);
@@ -248,8 +403,10 @@ impl TestServer {
                     };
                     let session = Session {
                         script: Arc::clone(&script),
+                        live: Arc::clone(&live),
                         events: Arc::clone(&events),
                         bound: None,
+                        group_searches: 0,
                         _gauge: Gauge::open(&open_now, &open_max),
                     };
                     let acceptor = acceptor.clone();
@@ -262,11 +419,33 @@ impl TestServer {
         Self {
             addr,
             ca,
+            live,
             events,
             open_now,
             open_max,
             task,
         }
+    }
+
+    /// Replace the directory's contents: what the next bind and search see.
+    pub fn set_entries(&self, entries: Vec<Entry>) {
+        *self.live.entries.lock().unwrap() = entries;
+    }
+
+    /// Set what the rootDSE answers (T23.3.5): `(attribute, value)` pairs, e.g.
+    /// AD's `highestCommittedUSN` and `dsServiceName`.
+    pub fn set_root_dse(&self, attrs: &[(&str, &str)]) {
+        *self.live.root_dse.lock().unwrap() = Some(
+            attrs
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), vec![value.as_bytes().to_vec()]))
+                .collect(),
+        );
+    }
+
+    /// Change the scripted final result of group searches (`None`: success).
+    pub fn set_group_search_done(&self, done: Option<(LdapResultCode, Vec<String>)>) {
+        *self.live.group_search_done.lock().unwrap() = done;
     }
 
     pub fn port(&self) -> u16 {
@@ -322,6 +501,11 @@ impl TestServer {
             .collect()
     }
 
+    /// Connections open right now.
+    pub fn open_connections(&self) -> usize {
+        self.open_now.load(Ordering::SeqCst)
+    }
+
     /// Most connections that were open at the same moment.
     pub fn max_concurrent_connections(&self) -> usize {
         self.open_max.load(Ordering::SeqCst)
@@ -351,8 +535,11 @@ impl Drop for Gauge {
 
 struct Session {
     script: Arc<Script>,
+    live: Arc<Live>,
     events: Arc<Mutex<Vec<Event>>>,
     bound: Option<String>,
+    /// Group searches answered so far on this connection.
+    group_searches: usize,
     _gauge: Gauge,
 }
 
@@ -448,13 +635,76 @@ impl Session {
                 LdapOp::SearchRequest(req) => {
                     self.record(Event::Search {
                         base: req.base.clone(),
+                        scope: req.scope.clone(),
                         filter: req.filter.clone(),
                         sizelimit: req.sizelimit,
                         deref: req.aliases.clone(),
                         attrs: req.attrs.clone(),
                         encrypted,
                     });
-                    self.search(&req.filter, &req.attrs)
+                    if !is_group_search(&req)
+                        && !is_root_dse(&req)
+                        && let Some(raw) = self.script.raw_user_search_reply.clone()
+                    {
+                        use tokio::io::AsyncWriteExt;
+                        let io = framed.get_mut();
+                        let _ = io.write_all(&raw).await;
+                        let _ = io.flush().await;
+                        self.record(Event::RawReplySent);
+                        // Send nothing more; wait for the client to give up.
+                        while let Some(item) = framed.next().await {
+                            if item.is_err() {
+                                break;
+                            }
+                        }
+                        self.record(Event::ClosedByClient);
+                        return Next::Close;
+                    }
+                    if is_group_search(&req)
+                        && let Some(delay) = self.script.group_search_delay
+                    {
+                        tokio::time::sleep(delay).await;
+                    }
+                    if is_group_search(&req) {
+                        let index = self.group_searches;
+                        self.group_searches += 1;
+                        let needle_hit = self
+                            .script
+                            .fail_group_searches_matching
+                            .as_ref()
+                            .is_some_and(|needle| format!("{:?}", req.filter).contains(needle));
+                        if needle_hit
+                            || self
+                                .script
+                                .fail_group_searches_from
+                                .is_some_and(|n| index >= n)
+                        {
+                            vec![LdapOp::SearchResultDone(result(
+                                LdapResultCode::Busy,
+                                "scripted failure",
+                                vec![],
+                            ))]
+                        } else {
+                            self.search(&req)
+                        }
+                    } else if !is_root_dse(&req) {
+                        let index = self.live.user_searches.fetch_add(1, Ordering::SeqCst);
+                        if self
+                            .script
+                            .fail_user_searches_from
+                            .is_some_and(|n| index >= n)
+                        {
+                            vec![LdapOp::SearchResultDone(result(
+                                LdapResultCode::Busy,
+                                "scripted failure",
+                                vec![],
+                            ))]
+                        } else {
+                            self.search(&req)
+                        }
+                    } else {
+                        self.search(&req)
+                    }
                 }
                 LdapOp::UnbindRequest => {
                     self.record(Event::Unbind);
@@ -483,7 +733,15 @@ impl Session {
             self.bound = Some(dn.to_string());
             return (LdapResultCode::Success, String::new());
         }
-        if let Some(entry) = self.script.entries.iter().find(|e| e.dn == dn)
+        let found = self
+            .live
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.dn == dn)
+            .cloned();
+        if let Some(entry) = found
             && entry.password == password
         {
             if let Some((code, message)) = &self.script.user_bind_result {
@@ -500,7 +758,29 @@ impl Session {
         )
     }
 
-    fn search(&self, filter: &LdapFilter, attrs: &[String]) -> Vec<LdapOp> {
+    fn root_dse(&self, attrs: &[String]) -> Vec<LdapOp> {
+        let Some(root) = self.live.root_dse.lock().unwrap().clone() else {
+            return vec![LdapOp::SearchResultDone(result(
+                LdapResultCode::NoSuchObject,
+                "",
+                vec![],
+            ))];
+        };
+        vec![
+            LdapOp::SearchResultEntry(LdapSearchResultEntry {
+                dn: String::new(),
+                attributes: root
+                    .into_iter()
+                    .filter(|(name, _)| attrs.iter().any(|a| a.eq_ignore_ascii_case(name)))
+                    .map(|(name, vals)| LdapPartialAttribute { atype: name, vals })
+                    .collect(),
+            }),
+            LdapOp::SearchResultDone(result(LdapResultCode::Success, "", vec![])),
+        ]
+    }
+
+    fn search(&self, req: &LdapSearchRequest) -> Vec<LdapOp> {
+        let (filter, attrs) = (&req.filter, &req.attrs);
         if self.bound.as_deref() != Some(SERVICE_DN) {
             return vec![LdapOp::SearchResultDone(result(
                 LdapResultCode::InsufficentAccessRights,
@@ -508,19 +788,51 @@ impl Session {
                 vec![],
             ))];
         }
+        if is_root_dse(req) {
+            return self.root_dse(attrs);
+        }
+        let group_search = is_group_search(req);
         let mut out = Vec::new();
         for uri in &self.script.search_references {
             out.push(LdapOp::SearchResultReference(LdapSearchResultReference {
                 uris: vec![uri.clone()],
             }));
         }
-        for entry in self.script.entries.iter().filter(|e| matches(filter, e)) {
+        let base_object = matches!(req.scope, LdapSearchScope::Base);
+        let mut found_base = false;
+        let mut limited = false;
+        let entries = self.live.entries.lock().unwrap().clone();
+        for (sent, entry) in entries
+            .iter()
+            .filter(|e| {
+                if base_object {
+                    // A base-object read: the one entry whose DN is the base.
+                    e.dn.eq_ignore_ascii_case(&req.base) && matches(filter, e)
+                } else {
+                    matches(filter, e)
+                }
+            })
+            .enumerate()
+        {
+            found_base = true;
+            if self.script.enforce_sizelimit
+                && req.sizelimit > 0
+                && sent >= usize::try_from(req.sizelimit).unwrap_or(usize::MAX)
+            {
+                limited = true;
+                break;
+            }
             out.push(LdapOp::SearchResultEntry(LdapSearchResultEntry {
                 dn: entry.dn.clone(),
                 attributes: entry
                     .attrs
                     .iter()
-                    .filter(|(name, _)| attrs.iter().any(|a| a.eq_ignore_ascii_case(name)))
+                    .filter(|(name, _)| {
+                        // A ranged attribute (`memberOf;range=0-1499`) answers a
+                        // request for `memberOf`, as Active Directory's does.
+                        let plain = name.split(';').next().unwrap_or(name);
+                        attrs.iter().any(|a| a.eq_ignore_ascii_case(plain))
+                    })
                     .map(|(name, vals)| LdapPartialAttribute {
                         atype: name.clone(),
                         vals: vals.clone(),
@@ -528,14 +840,38 @@ impl Session {
                     .collect(),
             }));
         }
-        let (code, referral) = self
-            .script
-            .search_done
-            .clone()
-            .unwrap_or((LdapResultCode::Success, vec![]));
+        let scripted = if group_search {
+            self.live.group_search_done.lock().unwrap().clone()
+        } else {
+            None
+        };
+        let (code, referral) = if let Some(done) = scripted {
+            done
+        } else if limited {
+            (LdapResultCode::SizeLimitExceeded, vec![])
+        } else if base_object && !found_base {
+            (LdapResultCode::NoSuchObject, vec![])
+        } else {
+            self.script
+                .search_done
+                .clone()
+                .unwrap_or((LdapResultCode::Success, vec![]))
+        };
         out.push(LdapOp::SearchResultDone(result(code, "", referral)));
         out
     }
+}
+
+/// A group lookup rather than the user search: a base-object read, or a search
+/// under any base but the user base.
+fn is_group_search(req: &LdapSearchRequest) -> bool {
+    !is_root_dse(req)
+        && (matches!(req.scope, LdapSearchScope::Base) || !req.base.eq_ignore_ascii_case(BASE_DN))
+}
+
+/// A base-object read of the empty DN: the rootDSE.
+fn is_root_dse(req: &LdapSearchRequest) -> bool {
+    req.base.is_empty() && matches!(req.scope, LdapSearchScope::Base)
 }
 
 fn values(entry: &Entry, attr: &str) -> Vec<String> {
@@ -559,6 +895,16 @@ fn matches(filter: &LdapFilter, entry: &Entry) -> bool {
             .iter()
             .any(|v| v.eq_ignore_ascii_case(value)),
         LdapFilter::Present(attr) => !values(entry, attr).is_empty(),
+        // `(attr>=value)`: numeric when both sides are numbers (AD's USNs),
+        // otherwise by string (generalized time sorts lexicographically).
+        LdapFilter::GreaterOrEqual(attr, value) => {
+            values(entry, attr)
+                .iter()
+                .any(|v| match (v.parse::<u64>(), value.parse::<u64>()) {
+                    (Ok(have), Ok(want)) => have >= want,
+                    _ => v.as_str() >= value.as_str(),
+                })
+        }
         LdapFilter::Substring(attr, sub) => values(entry, attr).iter().any(|v| {
             let v = v.to_ascii_lowercase();
             sub.initial
@@ -596,5 +942,55 @@ fn extended(code: LdapResultCode) -> LdapExtendedResponse {
         res: result(code, "", vec![]),
         name: None,
         value: None,
+    }
+}
+
+/// A resolver that answers one host name from a script — the `n`th question
+/// gets the `n`th answer, the last one repeating — and counts the questions
+/// (T23.3.7). Any other name is unknown. The names it serves (`*.test`) are
+/// ones the system resolver cannot answer, so a connection that reached a
+/// server through one of them used the address this resolver gave, and nothing
+/// else resolved it.
+pub struct ScriptedResolver {
+    host: String,
+    answers: Vec<Vec<std::net::IpAddr>>,
+    asked: AtomicUsize,
+}
+
+impl ScriptedResolver {
+    pub fn new(host: &str, answers: Vec<Vec<std::net::IpAddr>>) -> Arc<Self> {
+        Arc::new(Self {
+            host: host.to_string(),
+            answers,
+            asked: AtomicUsize::new(0),
+        })
+    }
+
+    pub fn questions(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
+}
+
+impl axiam_directory::Resolver for ScriptedResolver {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> axiam_directory::address::ResolveFuture<'a> {
+        let index = self.asked.fetch_add(1, Ordering::SeqCst);
+        let answer = (host == self.host).then(|| {
+            let ips = self
+                .answers
+                .get(index)
+                .or_else(|| self.answers.last())
+                .cloned()
+                .unwrap_or_default();
+            ips.into_iter()
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect::<Vec<_>>()
+        });
+        Box::pin(async move {
+            answer.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "unknown name"))
+        })
     }
 }

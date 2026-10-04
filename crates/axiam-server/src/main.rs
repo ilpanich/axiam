@@ -34,6 +34,7 @@ use std::time::Duration;
 use actix_web::{App, HttpServer, web};
 use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher, WebhookPublisher};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
+use axiam_api_rest::middleware::request_span::RedactingRootSpanBuilder;
 use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
 use axiam_api_rest::state::AppState;
 use axiam_api_rest::state::bundles;
@@ -184,11 +185,90 @@ struct AppConfig {
     /// Skipped by serde — populated from the secret provider at startup.
     #[serde(skip)]
     directory_encryption_key: Option<[u8; 32]>,
+    /// The SAML IdP's pairwise-identifier key (32 bytes, D-22), from the secret
+    /// provider as `saml_pairwise_key` (`AXIAM__AUTH__SAML_PAIRWISE_KEY` under
+    /// the default provider).
+    ///
+    /// **Optional, never a reason to refuse boot, and must never rotate**:
+    /// absent, a sign-on to a service provider whose `NameID` is the persistent
+    /// pairwise identifier is answered `Responder` (an `emailAddress` SP still
+    /// works); rotated or lost, every user becomes a new, unknown account at
+    /// every such SP. Skipped by serde — populated from the secret provider.
+    #[serde(skip)]
+    saml_pairwise_key: Option<[u8; 32]>,
     /// HMAC-SHA256 pepper (32 bytes) for GDPR audit pseudonymization (D-02).
     /// Loaded from `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` (hex-encoded, 64 chars).
     /// Skipped by serde — populated manually from env at startup.
     #[serde(skip)]
     gdpr_pseudonym_pepper: Option<[u8; 32]>,
+}
+
+/// The one LDAP client every directory path shares (G-3), with the
+/// deployment's connector guards (T23.3.7, D-19, D-32):
+///
+/// * the **address policy** — loopback, link-local (the metadata service),
+///   unspecified, multicast and special-purpose addresses are always refused,
+///   private ranges only inside `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS`,
+///   and this host's addresses on AXIAM's own REST and gRPC ports never — applied
+///   to every directory connection, with the resolved address pinned;
+/// * the **frame cap** on every LDAP message a directory sends
+///   (`AXIAM__DIRECTORY__MAX_MESSAGE_BYTES`, default 2 MiB).
+///
+/// Both are deployment configuration a tenant administrator cannot change, and
+/// both are logged here, once, at startup.
+fn directory_client(config: &AppConfig) -> Arc<axiam_directory::DirectoryClient> {
+    use axiam_directory::address::{ALLOWED_PRIVATE_NETWORKS_ENV, parse_allowed_networks};
+    use axiam_directory::frame::{MAX_MESSAGE_BYTES_ENV, max_message_bytes_from};
+
+    let raw_networks = std::env::var(ALLOWED_PRIVATE_NETWORKS_ENV).unwrap_or_default();
+    let (networks, rejected) = parse_allowed_networks(&raw_networks);
+    if !rejected.is_empty() {
+        // A typo admits nothing (fail closed), but it must not pass silently.
+        tracing::error!(
+            setting = ALLOWED_PRIVATE_NETWORKS_ENV,
+            rejected = %rejected.join(","),
+            "directory allow-list entries that are not CIDR blocks or addresses were ignored"
+        );
+    }
+    if networks.is_empty() {
+        tracing::info!(
+            "directory address guard: no private network admitted ({} unset) — a tenant's \
+             directory must resolve to a globally routable address",
+            ALLOWED_PRIVATE_NETWORKS_ENV
+        );
+    } else {
+        tracing::warn!(
+            networks = %networks.iter().map(ToString::to_string).collect::<Vec<_>>().join(","),
+            "directory address guard: tenant directories may resolve into these private \
+             networks ({}); loopback, link-local, metadata and AXIAM's own listeners stay \
+             refused",
+            ALLOWED_PRIVATE_NETWORKS_ENV
+        );
+    }
+    let policy = axiam_directory::AddressPolicy::new()
+        .with_allowed_private_networks(networks)
+        .with_listener_ports([config.server.port, config.grpc.port]);
+
+    let (max_message_bytes, adjusted) =
+        max_message_bytes_from(std::env::var(MAX_MESSAGE_BYTES_ENV).ok().as_deref());
+    if adjusted {
+        tracing::warn!(
+            setting = MAX_MESSAGE_BYTES_ENV,
+            effective = max_message_bytes,
+            "directory frame cap: the configured value was not usable or out of range; \
+             using the effective value"
+        );
+    }
+    tracing::info!(
+        max_message_bytes,
+        "directory frame guard: LDAP messages from a directory above this size end the connection"
+    );
+
+    Arc::new(
+        axiam_directory::DirectoryClient::new(axiam_directory::ClientLimits::default())
+            .with_address_policy(Arc::new(policy))
+            .with_max_message_bytes(max_message_bytes),
+    )
 }
 
 #[tokio::main]
@@ -408,6 +488,27 @@ async fn main() -> std::io::Result<()> {
             "directory encryption key not configured: the LDAP / Active Directory \
              identity source is unavailable (set {} to enable it)",
             keys::env_var_name(keys::DIRECTORY_ENCRYPTION_KEY),
+        );
+    }
+
+    // The SAML IdP's pairwise-identifier key (G-2, D-22). Optional, like the
+    // directory key: a deployment that issues no persistent SAML `NameID` has
+    // no use for it, so its absence is INFO and never refuses boot. It must
+    // never rotate (see the field's documentation), which is why the log names
+    // the variable rather than suggesting one is generated.
+    config.saml_pairwise_key = read_key(keys::SAML_PAIRWISE_KEY);
+    if config.saml_pairwise_key.is_some() {
+        tracing::info!(
+            provider = secret_provider.describe(),
+            "SAML pairwise-identifier key loaded"
+        );
+    } else {
+        tracing::info!(
+            provider = secret_provider.describe(),
+            "SAML pairwise-identifier key not configured: SAML sign-on to a service \
+             provider using persistent NameIDs is refused (set {} to enable it; it \
+             must never change once set)",
+            keys::env_var_name(keys::SAML_PAIRWISE_KEY),
         );
     }
 
@@ -1044,6 +1145,44 @@ async fn main() -> std::io::Result<()> {
          'reactor.dispatch_failed'."
     );
 
+    // G-3 (T23.3.2, T23.3.4): one directory authenticator, shared by the sign-in
+    // path and the group mapper, so both read the same configuration and draw
+    // on the same bounded connection pool.
+    let directory_config_repo = axiam_db::SurrealDirectoryConfigRepository::new(
+        pool.handle_for_repo(),
+        config.directory_encryption_key,
+    );
+    let directory_authenticator = Arc::new(
+        axiam_directory::RepositoryDirectoryAuthenticator::with_client(
+            directory_config_repo.clone(),
+            directory_client(&config),
+        ),
+    );
+    // The mapper flushes the authorization decision cache for a user whose
+    // memberships it changed, as the group-membership routes do. The cache does
+    // not exist yet, so the hook is set below, once `rest_authz` is built.
+    let directory_membership_slot = axiam_directory::MembershipChangeSlot::new();
+    // One mapper and one audit sink, shared by the sign-in path and the sync job
+    // (T23.3.5): the job applies the very same function, flushes the very same
+    // decision cache, and writes to the very same append-only log.
+    let directory_group_mapper = Arc::new(
+        axiam_directory::RepositoryGroupMapper::new(
+            Arc::clone(&directory_authenticator),
+            axiam_db::SurrealGroupRepository::new(pool.handle_for_repo()),
+        )
+        .with_change_slot(directory_membership_slot.clone()),
+    );
+    let directory_audit_sink = Arc::new(axiam_auth::service::RepositoryDirectoryAuditSink(
+        SurrealAuditLogRepository::new(pool.handle_for_repo())
+            .with_minimisation(audit_minimisation),
+    ));
+    // The sync job revokes through the same repository the sign-in path owns, so
+    // the session validation cache and the revocation feed see what it revokes.
+    let directory_sync_refresh_repo = auth_refresh_token_repo.clone();
+    // Built here, with the handle the rest of this block uses: `pool` is moved
+    // into the health checker further down.
+    let directory_sync_state_repo =
+        axiam_db::SurrealDirectorySyncStateRepository::new(pool.handle_for_repo());
     let auth_service = AuthService::new(
         user_repo.clone(),
         session_repo.clone(),
@@ -1058,14 +1197,16 @@ async fn main() -> std::io::Result<()> {
     // `directory_encryption_key` the repository cannot decrypt a bind secret,
     // so every directory sign-in fails closed as `Unavailable` (never a local
     // hash), and tenants without a directory are untouched.
-    .with_directory_authenticator(Arc::new(
-        axiam_directory::RepositoryDirectoryAuthenticator::new(
-            axiam_db::SurrealDirectoryConfigRepository::new(
-                pool.handle_for_repo(),
-                config.directory_encryption_key,
-            ),
-        ),
-    ));
+    .with_directory_authenticator(Arc::clone(&directory_authenticator) as _)
+    // G-3 (T23.3.4, D-30): the tenant's mapping table is applied on every
+    // successful directory sign-in, before anything is issued; a mapping that
+    // cannot be applied (the directory cannot be asked, the 1 000-group cap) is
+    // a refused sign-in. A tenant with an empty table asks the directory nothing.
+    .with_directory_group_mapper(Arc::clone(&directory_group_mapper) as _)
+    // G-3 (T23.3.3): the rows for just-in-time provisioning, its refusals and
+    // the linking of an account, on the same append-only repository (and the
+    // same minimisation) as every other audit row.
+    .with_directory_audit(Arc::clone(&directory_audit_sink) as _);
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());
     let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo());
@@ -1305,6 +1446,11 @@ async fn main() -> std::io::Result<()> {
     let federation_login_state_repo =
         SurrealFederationLoginStateRepository::new(pool.handle_for_repo());
     let sso_handoff_code_repo = SurrealSsoHandoffCodeRepository::new(pool.handle_for_repo());
+    // T23.2.3 — pending SAML AuthnRequests (schema v73). Built in every build:
+    // the table exists whether or not SAML is compiled in, and the sweep below
+    // keeps it bounded either way.
+    let saml_pending_repo =
+        axiam_db::SurrealPendingSamlRequestRepository::new(pool.handle_for_repo());
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
     // B3: process-wide in-process cache for AXIAM's OWN `GET /oauth2/jwks`
@@ -1495,6 +1641,26 @@ async fn main() -> std::io::Result<()> {
         assertion_replay_repo.clone(),
         http_client.clone(),
     );
+    // T23.2.3 (G-2) — the SAML IdP: the SP registry, the pending-request store,
+    // the tenant signing-credential service (D-21: its keys are sealed through
+    // the database custodian of the same custodian set the CAs use) and the
+    // issuer, built on the deployment's root issuer and the pairwise key.
+    #[cfg(feature = "saml")]
+    let saml_idp_state = bundles::SamlIdpState {
+        sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(pool.handle_for_repo()),
+        pending_repo: saml_pending_repo.clone(),
+        credential_service: axiam_pki::saml_signing::SamlIdpCredentialService::new(
+            cert_service.clone(),
+            Arc::clone(&ca_custodians),
+            axiam_db::SurrealSamlIdpCredentialRepository::new(pool.handle_for_repo()),
+        ),
+        issuer: Arc::new(axiam_federation::saml_idp::SamlIdpIssuer::new(
+            config.auth.root_issuer(),
+            config
+                .saml_pairwise_key
+                .map(axiam_federation::saml_idp::PairwiseKey::new),
+        )),
+    };
 
     // G7: resolve the deployment rate-limit posture BEFORE validation and
     // before `config.rate_limit` / `config.grpc` are cloned into the App
@@ -1986,6 +2152,31 @@ async fn main() -> std::io::Result<()> {
             None => engine,
         })
     };
+
+    // G-3 (T23.3.4): a membership the directory mapping changes at sign-in
+    // flushes that one subject's cached decisions locally and on every replica
+    // (the same call the group-membership routes make), so a role that arrived
+    // through a group the directory has since removed does not outlive the
+    // sign-in that noticed. A failed broadcast is logged: the local cache is
+    // already flushed and the TTL bounds the other replicas.
+    {
+        let authz = Arc::clone(&rest_authz);
+        directory_membership_slot.set(Arc::new(move |tenant_id, user_id| {
+            let authz = Arc::clone(&authz);
+            Box::pin(async move {
+                if let Err(error) = authz.invalidate_subject(tenant_id, user_id).await {
+                    tracing::error!(
+                        target: "axiam::directory",
+                        %tenant_id,
+                        %user_id,
+                        %error,
+                        "the decision-cache flush after a directory group mapping change \
+                         could not be broadcast to the other replicas"
+                    );
+                }
+            })
+        }));
+    }
 
     // Spawn AMQP authorization consumer on a background task.
     // Uses a publisher channel because the consumer also publishes responses.
@@ -2485,6 +2676,10 @@ async fn main() -> std::io::Result<()> {
     for job in [
         "saml_assertion_replay",
         "federation_login_state",
+        "saml_authn_request",
+        // G-3 (T23.3.5): the directory sync job. Registered like the others, so a
+        // deployment where it has never run once still lists it.
+        "directory_sync",
         "amqp_nonce_replay",
         "gdpr_purge",
         "gdpr_export",
@@ -2510,6 +2705,7 @@ async fn main() -> std::io::Result<()> {
         Arc::new(assertion_replay_repo.clone()),
         Arc::new(federation_login_state_repo.clone()),
         Arc::new(sso_handoff_code_repo.clone()),
+        Arc::new(saml_pending_repo.clone()),
         Arc::new(amqp_nonce_repo.clone()),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),
@@ -2537,7 +2733,21 @@ async fn main() -> std::io::Result<()> {
         Arc::new(settings_repo.clone()),
         job_health.clone(),
         cleanup_shutdown_rx,
-    );
+    )
+    // G-3 (T23.3.5, D-31): the directory sync job runs on this scheduler, last in
+    // each tick, one tenant at a time. There is no multi-replica guard (none of
+    // the sweeps has one): every replica runs it, and every write is idempotent
+    // or a compare-and-set.
+    .with_directory_sync(Arc::new(axiam_directory::DirectorySync::new(
+        directory_config_repo.clone(),
+        Arc::clone(&directory_authenticator),
+        user_repo.clone(),
+        session_repo.clone(),
+        directory_sync_refresh_repo,
+        directory_sync_state_repo.clone(),
+        Arc::clone(&directory_group_mapper) as _,
+        Arc::clone(&directory_audit_sink) as _,
+    )));
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared
@@ -2705,6 +2915,17 @@ async fn main() -> std::io::Result<()> {
             #[cfg(feature = "saml")]
             saml_federation_service: saml_federation_service.clone(),
         },
+        // G-3 (T23.3.8): the management routes share the sign-in path's
+        // configuration repository (and so its encryption key) and its
+        // connector — the address policy a write is checked against is the
+        // policy every connection is checked against.
+        directory: bundles::DirectoryState {
+            config_repo: directory_config_repo.clone(),
+            sync_state_repo: directory_sync_state_repo,
+            client: Arc::clone(directory_authenticator.client()),
+        },
+        #[cfg(feature = "saml")]
+        saml_idp: saml_idp_state,
     };
 
     // X4 — accept subject tokens from trusted external IdPs.
@@ -2732,7 +2953,10 @@ async fn main() -> std::io::Result<()> {
         let rl = rate_limit_cfg.clone();
         App::new()
             .wrap(SecurityHeadersMiddleware)
-            .wrap(TracingLogger::default())
+            // F4 P23W3-03 (T-325): the default builder's field set, with query
+            // values (a SAML handle, `RelayState`, `state`, a reset token) and
+            // `{token}` path segments redacted from `http.target`.
+            .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
             .wrap(audit_middleware.clone())
             .wrap(build_cors(&server_config.cors_allowed_origins))
             // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce

@@ -9,6 +9,361 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory e2e against a real OpenLDAP and a real Samba AD DC (T23.3.6,
+  G-3).** The oracle for the whole G-3 stack: `docker/docker-compose.directory.yml`
+  brings up OpenLDAP (slapd with ppolicy, TLS 1.2 floor, a read-only bind
+  account) and a Samba Active Directory domain controller, each seeded with
+  people, a direct and a nested group, a disabled entry (ppolicy's permanent lock
+  `000001010000Z`; `userAccountControl` bit `0x2`) and an entry whose name holds
+  filter metacharacters, on fixed private addresses so the T23.3.7 address guard
+  and its allow-list are exercised rather than bypassed. The CA, both
+  certificates and every password are generated at run time by
+  `scripts/gen-directory-e2e-secrets.sh` into the gitignored
+  `docker/.secrets/directory/`; nothing is committed. Images are pinned by
+  digest. `crates/axiam-server/tests/directory_e2e.rs` (gated by
+  `AXIAM_E2E_DIRECTORY=1`; without it every test prints `SKIPPED`, with it a
+  missing server is a failure) configures the directory through the §30 routes
+  and drives `POST /api/v1/auth/login`, the group mapper, a real authorization
+  engine and `sweep_directories` against **both** servers: login with JIT
+  creating the account `Active` and marked, a role on a mapped AXIAM group
+  effective for the directory member, an unmapped directory group granting
+  nothing, a nested group, a disabled account refused with the unknown-user
+  answer, seven filter-injection payloads refused (each presented with the real
+  password of the entry it would select unescaped) and the metacharacter entry
+  signing in only under its exact name, a plaintext URL (and loopback, an
+  unlisted private range, the metadata address) refused at config time, StartTLS
+  accepted, an untrusted server certificate refused, and the sync job
+  deactivating a vanished or directory-disabled user as `Inactive` with the row
+  kept and its sessions revoked. New workflow `.github/workflows/directory-e2e.yml`
+  runs it on `workflow_dispatch` and on pull requests touching the directory
+  code. How to run it locally: `docker/directory/README.md`.
+
+- **Directory management routes, console page and docs (T23.3.8, G-3).** The
+  six §30 routes exist: `GET`/`PUT`/`PATCH`/`DELETE`
+  `/api/v1/tenants/{tenant_id}/directory`, `POST …/directory/links` (wraps the
+  D-28 linking function; the owner is signed out everywhere) and `GET
+  …/directory/sync-status`, OpenAPI tag `directory`, the permissions
+  `directory:read`, `directory:write` and `directory:link` (service-account
+  tokens refused, another tenant's id `403`). **Every write** runs
+  `axiam_directory::config::validate` and the address guard on the URL as
+  written (a name re-pointed since the last save is caught by an unrelated
+  write), each refusal a `400` naming the rule — IPv6-literal hosts, loopback,
+  link-local and the metadata address, unresolvable names and unlisted private
+  addresses included; **moving `url`, `start_tls`, `bind_dn` or the trust
+  anchors without the `bind_secret` is a `400`** on `PUT` and `PATCH` (F4
+  P23W2-01); an enabled directory and an effective `opaque_mode = required` are
+  refused together in **both** directions (`409`: the directory write, and the
+  tenant, tenant-override and organization settings writes); a write that
+  carries a secret is `503` without `directory_encryption_key` (the response
+  does not name the key; reads, `DELETE`, the sync status and a write with no
+  secret still work — the repository's `update` now needs the key only to seal).
+  The bind secret is write-only on exactly two request types, and these routes
+  have their own JSON error handler so a body in which it has the wrong type is
+  not echoed in the `400`. Audit rows `directory.config_created`,
+  `directory.config_updated` and `directory.config_deleted` carry the actor, the
+  names of the changed fields, `connection_moved`, `secret_replaced` and, on a
+  delete or disable, the count of live directory accounts; a refusal by the
+  guard or by P23W2-01 is audited with its rule; never the secret, never an
+  anchor's content. New per-IP rate-limit bucket
+  `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` (default 30, never preset) on the
+  four writes. `UserRepository::count_live_directory_accounts` is new. The admin
+  console gains a per-tenant **Directory** page (view, create, replace, edit,
+  delete; the secret write-only and re-asked when the URL, StartTLS, bind DN or
+  trust anchors change; group-mapping table; sync status; link an account), the
+  website's *Integrate* section an *LDAP / Active Directory* page, the design
+  document a directory chapter, and the deployment guide a *Managing a tenant's
+  directory* section — including that an entry without a usable e-mail address
+  cannot be provisioned (D-29). `sdks/openapi.json` and
+  `sdks/management-registry.json` are regenerated (168 operations, 25
+  namespaces; `PATCH` bodies are classified `sparse`); the ports follow from
+  the merge commit (§30.10).
+
+- **SDK contract 1.54: §30 directory configuration (T23.3.7, G-3).** The
+  normative management surface for a tenant's LDAP / Active Directory identity
+  source, ahead of the routes (T23.3.8 implements them and regenerates
+  `openapi.json` and `management-registry.json`): a §27 namespace `directory` —
+  `get`, `set` (replace), `update` (sparse), `delete`, `link_account` (D-28) and
+  `get_sync_status` under `/api/v1/tenants/{tenant_id}/directory` — with the
+  write-only `bind_secret` **`Sensitive<T>`** in every SDK from the first
+  version and never returned; every write validated and run through the address
+  guard (`400 validation_error` naming the rule, IPv6-literal hosts included);
+  moving the connection (`url`, `start_tls`, `bind_dn`, `trust_anchors_pem`)
+  without the secret a `400` (P23W2-01); an enabled directory and
+  `opaque_mode = required` refused together, both ways (`409`); `503` without
+  `directory_encryption_key`; the permissions `directory:read`,
+  `directory:write` and `directory:link`; a rate-limit bucket
+  `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN`; audit rows that record that the
+  connection moved and never the secret; no retry of writes; six portable tests
+  per SDK. No safety-valve override in this cut (§30.3 rule 7 says why). §29 is
+  reserved for G-2's SAML service-provider registration. Non-breaking /
+  additive; **re-sync `CONTRACT.md` for 1.54 in all eleven SDK repositories**
+  from the merged commit.
+
+- **Directory sources: the sync job (T23.3.5, G-3, D-31).** A background job on
+  the cleanup scheduler (`directory_sync` in `GET /health/jobs`, last in each
+  tick, one tenant at a time, only tenants whose directory is enabled) keeps
+  directory accounts in step with their directory and **cannot grant anything**.
+  A vanished entry or one the directory disabled (`userAccountControl` bit `0x2`
+  on Active Directory; on OpenLDAP `pwdAccountLockedTime` equal to ppolicy's
+  permanent-lock value `000001010000Z` — a timed lockout after failed attempts is
+  **not** a disable, since an outsider could trigger it) sets
+  the account **`Inactive`** — never `Deleted`, never a hard delete: sessions and
+  OAuth2 refresh tokens are revoked through the repositories (so the validation
+  cache and revocation feed see it), directory-sourced memberships are removed
+  through the D-30 mapper (manual ones kept, decision cache flushed), and
+  `account_may_act` then refuses the account on every path, which closes
+  T-303's residual for passkeys and the OP cookie. The status is flipped last by
+  one compare-and-set, so a failure part-way leaves the account `Active` for the
+  next run. **Sync never re-enables, never creates and never links** (D-28): an
+  `Inactive` account whose entry is present and enabled is reported once as
+  `directory.account_reappeared` ("administrator action required"). A *full* run
+  (first, every 24 h, and after any skipped account, bound hit or untrusted
+  watermark) looks up every marked account by `entryUUID` or by `objectGUID`
+  (the 16 little-endian octets, each escaped, through a new binary-value escaper
+  in the one module that puts values into filters) and is the only run that
+  concludes "vanished"; an *incremental* run every `sync_interval_secs` searches
+  `(<modifyTimestamp|uSNChanged> >= <watermark>)` under `base_dn`, acts only on
+  entries whose identifier belongs to a marked account, applies what it read when
+  its result bound is hit (and owes a full run), and on Active Directory
+  takes the watermark from the rootDSE's `highestCommittedUSN` and falls back to
+  a full run when `dsServiceName` changes or no watermark is readable. Present
+  and enabled accounts have their username, email and display name refreshed
+  through the same cleaners provisioning uses (a colliding change is skipped and
+  audited as `directory.sync_attribute_skipped`) and their group mapping applied.
+  **The safety valve:** a full run that would deactivate more than 10 % of a
+  tenant's directory accounts **and** at least 5 applies nothing, audits
+  `directory.sync_safety_valve` once and fails `directory_sync` in job health.
+  **Errors change nothing**: a full run reads every answer before it writes any,
+  so an unreachable directory, a refused search or a deadline leaves every
+  account as it was; an identifier that cannot be put in a filter or matches two
+  entries skips that account and is never read as "vanished". State (watermark,
+  server identity, last runs, last result) is one row per tenant, schema **v75**
+  `directory_sync_state`, deleted in the tenant-delete transaction. There is no
+  multi-replica guard (no sweep has one): every replica runs the job and every
+  write is idempotent or a compare-and-set. New audit actions
+  `directory.account_deactivated`, `.account_reappeared`, `.account_updated`,
+  `.sync_attribute_skipped`, `.sync_user_skipped`, `.sync_safety_valve` and
+  `.sync_run`; none carries a name, address or DN. `UserRepository` gains
+  `list_directory_accounts`, `get_by_directory_external_id`,
+  `deactivate_directory_account` and `find_identity_collision_excluding`
+  (refusing defaults); `DirectoryGroupMapper` gains
+  `remove_directory_memberships`. The attribute cleaners moved from `axiam-auth`
+  to `axiam-core` so both callers apply one definition. Operator documentation:
+  *Sync* in `docs/deployment/README.md`. No API, contract or SDK change.
+
+- **Directory sources: group mapping (T23.3.4, G-3, D-30).** A directory user's
+  groups now become AXIAM group memberships, so roles and permissions assigned
+  to those groups apply to them unchanged. **An explicit mapping table only**:
+  `DirectoryConfig.group_mappings`, at most 500 rows of `{ directory_group_dn,
+  group_id }` stored in the tenant's `directory_config` row (schema **v74**).
+  There is no match by name, prefix or wildcard and no AXIAM group is ever
+  created from a directory one: a directory group called `admins` gains nothing
+  unless a tenant administrator mapped it. A DN is compared after RFC 4514
+  normalisation (case of types and values, spacing around the separators,
+  `\,` against `\2C`, UTF-8 hex escapes, the order inside a multi-valued RDN);
+  every `group_id` must be a group **of the same tenant**, checked in the
+  repository's write path before anything is written, and `config::validate`
+  refuses a table over 500 rows, a DN that does not parse, a repeated pair, and
+  — for OpenLDAP, whose groups are found by search — a table with no
+  `group_base_dn`. **The mapping owns only its own memberships**: every
+  `member_of` edge it writes carries `source = directory` (new column, schema
+  v74; an edge without it is manual), each application adds the missing mapped
+  memberships and removes the directory-sourced ones the directory no longer
+  backs, and a manual membership — of the same group or another — is never
+  touched and never duplicated. Resolution runs over the service-bound pooled
+  connection, never the user's bind: Active Directory reads `memberOf` off the
+  entry (and each group's own), OpenLDAP searches `group_base_dn` for
+  `(&<group_filter>(<member attribute>=<DN>))` with the DN entering the filter
+  only through the RFC 4515 escape; nested groups are followed to
+  `group_nesting_depth` levels (level N + 1 is never read), a cycle terminates,
+  a **hard cap of 1 000 groups per user** refuses rather than truncates (a
+  ranged `memberOf` counts as the cap), search references are skipped, a
+  referral result fails, and entries go through the fallible parser. It runs on
+  **every successful directory sign-in**, a just-provisioned account and an
+  existing one alike, before any session or MFA challenge is issued, so a
+  removal in the directory takes effect at the next sign-in. **Fail closed**: a
+  lookup that fails, times out or hits the cap refuses the sign-in with the
+  ordinary failure (not counted against the account) and changes nothing; a
+  just-provisioned account whose lookup fails holds no membership and grants
+  nothing. A tenant with an empty table asks the directory no group question.
+  A membership the mapping changes flushes that one subject's cached
+  authorization decisions, locally and on every replica, through the same call
+  the group-membership routes make, so a role that arrived through a group the
+  directory has since removed does not outlive the sign-in that noticed.
+  New audit actions `directory.groups_mapped` (the AXIAM groups added and
+  removed and counts, nothing that names a person) and
+  `directory.group_mapping_refused`. `DirectoryGroupMapper::apply_for_user`
+  (`axiam-core` port, `RepositoryGroupMapper` in `axiam-directory`) is the one
+  function the sync job (T23.3.5) will call. `GroupRepository` gains
+  `add_directory_member`, `remove_directory_member` and
+  `get_user_directory_group_ids`. No API, contract or SDK change: no route
+  writes a directory configuration yet (T23.3.8).
+
+- **Directory sources: just-in-time provisioning and linking (T23.3.3, G-3, D-28).**
+  A login name that matches no local account is now offered to the tenant's
+  directory when it has an enabled directory with `jit_provisioning`: the typed
+  name and password are authenticated through the same bind as a directory
+  sign-in, timed beside the same dummy Argon2id verify under the same hash
+  permit, and on success the account is created **in one write** — `Active`,
+  marked with the entry's `entryUUID` / `objectGUID`, an unusable password hash,
+  `username` and `email` from the mapped attributes, the display name in
+  `metadata.oidc.name` — and the login continues like any other (MFA policy,
+  `amr = [pwd]`). A second first login for the same entry finds the first one's
+  account; the unique indexes make two concurrent ones yield one account. Every
+  other outcome — no directory, `jit_provisioning` off (answered **before** any
+  connection), a wrong password, no such entry, a directory that is down — is
+  exactly the unknown-name answer at the same cost. **A directory never takes
+  over a local account (D-28):** an entry whose username or email equals, in any
+  case and across both columns, an existing account's is refused with the
+  generic failure and a `directory.jit_refused` audit row; so is an entry with
+  no usable e-mail address. Attributes the directory supplies are bounded and
+  cleaned (control and bidirectional-override characters) before they are
+  stored. Linking an existing account is an explicit act,
+  `AuthService::link_local_account_to_directory` (no route yet — T23.3.8): it
+  resolves the entry through the directory by the account's login name, refuses
+  one already linked to another account, marks the account, then deletes its
+  WebAuthn credentials, revokes its `User`-type certificates and every session
+  and OAuth2 refresh token (TOTP is kept), and writes `directory.account_linked`;
+  interrupted, it is safe to repeat. New audit actions: `directory.jit_provisioned`,
+  `directory.jit_refused`, `directory.account_linked`. No API, contract or SDK
+  change. Repository additions: `UserRepository::create_directory_account` and
+  `find_identity_collision`, `CertificateRepository::revoke_user_certificates`.
+
+- **SAML 2.0 identity provider: the SSO endpoint (T23.2.3, G-2, D-24 … D-27).**
+  `/saml/v2/{tenant_id}/sso` serves the Web Browser SSO profile per tenant, on
+  the HTTP-Redirect (`GET`) and HTTP-POST (`POST`) bindings, plus
+  `/sso/idp-initiated?sp=…` for a service provider that opted in (D-3) and the
+  return leg `/sso/continue`. A request is checked in full before anyone is
+  asked to sign in — DTDs refused on the bytes (no XML external entity or entity
+  expansion reaches the parser), a 64 KiB inflate cap, `IssueInstant` within
+  five minutes, the SP found by `Issuer` within the tenant, any signature
+  verified (Redirect over the exact query octets; POST as the root's one
+  enveloped signature), `Destination` = this tenant's SSO URL, the ACS URL or
+  index exactly as registered, HTTP-POST response binding, `RelayState` ≤ 80
+  bytes, a request `ID` never seen for that SP — and is then held server-side
+  (schema **v73**, `saml_authn_request`) under an opaque handle bound to the
+  browser by a cookie. The second leg signs the user in through the same login
+  hop and OP-session cookie as `/oauth2/authorize` (which a sign-in now also
+  mints at `/saml/v2/{tenant_id}/sso`), applies `account_may_act`,
+  `allowed_groups`, `IsPassive` and a `ForceAuthn` bound to the request rather
+  than to the hop marker, consumes the handle exactly once, and posts the signed
+  response from a page with its own content-security policy (`form-action` the
+  ACS origin only). The SPA's `return_to` validator accepts the SAML return leg.
+  A tenant whose `saml_idp_enabled` is off, an unknown tenant, and a build
+  without `saml` all answer the same empty `404`. Rate-limited at the
+  browser-endpoint preset under buckets of their own. Composition: the optional
+  deployment key `AXIAM__AUTH__SAML_PAIRWISE_KEY` (D-22) is now read at startup
+  (absence logged at INFO); pending requests are swept by the cleanup task
+  (`saml_authn_request` on `/health/jobs`). Threat model **2.22.0**: T-317 …
+  T-330, T-313 closed.
+
+- **SAML 2.0 identity provider: assertion issuance (T23.2.2, G-2, D-22).**
+  `axiam_federation::saml_idp`, a library behind the `saml` feature that the SSO
+  endpoint (T23.2.3) will call; no route serves SAML yet. `SamlIdpIssuer::issue`
+  turns a verified AXIAM session into a `samlp:Response` for a registered service
+  provider: `Issuer` from `idp_entity_id` (`{base}/saml/v2/{tenant}/metadata`,
+  the one definition the metadata endpoint will reuse), a bearer
+  `SubjectConfirmation` whose `Recipient` and the response's `Destination` are
+  the registered HTTP-POST ACS URL used, `InResponseTo` on both when
+  SP-initiated and on neither when IdP-initiated, `Conditions` valid five
+  minutes and backdated by the existing 60 s skew allowance, the SP's entity id
+  as the only `Audience`, `AuthnInstant` = the session's `authenticated_at`,
+  `SessionIndex` = the session id, `AuthnContextClassRef` from the session's
+  `amr` only (REFEDS MFA, `X509`, `PasswordProtectedTransport` or
+  `unspecified`), and an `AttributeStatement` from the SP's attribute mapping
+  over user fields, group names and role names. The `NameID` is a persistent
+  **pairwise** identifier by default — HMAC-SHA256 under the new optional
+  deployment key `saml_pairwise_key` over the tenant, the user and the SP entity
+  id (D-22), stable across credential rotation and never containing the user id
+  — or the user's email when the SP asks (no address is a refusal). The
+  assertion is always signed (enveloped XML-DSig, `rsa-sha256`, `sha256`,
+  exclusive c14n, the certificate in `KeyInfo`), the response too when the SP's
+  `sign_responses` is set, after the assertion so its signature covers it; the
+  issuer then verifies every signature and the document's shape before
+  returning. A credential that is not the tenant's, not `active` or outside
+  `not_before..not_after` is refused. `failure` builds unsigned, status-only
+  responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`,
+  `RequestDenied`, `InvalidNameIDPolicy`). `check_allowed_groups`,
+  `check_acs_url`, `check_request_id` and `check_relay_state` (80 bytes) are
+  exposed for the SSO endpoint to call before the login hop. An SP registered
+  with `encrypt_assertions` is refused (`Responder`): encryption (D-2) is not
+  implemented. Threat model 2.21.0: the trust boundary AXIAM ↔ SAML service
+  provider, T-304…T-316.
+
+- **`CertificateType::SamlSigning` (T23.2.1, G-2, D-21).** A fifth certificate
+  type for the leaf of a tenant SAML identity provider's signing credential, on
+  T22.14's per-type profile: `keyUsage` is `digitalSignature` only (no
+  `keyEncipherment` even on an RSA key), `extendedKeyUsage` is
+  `id-kp-documentSigning` (RFC 9336, `1.3.6.1.5.5.7.3.36`) so no TLS verifier
+  accepts it, and there is no `subjectAltName`; the Vault PKI custodian states
+  the purpose as an OID (`ext_key_usage_oids`). It is **internal only and not on
+  the wire**: `#[serde(skip)]` keeps it out of every request, response and the
+  OpenAPI enum, the certificate inventory refuses it (the `cert_type` assertion
+  is unchanged), and `generate` / `sign_csr` refuse it by name. It authenticates
+  nobody: the bind endpoint and `MtlsService::authenticate_der` (device login and
+  native mTLS) refuse it by type, and both doors are now exhaustive `match`es
+  instead of `== Server`, so the next such type is a compile error rather than a
+  silently accepted one. Leaf issuance is split so the SAML credential can reuse
+  the whole issuing path without writing an inventory row.
+
+- **The SAML IdP signing credential (T23.2.1, G-2, D-21): an RSA-4096 leaf
+  with its key sealed at rest.** A new per-tenant `saml_idp_credential` table
+  (schema v72) holds the certificate PEM, issuing CA, serial, SHA-256
+  fingerprint, `not_after`, a status of `active`, `next` or `retired`, and the
+  private key sealed AES-256-GCM under `pki_encryption_key` by
+  `DatabaseCaKeyStore`, with the custody recorded on the row so a later custodian
+  needs no migration. It is deliberately **not a `certificate` row**, so no
+  certificate list or get can return it. At most one `active` and one `next` per
+  tenant is a unique index over a computed `slot` field, so the database refuses a
+  second one whichever caller wrote it. `SamlIdpCredentialService` in `axiam-pki`
+  issues a credential from a caller-named active signing CA of the tenant's
+  organization (another organization's CA, another tenant's, a non-signing or an
+  expired one is refused), valid at most 730 days and never past its CA, through
+  the same issuing path as `CertService::generate` (stopped before the inventory
+  write); returns the active credential with its key in a `Zeroizing` buffer for
+  the assertion signer; lists credentials without key material; and retires one,
+  which destroys its sealed key in the same write. Only one repository method
+  selects the key columns, and every `Debug` redacts them. The row is deleted
+  with its tenant inside the tenant-delete transaction. Creation is explicit: no
+  lazy issuance, no automatic rotation and no REST route yet (the admin route is
+  T23.2.5).
+
+- **The SAML service-provider registry (T23.2.1, G-2): model, validation,
+  repository, schema v72.** `SamlServiceProvider` in `axiam-core` — entity id
+  (unique per tenant), an ACS allow-list (`url`, `binding`, `index`,
+  `is_default`), optional SLO endpoint, `NameID` format (persistent pairwise by
+  default, email on request), `sign_responses` (default on), `encrypt_assertions`
+  (default off, D-2), optional SP signing and encryption certificates,
+  `want_authn_requests_signed`, `allow_idp_initiated` (per-SP opt-in, off by
+  default, D-3), an attribute mapping table over username, email, display,
+  given and family name, groups and roles, and an `allowed_groups` restriction.
+  There is deliberately **no `sign_assertions` field**: assertions are signed
+  always. `axiam_federation::saml_sp::validate_saml_service_provider` is the
+  write-time rule: an ACS URL is refused exactly when an OAuth2 redirect URI
+  would be (https except loopback, no fragment) and additionally when it holds a
+  `*`, duplicates and a second default are refused, certificates must be exactly
+  one parseable `CERTIFICATE` block (a private key is refused by name), and
+  encryption or signed requests without their certificate are refused. The
+  redirect rule now exists once: the admin OAuth2 client API calls the same
+  function. `SamlServiceProviderRepository` with the SurrealDB implementation
+  (`create`, `get`, `get_by_entity_id`, `list`, `update`, `delete`), tenant-scoped
+  on every verb; the table is deleted with its tenant inside the tenant-delete
+  transaction. Nothing serves SAML yet.
+
+- **`saml_idp_enabled`: the layered switch for the SAML identity provider
+  (T23.2.1, G-2, D-20).** A new setting on the OIDC policy block, default
+  `false`, with exactly the shape of `sensitive_scopes_enabled`: an
+  organization baseline, a tenant override that may only turn an organization's
+  `true` off (never its `false` on), the same `validate_tenant_override` /
+  `clamp_overrides_to_org` treatment, and a clamp that drops a tenant opt-in the
+  organization later withdraws. Stored in `security_settings.oidc_saml_idp_enabled`
+  (schema v72, `option<bool> DEFAULT false`, so a pre-v72 row reads as off).
+  Appears in the settings API (`OidcPolicy`, `SetOrgSettings`,
+  `TenantSettingsOverride`; OpenAPI regenerated) and is carried through the
+  admin console's whole-row organization save so a save cannot reset it. Nothing
+  reads it yet: the SAML endpoints that answer `404` when it is off arrive with
+  T23.2.3.
+
 - **Directory sign-in: the LDAP client and the bind-as-user path (T23.3.2,
   G-3).** A tenant's LDAP or Active Directory server can now authenticate its
   accounts. `axiam-directory` gains the client — `ldap3` over rustls only (no
@@ -155,9 +510,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **An email `NameID` is issued only for an address something vouches for
+  (T23.2.3, D-25, T-313).** The SAML IdP asserts a user's email — as the
+  `NameID` of an `emailAddress` service provider, or as an `email` attribute —
+  only when it was verified or the account is `Active`. A `PendingVerification`
+  account with an unverified address is answered `InvalidNameIDPolicy` at such
+  an SP (and the attribute is omitted); it still signs on where the `NameID` is
+  the pairwise default.
+- **A handler may set a stricter `Content-Security-Policy` of its own
+  (T23.2.3, D-27).** The security-headers middleware writes the global policy
+  only when the response carries none; the one handler that sets its own is the
+  SAML auto-post page. Every other response is unchanged.
+- **A sign-in mints a third OP-session cookie copy** at the tenant's SAML SSO
+  path (`/saml/v2/{tenant_id}/sso`), same value and attributes; logout and both
+  `end_session`s clear it with the others (T23.2.3, D-11).
 - Front-channel logout declined by design and recorded (T23.12.1, D-6)
 
 ### Fixed
+
+- **Directory just-in-time provisioning: a lost race checks the winner's status
+  before mapping groups (F4 P23W3-05).** When two first sign-ins for one
+  directory entry race, the loser continues with the winner's account. It now
+  refuses an account that may not sign in — deactivated by the sync job in
+  between, or suspended — *before* the group mapping runs, instead of re-adding
+  directory memberships to it and refusing afterwards. The memberships granted
+  nothing while the account was not active, and the answer is unchanged. Test:
+  `p23w3_05_a_lost_race_to_an_inactive_account_maps_no_groups`.
 
 - **A tenant delete that fails is reported as a failure (F4 P23W2-02).**
   Since T23.3.1 the tenant delete removes the tenant's directory configuration
@@ -222,6 +600,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the 16 KiB body limit on `PUT /oauth2/register/{client_id}`.
 
 ### Security
+
+- **Directory management: the address guard's answer to a host name no longer
+  maps internal DNS (F4 P23W3-04, adds T-356).** A `PUT` or `PATCH` on
+  `/api/v1/tenants/{tenant_id}/directory` told the tenant administrator whether a
+  host name did not resolve, resolved into a private range outside the
+  allow-list, to loopback, to the metadata service or to an AXIAM listener — at
+  30 writes a minute, a way to enumerate the deployment's internal names. For a
+  host name, every refusal that depends on what it resolved to is now one `400`
+  message ("the directory host does not resolve to an address this deployment
+  permits…") and one audit rule, `address_guard.not_permitted`; the specific
+  rule goes to the operator's log. An IP literal, an IPv6 literal and an
+  unparseable URL keep their specific answers. Contract §30.3 rule 1 amended in
+  place (1.54 is unreleased). Threat model 2.24.0: T-356 added (Low,
+  Mitigated). Tests: `p23w3_04_a_refused_host_name_gets_one_answer_whatever_it_resolves_to`,
+  and `the_address_guard_refuses_each_class_as_a_400_naming_the_rule` updated.
+
+- **Request logs no longer carry credentials from the query string (F4
+  P23W3-03, closes T-325).** The request tracer (`tracing-actix-web`'s default
+  root span) recorded every request's full target, so the SAML SSO endpoint's
+  pending sign-on `handle`, `RelayState` and `SAMLRequest`, `/oauth2/authorize`'s
+  `state` and `login_hint`, `end_session`'s `id_token_hint`, password-reset and
+  GDPR tokens and administrators' search terms reached the request log wherever
+  an operator enabled the tracer's span (the shipped `axiam=info` filter does
+  not). `axiam-server` now installs `RedactingRootSpanBuilder`: the same fields,
+  span name and target, with every query value recorded as `[redacted]` unless
+  its parameter is one of a short list of structural ones (tenant, organization
+  and client ids, `response_type`, `scope`, `prompt`, pagination and the like),
+  and the `{token}` segment of `/account/export/{token}` redacted too. Parameter
+  names stay. Threat model 2.24.0: T-325 closed. Tests: `request_span::tests`
+  (three), and `t9_4_the_request_logging_layer_records_no_headers_at_all`, now
+  pinning the new builder and that it reads no header but `User-Agent`.
+
+- **Directory sources: a lockout for login names AXIAM holds no account for (F4
+  P23W3-02, closes T-332).** With just-in-time provisioning on, a sign-in for an
+  unknown name is answered by the tenant's directory, and no AXIAM counter stood
+  in front of it — the per-account lockout has no account to count against — so
+  the login endpoint could spray passwords at directory users who had never
+  signed in to AXIAM, limited only by the per-IP limits and the directory's own
+  lockout. Failures the directory decides for an unknown name (a wrong password
+  or no such entry; an unusable directory counts against nobody) are now counted
+  per tenant and login name, trimmed and case-folded, under the tenant's lockout
+  policy (`max_failed_login_attempts`, `lockout_duration_secs`, the backoff and
+  its cap). Over the threshold, the name is answered as an unknown user — dummy
+  verify included — without asking the directory, even with the right password,
+  until the lockout expires; a successful sign-in clears it. The counter is per
+  process (with N replicas a name gets at most N times the attempts per window)
+  and tracks at most 50 000 names. Threat model 2.24.0: T-332 closed. Tests:
+  `p23w3_02_guessing_at_an_unknown_name_stops_reaching_the_directory`,
+  `p23w3_02_failures_below_the_threshold_still_provision`, and four unit tests
+  in `axiam_auth::unknown_name_lockout`.
+
+- **Directory linking also removes the account's federation links (F4 P23W3-01,
+  T-336).** `POST /api/v1/tenants/{tenant_id}/directory/links` (D-28) retired
+  the passkeys, `User` certificates, sessions and refresh tokens of the account
+  it linked, but not its federation links: a social or upstream-IdP identity
+  bound to the account kept signing it in without the directory deciding — the
+  same way in that deleting its passkeys closes. Linking now deletes every
+  federation link the account holds, before the sessions are revoked, and counts
+  them in the `directory.account_linked` audit row (`federation_links_deleted`);
+  a deleted link is not re-made at the next upstream sign-in, because federated
+  provisioning never links by name or address. The response shape is unchanged.
+  Contract §30.3 rule 6 amended in place. Test:
+  `p23w3_01_linking_removes_the_accounts_federation_links`.
+
+- **Directory sources: the address guard and the frame cap beneath the LDAP
+  client (T23.3.7, G-3, D-19, D-32; closes T-300, amends T-295, adds T-331).**
+  A tenant administrator chooses the directory URL, so the connector now holds
+  every directory host to a deployment rule before it opens a socket.
+  `axiam_directory::address::guard` resolves the host once and judges **every**
+  address: loopback, unspecified, link-local (`169.254.169.254`, `fe80::/10`),
+  multicast and special-purpose addresses are always refused, IPv4-mapped forms
+  as the IPv4 address they carry; a private address (RFC 1918, CGNAT
+  `100.64/10`, ULA `fc00::/7`) only inside a network listed in the new
+  **`AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS`** (comma-separated CIDR blocks;
+  unset admits none — a deployment whose directories are on private networks
+  must set it); a metadata endpoint inside a private range whatever the list
+  says; and an address of this host on AXIAM's REST or gRPC port. IPv6-literal
+  URLs are refused (they could never be certificate-checked). The TCP socket is
+  opened to a vetted address and handed to `ldap3`, so nothing resolves the name
+  again — DNS rebinding between the check and the connect is impossible — and
+  the certificate is still verified against the URL's host, for `ldaps://` and
+  StartTLS alike; the guard runs at every connection (pool, user bind, group
+  lookup, sync). `DirectoryClient::guard` / `RepositoryDirectoryAuthenticator::guard_url`
+  is the call the management routes (T23.3.8) make before saving. The
+  classification is `guarded_fetch`'s, moved to `axiam_core::ip_class` so the two
+  guards cannot disagree. **Frame cap (P23W2-10):** AXIAM now performs StartTLS
+  and the TLS handshake itself and gives `ldap3` one end of a private Unix socket
+  pair; a relay forwards each LDAP message from the directory only after
+  `axiam_directory::frame` has measured it — a declared length above
+  **`AXIAM__DIRECTORY__MAX_MESSAGE_BYTES`** (default 2 MiB, clamped to
+  64 KiB … 16 MiB) ends the connection from the header alone — and checked it
+  whole: definite lengths, single-octet tags, nesting at most 16 deep, a message
+  id and an operation. Before this, a hostile directory could make the shared
+  connector buffer whatever it sent until the operation timeout, abort the
+  process through `lber`'s unbounded recursion (a few tens of kilobytes of
+  nesting), or panic a connection task with a short envelope (T-331). Latent
+  until now — no route writes a directory configuration — and closed before
+  T23.3.8 adds one. Threat model **2.23.0**: T-300 closed, T-295 amended, T-302
+  widened, and **T-331 … T-355** added — the frame guard, just-in-time
+  provisioning and linking (T-332 open: an unknown name under
+  `jit_provisioning` reaches the directory with no AXIAM counter in front of it),
+  group mapping, a new **Directory sync job** process with its
+  `directory_sync_state` and `user accounts & member_of` stores, and the sync
+  job's threats; 355 threats, 337 mitigated / 18 open. Tests: 13 in
+  `connector_guard_test.rs` (every refused class at `guard` and at connect, a
+  name resolving to loopback, the listener port, the allow-list both ways, DNS
+  rebinding, one resolution per connection, the hostname TLS check over a pinned
+  address for ldaps and StartTLS, an IP-only certificate refused, an over-long
+  length, 20 000 levels of nesting and a short envelope each aborted at once,
+  the configurable cap), 19 unit tests for the guard and the frame reader, 5
+  classifier tests in `axiam-core`; every existing directory suite unchanged
+  and green.
+
+- **SAML SP: a signed document without an assertion can no longer vouch for a
+  forged one (T23.2.2, D-23, T-67).** The SAML assertion consumer verified only
+  the *first* `ds:Signature` in a response and bound the assertion to *any*
+  `Reference` that named it, verified or not. A document the upstream identity
+  provider signed for another purpose — a signed `LogoutRequest` or
+  `LogoutResponse`, a signed error response — placed ahead of a forged
+  assertion carrying a dummy signature made the forged assertion pass, and the
+  ACS signed in (or provisioned) whatever user it named: an authentication
+  bypass on every SAML federation whose IdP signs such messages with its
+  assertion key. A `ds:Signature` is now accepted only as the enveloped child of
+  the `Response` root or of the `Assertion` that is its child, at most one per
+  parent and each referencing its parent's `ID`; any other `Signature` element
+  refuses the whole response; every signature is verified individually on its
+  own node; IDs must be unique `NCName`s; and the assertion must carry its own
+  enveloped signature. A response signed only at the `Response` level was
+  already refused and still is. Present in every release that shipped SAML
+  federation.
 
 - **A directory configuration update can no longer redirect the stored bind
   secret (F4 P23W2-01, T-298).** `DirectoryConfigRepository::update` kept the

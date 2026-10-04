@@ -6,6 +6,7 @@ pub mod ca_certificates;
 pub mod certificates;
 pub mod dcr;
 pub mod device;
+pub mod directory;
 pub mod email_config;
 pub mod email_verification;
 pub mod federation;
@@ -27,6 +28,8 @@ pub mod pgp_keys;
 pub mod reactors;
 pub mod resources;
 pub mod roles;
+#[cfg(feature = "saml")]
+pub mod saml_idp;
 pub mod scim_tokens;
 pub mod scopes;
 pub mod service_accounts;

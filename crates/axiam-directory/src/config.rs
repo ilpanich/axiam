@@ -37,8 +37,10 @@
 //! as the bind identity, and a stricter check would refuse a common, correct
 //! configuration. Whether the server accepts the DN is learned by binding.
 
+use std::collections::BTreeSet;
+
 use axiam_core::error::AxiamError;
-use axiam_core::models::directory::NewDirectoryConfig;
+use axiam_core::models::directory::{GROUP_MAPPINGS_MAX, GroupStrategy, NewDirectoryConfig};
 use url::Url;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -128,6 +130,41 @@ pub enum ConfigError {
         /// What is wrong with it.
         defect: AnchorDefect,
     },
+    /// The group-mapping table is unacceptable (T23.3.4, D-30).
+    #[error("directory group_mappings{}: {defect}", index.map(|i| format!(" #{i}")).unwrap_or_default())]
+    GroupMapping {
+        /// Zero-based position in `group_mappings`, when one row is at fault.
+        index: Option<usize>,
+        /// What is wrong with it.
+        defect: MappingDefect,
+    },
+}
+
+/// What is wrong with the group-mapping table. That every `group_id` is a
+/// group **of the tenant** is not here: [`validate`] is pure, so that rule
+/// lives in the repository's write path, and the management route (T23.3.8)
+/// calls both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MappingDefect {
+    /// More than [`GROUP_MAPPINGS_MAX`] rows.
+    #[error("may hold at most {GROUP_MAPPINGS_MAX} entries")]
+    TooMany,
+    /// The directory group's DN is empty, over-long or has a control character.
+    #[error("directory_group_dn is not acceptable (empty, too long or control characters)")]
+    BadDnText,
+    /// The directory group's DN is not an RFC 4514 distinguished name, so it
+    /// could never match anything and would only look like a mapping.
+    #[error("directory_group_dn is not a valid distinguished name: {0}")]
+    BadDn(crate::dn::DnError),
+    /// The same directory group (compared as the mapping compares) is mapped to
+    /// the same AXIAM group twice.
+    #[error("repeats an earlier entry (same directory group, same AXIAM group)")]
+    Duplicate,
+    /// A mapping needs `group_base_dn` where the directory is searched for the
+    /// groups a user is in (OpenLDAP's reverse `member` lookup): without it the
+    /// mapping could never be applied, and a sign-in would be refused.
+    #[error("needs group_base_dn for a directory that discovers groups by reverse member search")]
+    GroupBaseDnRequired,
 }
 
 /// What is wrong with a server URL.
@@ -315,6 +352,7 @@ pub fn validate(input: &NewDirectoryConfig) -> Result<(), ConfigError> {
         validate_group_filter(group_filter)?;
     }
     validate_attribute("group_member_attribute", &input.group_member_attribute)?;
+    validate_group_mappings(input)?;
 
     if input.group_nesting_depth > GROUP_NESTING_DEPTH_MAX {
         return Err(ConfigError::NestingDepth);
@@ -324,6 +362,37 @@ pub fn validate(input: &NewDirectoryConfig) -> Result<(), ConfigError> {
     }
 
     validate_trust_anchors(&input.trust_anchors_pem)
+}
+
+/// The mapping table's own rules (D-30): bounded, every DN an RFC 4514 DN, no
+/// redundant row, and — for a directory whose groups are found by searching —
+/// somewhere to search.
+fn validate_group_mappings(input: &NewDirectoryConfig) -> Result<(), ConfigError> {
+    let err = |index, defect| ConfigError::GroupMapping { index, defect };
+    let mappings = &input.group_mappings;
+    if mappings.len() > GROUP_MAPPINGS_MAX {
+        return Err(err(None, MappingDefect::TooMany));
+    }
+    if mappings.is_empty() {
+        return Ok(());
+    }
+    if input.kind.group_strategy() == GroupStrategy::ReverseMember && input.group_base_dn.is_none()
+    {
+        return Err(err(None, MappingDefect::GroupBaseDnRequired));
+    }
+    let mut seen = BTreeSet::new();
+    for (index, mapping) in mappings.iter().enumerate() {
+        let dn = &mapping.directory_group_dn;
+        if dn.trim().is_empty() || dn.len() > DN_MAX_LEN || dn.chars().any(char::is_control) {
+            return Err(err(Some(index), MappingDefect::BadDnText));
+        }
+        let key = crate::dn::normalize(dn)
+            .map_err(|defect| err(Some(index), MappingDefect::BadDn(defect)))?;
+        if !seen.insert((key, mapping.group_id)) {
+            return Err(err(Some(index), MappingDefect::Duplicate));
+        }
+    }
+    Ok(())
 }
 
 fn validate_url(raw: &str, start_tls: bool) -> Result<(), UrlDefect> {
@@ -536,6 +605,7 @@ mod tests {
             group_filter: Some("(objectClass=groupOfNames)".into()),
             group_member_attribute: "member".into(),
             group_nesting_depth: GROUP_NESTING_DEPTH_DEFAULT,
+            group_mappings: vec![],
             sync_interval_secs: SYNC_INTERVAL_DEFAULT_SECS,
             jit_provisioning: true,
             trust_anchors_pem: vec![],
@@ -1155,6 +1225,143 @@ mod tests {
             ..valid()
         };
         assert_eq!(validate(&many), Err(ConfigError::TooManyTrustAnchors));
+    }
+
+    // --- the group-mapping table (T23.3.4, D-30) --------------------------
+
+    fn mapping(dn: &str, group_id: Uuid) -> axiam_core::models::directory::GroupMapping {
+        axiam_core::models::directory::GroupMapping {
+            directory_group_dn: dn.into(),
+            group_id,
+        }
+    }
+
+    fn with_mappings(
+        mappings: Vec<axiam_core::models::directory::GroupMapping>,
+    ) -> NewDirectoryConfig {
+        NewDirectoryConfig {
+            group_mappings: mappings,
+            ..valid()
+        }
+    }
+
+    fn mapping_defect(input: &NewDirectoryConfig) -> (Option<usize>, MappingDefect) {
+        match validate(input) {
+            Err(ConfigError::GroupMapping { index, defect }) => (index, defect),
+            other => panic!("expected a mapping refusal for the case under test, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_table_of_well_formed_rows_passes_and_one_dn_may_map_to_two_groups() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let table = vec![
+            mapping("cn=staff,ou=groups,dc=example,dc=com", a),
+            mapping("cn=staff,ou=groups,dc=example,dc=com", b),
+            mapping("CN=Ops, OU=Groups, DC=example, DC=com", a),
+        ];
+        assert_eq!(validate(&with_mappings(table)), Ok(()));
+        assert_eq!(validate(&with_mappings(vec![])), Ok(()));
+    }
+
+    #[test]
+    fn more_than_five_hundred_rows_are_refused() {
+        let g = Uuid::new_v4();
+        let at_limit: Vec<_> = (0..GROUP_MAPPINGS_MAX)
+            .map(|i| mapping(&format!("cn=g{i},dc=example,dc=com"), g))
+            .collect();
+        assert_eq!(validate(&with_mappings(at_limit.clone())), Ok(()));
+        let mut over = at_limit;
+        over.push(mapping("cn=extra,dc=example,dc=com", g));
+        assert_eq!(
+            mapping_defect(&with_mappings(over)),
+            (None, MappingDefect::TooMany)
+        );
+    }
+
+    #[test]
+    fn a_row_that_is_not_a_distinguished_name_is_refused_with_its_position() {
+        let g = Uuid::new_v4();
+        let good = mapping("cn=a,dc=example,dc=com", g);
+        for (bad, want) in [
+            ("", MappingDefect::BadDnText),
+            ("cn=a\u{0}b", MappingDefect::BadDnText),
+            (
+                "staff",
+                MappingDefect::BadDn(crate::dn::DnError::MissingType),
+            ),
+            (
+                "cn=a\\zz",
+                MappingDefect::BadDn(crate::dn::DnError::BadEscape),
+            ),
+        ] {
+            let table = vec![good.clone(), mapping(bad, g)];
+            assert_eq!(
+                mapping_defect(&with_mappings(table)),
+                (Some(1), want),
+                "case {bad:?}"
+            );
+        }
+        let long = format!("cn={},dc=example,dc=com", "a".repeat(DN_MAX_LEN));
+        assert_eq!(
+            mapping_defect(&with_mappings(vec![mapping(&long, g)])),
+            (Some(0), MappingDefect::BadDnText)
+        );
+    }
+
+    /// Equivalent spellings of one DN, mapped to the same group, are one row
+    /// said twice.
+    #[test]
+    fn a_repeated_pair_is_refused_even_when_spelled_differently() {
+        let g = Uuid::new_v4();
+        let table = vec![
+            mapping("cn=staff,ou=groups,dc=example,dc=com", g),
+            mapping("CN=Staff, OU=Groups, DC=Example, DC=com", g),
+        ];
+        assert_eq!(
+            mapping_defect(&with_mappings(table)),
+            (Some(1), MappingDefect::Duplicate)
+        );
+    }
+
+    /// A reverse-member directory has nowhere to look for groups without a
+    /// group base: refuse at write what could only refuse every sign-in.
+    #[test]
+    fn a_reverse_member_directory_needs_a_group_base_for_a_non_empty_table() {
+        let table = vec![mapping("cn=staff,dc=example,dc=com", Uuid::new_v4())];
+        let open_ldap = NewDirectoryConfig {
+            group_base_dn: None,
+            group_mappings: table.clone(),
+            ..valid()
+        };
+        assert_eq!(
+            mapping_defect(&open_ldap),
+            (None, MappingDefect::GroupBaseDnRequired)
+        );
+        // Empty table: no lookup will ever run, so no base is needed.
+        let empty = NewDirectoryConfig {
+            group_base_dn: None,
+            ..valid()
+        };
+        assert_eq!(validate(&empty), Ok(()));
+        // Active Directory reads `memberOf` off the entry and needs no base.
+        let ad = NewDirectoryConfig {
+            kind: DirectoryKind::ActiveDirectory,
+            group_base_dn: None,
+            group_member_attribute: "memberOf".into(),
+            group_mappings: table,
+            ..valid()
+        };
+        assert_eq!(validate(&ad), Ok(()));
+    }
+
+    #[test]
+    fn a_mapping_refusal_names_the_row_and_never_the_value() {
+        let table = vec![mapping("cn=value-marker\\zz", Uuid::new_v4())];
+        let err = validate(&with_mappings(table)).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("group_mappings #0"));
+        assert!(!text.contains("value-marker"));
     }
 
     // --- conversion ------------------------------------------------------

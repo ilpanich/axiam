@@ -410,7 +410,7 @@ pub fn check_leaf_names(
         }
         return Err(refuse(format!(
             "subject_alt_names is accepted only for cert_type Server; a {cert_type:?} \
-             certificate authenticates a client and names no host"
+             certificate names no host"
         )));
     }
     if allowed.is_empty() {

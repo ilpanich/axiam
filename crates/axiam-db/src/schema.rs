@@ -397,6 +397,26 @@ static MIGRATIONS: &[Migration] = &[
         name: "user_directory_external_id",
         sql: SCHEMA_V71,
     },
+    Migration {
+        version: 72,
+        name: "saml_identity_provider",
+        sql: SCHEMA_V72,
+    },
+    Migration {
+        version: 73,
+        name: "saml_pending_authn_request",
+        sql: SCHEMA_V73,
+    },
+    Migration {
+        version: 74,
+        name: "directory_group_mapping",
+        sql: SCHEMA_V74,
+    },
+    Migration {
+        version: 75,
+        name: "directory_sync_state",
+        sql: SCHEMA_V75,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -3793,9 +3813,507 @@ DEFINE INDEX IF NOT EXISTS idx_user_tenant_directory_external_id ON TABLE user \
     COLUMNS tenant_id, directory_external_id UNIQUE;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v72 — T23.2.1 / G-2: the SAML 2.0 identity provider's storage
+// -----------------------------------------------------------------------
+//
+// Additive DDL only. Nothing is backfilled: no tenant is a SAML identity
+// provider until an organization turns the switch on and an administrator
+// registers a service provider.
+//
+// **`security_settings.oidc_saml_idp_enabled`** (D-20) is the layered
+// `saml_idp_enabled` switch, with the shape of `oidc_sensitive_scopes_enabled`
+// (v57): `option<bool> DEFAULT false`, so a row written before this migration
+// reads as *off* and there is no shape of stored data that turns the IdP on by
+// accident.
+//
+// **`saml_service_provider`** is the tenant's registry of service providers an
+// assertion may be issued to: one SCHEMAFULL row each, tenant-scoped, with
+// `idx_saml_sp_tenant_entity` UNIQUE on `(tenant_id, entity_id)` so the
+// datastore, not the application, decides the race between two concurrent
+// registrations of the same entity id. The two structured lists — the ACS
+// allow-list and the attribute mapping table — are JSON text columns
+// (`acs_urls_json`, `attribute_mappings_json`, the pattern `oidc_cimd_json`
+// set): they are written and replaced whole and never queried by member. There
+// is no `sign_assertions` column: assertions are signed always, so the column
+// could only ever be a switch for turning that off. `slo_binding` and
+// `name_id_format` are asserted against the spellings the model writes. The
+// certificate columns hold public PEM only; the validator refuses anything but
+// one CERTIFICATE block. Rows are removed with their tenant
+// (`SurrealTenantRepository::delete`).
+//
+// **`saml_idp_credential`** (D-21) is the tenant's SAML signing leaf and its
+// sealed private key — deliberately **not** a `certificate` row, so no
+// certificate list or get response can carry it. `encrypted_private_key` is
+// AES-256-GCM ciphertext under `pki_encryption_key` (the CA custodian's database
+// sealing); `key_custody` records which custodian sealed it, as
+// `ca_certificate.key_custody` does, and is *not* enumerated in the DDL so a
+// later custodian is a new value rather than a migration. The `slot` field is a
+// `VALUE` expression the datastore evaluates on every write:
+// `<tenant>:active` and `<tenant>:next` for the two live statuses and a
+// per-row `<tenant>:retired:<id>` for a retired one, with a UNIQUE index on it.
+// That is how "at most one active and one next per tenant" is a property of the
+// database and not of the service: a second active credential is an index
+// violation whichever caller wrote it, and retired rows are unbounded because
+// each carries its own slot. Retiring a credential also clears
+// `encrypted_private_key`.
+const SCHEMA_V72: &str = "\
+DEFINE FIELD IF NOT EXISTS oidc_saml_idp_enabled ON TABLE security_settings
+    TYPE option<bool> DEFAULT false;
+DEFINE TABLE IF NOT EXISTS saml_service_provider SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_service_provider TYPE string;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE saml_service_provider TYPE bool;
+DEFINE FIELD IF NOT EXISTS display_name ON TABLE saml_service_provider TYPE string;
+DEFINE FIELD IF NOT EXISTS entity_id ON TABLE saml_service_provider TYPE string;
+DEFINE FIELD IF NOT EXISTS acs_urls_json ON TABLE saml_service_provider TYPE string;
+DEFINE FIELD IF NOT EXISTS slo_url ON TABLE saml_service_provider TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS slo_binding ON TABLE saml_service_provider TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['http_post', 'http_redirect'];
+DEFINE FIELD IF NOT EXISTS name_id_format ON TABLE saml_service_provider TYPE string
+    ASSERT $value IN ['persistent', 'email_address'];
+DEFINE FIELD IF NOT EXISTS sign_responses ON TABLE saml_service_provider TYPE bool;
+DEFINE FIELD IF NOT EXISTS encrypt_assertions ON TABLE saml_service_provider TYPE bool;
+DEFINE FIELD IF NOT EXISTS sp_signing_cert_pem ON TABLE saml_service_provider
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS sp_encryption_cert_pem ON TABLE saml_service_provider
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS want_authn_requests_signed ON TABLE saml_service_provider
+    TYPE bool;
+DEFINE FIELD IF NOT EXISTS allow_idp_initiated ON TABLE saml_service_provider TYPE bool;
+DEFINE FIELD IF NOT EXISTS attribute_mappings_json ON TABLE saml_service_provider
+    TYPE string;
+DEFINE FIELD IF NOT EXISTS allowed_groups ON TABLE saml_service_provider
+    TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_service_provider TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE saml_service_provider TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_tenant_entity ON TABLE saml_service_provider
+    COLUMNS tenant_id, entity_id UNIQUE;
+DEFINE TABLE IF NOT EXISTS saml_idp_credential SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS issuer_ca_id ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS certificate_pem ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS serial ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS fingerprint ON TABLE saml_idp_credential TYPE string;
+DEFINE FIELD IF NOT EXISTS not_before ON TABLE saml_idp_credential TYPE datetime;
+DEFINE FIELD IF NOT EXISTS not_after ON TABLE saml_idp_credential TYPE datetime;
+DEFINE FIELD IF NOT EXISTS status ON TABLE saml_idp_credential TYPE string
+    ASSERT $value IN ['active', 'next', 'retired'];
+DEFINE FIELD IF NOT EXISTS key_custody ON TABLE saml_idp_credential TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS key_locator ON TABLE saml_idp_credential TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS encrypted_private_key ON TABLE saml_idp_credential
+    TYPE option<bytes>;
+DEFINE FIELD IF NOT EXISTS slot ON TABLE saml_idp_credential TYPE string
+    VALUE IF $this.status IN ['active', 'next'] {
+        string::concat($this.tenant_id, ':', $this.status)
+    } ELSE {
+        string::concat($this.tenant_id, ':retired:', meta::id($this.id))
+    };
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_idp_credential TYPE datetime;
+DEFINE FIELD IF NOT EXISTS retired_at ON TABLE saml_idp_credential TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE saml_idp_credential TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_saml_idp_credential_slot ON TABLE saml_idp_credential
+    COLUMNS slot UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_idp_credential_tenant ON TABLE saml_idp_credential
+    COLUMNS tenant_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v73 — T23.2.3 / G-2: SAML AuthnRequests held across the login hop
+// -----------------------------------------------------------------------
+//
+// Additive DDL only: one new table, nothing backfilled (no request is pending
+// before the SSO endpoint exists).
+//
+// **`saml_authn_request`** holds what the SAML SSO endpoint's first leg
+// decided — the SP, the ACS URL already resolved against its registration,
+// `RelayState`, `ForceAuthn` / `IsPassive` and the outbound instant — under the
+// SHA-256 of an opaque handle, plus the SHA-256 of the browser-binding cookie.
+// No raw handle or binding value is stored. `status` moves `pending` →
+// `consumed` exactly once (the X6 two-layer arbiter, with `consumption_id` as
+// the read-back nonce), and a consumed row is **kept** until `expires_at`:
+//
+// **`idx_saml_authn_request_replay` is UNIQUE on `(tenant_id, replay_key)`**,
+// where `replay_key` is `{sp_id}:{request_id}` (or `idp:{row id}` for an
+// IdP-initiated sign-on), so a replayed `AuthnRequest` is refused by the
+// datastore for the row's whole ten-minute life — longer than the window an
+// `IssueInstant` is accepted in, which is what bounds a replay from outside.
+// `idx_saml_authn_request_handle` is UNIQUE on the handle digest. Rows go with
+// their tenant (`SurrealTenantRepository::delete`) and are swept when expired.
+const SCHEMA_V73: &str = "\
+DEFINE TABLE IF NOT EXISTS saml_authn_request SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_authn_request TYPE string;
+DEFINE FIELD IF NOT EXISTS sp_id ON TABLE saml_authn_request TYPE string;
+DEFINE FIELD IF NOT EXISTS request_id ON TABLE saml_authn_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS replay_key ON TABLE saml_authn_request TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS acs_url ON TABLE saml_authn_request TYPE string;
+DEFINE FIELD IF NOT EXISTS relay_state ON TABLE saml_authn_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS force_authn ON TABLE saml_authn_request TYPE bool;
+DEFINE FIELD IF NOT EXISTS is_passive ON TABLE saml_authn_request TYPE bool;
+DEFINE FIELD IF NOT EXISTS handle_hash ON TABLE saml_authn_request TYPE string
+    ASSERT string::len($value) = 64;
+DEFINE FIELD IF NOT EXISTS binding_hash ON TABLE saml_authn_request TYPE string
+    ASSERT string::len($value) = 64;
+DEFINE FIELD IF NOT EXISTS status ON TABLE saml_authn_request TYPE string
+    ASSERT $value IN ['pending', 'consumed'];
+DEFINE FIELD IF NOT EXISTS consumption_id ON TABLE saml_authn_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_authn_request TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE saml_authn_request TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_saml_authn_request_replay ON TABLE saml_authn_request
+    COLUMNS tenant_id, replay_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_authn_request_handle ON TABLE saml_authn_request
+    COLUMNS handle_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_authn_request_expires ON TABLE saml_authn_request
+    COLUMNS expires_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v74 — T23.3.4 / G-3 / D-30: directory group mapping
+// -----------------------------------------------------------------------
+//
+// Additive DDL only: two new columns, nothing backfilled.
+//
+// **`directory_config.group_mappings`** is the tenant's mapping table, a list
+// of `{ directory_group_dn, group_id }` objects stored in the one row the
+// tenant's directory already has (D-30). It is **optional with an empty
+// default**, so a row written before this migration reads as *no mapping* and
+// a sign-in then maps nothing: there is no shape of stored data that grants a
+// membership by accident. At most 500 rows, a datastore rule restating the one
+// `axiam-directory::config::validate` and the repository enforce. That every
+// `group_id` is a group **of the same tenant** is not expressible here (it is
+// a lookup in another table) and is checked by the repository's write path,
+// before the row is touched.
+//
+// **`member_of.source`** marks who owns a membership edge. `'directory'` is
+// written by the directory mapping and by nothing else; **an edge without the
+// field reads as manual**, which is the answer for every edge that exists
+// today and for every edge `GroupRepository::add_member` writes. The mapping
+// removes only edges that say `'directory'`, so a membership an administrator
+// made by hand can never be taken away by the directory. The assertion admits
+// those two states and no third, so a typo cannot create an owner nobody
+// handles.
+const SCHEMA_V74: &str = "\
+DEFINE FIELD IF NOT EXISTS group_mappings ON TABLE directory_config \
+    TYPE option<array<object>> DEFAULT [] \
+    ASSERT $value = NONE OR array::len($value) <= 500;
+DEFINE FIELD IF NOT EXISTS group_mappings.* ON TABLE directory_config TYPE object;
+DEFINE FIELD IF NOT EXISTS group_mappings.*.directory_group_dn ON TABLE directory_config \
+    TYPE string ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS group_mappings.*.group_id ON TABLE directory_config \
+    TYPE string ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS source ON TABLE member_of TYPE option<string> \
+    ASSERT $value = NONE OR $value = 'directory';
+";
+
+// -----------------------------------------------------------------------
+// Schema v75 — T23.3.5 / G-3 / D-31: the directory sync job's state
+// -----------------------------------------------------------------------
+//
+// One new table, `directory_sync_state`, one row per tenant. Purely additive:
+// nothing existing is touched and nothing is backfilled — a tenant with no row
+// has simply never been synced, which the job reads as "run a full
+// reconciliation first".
+//
+// **One row per tenant is the key's doing.** The repository writes the row
+// under `type::record('directory_sync_state', <tenant id>)`, and the UNIQUE
+// index on `tenant_id` restates it for anything that writes another way.
+//
+// The row holds what the next run needs and nothing that names a person: the
+// `watermark` the incremental run resumes from (a generalized-time value or a
+// decimal USN — an opaque string to the datastore), the `server_identity` the
+// watermark belongs to (AD's `dsServiceName`; USNs are per domain controller,
+// so a watermark is meaningless against another one), whether the next run
+// must be a full one, when the last attempt and the last complete full run
+// were, how the last attempt ended, and the bounded list of accounts already
+// reported as `Inactive` while the directory shows them present and enabled
+// (so the audit log says it once, not nightly). `last_result` is asserted
+// against the four spellings `DirectorySyncResult::as_str` writes; the list is
+// capped at 5 000, the same constant the repository trims to.
+//
+// The row is removed with its tenant, in the same transaction as the tenant
+// (`SurrealTenantRepository::delete`).
+const SCHEMA_V75: &str = "\
+DEFINE TABLE IF NOT EXISTS directory_sync_state SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE directory_sync_state TYPE string;
+DEFINE FIELD IF NOT EXISTS watermark ON TABLE directory_sync_state TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS server_identity ON TABLE directory_sync_state TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS full_required ON TABLE directory_sync_state TYPE bool;
+DEFINE FIELD IF NOT EXISTS last_attempt_at ON TABLE directory_sync_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_full_run_at ON TABLE directory_sync_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_result ON TABLE directory_sync_state TYPE option<string>
+    ASSERT $value = NONE OR $value IN ['ok', 'partial', 'failed', 'safety_valve'];
+DEFINE FIELD IF NOT EXISTS reported_user_ids ON TABLE directory_sync_state TYPE array<string>
+    ASSERT array::len($value) <= 5000;
+DEFINE FIELD IF NOT EXISTS reported_user_ids.* ON TABLE directory_sync_state TYPE string;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE directory_sync_state TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_directory_sync_state_tenant ON TABLE directory_sync_state \
+    COLUMNS tenant_id UNIQUE;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.3.5 / D-31 — v75 adds one table, additively, one row per tenant, with
+    /// no personal data column and the last result held to the four spellings.
+    #[test]
+    fn v75_defines_the_directory_sync_state_table_additively() {
+        assert!(SCHEMA_V75.contains("DEFINE TABLE IF NOT EXISTS directory_sync_state SCHEMAFULL"));
+        assert!(SCHEMA_V75.contains(
+            "idx_directory_sync_state_tenant ON TABLE directory_sync_state \
+    COLUMNS tenant_id UNIQUE"
+        ));
+        assert!(
+            SCHEMA_V75.contains("$value IN ['ok', 'partial', 'failed', 'safety_valve']"),
+            "last_result must be held to DirectorySyncResult's spellings"
+        );
+        assert!(SCHEMA_V75.contains("array::len($value) <= 5000"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V75.contains(forbidden),
+                "v75 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        // Nothing but the new table: every statement is about it.
+        for statement in SCHEMA_V75
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v75 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("directory_sync_state"),
+                "v75 defined something outside its own table: {statement}"
+            );
+        }
+        // No column that could hold a name, an address or a DN.
+        for column in ["username", "email", "display", "dn "] {
+            assert!(!SCHEMA_V75.contains(column), "v75 must hold no {column}");
+        }
+    }
+
+    /// v75 takes the next number and keeps the three before it as they were.
+    #[test]
+    fn v75_follows_v74_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| m.version >= 74)
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                (74, "directory_group_mapping"),
+                (75, "directory_sync_state")
+            ]
+        );
+    }
+
+    /// T23.3.4 / D-30 — v74 adds the mapping table to the directory row and the
+    /// owner marker to the membership edge, both optional so that every row and
+    /// edge written before it reads as "no mapping" and "manual".
+    #[test]
+    fn v74_adds_the_mapping_table_and_the_membership_owner_additively() {
+        // The table: optional, empty by default, capped at 500, typed members.
+        assert!(SCHEMA_V74.contains(
+            "group_mappings ON TABLE directory_config \
+    TYPE option<array<object>> DEFAULT []"
+        ));
+        assert!(SCHEMA_V74.contains("array::len($value) <= 500"));
+        assert!(
+            SCHEMA_V74.contains("group_mappings.*.directory_group_dn ON TABLE directory_config")
+        );
+        assert!(SCHEMA_V74.contains("group_mappings.*.group_id ON TABLE directory_config"));
+        // The owner marker: absent reads as manual, `directory` is the only
+        // other state the datastore will hold.
+        assert!(SCHEMA_V74.contains("source ON TABLE member_of TYPE option<string>"));
+        assert!(SCHEMA_V74.contains("ASSERT $value = NONE OR $value = 'directory'"));
+        // Nothing is backfilled and nothing older is redefined: a row written
+        // before v74 must read exactly as it did.
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V74.contains(forbidden),
+                "v74 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V74
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE FIELD IF NOT EXISTS"),
+                "v74 statements must be idempotent field definitions"
+            );
+        }
+    }
+
+    /// D-30 — v74 touches only the two tables it is about, and v72 and v73 keep
+    /// the numbers they were given: this wave's migrations are extended by
+    /// nothing older.
+    #[test]
+    fn v74_touches_only_the_directory_row_and_the_membership_edge() {
+        for statement in SCHEMA_V74
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.contains("ON TABLE directory_config")
+                    || statement.contains("ON TABLE member_of"),
+                "v74 defined something outside its two tables: {statement}"
+            );
+        }
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| m.version >= 72)
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                (72, "saml_identity_provider"),
+                (73, "saml_pending_authn_request"),
+                (74, "directory_group_mapping"),
+                (75, "directory_sync_state"),
+            ]
+        );
+    }
+
+    /// T23.2.3 — v73 adds one table, additively, whose two unique indexes are
+    /// the replay guard and the handle, and which stores digests only.
+    #[test]
+    fn v73_defines_the_pending_authn_request_table_additively() {
+        assert!(SCHEMA_V73.contains("DEFINE TABLE IF NOT EXISTS saml_authn_request SCHEMAFULL"));
+        assert!(SCHEMA_V73.contains(
+            "idx_saml_authn_request_replay ON TABLE saml_authn_request
+    COLUMNS tenant_id, replay_key UNIQUE"
+        ));
+        assert!(SCHEMA_V73.contains(
+            "idx_saml_authn_request_handle ON TABLE saml_authn_request
+    COLUMNS handle_hash UNIQUE"
+        ));
+        assert!(SCHEMA_V73.contains("ASSERT $value IN ['pending', 'consumed']"));
+        // Digests only: no column could hold a raw handle or binding value.
+        for forbidden in [
+            "EXISTS handle ON",
+            "EXISTS binding ON",
+            "handle_value",
+            "binding_value",
+        ] {
+            assert!(!SCHEMA_V73.contains(forbidden), "{forbidden}");
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V73.contains(forbidden),
+                "v73 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V73
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE") && statement.contains("IF NOT EXISTS"),
+                "v73 statements must be idempotent DEFINEs"
+            );
+        }
+    }
+
+    /// T23.2.1 — the SP registry table has no `sign_assertions` column, asserts
+    /// its enumerations, and is unique per tenant on the entity id.
+    #[test]
+    fn v72_defines_the_service_provider_registry() {
+        assert!(SCHEMA_V72.contains("DEFINE TABLE IF NOT EXISTS saml_service_provider SCHEMAFULL"));
+        assert!(SCHEMA_V72.contains(
+            "idx_saml_sp_tenant_entity ON TABLE saml_service_provider
+    COLUMNS tenant_id, entity_id UNIQUE"
+        ));
+        assert!(
+            !SCHEMA_V72.contains("sign_assertions"),
+            "assertions are signed always: there must be no column to turn that off"
+        );
+        for spelling in [
+            "'http_post', 'http_redirect'",
+            "'persistent', 'email_address'",
+        ] {
+            assert!(
+                SCHEMA_V72.contains(spelling),
+                "missing assertion {spelling}"
+            );
+        }
+    }
+
+    /// D-21 — v72 does **not** widen the `cert_type` assertion: the SAML signing
+    /// leaf is not a `certificate` row, and the datastore keeps refusing it.
+    #[test]
+    fn v72_leaves_the_certificate_type_assertion_alone() {
+        assert!(!SCHEMA_V72.contains("cert_type"));
+        assert!(SCHEMA_V67.contains("['User', 'Service', 'Device', 'Server']"));
+    }
+
+    /// D-21 — the signing credential is its own table (not a `certificate`
+    /// row), its key column is bytes and optional (retiring clears it), and
+    /// the one-active/one-next rule is a unique index over a computed slot.
+    #[test]
+    fn v72_defines_the_idp_credential_with_a_database_enforced_slot() {
+        assert!(SCHEMA_V72.contains("DEFINE TABLE IF NOT EXISTS saml_idp_credential SCHEMAFULL"));
+        assert!(SCHEMA_V72.contains(
+            "encrypted_private_key ON TABLE saml_idp_credential
+    TYPE option<bytes>"
+        ));
+        assert!(SCHEMA_V72.contains(
+            "idx_saml_idp_credential_slot ON TABLE saml_idp_credential
+    COLUMNS slot UNIQUE"
+        ));
+        assert!(SCHEMA_V72.contains("ASSERT $value IN ['active', 'next', 'retired']"));
+        // A later custodian must not need a migration: the custody column is
+        // not an enumeration.
+        let custody = SCHEMA_V72
+            .split("key_custody ON TABLE saml_idp_credential")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("key_custody field");
+        assert!(!custody.contains("IN ["), "custody must not be enumerated");
+        // No plaintext-key column of any spelling.
+        for forbidden in ["private_key_pem", "key_pem", "plaintext"] {
+            assert!(
+                !SCHEMA_V72.contains(forbidden),
+                "no plaintext key column: {forbidden}"
+            );
+        }
+    }
+
+    /// T23.2.1 — v72 is additive DDL only and defaults the IdP switch to off.
+    #[test]
+    fn v72_is_additive_and_defaults_the_saml_idp_to_off() {
+        assert!(SCHEMA_V72.contains(
+            "oidc_saml_idp_enabled ON TABLE security_settings\n    TYPE option<bool> DEFAULT false"
+        ));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V72.contains(forbidden),
+                "v72 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V72
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE") && statement.contains("IF NOT EXISTS"),
+                "v72 statements must be idempotent DEFINEs"
+            );
+        }
+    }
 
     /// T23.3.2 — v71 adds one optional column and one unique index to `user`
     /// and rewrites no row: an absent marker is how every existing account is
@@ -4373,9 +4891,12 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&71),
-            "v71 is the newest migration (T23.3.2 — the directory marker \
-             `user.directory_external_id`; v70 was T23.3.1's `directory_config` table for \
+            Some(&75),
+            "v75 is the newest migration (T23.3.5 — the directory sync job's per-tenant state, \
+             `directory_sync_state`; v74 was T23.3.4 — directory group mapping: \
+             `directory_config.group_mappings` and `member_of.source`; v73 was T23.2.3's \
+             pending SAML AuthnRequests, v72 was T23.2.1 — the SAML identity provider's storage; \
+             v71 was T23.3.2's directory marker `user.directory_external_id`; v70 was T23.3.1's `directory_config` table for \
              the LDAP / Active Directory identity source, v69 was T23.4.1's RFC 7592 \
              registration access token hash on `oauth2_client`, and v68 was X7.2 / D-9's \
              authentication evidence on the OAuth2 refresh token). \

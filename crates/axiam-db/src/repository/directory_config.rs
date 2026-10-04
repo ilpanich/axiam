@@ -17,7 +17,8 @@ use axiam_auth::crypto::{decrypt_separate, encrypt_separate};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::directory::{
-    DirectoryConfig, DirectoryKind, NewDirectoryConfig, UserAttributeMap,
+    CONNECTION_MOVED_WITHOUT_SECRET, DirectoryConfig, DirectoryKind, GROUP_MAPPINGS_MAX,
+    GroupMapping, NewDirectoryConfig, UserAttributeMap,
 };
 use axiam_core::repository::DirectoryConfigRepository;
 use axiam_core::secrets::{DIRECTORY_ENCRYPTION_KEY, env_var_name};
@@ -40,8 +41,15 @@ const SECRET_KEY_VERSION: i64 = 1;
 const PUBLIC_COLUMNS: &str = "meta::id(id) AS record_id, tenant_id, enabled, kind, url, \
     start_tls, bind_dn, base_dn, user_filter, attr_username, attr_email, \
     attr_display_name, attr_external_id, group_base_dn, group_filter, \
-    group_member_attribute, group_nesting_depth, sync_interval_secs, \
+    group_member_attribute, group_nesting_depth, group_mappings, sync_interval_secs, \
     jit_provisioning, trust_anchors_pem, created_at, updated_at";
+
+/// One stored row of the group-mapping table (v74).
+#[derive(Debug, SurrealValue)]
+struct GroupMappingRow {
+    directory_group_dn: String,
+    group_id: String,
+}
 
 /// A directory row without its secret columns.
 #[derive(Debug, SurrealValue)]
@@ -63,11 +71,20 @@ struct DirectoryRow {
     group_filter: Option<String>,
     group_member_attribute: String,
     group_nesting_depth: i64,
+    /// Absent on a row written before v74: reads as no mapping at all.
+    group_mappings: Option<Vec<GroupMappingRow>>,
     sync_interval_secs: i64,
     jit_provisioning: bool,
     trust_anchors_pem: Vec<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+/// Just the id of a group, for the same-tenant check on the mapping table.
+#[derive(Debug, SurrealValue)]
+struct GroupIdRow {
+    #[allow(dead_code)] // counted, never read: the check is on how many came back
+    record_id: String,
 }
 
 /// The two secret columns. Deliberately not `Debug`: there is nothing safe to
@@ -89,6 +106,17 @@ impl DirectoryRow {
         let interval = u64::try_from(self.sync_interval_secs).map_err(|_| {
             DbError::Serialization("directory_config sync_interval_secs is out of range".into())
         })?;
+        let group_mappings = self
+            .group_mappings
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| {
+                Ok(GroupMapping {
+                    directory_group_dn: row.directory_group_dn,
+                    group_id: parse_uuid(&row.group_id, "group")?,
+                })
+            })
+            .collect::<Result<Vec<_>, DbError>>()?;
         Ok(DirectoryConfig {
             id: parse_uuid(&self.record_id, "directory_config")?,
             tenant_id: parse_uuid(&self.tenant_id, "tenant")?,
@@ -109,6 +137,7 @@ impl DirectoryRow {
             group_filter: self.group_filter,
             group_member_attribute: self.group_member_attribute,
             group_nesting_depth: depth,
+            group_mappings,
             sync_interval_secs: interval,
             jit_provisioning: self.jit_provisioning,
             trust_anchors_pem: self.trust_anchors_pem,
@@ -150,6 +179,14 @@ impl<C: Connection> SurrealDirectoryConfigRepository<C> {
         Self { db: db.into(), key }
     }
 
+    /// Whether the encryption key is configured: the one fact a management
+    /// route needs to answer "this deployment does not have the feature" before
+    /// it validates anything, without learning or logging the key itself.
+    #[must_use]
+    pub fn has_encryption_key(&self) -> bool {
+        self.key.is_some()
+    }
+
     /// The text every missing-key refusal carries: the logical name and the
     /// variable the default provider reads, so the operator can act on it.
     fn missing_key_message() -> String {
@@ -165,6 +202,54 @@ impl<C: Connection> SurrealDirectoryConfigRepository<C> {
         self.key.as_ref().ok_or_else(|| AxiamError::Validation {
             message: Self::missing_key_message(),
         })
+    }
+
+    /// The write-path rules of the mapping table that need the datastore
+    /// (D-30): at most [`GROUP_MAPPINGS_MAX`] rows, and **every `group_id` a
+    /// group of `tenant_id`**. A mapping naming another tenant's group, or none
+    /// at all, is refused before the row is touched, so a tenant administrator
+    /// can never point their directory at a group they do not own.
+    ///
+    /// The shape of each DN is `axiam-directory::config::validate`'s rule (this
+    /// layer cannot reach it); the two together are what `T23.3.8` calls.
+    async fn check_group_mappings(
+        &self,
+        tenant_id: Uuid,
+        mappings: &[GroupMapping],
+    ) -> AxiamResult<()> {
+        if mappings.len() > GROUP_MAPPINGS_MAX {
+            return Err(AxiamError::Validation {
+                message: format!(
+                    "directory group_mappings may hold at most {GROUP_MAPPINGS_MAX} entries"
+                ),
+            });
+        }
+        let mut wanted: Vec<String> = mappings.iter().map(|m| m.group_id.to_string()).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM group \
+                 WHERE tenant_id = $tenant_id AND meta::id(id) IN $ids",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("ids", wanted.clone()))
+            .await
+            .map_err(DbError::from)?;
+        let found: Vec<GroupIdRow> = result.take(0).map_err(DbError::from)?;
+        if found.len() != wanted.len() {
+            return Err(AxiamError::Validation {
+                message: "directory group_mappings names a group that is not a group of this \
+                          tenant"
+                    .into(),
+            });
+        }
+        Ok(())
     }
 
     async fn fetch_public(&self, tenant_id: Uuid) -> AxiamResult<Option<DirectoryConfig>> {
@@ -205,6 +290,16 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
                     .into(),
             })?;
         let (nonce, ciphertext) = seal(key, secret)?;
+        self.check_group_mappings(input.tenant_id, &input.group_mappings)
+            .await?;
+        let mapping_rows: Vec<GroupMappingRow> = input
+            .group_mappings
+            .iter()
+            .map(|m| GroupMappingRow {
+                directory_group_dn: m.directory_group_dn.clone(),
+                group_id: m.group_id.to_string(),
+            })
+            .collect();
 
         let id = new_id();
         let tenant_id = input.tenant_id;
@@ -223,6 +318,7 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
                  group_base_dn = $group_base_dn, group_filter = $group_filter, \
                  group_member_attribute = $group_member_attribute, \
                  group_nesting_depth = $group_nesting_depth, \
+                 group_mappings = $group_mappings, \
                  sync_interval_secs = $sync_interval_secs, \
                  jit_provisioning = $jit_provisioning, \
                  trust_anchors_pem = $trust_anchors_pem, \
@@ -248,6 +344,7 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
             .bind(("group_filter", input.group_filter))
             .bind(("group_member_attribute", input.group_member_attribute))
             .bind(("group_nesting_depth", i64::from(input.group_nesting_depth)))
+            .bind(("group_mappings", mapping_rows))
             .bind((
                 "sync_interval_secs",
                 i64::try_from(input.sync_interval_secs).map_err(|_| AxiamError::Validation {
@@ -273,13 +370,28 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
     }
 
     async fn update(&self, input: NewDirectoryConfig) -> AxiamResult<DirectoryConfig> {
-        let key = self.key_for_write()?;
         // `None` keeps the stored ciphertext and nonce untouched; `Some` writes
-        // both, under a fresh nonce.
+        // both, under a fresh nonce. **The key is needed only to seal**: an
+        // update that carries no secret (enabling or disabling the directory,
+        // editing a filter) neither reads nor writes one, so a deployment that
+        // later lost its key can still switch its directory off (T23.3.8,
+        // CONTRACT §30.3 rule 4: only a write that carries a secret is `503`).
         let sealed = match &input.bind_secret {
-            Some(secret) => Some(seal(key, secret)?),
+            Some(secret) => Some(seal(self.key_for_write()?, secret)?),
             None => None,
         };
+        // D-30: before anything is written, so a refused table changes nothing.
+        self.check_group_mappings(input.tenant_id, &input.group_mappings)
+            .await?;
+        let mapping_rows: Vec<GroupMappingRow> = input
+            .group_mappings
+            .iter()
+            .map(|m| GroupMappingRow {
+                directory_group_dn: m.directory_group_dn.clone(),
+                group_id: m.group_id.to_string(),
+            })
+            .collect();
+
         let secret_sets = if sealed.is_some() {
             "bind_secret_ciphertext = $ciphertext, bind_secret_nonce = $nonce, \
              secret_key_version = $key_version, "
@@ -327,6 +439,7 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
                  group_base_dn = $group_base_dn, group_filter = $group_filter, \
                  group_member_attribute = $group_member_attribute, \
                  group_nesting_depth = $group_nesting_depth, \
+                 group_mappings = $group_mappings, \
                  sync_interval_secs = $sync_interval_secs, \
                  jit_provisioning = $jit_provisioning, \
                  trust_anchors_pem = $trust_anchors_pem, \
@@ -349,6 +462,7 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
             .bind(("group_filter", input.group_filter))
             .bind(("group_member_attribute", input.group_member_attribute))
             .bind(("group_nesting_depth", i64::from(input.group_nesting_depth)))
+            .bind(("group_mappings", mapping_rows))
             .bind(("sync_interval_secs", interval))
             .bind(("jit_provisioning", input.jit_provisioning))
             .bind(("trust_anchors_pem", input.trust_anchors_pem));
@@ -379,10 +493,7 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
                 || updated.trust_anchors_pem != anchors)
         {
             return Err(AxiamError::Validation {
-                message: "changing the directory's url, start_tls, bind_dn or trust anchors \
-                          requires entering the bind secret again: a stored bind secret is \
-                          never sent to a server it was not entered for"
-                    .into(),
+                message: CONNECTION_MOVED_WITHOUT_SECRET.into(),
             });
         }
         Ok(updated)

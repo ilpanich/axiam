@@ -16,6 +16,7 @@ use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
     certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
     directory::{DirectoryConfig, NewDirectoryConfig},
+    directory_sync::DirectorySyncState,
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
     email_template::{EmailTemplate, SetEmailTemplate, TemplateKind},
     email_verification::{CreateEmailVerificationToken, EmailVerificationToken},
@@ -27,7 +28,7 @@ use crate::models::{
         AccountDeletion, Consent, CreateAccountDeletion, CreateConsent, CreateErasureProof,
         CreateExportJob, ErasureProof, ExportJob,
     },
-    group::{CreateGroup, Group, UpdateGroup},
+    group::{CreateGroup, DirectoryMembershipWrite, Group, UpdateGroup},
     mds::{MdsBlobMeta, MdsEntry},
     notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
     oauth2_client::{
@@ -48,6 +49,8 @@ use crate::models::{
     reactor::{CreateReactor, Reactor, UpdateReactor},
     resource::{CreateResource, Resource, UpdateResource},
     role::{AssignmentScope, CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole},
+    saml_idp_credential::{SamlIdpCredential, SealedSamlIdpCredential, StoreSamlIdpCredential},
+    saml_sp::{SamlServiceProvider, SamlServiceProviderInput},
     scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
@@ -55,7 +58,7 @@ use crate::models::{
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     uma::{CreatePermissionTicket, PermissionTicket},
-    user::{CreateUser, UpdateUser, User},
+    user::{CreateDirectoryAccount, CreateUser, IdentityCollision, UpdateUser, User},
     webauthn_credential::{CreateWebauthnCredential, WebauthnCredential},
     webauthn_policy::WebauthnAttestationPolicy,
     webhook::{CreateWebhook, UpdateWebhook, Webhook},
@@ -347,6 +350,165 @@ pub trait UserRepository: Send + Sync {
         _user_id: Uuid,
         _external_id: &str,
     ) -> impl Future<Output = AxiamResult<User>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// Create a directory account in **one write** (G-3, T23.3.3): `Active`,
+    /// the marker set, and `password_hash` an Argon2id hash of 32 random bytes
+    /// nobody holds — the row never exists in any other state, so just-in-time
+    /// provisioning cannot leave a half-made account (a created-but-unmarked
+    /// local account whose password nobody knows, squatting the name).
+    ///
+    /// This is the second, and last, place the marker is written, beside
+    /// [`Self::mark_directory_account`]: that one turns an *existing* account
+    /// into a directory account (an administrator's act, D-28), this one makes
+    /// a *new* one. Neither is reachable from `CreateUser`, `UpdateUser`, the
+    /// admin API or SCIM. `AlreadyExists` when the username, the email or the
+    /// marker is taken in the tenant — which of them is not said, and the
+    /// caller does not need it: it re-reads by username to tell a lost race
+    /// for the same entry from a real collision.
+    ///
+    /// The default implementation refuses.
+    fn create_directory_account(
+        &self,
+        _input: CreateDirectoryAccount,
+    ) -> impl Future<Output = AxiamResult<User>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// The existing account, if any, that a prospective directory account
+    /// would collide with: one whose username or email equals, **ignoring
+    /// case**, any of `names` (G-3, T23.3.3, D-28).
+    ///
+    /// `names` are the prospective username, the prospective email and the
+    /// login name that was typed. Both of an existing account's columns are
+    /// compared with each name — a new username equal to somebody's *email* is
+    /// a collision too, because the login lookup tries the username first and
+    /// would hand that person's address to the new account. Every status
+    /// counts, tombstones included: a name an account holds is held.
+    ///
+    /// The ordinary lookups (`get_by_username`, `get_by_email`) are exact; this
+    /// is the one place case is folded, and it is deliberately wider than the
+    /// unique indexes so that `Admin` cannot be provisioned beside `admin`.
+    ///
+    /// The default implementation refuses, so a double that cannot answer
+    /// never reads as "no collision".
+    fn find_identity_collision(
+        &self,
+        _tenant_id: Uuid,
+        _names: &[String],
+    ) -> impl Future<Output = AxiamResult<Option<IdentityCollision>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// [`Self::find_identity_collision`] with one account left out: the sync
+    /// job (T23.3.5) asks whether a directory account's **new** username or
+    /// email would collide with *another* account, and the account itself
+    /// holding the name — in another case, or in its other column — is not a
+    /// collision. A name held by several other accounts is reported once, for
+    /// any one of them.
+    ///
+    /// The default implementation refuses, as for the method above.
+    fn find_identity_collision_excluding(
+        &self,
+        _tenant_id: Uuid,
+        _names: &[String],
+        _exclude_user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<IdentityCollision>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// The tenant's account that carries `external_id` as its directory marker,
+    /// or `None` (T23.3.5): the sync job's incremental run, which learns of a
+    /// changed entry by its identifier and must find the one account it could
+    /// belong to without listing them all. The marker is unique per tenant.
+    ///
+    /// The default implementation refuses.
+    fn get_by_directory_external_id(
+        &self,
+        _tenant_id: Uuid,
+        _external_id: &str,
+    ) -> impl Future<Output = AxiamResult<Option<User>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// One page of the tenant's **directory accounts** — those carrying
+    /// [`User::directory_external_id`] — in id order, strictly after `after`
+    /// (the id of the last row of the previous page; `None` for the first),
+    /// for the sync job (T23.3.5). At most `limit` rows. Credential columns are
+    /// never hydrated.
+    ///
+    /// The default implementation refuses.
+    fn list_directory_accounts(
+        &self,
+        _tenant_id: Uuid,
+        _after: Option<Uuid>,
+        _limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<User>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// Set a directory account `Inactive` — the sync job's soft-delete (D-31) —
+    /// **as one compare-and-set**: the write applies only while the row still
+    /// carries a directory marker and is `Active`, `PendingVerification` or
+    /// `Locked`. `Some(user)` is the account after the change; `None` means it
+    /// did not apply (the account is already `Inactive`, was deleted or
+    /// anonymised meanwhile, or lost its marker), which is never an error and
+    /// never overwrites a state an administrator chose.
+    ///
+    /// This is the only status the directory path can write: there is no
+    /// directory-driven way to `Deleted`, and none to re-enable.
+    ///
+    /// The default implementation refuses.
+    fn deactivate_directory_account(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<User>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
+
+    /// How many of the tenant's directory accounts are **live** — carry a
+    /// directory marker and are `Active`, `PendingVerification` or `Locked`,
+    /// i.e. the ones `deactivate_directory_account` would still deactivate and
+    /// that a deleted or disabled directory leaves with sessions and passkeys
+    /// that keep working (G-3, T23.3.8). One count, no rows hydrated: the audit
+    /// row of a configuration delete or disable records it (CONTRACT §30.3
+    /// rule 5).
+    ///
+    /// The default implementation refuses.
+    fn count_live_directory_accounts(
+        &self,
+        _tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send {
         async {
             Err(AxiamError::Internal(
                 "this user repository does not support directory accounts".into(),
@@ -1087,6 +1249,63 @@ pub trait GroupRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<Group>>> + Send;
+
+    /// Add a user to a group on the directory mapping's behalf (G-3, T23.3.4,
+    /// D-30): the `member_of` edge is written with `source = directory`.
+    ///
+    /// **The mapping owns only its own edges.** When an edge for the pair
+    /// already exists, nothing is written: a manual one is reported as
+    /// [`DirectoryMembershipWrite::AlreadyManual`] and stays manual, so the
+    /// directory can never later remove it. The unique `(in, out)` index decides
+    /// a race between two writers.
+    ///
+    /// `NotFound` when the user or the group is not in `tenant_id`.
+    /// Defaulted to a refusal, like the service-account methods, so a test
+    /// double cannot silently accept a membership it never wrote.
+    fn add_directory_member(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<DirectoryMembershipWrite>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "add_directory_member is not implemented by this repository".into(),
+            ))
+        }
+    }
+
+    /// Remove a user's **directory-sourced** membership of a group (T23.3.4).
+    /// A manual edge for the same pair is left alone. Returns whether an edge
+    /// was removed. Defaulted to a refusal.
+    fn remove_directory_member(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _group_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "remove_directory_member is not implemented by this repository".into(),
+            ))
+        }
+    }
+
+    /// The groups of `tenant_id` the user holds a **directory-sourced**
+    /// membership of — the only memberships the mapping may remove. An edge
+    /// without a `source` reads as manual and is not listed. Defaulted to a
+    /// refusal.
+    fn get_user_directory_group_ids(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "get_user_directory_group_ids is not implemented by this repository".into(),
+            ))
+        }
+    }
 
     /// Add a **service account** to a group (creates a `member_of` edge from
     /// the `service_account` record).
@@ -2487,6 +2706,31 @@ pub trait CertificateRepository: Send + Sync {
         fingerprint: &str,
     ) -> impl Future<Output = AxiamResult<Certificate>> + Send;
     fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Revoke every **active `User`-type certificate** that belongs to
+    /// `user_id`, returning how many were revoked (G-3, T23.3.3, D-28).
+    ///
+    /// **The model has no user-to-certificate relation**: a certificate
+    /// authenticates as the service account it is bound to, and nothing
+    /// records that a `User` certificate was issued *for* an account. "Belongs
+    /// to" is therefore the only convention that exists — a certificate's
+    /// `metadata.user_id` naming the account (the example
+    /// [`Certificate::metadata`] has always given), or its subject common name
+    /// equal, ignoring case, to the account's `username` or `email`. Both are
+    /// matched, and only among `User`-type, still-active certificates of the
+    /// tenant; over-matching revokes a certificate, which is the safe side of
+    /// the error.
+    ///
+    /// Required, with no default, for the reason
+    /// [`WebauthnCredentialRepository::delete_by_user`] gives: a default of
+    /// "zero revoked" would make every double silently not revoke.
+    fn revoke_user_certificates(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        username: &str,
+        email: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
     fn list(
         &self,
         tenant_id: Uuid,
@@ -2972,6 +3216,193 @@ pub trait DirectoryConfigRepository: Send + Sync {
 
     /// Every enabled configuration across all tenants, for the sync job.
     fn list_enabled(&self) -> impl Future<Output = AxiamResult<Vec<DirectoryConfig>>> + Send;
+}
+
+/// Storage for what the directory sync job remembers about a tenant between
+/// runs (G-3, T23.3.5, D-31): one row per tenant, deleted with the tenant.
+pub trait DirectorySyncStateRepository: Send + Sync {
+    /// The tenant's state, or `None` when it has never been synced.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<DirectorySyncState>>> + Send;
+
+    /// Replace the tenant's state (creating it on the first run).
+    fn save(&self, state: &DirectorySyncState) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete the tenant's state. Succeeds when there is none.
+    fn delete(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SAML service-provider registry (tenant-scoped) (G-2)
+// ---------------------------------------------------------------------------
+
+/// Storage for the SAML service providers a tenant has registered.
+///
+/// Every method takes the `tenant_id` and no row of another tenant is ever
+/// visible: a `get`, `update` or `delete` for an id that belongs to a different
+/// tenant answers `NotFound`, exactly as for an id that does not exist.
+/// `(tenant_id, entity_id)` is unique in the datastore.
+///
+/// The repository does **not** validate the input. The rules (ACS allow-list,
+/// certificates, attribute mappings) live in
+/// `axiam_federation::saml_sp::validate_saml_service_provider`, which needs URL
+/// and X.509 parsing that this layer does not carry; callers run it first, as
+/// they do for the directory configuration.
+pub trait SamlServiceProviderRepository: Send + Sync {
+    /// Register a service provider. `AlreadyExists` when the tenant already
+    /// has one with this `entity_id`.
+    fn create(
+        &self,
+        tenant_id: Uuid,
+        input: SamlServiceProviderInput,
+    ) -> impl Future<Output = AxiamResult<SamlServiceProvider>> + Send;
+
+    /// One service provider by id. `NotFound` when it does not exist in this
+    /// tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<SamlServiceProvider>> + Send;
+
+    /// The tenant's service provider with this `entity_id`, or `None`. The
+    /// SSO endpoint's lookup: an `AuthnRequest` names its issuer by entity id.
+    fn get_by_entity_id(
+        &self,
+        tenant_id: Uuid,
+        entity_id: &str,
+    ) -> impl Future<Output = AxiamResult<Option<SamlServiceProvider>>> + Send;
+
+    /// Every service provider of the tenant, oldest first.
+    fn list(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<SamlServiceProvider>>> + Send;
+
+    /// Replace a service provider's configuration (a full replacement, not a
+    /// patch). `NotFound` when it does not exist in this tenant;
+    /// `AlreadyExists` when the new `entity_id` is another SP's.
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        input: SamlServiceProviderInput,
+    ) -> impl Future<Output = AxiamResult<SamlServiceProvider>> + Send;
+
+    /// Remove a service provider. `NotFound` when it does not exist in this
+    /// tenant.
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SAML IdP pending AuthnRequests (tenant-scoped) (G-2, T23.2.3)
+// ---------------------------------------------------------------------------
+
+/// Storage for the SAML `AuthnRequest`s waiting for their login hop; see
+/// [`crate::models::saml_authn_request`].
+///
+/// Every method takes the `tenant_id`; a handle digest belonging to another
+/// tenant is not found, exactly as one that does not exist.
+pub trait PendingSamlRequestRepository: Send + Sync {
+    /// Store a pending request.
+    ///
+    /// [`AxiamError::ReplayDetected`] when the SP already has a row with this
+    /// request id in this tenant — a replayed `AuthnRequest` — decided by a
+    /// unique index, so two concurrent copies of one request cannot both be
+    /// stored.
+    fn create(
+        &self,
+        input: crate::models::saml_authn_request::NewPendingSamlRequest,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// The pending, unexpired request with this handle digest, or `None`. A
+    /// read: it consumes nothing.
+    fn get_pending(
+        &self,
+        tenant_id: Uuid,
+        handle_hash: &str,
+    ) -> impl Future<
+        Output = AxiamResult<Option<crate::models::saml_authn_request::PendingSamlRequest>>,
+    > + Send;
+
+    /// Consume the request with this handle digest: `Some` for exactly one
+    /// caller, `None` for every other (consumed, expired, unknown, or lost the
+    /// race). The X6 two-layer arbiter. The row is kept, marked consumed, until
+    /// it expires, so its request id keeps guarding against replay.
+    fn consume(
+        &self,
+        tenant_id: Uuid,
+        handle_hash: &str,
+    ) -> impl Future<
+        Output = AxiamResult<Option<crate::models::saml_authn_request::PendingSamlRequest>>,
+    > + Send;
+
+    /// Remove every expired row, in every tenant; returns how many.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SAML IdP signing credential (tenant-scoped) (G-2, D-21)
+// ---------------------------------------------------------------------------
+
+/// Storage for a tenant's SAML identity-provider signing credentials.
+///
+/// Every method takes the `tenant_id`; an id belonging to another tenant
+/// answers `NotFound`, exactly as an id that does not exist.
+///
+/// **At most one `active` and one `next` credential per tenant**, enforced by a
+/// unique index in the datastore. A second `create` into an occupied slot is
+/// `AlreadyExists`, whichever of two concurrent callers lost the race.
+///
+/// **Key material.** Only [`Self::get_active_sealed`] returns a key, and it
+/// returns it sealed ([`SealedSamlIdpCredential`]); `create` takes it sealed.
+/// Nothing in this trait ever sees a plaintext key, and none of
+/// [`Self::get`], [`Self::get_active`] or [`Self::list`] can return one.
+pub trait SamlIdpCredentialRepository: Send + Sync {
+    /// Store a credential. `Validation` when `input.status` is `Retired`;
+    /// `AlreadyExists` when the tenant already has a credential in that slot.
+    fn create(
+        &self,
+        input: StoreSamlIdpCredential,
+    ) -> impl Future<Output = AxiamResult<SamlIdpCredential>> + Send;
+
+    /// One credential by id, without its key. `NotFound` when it does not exist
+    /// in this tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<SamlIdpCredential>> + Send;
+
+    /// The tenant's `active` credential, without its key, or `None`.
+    fn get_active(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<SamlIdpCredential>>> + Send;
+
+    /// The tenant's `active` credential **with its sealed key**, or `None`. The
+    /// signer's lookup, and the only method here that returns key material.
+    fn get_active_sealed(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<SealedSamlIdpCredential>>> + Send;
+
+    /// Every credential of the tenant, oldest first, without key material.
+    fn list(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<SamlIdpCredential>>> + Send;
+
+    /// Retire a credential: it leaves its slot, and its sealed key is
+    /// destroyed in the same write. Retiring a retired credential returns it
+    /// unchanged. `NotFound` when it does not exist in this tenant.
+    fn retire(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<SamlIdpCredential>> + Send;
 }
 
 // ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@ webauthn-rs-proto = { workspace = true }
 [dev-dependencies]
 axiam-test-support = { workspace = true }
 axiam-db = { workspace = true }
+rcgen = { workspace = true }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }

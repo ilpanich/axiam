@@ -22,6 +22,9 @@ axiam-core = { workspace = true }
 # parser axiam-pki and axiam-federation use, so no new crate enters the graph.
 thiserror = { workspace = true }
 url = { workspace = true }
+# T23.3.5 -- the sync job's schedule arithmetic and audit metadata.
+chrono = { workspace = true }
+serde_json = { workspace = true }
 x509-parser = { workspace = true }
 # T23.3.2 — the LDAP client (src/client.rs, src/tls.rs). `ldap3` over rustls
 # only (workspace pin: `default-features = false`, `tls-rustls-ring`); the
@@ -30,7 +33,12 @@ ldap3 = { workspace = true }
 rustls = { workspace = true, features = ["ring"] }
 rustls-pki-types = "1"
 webpki-roots = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros", "net", "io-util"] }
+# T23.3.7 — AXIAM does the directory's TLS handshake itself (to the pinned
+# address, with the URL's host as the server name) so the frame guard can read
+# the decrypted stream beneath `ldap3` (src/relay.rs). Already in the graph
+# through `ldap3`'s own rustls support; no new crate.
+tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
@@ -44,8 +52,14 @@ rcgen = { workspace = true }
 # codec, a rustls acceptor, and the framing glue between them. Test-only; none
 # of these reaches the production graph.
 ldap3_proto = "0.8.1"
-tokio-rustls = { workspace = true }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = { version = "0.3", features = ["sink"] }
 tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros", "time"] }
-chrono = { workspace = true }
+# T23.3.4 — group mapping end to end (tests/group_mapping_test.rs): the real
+# sign-in path, the real repositories and the real authorization engine, over
+# the in-process directory. All three sit in lower layers than this crate, so
+# these dev-edges point inward and need no declared inversion.
+axiam-auth = { workspace = true }
+axiam-authz = { workspace = true }
+axiam-db = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }

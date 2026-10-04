@@ -1,0 +1,118 @@
+# The directory e2e stack (T23.3.6, G-3): a real OpenLDAP and a real Samba AD DC.
+#
+# Why a compose file of its own and not a service in docker-compose.e2e.yml
+# -------------------------------------------------------------------------
+# docker-compose.e2e.yml is the *whole product* stack (SurrealDB, RabbitMQ,
+# Keycloak, the server image built from source, then Playwright against it). The
+# directory suite drives the real AXIAM code — the §30 routes, the guard, the
+# connector, `AuthService`, the group mapper, the sync job, a real authorization
+# engine — in-process over an in-memory database, exactly like the other
+# `crates/*/tests`, and needs only the two directory servers beside it. Putting
+# them in the whole-product file would make a 15-minute server image build a
+# prerequisite of a test that never starts that image, and would give every
+# unrelated E2E run two more containers (one of them a domain controller) to
+# wait for.
+#
+# Usage, from the repository root (see docker/directory/README.md):
+#
+#   bash scripts/gen-directory-e2e-secrets.sh
+#   docker compose -f docker/docker-compose.directory.yml \
+#       --env-file docker/.secrets/directory/env up -d --build --wait
+#   AXIAM_E2E_DIRECTORY=1 cargo test -p axiam-server --test directory_e2e
+#   docker compose -f docker/docker-compose.directory.yml \
+#       --env-file docker/.secrets/directory/env down -v
+#
+# Addresses
+# ---------
+# Both servers have FIXED addresses on a network of their own, so the
+# certificates (generated before either container exists) can name them, and so
+# the tests connect to a private, NON-loopback address: AXIAM's address guard
+# (T23.3.7) always refuses loopback, so publishing a port on 127.0.0.1 would be a
+# configuration the product rightly refuses. The tests set
+# AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS to this subnet, as an operator does.
+# Nothing is published on the host.
+#
+# Images
+# ------
+# Both are third-party images pinned by digest, used as a pinned binary and
+# nothing else: each service replaces the image's own bootstrap with a script in
+# docker/directory/ (the cn=config, the domain, the TLS, the seed are this
+# repository's). Own Dockerfiles were tried first and dropped: they need apt, and
+# a build that cannot run in every environment that has to run the suite is a
+# test nobody can verify. What was rejected: bitnami/openldap:2.6 no longer
+# exists on Docker Hub; the community Samba AD images drive provisioning from
+# their own env conventions, which hides exactly what this suite is the oracle
+# for. See docker/directory/README.md.
+
+name: axiam-directory-e2e
+
+services:
+  openldap:
+    # The image is used as a PINNED slapd and nothing else: its own bootstrap
+    # (which is what makes it convenient) is replaced by directory/openldap/
+    # entrypoint.sh, so the cn=config under test is the one in this repository
+    # (config.ldif.tmpl: TLS 1.2 floor, ppolicy, a read-only service account),
+    # not whatever the image's env-driven script would have built. Debian's
+    # slapd 2.4.57 (GnuTLS); the digest is the multi-arch index.
+    image: osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28
+    container_name: axiam-directory-e2e-openldap
+    hostname: openldap.example.test
+    user: "911:911"
+    entrypoint: ["/bin/sh", "/e2e/entrypoint.sh"]
+    environment:
+      E2E_ADMIN_PW: "${OPENLDAP_ADMIN_PW:?run scripts/gen-directory-e2e-secrets.sh and pass --env-file}"
+      E2E_BIND_PW: "${OPENLDAP_BIND_PW:?}"
+      E2E_USER_PW: "${OPENLDAP_USER_PW:?}"
+    volumes:
+      - ./directory/openldap:/e2e:ro
+      - ./.secrets/directory/ca.pem:/tls-src/ca.pem:ro
+      - ./.secrets/directory/openldap.pem:/tls-src/server.pem:ro
+      - ./.secrets/directory/openldap.key:/tls-src/server.key:ro
+    networks:
+      directory:
+        ipv4_address: "${DIRECTORY_E2E_OPENLDAP_IP:-172.28.77.10}"
+    healthcheck:
+      # Local administrator over ldapi: "slapd is up AND the seed is loaded".
+      test: ["CMD", "ldapsearch", "-Q", "-Y", "EXTERNAL", "-H", "ldapi://%2Ftmp%2Fe2e%2Frun%2Fldapi", "-b", "uid=alice,ou=people,dc=example,dc=test", "-s", "base", "-LLL", "dn"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 2s
+    restart: "no"
+
+  samba:
+    # As for OpenLDAP, the image is a PINNED Samba (4.23, Alpine) and its
+    # entrypoint is replaced by directory/samba/entrypoint.sh: the domain, the
+    # TLS configuration and the seed are the ones in this repository.
+    image: instantlinux/samba-dc:latest@sha256:9dc7a3a6050609dc4d5157148dcafcecd5fa402de5bc75b090e18d0d3bb8454d
+    container_name: axiam-directory-e2e-samba
+    hostname: dc1
+    domainname: example.test
+    entrypoint: ["/bin/sh", "/e2e/entrypoint.sh"]
+    environment:
+      E2E_ADMIN_PW: "${SAMBA_ADMIN_PW:?run scripts/gen-directory-e2e-secrets.sh and pass --env-file}"
+      E2E_BIND_PW: "${SAMBA_BIND_PW:?}"
+      E2E_USER_PW: "${SAMBA_USER_PW:?}"
+    volumes:
+      - ./directory/samba:/e2e:ro
+      - ./.secrets/directory/ca.pem:/tls-src/ca.pem:ro
+      - ./.secrets/directory/samba.pem:/tls-src/server.pem:ro
+      - ./.secrets/directory/samba.key:/tls-src/server.key:ro
+    networks:
+      directory:
+        ipv4_address: "${DIRECTORY_E2E_SAMBA_IP:-172.28.77.11}"
+    healthcheck:
+      # Seeded AND listening on LDAPS.
+      test: ["CMD-SHELL", "test -f /tmp/ready && nc -z 127.0.0.1 636"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+    restart: "no"
+
+networks:
+  directory:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${DIRECTORY_E2E_SUBNET:-172.28.77.0/24}"

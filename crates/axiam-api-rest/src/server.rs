@@ -578,6 +578,12 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                 .route(web::post().to(handlers::federation_login::saml_acs_form_public::<C>)),
         );
     cfg.service(auth_scope);
+    // T23.2.3 (G-2) — the SAML 2.0 IdP's SSO endpoint, per tenant. Only in a
+    // build with `saml`; a build without it mounts nothing here, and every
+    // route below answers the same empty `404` for a tenant whose effective
+    // `saml_idp_enabled` is off (D-20). See `saml_idp_scope`.
+    #[cfg(feature = "saml")]
+    cfg.service(saml_idp_scope::<C>(rate_limit_cfg));
     // OIDC Discovery (must be outside /oauth2 scope per spec)
     cfg.route(
         "/.well-known/openid-configuration",
@@ -1283,6 +1289,68 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         handlers::email_config::test_tenant_email_config::<C>,
                     )),
             )
+            // --- Tenant directory (LDAP / Active Directory, G-3, T23.3.8,
+            // CONTRACT §30). Reads are unlimited; the four writes — `PUT`,
+            // `PATCH`, `DELETE` and the link `POST` — are each wrapped, since
+            // each resolves a tenant-chosen host name or opens directory
+            // connections (plan §7 rule 6). The three methods of the
+            // configuration resource count in one shared bucket
+            // (`directory_config`), the link route in its own
+            // (`directory_link`). The resource carries its own JSON config:
+            // a body whose `bind_secret` has the wrong type must not be echoed
+            // back in the `400`.
+            .service(
+                web::resource("/tenants/{tenant_id}/directory")
+                    .app_data(handlers::directory::directory_json_config())
+                    .route(web::get().to(handlers::directory::get_directory::<C>))
+                    .route(
+                        // `.to()` first: `Route::to` after `.wrap()` would
+                        // replace the wrapped service and drop the limiter.
+                        web::put()
+                            .to(handlers::directory::set_directory::<C>)
+                            .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "directory_config",
+                                rate_limit_cfg.directory_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        // `.to()` first: `Route::to` after `.wrap()` would
+                        // replace the wrapped service and drop the limiter.
+                        web::patch()
+                            .to(handlers::directory::update_directory::<C>)
+                            .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "directory_config",
+                                rate_limit_cfg.directory_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        // `.to()` first: `Route::to` after `.wrap()` would
+                        // replace the wrapped service and drop the limiter.
+                        web::delete()
+                            .to(handlers::directory::delete_directory::<C>)
+                            .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "directory_config",
+                                rate_limit_cfg.directory_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/directory/links")
+                    .app_data(handlers::directory::directory_json_config())
+                    .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "directory_link",
+                        rate_limit_cfg.directory_admin_per_min,
+                    ))
+                    .route(web::post().to(handlers::directory::link_account::<C>)),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/directory/sync-status")
+                    .route(web::get().to(handlers::directory::get_sync_status::<C>)),
+            )
             // --- Tenant security overrides (explicit {tenant_id} path segment,
             // same convention as the email-config trio above) ---
             .service(
@@ -1450,6 +1518,56 @@ pub fn build_cors(allowed_origins: &[String]) -> Cors {
         cors = cors.allowed_origin(origin);
     }
     cors
+}
+
+/// The SAML 2.0 IdP's routes (T23.2.3, G-2): `/saml/v2/{tenant_id}/sso` (both
+/// bindings), `/sso/continue` and `/sso/idp-initiated`.
+///
+/// **Rate limited (§7 rule 6)** with the browser-endpoint preset
+/// `end_session_per_min` — human-driven, unauthenticated, 30 per minute per
+/// address by default — under buckets of their own (`saml_idp_sso`,
+/// `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`), so a flood here
+/// cannot spend `/oauth2/end_session`'s allowance or the reverse. Every route
+/// allocates state (a pending row) or does XML and signature work, which is
+/// what is being bounded.
+///
+/// **D-20.** Any other method on these paths, and any other path under the
+/// scope, answers [`handlers::saml_idp::not_found`] — the same empty `404` a
+/// path that is not mounted at all answers — so a `405` cannot tell a build
+/// with SAML from one without.
+#[cfg(feature = "saml")]
+fn saml_idp_scope<C: surrealdb::Connection + Clone>(
+    rate_limit_cfg: &RateLimitConfig,
+) -> impl actix_web::dev::HttpServiceFactory + 'static {
+    use handlers::saml_idp;
+    let per_min = rate_limit_cfg.end_session_per_min;
+    web::scope("/saml/v2/{tenant_id}")
+        .service(
+            web::resource("/sso")
+                .wrap(build_governor(per_min))
+                .wrap(RateLimitShared::<C>::new("saml_idp_sso", per_min))
+                .route(web::get().to(saml_idp::sso_redirect::<C>))
+                .route(web::post().to(saml_idp::sso_post::<C>))
+                .default_service(web::to(saml_idp::not_found)),
+        )
+        .service(
+            web::resource("/sso/continue")
+                .wrap(build_governor(per_min))
+                .wrap(RateLimitShared::<C>::new("saml_idp_sso_continue", per_min))
+                .route(web::get().to(saml_idp::sso_continue::<C>))
+                .default_service(web::to(saml_idp::not_found)),
+        )
+        .service(
+            web::resource("/sso/idp-initiated")
+                .wrap(build_governor(per_min))
+                .wrap(RateLimitShared::<C>::new(
+                    "saml_idp_sso_idp_initiated",
+                    per_min,
+                ))
+                .route(web::get().to(saml_idp::sso_idp_initiated::<C>))
+                .default_service(web::to(saml_idp::not_found)),
+        )
+        .default_service(web::to(saml_idp::not_found))
 }
 
 /// The `/oauth2` scope, as a factory.

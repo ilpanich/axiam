@@ -462,8 +462,16 @@ const AUTHORIZE_PATH: &str = axiam_oauth2::login_hop::AUTHORIZE_PATH;
 ///   other tenant, so a request to `/t/B/oauth2/authorize` carries nothing it
 ///   could be resolved from.
 ///
-/// W3 (plan §4 G-2) adds the SAML SSO endpoint, `/saml/v2/{tenant_id}/sso`, by
-/// adding one entry here.
+/// - `/saml/v2/{tenant_id}/sso` — the tenant's SAML 2.0 IdP SSO endpoint (G-2,
+///   T23.2.3), for the session's own tenant, **always**: it is not gated on
+///   `tenant_issuer_paths` (the SAML routes are per-tenant paths by design), on
+///   the `saml` build feature, or on the tenant's `saml_idp_enabled` setting.
+///   A sign-in cannot know cheaply whether the tenant serves SAML, and a cookie
+///   scoped to a path that answers `404` is read by nothing; minting it the same
+///   way in every build is also what keeps a build without SAML
+///   indistinguishable from a tenant with SAML off (D-20). The path covers the
+///   endpoint's two sub-paths, `/continue` (the login hop's return leg) and
+///   `/idp-initiated`, and nothing else.
 ///
 /// # Why one name for every path
 ///
@@ -504,6 +512,7 @@ pub fn op_session_cookie_paths(tenant_id: Uuid, config: &AuthConfig) -> Vec<Stri
     if config.tenant_issuer_paths {
         paths.push(axiam_oauth2::login_hop::tenant_authorize_path(tenant_id));
     }
+    paths.push(axiam_oauth2::login_hop::saml_sso_path(tenant_id));
     paths
 }
 
@@ -627,6 +636,14 @@ pub fn clear_presented_op_session_cookie(tenant_path: Option<Uuid>) -> Cookie<'s
             clear_op_session_cookie_at(axiam_oauth2::login_hop::tenant_authorize_path(tenant_id))
         }
     }
+}
+
+/// The removal for the OP-session copy a request under the tenant's SAML SSO
+/// path carried (T23.2.3): the `/saml/v2/{tenant_id}/sso` copy and nothing else,
+/// for the reason [`clear_presented_op_session_cookie`] gives.
+#[must_use]
+pub fn clear_presented_saml_op_session_cookie(tenant_id: Uuid) -> Cookie<'static> {
+    clear_op_session_cookie_at(axiam_oauth2::login_hop::saml_sso_path(tenant_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -894,8 +911,8 @@ mod tests {
 
     /// **The list, pinned.** Every setter and every remover is built from
     /// `op_session_cookie_paths`, so this is the whole of where the cookie can
-    /// exist. W3 adds the SAML SSO path here and nowhere else — and changes
-    /// this test in the same commit, which is the point of it.
+    /// exist. T23.2.3 added the SAML SSO path here and nowhere else — and
+    /// changed this test in the same commit, which is the point of it.
     #[test]
     fn d11_the_op_session_cookie_paths_are_pinned() {
         assert_eq!(
@@ -903,14 +920,17 @@ mod tests {
             vec![
                 "/oauth2/authorize".to_owned(),
                 format!("/t/{TENANT_A}/oauth2/authorize"),
+                format!("/saml/v2/{TENANT_A}/sso"),
             ],
         );
-        // A deployment that does not serve per-tenant paths mints exactly the
-        // cookie it minted before D-11, and nothing for a path it has not
-        // mounted.
+        // A deployment that does not serve per-tenant OAuth2 paths mints no
+        // `/t/` copy; the SAML SSO copy (T23.2.3) is not gated on that flag.
         assert_eq!(
             op_session_cookie_paths(tenant(TENANT_A), &deployment(false)),
-            vec!["/oauth2/authorize".to_owned()],
+            vec![
+                "/oauth2/authorize".to_owned(),
+                format!("/saml/v2/{TENANT_A}/sso"),
+            ],
         );
     }
 
@@ -924,7 +944,9 @@ mod tests {
                 "a tenant-A sign-in must not be scoped to tenant B: {path}"
             );
             assert!(
-                path == "/oauth2/authorize" || path.starts_with(&format!("/t/{TENANT_A}/")),
+                path == "/oauth2/authorize"
+                    || path.starts_with(&format!("/t/{TENANT_A}/"))
+                    || path.starts_with(&format!("/saml/v2/{TENANT_A}/")),
                 "every path is the bare one or tenant A's own: {path}"
             );
         }
@@ -936,7 +958,7 @@ mod tests {
     #[test]
     fn d11_every_copy_differs_from_the_bare_cookie_in_path_alone() {
         let set = op_session_cookies("tok", 86_400, tenant(TENANT_A), &deployment(true));
-        assert_eq!(set.len(), 2);
+        assert_eq!(set.len(), 3);
         let bare = op_session_cookie("tok", 86_400);
         assert_eq!(
             set[0].to_string(),
@@ -958,6 +980,10 @@ mod tests {
         assert_eq!(
             set[1].path(),
             Some(format!("/t/{TENANT_A}/oauth2/authorize").as_str())
+        );
+        assert_eq!(
+            set[2].path(),
+            Some(format!("/saml/v2/{TENANT_A}/sso").as_str())
         );
     }
 
@@ -984,6 +1010,10 @@ mod tests {
             format!("/t/{TENANT_A}/oauth2/authorize"),
             format!("/t/{TENANT_A}/oauth2/authorize/logout"),
             format!("/t/{TENANT_B}/oauth2/authorize"),
+            format!("/saml/v2/{TENANT_A}/sso"),
+            format!("/saml/v2/{TENANT_A}/sso/continue"),
+            format!("/saml/v2/{TENANT_A}/sso/idp-initiated"),
+            format!("/saml/v2/{TENANT_B}/sso/continue"),
         ] {
             let carried = paths.iter().filter(|p| path_matches(&request, p)).count();
             assert_eq!(carried, 1, "{request} must carry exactly one copy");
@@ -993,6 +1023,13 @@ mod tests {
             format!("/t/{TENANT_A}/oauth2/end_session"),
             format!("/t/{TENANT_A}/oauth2/token"),
             "/api/v1/auth/me".to_owned(),
+            // T23.2.3: the SAML copy reaches the SSO endpoint and its two
+            // sub-paths only — not the metadata or SLO endpoints, not a path
+            // that merely starts the same way.
+            format!("/saml/v2/{TENANT_A}/metadata"),
+            format!("/saml/v2/{TENANT_A}/slo"),
+            format!("/saml/v2/{TENANT_A}/ssox"),
+            format!("/saml/v2/{TENANT_A}"),
         ] {
             assert!(
                 paths.iter().all(|p| !path_matches(&request, p)),
@@ -1043,6 +1080,17 @@ mod tests {
         assert!(on_tenant.secure().unwrap_or(false));
         assert!(on_tenant.http_only().unwrap_or(false));
         assert_eq!(on_tenant.max_age(), Some(Duration::seconds(0)));
+
+        // T23.2.3 — the SAML copy's removal, built from the same setter.
+        let on_saml = clear_presented_saml_op_session_cookie(tenant(TENANT_A));
+        assert_eq!(
+            on_saml.path(),
+            Some(format!("/saml/v2/{TENANT_A}/sso").as_str())
+        );
+        assert_eq!(on_saml.same_site(), Some(SameSite::Lax));
+        assert!(on_saml.secure().unwrap_or(false));
+        assert!(on_saml.http_only().unwrap_or(false));
+        assert_eq!(on_saml.max_age(), Some(Duration::seconds(0)));
     }
 
     /// `make_removal` is what actually expires the cookie; the attribute

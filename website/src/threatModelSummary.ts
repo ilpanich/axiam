@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.20.0",
+ "version": "2.24.0",
  "diagramCount": 9,
- "total": 303,
- "open": 14,
- "mitigated": 289,
+ "total": 356,
+ "open": 16,
+ "mitigated": 340,
  "areas": [
   {
    "id": 0,
@@ -80,8 +80,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 44,
-   "open": 2
+   "total": 97,
+   "open": 4
   },
   {
    "id": 4,
@@ -117,54 +117,54 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 75,
-   "open": 3
+   "total": 84,
+   "open": 4
   },
   {
    "name": "Tampering",
-   "total": 60,
+   "total": 70,
    "open": 1
   },
   {
    "name": "Repudiation",
-   "total": 6,
+   "total": 8,
    "open": 0
   },
   {
    "name": "Information disclosure",
-   "total": 71,
+   "total": 81,
    "open": 7
   },
   {
    "name": "Denial of service",
-   "total": 31,
-   "open": 2
+   "total": 39,
+   "open": 3
   },
   {
    "name": "Elevation of privilege",
-   "total": 60,
+   "total": 74,
    "open": 1
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 35,
-   "open": 1
+   "total": 41,
+   "open": 2
   },
   {
    "name": "High",
-   "total": 141,
+   "total": 161,
    "open": 8
   },
   {
    "name": "Medium",
-   "total": 116,
-   "open": 4
+   "total": 137,
+   "open": 5
   },
   {
    "name": "Low",
-   "total": 11,
+   "total": 17,
    "open": 1
   }
  ],
@@ -178,6 +178,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Client SDKs & admin UI integration surface",
    "element": "Public package registries",
    "residualRisk": "Partially enacted, and narrowed at beta03. Nine of the eleven pipelines carry no long-lived registry credential: Rust, TypeScript, Python and C# and the shared axiam-opaque core publish via Trusted Publishing (OIDC); PHP through Packagist's webhook; Go, Swift, C and C++ from git tags. Every release workflow in the fleet now pins its actions by commit digest, and every published artifact — the server's binary tarballs and CycloneDX SBOMs, the container images, and each SDK's release artifacts — carries a GitHub build-provenance attestation, so an integrator can verify build origin with `gh attestation verify`. Maven Central (Java, Kotlin) still requires a stored Portal user token: Central has no trusted-publishing equivalent, and its OIDC surfaces are account sign-in and Sigstore signing, neither of which authorises an upload — see claude_dev/maven-central-publishing-decision.md. Those two are bounded by compensating controls instead: the credential is an environment secret behind a required-reviewer GitHub environment restricted to v* tags, every published file carries a Sigstore bundle (`.sigstore.json`) alongside its PGP signature — keyless, signed against the release workflow's GitHub OIDC identity and validated by the Central Publisher Portal, so the artifact set Central itself serves carries a statement of build origin the Portal token cannot forge — and the token rotates quarterly. A pull-request gate in each of those two repositories performs a real keyless signing run of the real artifact set on every change, so a release-path misconfiguration surfaces on a pull request rather than at a tag. Open because a stored bearer credential still exists for two of eleven registries."
+  },
+  {
+   "number": 306,
+   "title": "A leaked signing key keeps forging assertions after the credential is retired",
+   "category": "Spoofing",
+   "severity": "Critical",
+   "diagramId": 3,
+   "area": "Federation — SAML SP & OIDC relying party",
+   "element": "SAML service provider (registered per tenant)",
+   "residualRisk": "Partly mitigated. Retiring the credential destroys its key and takes its certificate out of the tenant's metadata (D-21; the metadata endpoint is T23.2.5), and a credential is valid for at most two years (`MAX_SAML_IDP_CREDENTIAL_VALIDITY_DAYS`), after which AXIAM's own signer refuses it (T-308) and SPs that check validity do too. Open because nothing AXIAM does reaches an SP's pinned trust: recovering from a leak means telling every SP administrator, which is a procedure, not a control. T-304 and T-305 are what keep the key from leaking."
   },
   {
    "number": 18,
@@ -290,14 +300,24 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Deployment responsibility: use an encrypted transport and server-side encryption on the backup target."
   },
   {
-   "number": 300,
-   "title": "A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network",
+   "number": 309,
+   "title": "Sign-on stops when the active credential expires or is retired before a successor is in place",
+   "category": "Denial of service",
+   "severity": "Medium",
+   "diagramId": 3,
+   "area": "Federation — SAML SP & OIDC relying party",
+   "element": "saml_idp_credential (sealed signing key)",
+   "residualRisk": "Open until rotation exists. The `next` slot is in the schema (at most one per tenant, enforced by the database), so a successor can be issued ahead of time, but there is no promote verb and the metadata endpoint does not yet publish `next` (T23.2.5). Until then an administrator issues the successor early and coordinates the switch with each SP. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion."
+  },
+  {
+   "number": 312,
+   "title": "Service providers link a user across SPs, or back to the AXIAM account",
    "category": "Information disclosure",
    "severity": "Medium",
    "diagramId": 3,
    "area": "Federation — SAML SP & OIDC relying party",
-   "element": "Directory sign-in (bind-as-user, bounded pool)",
-   "residualRisk": "Partly mitigated. TLS is mandatory and nothing is sent before a verified handshake, so no LDAP request reaches a host that cannot present a certificate chaining to the tenant's anchors; every outcome reaches the user as the same generic failure and the reason is logged for the operator only; connecting is bounded at 5 s and pooled per tenant. Open because the directory connector does not apply the `guarded_fetch` address policy (no refusal of private, loopback or link-local addresses): directories are usually on private networks, so a blanket refusal would break the feature it serves. Tenant administrators are trusted within their own tenant (assumption 7). Follow-up for the management routes (T23.3.8): an operator-level allow-list of directory hosts."
+   "element": "SAML assertion issuer (saml_idp)",
+   "residualRisk": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. Open because `SessionIndex` is the AXIAM session id (plan §4 G-2, so that SLO and the revocation feed revoke the same thing): it is identical at every SP of one sign-on, as is `AuthnInstant`, so SPs that collude can correlate concurrent sessions despite pairwise identifiers. T23.2.4 decides whether SLO can map a per-SP index back to the session."
   },
   {
    "number": 161,

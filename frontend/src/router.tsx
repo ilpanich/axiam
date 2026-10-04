@@ -28,6 +28,7 @@ import { FederationPage } from "@/pages/federation/FederationPage";
 import { TenantsPage } from "@/pages/tenants/TenantsPage";
 import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { AttestationPolicyPage } from "@/pages/settings/AttestationPolicyPage";
+import { DirectoryPage } from "@/pages/directory/DirectoryPage";
 import { ProfilePage } from "@/pages/profile/ProfilePage";
 import { ChangePasswordPage } from "@/pages/profile/ChangePasswordPage";
 import { MfaManagementPage } from "@/pages/profile/MfaManagementPage";
@@ -291,6 +292,16 @@ export const router = createBrowserRouter([
             path: "settings",
             element: <SettingsPage />,
             handle: { crumb: "Settings" },
+          },
+        ],
+      },
+      {
+        element: <ProtectedRoute permission="directory:read" />,
+        children: [
+          {
+            path: "directory",
+            element: <DirectoryPage />,
+            handle: { crumb: "Directory" },
           },
         ],
       },

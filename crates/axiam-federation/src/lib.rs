@@ -21,6 +21,15 @@ pub mod oidc;
 pub mod pkce;
 #[cfg(feature = "saml")]
 pub mod saml;
+/// SAML 2.0 identity provider: assertion issuance — `NameID` policy, attribute
+/// mapping, enveloped XML-DSig, the response envelope (G-2, T23.2.2). A library;
+/// the SSO, SLO and metadata endpoints are `axiam-api-rest`'s.
+#[cfg(feature = "saml")]
+pub mod saml_idp;
+/// Write-time rules for the SAML service-provider registry (G-2, T23.2.1):
+/// the ACS allow-list, SP certificates and attribute mappings. Plain data and
+/// URL/X.509 parsing, so it is not behind the `saml` feature.
+pub mod saml_sp;
 pub mod secrets;
 /// X4 — verifying an external IdP's token as an RFC 8693 subject token.
 pub mod token_exchange;

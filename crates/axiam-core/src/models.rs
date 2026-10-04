@@ -6,6 +6,8 @@
 pub mod audit;
 pub mod certificate;
 pub mod directory;
+pub mod directory_profile;
+pub mod directory_sync;
 pub mod email;
 pub mod email_template;
 pub mod email_verification;
@@ -29,6 +31,9 @@ pub mod pgp_key;
 pub mod reactor;
 pub mod resource;
 pub mod role;
+pub mod saml_authn_request;
+pub mod saml_idp_credential;
+pub mod saml_sp;
 pub mod scim_token;
 pub mod scope;
 pub mod server_names;

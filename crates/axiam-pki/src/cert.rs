@@ -3,8 +3,8 @@
 use axiam_core::ca_keys::LeafSigningRequest;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{
-    Certificate, CertificateStatus, CreateCertificate, GeneratedCertificate, LeafExtendedKeyUsage,
-    LeafKeyUsage, LeafProfile, SignCertificateCsr, StoreCertificate,
+    Certificate, CertificateStatus, CertificateType, CreateCertificate, GeneratedCertificate,
+    LeafExtendedKeyUsage, LeafKeyUsage, LeafProfile, SignCertificateCsr, StoreCertificate,
 };
 use axiam_core::models::server_names::{RequestedName, check_leaf_names};
 use axiam_core::repository::{
@@ -115,6 +115,20 @@ struct LeafIssuance<'a> {
     store: &'a dyn axiam_core::ca_keys::CaKeyStore,
     not_before: DateTime<Utc>,
     not_after: DateTime<Utc>,
+}
+
+/// A freshly issued leaf, before anything is recorded: the certificate, the
+/// private key it was issued for, and the window it really carries (read from
+/// the certificate when a remote signer may have shortened it).
+///
+/// Deliberately not `Debug`: `private_key_pem` is a key.
+pub(crate) struct LeafMaterial {
+    pub(crate) private_key_pem: String,
+    pub(crate) public_cert_pem: String,
+    pub(crate) chain_pem: Option<String>,
+    pub(crate) fingerprint: String,
+    pub(crate) not_before: DateTime<Utc>,
+    pub(crate) not_after: DateTime<Utc>,
 }
 
 /// Service for tenant-level certificate operations.
@@ -309,11 +323,62 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         max_validity_days: Option<u32>,
         server_names: &[String],
     ) -> AxiamResult<GeneratedCertificate> {
+        // D-21. The SAML signing leaf is not an inventory certificate: it is
+        // issued by `crate::saml_signing` and kept in the tenant's `saml_idp_credential` row. Refused here by
+        // name rather than left to the schema's `cert_type` assertion, which
+        // would refuse it only after the key was generated and the leaf signed.
+        if input.cert_type == CertificateType::SamlSigning {
+            return Err(AxiamError::Validation {
+                message: "a SamlSigning certificate is not issued through the certificate \
+                          inventory"
+                    .into(),
+            });
+        }
+
         // DF-023. Normalised before anything reads it, so the locally signed
         // path, the remote-custodian path and the stored row all carry the
         // same common name. See [`crate::subject_common_name`].
         input.subject = subject_common_name(&input.subject)?;
 
+        let material = self
+            .issue_leaf_material(org_id, scope, &input, max_validity_days, server_names)
+            .await?;
+
+        let store = StoreCertificate {
+            tenant_id: input.tenant_id,
+            issuer_ca_id: input.issuer_ca_id,
+            subject: input.subject,
+            public_cert_pem: material.public_cert_pem,
+            fingerprint: material.fingerprint,
+            cert_type: input.cert_type,
+            key_algorithm: input.key_algorithm,
+            not_before: material.not_before,
+            not_after: material.not_after,
+            metadata: input.metadata.unwrap_or(serde_json::json!({})),
+        };
+
+        let certificate = self.cert_repo.create(store).await?;
+
+        Ok(GeneratedCertificate {
+            certificate,
+            private_key_pem: material.private_key_pem,
+            chain_pem: material.chain_pem,
+        })
+    }
+
+    /// Everything [`Self::generate`] does up to, and not including, writing the
+    /// inventory row: the name fence, the issuing-CA checks, the key pair and
+    /// the signature, under whichever custodian holds the CA's key.
+    ///
+    /// `input.subject` must already be normalised.
+    pub(crate) async fn issue_leaf_material(
+        &self,
+        org_id: Uuid,
+        scope: IssuingScope,
+        input: &CreateCertificate,
+        max_validity_days: Option<u32>,
+        server_names: &[String],
+    ) -> AxiamResult<LeafMaterial> {
         // S-7 — the name fence, before the CA is even looked up: a name the
         // tenant may not use is refused the same way whichever CA it named
         // and whichever custodian holds that CA's key.
@@ -412,27 +477,15 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             .await
             .map_err(|e| AxiamError::Internal(format!("spawn_blocking join error: {e}")))??;
 
-        let store = StoreCertificate {
-            tenant_id: input.tenant_id,
-            issuer_ca_id: input.issuer_ca_id,
-            subject: input.subject,
-            public_cert_pem,
-            fingerprint,
-            cert_type: input.cert_type,
-            key_algorithm: input.key_algorithm,
-            not_before,
-            not_after,
-            metadata: input.metadata.unwrap_or(serde_json::json!({})),
-        };
-
-        let certificate = self.cert_repo.create(store).await?;
-
-        Ok(GeneratedCertificate {
-            certificate,
+        Ok(LeafMaterial {
             private_key_pem,
+            public_cert_pem,
             // Signed in-process by a CA whose certificate the caller can fetch;
             // there is no chain here they cannot already assemble.
             chain_pem: None,
+            fingerprint,
+            not_before,
+            not_after,
         })
     }
 
@@ -444,12 +497,12 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     async fn generate_remotely(
         &self,
         ca_cert: &axiam_core::models::certificate::CaCertificate,
-        input: CreateCertificate,
+        input: &CreateCertificate,
         not_before: DateTime<Utc>,
         not_after: DateTime<Utc>,
         sans: Vec<RequestedName>,
         profile: LeafProfile,
-    ) -> AxiamResult<GeneratedCertificate> {
+    ) -> AxiamResult<LeafMaterial> {
         // Only the keygen and CSR are CPU-bound. The permit is dropped before
         // the call to the custodian: holding it across a network round trip
         // would let one slow signer block every other issuance in the
@@ -518,25 +571,13 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         // lookup by fingerprint misses.
         let issued = parse_issued_leaf(&signed.certificate_pem)?;
 
-        let store_record = StoreCertificate {
-            tenant_id: input.tenant_id,
-            issuer_ca_id: input.issuer_ca_id,
-            subject: input.subject,
+        Ok(LeafMaterial {
+            private_key_pem,
             public_cert_pem: signed.certificate_pem,
+            chain_pem: (!signed.chain_pem.is_empty()).then(|| join_pem(&signed.chain_pem)),
             fingerprint: issued.fingerprint,
-            cert_type: input.cert_type,
-            key_algorithm: input.key_algorithm,
             not_before: issued.not_before,
             not_after: issued.not_after,
-            metadata: input.metadata.unwrap_or(serde_json::json!({})),
-        };
-
-        let certificate = self.cert_repo.create(store_record).await?;
-
-        Ok(GeneratedCertificate {
-            certificate,
-            private_key_pem,
-            chain_pem: (!signed.chain_pem.is_empty()).then(|| join_pem(&signed.chain_pem)),
         })
     }
 
@@ -613,6 +654,16 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         max_validity_days: Option<u32>,
         server_names: &[String],
     ) -> AxiamResult<Certificate> {
+        // D-21: see `generate`. A caller's CSR is the opposite of what the SAML
+        // credential is — a key AXIAM never sees — so it can never be one.
+        if input.cert_type == CertificateType::SamlSigning {
+            return Err(AxiamError::Validation {
+                message: "a SamlSigning certificate is not issued through the certificate \
+                          inventory"
+                    .into(),
+            });
+        }
+
         // Parsed before the CA is even looked up, and outside the blocking
         // task: a malformed or unsigned request is by far the likeliest failure
         // on an endpoint whose input is pasted by hand, and it must be a 400
@@ -884,6 +935,9 @@ fn leaf_params(
         .map(|u| match u {
             LeafExtendedKeyUsage::ClientAuth => ExtendedKeyUsagePurpose::ClientAuth,
             LeafExtendedKeyUsage::ServerAuth => ExtendedKeyUsagePurpose::ServerAuth,
+            LeafExtendedKeyUsage::DocumentSigning => ExtendedKeyUsagePurpose::Other(
+                LeafExtendedKeyUsage::DocumentSigning.oid_arcs().to_vec(),
+            ),
         })
         .collect();
     params.not_before = time::OffsetDateTime::from_unix_timestamp(not_before_ts)

@@ -1049,7 +1049,7 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
 
 ---
 
-## Phase 23: Competitor gap closure — IN PROGRESS (W1 merged 2026-10-03, W2 executed 2026-10-03, PR open)
+## Phase 23: Competitor gap closure — IN PROGRESS (W1 and W2 merged 2026-10-03, W3 in progress)
 
 Close the gaps the three competitor comparisons
 ([Keycloak](competitor-comparison-keycloak.md),
@@ -1075,9 +1075,9 @@ with an F4 security review of the wave's diff against
 | T23.1.6 | X7.9 Basic OP harness, final runs, `docs/conformance/REVIEW-JUDGEMENTS.md` | Sonnet 5.5 | W2 | ✓ |
 | T23.1.7 | FAPI `WARNING`/`REVIEW` judgements, X5.3 submission, website mark | Sonnet 5.5 | W2 | ✓ |
 | T23.1.8 | D-11: per-tenant-prefix OP-session cookie; tenant-path principal resolution; every minted cookie cleared on logout, `end_session`, revocation (P23W1-10) | Opus 5.5 | W2 | ✓ |
-| T23.2.1 | `SamlServiceProvider` model and repository, `CertificateType::SamlSigning`, encrypted key storage | Sonnet 5.5 | W3 | |
-| T23.2.2 | `saml_idp`: assertion builder, `NameID` policy, attribute mapping, signing | Opus 5.5 | W3 | |
-| T23.2.3 | SSO endpoint: `AuthnRequest` bindings, `InResponseTo` single use, ACS allow-list, `Destination` | Opus 5.5 | W3 | |
+| T23.2.1 | `SamlServiceProvider` model and repository, `CertificateType::SamlSigning`, encrypted key storage | Sonnet 5.5 | W3 |✓ |
+| T23.2.2 | `saml_idp`: assertion builder, `NameID` policy, attribute mapping, signing | Opus 5.5 | W3 |✓ |
+| T23.2.3 | SSO endpoint: `AuthnRequest` bindings, `InResponseTo` single use, ACS allow-list, `Destination` | Opus 5.5 | W3 |✓ |
 | T23.2.4 | SLO wired to session revocation and the revocation feed | Sonnet 5.5 | W4 | |
 | T23.2.5 | IdP metadata endpoint; SP metadata import | Sonnet 5.5 | W4 | |
 | T23.2.6 | Console *SAML Service Providers* page | Sonnet 5.5 | W4 | |
@@ -1086,12 +1086,12 @@ with an F4 security review of the wave's diff against
 | T23.2.9 | OpenAPI, website *Integrate*, eleven SDK ports of §29 | Sonnet 5.5 | W4 | |
 | T23.3.1 | `axiam-directory` crate at layer 3, `DirectoryConfig` with the secret provider | Sonnet 5.5 | W2 | ✓ |
 | T23.3.2 | LDAP client over `rustls`, RFC 4515 escaping, bind-as-user path, refusals for directory users | Opus 5.5 | W2 | ✓ |
-| T23.3.3 | JIT provisioning | Sonnet 5.5 | W3 | |
-| T23.3.4 | Group mapping (`memberOf`, reverse `member`, nested) | Sonnet 5.5 | W3 | |
-| T23.3.5 | Sync job: incremental, nightly full, soft-delete | Sonnet 5.5 | W3 | |
-| T23.3.6 | OpenLDAP and Samba AD containers; e2e acceptance list | Sonnet 5.5 | W3 | |
-| T23.3.7 | Threat-model elements; contract §30 | Opus 5.5 | W3 | |
-| T23.3.8 | CRUD routes, console *Directory* page, OpenAPI, website, design chapter | Sonnet 5.5 | W3 | |
+| T23.3.3 | JIT provisioning | Sonnet 5.5 | W3 |✓ |
+| T23.3.4 | Group mapping (`memberOf`, reverse `member`, nested) | Sonnet 5.5 | W3 |✓ |
+| T23.3.5 | Sync job: incremental, nightly full, soft-delete | Sonnet 5.5 | W3 |✓ |
+| T23.3.6 | OpenLDAP and Samba AD containers; e2e acceptance list | Sonnet 5.5 | W3 |✓ |
+| T23.3.7 | Threat-model elements; contract §30 | Opus 5.5 | W3 |✓ |
+| T23.3.8 | CRUD routes, console *Directory* page, OpenAPI, website, design chapter | Sonnet 5.5 | W3 |✓ |
 | T23.4.1 | RFC 7592 client configuration endpoint; contract §28 addition; threat entry | Opus 5.5 | W1 | ✓ |
 | T23.5.1 | Shared outbound dispatcher extracted from the webhook engine | Sonnet 5.5 | W4 | |
 | T23.5.2 | SSF: streams, SET issuance, stream API authentication, discovery | Opus 5.5 | W4 | |
@@ -1148,7 +1148,7 @@ where §5 says it depends on it.
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
 | Phase 22 | 20 | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates, gRPC client auth, service accounts on management, non-inheritable assignments, contracts 1.51/1.52 and the eleven SDK ports) |
-| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **in progress**, W1 merged, W2 executed |
+| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **in progress**, W1 and W2 merged, W3 in progress |
 
 **Total: 132 tasks across 23 complete phases, plus Phase 23 (47 tasks) in progress**
 

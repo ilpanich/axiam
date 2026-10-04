@@ -55,6 +55,12 @@ struct CertificateRowWithId {
 }
 
 #[derive(Debug, SurrealValue)]
+struct RevokedCertificateRow {
+    #[allow(dead_code)]
+    record_id: String,
+}
+
+#[derive(Debug, SurrealValue)]
 struct BoundTargetRow {
     sa_id: String,
 }
@@ -105,6 +111,10 @@ fn parse_cert_type(s: &str) -> Result<CertificateType, DbError> {
         "Service" => Ok(CertificateType::Service),
         "Device" => Ok(CertificateType::Device),
         "Server" => Ok(CertificateType::Server),
+        // Reads what a bypass of the service layer might have left behind, so a
+        // door refuses it *by type* (and says so) rather than failing opaquely
+        // on the read. Nothing writes it: see `cert_type_str`.
+        "SamlSigning" => Ok(CertificateType::SamlSigning),
         other => Err(DbError::Migration(format!(
             "unknown certificate type: {other}"
         ))),
@@ -117,6 +127,11 @@ fn cert_type_str(t: &CertificateType) -> &'static str {
         CertificateType::Service => "Service",
         CertificateType::Device => "Device",
         CertificateType::Server => "Server",
+        // Never stored (D-21): the SAML signing leaf lives in
+        // `saml_idp_credential`. The arm exists so the match is exhaustive, and
+        // the schema's `cert_type` assertion refuses the value if anything ever
+        // tries to write it.
+        CertificateType::SamlSigning => "SamlSigning",
     }
 }
 
@@ -331,6 +346,46 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         }
 
         Ok(())
+    }
+
+    async fn revoke_user_certificates(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        username: &str,
+        email: &str,
+    ) -> AxiamResult<u64> {
+        // See the trait for why "belongs to" is a convention here. A
+        // certificate matches on `metadata.user_id`, or on its subject common
+        // name equalling the account's username or email, ignoring case — and
+        // only `User`-type certificates that are still active.
+        let names: Vec<String> = [username, email]
+            .into_iter()
+            .map(|name| name.trim().to_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect();
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM \
+                 (UPDATE certificate SET status = 'Revoked' \
+                  WHERE tenant_id = $tenant_id \
+                    AND cert_type = 'User' \
+                    AND status = 'Active' \
+                    AND (metadata.user_id = $user_id \
+                         OR string::lowercase(subject) IN $names))",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("names", names))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<RevokedCertificateRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.len() as u64)
     }
 
     async fn list(

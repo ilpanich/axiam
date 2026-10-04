@@ -6,7 +6,10 @@
 > submission package, T23.1.8, G-3's crate and bind path) runs on
 > `claude/phase23-w2`: D-11 taken by the maintainer on 2026-10-03 (option 1,
 > issue #516), D-12 and D-13 accepted as recommended, D-14 … D-18 taken during
-> it; all seven W2 tasks executed and the W2 F4 review done. Written against AXIAM `1.0.0-beta17` from the three
+> it; merged as PR #527. W3 (G-2 SP registry, signing key and SSO; G-3 JIT,
+> mapping, sync, management, e2e) ran on `claude/phase23-w3`, with D-19 and
+> D-20 taken at its start and D-21 … D-34 during it; G-3 is complete, G-2
+> continues in W4. Written against AXIAM `1.0.0-beta17` from the three
 > comparisons in this directory:
 > [`competitor-comparison-keycloak.md`](competitor-comparison-keycloak.md)
 > (Keycloak 26.8.0),
@@ -375,6 +378,141 @@ security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 
 ### G-2 — SAML 2.0 identity provider — **P1**
 
+> **EXECUTED (partly) — G-2, W3: T23.2.1, 2026-10-03** (`8d0d875`, `5f4129c`,
+> `9932129`, `e1397b6`, `bfb2961`; Sonnet 5.5 for the registry and the
+> credential store, Opus 5.5 in the hand-over session for `9932129`). The
+> data layer of the SAML IdP; nothing serves SAML yet. **D-20** shipped as the
+> layered, disable-only setting `saml_idp_enabled` (organization default,
+> tenant may only turn it off, default `false`). `SamlServiceProvider` lives
+> in `axiam-core` with its write-time validator in `axiam-federation`
+> (`saml_sp::validate_saml_service_provider`): the ACS list is refused exactly
+> where an OAuth2 redirect URI would be, plus a `*`; certificates are one
+> `CERTIFICATE` block and a private key is refused by name; there is **no
+> `sign_assertions` field**, so assertions cannot be configured unsigned; D-2
+> (encryption off) and D-3 (IdP-initiated per SP, off) are the defaults. The
+> redirect rule now exists once and the admin OAuth2 client API calls it.
+> **D-21** shipped: `CertificateType::SamlSigning` (keyUsage
+> `digitalSignature`, EKU `id-kp-documentSigning` only, no SAN, RSA-4096) is
+> `serde`-skipped, so the OpenAPI enum is byte-identical, and it is refused by
+> certificate generation, CSR signing, the bind endpoint, device login and
+> mTLS. The IdP credential is a `saml_idp_credential` row (one `active` and
+> one `next` per tenant, enforced by a computed `slot` under a UNIQUE index),
+> never a `certificate` row; its key is sealed through the database custodian
+> explicitly, only `get_active_sealed` selects it, `retire` destroys it in the
+> same write, and both tables go with their tenant in the tenant-delete
+> transaction. Schema **v72** (registry, setting, credential). Tests: 12 + 12
+> repository tests, 6 PKI tests (profile parsed back from the DER, chain, the
+> sealed bytes hold no PEM and decrypt to the certificate's key, refusals of
+> another organization's, an imported, an expired and a revoked CA, the
+> 730-day cap), the refusal tests in `cert_test`, `mtls_test` and
+> `device_auth_test`, 28 validator unit tests, the v72 schema tests.
+>
+> What the plan did not anticipate. The model has no "signing CA" flag; a CA
+> AXIAM cannot sign with is one whose custody is `External`, refused by the
+> custodian. The issuing scope is a caller parameter: a tenant principal gets
+> only its tenant's CA; T23.2.5 passes it from the principal. A retired
+> credential's key is destroyed, so rotation must publish `next` before
+> promoting, and there is no promote verb yet (T23.2.5). The service returns an
+> expired active credential; the signer (T23.2.2) decides. RSA-4096 key
+> generation makes the PKI tests ~3 minutes in a debug build. No threat entry:
+> the signing-key-at-rest threat is T23.2.2's (§7 rule 2, pulled forward to the
+> Opus task that first signs with it).
+>
+> **EXECUTED (partly) — G-2, W3: T23.2.2, 2026-10-03** (`0d0aaaa`, `c3db35c`;
+> Opus 5.5). `axiam_federation::saml_idp` (behind `saml`), a library with no
+> route: `idp_entity_id`/`idp_sso_url`/`idp_slo_url` as one function of the
+> root issuer and the path tenant; `SamlIdpIssuer::issue` builds the
+> assertion (bearer confirmation and `Conditions` five minutes, audience = SP
+> entity id, `Recipient`/`Destination` = the ACS used, `InResponseTo` only when
+> SP-initiated, `SessionIndex` = the AXIAM session id, `AuthnInstant` =
+> `authenticated_at`, a pinned `amr` → `AuthnContextClassRef` table, attributes
+> XML-escaped over every `AttributeSource`), signs it always and the `Response`
+> after it by policy (`rsa-sha256`, `sha256`, exclusive c14n, the certificate
+> in `KeyInfo`), and re-verifies its own output before returning it; failure
+> responses are status-only and **never signed**, so the key mints no
+> wrapping gadget. A credential outside its validity window refuses to sign.
+> The pre-hop checks T23.2.3 needs are exposed on their own (`check_acs_url`,
+> `check_request_id`, `check_relay_state`, `check_allowed_groups`). **D-22**:
+> the persistent `NameID` is HMAC-SHA256 under a new optional deployment key
+> `saml_pairwise_key`, keyed on the SP entity id, independent of the signing
+> credential; without the key a persistent sign-on is a `Responder` failure.
+> D-2's encryption is **refused** for now (`samael` has no encryption API): an
+> `encrypt_assertions` SP gets `Responder`, never plaintext. Threat model
+> **2.21.0**: trust boundary AXIAM ↔ SAML service providers, **T-304 … T-316**
+> (316 threats, 298 mitigated, 18 open; T-306, T-309, T-312, T-313 open).
+> Tests: 41 in `saml_idp::tests`, including a round trip through AXIAM's own
+> SP verifier, xmlsec against the credential certificate only, a changed byte
+> in every signed element, XSW1–XSW4 copies refused, pairwise stability across
+> a rotation and separation across SPs, tenants and users.
+>
+> What the plan did not anticipate. **A Critical, pre-existing defect in the
+> SP verifier** (`saml.rs`): only the first `ds:Signature` was verified and any
+> reference naming the assertion bound it, so a document the upstream IdP had
+> signed for another purpose vouched for a forged assertion. Fixed in the same
+> task per **D-23** (`c3db35c`): a signature is admitted only as the enveloped
+> child of the `Response` root or of its `Assertion`, each is verified on its
+> own node with xmlsec, the consumed assertion must carry its own verified
+> signature; 27 gadget placements and the extra-unsigned-signature variants
+> are refused; T-67 amended, CHANGELOG *Security*. No other SP-side SAML
+> signature check exists (there is no SP-side SLO, and IdP metadata
+> signatures are not checked at all, an absent control rather than a
+> sibling). Also: `SessionIndex` = session id lets colluding SPs correlate
+> (T-312); most accounts never have `email_verified_at`, so an email `NameID`
+> for an unverified address stays open as T-313 for T23.2.3 to decide;
+> `samael` signs only the first template, so the assertion is signed alone and
+> embedded; the `pem` crate keeps copies of the key text, so it is decoded by
+> hand into `Zeroizing` buffers.
+
+> **EXECUTED (partly) — G-2, W3: T23.2.3, 2026-10-03** (`7f1d324`, `9b49d18`,
+> `d6e9961`, `e7f7845`; Opus 5.5). The SSO endpoint, `/saml/v2/{tenant}/sso`,
+> on both bindings, with IdP-initiated sign-on (`/sso/idp-initiated`, D-3) and a
+> second leg (`/sso/continue`). **D-24**: the first leg refuses everything
+> decidable without a principal — with an error page that posts nowhere, or, once
+> the ACS is a registered POST endpoint, a posted unsigned failure — and holds the
+> checked request in `saml_authn_request` (schema **v73**) under an opaque handle
+> bound to the browser by a per-handle `SameSite=Lax` cookie; the second leg
+> resolves the OP cookie (now minted at `/saml/v2/{t}/sso` too, pinned in the same
+> commit) through the tenant-keyed lookup, applies `account_may_act`, runs the
+> login hop with the SAML arm of `return_to` (server and SPA, the T23.1.3 list
+> re-run against it), binds `ForceAuthn` to the request's outbound instant (a
+> forged marker yields `AuthnFailed`), never hops under `IsPassive`, and consumes
+> the handle on the X6 arbiter before issuing. Request IDs are single-use per SP
+> for longer than the `IssueInstant` window. Receiving
+> (`saml_idp::request`): DTDs refused on the bytes, NUL and non-UTF-8 declarations
+> refused, a 64 KiB inflate cap, the Redirect signature over the exact query
+> octets (`samael`'s `UrlVerifier` re-encodes), the POST signature under D-23's
+> placement rule. **D-25** closes T-313: an email is asserted only when verified or
+> the account is `Active`. **D-26**: the IdP-initiated trigger and what a refusal
+> looks like. **D-27**: a handler may set a stricter CSP (the auto-post page:
+> nonce, `form-action` = the ACS origin), the `end_session_per_min` preset with
+> buckets of its own, the D-20 `404` before the body is read and on every method.
+> Composition: the pairwise key is read in `axiam-server`, documented in the
+> deployment guide and the website configuration page; the pending rows are swept.
+> Threat model **2.22.0**: **T-317 … T-330** (13 mitigated; T-325, the query string
+> in request logs, Low, open), T-313 closed — 330 threats, 312 / 18. No OpenAPI
+> or contract change: browser routes, compiled out of the spec build.
+> Tests: 18 over HTTP (`saml_idp_sso_test.rs`), 17 receiving unit tests, 7 + 1
+> repository/schema tests (100 rounds of 8 concurrent consumes on surrealkv), the
+> D-25 unit test, the cookie-list pins and the suites that count the copies.
+>
+> What the plan did not anticipate. The global security-headers middleware
+> overwrote every response's CSP, so the auto-post page could not run its one
+> script or post cross-origin without D-27. The `/oauth2/authorize` preset the
+> task names does not exist (that route has no limiter). The OP cookie cannot
+> reach a cross-site POST at all, which is what forces two legs for every
+> binding. `tracing-actix-web` records every route's query string, `RelayState`
+> and the handle included (T-325, for the F4 review). Chrome applies
+> `form-action` to post-submission redirects, so an SP whose ACS redirects
+> cross-origin before rendering will need its ACS on that origin. An HTTP-level
+> race test on `kv-mem` would be flaky by design (`tests/common`), so the
+> single-use race is pinned at the repository on surrealkv and sequentially over
+> HTTP. Left for T23.2.4: `SessionIndex` per SP (T-312) and SLO signing (T-316's
+> constraint). For T23.2.5: the metadata's `SingleSignOnService` locations are
+> `idp_sso_url` for both bindings; the SP write path should refuse
+> `encrypt_assertions` and validate that a signing SP's certificate parses (the
+> endpoint answers `sp_certificate` otherwise). For T23.2.7: `test_support` in
+> `saml_idp` (doc-hidden) signs requests the way an SP library does.
+
 **Target.** AXIAM issues SAML 2.0 assertions to registered service providers,
 per tenant: IdP metadata, Web Browser SSO profile with HTTP-Redirect and
 HTTP-POST bindings, SP-initiated and IdP-initiated flows, signed assertions
@@ -530,6 +668,231 @@ fan-out.
 > enrolled keep working until the account is disabled, so the sync job
 > (T23.3.5) must disable or soft-delete vanished and disabled entries
 > (T-303). Its threats and contract §30 start at T-304.
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.3, 2026-10-03** (`7bd2b2a`,
+> `b70fa3e`, `f5db88e`, `110a25e`; Sonnet 5.5). Just-in-time provisioning at
+> the seam T23.3.2 left, `AuthService::login_unknown_user`. The port gained
+> `authenticate_for_provisioning`, gated inside the authenticator, so a tenant
+> without an enabled directory and `jit_provisioning` answers before the bind
+> secret is decrypted or a socket opens, and `lookup_entry` (the same escaped
+> exactly-one search, no user bind) for linking. The hash permit is taken
+> first and the dummy verify runs beside the directory call, so every
+> non-success branch is the unknown-user answer at its cost, and saturation is
+> the same `503` before the directory hears anything. On success a cleaned
+> profile (username and email refused, not repaired, when they hold control,
+> whitespace or bidi characters or are overlong; display name stripped and
+> capped, stored where `ProfileClaims` reads it) passes a case-folded
+> collision probe over both columns of every account, tombstones included, and
+> is created by one `CREATE`, `Active` and marked (**D-29**), the v71 unique
+> indexes deciding a race. **D-28**: JIT never links; a collision is the
+> generic failure plus a `directory.jit_refused` audit row.
+> `link_local_account_to_directory` resolves the entry by the account's
+> username, refuses an entry linked elsewhere, marks the account, deletes its
+> passkeys, revokes its `User` certificates (by convention, D-29), and revokes
+> its sessions and refresh tokens last, through the repositories so the
+> validation cache and revocation feed see it; TOTP is kept; an interrupted
+> link is retried to completion. Audit rows carry identifiers and counts only,
+> through a new `DirectoryAuditSink` port attached by `axiam-server`. Tests: 9
+> repository, 16 `AuthService` (every refusal branch timed against the
+> unknown-user cost, five collision variants, a race run six times, the full
+> linking revocation set), 6 more authenticator tests against the in-process
+> TLS directory, 6 cleaner unit tests.
+>
+> What the plan did not anticipate. No certificate is bound to a user, D-18's
+> single writer, and AD entries without `mail` (all three in D-29). The
+> repository does not fold case, so the probe folds explicitly and scans one
+> tenant per first-ever login. "One unit of work" is ordered rather than one
+> transaction, because a raw cross-table write would bypass the session
+> validation cache. A case variant of an existing directory account's name
+> (`ALICE` for `alice`) is refused as a collision, as a local account's would
+> be. No real-server test here (layering keeps `axiam-auth` from depending on
+> `axiam-directory`); T23.3.6 is the oracle. Threats listed for T23.3.7: the
+> unknown-name bind oracle (T-302 widened), JIT as an account-creation oracle,
+> directory-side takeover by name, attribute injection, linking completeness.
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.4, 2026-10-03** (`624376d`,
+> `ab9e41a`, `198aa66`, `5aaa7fa`, `45ee025`; Sonnet 5.5). Group mapping per
+> **D-30**: `DirectoryConfig.group_mappings` (≤ 500, every group of the same
+> tenant, refused at write before anything is written) and `member_of.source`
+> (absent reads as manual), schema **v74**. `axiam_directory::dn::normalize`
+> folds what RFC 4514 lets two spellings of one DN differ by and refuses what
+> it cannot parse. Resolution on the pooled service connection: AD reads
+> `memberOf` by base-object read, OpenLDAP runs the reverse search with the DN
+> entering the filter only through `escape::reverse_member_filter`; depth N
+> follows N levels, cycles terminate on the normalised DN, the 1 001st group
+> refuses rather than truncates, a ranged `memberOf` counts as the cap,
+> referrals fail. Application removes before it adds (a stop part-way leaves
+> less access), never touches or duplicates a manual edge, skips a mapping
+> whose group was deleted, and runs on every successful directory sign-in
+> before any session or MFA challenge; a mapping that cannot be applied
+> refuses the sign-in (generic answer, not counted against the account) and
+> changes nothing. Membership changes flush the authorization decision cache
+> for the user (local and broadcast). Tests: 13 repository, 2 schema, 39 unit
+> (DN, groups, escape, mapper, config), 23 lookup tests against the
+> in-process TLS directory (the injection attempt asserted on the filter the
+> server parsed), 14 end-to-end over the real `AuthService`, repositories and
+> authorization engine, including a role through a mapped group that is
+> effective and then gone after the directory removes the user.
+>
+> What the plan did not anticipate. Mapping writes bypassed the decision
+> cache, so a cached allow survived a removal until its TTL; a hook now
+> invalidates the subject (a failed broadcast is logged and bounded by the
+> TTL on other replicas). A JIT account is created before the mapping runs, so
+> a failed lookup leaves an `Active` account with no memberships (it grants
+> nothing). An administrator's `add_member` on a pair the directory owns does
+> not promote the edge to manual, so the membership leaves with the directory
+> (the safe direction). AD's primary group (`primaryGroupID`) is not resolved.
+> A stale schema tripwire (`Some(&72)` with v73 registered) is corrected.
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.5, 2026-10-03** (`02680a7`,
+> `9f2e87f`, `29a8529`, `eb6bd89`, `fe97d9a`, `b6ef483`; Sonnet 5.5). The sync
+> job per **D-31**, last in each cleanup tick, recorded in job health as
+> `directory_sync`. A full run (first, then every 24 h, and after any skipped
+> account, bound hit or untrusted watermark) reads every answer before it
+> writes anything, so an error part-way changes nothing; it looks up each
+> marked account by `entryUUID` or the little-endian `objectGUID` octets,
+> escaped through the escape module's new binary escaper. An incremental run
+> searches `(<attr> >= <watermark>)`, acts only on entries owned by a marked
+> account, never concludes "vanished", and on AD takes `highestCommittedUSN`
+> from the rootDSE and falls back to full on a `dsServiceName` change.
+> Deactivation revokes sessions and refresh tokens, then removes the
+> directory's memberships (with the decision-cache flush), then flips the
+> status to `Inactive` by compare-and-set from a live status only; nothing
+> re-enables, creates, links, writes `Deleted` or removes a row. The safety
+> valve (> 10 % and ≥ 5) applies nothing and fails the job. Attribute changes
+> follow the entry through T23.3.3's cleaners, now in
+> `axiam-core::models::directory_profile`; a colliding change is skipped and
+> audited. State is the per-tenant `directory_sync_state` row, schema **v75**,
+> deleted with its tenant. Tests: 40 sync and 26 lookup tests against the
+> in-process TLS directory and real repositories (every D-31 clause), 16
+> repository, 20 unit, 4 sweep tests in `axiam-server`. The operator
+> *Sync* section is in `docs/deployment/README.md`.
+>
+> What the plan did not anticipate. D-31 first read any
+> `pwdAccountLockedTime` as disabled, which turned a temporary failed-bind
+> lockout into a permanent deactivation; amended to ppolicy's permanent-lock
+> value only (`b6ef483`, tests for both runs). No sweep in the tree has a
+> multi-replica guard, so every replica runs the job (writes are idempotent or
+> compare-and-set; reads and refresh audit rows are duplicated). Reappeared or
+> re-enabled accounts are reported once (deduplicated in the state row); the
+> first full run reports every already-`Inactive` account whose entry is
+> present, including administrator suspensions. The valve has no override yet
+> (a candidate for T23.3.8). Incremental disables have no valve, by D-31.
+> Observed and carried to F4: in JIT's lost-race branch the group mapping runs
+> before the status check, so it can re-add directory memberships to an
+> `Inactive` account (they grant nothing while it is `Inactive`).
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.7, 2026-10-03/04** (`7fdd540`,
+> `b26d2f5`, `a2d5e4f`; Opus 5.5). **T-300 closed** per D-19 and **D-32**. The
+> IP classifier moved to `axiam_core::ip_class` (one classifier for every
+> outbound guard; `axiam_pki::ssrf` re-exports it). `axiam_directory::address::
+> guard` resolves the host once and refuses it unless every address passes:
+> loopback, unspecified, link-local (incl. `169.254.169.254`), multicast,
+> special-purpose and their IPv4-mapped forms always; this host's addresses on
+> the REST or gRPC port; private ranges unless the operator's
+> `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` lists them; IPv6-literal URLs.
+> It runs at write time (`guard_url`, for T23.3.8) and at every connection
+> (pool, user bind, group lookup, sync), and the socket is connected to the
+> vetted address while TLS checks the hostname, so rebinding cannot reach
+> loopback. **Frame cap (P23W2-10):** `ldap3` does its own TLS, so a counter
+> beneath it would see ciphertext; AXIAM now performs StartTLS and TLS itself
+> and hands `ldap3` one end of a Unix socket pair, relaying each directory
+> message only after checking its declared length against
+> `AXIAM__DIRECTORY__MAX_MESSAGE_BYTES` (2 MiB default) before allocating,
+> definite lengths, element containment, nesting ≤ 16, and the envelope shape.
+> Threat model **2.23.0**: the *Directory sync job* element, two stores,
+> **T-331 … T-355** (355 threats, 337 mitigated, 18 open; **T-332 open**: with
+> JIT on, an unknown name reaches the directory and no AXIAM per-name counter
+> stops it); T-295 and T-302 amended. **Contract 1.54, §30 Directory
+> configuration**: `get`, `set` (PUT), `update` (PATCH), `delete`,
+> `link_account`, `get_sync_status` under `/api/v1/tenants/{tenant_id}/
+> directory`, `bind_secret` write-only and `Sensitive<T>`, `validate` and the
+> guard on every write, the P23W2-01 rule as `400`, the `opaque_mode =
+> required` exclusion as `409` both ways, `503` without the encryption key, a
+> `directory_admin` rate-limit bucket, audit rows that record
+> `connection_moved` and never the secret; §29 stays reserved for G-2. Tests:
+> 13 connector-guard tests (each refused class at guard and at connect,
+> rebinding, the pinned address, the hostname TLS check over it, an over-long
+> length, 20 000 nesting levels, an envelope `ldap3` would panic on), 19 unit
+> tests, 5 classifier tests; every earlier directory suite green.
+>
+> What the plan did not anticipate. `lber` recurses without a depth bound, so
+> a few tens of KB of nesting overflowed the stack and aborted the whole
+> process, and `ldap3`'s decoder `expect`s on short envelopes (**T-331**,
+> High, closed by the relay). The relay needs Unix sockets (AXIAM ships Linux
+> only; elsewhere the connector refuses). The `url` crate does not parse IPv4
+> hosts for `ldap`/`ldaps`, so the guard parses them. Own listeners are
+> recognised by port on a local address only, so another replica's pod IP or a
+> Service looping back is a stated residual of the allow-list. Deleting or
+> disabling a directory leaves its accounts' sessions and passkeys working and
+> stops deprovisioning; §30 documents it, and it is carried to F4.
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.8, 2026-10-04** (`bda6b14`,
+> `1b69d2d`, `a8e6814`, `7214346`, `7396cfd`, `ee34f10`, `7cf3b4f`, `6397ca7`;
+> Sonnet 5.5). The §30 surface: `GET`/`PUT`/`PATCH`/`DELETE
+> /api/v1/tenants/{tenant_id}/directory`, `POST …/links` (D-28's linking) and
+> `GET …/sync-status`, behind `directory:read`, `directory:write` and
+> `directory:link`, human principals only, the four writes on a new
+> `directory_admin` rate-limit bucket (30/min). Every write runs, in order: the
+> `503` without `directory_encryption_key` when it carries a secret,
+> `config::validate`, the address guard on the URL as written (only when the
+> resulting configuration is enabled, **D-33**), the P23W2-01 rule as a `400`,
+> and the `opaque_mode = required` exclusion as a `409` — enforced both ways,
+> the settings writes (`set_effective`, `set_tenant_override`, `set_org` for
+> inheriting tenants) refusing `required` for a tenant with an enabled
+> directory. `bind_secret` is a `SecretString` on two request types and on no
+> response; the directory routes' own JSON error handler never echoes it;
+> audit rows carry changed field names, `connection_moved`, `secret_replaced`
+> and the live directory-account count. The console *Directory* page (secret
+> never pre-filled, asked again when the connection moves, group-mapping
+> picker over the tenant's groups, sync status, linking behind a confirmation),
+> the website *LDAP / Active Directory* page, the operator guide's *Managing a
+> tenant's directory* (with D-29's no-email note) and design-document **§8d**.
+> OpenAPI and the management registry regenerated (168 operations, 25
+> namespaces); §27.1 and §27.5 rows filled in. Tests: 27 HTTP tests (every
+> §30 answer, the guard and validate refusals, P23W2-01 on each connection
+> field and both verbs, both directions of the opaque-mode exclusion, the
+> secret absent from responses, logs and audit rows, D-33), 72 frontend tests;
+> `m2m_management_test` walks the new routes.
+>
+> What the plan did not anticipate. The repository's `update` demanded the
+> encryption key even without a secret, so a keyless deployment could not
+> switch a directory off; it now needs the key only to seal. The registry
+> script classified only `PUT`; `PATCH` is now `sparse`. §30's registry
+> `service_account` flag does not exist; machine refusal is the
+> `HUMAN_ONLY_FAMILIES` gate. The guard's two refusals ("private address
+> outside the allow-list" and "does not resolve") let a tenant administrator
+> probe internal names, bounded by the bucket — carried to F4 against T-300's
+> residual. The SAML IdP's handler had no frontend-coverage row; added
+> ("headless for now", T23.2.6 replaces it).
+>
+> **EXECUTED — G-3, W3: T23.3.6, 2026-10-04** (`94733bd`, `73d82f4`,
+> `f5bfc4f`; Sonnet 5.5). The oracle for T23.3.2: `docker/docker-compose.
+> directory.yml` runs a real OpenLDAP (slapd 2.4.57) and a real Samba AD DC
+> (Samba 4.23), pinned by digest, on their own bridge network, with the CA,
+> certificates and every password minted at run time by
+> `scripts/gen-directory-e2e-secrets.sh` into a gitignored directory.
+> `crates/axiam-server/tests/directory_e2e.rs` (gated by
+> `AXIAM_E2E_DIRECTORY=1`; a missing stack is a failure once asked for) drives
+> the real §30 routes, `/api/v1/auth/login`, the authorization engine and
+> `sweep_directories`: 18 tests, each scenario on both servers — JIT login,
+> role through a mapped group (an unmapped `admins` grants nothing), nested
+> group and depth 0, the disabled account answered as an unknown user, seven
+> filter-injection payloads presented with the password of the entry each
+> would select if unescaped (and the unescaped filter shown to match), the
+> metacharacter entry by exact name only, the config-time refusals (plaintext,
+> loopback, private outside the allow-list, metadata), an untrusted
+> certificate, StartTLS, and sync deactivating a vanished and a disabled
+> entry's account to `Inactive` with its sessions revoked. Ran green in the
+> W3 container, and again for the orchestrator. CI:
+> `.github/workflows/directory-e2e.yml` on directory paths and on dispatch. The
+> real servers exposed **no defect** in the G-3 code; a real AD's
+> configuration-partition search reference is ignored as T23.3.2 designed.
+>
+> **G-3 is complete for Phase 23** (issue #522). The three comparisons flip
+> their LDAP/AD rows with a dated change-log line; Kerberos stays declined
+> (D-1). Open and carried: T-332 (no per-name counter in front of JIT binds),
+> the allow-list residual of T-300, and the items the W3 F4 review takes.
 
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned
@@ -1019,6 +1382,35 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > `ldap3`'s missing frame cap (both latent with no writer, and **binding
 > preconditions on T23.3.8**), the directory timing residual, and the
 > evidence script. The T23.1.8 and T23.3.2 surfaces held.
+>
+> **W3 F4, 2026-10-04:** [`security-review-phase23-w3-2026-10-04.md`](security-review-phase23-w3-2026-10-04.md).
+> Fourteen findings, no merge blocker after fixes. Fixed on the branch, all
+> wave-introduced or missed siblings of the wave's own fixes: directory linking
+> left the account's **federation links** in place, a sign-in the directory never
+> sees (**P23W3-01**, Medium, T-336 amended); **T-332 closed** with a
+> per-(tenant, login name) failure counter for names AXIAM holds no account for,
+> on the tenant's lockout policy (**P23W3-02**, Medium); **T-325 closed** by a
+> request tracer that redacts every non-structural query value — the SAML handle
+> and `RelayState`, and the pre-existing `state`, reset tokens and search terms
+> (P23W3-03, Low); the §30 address guard's answers to a host name unified so they
+> cannot map internal DNS (P23W3-04, Low, new **T-356**); JIT's lost race checks
+> status before mapping (P23W3-05); CodeQL hygiene and two CSP pins (D-27
+> confirmed: one setter, strictly narrower). The wave's own **D-23 fix of the
+> Critical SP signature-confusion defect holds** under adversarial review
+> (P23W3-06); its issue is filed only after the fix is on `main`, the maintainer
+> deciding on a patch release and advisory first. Filed: the tenant email
+> provider held to no outbound address policy (P23W3-11, Medium, ilpanich/axiam#529), unsigned and
+> uncached IdP metadata (P23W3-07, #530), SHA-1 and DTDs accepted by the SP verifier
+> (P23W3-08, #531), no limiter on `/oauth2/authorize` (P23W3-09, #532), certificates bound to
+> users (P23W3-10, D-29, #533). Accepted with reasons: directory delete/disable leaving
+> sessions and passkeys (documented, confirmed, audited), the missing
+> multi-replica sweep guard, D-25 trusting directory-supplied addresses. Threat
+> model **2.24.0 — 356 threats, 340 mitigated / 16 open**. **Binding on W4:**
+> SLO (T23.2.4) verifies SP logout messages per node with the receiver's
+> placement rule and SHA-2 only — never `verify_signed_xml` — and its routes are
+> rate-limited; T23.2.5 refuses `encrypt_assertions` and an unparseable SP
+> certificate and fetches SP metadata only through `guarded_fetch`; a second
+> CSP-setting page must pass the D-27 pin; new ids start at T-357.
 
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This
@@ -1173,6 +1565,22 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-16 | *Taken in T23.1.8 (Opus 5.5), 2026-10-03, accepted by the orchestrator.* The OP cookie (`Path=/oauth2/authorize`, and since D-11 `/t/{tenant_id}/oauth2/authorize`) never reaches `/oauth2/end_session`, so a logout without an `id_token_hint` `sid` could expire the cookie but not read it, and the session row it named survived (F4 residual P23W1-10). How does such a logout end that row? | **A hop to the `/logout` sub-path of the authorization endpoint the request came through**: `end_session` answers a request with no verified hint `sid` with a `302` to `/oauth2/authorize/logout?tenant_id=…` (bare) or `/t/{tenant_id}/oauth2/authorize/logout`, which RFC 6265 §5.1.4 path-match sends the cookie to. The hop looks the digest up in the request's tenant, revokes that one row, clears every cookie and continues exactly as `end_session` (exact-match `post_logout_redirect_uri` against the identified client's allow-list, `state` echoed only on a redirect that happens; the continuation never carries the hint). GET-only, public, rate-limited with the `end_session` preset (bucket `oauth2_end_session_cookie`, both mounts), in OpenAPI, and with **no back-channel fan-out**, so logout CSRF stays exactly what `end_session` already was. Threat **T-290**. Rejected: adding `/oauth2/end_session` to the cookie path list (widens the maintainer's D-11 layout to a second endpoint, and misses cross-site form POSTs); fanning out back-channel logout from the hop (any page could log a user out of every RP); a confirmation prompt (against B5); leaving the residual. Residual: a hinted logout whose browser cookie names a *different* session leaves that row with its cookies cleared |
 | D-17 | *Taken by the orchestrator, 2026-10-03, on T23.1.5's escalation.* The request-time `fapi2` client-authentication re-check (`is_strong()`) ran at the token endpoint, token exchange and uma-ticket only; a `fapi2` row edited in the database to `client_secret_basic` or `client_secret_post` authenticated at PAR (`201`), introspection and revocation (`200`) with a correct secret | **The same rule runs at PAR, introspection and revocation**, after client authentication and before anything is pushed, revealed or revoked, through one extracted function (`fapi::enforce_client_authentication`, which `enforce_token_request` now calls first), so the endpoints cannot drift; the answer is the token endpoint's `invalid_client`. As with W1's "a `fapi2` row edited to `honour` is refused at authorize", the registration gate is not the only line. Rejected: accepting it as T-253's residual. Amends T-253 |
 | D-18 | *Taken in T23.3.2 (Opus 5.5), 2026-10-03, accepted by the orchestrator.* How is a directory account marked, so that the bind path can find it and every local password door can refuse it? The `User` model had no `source` or `external_id` | **One optional column, `user.directory_external_id`** (schema **v71**, unique per tenant, any number of unset rows): the entry's `entryUUID` or decoded `objectGUID`; `Some` means the tenant's directory is the only authority for the account's password. It has exactly one writer, `UserRepository::mark_directory_account`, which in one transaction sets it, replaces `password_hash` with an Argon2id hash of 32 random bytes nobody holds, and deletes any OPAQUE record; `CreateUser` and `UpdateUser` have no such field, so neither the admin API nor SCIM can set or clear it. Both erasure paths clear it and Art. 15 export carries it. Directory accounts are created `Active` by T23.3.3 (the directory vouches for them; the email-verification grace rule is about local passwords). Rejected: a `source` enum plus an external id (two columns that can disagree) and a link row like `federation_link` (an extra read on every login, and a row that can be deleted on its own, silently turning a directory account back into a local one with whatever hash it holds) |
+| D-19 | *Taken by the orchestrator, 2026-10-03, at the start of W3, on the W2 F4 review's §12.* The F4 review made T23.3.8 (Sonnet, "pattern work") responsible for closing **T-300** (a tenant-chosen directory host is not held to `guarded_fetch`'s private-address policy) and for a frame cap beneath `ldap3` before any write route ships. Both are security-bearing connector code: a resolver-and-pin connector beneath `ldap3`, with the TLS server name kept as the hostname, is exactly the kind of place §6 rule (a) gives to Opus | **The address guard and the frame cap ride T23.3.7 (Opus 5.5)**, which already owns the directory's remaining threat entries and contract §30, and which runs **before** T23.3.8: refuse loopback, link-local (including `169.254.169.254`), unspecified, multicast and AXIAM's own listener addresses after resolution, pin the resolved address for the connection, an operator-level allow-list for private ranges, a per-message frame cap; T-300 closes in that commit. T23.3.8 (Sonnet) then only calls `config::validate` and the guard on every write, surfaces the P23W2-01 rule as a `400`, and refuses a directory with `opaque_mode = required` (both ways) and IPv6-literal URLs. W3 order for G-3 is therefore T23.3.3 → T23.3.4 → T23.3.5 → T23.3.7 → T23.3.8 → T23.3.6 |
+| D-20 | *Taken by the orchestrator, 2026-10-03, before T23.2.1.* §4 G-2's acceptance says "a tenant without the feature returns 404 on all three endpoints", but no per-tenant switch is designed; the `saml` Cargo feature is deployment-wide | **A layered setting `saml_idp_enabled`, default `false`**, exactly the shape of `sensitive_scopes_enabled` (organization default, tenant override, the same validation), added by T23.2.1. The metadata, SSO and SLO endpoints answer `404` when the deployment was built without `saml` **or** the tenant's effective setting is `false`, and the `404` does not distinguish the two. Rejected: "404 until the tenant registers an SP" (an SP administrator needs the IdP metadata *before* registering) |
+| D-21 | *Taken by the orchestrator, 2026-10-03, on resuming T23.2.1.* The previous session landed T23.2.1's registry and D-20 (`8d0d875`, `5f4129c`) but not `CertificateType::SamlSigning` or the key at rest, and §4 G-2 *Signing key* leaves open the key algorithm, the extended key usage, where the key lives, who creates the credential and which CA signs it | **RSA-4096, `rsa-sha256`/`sha256`** (the XML-DSig pair every SP accepts; Ed25519 XML signatures are not deployed at SPs, and ECDSA is outside CLAUDE.md's pin). **`SamlSigning` profile:** keyUsage `digitalSignature` only (no `keyEncipherment`, even on RSA), extendedKeyUsage `id-kp-documentSigning` (RFC 9336) so no TLS verifier accepts it, no SANs. **Internal-only type:** the certificate issuance API, CSR signing, the bind endpoint, device login and mTLS refuse it, as they refuse `Server` where it authenticates nobody. **Custody:** a new per-tenant `saml_idp_credential` row (certificate PEM, the issuing CA's id, serial, SHA-256 fingerprint, `not_after`, a status `active` / `next` / `retired` with at most one `active` and one `next` per tenant enforced by the database) whose private key is sealed with AES-256-GCM under `pki_encryption_key` through `DatabaseCaKeyStore` — the CA custodian's database sealing — with the custody recorded on the row so a later custodian needs no migration. Not the configured CA custodian: the key signs on every assertion, a Vault round trip per sign-in is the wrong latency, and `VaultPki` cannot hold an exported key. The key is never returned by any API, `Debug`-redacted, and decrypted only into a `Zeroizing` buffer at signing time. **Not a `certificate` row and not on the wire:** the leaf lives in `saml_idp_credential` only, so no certificate-list or certificate-get response can carry it, and `SamlSigning` is excluded from the serialized `CertificateType` (no request deserializes to it, the OpenAPI enum is unchanged), so W3 makes no contract change; T23.2.8 (contract §29, Opus) decides whether the credential is exposed to SDKs. Retiring a credential removes it from metadata; no CRL entry is needed, since SPs pin the metadata certificate. The row goes with its tenant in the tenant-delete transaction. **Creation is explicit:** one service function issues the credential from a caller-named active signing CA of the tenant's organization (a CA of another organization, a non-signing or expired CA is refused); validity is the issuer-bounded leaf rule, at most 2 years. No lazy creation and no automatic rotation in W3: T23.2.5 adds the admin route and the metadata endpoint's behaviour without a credential; `next`/`retired` exist so rotation (publish `next` in metadata, then promote) needs no schema change. Rejected: storing it through the configured `CaKeyStore` (above), an ECDSA key (pin), and issuing it lazily on first SSO (an SP would see the IdP certificate change under it with no admin act) |
+| D-22 | *Taken in T23.2.2 (Opus 5.5), 2026-10-03.* §4 G-2 makes the persistent **pairwise** `NameID` the default, and nothing in the workspace derives one: there is no pairwise-identifier helper, and no deployment secret meant for derivation (`axiam_core::secrets` holds encryption keys, the AMQP signing key and the GDPR audit pepper, each with its own purpose and lifecycle). The identifier must be stable per (tenant, SP entity id, user), unlinkable across SPs, not reversible to the user id, and must survive the IdP signing credential's rotation | **HMAC-SHA256 under a new, dedicated deployment key `saml_pairwise_key`** (logical name `axiam_core::secrets::SAML_PAIRWISE_KEY`, in `ALL_KEYS`, read from the secret provider like every 256-bit key; `AXIAM__AUTH__SAML_PAIRWISE_KEY` under the env provider): `NameID = hex(HMAC(k, "axiam/saml-pairwise/v1" ‖ 0x00 ‖ tenant_id ‖ user_id ‖ u32be(len(entity_id)) ‖ entity_id))`, 64 lower-case hex characters, written with `NameQualifier` = the IdP entity id and `SPNameQualifier` = the SP entity id. Keyed on the SP's **entity id**, not its row id, so deleting and re-registering an SP gives its users their identifiers back. Independent of the SAML signing key by construction, so rotating, retiring or re-issuing the credential changes nothing. The key is **optional and must never rotate**: without it a persistent-`NameID` sign-on is refused with `Responder` (never answered with a weaker identifier) and an `emailAddress` SP still works; rotating it, or losing it, gives every user a new, unknown account at every SP, which the constant's documentation says in those words. Nothing is stored, so there is no table, no migration, no erasure path and no export: erasing the user removes the only input that resolves to a person. `axiam_federation::saml_idp::pairwise_name_id` is the one implementation; the composition root (T23.2.3) reads the key into `SamlIdpIssuer::new`. Threat **T-312**. Rejected: a stored random value per (tenant, SP, user) — a new table in the tenant-delete transaction and both erasure paths, a write on every first sign-on with its own race, and nothing gained over a PRF unless the key is lost, which the key's documentation already treats as an outage; deriving from the SAML signing key (a rotation would re-key every account, the exact property required against); reusing `gdpr_pseudonym_pepper` or another existing key (one key serving two purposes with different rotation rules — the pepper's rotation is survivable for audit, this one's is not); a hash without a key (reversible by enumerating a tenant's user ids). Residual: the `SessionIndex` is the AXIAM session id (§4 G-2), the same at every SP of one sign-on, so SPs that compare notes can correlate concurrent sessions despite pairwise `NameID`s; recorded open on T-312 for T23.2.4 to decide whether SLO can map a per-SP index back |
+| D-23 | *Taken by the orchestrator, 2026-10-03, on T23.2.2's finding.* T23.2.2 found a **Critical, pre-existing** defect in AXIAM's SAML **SP** verifier (`saml.rs`): `verify_signature` verifies only the first `ds:Signature` in the document, and `bind_signature_to_assertion` accepts any `Reference` naming the assertion whether or not that signature verified, so a document the upstream IdP signed for another purpose (a signed `LogoutRequest`/`LogoutResponse`, a signed error response) placed ahead of a forged assertion with a dummy signature provisions an arbitrary user. The wave rule says F4 files pre-existing findings as issues | **Fix it in W3, now, in T23.2.2's session (Opus 5.5)**, not at F4 and not as an issue: it is an authentication bypass on a shipped surface; G-2 itself adds a producer of exactly the gadget (an AXIAM IdP that will sign logout messages, T23.2.4), so W3 would widen it; and the probe test describing the attack is already on a public branch. The rule: a `ds:Signature` is accepted only as the enveloped child of the `Assertion` or of the `Response` root, any other `Signature` anywhere refuses the document; every accepted signature is verified individually against the IdP's certificate; the consumed assertion must be covered by a signature that verified (its own enveloped one); T-67 is amended (not reopened, since the fix lands in the same wave) and the CHANGELOG carries it under *Security*. The maintainer is told in the PR so that a patch release or advisory for deployments on `main` can be decided; the issue is filed after the fix is on `main`, not before |
+| D-24 | *Taken in T23.2.3 (Opus 5.5), 2026-10-03.* How does a SAML `AuthnRequest` cross the login hop? The HTTP-POST binding arrives as a **cross-site form post**: the `SameSite=Lax` OP cookie is not sent on it, and the browser cannot be sent to `/login` and then re-post it. And how is `ForceAuthn` kept from inheriting P23W1-08 (an unbound hop marker)? | **Two legs and a server-side pending request.** The first leg (`GET`/`POST /saml/v2/{t}/sso`, `GET /sso/idp-initiated`) refuses everything decidable without a principal, then stores what it decided — SP, the ACS URL resolved against the registration, `RelayState`, `ForceAuthn`, `IsPassive`, the request `ID` and the **outbound instant** — in `saml_authn_request` (schema **v73**, ten-minute TTL) under the SHA-256 of a 256-bit opaque handle, and answers `303` to `/sso/continue?handle=…` with an `HttpOnly; Secure; SameSite=Lax` **binding cookie** scoped to the SSO path and named per handle (`axiam_saml_req_<16 hex of the handle digest>`, so concurrent sign-ons in one browser do not collide), whose digest the row also holds. The second leg requires that cookie (constant-time) before it reads a session or consumes anything, resolves the session from the OP cookie through the tenant-keyed digest lookup alone (the OP cookie is minted at `/saml/v2/{t}/sso` by every sign-in, D-11), applies `account_may_act`, and either issues (consuming the row on the X6 two-layer arbiter immediately before signing), answers (`NoPassive`; `AuthnFailed` on a return leg), or hops to `/login` with `return_to = /saml/v2/{t}/sso/continue?handle=…&axiam_login_hop=1` (the SAML arm of `validate_return_to_at`, re-run against the T23.1.3 list on both sides). **`ForceAuthn` is bound**: a session counts only if `authenticated_at > created_at` of the row; the marker only chooses between hopping again and answering, so forging it yields `AuthnFailed`, never an assertion. **Replay**: the row's `replay_key` (`{sp_id}:{request_id}`, or `idp:{row id}`) is UNIQUE per tenant and consumed rows are kept until expiry, which outlives the `IssueInstant` window (5 min back, 60 s skew forward). Rejected: replaying the request through the hop in the URL (the POST binding cannot, and a signed Redirect request's octets would have to survive the SPA untouched); a handle with no browser binding (a leaked link would sign in whoever opens it, T-322); deciding `ForceAuthn` by the marker (P23W1-08) |
+| D-25 | *Taken in T23.2.3 (Opus 5.5), 2026-10-03, closing T-313.* May an email `NameID` carry an address AXIAM never verified? Most accounts never get `email_verified_at` (administrator, SCIM, directory, federation), and federated accounts are `PendingVerification` for life (T-160), so "verified only" would end email `NameID`s for nearly everyone; "always" lets a self-registration inside its grace period take over an email-keyed SP account | **An address is asserted when something vouches for it: `email_verified_at` is set, or the account is `Active`** — a state only the verification flow, an administrator, SCIM or the directory path put an account in, each of which proved or wrote the address. A `PendingVerification` account with an unverified address gets `InvalidNameIDPolicy` (`SamlIdpError::NameIdUnverified`) at an `emailAddress` SP, never a weaker identifier, and the `email` **attribute** is omitted for it under the same rule (an SP may key accounts on the attribute just as well). It keeps signing on wherever the `NameID` is the pairwise default. Implemented once, in `saml_idp` (`email_is_vouched_for`). Rejected: verified-only (above); a per-SP switch (a tenant administrator choosing to trust unverified addresses is the configuration T-313 is about); refusing the attribute rather than omitting it (the sign-on does not depend on it). Residual: a federated (JIT) account is pending for life, so an email-keyed SP refuses it until an administrator activates it |
+| D-26 | *Taken in T23.2.3 (Opus 5.5), 2026-10-03.* D-3 makes IdP-initiated SSO a per-SP opt-in but designs no trigger, and §4 G-2 says nothing about which refusals an SP is told about. What starts an unsolicited response, and what does a refusal look like? | **Trigger: `GET /saml/v2/{t}/sso/idp-initiated?sp=<entity id>[&RelayState=…]`**, for AXIAM's own pages and bookmarks: refused with `403` when `Sec-Fetch-Site: cross-site` (a third-party page could otherwise sign a visitor in to an SP with a `RelayState` of its choosing), for an SP without `allow_idp_initiated`, a disabled SP, an SP asking for encryption, an unusable default ACS or an over-long `RelayState` — all before the hop, all error pages (an unsolicited failure response is no use to an SP). The response goes to the SP's default ACS with no `InResponseTo`. **Refusals, SP-initiated:** a request that has not shown it comes from the SP — undecodable, oversized, DTD-bearing, stale, malformed, unknown issuer, a failed or misplaced signature, a `Destination` mismatch, an ACS URL or index outside the registry, a non-POST `ProtocolBinding`, an over-long `RelayState`, a replayed `ID` — gets an **error page that posts nowhere** (`400`/`413`, generic text, nothing reflected); once the ACS is a registered POST endpoint, policy refusals are **posted** as unsigned status-only failures (`RequestDenied` for a disabled SP, `Responder` for encryption, `InvalidNameIDPolicy` for a conflicting `NameIDPolicy@Format`; after the hop `NoPassive`, `AuthnFailed`, `RequestDenied` for `allowed_groups`, `Responder` for a missing credential). An AuthnRequest naming a `Subject` is refused (not honoured); `RequestedAuthnContext` is not read (the assertion's class is the session's evidence, T-314). A signed request from an SP that registered no certificate is treated as unsigned (it cannot be evaluated); one that registered a certificate has every signature checked whether or not it requires signing. Rejected: a `POST` trigger with the API's CSRF token (the console has no launcher yet, and a top-level `GET` is what bookmarks and portals use); answering every refusal at the ACS (that posts attacker-chosen `RelayState`/`InResponseTo` to an SP on an unauthenticated request's word) |
+| D-27 | *Taken in T23.2.3 (Opus 5.5), 2026-10-03.* The auto-post page needs an inline `submit()` and a `form-action` naming the ACS origin, but `SecurityHeadersMiddleware` overwrote every response's `Content-Security-Policy` with the global one (`script-src 'self'; form-action 'self'`); and the SSO routes need a rate-limit preset (§7 rule 6), and an indistinguishable `404` (D-20) | **The middleware writes the global policy only when the handler set none**; exactly one handler sets its own — the auto-post page's `default-src 'none'; script-src 'nonce-<per response>'; form-action <ACS origin>; frame-ancestors 'none'; base-uri 'none'`, stricter than the global policy everywhere but those two directives — with `Cache-Control: no-store`. **Rate limit:** the browser-endpoint preset `end_session_per_min` (human-driven, unauthenticated, 30/min/IP by default) on each route, with buckets of their own (`saml_idp_sso`, `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`) — no new configuration key. **D-20:** the tenant check (canonical UUID spelling, tenant exists, effective `saml_idp_enabled`) runs before the body is read, and every other method and sub-path under `/saml/v2/{t}` answers the same empty `404` via `default_service`, so no `405` tells a build with SAML from one without. Rejected: loosening the global CSP (`form-action *` everywhere); a new `saml_sso_per_min` key (one more knob for the same human-driven posture); `login_per_min` (10/min would throttle a NAT'd office that signs in to several SPs, the continue leg counting twice per hop). Residuals: Chrome applies `form-action` to redirects after the submission, so an SP whose ACS redirects to another origin before rendering needs that origin to be the ACS's; a flood tells a build with SAML from one without (429 vs 404) though not one tenant from another |
+| D-28 | *Taken by the orchestrator, 2026-10-03, before T23.3.3, on the W2 F4 review's §12.* Does just-in-time provisioning (or the sync job) ever turn an **existing local account** into a directory account, and if an account is linked, what happens to what it already holds? `mark_directory_account` replaces the hash and deletes the OPAQUE record but revokes nothing, so the account's sessions, refresh tokens, passkeys and user certificates would keep working | **JIT and sync never link.** JIT creates an account only for a login name that matches no local account; if the entry the directory returns would collide with an existing account's username or email (case-folded as the repository folds them), the answer is the ordinary invalid-credentials failure, with the same dummy-verify timing, plus an audit row naming the collision (never the password) — so a directory administrator cannot take over a local account (e.g. `admin`) by creating a matching entry. The sync job (T23.3.5) never creates or links by name either; it acts only on accounts already carrying a `directory_external_id`. **Linking is an explicit administrator act**: T23.3.3 provides one service function, `link_local_account_to_directory`, that resolves the entry by the directory (not by a caller-supplied id), refuses an entry already linked to another account, and in one unit of work marks the account (`mark_directory_account`), **revokes all its sessions and OAuth2 refresh tokens, deletes its WebAuthn credentials and revokes its `User`-type certificates** (both authenticate without the directory deciding); TOTP enrolment is kept, since it is a second factor behind the directory password. It is audited. T23.3.8 exposes it as a route. Rejected: auto-linking by username or email (a directory-side takeover of local accounts), and keeping passkeys and certificates on a linked account (sign-in that the directory never sees, T-303's residual widened) |
+| D-29 | *Taken by the orchestrator, 2026-10-03, on T23.3.3's report.* Three points D-18 and D-28 assumed and the tree contradicts: (1) **no certificate is bound to a user** — a certificate authenticates only as the service account it is bound to, so "revoke its `User`-type certificates" had no data model; (2) D-18 names exactly one writer of `directory_external_id`, but a half-made JIT account can only be avoided by creating it marked; (3) `User.email` is required and unique, and an AD entry may have no `mail` | (1) **Accepted for W3 as T23.3.3 built it**: linking revokes the tenant's still-active `User`-type certificates whose `metadata.user_id` names the account or whose subject CN equals its username or email, ignoring case (over-matching is the safe side of an administrator act that is audited); a real `user_id` binding on certificates (schema, issuance API, an SDK-visible field) is **filed as a follow-up issue**, not done in this phase. (2) **D-18 amended**: the marker has **two writers, both on the directory path only** — `mark_directory_account` (linking) and `create_directory_account` (JIT, one `CREATE` that is `Active`, marked and holding an unusable hash); neither `CreateUser` nor `UpdateUser`, the admin API nor SCIM can set or clear it. (3) **An entry without a usable email is refused** (the generic failure plus an `unusable_attributes` audit row): a synthesised placeholder address would be released as an email `NameID` (D-25 serves `Active` accounts) and as OIDC `email`. The *Directory* admin guide (T23.3.8) says so |
+| D-30 | *Taken by the orchestrator, 2026-10-03, before T23.3.4, so the Sonnet task does not stall.* §4 G-3 says directory groups map "onto AXIAM groups by DN or by a mapping table", and leaves open where the mapping lives, whether a directory group name can match an AXIAM group by itself, which memberships the mapping owns, when it runs and what a failed group lookup does | **An explicit mapping table only**: `DirectoryConfig.group_mappings`, a list of `{ directory_group_dn, group_id }` (DN compared after RFC 4514 normalisation and case-folding of attribute types and values, at most 500 entries, every `group_id` a group of the same tenant, checked at write), in the `directory_config` row (next schema version). **No implicit match by name and no auto-created AXIAM groups**: a directory administrator who names a group `admins` gains nothing unless a tenant administrator mapped it. **The mapping owns only the memberships it made**: each `member_of` edge it writes is marked `source = directory`; on each application it adds the missing mapped memberships and removes directory-sourced ones no longer backed by the directory, and never touches a membership an administrator added by hand (and a manual membership of the same pair is left as it is). **Resolution**: `memberOf` (AD) or a reverse search `(&<group_filter>(<group_member_attribute>=<escaped user DN>))` under `group_base_dn` (OpenLDAP), the user DN entering the filter only through the RFC 4515 escape function; nested groups followed to `group_nesting_depth` with cycle detection and a hard cap of 1 000 groups per user; referrals never followed. **When**: on every successful directory sign-in (JIT and existing accounts) before the session is issued, so a removal in the directory takes effect at the next sign-in, and by the sync job (T23.3.5). **Fail closed**: a group lookup that fails or hits a cap refuses the sign-in with the directory-unavailable answer rather than keeping memberships that may have been revoked. Membership changes are audited. Rejected: matching by name (a directory-side privilege escalation), mapping by DN prefix or wildcard, and "keep the old memberships when the directory cannot be asked" |
+| D-31 | *Taken by the orchestrator, 2026-10-03, before T23.3.5, so the Sonnet task does not stall.* §4 G-3 says "incremental by `modifyTimestamp`/`uSNChanged`, full reconciliation nightly, soft-delete on disappearance". AXIAM's `Deleted` status is an anonymised tombstone (erasure, not a soft delete); a vanished entry cannot be seen incrementally; the user filter is a login template, not an enumeration filter; and nothing says what "disabled in the directory" means on OpenLDAP or what happens when an entry comes back | **Soft-delete is `Inactive`**: a vanished or directory-disabled account is set `Inactive` (which `account_may_act` refuses on every path, passkeys and the OP cookie included, closing T-303's residual at the next run), its sessions and OAuth2 refresh tokens are revoked through the repositories, and its directory-sourced memberships are removed through the D-30 mapper; the row, its marker and its audit trail stay; never `Deleted`, never a hard delete. **Sync never re-enables and never creates or links** (D-28): an account the directory re-enables, or an entry that reappears, is re-enabled by an administrator; the audit row says so. **Full reconciliation (every 24 h)** looks up every account carrying `directory_external_id` by that id (`entryUUID` or the binary-escaped `objectGUID`, through the RFC 4515 escape function, exactly-one, under `base_dn`): found → update and map; not found → vanished. **Incremental (every `sync_interval_secs`)** searches `(<change attribute> >= <watermark>)` under `base_dn` and acts only on entries whose external id matches a marked account; on AD the watermark is `highestCommittedUSN` read from the rootDSE of the same server, and a change of server (`dsServiceName`) or a missing watermark falls back to a full run; deletions are left to the full run. **Disabled** means `userAccountControl` bit `0x2` on AD and, on OpenLDAP, `pwdAccountLockedTime` equal to ppolicy's permanent-lock value `000001010000Z` (amended after T23.3.5: any other value is a temporary failed-bind lockout, which an outsider can provoke by guessing at the directory, and since sync never re-enables it would have become a permanent deactivation — a denial of service; AD's own lockout lives in `lockoutTime`, not in `userAccountControl`, so AD was never affected). **Attribute updates** reuse T23.3.3's cleaners; a username or email change that would collide is skipped and audited, never applied. **Safety valve**: a full run that would deactivate more than 10 % of the tenant's directory accounts (and at least 5) applies nothing, is audited and reported as failed in job health — an empty search after a misconfiguration or an outage must not disable a company. **Errors** skip the tenant's run and change nothing. **State** (watermark, server, last full run, last result) in a per-tenant row (next schema version), deleted with the tenant. Runs on the existing cleanup scheduler, one tenant at a time, under the same deadlines and pool; only on tenants with an enabled directory. Rejected: `Deleted` (erases personal data the administrator never asked to erase), re-enabling from the directory (an attacker-controlled directory could revive accounts an administrator disabled), and enumerating with the login filter |
+| D-32 | *Taken in T23.3.7 (Opus 5.5), 2026-10-04, accepted by the orchestrator.* D-19 asks for "an operator-level allow-list for private ranges", "AXIAM's own listener addresses" refused and "a per-message frame cap", and leaves open the allow-list's shape (SEC-107's `AXIAM__PKI__SSRF_ALLOWED_HOSTS` is a host list, and argues against CIDRs), what "own listener" means when the server knows only bind host and port, and how a cap can sit beneath `ldap3`, which does its own TLS | **(1) A network list, not a host list**: `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS`, comma-separated CIDR blocks or single addresses, unset admits nothing, an unparseable entry ignored and logged at `error` (fails closed). Only addresses of the *private* class (RFC 1918, CGNAT, ULA) ever consult it; loopback, link-local, unspecified, multicast, special-purpose and the metadata endpoints inside private ranges (`fd00:ec2::254`, `100.100.100.200`) stay refused whatever it says. SEC-107's reasoning (a CIDR is widened by any DNS answer) holds for HTTP fetches whose response AXIAM processes; here the host is chosen per tenant in a multi-tenant deployment (an operator cannot enumerate every tenant's directory names, and an AD domain name resolves to a changing set of domain controllers), and inside a listed network the connector can do no more than a TLS handshake toward a host that must chain to the tenant's anchors before anything is sent — that residual is T-300's, stated. **(2) Own listeners by port on a local address**: the server knows its REST and gRPC bind host and port; an address is refused when its port is one of those and the address is this host's (loopback, or bindable by an unprivileged UDP socket — no packet sent); another replica's pod address and a Service forwarding to AXIAM are not recognisable, so the operator note says not to list AXIAM's own networks. **(3) The frame guard is a relay**: `ldap3 0.12` accepts an open stream only as a standard TCP or Unix socket and does its own TLS on the former, so a cap beneath it would see ciphertext; AXIAM performs StartTLS (one fixed 31-byte request, the reply through the guard) and the TLS handshake itself — same `ClientConfig`, server name the URL's host — and gives `ldap3` one end of a Unix socket pair (`ldapi`), a relay forwarding each directory message only after checking it: declared length ≤ the cap (`AXIAM__DIRECTORY__MAX_MESSAGE_BYTES`, default 2 MiB, 64 KiB … 16 MiB) from the header, then well-formed, ≤ 16 levels deep, id + operation — which also closes `lber`'s unbounded recursion (T-331). `close` awaits the relay so a released permit never counts an open socket. A platform without Unix sockets refuses to connect (AXIAM ships on Linux only). **(4) The guard also refuses IPv6-literal URLs**, so T23.3.8's "refuse IPv6 literals" is the guard's answer surfaced as a `400`, and a stored one fails with that reason rather than a TLS name error. **(5) No safety-valve override in contract §30's first cut** (§30.3 rule 7 says why). Rejected: reusing the SEC-107 host list (unworkable per tenant), refusing all private ranges (breaks the feature), enumerating interfaces through a new dependency (the bind test needs none), a capped reader under `ldap3`'s TCP (sees ciphertext), forking `ldap3` |
+| D-33 | *Taken by the orchestrator, 2026-10-04, on T23.3.8's question.* §30.3 rule 1 runs the address guard on every write, even one that does not change `url`, so a directory whose stored hostname has since been re-pointed to a refused address cannot even be switched off (`PATCH {"enabled": false}` is a `400`); only `DELETE` works, which also discards the configuration and its sync state | **The guard runs on every write whose resulting configuration is enabled**, and is skipped when the result is disabled, because a disabled directory opens no connection (the connect-time guard of T23.3.7 still applies to anything that does connect). `config::validate` still runs on every write, and the P23W2-01 rule is unchanged (moving the connection still needs the secret, enabled or not). Re-enabling runs the guard. Contract §30.3 rule 1 amended in place (no version bump: 1.54 is unreleased, and the change only admits a write the earlier text refused). Rejected: exempting only writes that touch no connection field (a disabled write that moves the URL would then skip the guard and be refused later anyway, so the simpler rule loses nothing) and leaving it (an administrator responding to an incident should be able to switch the connector off without deleting it) |
+| D-34 | *Taken by the orchestrator, 2026-10-04, before W4 (lesson recorded at W3's start).* §6 assigns no task the SAML **SP registry's management routes** (create, read, list, update, delete of `SamlServiceProvider`, and the IdP signing-credential issue/list/retire/promote D-21 deferred), although T23.2.1 built the model and repository, T23.2.6's console page needs them, and contract §29 (T23.2.8) describes them | **They ride T23.2.5 (Sonnet 5.5)**, together with the IdP metadata endpoint and SP metadata import, because both write the same registry and both need `validate_saml_service_provider` on every write: T23.2.5 adds the routes under the §27 conventions (namespace `saml`, `Sensitive<T>` for nothing — the registry holds no secret — permissions `saml_sp:read`/`saml_sp:write`, human principals only, a rate-limit bucket), the credential routes with a **promote** verb (`next` → `active`, the old `active` → `retired`, one transaction) so T-309's rotation window can close, refuses `encrypt_assertions` while D-2's encryption is unimplemented and an SP certificate that does not parse (W3 F4 §15), fetches SP metadata only through `guarded_fetch`, and regenerates OpenAPI. **T23.2.8 (Opus) writes contract §29 first**, normative over those routes, so the order in W4 is T23.2.8's §29 → T23.2.5 → T23.2.6 (as G-3 ran T23.3.7's §30 before T23.3.8). The SP registry's threat-model element enters with the routes (§7 rule 2), written in T23.2.8. Rejected: giving the routes to T23.2.6 (a console task would then define an API) or to T23.2.8 (an Opus session spent on CRUD) |
 
 ---
 

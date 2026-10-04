@@ -4,6 +4,7 @@ pub mod audit_minimisation;
 pub mod ca_keys;
 pub mod error;
 pub mod id;
+pub mod ip_class;
 pub mod models;
 pub mod permission_scope;
 pub mod personal_data;

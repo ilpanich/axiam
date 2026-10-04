@@ -853,6 +853,7 @@ dependencies = [
  "axiam-authz",
  "axiam-core",
  "axiam-db",
+ "axiam-directory",
  "axiam-email",
  "axiam-federation",
  "axiam-oauth2",
@@ -893,6 +894,7 @@ dependencies = [
  "webauthn-rs-proto",
  "wiremock",
  "x509-parser 0.18.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -930,6 +932,7 @@ dependencies = [
  "jsonwebtoken 11.1.0",
  "opaque-ke",
  "rand 0.10.3",
+ "rcgen",
  "reqwest 0.12.28",
  "secrecy",
  "serde",
@@ -1022,7 +1025,10 @@ dependencies = [
 name = "axiam-directory"
 version = "1.0.0-beta17"
 dependencies = [
+ "axiam-auth",
+ "axiam-authz",
  "axiam-core",
+ "axiam-db",
  "axiam-test-support",
  "chrono",
  "futures-util",
@@ -1031,6 +1037,8 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "serde_json",
+ "surrealdb",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -1073,8 +1081,10 @@ dependencies = [
  "chrono",
  "flate2",
  "hex",
+ "hmac 0.13.0",
  "jsonwebtoken 11.1.0",
  "libxml",
+ "openssl",
  "pem 4.0.0",
  "rand 0.10.3",
  "rcgen",
@@ -1091,6 +1101,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "x509-parser 0.18.1",
+ "zeroize",
 ]
 
 [[package]]

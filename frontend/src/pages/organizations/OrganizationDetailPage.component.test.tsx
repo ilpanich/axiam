@@ -121,6 +121,7 @@ const settingsWithOidc: SecuritySettings = {
   oidc: {
     sensitive_scopes_enabled: true,
     default_locale: "it",
+    saml_idp_enabled: true,
     dynamic_registration: "anonymous",
     dcr_allowed_scopes: ["openid", "profile"],
     dcr_allowed_redirect_hosts: ["*.example.com"],
@@ -634,6 +635,7 @@ describe("OrganizationDetailPage — settings tab", () => {
         min_length: 10,
         sensitive_scopes_enabled: true,
         default_locale: "it",
+        saml_idp_enabled: true,
         dynamic_registration: "anonymous",
         dcr_allowed_scopes: ["openid", "profile"],
         dcr_allowed_redirect_hosts: ["*.example.com"],
@@ -663,6 +665,7 @@ describe("OrganizationDetailPage — settings tab", () => {
       expect.objectContaining({
         sensitive_scopes_enabled: false,
         default_locale: null,
+        saml_idp_enabled: false,
         dynamic_registration: "disabled",
         dcr_allowed_scopes: [],
         dcr_allowed_redirect_hosts: [],

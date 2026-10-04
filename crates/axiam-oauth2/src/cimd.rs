@@ -976,6 +976,7 @@ mod tests {
             dcr_max_clients: 20,
             dcr_unused_client_ttl_days: 30,
             cimd,
+            saml_idp_enabled: false,
         }
     }
 

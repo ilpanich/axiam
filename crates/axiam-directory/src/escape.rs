@@ -3,10 +3,13 @@
 //!
 //! # The rule
 //!
-//! A value that came from outside AXIAM — a login name typed into a form —
-//! reaches an LDAP filter **only** through [`escape_filter_value`], and only
-//! through [`user_filter_for`], which substitutes the escaped value into the
-//! single `{username}` placeholder of the tenant's template. Nothing in this
+//! A value that came from outside AXIAM — a login name typed into a form, or a
+//! distinguished name a directory returned — reaches an LDAP filter **only**
+//! through [`escape_filter_value`], and only through [`user_filter_for`] (which
+//! substitutes the escaped login name into the single `{username}` placeholder
+//! of the tenant's template) or [`reverse_member_filter`] (which does the same
+//! for the DNs of a reverse group-membership search), or, for the sync job
+//! (T23.3.5), [`external_id_filter`] and [`changed_since_filter`]. Nothing in this
 //! crate builds a filter with `format!` around raw input, and nothing builds a
 //! distinguished name at all: the DN the user binds as is the one the directory
 //! returned from the search, so RFC 4514 DN escaping is never needed and is not
@@ -97,6 +100,161 @@ pub fn user_filter_for(template: &str, login_name: &str) -> Result<String, UserF
         return Err(UserFilterError::TemplateWithoutSinglePlaceholder);
     }
     Ok(template.replacen(USERNAME_PLACEHOLDER, &escape_filter_value(login_name), 1))
+}
+
+/// Most DNs one reverse-member search carries in its `(|...)` filter. Bounds
+/// the size of a filter built from directory-supplied names.
+pub const REVERSE_MEMBER_BATCH: usize = 16;
+
+/// Build the reverse group-membership filter (T23.3.4, D-30): the groups, under
+/// the group base, whose member attribute names one of `dns`.
+///
+/// ```text
+/// (&<group_filter>(<attribute>=<escaped dn>))            one DN
+/// (&<group_filter>(|(<attribute>=<dn>)(<attribute>=<dn>)))   several
+/// ```
+///
+/// Without a `group_filter` the `(&...)` wrapper is dropped. **Each DN enters
+/// the filter only through [`escape_filter_value`]**, exactly as a login name
+/// does: a user's DN is a directory-supplied string and may carry `*`, `(`,
+/// `)`, `\` or NUL, none of which can then widen the search. `group_filter` is
+/// the tenant's own, validated, static filter; `attribute` is checked to be a
+/// plain attribute name here as well, because it too is placed in the filter.
+///
+/// `None` when `dns` is empty or `attribute` is not a plain attribute name
+/// (letters, digits and `-`, starting with a letter) — the caller treats it as
+/// a misconfiguration and refuses; an unparameterised filter is never sent.
+#[must_use]
+pub fn reverse_member_filter(
+    group_filter: Option<&str>,
+    attribute: &str,
+    dns: &[&str],
+) -> Option<String> {
+    let plain = attribute.starts_with(|c: char| c.is_ascii_alphabetic())
+        && attribute
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if dns.is_empty() || !plain {
+        return None;
+    }
+    let clauses: Vec<String> = dns
+        .iter()
+        .map(|dn| format!("({attribute}={})", escape_filter_value(dn)))
+        .collect();
+    let membership = match clauses.as_slice() {
+        [only] => only.clone(),
+        many => format!("(|{})", many.concat()),
+    };
+    Some(match group_filter {
+        Some(group_filter) => format!("(&{group_filter}{membership})"),
+        None => membership,
+    })
+}
+
+/// Escape arbitrary octets for use as an RFC 4515 assertion value: **every**
+/// byte is written as `\XX`, so the output is printable ASCII whatever the
+/// bytes were. For binary attributes (`objectGUID`), where the value is not
+/// text and no octet may be left to be read as filter syntax or as part of a
+/// multi-byte character.
+#[must_use]
+pub fn escape_filter_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for &byte in bytes {
+        out.push('\\');
+        out.push(hex_digit(byte >> 4));
+        out.push(hex_digit(byte & 0x0F));
+    }
+    out
+}
+
+/// A plain attribute name — letters, digits and `-`, starting with a letter —
+/// the only kind that is ever placed in a filter.
+fn is_plain_attribute(attribute: &str) -> bool {
+    attribute.starts_with(|c: char| c.is_ascii_alphabetic())
+        && attribute
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Longest external identifier that is looked up, in bytes (the client's own
+/// bound on what it accepts from a directory).
+const EXTERNAL_ID_MAX_LEN: usize = 256;
+
+/// Build the filter that finds the one entry whose immutable identifier is
+/// `external_id` (T23.3.5, D-31): `(<attribute>=<value>)`.
+///
+/// * `objectGUID` (Active Directory) is **binary**: the stored identifier is
+///   the canonical text of the GUID, and the directory matches the 16 raw
+///   octets in Microsoft's mixed-endian layout, so the text is parsed and
+///   written back with `Uuid::to_bytes_le` — the inverse of the decoding the
+///   client applies to what the directory returns — and every octet is escaped
+///   by [`escape_filter_bytes`].
+/// * Any other attribute (`entryUUID`, or whatever the tenant mapped) carries
+///   text, which enters the filter through [`escape_filter_value`].
+///
+/// **This, with [`user_filter_for`], [`reverse_member_filter`] and
+/// [`changed_since_filter`], is the only way a value reaches a filter.** `None`
+/// when the attribute is not a plain name, the identifier is empty or overlong,
+/// or (for `objectGUID`) is not a GUID: the caller treats that as "cannot ask",
+/// never as "not found".
+#[must_use]
+pub fn external_id_filter(attribute: &str, external_id: &str) -> Option<String> {
+    if !is_plain_attribute(attribute) || external_id.is_empty() {
+        return None;
+    }
+    if attribute.eq_ignore_ascii_case("objectGUID") {
+        let guid = uuid::Uuid::parse_str(external_id.trim()).ok()?;
+        return Some(format!(
+            "({attribute}={})",
+            escape_filter_bytes(&guid.to_bytes_le())
+        ));
+    }
+    if external_id.len() > EXTERNAL_ID_MAX_LEN {
+        return None;
+    }
+    Some(format!(
+        "({attribute}={})",
+        escape_filter_value(external_id)
+    ))
+}
+
+/// Whether `value` is an LDAP generalized time as `modifyTimestamp` carries it:
+/// fourteen digits, an optional fraction, and `Z` (`20261003120000Z`,
+/// `20261003120000.0Z`).
+#[must_use]
+pub fn is_generalized_time(value: &str) -> bool {
+    let Some(body) = value.strip_suffix('Z') else {
+        return false;
+    };
+    let (whole, fraction) = match body.split_once(['.', ',']) {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (body, None),
+    };
+    whole.len() == 14
+        && whole.bytes().all(|b| b.is_ascii_digit())
+        && fraction
+            .is_none_or(|f| !f.is_empty() && f.len() <= 6 && f.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether `value` is an update sequence number: one to twenty decimal digits.
+#[must_use]
+pub fn is_usn(value: &str) -> bool {
+    (1..=20).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Build the incremental-sync filter (T23.3.5, D-31):
+/// `(<attribute>>=<watermark>)`.
+///
+/// The watermark is a value AXIAM stored from the directory's own answer and
+/// still never reaches a filter unchecked: it must be a generalized time or a
+/// USN, and passes through [`escape_filter_value`] as well. `None` for an
+/// attribute that is not a plain name or a watermark that is neither.
+#[must_use]
+pub fn changed_since_filter(attribute: &str, watermark: &str) -> Option<String> {
+    if !is_plain_attribute(attribute) || !(is_generalized_time(watermark) || is_usn(watermark)) {
+        return None;
+    }
+    Some(format!("({attribute}>={})", escape_filter_value(watermark)))
 }
 
 #[cfg(test)]
@@ -230,5 +388,153 @@ mod tests {
                 Err(UserFilterError::TemplateWithoutSinglePlaceholder)
             );
         }
+    }
+    #[test]
+    fn the_reverse_member_filter_escapes_every_dn_and_never_widens() {
+        let hostile = "uid=a*)(uid=*\\,ou=\u{0}x,dc=example,dc=com";
+        let filter =
+            reverse_member_filter(Some("(objectClass=groupOfNames)"), "member", &[hostile])
+                .unwrap();
+        assert_eq!(
+            filter,
+            "(&(objectClass=groupOfNames)(member=uid=a\\2a\\29\\28uid=\\2a\\5c,ou=\\00x,dc=example,dc=com))"
+        );
+        // The only parentheses are the filter's own: 3 opens, 3 closes.
+        assert_eq!(filter.matches('(').count(), 3);
+        assert_eq!(filter.matches(')').count(), 3);
+        assert!(!filter.contains('*'));
+    }
+
+    #[test]
+    fn several_dns_share_one_or_and_none_is_refused() {
+        let filter = reverse_member_filter(None, "member", &["cn=a,dc=x", "cn=b,dc=x"]).unwrap();
+        assert_eq!(filter, "(|(member=cn=a,dc=x)(member=cn=b,dc=x))");
+        assert_eq!(
+            reverse_member_filter(None, "member", &["cn=a,dc=x"]).unwrap(),
+            "(member=cn=a,dc=x)"
+        );
+        assert_eq!(reverse_member_filter(None, "member", &[]), None);
+    }
+
+    #[test]
+    fn an_attribute_that_is_not_plain_is_never_placed_in_a_filter() {
+        for attribute in ["", "me mber", "member)(uid=*", "1member", "member=", "mem*"] {
+            assert_eq!(
+                reverse_member_filter(None, attribute, &["cn=a,dc=x"]),
+                None,
+                "{attribute:?}"
+            );
+        }
+        assert!(reverse_member_filter(None, "uniqueMember", &["cn=a,dc=x"]).is_some());
+    }
+
+    #[test]
+    fn bytes_are_escaped_one_by_one_whatever_they_are() {
+        assert_eq!(escape_filter_bytes(&[]), "");
+        assert_eq!(
+            escape_filter_bytes(&[0x2a, 0x28, 0x29, 0x5c, 0x00, 0xff, 0x41]),
+            "\\2a\\28\\29\\5c\\00\\ff\\41"
+        );
+        let all: Vec<u8> = (0..=255u8).collect();
+        let out = escape_filter_bytes(&all);
+        assert_eq!(out.len(), 256 * 3);
+        assert!(out.bytes().all(|b| (0x20..=0x7E).contains(&b)));
+        assert!(!out.contains(['*', '(', ')']));
+    }
+
+    /// The documented example GUID: `{6f9619ff-8b86-d011-b42d-00c04fc964ff}`
+    /// is `ff 19 96 6f 86 8b 11 d0 b4 2d 00 c0 4f c9 64 ff` on the wire.
+    #[test]
+    fn an_object_guid_is_matched_in_little_endian_layout() {
+        assert_eq!(
+            external_id_filter("objectGUID", "6f9619ff-8b86-d011-b42d-00c04fc964ff").unwrap(),
+            "(objectGUID=\\ff\\19\\96\\6f\\86\\8b\\11\\d0\\b4\\2d\\00\\c0\\4f\\c9\\64\\ff)"
+        );
+        // The inverse of how the client decodes what the directory returns.
+        let raw = [
+            0xff, 0x19, 0x96, 0x6f, 0x86, 0x8b, 0x11, 0xd0, 0xb4, 0x2d, 0x00, 0xc0, 0x4f, 0xc9,
+            0x64, 0xff,
+        ];
+        let text = crate::client::decode_external_id("objectGUID", &raw).unwrap();
+        assert_eq!(
+            external_id_filter("objectguid", &text).unwrap(),
+            format!("(objectguid={})", escape_filter_bytes(&raw))
+        );
+    }
+
+    #[test]
+    fn an_entry_uuid_is_matched_as_escaped_text() {
+        assert_eq!(
+            external_id_filter("entryUUID", "6f9619ff-8b86-d011-b42d-00c04fc964ff").unwrap(),
+            "(entryUUID=6f9619ff-8b86-d011-b42d-00c04fc964ff)"
+        );
+        // A tenant-mapped attribute carrying free text is escaped, not trusted.
+        assert_eq!(
+            external_id_filter("employeeNumber", "E*)(x").unwrap(),
+            "(employeeNumber=E\\2a\\29\\28x)"
+        );
+    }
+
+    #[test]
+    fn an_identifier_that_cannot_be_asked_for_builds_no_filter() {
+        assert_eq!(external_id_filter("objectGUID", "not-a-guid"), None);
+        assert_eq!(external_id_filter("objectGUID", ""), None);
+        assert_eq!(external_id_filter("entryUUID", ""), None);
+        assert_eq!(
+            external_id_filter("entryUUID", &"x".repeat(EXTERNAL_ID_MAX_LEN + 1)),
+            None
+        );
+        for attribute in ["", "entry UUID", "entryUUID)(uid=*", "1x", "a=b"] {
+            assert_eq!(external_id_filter(attribute, "x"), None, "{attribute:?}");
+        }
+    }
+
+    #[test]
+    fn watermarks_are_recognised_by_shape() {
+        for good in [
+            "20261003120000Z",
+            "20261003120000.0Z",
+            "20261003120000,123Z",
+        ] {
+            assert!(is_generalized_time(good), "{good}");
+        }
+        for bad in [
+            "",
+            "Z",
+            "2026100312000Z",
+            "20261003120000",
+            "20261003120000.Z",
+            "2026100312000a Z",
+            "20261003120000.1234567Z",
+        ] {
+            assert!(!is_generalized_time(bad), "{bad}");
+        }
+        for good in ["0", "1", "123456789012345678"] {
+            assert!(is_usn(good), "{good}");
+        }
+        for bad in ["", "-1", "1.5", "12345678901234567890123", "1 "] {
+            assert!(!is_usn(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_incremental_filter_carries_only_a_checked_watermark() {
+        assert_eq!(
+            changed_since_filter("modifyTimestamp", "20261003120000Z").unwrap(),
+            "(modifyTimestamp>=20261003120000Z)"
+        );
+        assert_eq!(
+            changed_since_filter("uSNChanged", "4242").unwrap(),
+            "(uSNChanged>=4242)"
+        );
+        for watermark in ["", "*", "1)(uid=*", "4242)(|(a=b", "\\00", "yesterday"] {
+            assert_eq!(
+                changed_since_filter("uSNChanged", watermark),
+                None,
+                "{watermark:?}"
+            );
+        }
+        assert_eq!(changed_since_filter("uSN Changed", "1"), None);
+        assert_eq!(changed_since_filter("uSNChanged)(x", "1"), None);
     }
 }

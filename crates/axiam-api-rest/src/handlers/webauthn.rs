@@ -1364,11 +1364,19 @@ mod tests {
             .cookies()
             .filter(|c| c.name() == "axiam_op_session")
             .collect();
-        assert_eq!(ops.len(), 2, "the bare copy and the tenant copy");
+        assert_eq!(
+            ops.len(),
+            3,
+            "the bare copy, the tenant copy and the SAML SSO copy"
+        );
         assert_eq!(ops[0].path(), Some("/oauth2/authorize"));
         assert_eq!(
             ops[1].path(),
             Some("/t/11111111-2222-3333-4444-555555555555/oauth2/authorize")
+        );
+        assert_eq!(
+            ops[2].path(),
+            Some("/saml/v2/11111111-2222-3333-4444-555555555555/sso")
         );
         for c in &ops {
             assert!(c.value() == "op-session-value", "both name the session");

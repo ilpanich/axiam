@@ -276,3 +276,46 @@ pub struct FederationState<C: Connection + Clone> {
     #[cfg(feature = "saml")]
     pub saml_federation_service: SamlFederationServiceT<C>,
 }
+
+/// The LDAP / Active Directory identity source's management surface (G-3,
+/// T23.3.8): the per-tenant configuration, the sync job's state row, and the
+/// connector's address guard.
+///
+/// The configuration repository carries the optional `directory_encryption_key`
+/// (D-15): without it a write that carries a bind secret is `503`, while reads,
+/// `DELETE` and the sync status still answer. The client is the **one** the
+/// sign-in path and the sync job use (the composition root shares it), so the
+/// address policy a write is checked against is the policy every connection is
+/// checked against.
+#[derive(Clone)]
+pub struct DirectoryState<C: Connection + Clone> {
+    /// One row per tenant; the bind secret sealed in it.
+    pub config_repo: axiam_db::SurrealDirectoryConfigRepository<C>,
+    /// What the sync job remembers about a tenant (deleted with the config).
+    pub sync_state_repo: axiam_db::SurrealDirectorySyncStateRepository<C>,
+    /// The connector, for its address guard: `client.guard(url)` resolves the
+    /// host and judges every address under the deployment's policy.
+    pub client: Arc<axiam_directory::DirectoryClient>,
+}
+
+/// The SAML 2.0 identity provider (G-2, T23.2.3): the service-provider
+/// registry, the pending `AuthnRequest`s held across the login hop, the
+/// tenant's signing credential, and the issuer.
+///
+/// Behind `saml`, like the routes that read it: the issuer is
+/// `axiam_federation::saml_idp`, which exists only in a build with
+/// `axiam-federation/saml` (see [`FederationState::saml_federation_service`]
+/// for why that gate is load-bearing).
+#[cfg(feature = "saml")]
+#[derive(Clone)]
+pub struct SamlIdpState<C: Connection + Clone> {
+    /// The tenant's registered service providers (T23.2.1).
+    pub sp_repo: axiam_db::SurrealSamlServiceProviderRepository<C>,
+    /// `AuthnRequest`s between the SSO endpoint's two legs (schema v73).
+    pub pending_repo: axiam_db::SurrealPendingSamlRequestRepository<C>,
+    /// The tenant's signing credential, unsealed per issuance (D-21).
+    pub credential_service: SamlIdpCredentialServiceT<C>,
+    /// The deployment's issuer: the root issuer every IdP entity id is built
+    /// on, and the pairwise-identifier key (D-22). One per process.
+    pub issuer: Arc<axiam_federation::saml_idp::SamlIdpIssuer>,
+}

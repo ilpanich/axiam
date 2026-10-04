@@ -680,6 +680,9 @@ impl CaKeyStore for VaultPkiCaKeyStore {
                 "format": "pem",
                 "key_usage": vault_key_usage(&request.profile),
                 "ext_key_usage": vault_ext_key_usage(&request.profile),
+                // Purposes Vault has no name for travel as dotted OIDs
+                // (`id-kp-documentSigning`, the SAML signing leaf).
+                "ext_key_usage_oids": vault_ext_key_usage_oids(&request.profile),
                 "exclude_cn_from_sans": true,
             });
             let data = self.post(&url, body).await?;
@@ -834,14 +837,28 @@ fn vault_key_usage(profile: &LeafProfile) -> Vec<&'static str> {
         .collect()
 }
 
-/// The S-7 profile's extended key usages, spelled as Vault spells them.
+/// The S-7 profile's extended key usages, spelled as Vault spells them. A
+/// purpose Vault has no name for is left to [`vault_ext_key_usage_oids`].
 fn vault_ext_key_usage(profile: &LeafProfile) -> Vec<&'static str> {
     profile
         .extended_key_usage
         .iter()
-        .map(|u| match u {
-            LeafExtendedKeyUsage::ClientAuth => "ClientAuth",
-            LeafExtendedKeyUsage::ServerAuth => "ServerAuth",
+        .filter_map(|u| match u {
+            LeafExtendedKeyUsage::ClientAuth => Some("ClientAuth"),
+            LeafExtendedKeyUsage::ServerAuth => Some("ServerAuth"),
+            LeafExtendedKeyUsage::DocumentSigning => None,
+        })
+        .collect()
+}
+
+/// The extended key usages Vault names by OID rather than by keyword.
+fn vault_ext_key_usage_oids(profile: &LeafProfile) -> Vec<String> {
+    profile
+        .extended_key_usage
+        .iter()
+        .filter_map(|u| match u {
+            LeafExtendedKeyUsage::DocumentSigning => Some(u.oid_dotted()),
+            LeafExtendedKeyUsage::ClientAuth | LeafExtendedKeyUsage::ServerAuth => None,
         })
         .collect()
 }
@@ -930,6 +947,22 @@ fn log_warnings(url: &str, payload: &serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
+
+    /// G-2 — the SAML signing leaf's purpose has no Vault keyword, so it
+    /// travels as a dotted OID and never as a name; the TLS purposes keep their
+    /// keywords and add no OID.
+    #[test]
+    fn document_signing_travels_as_an_oid_and_the_tls_purposes_as_names() {
+        use axiam_core::models::certificate::{CertificateType, KeyAlgorithm, LeafProfile};
+        let saml = LeafProfile::for_leaf(&CertificateType::SamlSigning, &KeyAlgorithm::Rsa4096);
+        assert_eq!(vault_key_usage(&saml), vec!["DigitalSignature"]);
+        assert!(vault_ext_key_usage(&saml).is_empty());
+        assert_eq!(vault_ext_key_usage_oids(&saml), vec!["1.3.6.1.5.5.7.3.36"]);
+
+        let device = LeafProfile::for_leaf(&CertificateType::Device, &KeyAlgorithm::Ed25519);
+        assert_eq!(vault_ext_key_usage(&device), vec!["ClientAuth"]);
+        assert!(vault_ext_key_usage_oids(&device).is_empty());
+    }
     use super::*;
 
     fn config() -> VaultPkiConfig {

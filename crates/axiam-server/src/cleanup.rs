@@ -25,8 +25,9 @@ use axiam_core::repository::{
     AccountDeletionRepository, AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter,
     AuditLogRepository, ConsentRepository, ErasureProofRepository, ExportJobRepository,
     FederationLinkRepository, FederationLoginStateRepository, GroupRepository, MailPublisher,
-    Pagination, PasswordHistoryRepository, RoleRepository, SessionRepository,
-    SsoHandoffCodeRepository, TenantRepository, UserRepository, WebauthnCredentialRepository,
+    Pagination, PasswordHistoryRepository, PendingSamlRequestRepository, RoleRepository,
+    SessionRepository, SsoHandoffCodeRepository, TenantRepository, UserRepository,
+    WebauthnCredentialRepository,
 };
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
@@ -50,6 +51,15 @@ type AuthSvc<C> = AuthService<
     SurrealRefreshTokenRepository<C>,
 >;
 
+/// The directory sync job over the production repositories (G-3, T23.3.5).
+pub type DirectorySyncJob<C> = axiam_directory::DirectorySync<
+    axiam_db::SurrealDirectoryConfigRepository<C>,
+    SurrealUserRepository<C>,
+    SurrealSessionRepository<C>,
+    SurrealRefreshTokenRepository<C>,
+    axiam_db::SurrealDirectorySyncStateRepository<C>,
+>;
+
 // ---------------------------------------------------------------------------
 // CleanupTask
 // ---------------------------------------------------------------------------
@@ -64,6 +74,10 @@ pub struct CleanupTask<C: Connection> {
     // closed the tab at the IdP) leaves a row behind, and "almost nothing"
     // accumulates without a sweep.
     sso_handoff_code_repo: Arc<SurrealSsoHandoffCodeRepository<C>>,
+    // T23.2.3: pending SAML AuthnRequests. Ten-minute rows, kept after use
+    // until they expire (they are the request-id replay guard), so the sweep
+    // is what bounds the table.
+    saml_pending_repo: Arc<axiam_db::SurrealPendingSamlRequestRepository<C>>,
     // NEW-4: AMQP nonce replay store sweep.
     amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
     // GDPR purge sweep (D-05/D-06/D-08).
@@ -109,7 +123,67 @@ pub struct CleanupTask<C: Connection> {
     settings_repo: Arc<axiam_db::SurrealSettingsRepository<C>>,
     /// T-129: records each sweep's outcome for `GET /health/jobs`.
     job_health: crate::job_health::JobHealth,
+    /// G-3 (T23.3.5): the directory sync job. `None` — the default — runs no
+    /// sync; a test harness that exercises other sweeps leaves it out.
+    directory_sync: Option<Arc<DirectorySyncJob<C>>>,
     shutdown: watch::Receiver<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Directory sync sweep (G-3, T23.3.5, D-31)
+// ---------------------------------------------------------------------------
+
+/// One pass of the directory sync job, as a sweep the scheduler can record.
+///
+/// A free function, and public, for the reason [`run_erasure_pipeline`] is one:
+/// the loop that calls it is awkward to construct in a test, and the conversion
+/// of the job's outcome into job health is the part worth testing directly.
+///
+/// * `Ok(n)` is the number of accounts the pass changed (deactivated, updated or
+///   re-mapped); a pass that found nothing to do is `Ok(0)`.
+/// * **Any tenant's failure makes the sweep fail** — an unreachable directory, a
+///   refused search, the safety valve — with a message that names how many
+///   tenants failed and the fixed tag of each, never a tenant's data. The other
+///   tenants still ran; one tenant's outage is not another's.
+/// * A shutdown signal abandons the pass (`Ok(0)`): every step the job takes is
+///   idempotent or a compare-and-set, and the next process starts it again.
+///
+/// # Errors
+///
+/// [`AxiamError::Internal`] when the pass failed, as described above.
+pub async fn sweep_directories<C: Connection + Send + Sync + 'static>(
+    sync: &DirectorySyncJob<C>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<u64, AxiamError> {
+    let outcome = tokio::select! {
+        // A shutdown request wins over starting work: polled first.
+        biased;
+        _ = async {
+            // Resolves on a shutdown request; a dropped sender never does.
+            loop {
+                if *shutdown.borrow() {
+                    return;
+                }
+                if shutdown.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        } => {
+            tracing::info!("directory sync abandoned: the process is shutting down");
+            return Ok(0);
+        }
+        outcome = sync.run_due() => outcome,
+    };
+    match outcome {
+        Ok(summary) => match summary.failure_message() {
+            Some(message) => Err(AxiamError::Internal(message)),
+            None => Ok(summary.changed()),
+        },
+        Err(error) => Err(AxiamError::Internal(format!(
+            "directory sync could not list the tenants' directories ({})",
+            error.tag()
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +632,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         replay_repo: Arc<SurrealAssertionReplayRepository<C>>,
         state_repo: Arc<SurrealFederationLoginStateRepository<C>>,
         sso_handoff_code_repo: Arc<SurrealSsoHandoffCodeRepository<C>>,
+        saml_pending_repo: Arc<axiam_db::SurrealPendingSamlRequestRepository<C>>,
         amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
         user_repo: Arc<SurrealUserRepository<C>>,
         auth_svc: Arc<AuthSvc<C>>,
@@ -600,6 +675,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             replay_repo,
             state_repo,
             sso_handoff_code_repo,
+            saml_pending_repo,
             amqp_nonce_repo,
             user_repo,
             auth_svc,
@@ -625,8 +701,19 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             oauth2_registration_token_repo,
             settings_repo,
             job_health,
+            directory_sync: None,
             shutdown,
         }
+    }
+
+    /// Run the directory sync job on this scheduler (G-3, T23.3.5, D-31).
+    ///
+    /// A builder step rather than another constructor argument, because the
+    /// absence has a meaning (no sync) and the constructor's list is long enough.
+    #[must_use]
+    pub fn with_directory_sync(mut self, sync: Arc<DirectorySyncJob<C>>) -> Self {
+        self.directory_sync = Some(sync);
+        self
     }
 
     /// Run the cleanup loop until a shutdown signal is received.
@@ -661,6 +748,14 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         &self.job_health,
                         "sso_handoff_code",
                         self.sso_handoff_code_repo.cleanup_expired().await,
+                        tracing::Level::DEBUG,
+                    );
+
+                    // T23.2.3: expired pending SAML AuthnRequests.
+                    Self::record(
+                        &self.job_health,
+                        "saml_authn_request",
+                        self.saml_pending_repo.cleanup_expired().await,
                         tracing::Level::DEBUG,
                     );
 
@@ -748,6 +843,20 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         self.sweep_expired_registration_tokens().await,
                         tracing::Level::DEBUG,
                     );
+
+                    // G-3 (T23.3.5, D-31) — the directory sync, last in the tick:
+                    // it talks to other people's servers and can take minutes, and
+                    // nothing above should wait on it. INFO, because it changes
+                    // who may sign in, and an operator asking "why can alice no
+                    // longer sign in" needs to find it in the log.
+                    if let Some(sync) = &self.directory_sync {
+                        Self::record(
+                            &self.job_health,
+                            "directory_sync",
+                            sweep_directories(sync, self.shutdown.clone()).await,
+                            tracing::Level::INFO,
+                        );
+                    }
                 }
                 changed = self.shutdown.changed() => {
                     if changed.is_ok() && *self.shutdown.borrow() {
@@ -770,7 +879,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// Errors are recorded and swallowed, never propagated: the loop must
     /// survive a failing sweep (T-04-36), and now the failure is visible on
     /// the health endpoint instead of only in the log.
-    fn record(
+    pub fn record(
         health: &crate::job_health::JobHealth,
         job: &'static str,
         outcome: Result<u64, AxiamError>,

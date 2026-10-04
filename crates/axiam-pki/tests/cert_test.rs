@@ -1821,6 +1821,47 @@ async fn the_profile_is_per_type_and_per_key_algorithm() {
     }
 }
 
+/// D-21 — the SAML signing leaf is not an inventory certificate: both public
+/// issuance paths refuse the type by name, before any key is generated.
+#[tokio::test]
+async fn the_inventory_issuance_paths_refuse_the_saml_signing_type() {
+    let (certs, org, tenant, ca) = s7_fixture().await;
+    let mut req = leaf(tenant, ca, "saml-signing");
+    req.cert_type = CertificateType::SamlSigning;
+    let err = certs
+        .generate(org, IssuingScope::Tenant, req, None, &lakeside())
+        .await
+        .expect_err("generate must refuse SamlSigning");
+    assert!(matches!(
+        err,
+        axiam_core::error::AxiamError::Validation { .. }
+    ));
+    assert!(err.to_string().contains("SamlSigning"));
+
+    let err = certs
+        .sign_csr(
+            org,
+            IssuingScope::Tenant,
+            axiam_core::models::certificate::SignCertificateCsr {
+                tenant_id: tenant,
+                issuer_ca_id: ca,
+                csr_pem: "not parsed".into(),
+                cert_type: CertificateType::SamlSigning,
+                validity_days: 30,
+                metadata: None,
+                subject_alt_names: vec![],
+            },
+            None,
+            &lakeside(),
+        )
+        .await
+        .expect_err("sign_csr must refuse SamlSigning");
+    assert!(matches!(
+        err,
+        axiam_core::error::AxiamError::Validation { .. }
+    ));
+}
+
 /// (b), at the point of issuance: the list a widening tenant override would
 /// have produced never reaches the fence, because the effective list is the
 /// intersection with the baseline.

@@ -185,6 +185,66 @@ pub struct CreateUser {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// What just-in-time provisioning (G-3, T23.3.3) creates: a directory account,
+/// in one write.
+///
+/// Not a [`CreateUser`]: there is no password (the directory holds it; the
+/// stored hash is an unusable random one), the status is not the repository's
+/// `PendingVerification` default (the directory vouches for the account, D-18),
+/// and there is a marker. Not serialisable and not on the wire — only the
+/// directory path constructs one, which is what keeps the marker unreachable
+/// from the admin API and SCIM.
+#[derive(Clone)]
+pub struct CreateDirectoryAccount {
+    pub tenant_id: Uuid,
+    pub username: String,
+    pub email: String,
+    /// The entry's `entryUUID` / decoded `objectGUID` — the marker.
+    pub external_id: String,
+    /// Profile data the directory supplied, stored in the same bucket an
+    /// administrator-written profile uses (`metadata.oidc`).
+    pub metadata: serde_json::Value,
+}
+
+impl std::fmt::Debug for CreateDirectoryAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateDirectoryAccount")
+            .field("tenant_id", &self.tenant_id)
+            .field("username", &"<redacted>")
+            .field("email", &"<redacted>")
+            .field("external_id", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Which attribute of an existing account a prospective one would collide
+/// with, and whose account it is (G-3, T23.3.3, D-28).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityCollision {
+    /// The account that already holds the name.
+    pub user_id: Uuid,
+    /// Whether the clash is with its username or its email.
+    pub attribute: CollisionAttribute,
+}
+
+/// The column an [`IdentityCollision`] is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionAttribute {
+    Username,
+    Email,
+}
+
+impl CollisionAttribute {
+    /// The spelling an audit row uses.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Username => "username",
+            Self::Email => "email",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct UpdateUser {
     pub username: Option<String>,

@@ -81,7 +81,7 @@ async fn bind_as_user_succeeds_over_ldaps() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let target = target_for(&server, Uuid::new_v4());
 
     let identity = auth(&client, &target, "alice", &alice_password())
@@ -138,7 +138,7 @@ async fn bind_as_user_succeeds_over_starttls_and_nothing_precedes_the_upgrade() 
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let target = starttls_target(&server);
 
     auth(&client, &target, "alice", &alice_password())
@@ -175,7 +175,7 @@ async fn a_tls_1_2_only_directory_is_accepted() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     assert!(
         auth(
             &client,
@@ -195,7 +195,7 @@ async fn a_wrong_password_is_invalid_credentials() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let outcome = auth(
         &client,
         &target_for(&server, Uuid::new_v4()),
@@ -216,7 +216,7 @@ async fn a_certificate_outside_the_tenant_anchors_is_refused_before_any_bind() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let mut target = target_for(&server, Uuid::new_v4());
     target.tls = client_config(&[TestCa::new().pem]).unwrap();
 
@@ -238,7 +238,7 @@ async fn the_public_bundle_does_not_trust_a_private_ca() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let mut target = target_for(&server, Uuid::new_v4());
     target.tls = client_config(&[]).unwrap();
     let outcome = auth(&client, &target, "alice", &alice_password()).await;
@@ -255,7 +255,7 @@ async fn a_server_name_mismatch_is_refused_before_any_bind() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let outcome = auth(
         &client,
         &target_for(&server, Uuid::new_v4()),
@@ -280,7 +280,7 @@ async fn a_refused_starttls_fails_closed_with_no_bind_in_the_clear() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let outcome = auth(
         &client,
         &starttls_target(&server),
@@ -306,7 +306,7 @@ async fn a_plaintext_target_is_refused_with_zero_connections() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let mut target = starttls_target(&server);
     target.start_tls = false; // ldap:// without StartTLS
     let outcome = auth(&client, &target, "alice", &alice_password()).await;
@@ -332,7 +332,7 @@ async fn search_references_are_neither_followed_nor_matched() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let outcome = auth(
         &client,
         &target_for(&server, Uuid::new_v4()),
@@ -385,7 +385,7 @@ async fn a_referral_result_is_not_followed() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let outcome = auth(
         &client,
         &target_for(&server, Uuid::new_v4()),
@@ -409,7 +409,7 @@ async fn zero_matches_is_the_generic_failure_without_a_user_bind() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let outcome = auth(
         &client,
         &target_for(&server, Uuid::new_v4()),
@@ -434,7 +434,7 @@ async fn two_matches_is_the_generic_failure_without_a_user_bind() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let outcome = auth(
         &client,
         &target_for(&server, Uuid::new_v4()),
@@ -469,7 +469,7 @@ async fn filter_injection_reaches_the_server_as_a_literal_value() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let target = target_for(&server, Uuid::new_v4());
 
     let hostile = [
@@ -521,7 +521,7 @@ async fn a_utf8_login_name_is_matched_as_itself() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     assert!(
         auth(
             &client,
@@ -543,7 +543,7 @@ async fn an_empty_password_is_refused_with_zero_packets() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let empty = String::new();
     let outcome = auth(
         &client,
@@ -570,7 +570,7 @@ async fn an_active_directory_disabled_account_is_refused() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let outcome = auth(
         &client,
         &target_for(&server, Uuid::new_v4()),
@@ -606,7 +606,7 @@ async fn an_active_directory_object_guid_is_decoded() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let mut target = target_for(&server, Uuid::new_v4());
     target.attributes = DirectoryKind::ActiveDirectory.default_user_attribute_map();
     target.user_filter = "(&(objectClass=person)(sAMAccountName={username}))".into();
@@ -627,7 +627,7 @@ async fn the_pool_reuses_service_connections_and_never_user_bound_ones() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let tenant = Uuid::new_v4();
     let target = target_for(&server, tenant);
 
@@ -691,7 +691,7 @@ async fn the_pool_bounds_concurrent_connections_per_tenant() {
         authentication_deadline: Duration::from_secs(5),
         ..ClientLimits::default()
     };
-    let client = Arc::new(DirectoryClient::new(limits));
+    let client = Arc::new(support::loopback_client(limits));
     let target = target_for(&server, Uuid::new_v4());
 
     let mut tasks = Vec::new();
@@ -734,7 +734,7 @@ async fn pools_are_partitioned_by_tenant() {
         max_connections_per_tenant: 1,
         ..fast_limits()
     };
-    let client = DirectoryClient::new(limits);
+    let client = support::loopback_client(limits);
     let a = target_for(&server, Uuid::new_v4());
     let b = target_for(&server, Uuid::new_v4());
     auth(&client, &a, "alice", &alice_password()).await.unwrap();
@@ -756,7 +756,7 @@ async fn a_silent_directory_times_out_at_connect() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let started = Instant::now();
     let outcome = auth(
         &client,
@@ -778,7 +778,7 @@ async fn a_stalling_directory_times_out_per_operation() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let started = Instant::now();
     let outcome = auth(
         &client,
@@ -806,7 +806,7 @@ async fn the_authentication_deadline_bounds_the_whole_flow() {
         authentication_deadline: Duration::from_millis(600),
         ..fast_limits()
     };
-    let client = DirectoryClient::new(limits);
+    let client = support::loopback_client(limits);
     let started = Instant::now();
     let outcome = auth(
         &client,
@@ -828,7 +828,7 @@ async fn a_refused_service_bind_is_a_misconfiguration() {
         ..Script::default()
     })
     .await;
-    let client = DirectoryClient::new(fast_limits());
+    let client = support::loopback_client(fast_limits());
     let outcome = client
         .authenticate(
             &target_for(&server, Uuid::new_v4()),

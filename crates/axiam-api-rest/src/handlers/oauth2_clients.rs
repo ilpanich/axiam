@@ -394,40 +394,12 @@ pub(crate) fn validate_redirect_uris(uris: &[String]) -> Result<(), AxiamApiErro
     if uris.is_empty() {
         return Err(validation_err("redirect_uris must not be empty"));
     }
+    // The per-URI rule (absolute, https except loopback, no fragment) is the
+    // one copy in `axiam_federation::saml_sp`, shared with the SAML ACS
+    // allow-list (G-2, T23.2.1) so the two registrations can never disagree
+    // about what a registrable redirect is.
     for uri in uris {
-        let parsed: url::Url = uri
-            .parse()
-            .map_err(|_| validation_err(format!("invalid redirect_uri: {uri}")))?;
-        // Redirect URIs must be absolute with an authority (host)
-        let host = parsed.host_str().ok_or_else(|| {
-            validation_err(format!(
-                "redirect_uri must be an absolute URL with a host: {uri}"
-            ))
-        })?;
-        // Allow http for localhost/loopback only, require HTTPS otherwise.
-        //
-        // `[::1]`, with the brackets, is what `Url::host_str` returns for an
-        // IPv6 literal — the bare `::1` this line compared against until T21.8
-        // is a spelling no parser produces, so the IPv6 arm was unreachable and
-        // `http://[::1]/callback` was refused by both registration endpoints
-        // while the error message named it as allowed. The rest of the stack
-        // always spelled it with brackets: the redirect matcher's loopback arm
-        // (`axiam_oauth2::redirect_uri`), the DCR host allow-list
-        // (`axiam_oauth2::dcr::ALWAYS_ALLOWED_REDIRECT_HOSTS`) and the CIMD
-        // document validator all do, and all are tested on it. RFC 8252 §7.3
-        // lists the IPv6 loopback beside `127.0.0.1`.
-        let is_localhost = host == "localhost" || host == "127.0.0.1" || host == "[::1]";
-        if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_localhost) {
-            return Err(validation_err(format!(
-                "redirect_uri must use https (http is only allowed for localhost/127.0.0.1/[::1]): {uri}"
-            )));
-        }
-        // RFC 6749 §3.1.2: redirect URIs must not include a fragment
-        if parsed.fragment().is_some() {
-            return Err(validation_err(format!(
-                "redirect_uri must not contain a fragment: {uri}"
-            )));
-        }
+        axiam_federation::saml_sp::check_redirect_uri_registration(uri).map_err(validation_err)?;
     }
     Ok(())
 }
@@ -918,4 +890,54 @@ pub async fn delete<C: Connection + Clone>(
     let id = path.into_inner();
     state.oauth2_client_repo.delete(user.tenant_id, id).await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+#[cfg(test)]
+mod redirect_registration_pin {
+    use super::validate_redirect_uris;
+
+    /// G-2 / T23.2.1 — the SAML ACS allow-list shares this registration rule
+    /// (`axiam_federation::saml_sp::check_redirect_uri_registration`, which
+    /// this endpoint now calls). The same accept/refuse list is pinned in that
+    /// crate against the ACS validator; pinning it here against the admin API's
+    /// own entry point means a change to either surface fails a test.
+    #[test]
+    fn the_admin_api_accepts_and_refuses_the_pinned_redirect_list() {
+        for uri in [
+            "https://app.example.com/cb",
+            "https://app.example.com:8443/cb?x=1",
+            "http://localhost/cb",
+            "http://localhost:3000/cb",
+            "http://127.0.0.1/cb",
+            "http://127.0.0.1:8080/cb",
+            "http://[::1]/cb",
+            "http://[::1]:9000/cb",
+        ] {
+            assert!(
+                validate_redirect_uris(&[uri.to_owned()]).is_ok(),
+                "{uri} must be registrable"
+            );
+        }
+        for uri in [
+            "",
+            "not a url",
+            "/relative/path",
+            "https://app.example.com/cb#frag",
+            "http://app.example.com/cb",
+            "http://localhost.example.com/cb",
+            "ftp://app.example.com/cb",
+            "javascript:alert(1)",
+            "myapp://callback",
+            "mailto:a@example.com",
+        ] {
+            assert!(
+                validate_redirect_uris(&[uri.to_owned()]).is_err(),
+                "{uri} must not be registrable"
+            );
+        }
+        assert!(
+            validate_redirect_uris(&[]).is_err(),
+            "an empty list is refused"
+        );
+    }
 }

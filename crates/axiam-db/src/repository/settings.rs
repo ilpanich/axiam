@@ -98,6 +98,11 @@ struct SettingsRow {
     // the default, which is `enabled: false` (I1).
     #[surreal(default)]
     oidc_cimd_json: Option<String>,
+    // SAML identity provider switch (V72 / G-2 / D-20). `Option` and
+    // defaulted for the same reason as every column above: a pre-V72 row has
+    // no such column, and absent resolves to *off*.
+    #[surreal(default)]
+    oidc_saml_idp_enabled: Option<bool>,
     // Server certificate names (V67 / T22.14). The organization baseline of
     // the S-7 fence; absent — a pre-V67 row — reads as the empty list, which
     // refuses every `Server` request (I1). A tenant row carries the resolved
@@ -184,6 +189,11 @@ struct SettingsRowWithId {
     // the default, which is `enabled: false` (I1).
     #[surreal(default)]
     oidc_cimd_json: Option<String>,
+    // SAML identity provider switch (V72 / G-2 / D-20). `Option` and
+    // defaulted for the same reason as every column above: a pre-V72 row has
+    // no such column, and absent resolves to *off*.
+    #[surreal(default)]
+    oidc_saml_idp_enabled: Option<bool>,
     // Server certificate names (V67 / T22.14). The organization baseline of
     // the S-7 fence; absent — a pre-V67 row — reads as the empty list, which
     // refuses every `Server` request (I1). A tenant row carries the resolved
@@ -282,6 +292,7 @@ fn decode_oidc(
     locale: Option<&str>,
     dcr: StoredDcrColumns<'_>,
     cimd_json: Option<&str>,
+    saml_idp_enabled: Option<bool>,
 ) -> OidcPolicy {
     OidcPolicy {
         sensitive_scopes_enabled: enabled.unwrap_or(false),
@@ -316,6 +327,10 @@ fn decode_oidc(
             .unwrap_or(DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS),
         // T21.5 — see `decode_cimd`.
         cimd: decode_cimd(cimd_json),
+        // G-2 / D-20 — the strict direction again: an absent column is a
+        // pre-V72 row and reads as off, so there is no shape of stored data
+        // that makes a tenant an identity provider by accident.
+        saml_idp_enabled: saml_idp_enabled.unwrap_or(false),
     }
 }
 
@@ -404,6 +419,7 @@ impl SettingsRowWithId {
                     unused_client_ttl_days: self.oidc_dcr_unused_client_ttl_days,
                 },
                 self.oidc_cimd_json.as_deref(),
+                self.oidc_saml_idp_enabled,
             ),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -452,6 +468,7 @@ oidc_external_client_allowed_resources = $oidc_external_client_allowed_resources
 oidc_dcr_max_clients = $oidc_dcr_max_clients, \
 oidc_dcr_unused_client_ttl_days = $oidc_dcr_unused_client_ttl_days, \
 oidc_cimd_json = $oidc_cimd_json, \
+oidc_saml_idp_enabled = $oidc_saml_idp_enabled, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -637,6 +654,11 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         bindings.push((
             "oidc_cimd_json",
             BindValue::OptionStr(serde_json::to_string(&settings.oidc.cimd).ok()),
+        ));
+        // G-2 / D-20 — fully resolved, like the other OIDC bindings.
+        bindings.push((
+            "oidc_saml_idp_enabled",
+            BindValue::Bool(settings.oidc.saml_idp_enabled),
         ));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
@@ -833,6 +855,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                     unused_client_ttl_days: row.oidc_dcr_unused_client_ttl_days,
                 },
                 row.oidc_cimd_json.as_deref(),
+                row.oidc_saml_idp_enabled,
             ),
             created_at: row.created_at,
             updated_at: row.updated_at,

@@ -1143,6 +1143,7 @@ async fn d11_forced_enrolment_and_mfa_verify_set_the_bare_and_the_tenant_op_cook
     let expected = vec![
         ("/oauth2/authorize".to_owned(), true),
         (format!("/t/{tenant_id}/oauth2/authorize"), true),
+        (format!("/saml/v2/{tenant_id}/sso"), true),
     ];
     let login = || {
         test::TestRequest::post()

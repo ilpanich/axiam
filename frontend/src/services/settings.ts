@@ -186,6 +186,12 @@ export interface OidcPolicy {
   sensitive_scopes_enabled?: boolean;
   /** The tenant's preferred UI locale, or `null` for none. */
   default_locale?: string | null;
+  /**
+   * G-2 / D-20 — whether the tenant may act as a SAML 2.0 identity provider.
+   * Off unless an organization turns it on; carried through unedited until the
+   * SAML service-provider console page gives it a control.
+   */
+  saml_idp_enabled?: boolean;
   dynamic_registration: DynamicRegistrationMode;
   /** May not contain `address` or `phone` — see `validateDcrPolicy`. */
   dcr_allowed_scopes: string[];
@@ -221,6 +227,7 @@ export function readOidcPolicy(s: {
   return {
     sensitive_scopes_enabled: o?.sensitive_scopes_enabled ?? false,
     default_locale: o?.default_locale ?? null,
+    saml_idp_enabled: o?.saml_idp_enabled ?? false,
     dynamic_registration: o?.dynamic_registration ?? "disabled",
     dcr_allowed_scopes: o?.dcr_allowed_scopes ?? [],
     dcr_allowed_redirect_hosts: o?.dcr_allowed_redirect_hosts ?? [],

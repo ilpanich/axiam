@@ -1,0 +1,114 @@
+# The e2e directory's contents, loaded with `slapadd -n 1`.
+# @READER_HASH@ and @USER_HASH@ are filled in by entrypoint.sh (SSHA, from the
+# passwords the compose file passes in; nothing in this file is a credential).
+
+dn: dc=example,dc=test
+objectClass: top
+objectClass: dcObject
+objectClass: organization
+o: Example
+dc: example
+
+dn: ou=people,dc=example,dc=test
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=test
+objectClass: organizationalUnit
+ou: groups
+
+dn: ou=policies,dc=example,dc=test
+objectClass: organizationalUnit
+ou: policies
+
+# ppolicy: lockout on, a threshold far above anything a test run reaches (the
+# tests do fail a few binds on purpose; D-31 is about *permanent* locks, and a
+# temporary one must not appear mid-run), and no automatic unlock needed.
+dn: cn=default,ou=policies,dc=example,dc=test
+objectClass: device
+objectClass: pwdPolicy
+cn: default
+pwdAttribute: userPassword
+pwdLockout: TRUE
+pwdMaxFailure: 50
+pwdLockoutDuration: 30
+pwdFailureCountInterval: 30
+
+# The read-only service account (the bind DN the tenant is configured with).
+dn: cn=reader,dc=example,dc=test
+objectClass: organizationalRole
+objectClass: simpleSecurityObject
+cn: reader
+userPassword: @READER_HASH@
+
+dn: uid=alice,ou=people,dc=example,dc=test
+objectClass: inetOrgPerson
+uid: alice
+cn: Alice Example
+sn: Example
+displayName: Alice Example
+mail: alice@example.test
+userPassword: @USER_HASH@
+
+dn: uid=bob,ou=people,dc=example,dc=test
+objectClass: inetOrgPerson
+uid: bob
+cn: Bob Example
+sn: Example
+displayName: Bob Example
+mail: bob@example.test
+userPassword: @USER_HASH@
+
+# A name that is a unique PREFIX of nobody else's and a wildcard away from being
+# matched: `adminu*` selects exactly this entry if a login name ever reaches a
+# filter unescaped, so the injection tests sign in with this entry's real
+# password and still must be refused.
+dn: uid=adminuser,ou=people,dc=example,dc=test
+objectClass: inetOrgPerson
+uid: adminuser
+cn: Admin User
+sn: User
+displayName: Admin User
+mail: adminuser@example.test
+userPassword: @USER_HASH@
+
+# An entry whose NAME holds every filter metacharacter RFC 4515 escapes:
+#   uid = odd*(name)\z      (the DN spells them \2A \28 \29 \5C)
+dn: uid=odd\2A\28name\29\5Cz,ou=people,dc=example,dc=test
+objectClass: inetOrgPerson
+uid:: b2RkKihuYW1lKVx6
+cn: Odd Name
+sn: Name
+displayName: Odd Name
+mail: odd@example.test
+userPassword: @USER_HASH@
+
+# Disabled the way D-31 amends it: ppolicy's PERMANENT lock value.
+dn: uid=dave,ou=people,dc=example,dc=test
+objectClass: inetOrgPerson
+uid: dave
+cn: Dave Disabled
+sn: Disabled
+displayName: Dave Disabled
+mail: dave@example.test
+userPassword: @USER_HASH@
+pwdAccountLockedTime: 000001010000Z
+
+# staff: alice directly; devs (and so bob) by NESTING.
+dn: cn=staff,ou=groups,dc=example,dc=test
+objectClass: groupOfNames
+cn: staff
+member: uid=alice,ou=people,dc=example,dc=test
+member: cn=devs,ou=groups,dc=example,dc=test
+
+dn: cn=devs,ou=groups,dc=example,dc=test
+objectClass: groupOfNames
+cn: devs
+member: uid=bob,ou=people,dc=example,dc=test
+
+# A directory group nobody mapped: it must grant nothing, whatever AXIAM groups
+# exist by the same name.
+dn: cn=admins,ou=groups,dc=example,dc=test
+objectClass: groupOfNames
+cn: admins
+member: uid=alice,ou=people,dc=example,dc=test

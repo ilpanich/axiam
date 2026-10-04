@@ -48,8 +48,9 @@ const DOMAINS = [
   },
   {
     label: "Federation",
-    blurb: "SAML service provider and OIDC relying-party configuration, and the SSO entry points.",
-    tags: ["federation", "federation-sso"],
+    blurb:
+      "SAML service provider and OIDC relying-party configuration, the SSO entry points, and a tenant's LDAP / Active Directory identity source.",
+    tags: ["federation", "federation-sso", "directory"],
   },
   {
     label: "Identity",

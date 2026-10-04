@@ -221,6 +221,48 @@ async fn refuse_incomplete_opaque_coverage<C: Connection + Clone>(
     Ok(())
 }
 
+/// Refuse `opaque_mode = required` for a tenant that has an **enabled
+/// directory** (G-3, T23.3.8, CONTRACT §30.3 rule 3).
+///
+/// Under `required` a tenant refuses `/auth/login` before reading a password,
+/// deliberately (so that login is not an oracle for who is enrolled), so a
+/// directory account — which has no OPAQUE record and never can — could not sign
+/// in at all. The directory routes refuse the other direction (an enabled
+/// directory saved under an effective `required`); this is the settings half.
+/// A *disabled* directory may coexist, and enabling it is then the refused
+/// write, which is why only an enabled one is looked for here.
+///
+/// `409`, not `400`: the settings are well-formed and so is the directory; the
+/// two simply cannot both be in force.
+async fn refuse_required_over_enabled_directory<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenants: &[axiam_core::models::tenant::Tenant],
+) -> Result<(), AxiamApiError> {
+    use axiam_core::repository::DirectoryConfigRepository as _;
+
+    let mut conflicting = Vec::new();
+    for tenant in tenants {
+        if let Some(config) = state.directory.config_repo.get_by_tenant(tenant.id).await?
+            && config.enabled
+        {
+            conflicting.push(tenant.slug.clone());
+        }
+    }
+    if conflicting.is_empty() {
+        return Ok(());
+    }
+    Err(AxiamApiError(AxiamError::Conflict {
+        reason: format!(
+            "opaque_mode `required` cannot be set while a tenant has an enabled directory \
+             (LDAP / Active Directory): under `required` password sign-in is refused before \
+             a password is read, so directory accounts could not sign in at all. Tenants with \
+             an enabled directory: {}. Disable or delete the directory first, or use \
+             `optional`.",
+            conflicting.join(", ")
+        ),
+    }))
+}
+
 /// Re-apply the tighten-only rule to every tenant after the baseline moves.
 ///
 /// A tenant override may only ever be *more* restrictive than the organization's
@@ -335,6 +377,9 @@ pub async fn get_org_settings<C: Connection + Clone>(
         (status = 400,
          description = "Settings are internally inconsistent, or enable OPAQUE \
                         on a server holding no OPAQUE keys"),
+        (status = 409,
+         description = "opaque_mode `required` would coexist with an enabled \
+                        directory (LDAP / Active Directory)"),
     ),
     security(("bearer" = []))
 )]
@@ -389,6 +434,9 @@ pub async fn set_org_settings<C: Connection + Clone>(
     // tighten-only rule means no tenant can hold itself below the baseline — so
     // every tenant is in scope, the organization's own reserved scope included.
     if opaque_mode == OpaqueMode::Required {
+        // The directory exclusion first (G-3): it is the more specific refusal,
+        // and no amount of OPAQUE enrolment would make it go away.
+        refuse_required_over_enabled_directory(&state, &tenants).await?;
         refuse_incomplete_opaque_coverage(&state, &tenants).await?;
     }
 
@@ -455,6 +503,9 @@ pub async fn get_tenant_settings<C: Connection + Clone>(
         (status = 400, description = "Override violates org baseline, or \
                                       enables OPAQUE on a server holding no \
                                       OPAQUE keys"),
+        (status = 409,
+         description = "opaque_mode `required` would coexist with an enabled \
+                        directory (LDAP / Active Directory)"),
     ),
     security(("bearer" = []))
 )]
@@ -488,6 +539,12 @@ pub async fn set_tenant_settings<C: Connection + Clone>(
     // SurrealSettingsRepository derives a deterministic UUID (v5)
     // from (scope, scope_id) and uses that as the canonical ID.
     let merged = effective_settings(&org, &overrides, user.tenant_id, Uuid::nil());
+
+    // G-3: an effective `required` and an enabled directory never coexist.
+    if merged.opaque.opaque_mode == OpaqueMode::Required {
+        let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
+        refuse_required_over_enabled_directory(&state, std::slice::from_ref(&tenant)).await?;
+    }
 
     let result = state
         .settings_repo
@@ -575,6 +632,9 @@ pub async fn get_tenant_override<C: Connection + Clone>(
         (status = 400, description = "An override is less restrictive than the org \
                                       baseline, or enables OPAQUE on a server holding \
                                       no OPAQUE keys"),
+        (status = 409,
+         description = "opaque_mode `required` would coexist with an enabled \
+                        directory (LDAP / Active Directory)"),
     ),
     security(("bearer" = []))
 )]
@@ -620,6 +680,12 @@ pub async fn set_tenant_override<C: Connection + Clone>(
     // unrelated override against is not gated twice — the organization write
     // already established coverage for it.
     let would_be = effective_settings(&org, &overrides, tenant_id, Uuid::nil());
+    // G-3: an effective `required` and an enabled directory never coexist,
+    // whichever layer made it `required`.
+    if would_be.opaque.opaque_mode == OpaqueMode::Required {
+        let tenant = state.tenant_repo.get_by_id(tenant_id).await?;
+        refuse_required_over_enabled_directory(&state, std::slice::from_ref(&tenant)).await?;
+    }
     if would_be.opaque.opaque_mode == OpaqueMode::Required
         && overrides.opaque_mode == Some(OpaqueMode::Required)
     {

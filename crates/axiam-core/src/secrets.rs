@@ -102,6 +102,21 @@ pub const AMQP_SIGNING_KEY: &str = "amqp_signing_key";
 /// which breaks the audit trail rather than any login.
 pub const GDPR_PSEUDONYM_PEPPER: &str = "gdpr_pseudonym_pepper";
 
+/// HMAC-SHA256 key deriving the SAML identity provider's persistent pairwise
+/// `NameID` (G-2, decision D-22).
+///
+/// **Optional**, and only for a deployment that issues SAML assertions with the
+/// persistent `NameID` policy (the default per service provider). Without it
+/// such a sign-in is refused, never answered with a weaker identifier.
+///
+/// **It must never rotate.** Every service provider keys its accounts on the
+/// identifiers it derives; a new key gives every user a new, unknown account at
+/// every SP. Losing it is the same outage with no way back. Leaking it lets the
+/// holder compute which identifier a known user has at a known SP (linking
+/// accounts across SPs), but signs nothing: forging an assertion still needs
+/// the tenant's signing key.
+pub const SAML_PAIRWISE_KEY: &str = "saml_pairwise_key";
+
 /// Every 256-bit key this port defines, for providers that preload.
 pub const ALL_KEYS: &[&str] = &[
     OPAQUE_SESSION_KEY,
@@ -113,6 +128,7 @@ pub const ALL_KEYS: &[&str] = &[
     GDPR_PSEUDONYM_PEPPER,
     PKI_ENCRYPTION_KEY,
     AMQP_SIGNING_KEY,
+    SAML_PAIRWISE_KEY,
 ];
 
 /// The password pepper, prepended before Argon2id hashing.
@@ -324,6 +340,19 @@ mod env_name_tests {
     /// provider fetches it in the round trip it already makes. Absent from
     /// that list a Vault deployment would answer `None` and the feature would
     /// be silently unavailable.
+    /// The SAML pairwise-identifier key (G-2, D-22): the same shape, for the
+    /// same reason — absent from `ALL_KEYS`, a Vault deployment would answer
+    /// `None` and every persistent-`NameID` sign-on would be refused.
+    #[test]
+    fn the_saml_pairwise_key_is_a_preloaded_auth_prefixed_key() {
+        assert_eq!(SAML_PAIRWISE_KEY, "saml_pairwise_key");
+        assert!(ALL_KEYS.contains(&SAML_PAIRWISE_KEY));
+        assert_eq!(
+            env_var_name(SAML_PAIRWISE_KEY),
+            "AXIAM__AUTH__SAML_PAIRWISE_KEY"
+        );
+    }
+
     #[test]
     fn the_directory_key_is_a_preloaded_auth_prefixed_key() {
         assert_eq!(DIRECTORY_ENCRYPTION_KEY, "directory_encryption_key");

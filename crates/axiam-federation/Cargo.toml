@@ -21,6 +21,12 @@ chrono = { workspace = true }
 # hash (`sha2`/`hex`). All three are already workspace dependencies used the
 # same way elsewhere; none is new to the dependency graph.
 hex = { workspace = true }
+# SAML IdP (T23.2.2): the pairwise `NameID` is HMAC-SHA256 under a dedicated
+# deployment key (D-22), and the signing key's DER and the pairwise key live in
+# zeroizing buffers. Both are workspace dependencies already in Cargo.lock
+# (axiam-auth, axiam-pki), so no crate enters the graph.
+hmac = { workspace = true }
+zeroize = { workspace = true }
 jsonwebtoken = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
@@ -45,6 +51,12 @@ pem = { workspace = true }
 # (no new crate enters the dependency graph). Gated behind the `saml` feature
 # like samael itself.
 libxml = { workspace = true, optional = true }
+# SAML IdP SSO endpoint (T23.2.3): the HTTP-Redirect binding's query signature
+# is verified over the exact octets received (SAML Bindings §3.4.4.1), which
+# samael's `UrlVerifier` does not do (it re-encodes). Already in Cargo.lock
+# through samael's `xmlsec` feature, so no crate enters the graph; gated behind
+# `saml` like samael itself.
+openssl = { version = "0.10", optional = true }
 
 [features]
 # SAML Service Provider support. Pulls in `samael` (and transitively its
@@ -55,10 +67,15 @@ libxml = { workspace = true, optional = true }
 # whose system libxml2 is too new for samael's pinned bindings (e.g. Arch's
 # libxml2 2.15.x). OIDC federation is unaffected; SAML simply isn't compiled.
 default = ["saml"]
-saml = ["dep:samael", "dep:libxml"]
+saml = ["dep:samael", "dep:libxml", "dep:openssl"]
 
 [dev-dependencies]
 rcgen = { workspace = true }
+# SAML IdP tests (T23.2.2): an RSA-4096 signing key generated at runtime, once
+# per test binary. OpenSSL rather than the pure-Rust `rsa` crate because a
+# 4096-bit generation in a debug build takes seconds there instead of minutes.
+# Already in Cargo.lock through samael, so no crate enters the graph.
+openssl = "0.10"
 base64 = { workspace = true }
 # CQ-B23 DiscoveryCache test: a loopback mock IdP discovery endpoint, same
 # version already used by axiam-server/axiam-api-rest for equivalent OIDC

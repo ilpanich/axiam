@@ -76,10 +76,27 @@ impl<CR: CertificateRepository, CCR: CaCertificateRepository> DeviceAuthService<
         // route, and on the proxy-header path, where no TLS verifier checks the
         // certificate's `serverAuth`-only usage. Checked before anything that
         // could answer differently for it, so the refusal names the type.
-        if cert.cert_type == CertificateType::Server {
-            return Err(AxiamError::Certificate(
-                "a Server certificate cannot authenticate a device or a service account".into(),
-            ));
+        //
+        // An exhaustive match, not `== Server` (G-2): a certificate type added
+        // later that authenticates nobody must be a compile error at this door
+        // rather than a type it silently accepts. `SamlSigning` is the second
+        // such type — it signs the tenant's SAML assertions and is not a
+        // client credential, and its profile (no extendedKeyUsage) would not
+        // stop a chain-validating verifier from accepting it, so the refusal
+        // rests here, on the type.
+        match cert.cert_type {
+            CertificateType::Server => {
+                return Err(AxiamError::Certificate(
+                    "a Server certificate cannot authenticate a device or a service account".into(),
+                ));
+            }
+            CertificateType::SamlSigning => {
+                return Err(AxiamError::Certificate(
+                    "a SamlSigning certificate cannot authenticate a device or a service account"
+                        .into(),
+                ));
+            }
+            CertificateType::User | CertificateType::Service | CertificateType::Device => {}
         }
 
         // Validate status

@@ -841,6 +841,201 @@ export const INTEGRATE_PAGES: DocPage[] = [
   },
 
   {
+    slug: "directory",
+    section: "APIs & integration",
+    navLabel: "LDAP / Active Directory",
+    title: "LDAP and Active Directory",
+    intro:
+      "Let a tenant's people sign in with the directory they already run. The directory checks the password, AXIAM never stores it, and the directory's groups map onto AXIAM groups, so roles keep working.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
+    blocks: [
+      { type: "h", id: "what", text: "What it does" },
+      {
+        type: "p",
+        text: "A tenant points AXIAM at one LDAP or Active Directory server. At sign-in AXIAM looks the person up with a read-only **service account**, then binds **as that person** with the password they typed — the directory's own answer is the answer. The password and any hash of it are never kept. Multi-factor, passkeys and sessions then proceed exactly as for any other user. Signing in needs **nothing new from a client or an SDK**: a directory account calls the same `login`.",
+      },
+      {
+        type: "list",
+        items: [
+          "**Read-only.** AXIAM never adds, modifies, deletes or changes a password in the directory.",
+          "**Provisioned just in time**, if you switch that on: the first successful sign-in for a name that matches no local account creates one.",
+          "**Groups map by an explicit table** you maintain — a directory group has to be named in it to put anyone anywhere. There is no match by name and no AXIAM group is ever created from a directory one.",
+          "**Kept in step by a sync job** that deactivates (never deletes) accounts the directory dropped or disabled.",
+          "**Not Kerberos.** Single sign-on through SPNEGO is out of scope; this is password sign-in checked by the directory.",
+        ],
+      },
+      { type: "h", id: "before", text: "Before you start" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["You need", "Why"],
+        rows: [
+          [
+            "A read-only bind account",
+            "AXIAM binds as it only to search. Give it read rights on the user subtree (and the group subtree) and nothing else; on Active Directory an ordinary domain user is enough.",
+          ],
+          [
+            "`AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY`",
+            "Encrypts the bind secret at rest. Without it the feature is unavailable: a write that carries a secret is refused with `503`.",
+          ],
+          [
+            "TLS the directory's certificate can pass",
+            "`ldaps://`, or `ldap://` with StartTLS — plaintext is refused when you save. The certificate must name the host in the URL and chain to the tenant's trust anchors (or, with none given, a public root). Verification cannot be switched off.",
+          ],
+          [
+            "A host name AXIAM may connect to",
+            "The address is checked when you save and at every connection: loopback, link-local, the cloud metadata service, AXIAM's own listener and IPv6 literals are always refused, and a private address needs the operator to list its network in `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS`.",
+          ],
+          [
+            "A tenant that is not in `opaque_mode = required`",
+            "Under `required` the tenant refuses password sign-in before reading a password, so directory accounts could not sign in. The two are refused together, in both directions, with a `409`.",
+          ],
+        ],
+      },
+      { type: "h", id: "configure", text: "Configure it" },
+      {
+        type: "p",
+        text: "One configuration per tenant, under `/api/v1/tenants/{tenant_id}/directory` for the caller's own tenant, or on the console's **Directory** page. `PUT` creates or replaces; `PATCH` changes only the members you send, and an explicit `null` clears `group_base_dn` or `group_filter`.",
+      },
+      {
+        type: "code",
+        caption: "Create a configuration (the bind secret is write-only)",
+        code: 'PUT /api/v1/tenants/{tenant_id}/directory\n{\n  "enabled": true,\n  "kind": "active_directory",\n  "url": "ldaps://dc1.corp.example.com",\n  "start_tls": false,\n  "bind_dn": "CN=axiam-ro,OU=Service,DC=corp,DC=example,DC=com",\n  "bind_secret": "<entered once, never returned>",\n  "base_dn": "OU=People,DC=corp,DC=example,DC=com",\n  "user_filter": "(&(objectClass=user)(sAMAccountName={username}))",\n  "jit_provisioning": true,\n  "trust_anchors_pem": ["-----BEGIN CERTIFICATE-----\\n...\\n-----END CERTIFICATE-----\\n"]\n}',
+      },
+      {
+        type: "p",
+        text: "`kind` only chooses defaults (`sAMAccountName` / `objectGUID` / `memberOf` for Active Directory; `uid` / `entryUUID` / reverse `member` search for OpenLDAP). A replacement **resets every member it omits to its default**; use `PATCH` to change one thing.",
+      },
+      {
+        type: "p",
+        text: "Every write is validated and the host is checked before anything is stored, on the URL **as written** — so a name that was re-pointed since the last save is caught by the next write that leaves the directory enabled, even if the URL did not change (a write that leaves it disabled opens no connection and skips the host check, so a directory can always be switched off). A refusal is a `400` that names the rule and never echoes the secret.",
+      },
+      { type: "h", id: "secret", text: "The bind secret is write-only" },
+      {
+        type: "p",
+        text: "No response carries it, a flag that says one is set, or a hash of it, and the console never pre-fills it. Leave it out of a write that does not touch the connection and the stored one is kept.",
+      },
+      {
+        type: "warn",
+        text: "Changing the `url`, `start_tls`, `bind_dn` or `trust_anchors_pem` **requires entering the bind secret again** — without it the write is a `400` and changes nothing. A kept secret sent to a new host, through a trust anchor the editor chose, would be the secret handed to whoever runs that host. The console asks for it the moment you edit any of the four.",
+      },
+      { type: "h", id: "email", text: "An entry needs an e-mail address" },
+      {
+        type: "p",
+        text: "A local account must have an e-mail address and AXIAM does not invent one — a placeholder would be released as the user's e-mail `NameID` and as the OIDC `email` claim. With provisioning on, a first sign-in for an entry whose mapped e-mail attribute is missing or unusable is the ordinary invalid-credentials failure, and the audit log records `directory.jit_refused` with the reason `unusable_attributes`. Active Directory entries without `mail` are the usual case: fill the attribute in, or map `user_attribute_map.email` to one every entry has.",
+      },
+      { type: "h", id: "groups", text: "Groups" },
+      {
+        type: "p",
+        text: "`group_mappings` is a list of `{ directory_group_dn, group_id }`, at most 500, each `group_id` a group of the same tenant. Members of a directory group are put into the AXIAM group at **every** directory sign-in and by the sync job, nested groups followed to `group_nesting_depth`. The mapping owns only the memberships it made: one an administrator added by hand is never touched. If the directory cannot be asked, the sign-in fails rather than keep memberships that may have been revoked.",
+      },
+      { type: "h", id: "linking", text: "Linking an existing account" },
+      {
+        type: "p",
+        text: "Provisioning only ever **creates**: it never turns an existing local account into a directory account, so a directory administrator cannot take over a local `admin` by creating a matching entry. Linking is the explicit administrator act that does — the directory finds the entry from the account's own username (you name only the account).",
+      },
+      {
+        type: "warn",
+        text: "Linking signs the owner out **everywhere**: their passkeys and security keys are deleted, so is any social or upstream-IdP identity linked to the account, their user certificates are revoked, and every session and refresh token revoked. Their authenticator-app (TOTP) enrolment is kept. There is no unlink. Repeating the call on an account already linked to that entry is a `200` that runs the revocations again — the way an interrupted link is completed.",
+      },
+      { type: "h", id: "sync", text: "Sync, disabling and deleting" },
+      {
+        type: "p",
+        text: "A job on the server's cleanup schedule keeps accounts in step with the directory while it is enabled. An entry that vanished or was disabled sets the account `Inactive` — never `Deleted` — and revokes its sessions; nothing is ever re-enabled, created or linked by the job. A full run that would deactivate more than 10% of a tenant's directory accounts (and at least 5) applies nothing and reports `safety_valve`. `GET …/directory/sync-status` shows the last result and times.",
+      },
+      {
+        type: "note",
+        text: "Disabling or deleting the configuration stops the directory and only that. Directory accounts can no longer sign in with a password and the job stops, but sessions, refresh tokens and passkeys they hold keep working until they expire or an administrator deactivates the accounts. The audit row records how many live directory accounts the tenant had.",
+      },
+      { type: "h", id: "endpoints", text: "Endpoints" },
+      {
+        type: "api",
+        endpoints: [
+          {
+            method: "GET",
+            path: "/api/v1/tenants/{tenant_id}/directory",
+            summary: "The configuration, without the secret. `404` until one is saved.",
+          },
+          {
+            method: "PUT",
+            path: "/api/v1/tenants/{tenant_id}/directory",
+            summary: "Create (`201`) or replace (`200`) the configuration.",
+          },
+          {
+            method: "PATCH",
+            path: "/api/v1/tenants/{tenant_id}/directory",
+            summary: "Change only the members sent; `null` clears `group_base_dn` / `group_filter`.",
+          },
+          {
+            method: "DELETE",
+            path: "/api/v1/tenants/{tenant_id}/directory",
+            summary: "Remove the configuration and its sync state (`204`).",
+          },
+          {
+            method: "POST",
+            path: "/api/v1/tenants/{tenant_id}/directory/links",
+            summary: "Link an existing account to its directory entry; signs the owner out everywhere.",
+          },
+          {
+            method: "GET",
+            path: "/api/v1/tenants/{tenant_id}/directory/sync-status",
+            summary: "The sync job's last result and times; nulls before the first run.",
+          },
+        ],
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Answer", "When"],
+        rows: [
+          ["`400 validation_error`", "A rule refused the write — it names the rule — or the connection moved without the bind secret."],
+          ["`403 authorization_denied`", "Another tenant's id, or a missing permission."],
+          ["`404 not_found`", "No configuration; or, for linking, no such account or no single directory entry for its username."],
+          ["`409 conflict`", "An enabled directory under `opaque_mode = required`; or, for linking, no enabled directory, an entry linked elsewhere, or an account linked to a different entry."],
+          ["`429`", "More than 30 writes a minute from one address (`AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN`); reads are not limited."],
+          ["`503 service_unavailable`", "No directory encryption key on the deployment, or the directory could not be asked."],
+        ],
+      },
+      {
+        type: "p",
+        text: "Three permissions, held by the `admin` and `super-admin` roles: `directory:read`, `directory:write` and `directory:link` (kept apart because linking acts on a person, not on the configuration). A service-account token is not accepted: the bind secret is a human administrator's to enter. Changes write `directory.config_created`, `directory.config_updated` and `directory.config_deleted` audit rows with the names of the fields that changed and whether the connection moved — never the secret.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "CONTRACT §30 — Directory configuration",
+            href: contractLink("30"),
+            note: "The normative text: shapes, every server rule an SDK can observe, error mapping, and `Sensitive<T>` for the bind secret.",
+          },
+          {
+            label: "Deployment guide — What a tenant's directory needs",
+            href: `${GH_BLOB}/docs/deployment/README.md`,
+            note: "The operator's side: the encryption key, the address guard and the private-network allow-list, the frame cap, and the sync job.",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Federation (SAML & OIDC) →",
+            body: "Sign-in through an external identity provider rather than a directory password.",
+            to: "docs",
+            doc: "federation",
+          },
+          {
+            title: "SCIM provisioning →",
+            body: "Let an IdP push users and groups instead of AXIAM reading them from a directory.",
+            to: "docs",
+            doc: "scim",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
     slug: "webhooks",
     section: "APIs & integration",
     navLabel: "Webhooks",

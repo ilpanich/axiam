@@ -24,6 +24,10 @@ futures-lite = { workspace = true }
 # default-features (=false) is inherited from [workspace.dependencies]; the
 # `saml` feature below re-enables it (on by default via this crate's `default`).
 axiam-federation = { workspace = true }
+# G-3 / T23.3.8: the directory management routes call `config::validate` and the
+# address guard (`DirectoryClient::guard`) on every write. Layer 3 beneath this
+# crate's layer 6; `scripts/check-crate-layering.py` holds the direction.
+axiam-directory = { workspace = true }
 axiam-pki = { workspace = true }
 # `POST /{scope}/email-config/test` builds the configured provider and sends
 # one message inline, so the operator sees the provider's own rejection at
@@ -53,6 +57,7 @@ url = { workspace = true }
 subtle = { workspace = true }
 rand = { workspace = true }
 secrecy = { workspace = true }
+zeroize = { workspace = true }
 
 surrealdb = { workspace = true }
 webauthn-rs-proto = { workspace = true }

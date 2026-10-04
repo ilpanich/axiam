@@ -95,6 +95,7 @@ fn input(tenant_id: Uuid, secret: Option<&str>) -> NewDirectoryConfig {
         group_filter: Some("(objectClass=group)".into()),
         group_member_attribute: "memberOf".into(),
         group_nesting_depth: 4,
+        group_mappings: vec![],
         sync_interval_secs: 900,
         jit_provisioning: true,
         trust_anchors_pem: vec![
@@ -428,9 +429,18 @@ async fn without_the_key_the_feature_fails_closed_and_names_the_key() {
     assert!(matches!(create_err, AxiamError::Validation { .. }));
     assert!(named(&create_err), "create must name the missing key");
 
-    let update_err = keyless.update(input(tenant, None)).await.unwrap_err();
+    // Only sealing needs the key: an update that carries a secret names it ...
+    let update_err = keyless
+        .update(input(tenant, Some(&fresh_secret())))
+        .await
+        .unwrap_err();
     assert!(matches!(update_err, AxiamError::Validation { .. }));
     assert!(named(&update_err), "update must name the missing key");
+    // ... and one that carries none never touches it (it finds no row here).
+    assert!(matches!(
+        keyless.update(input(tenant, None)).await.unwrap_err(),
+        AxiamError::NotFound { .. }
+    ));
 
     let decrypt_err = keyless.decrypt_bind_secret(tenant).await.unwrap_err();
     assert!(matches!(decrypt_err, AxiamError::ServiceUnavailable(_)));

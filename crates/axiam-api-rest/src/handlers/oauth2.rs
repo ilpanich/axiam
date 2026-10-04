@@ -432,7 +432,7 @@ fn client_query_of(req: &HttpRequest) -> String {
     }
 }
 
-fn return_to_is_on_this_deployment<C: Connection + Clone>(
+pub(crate) fn return_to_is_on_this_deployment<C: Connection + Clone>(
     state: &AppState<C>,
     return_to: &str,
     authorize_path: &str,

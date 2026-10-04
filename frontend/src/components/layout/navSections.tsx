@@ -30,6 +30,7 @@ import {
   Zap,
   MonitorSmartphone,
   ShieldCheck,
+  FolderTree,
 } from "lucide-react";
 
 interface NavItem {
@@ -212,6 +213,14 @@ export const navSections: NavSection[] = [
         label: "Federation",
         icon: <Globe size={18} />,
         requiredPermission: "federation:list",
+      },
+      {
+        // G-3: the tenant's own LDAP / Active Directory identity source. Acts on
+        // the caller's own tenant only, like the pages beside it.
+        to: "/directory",
+        label: "Directory",
+        icon: <FolderTree size={18} />,
+        requiredPermission: "directory:read",
       },
     ],
   },

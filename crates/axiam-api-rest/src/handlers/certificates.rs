@@ -429,12 +429,29 @@ pub async fn bind<C: Connection + Clone>(
     // make a certificate for a *host name* the credential of a principal. The
     // device-login path refuses it as well; this is the refusal an operator
     // sees, at the moment the mistake is made.
-    if cert.cert_type == CertificateType::Server {
-        return Err(AxiamApiError(AxiamError::Validation {
-            message: "a Server certificate cannot be bound to a service account: it identifies \
-                      a host, carries serverAuth only, and cannot authenticate a client"
-                .into(),
-        }));
+    //
+    // An exhaustive match, not `== Server`: the next certificate type that
+    // authenticates nobody must be a compile error here rather than a type
+    // this door silently accepts (G-2 added `SamlSigning` and found the
+    // deny-list shape).
+    match cert.cert_type {
+        CertificateType::Server => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "a Server certificate cannot be bound to a service account: it \
+                          identifies a host, carries serverAuth only, and cannot authenticate \
+                          a client"
+                    .into(),
+            }));
+        }
+        CertificateType::SamlSigning => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "a SamlSigning certificate cannot be bound to a service account: it \
+                          signs SAML assertions for the tenant's identity provider and cannot \
+                          authenticate a client"
+                    .into(),
+            }));
+        }
+        CertificateType::User | CertificateType::Service | CertificateType::Device => {}
     }
 
     // And that it can actually authenticate anything. A revoked or expired

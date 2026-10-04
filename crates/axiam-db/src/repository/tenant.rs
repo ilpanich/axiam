@@ -319,11 +319,27 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     }
 
     async fn delete(&self, id: Uuid) -> AxiamResult<()> {
-        // The tenant's directory configuration goes with it (T23.3.1, G-3). It
-        // is the one row this delete removes besides the tenant itself: it holds
-        // an encrypted service-account credential for the tenant's directory,
-        // and a deleted tenant must not leave that ciphertext behind. It is a
-        // single query, so the two deletes commit or roll back together.
+        // The tenant's SAML service providers go with it too (T23.2.1, G-2): a
+        // registry of where this tenant's assertions may be delivered has no
+        // meaning, and no business surviving, without the tenant.
+        //
+        // So does its SAML IdP signing credential (T23.2.1, D-21): a sealed
+        // private key for a tenant that no longer exists is key material
+        // nobody can account for, and it goes in the same transaction.
+        //
+        // And so do its pending SAML `AuthnRequest`s (T23.2.3, schema v73):
+        // short-lived, but a row naming a deleted tenant's SP and ACS URL is
+        // nothing a later tenant should be able to resume.
+        //
+        // The tenant's directory configuration goes with it (T23.3.1, G-3): it
+        // holds an encrypted service-account credential for the tenant's
+        // directory, and a deleted tenant must not leave that ciphertext
+        // behind. Its sync state (T23.3.5, schema v75: a watermark, a server
+        // identity, account ids) goes in the same transaction: the job must not
+        // find a deleted tenant's state, and a row naming accounts of a tenant
+        // that no longer exists has no business surviving it. Everything is one
+        // query, so the deletes commit or roll back
+        // together. (The broader cascade is issue #523.)
         //
         // F4 P23W2-02: and a transaction that rolled back is an error. The
         // driver reports a failed statement inside the response, not from
@@ -335,6 +351,10 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .query(
                 "BEGIN TRANSACTION; \
                  DELETE directory_config WHERE tenant_id = $id; \
+                 DELETE directory_sync_state WHERE tenant_id = $id; \
+                 DELETE saml_service_provider WHERE tenant_id = $id; \
+                 DELETE saml_idp_credential WHERE tenant_id = $id; \
+                 DELETE saml_authn_request WHERE tenant_id = $id; \
                  DELETE type::record('tenant', $id); \
                  COMMIT TRANSACTION;",
             )

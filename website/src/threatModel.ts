@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.20.0",
+ "version": "2.24.0",
  "diagramCount": 9,
- "total": 303,
- "open": 14,
- "mitigated": 289,
+ "total": 356,
+ "open": 16,
+ "mitigated": 340,
  "diagrams": [
   {
    "id": 0,
@@ -3313,9 +3313,9 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config.",
-   "width": 1438,
-   "height": 838,
+   "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config. Since Phase 23 (G-2) it also covers AXIAM as a SAML identity provider: the assertion issuer (`axiam_federation::saml_idp`, T23.2.2), the tenant's sealed signing credential (`saml_idp_credential`, D-21) and the trust boundary to the service providers it issues to. T23.2.3 adds the SSO endpoint (`/saml/v2/{tenant}/sso`, both bindings, IdP-initiated, the continue leg) and the `saml_authn_request` store that holds a request across the login hop.",
+   "width": 1478,
+   "height": 1068,
    "boundaries": [
     {
      "id": "a89fe874-1c88-526f-9ef4-378f7d6958a8",
@@ -3330,15 +3330,15 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 324,
      "y": 24,
      "w": 660,
-     "h": 760,
+     "h": 980,
      "label": "AXIAM federation services"
     },
     {
      "id": "4915d4de-0462-5843-a09e-77c433fcf2ac",
      "x": 1034,
      "y": 84,
-     "w": 380,
-     "h": 620,
+     "w": 420,
+     "h": 920,
      "label": "Data tier"
     },
     {
@@ -3348,6 +3348,14 @@ export const THREAT_MODEL: ThreatModel = {
      "w": 260,
      "h": 190,
      "label": "Tenant directory (LDAP / AD)"
+    },
+    {
+     "id": "ba2d3e30-eb5c-53ec-b467-783b02929021",
+     "x": 24,
+     "y": 854,
+     "w": 260,
+     "h": 190,
+     "label": "SAML service providers"
     }
    ],
    "nodes": [
@@ -3520,7 +3528,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Critical",
        "status": "Mitigated",
        "description": "A classic SAML attack: the attacker keeps a legitimately signed assertion but wraps it so the parser reads attacker-controlled content while the verifier checks the original signature.",
-       "mitigation": "The signature is verified over the exact element that is then consumed — the same reference is used for validation and for attribute extraction — and multiple assertions or unreferenced elements are rejected outright."
+       "mitigation": "The signature is verified over the exact element that is then consumed — the same reference is used for validation and for attribute extraction — and multiple assertions or unreferenced elements are rejected outright. **Amended 2026-10-03 (T23.2.2, D-23): every signature is verified, and only two places may hold one.** The verifier called `verify_signed_xml`, which verifies only the *first* `ds:Signature` in document order, and the binding check accepted *any* `Reference` naming the assertion, verified or not; so a document the IdP signed for another purpose and carrying no assertion (a signed `LogoutRequest` or `LogoutResponse`, a signed error response), placed ahead of a forged assertion with a dummy signature naming it, passed both and provisioned an arbitrary user — an authentication bypass, found while building AXIAM's own SAML IdP. Now a `ds:Signature` is accepted only as the enveloped child of the `Response` root or of the `Assertion` that is its child, at most one per parent, each with one `Reference` to its parent's `ID`; any other `Signature` element anywhere refuses the document. Every accepted signature is verified on its own node by xmlsec (`reduce_xml_to_signed`), IDs must be unique, and the consumed assertion must carry its own enveloped signature referencing it. Tests: `saml_idp::tests::a_signed_assertion_free_document_cannot_vouch_for_a_forged_assertion`, `no_signed_gadget_vouches_for_a_forged_assertion_wherever_it_is_placed` (three gadgets — signed LogoutRequest, LogoutResponse and error response — in `Extensions`, beside the assertion and in its `Advice`, with the dummy signature enveloped, at the root or in `Extensions`; all three failed before the fix), `a_valid_response_with_an_extra_unsigned_signature_is_refused`, and the existing XSW and fixture suites."
       },
       {
        "number": 68,
@@ -3880,7 +3888,7 @@ export const THREAT_MODEL: ThreatModel = {
       "bounded",
       "pool)"
      ],
-     "description": "axiam-directory's LDAP client (ldap3 over rustls) and its injection into the login path through the DirectoryAuthenticator port (T23.3.2).",
+     "description": "axiam-directory's LDAP client (ldap3 over rustls) and its injection into the login path through the DirectoryAuthenticator port (T23.3.2); just-in-time provisioning and explicit linking (T23.3.3, D-28); group mapping through the explicit table (T23.3.4, D-30). Every connection passes the address guard and is pinned to the vetted address, and every message from the directory passes the frame guard (T23.3.7, D-19).",
      "outOfScope": false,
      "threats": [
       {
@@ -3908,7 +3916,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "The directory is an external server a tenant administrator chooses. One that accepts and never answers, stalls on every bind, or streams entries without end could hold a task and a socket per sign-in attempt, and an attacker hammering one tenant's login could exhaust AXIAM's file descriptors for every tenant.",
-       "mitigation": "A bounded pool: at most 8 connections in use per tenant (`MAX_CONNECTIONS_PER_TENANT`) and 256 across tenants, each permit acquired within 2 s or answered `Unavailable` at once, so the overflow is refused rather than queued; at most 4 idle connections per tenant, closed after 60 s idle or 300 s of age. A permit is held until its socket is actually closed, so the bound counts real sockets. Connecting (TCP, StartTLS and the handshake together) is bounded at 5 s, each operation at 5 s, and the whole authentication at 15 s; the user search reads at most two entries. Tests: `the_pool_bounds_concurrent_connections_per_tenant` (a burst against a slow server never exceeds the per-tenant bound plus the idle cap in open sockets, and the overflow fails fast), `pools_are_partitioned_by_tenant`, `a_silent_directory_times_out_at_connect`, `a_stalling_directory_times_out_per_operation`, `the_authentication_deadline_bounds_the_whole_flow`. Residual: `ldap3`'s codec has no per-message size cap, so a hostile server can make one connection buffer whatever it sends before the deadline; memory is bounded by the deadline and the pool, not by a frame limit."
+       "mitigation": "A bounded pool: at most 8 connections in use per tenant (`MAX_CONNECTIONS_PER_TENANT`) and 256 across tenants, each permit acquired within 2 s or answered `Unavailable` at once, so the overflow is refused rather than queued; at most 4 idle connections per tenant, closed after 60 s idle or 300 s of age. A permit is held until its socket is actually closed, so the bound counts real sockets. Connecting (TCP, StartTLS and the handshake together) is bounded at 5 s, each operation at 5 s, and the whole authentication at 15 s; the user search reads at most two entries. Tests: `the_pool_bounds_concurrent_connections_per_tenant` (a burst against a slow server never exceeds the per-tenant bound plus the idle cap in open sockets, and the overflow fails fast), `pools_are_partitioned_by_tenant`, `a_silent_directory_times_out_at_connect`, `a_stalling_directory_times_out_per_operation`, `the_authentication_deadline_bounds_the_whole_flow`. **Amended 2026-10-04 (T23.3.7, P23W2-10): the frame cap.** That residual is closed. AXIAM now performs StartTLS and the TLS handshake itself and hands `ldap3` one end of a private Unix socket pair; a relay task forwards the directory's messages only after `axiam_directory::frame` has read each one whole — and the declared length is checked against the cap (default 2 MiB, `AXIAM__DIRECTORY__MAX_MESSAGE_BYTES`, clamped to 64 KiB … 16 MiB) from the header alone, before a byte of content is reserved; within the cap the buffer grows only as bytes arrive. A longer declaration ends the connection at once instead of after the operation timeout. Memory is now bounded by the cap twice (the relay's message and `ldap3`'s buffer) per connection, times the pool bounds. Tests: `an_over_long_declared_length_aborts_the_connection_without_waiting_for_it`, `the_cap_is_configurable_and_ordinary_traffic_passes_under_the_default` (`connector_guard_test.rs`), and the unit test `a_declared_length_over_the_cap_is_refused_from_the_header_alone`, which feeds the reader the six header octets only and gets the refusal, not a wait for content."
       },
       {
        "number": 296,
@@ -3933,9 +3941,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A tenant-configured directory URL turns sign-in into a probe of AXIAM's own network",
        "type": "Information disclosure",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The directory host and port are whatever a tenant administrator saves. Pointed at an internal address, each directory sign-in makes AXIAM open a TCP connection and begin a TLS handshake there, and how long the failure takes distinguishes an open port from a closed one.",
-       "mitigation": "Partly mitigated. TLS is mandatory and nothing is sent before a verified handshake, so no LDAP request reaches a host that cannot present a certificate chaining to the tenant's anchors; every outcome reaches the user as the same generic failure and the reason is logged for the operator only; connecting is bounded at 5 s and pooled per tenant. Open because the directory connector does not apply the `guarded_fetch` address policy (no refusal of private, loopback or link-local addresses): directories are usually on private networks, so a blanket refusal would break the feature it serves. Tenant administrators are trusted within their own tenant (assumption 7). Follow-up for the management routes (T23.3.8): an operator-level allow-list of directory hosts."
+       "mitigation": "**Closed 2026-10-04 (T23.3.7, D-19, D-32): the address guard.** `axiam_directory::address::guard` resolves the directory host once and judges every address it resolves to with the classifier `guarded_fetch` uses (`axiam_core::ip_class`, moved below both so they cannot disagree): loopback, unspecified, link-local (`169.254.169.254`, `fe80::/10`), multicast and special-purpose addresses are always refused; IPv4-mapped forms are judged as the IPv4 address they carry; a metadata endpoint inside a private range (`fd00:ec2::254`, `100.100.100.200`) is refused whatever the configuration says; an address of this host on AXIAM's REST or gRPC port is refused; and a private address (RFC 1918, CGNAT, ULA) is admitted only inside a network the operator listed in `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` — deployment configuration, unset admits none. An IPv6-literal URL is refused. `DirectoryClient::connect` runs the guard at **every** connection — the pool, the user bind, group lookup, the sync job — and opens its TCP socket to a vetted `SocketAddr`, so nothing resolves the name a second time; the TLS server name stays the URL's host. The management routes (T23.3.8) call the same guard before a configuration is saved, and answer every resolution-dependent refusal of a host name with one message (T-356). Tests (`connector_guard_test.rs`): `each_refused_class_is_refused_at_guard_and_at_connect_with_no_connection`, `a_hostname_that_resolves_to_loopback_is_refused`, `an_own_listener_port_is_refused_and_another_port_is_not`, `a_private_address_is_refused_without_the_allow_list_and_admitted_with_it`, `dns_rebinding_between_check_and_connect_never_reaches_loopback`, `the_connection_uses_the_pinned_address_and_resolves_once_per_connection`, `the_tls_name_checked_is_the_hostname_over_a_pinned_address`, plus the classifier's table test in `axiam-core`. Residual, stated: inside the networks the operator lists, any tenant administrator can aim the connector at any host and port, and what that buys is a TCP connect and a TLS ClientHello (after a 31-byte StartTLS request on `ldap://`) toward a host that must present a certificate chaining to that tenant's anchors before anything else is sent, answered to the user as the generic failure. The listener rule recognises this host's own addresses only — not another replica's pod address, nor a Service that forwards back to AXIAM — so the operator note says not to list AXIAM's own networks."
       },
       {
        "number": 301,
@@ -3953,7 +3961,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "Active Directory and many OpenLDAP deployments lock an account after a number of failed binds. An attacker who sprays passwords at AXIAM's login endpoint could make AXIAM perform those failed binds, locking real users out of their corporate accounts — mail, VPN, workstation — not just out of AXIAM; and the directory's own lockout may be absent altogether, leaving AXIAM's as the only brake.",
-       "mitigation": "AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`."
+       "mitigation": "AXIAM's brute-force controls sit in front of the directory. The temporary lockout is checked before the directory branch, so a locked account is refused without a bind; an inactive, suspended or deleted account and an empty password are refused without one too. A failed bind increments the same counter a wrong local password does, with the tenant's lockout policy, so AXIAM locks the account after the tenant's threshold and stops binding; a success resets it. Configure the tenant threshold below the directory's own so AXIAM's lockout always engages first; the per-IP login rate limits apply unchanged. An unusable directory does not count against the account. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `failed_binds_count_and_lock_and_then_stop_reaching_the_directory`, `an_inactive_directory_account_is_refused_before_the_directory`, `an_empty_password_never_reaches_the_directory`. **Widened 2026-10-04 (T23.3.7): names AXIAM holds no account for.** With `jit_provisioning` on, an unknown login name reaches the directory too (T23.3.3), and there is no AXIAM account whose counter could stop it; that case is T-332, closed by the W3 F4 review with a failure counter for names AXIAM holds no account for."
       },
       {
        "number": 303,
@@ -3963,9 +3971,126 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "A directory account's password belongs to the directory, where the customer's own policy, rotation and offboarding apply. A local credential beside it — a reset link mailed to the account's address, a self-service change, an administrator's or a SCIM provisioner's password write, an OPAQUE record, or simply the local hash it was created with — is a second way in that the directory never sees: disabling the person in Active Directory would leave it working, and whoever controls the mailbox or the provisioning token owns the account.",
        "mitigation": "Every local door is refused, and the account holds nothing a door could open. **The hash.** `mark_directory_account`, the marker's only writer, replaces `password_hash` with an Argon2id hash of 32 random bytes nobody holds and deletes any OPAQUE record, in the same transaction; and no sign-in path verifies a directory account's hash at all (`AuthService::login` binds to the directory, gRPC `ValidateCredentials` answers `valid: false`). **Change.** `AuthService::change_password` refuses before verifying or writing anything (`400 validation_error`, an existing code). **Reset.** The request answers a directory account exactly as an unknown address — the same `200`, the same dummy Argon2id verify, no token — so it reveals no more than existence does today; a confirm with a token that predates the marking spends it and writes nothing. **Administrators.** The native admin API has no password write; SCIM `PATCH` refuses `password` for a directory account with RFC 7644's `mutability`. **OPAQUE.** `login/start` serves a directory account the decoy whatever the table holds, `login/finish` refuses one with the generic `401`, and `store_credential` — the one place a record is written — refuses one too. **The marker itself** cannot be set or cleared by the admin API or SCIM (neither `CreateUser` nor `UpdateUser` carries it). Tests: `directory_account_test.rs` in `axiam-auth` (change, reset request, reset confirm), in `axiam-api-rest` (the change, reset and confirm routes, both OPAQUE doors, the admin API), in `axiam-scim` (password write, marker), `grpc_units.rs::validate_credentials_refuses_a_directory_account`, and `user_directory_marker_test.rs` (the transaction). Residual: a passkey enrolled by the account keeps working until the account is disabled in AXIAM (the sync job, T23.3.5, carries directory disablement over)."
+      },
+      {
+       "number": 331,
+       "title": "A hostile directory's malformed message crashes or panics the connector every tenant shares",
+       "type": "Denial of service",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`ldap3 0.12` hands every message to `lber`, whose parser recurses once per nested constructed element with no bound: a few tens of kilobytes of nesting overflow a worker's stack, and a stack overflow aborts the process — every tenant's sign-ins with it. Its envelope decoder `expect`s a message id and an operation, so a short message panics the connection's task. The directory is a tenant administrator's choice.",
+       "mitigation": "The frame guard beneath `ldap3` (`axiam_directory::frame`, through the crate's relay): AXIAM performs StartTLS and the TLS handshake itself and gives `ldap3` one end of a private Unix socket pair; a relay task reads each message from the decrypted stream and forwards it only after checking it whole — an outer `SEQUENCE`, definite lengths of at most four octets, single-octet tags, every element inside its parent, constructed nesting at most 16 deep (walked iteratively, so the check cannot itself be driven into the stack it protects), and an envelope of a one-to-four-octet message id followed by an operation. The first message refused closes both sockets, the operation in flight fails as `Unavailable`, and the reason is logged at `warn`. On a platform without Unix sockets the connector refuses to connect rather than run without the guard. Tests: `nesting_past_any_stack_is_refused_and_the_process_survives` (20 000 levels), `an_envelope_ldap3_would_panic_on_is_refused`, and the unit tests `nesting_is_bounded_without_recursion` (100 000 levels), `envelopes_ldap3_would_panic_on_are_refused`, `an_element_that_overruns_its_parent_is_malformed`. Residual: what `ldap3` does with a well-formed operation is still `ldap3`'s code; a panic there unwinds that connection's task only (the release profile keeps `panic = \"unwind\"`), and search entries are read by AXIAM's own fallible parser (T23.3.2), never `SearchEntry::construct`."
+      },
+      {
+       "number": 332,
+       "title": "With just-in-time provisioning on, an unknown name costs a directory bind that no AXIAM lockout counts",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "T-302's brake is the per-account counter, and an unknown name has no account. With `jit_provisioning` on, every sign-in for a name AXIAM does not hold is a directory search and, when the directory knows the name, a bind with the presented password: AXIAM can be used to spray passwords at directory accounts that have never signed in to AXIAM — guessing them, or tripping the directory's own lockout for them — at whatever rate the login endpoint admits.",
+       "mitigation": "**Closed 2026-10-04 (W3 F4 review, P23W3-02).** A failure counter for names AXIAM holds no account for: `axiam_auth::unknown_name_lockout`, keyed by tenant and the login name as typed, trimmed and lower-cased (directories compare names without regard to case), applying the tenant's own lockout policy — after `max_failed_login_attempts` failures the directory decided (a wrong password or no such entry; an unusable directory counts against nobody, as for accounts) the name is locked for `lockout_duration_secs`, growing by the backoff to `max_lockout_duration_secs`. A locked name is answered as an unknown user, dummy verify included, **without asking the directory**, even with the right password; a successful sign-in clears it. The provisioning gate, the hash permit taken first, the per-IP login limits and the unknown-user answer (T-333) still stand in front of it. Tests (`axiam-auth/tests/directory_provisioning_test.rs`): `p23w3_02_guessing_at_an_unknown_name_stops_reaching_the_directory`, `p23w3_02_failures_below_the_threshold_still_provision`, the counter's unit tests (`unknown_name_lockout::tests`), and the three that pinned the bounds before: `every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify`, `saturation_answers_the_same_503_before_the_directory_is_contacted`, `a_tenant_without_a_directory_observes_nothing_new`. Residual: the counter lives in each process's memory, so with N replicas a name gets at most N times the policy's attempts per lockout window (the bound the in-memory rate-limit governor has) and a restart forgets it; at most 50 000 names are tracked per process, and a full table makes room from the least recently failed name that is not locked, so a spray of other names cannot free a locked one; whoever guesses at a name can lock it out of its first sign-in for the lockout window — the account lockout's own trade-off."
+      },
+      {
+       "number": 333,
+       "title": "Just-in-time provisioning tells an outsider which names the directory holds",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "If a name the directory knows answered differently, or later, than one it does not — or a refused provisioning looked unlike a wrong password — the login endpoint would enumerate the corporate directory for anyone, and the account's creation would itself be a signal.",
+       "mitigation": "Every non-success branch of `AuthService::login_unknown_user` — no directory, provisioning off, no entry, a wrong password, an ambiguous entry, an unusable attribute, a collision (T-334), a directory that cannot be reached — is the unknown-user `InvalidCredentials`, and the dummy Argon2id verify runs beside the directory call under a hash permit taken first, so each costs at least what an unknown name costs. Success creates the account only after the bind succeeded; administrators and the audit log see it, the caller sees an ordinary sign-in. Residual, as for T-301: a bind usually costs more than a verify, so a name the directory knows can answer measurably later; the per-IP login limits bound the sampling. Tests: `every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify` (each branch timed against the unknown-user cost), `a_first_login_creates_an_active_marked_account_and_signs_in`."
+      },
+      {
+       "number": 334,
+       "title": "A directory administrator takes over a local AXIAM account by creating an entry with its name or address",
+       "type": "Elevation of privilege",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "Whoever administers the tenant's directory can create an entry called `admin`, or one carrying a local administrator's email address. Linking by name — at sign-in or in the sync job — would make that entry's password the local account's.",
+       "mitigation": "D-28: just-in-time provisioning never links, and the sync job never creates or links; both act only on accounts already carrying `directory_external_id`, whose only writers are on the directory path (D-18, D-29). Before creating, a collision probe compares the entry's username and email, lowercased, with both columns of every account of the tenant — every status, tombstones included — and the v71 unique indexes decide a concurrent race; a collision is the generic failure plus a `directory.jit_refused` audit row naming the collision, never the password. Linking an existing account is an explicit administrator act (T-336, T-337). Tests: `an_entry_that_collides_with_a_local_account_is_refused_and_audited` (five collision variants), `two_concurrent_first_logins_yield_exactly_one_account`, `a_local_account_is_never_touched` (sync). Residual: the comparison is Unicode lowercasing, not compatibility normalisation or confusable detection, so a fullwidth or look-alike spelling of `admin` is a distinct account — a phishing aid in a list of users, not a takeover."
+      },
+      {
+       "number": 335,
+       "title": "Directory-supplied attributes inject control characters, bidirectional overrides or oversize values into AXIAM's records",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A provisioned account's username, email and display name are whatever the directory says. Control characters, `U+202E`-style overrides or a megabyte of display name would reach every log line, administrator list, token claim and email that renders them.",
+       "mitigation": "One set of cleaners, `axiam_core::models::directory_profile`, used by provisioning and by the sync job: a username or email holding a control, whitespace or bidirectional-control character, or longer than its bound, is refused rather than repaired (the sign-in fails with the generic answer and an `unusable_attributes` audit row, and an entry without a plausible email is refused too, D-29); a display name loses its overrides and controls, has its whitespace collapsed and its length capped. The client drops any attribute value over 1 024 bytes rather than truncating it — a truncated address is another address. Tests: `directory_supplied_attributes_are_cleaned_before_they_are_stored`, `an_entry_without_a_usable_address_is_refused_and_audited`, `a_value_that_cannot_be_cleaned_leaves_the_account_alone` (sync), and the cleaners' unit tests."
+      },
+      {
+       "number": 336,
+       "title": "A linked account keeps a credential that signs in without the directory deciding",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Linking turns a local account into a directory account. Marking it retires the local password and the OPAQUE record (D-18), but its sessions, refresh tokens, passkeys, federation links and certificates were issued on the old basis; any one left alive is a way in that disabling the person in the directory does not close.",
+       "mitigation": "`AuthService::link_local_account_to_directory` (D-28) marks the account, then deletes its WebAuthn credentials and its federation links, revokes its still-active `User`-type certificates, and revokes its sessions and OAuth2 refresh tokens last — through the repositories, so the session validation cache and the revocation feed see it. TOTP is kept: it is a second factor behind the directory password. A link interrupted part-way is completed by calling it again. **Amended 2026-10-04 (W3 F4 review, P23W3-01):** federation links were missing from the set — an upstream OIDC or SAML identity bound to the account resolved its link and opened a session without the directory deciding, exactly as a passkey does; linking now deletes every link the account holds and counts them in the audit row (`federation_links_deleted`), and a deleted link is not re-made, because federated provisioning never links by name or address. Tests: `linking_marks_the_account_and_retires_what_the_directory_does_not_decide`, `p23w3_01_linking_removes_the_accounts_federation_links`, `an_interrupted_link_is_retryable_and_the_retry_completes_it`. Residual (D-29): no certificate carries a user binding, so certificates are found by convention — `metadata.user_id`, or a subject CN equal to the username or email, ignoring case — with over-matching the accepted side, and a real binding is a filed follow-up; a certificate authenticates only as the service account it is bound to, which limits what a missed one could do."
+      },
+      {
+       "number": 337,
+       "title": "An administrator links a colleague's account to a directory entry they control",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Linking hands an account's password to the directory. A tenant administrator who can also create directory entries could create one with a colleague's username, link the colleague's account, and sign in with a password of their own choosing.",
+       "mitigation": "Linking resolves the entry by the account's own username through the tenant's directory — never an identifier the caller supplies — refuses an entry already linked to another account and an account linked to a different entry, stays inside the path's tenant, revokes everything the account held (T-336), which its owner notices as being signed out everywhere, and writes a `directory.account_linked` row with the actor and the counts. Contract §30 puts the route behind a permission of its own, `directory:link`, apart from `directory:write`. It adds no capability a tenant administrator lacks: `users:update` already changes an account's email, and with it where the reset mail goes. Tests: `an_entry_already_linked_elsewhere_is_refused_and_nothing_is_revoked`, `an_account_linked_to_a_different_entry_is_refused`, `a_deleted_account_cannot_be_linked`, `an_entry_that_cannot_be_resolved_refuses_the_link_and_revokes_nothing`."
+      },
+      {
+       "number": 338,
+       "title": "A directory administrator grants AXIAM roles by naming or nesting a group",
+       "type": "Elevation of privilege",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "Group mapping turns directory membership into AXIAM group membership, and so into roles. Matching by name or DN prefix, or creating AXIAM groups from directory ones, would let whoever administers the directory create `admins` — or nest any group inside a mapped one — and grant themselves privileges no tenant administrator assigned.",
+       "mitigation": "D-30: an explicit table only. `DirectoryConfig.group_mappings` maps a directory group DN, compared after RFC 4514 normalisation (`axiam_directory::dn`), to an AXIAM group of the same tenant; at most 500 rows, written only through the configuration; no match by name, no prefix or wildcard, and no AXIAM group is ever created. Nesting is followed to the configured depth, and only groups the table names count. Tests: `unmapped_directory_groups_grant_nothing_including_one_named_like_an_axiam_group`, `a_mapping_matches_whatever_the_spelling_of_the_dn`, `a_role_through_a_mapped_group_is_effective_and_gone_after_removal`, `the_table_holds_at_most_five_hundred_rows`."
+      },
+      {
+       "number": 339,
+       "title": "A deep, cyclic or enormous group graph exhausts the connector during sign-in",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Nested groups are resolved on the sign-in path. A directory whose groups nest without end, loop, or number in the tens of thousands could make one sign-in issue unbounded searches and hold a pooled connection while it does.",
+       "mitigation": "Resolution follows at most `group_nesting_depth` levels (0–10, default 5), terminates cycles on the normalised DN, and refuses — rather than truncates — at the 1 001st group; a ranged `memberOf` (Active Directory's answer past 1 500 values) counts as the cap. Every search runs under the per-operation deadline on the pooled service connection, inside the per-tenant bounds, and every message passes the frame cap (T-295). A refused resolution refuses the sign-in (T-340). Tests: `nesting_is_followed_to_depth_n_and_n_plus_one_is_not_asked`, `a_cycle_terminates`, `the_hard_cap_of_one_thousand_groups_refuses`, `member_of_beyond_the_cap_or_in_ranged_form_refuses`, `a_slow_directory_is_unavailable_within_the_deadline`."
+      },
+      {
+       "number": 340,
+       "title": "Memberships the directory revoked survive while the directory cannot be asked",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A user removed from a mapped group in the directory should lose the AXIAM group. A sign-in that kept the old memberships whenever the directory could not answer — an outage, a timeout, the cap — would keep access the directory had taken away.",
+       "mitigation": "Fail closed (D-30): the mapping runs on every successful directory sign-in before any session or MFA challenge, and a lookup that fails or hits a cap refuses the sign-in with the generic answer, changes nothing and does not count against the account; a provisioned account whose lookup fails holds no memberships. The sync job applies the same mapping on every run, and a failed run changes nothing. Tests: `a_failed_group_lookup_refuses_the_sign_in_and_changes_nothing`, `a_provisioned_account_whose_group_lookup_fails_is_refused_and_holds_nothing`, `the_group_mapping_follows_the_directory_on_every_run`. Residual: a session already open keeps the memberships until the next sign-in or the next successful sync run applies the removal (the decision cache is then flushed, T-343); deactivation, not mapping, revokes sessions."
+      },
+      {
+       "number": 342,
+       "title": "A mapping row or a mapped edge places a user in another tenant's group",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The mapping table names AXIAM groups by id, and one process serves every tenant. A row naming another tenant's group, or an edge written without the tenant, would grant one tenant's directory users another tenant's roles.",
+       "mitigation": "Every `group_id` in the table is checked, at write and before anything is written, to be a group of the configuration's own tenant; membership writes and removals are scoped by tenant; a row whose group has since been deleted is skipped, never re-pointed. Tests: `a_mapping_naming_another_tenants_group_is_refused_and_writes_nothing`, `a_mapping_naming_no_group_at_all_is_refused`, `directory_memberships_are_tenant_scoped`, `a_mapping_row_whose_group_was_deleted_is_skipped`."
+      },
+      {
+       "number": 343,
+       "title": "A cached authorization decision outlives the directory's removal of a membership",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Authorization decisions are cached. A membership the mapping removes but whose cached allow survives keeps granting the role until the entry expires — on every replica.",
+       "mitigation": "Mapping writes go through `RepositoryGroupMapper`, whose `MembershipChangeHook` (installed by `axiam-server`) flushes the decision cache for the user, locally and by broadcast, whenever a membership changes — as the group-membership routes do. Tests: `a_membership_change_flushes_the_decision_cache_through_the_hook`, `a_role_through_a_mapped_group_is_effective_and_gone_after_removal`. Residual: a broadcast that fails is logged, and the other replicas' entries then live out the cache TTL."
+      },
+      {
+       "number": 356,
+       "title": "The directory management routes' address-guard answers map the deployment's internal DNS",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "A tenant administrator saving a directory URL with a host name learned from the `400` whether the name did not resolve, resolved into a private range outside the allow-list, to loopback, to the metadata service or to one of AXIAM's own listeners — so the write route answered, thirty times a minute, which names exist in the deployment's DNS and into which range they point: reconnaissance of an operator's network that a tenant in a multi-tenant deployment has no business seeing.",
+       "mitigation": "Decided in the W3 F4 review (P23W3-04, 2026-10-04): for a host **name**, every refusal that depends on what the name resolved to — it did not resolve, it resolved to too many addresses, to loopback, link-local or the metadata service, unspecified, multicast or special-purpose space, an own listener, or a private range outside the allow-list — is one `400` message and one audit rule, `address_guard.not_permitted`; the specific rule goes to the operator's log only. An IP literal, an IPv6 literal and an unparseable URL keep their specific answers, which reveal nothing the administrator did not type. The writes stay on the `directory_admin` bucket (30 a minute) and every refusal is audited. Tests: `p23w3_04_a_refused_host_name_gets_one_answer_whatever_it_resolves_to`, `the_address_guard_refuses_each_class_as_a_400_naming_the_rule`. Residual: a write that succeeds still tells the administrator that the name resolved into a permitted range — inherent in saving it, and confined to networks the operator listed for directories."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "5ecdb607-7d05-50ee-867f-13653e64219b",
@@ -3999,6 +4124,510 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The directory key is optional. A missing key must not mean a plaintext secret, a default key, or a server that refuses to boot over a feature most deployments do not use.",
        "mitigation": "Unavailable rather than insecure. Without the key a save is refused with an error naming it, `decrypt_bind_secret` answers `ServiceUnavailable`, and the authenticator turns that into `Unavailable` before any connection is opened. Boot logs the key's absence at INFO and continues. Test: `a_missing_encryption_key_is_unavailable_with_no_connection`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "0650fae0-6076-575a-82ea-efbb5f39ab39",
+     "kind": "actor",
+     "x": 49,
+     "y": 914,
+     "w": 150,
+     "h": 80,
+     "name": "SAML service provider (registered per tenant)",
+     "lines": [
+      "SAML service",
+      "provider",
+      "(registered per",
+      "tenant)"
+     ],
+     "description": "A relying application (SaaS or internal) registered in the tenant's SP registry (T23.2.1): entity id, ACS allow-list, NameID policy, attribute mapping. External: AXIAM controls what it signs for the SP, not what the SP does with it.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 306,
+       "title": "A leaked signing key keeps forging assertions after the credential is retired",
+       "type": "Spoofing",
+       "severity": "Critical",
+       "status": "Open",
+       "description": "Service providers pin the IdP certificate from metadata and cache metadata for hours or days, and SAML has no revocation channel SPs consult. Once a tenant's signing key has leaked, every SP that trusts the tenant accepts assertions forged for any user until its own administrator removes the certificate.",
+       "mitigation": "Partly mitigated. Retiring the credential destroys its key and takes its certificate out of the tenant's metadata (D-21; the metadata endpoint is T23.2.5), and a credential is valid for at most two years (`MAX_SAML_IDP_CREDENTIAL_VALIDITY_DAYS`), after which AXIAM's own signer refuses it (T-308) and SPs that check validity do too. Open because nothing AXIAM does reaches an SP's pinned trust: recovering from a leak means telling every SP administrator, which is a procedure, not a control. T-304 and T-305 are what keep the key from leaking."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "d311d7ba-fb5e-54ed-aab1-9d7aed357c69",
+     "kind": "process",
+     "x": 824,
+     "y": 514,
+     "w": 140,
+     "h": 140,
+     "name": "SAML assertion issuer (saml_idp)",
+     "lines": [
+      "SAML",
+      "assertion",
+      "issuer",
+      "(saml_idp)"
+     ],
+     "description": "axiam_federation::saml_idp (T23.2.2, behind the `saml` feature): builds the assertion (pairwise or email NameID, bearer confirmation, five-minute conditions, AuthnStatement from the session, attribute mapping), signs it with the tenant's credential (enveloped XML-DSig, rsa-sha256), optionally signs the response, checks its own output and returns the HTTP-POST binding value. Pure library; the SSO endpoint (T23.2.3) calls it.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 305,
+       "title": "The SAML signing key leaks from memory, a log line, a Debug print or an error",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The signing key is opened on every sign-on. A copy left in a freed buffer, printed by a derived `Debug`, interpolated into a log line or carried in an error string reaches crash dumps, log pipelines and support tickets, and from there anyone can sign as the tenant.",
+       "mitigation": "The plaintext exists only as `SamlIdpSigningKey::private_key_pem`, a `Zeroizing<String>` whose `Debug` prints `[REDACTED]` (T23.2.1). The issuer (`axiam_federation::saml_idp`) decodes it to DER itself, into `Zeroizing` buffers, rather than through the `pem` crate, whose parser keeps intermediate copies of the base64 text it does not wipe; the DER is dropped as soon as the last signature is made. `SamlIdpError` is a closed set of fixed strings with no fields, so no refusal can carry key material, and the signing path logs only xmlsec's own error text. The pairwise-identifier key (D-22) is held the same way (`PairwiseKey`: zeroizing, `Debug` redacted). Tests: `no_debug_output_carries_key_material`, `a_pkcs1_key_signs_too_and_a_key_that_does_not_match_the_certificate_is_refused`. Residual: libxmlsec1 and OpenSSL hold their own copy of the key for the duration of a signature and release it under their own discipline (OpenSSL clears an RSA key's private components when it frees them)."
+      },
+      {
+       "number": 307,
+       "title": "An assertion is signed with one tenant's key, or under one tenant's Issuer, for another tenant's user or SP",
+       "type": "Elevation of privilege",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "Credentials, SP registrations, users and sessions of every tenant sit in one process. An issuer that took its tenant from the SP row, the session or the credential rather than from the request could sign tenant B's user into tenant A's SP, or put tenant A's `Issuer` on tenant B's assertion; an SP trusting tenant A would then admit a user tenant A never authenticated.",
+       "mitigation": "The tenant is an explicit input taken from the request path (`SsoIssuance::tenant_id`), and the `Issuer` and `NameQualifier` are `idp_entity_id(public_base_url, tenant_id)` — one function, never a stored value; T23.2.5's metadata `entityID` uses the same one. `SamlIdpIssuer::issue` refuses with `TenantMismatch` (answered `Responder`) unless the SP row, the user, the session, every group and role passed for the attribute statement, and the signing credential all carry that tenant; the session must also be the user's and unexpired. Tests: `every_input_from_another_tenant_is_refused`, `a_credential_outside_its_validity_window_or_not_active_refuses_to_sign` (another tenant's credential), `the_session_must_be_the_users_and_live_and_the_account_may_act`, `the_idp_entity_id_is_one_function_of_the_base_url_and_the_path_tenant`."
+      },
+      {
+       "number": 308,
+       "title": "An expired, not-yet-valid or retired credential signs assertions",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`SamlIdpCredentialService::get_active_signing_key` returns the tenant's active row whatever its dates (T23.2.1 left the decision to the signer). A signer that used it anyway would issue under a certificate its SPs may already distrust, or keep a credential in service past the date an administrator relied on.",
+       "mitigation": "The signer refuses before any key is decoded: the credential must be `active` and `not_before ≤ now < not_after`, otherwise `CredentialNotActive` or `CredentialNotValid`, both answered `Responder` with no status message. Tests: `a_credential_outside_its_validity_window_or_not_active_refuses_to_sign` (one second past `not_after`, exactly at it, one second before `not_before`, `next`, `retired`)."
+      },
+      {
+       "number": 310,
+       "title": "The SAML signing certificate is accepted as a TLS or client-authentication credential",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The leaf is signed by a CA of the tenant's organization, which other verifiers — mTLS, device login — trust. A SAML signing certificate those verifiers accepted would make the IdP key a client credential, and an application-layer use of one key a cross-protocol one.",
+       "mitigation": "D-21's `SamlSigning` profile: keyUsage `digitalSignature` only (no `keyEncipherment`, even on RSA), extendedKeyUsage `id-kp-documentSigning` (RFC 9336) only, no SANs, so no TLS verifier accepts it for server or client authentication. The type is internal (`serde`-skipped and absent from the OpenAPI enum) and is refused by certificate generation, CSR signing, the bind endpoint, device login and mTLS; the leaf is never a `certificate` row. Tests (T23.2.1): `saml_idp_credential_test.rs::the_generic_issuance_paths_and_the_certificate_store_refuse_saml_signing`, `mtls_test.rs::a_saml_signing_certificate_cannot_log_in_as_a_device`, `device_auth_test.rs::a_saml_signing_certificate_cannot_be_bound`."
+      },
+      {
+       "number": 311,
+       "title": "The signer emits a wrapped, mis-referenced or markup-injected document under the tenant's signature",
+       "type": "Tampering",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "Signature-wrapping attacks need a signed element and a second, unsigned one an SP reads instead. An issuer that signed the wrong element, emitted two assertions, reused an `ID`, referenced something other than the element its signature sits in, or let a user-controlled value — a display name, a group name, an attribute name, an `AuthnRequest` id — close an element and open another, would hand an attacker a document signed by the tenant whose meaning the attacker chose.",
+       "mitigation": "The assertion is written as text through one escaping function for element text and attribute values alike (`&`, `<`, `>` and quotes as entities; tab, line feed and carriage return as character references; a character XML 1.0 cannot carry becomes U+FFFD). `InResponseTo` is echoed only when it is an ASCII `NCName` of at most 256 bytes. `ID`s are `_` followed by 160 CSPRNG bits. Signing is enveloped XML-DSig, `rsa-sha256` over `sha256` with exclusive canonicalization, the reference naming the signed element's `ID` and the certificate in `KeyInfo`; the assertion is signed on its own, embedded, and the response signed after it when the SP's `sign_responses` is set, so that signature covers the signed assertion. Before anything is returned the issuer re-parses its output and requires exactly one `Assertion`, the root's child; exactly the intended `ds:Signature`s, each referencing its parent's `ID`; two distinct `ID`s; and every signature verifying against the credential's certificate with the xmlsec verifier the SP side uses. Anything else is `SigningFailed`. Tests: `the_output_has_one_assertion_unique_ids_and_matching_references`, `values_are_escaped_and_round_trip_as_text_not_markup`, `a_single_changed_byte_in_any_signed_element_fails_verification`, `with_response_signing_on_both_signatures_verify_and_the_response_signature_covers_the_signed_assertion`, `xsw1_and_xsw2_wrapped_copies_of_a_signed_response_are_refused_by_the_sp`, `assertion_level_wrapping_of_the_builder_output_is_refused_by_the_sp`, `a_pkcs1_key_signs_too_and_a_key_that_does_not_match_the_certificate_is_refused` (a signature the certificate does not verify never leaves)."
+      },
+      {
+       "number": 312,
+       "title": "Service providers link a user across SPs, or back to the AXIAM account",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "A `NameID` that is the same at every SP, or derivable from the user id, lets SPs that compare notes — or an attacker who breaches two of them — follow a person across services the person kept apart, and hands every SP an AXIAM internal identifier.",
+       "mitigation": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. Open because `SessionIndex` is the AXIAM session id (plan §4 G-2, so that SLO and the revocation feed revoke the same thing): it is identical at every SP of one sign-on, as is `AuthnInstant`, so SPs that collude can correlate concurrent sessions despite pairwise identifiers. T23.2.4 decides whether SLO can map a per-SP index back to the session."
+      },
+      {
+       "number": 313,
+       "title": "An email NameID vouches for an address AXIAM never verified",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "An SP that keys accounts on email trusts the IdP to say who owns the address. In a tenant that allows self-registration, someone can create an account under a victim's address and, within the email-verification grace period (or as one of the accounts that stay pending for life, T-160), sign on to such an SP and land in the victim's existing account there.",
+       "mitigation": "Decided in T23.2.3 (D-25): an email `NameID` is issued only for an address something vouches for — `email_verified_at` is set, or the account is `Active`, which only the verification flow, an administrator, SCIM or the directory path make it, each of which proved or wrote the address. A `PendingVerification` account with an unverified address — a self-registration inside its grace period, or an account provisioned pending and never activated — is answered `InvalidNameIDPolicy` (`NameIdUnverified`) at an email-keyed SP, never with a weaker identifier, and the `email` attribute is omitted for it, since an SP may key accounts on that just as well. Such an account still signs on wherever the `NameID` is the pairwise default. An account with no address is refused (`NameIdUnavailable`). Tests: `t_313_an_unverified_pending_address_is_never_asserted`, `an_email_name_id_is_the_address_and_a_missing_address_is_a_refusal`."
+      },
+      {
+       "number": 314,
+       "title": "The authentication context overstates how the user authenticated",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "SPs that require a second factor read `AuthnContextClassRef`. Copied from the SP's `RequestedAuthnContext`, or from an upstream IdP's claim, it says multi-factor for a password login, and the SP releases what it meant to protect.",
+       "mitigation": "`authn_context_class_ref` takes the session's `amr` and nothing else; there is no request parameter to echo, the rule `acr_for` follows for OIDC (W4). Multi-factor evidence (`mfa`, or `hwk`/`swk` with `user`) is the REFEDS MFA profile; `x509` is `X509`; `pwd` is `PasswordProtectedTransport`; a federated login (`fed`), a presence-only key and no evidence are `unspecified`. Tests: `the_authn_context_mapping_table_is_pinned`, `the_authn_statement_carries_the_session_id_instant_and_class`."
+      },
+      {
+       "number": 315,
+       "title": "An SP registered for encrypted assertions receives them in plaintext",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "An administrator who set `encrypt_assertions` expects the attributes to be readable by the SP alone — not by a TLS-terminating proxy in front of it, nor from browser history. A silent downgrade would release them in the clear while the console says otherwise.",
+       "mitigation": "Assertion encryption (D-2) is not implemented: `samael` has no encryption API and nothing in the tree could verify an AES-256-GCM `EncryptedAssertion`. The issuer refuses such an SP outright (`EncryptionUnsupported`, answered `Responder`) and never emits the plaintext. Residual: the registry still accepts the flag, so the refusal surfaces at sign-on rather than at save; the write path (T23.2.5/T23.2.6) should refuse it until encryption ships. Test: `request_shaped_refusals`."
+      },
+      {
+       "number": 316,
+       "title": "A document signed by the tenant's key is harvested as a signature-wrapping gadget",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Some SP verifiers check only the first signature in a document, or treat a signature as covering an assertion because a reference names it. Against them, any document the tenant's key signed that carries no assertion — an error response echoing a request id an attacker chose, for instance — can be placed ahead of a forged assertion and vouch for it. Anyone who can send an `AuthnRequest` could collect one.",
+       "mitigation": "The tenant's key signs one shape of document only: a response carrying exactly one assertion (T-311). Failure responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`, `RequestDenied`, `InvalidNameIDPolicy`) carry no assertion and are never signed, which SAML Profiles §4.1.3.5 permits, and they have no status message or detail. Tests: `failure_responses_are_status_only_unsigned_and_echo_what_can_be_echoed`, `axiam_own_sp_refuses_a_failure_response`. Constraint for T23.2.4: a signed `LogoutRequest` or `LogoutResponse` is exactly such a document, so SLO signing needs its own decision rather than reusing this key by default."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "2a2a1983-07c2-5847-a3d0-7de61be737f2",
+     "kind": "store",
+     "x": 1079,
+     "y": 719,
+     "w": 170,
+     "h": 80,
+     "name": "saml_idp_credential (sealed signing key)",
+     "lines": [
+      "saml_idp_credential",
+      "(sealed signing key)"
+     ],
+     "description": "One active and at most one next credential per tenant (schema v72, D-21): the RSA-4096 SamlSigning leaf and its private key sealed AES-256-GCM under pki_encryption_key by the database custodian.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 304,
+       "title": "The tenant's SAML signing key is disclosed from the database or a backup",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Whoever holds a tenant's SAML signing key can sign an assertion for any user of the tenant, to every service provider that trusts the tenant's metadata: account takeover at every SP, with no AXIAM sign-in at all. The key lives in the tenant's `saml_idp_credential` row.",
+       "mitigation": "Decision D-21: the key is sealed with AES-256-GCM under `pki_encryption_key` through `DatabaseCaKeyStore` — the database custodian, chosen explicitly whatever the deployment's CA custody — with the custody recorded on the row. A database dump or backup alone yields ciphertext; it takes the dump and the provider-held `pki_encryption_key` together. Only `SamlIdpCredentialRepository::get_active_sealed` selects the ciphertext (every list and get returns `SamlIdpCredential`, a type with no key field); the leaf is never a `certificate` row, so no certificate API can return it; `retire` clears the sealed key in the same write that takes the row out of its slot; and both SAML tables go with their tenant in the tenant-delete transaction. Tests: `saml_idp_credential_test.rs::an_issued_credential_has_the_saml_profile_chains_to_its_ca_and_seals_its_key` (T23.2.1). Residual: no audit record is written when the key is unsealed — it is unsealed on every sign-on, so a record per read would be one per assertion — and a compromised application process can unseal it exactly as the signer does."
+      },
+      {
+       "number": 309,
+       "title": "Sign-on stops when the active credential expires or is retired before a successor is in place",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "Because the signer refuses an expired credential (T-308), a tenant whose credential reaches `not_after` stops issuing assertions to every SP, and so does one whose administrator retires the active credential. SPs pin the certificate, so a successor must be published in metadata before it signs, or every SP rejects its first assertion.",
+       "mitigation": "Open until rotation exists. The `next` slot is in the schema (at most one per tenant, enforced by the database), so a successor can be issued ahead of time, but there is no promote verb and the metadata endpoint does not yet publish `next` (T23.2.5). Until then an administrator issues the successor early and coordinates the switch with each SP. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "7443c8b5-68b4-5ac9-bd3d-f39cdb1d21be",
+     "kind": "process",
+     "x": 624,
+     "y": 794,
+     "w": 140,
+     "h": 140,
+     "name": "SAML SSO endpoint (/saml/v2/{tenant}/sso)",
+     "lines": [
+      "SAML SSO",
+      "endpoint",
+      "(/saml/v2/{tenant}/sso)"
+     ],
+     "description": "axiam-api-rest `handlers::saml_idp` (T23.2.3, behind `saml`): GET/POST `/saml/v2/{tenant}/sso` (HTTP-Redirect and HTTP-POST bindings), `/sso/idp-initiated` and `/sso/continue`. The first leg decodes, parses and checks the AuthnRequest (DTDs refused, signature, Destination, ACS allow-list, binding, RelayState, request-id replay) and holds it under an opaque handle bound to the browser; the second resolves the OP session through the tenant-keyed lookup, runs the login hop, and consumes the handle before calling the issuer. Answers 404 when the tenant's saml_idp_enabled is off (D-20).",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 317,
+       "title": "An AuthnRequest that does not come from the registered SP obtains an assertion for it",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Anyone can send an `AuthnRequest` naming any SP's entity id as its `Issuer`. If the SSO endpoint believed the request's own claims — its ACS URL, its binding, its requested identifier — a forged request could decide where and in what form an assertion for that SP is delivered.",
+       "mitigation": "The SP is found by `Issuer` within the tenant of the request path only, and nothing the request names is used until it has passed every check that needs no principal (D-24): for an SP that registered a signing certificate, any signature present must verify — on HTTP-Redirect over the exact query octets received (SAML Bindings §3.4.4.1), on HTTP-POST as the single enveloped signature of the root (D-23's placement rule on the receiving side), SHA-1 refused — and an SP with `want_authn_requests_signed` gets nothing unsigned. A signed request must carry `Destination`, which must be the tenant's own SSO URL. Even an unsigned request can only steer delivery to an ACS URL the SP registered (T-318), so a forged one at most signs the user in to that SP as themselves (T-322). Tests: `a_signing_sp_s_missing_bad_or_wrong_key_signature_is_refused_on_both_bindings`, `an_acs_outside_the_registry_or_a_destination_mismatch_is_refused_before_the_hop`, `saml_idp::request::tests` (placement gadgets, exact-octet verification, SHA-1)."
+      },
+      {
+       "number": 318,
+       "title": "ACS redirection: the signed assertion is posted to a URL the SP never registered",
+       "type": "Tampering",
+       "severity": "Critical",
+       "status": "Mitigated",
+       "description": "An `AuthnRequest` names the URL the response is posted to. Honouring an attacker's URL turns the IdP into a machine that hands a victim's signed assertion to the attacker, who presents it to the real SP as the victim.",
+       "mitigation": "The ACS URL is resolved against the SP's registration only: an `AssertionConsumerServiceURL` must equal a registered endpoint byte for byte, an index must name one, neither means the SP's default, both is malformed, and the endpoint must use HTTP-POST. Checked before the login hop, again by `SamlIdpIssuer::failure` and `issue`, and an unregistered URL is answered with an error page that posts nowhere — not even a failure response. The response's `Destination` and `Recipient` are the URL used; the auto-post page's `Content-Security-Policy` allows `form-action` to that URL's origin and nothing else. Tests: `an_acs_outside_the_registry_or_a_destination_mismatch_is_refused_before_the_hop` (unregistered, near-miss, unknown index, URL and index together), `redirect_binding_end_to_end_through_the_login_hop` (the CSP)."
+      },
+      {
+       "number": 319,
+       "title": "A replayed AuthnRequest or pending handle yields a second assertion",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A captured `AuthnRequest`, or the handle of one held across the login hop, presented again — from the same browser or another — obtains a second response answering the same request, which an SP that tracks outstanding requests poorly will accept.",
+       "mitigation": "The request `ID` is single-use per SP: the pending row is created under a unique index on `(tenant_id, sp_id:request_id)` and is kept, consumed, until it expires ten minutes later — longer than the `IssueInstant` window (five minutes back, the 60 s skew forward), so a replay from outside the window fails on freshness and one inside it on the index (schema v73). The handle is consumed on the X6 two-layer arbiter immediately before issuing, so of any number of concurrent continues one issues. Assertions live five minutes and carry `InResponseTo` (T23.2.2). Tests: `a_replayed_request_id_is_refused_before_the_hop` (both bindings), `a_handle_is_single_use_and_bound_to_the_browser_that_started_it`, `saml_authn_request_test::concurrent_consumes_yield_exactly_one_winner` (100 rounds of 8 racers on surrealkv), `a_request_id_is_single_use_per_service_provider_even_after_consumption`."
+      },
+      {
+       "number": 320,
+       "title": "XML external entities or entity expansion in an AuthnRequest",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "An `AuthnRequest` is attacker-supplied XML parsed before anything is known about its sender. A DTD can declare an external entity (a local file or an internal URL, read into a field AXIAM echoes or fetched on parse) or a nest of entities that expands to gigabytes (billion laughs).",
+       "mitigation": "Any markup declaration — `<!DOCTYPE`, `<!ENTITY`, `<!ELEMENT`, `<!ATTLIST`, `<!NOTATION` — is refused on the document's bytes before libxml sees it, so there is no entity to resolve or expand; a NUL byte (how UTF-16 would hide a `<!DOCTYPE` from that scan) and a declared encoding other than UTF-8 are refused too. libxml then runs without recovery and without network access, and the document is capped at 64 KiB. All of it happens before the SP lookup. Tests: `xxe_billion_laughs_and_a_decompression_bomb_are_refused_before_any_lookup` (both bindings), `saml_idp::request::tests::an_external_entity_request_is_refused_before_parsing`, `a_billion_laughs_request_is_refused_before_parsing`, `a_document_in_another_encoding_is_refused`."
+      },
+      {
+       "number": 321,
+       "title": "A decompression bomb, an oversized body or a request flood exhausts the SSO endpoint",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The HTTP-Redirect binding carries raw DEFLATE, which compresses a few kilobytes into gigabytes; the HTTP-POST binding is a body of the sender's choosing; and every accepted request writes a row and costs XML parsing and possibly an RSA verification.",
+       "mitigation": "Inflation stops one byte past 64 KiB, so a bomb costs at most that; the encoded value and the POST body (192 KiB, read only after the tenant check) are capped. The three SSO routes carry a per-route governor and shared buckets of their own (`saml_idp_sso`, `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`) at the browser-endpoint preset `end_session_per_min` (§7 rule 6). Pending rows expire in ten minutes and are swept. RSA-4096 signing runs off the async workers under the shared CPU gate. Tests: `the_sso_routes_are_rate_limited`, `xxe_billion_laughs_and_a_decompression_bomb_are_refused_before_any_lookup`, `saml_idp::request::tests::a_decompression_bomb_is_refused_at_the_inflated_bound`."
+      },
+      {
+       "number": 322,
+       "title": "Login CSRF or session swapping across the pending handle",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The browser leaves the SSO endpoint with an opaque handle in a URL and comes back with it after signing in. A handle that leaks (a referrer, a log, a shared link) or is planted in a victim's browser could pair one person's request with another person's session — the assertion going to the SP in the wrong browser, for the wrong user.",
+       "mitigation": "The handle is bound to the browser that started the request: the first leg sets an `HttpOnly; Secure; SameSite=Lax` cookie scoped to the tenant's SSO path, named per handle so concurrent sign-ons do not collide, and the continue leg requires the SHA-256 of its value to match the row (constant-time) before it reads a session or consumes anything. The assertion is always for the session whose OP cookie arrives, resolved through the tenant-keyed digest lookup, and is posted to the SP's registered ACS in that same browser, so neither party to a swap can receive the other's assertion. The redirects carry `Referrer-Policy: no-referrer` and `no-store`. Residual: anyone can make a victim's browser start an `AuthnRequest` of their own making and so sign the victim in to a registered SP as the victim — inherent to SAML Web Browser SSO and bounded by the SP's own `InResponseTo` tracking. Tests: `a_handle_is_single_use_and_bound_to_the_browser_that_started_it` (another browser, signed in, refused; the same browser without its binding cookie refused, nothing burned)."
+      },
+      {
+       "number": 323,
+       "title": "ForceAuthn is skipped by forging the login-hop marker",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "`ForceAuthn` asks the IdP to authenticate the user afresh. If the continue leg decided \"fresh\" from the login hop's return marker — as `/oauth2/authorize` does for `prompt=login` (P23W1-08) — anyone at an unlocked browser could append the marker and receive an assertion from the existing session.",
+       "mitigation": "Bound to the request rather than to the marker: the pending row records the instant the first leg accepted the request, and the continue leg treats a session as satisfying `ForceAuthn` only if its `authenticated_at` is strictly later. A session that is not is sent to sign in with `reauth=1`; on a return leg it is answered `AuthnFailed` with no assertion. The marker decides only whether to hop again or answer. `IsPassive` never shows the sign-in page (`NoPassive` without a session). Tests: `force_authn_requires_a_sign_in_after_the_request_and_a_forged_marker_skips_nothing`, `is_passive_never_shows_the_sign_in_page`."
+      },
+      {
+       "number": 324,
+       "title": "Unsolicited (IdP-initiated) responses are triggered for an SP or from a page that did not ask",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "An IdP-initiated response answers no request, so the SP cannot bind it to anything it started; and a trigger any web page can link to lets a third party sign a visitor in to an SP with a `RelayState` of its choosing.",
+       "mitigation": "Per-SP opt-in, off by default (D-3): `GET /saml/v2/{tenant}/sso/idp-initiated?sp=…` refuses an SP that has not set `allow_idp_initiated` — and a disabled SP, an SP asking for encryption, an unusable default ACS or an over-long `RelayState` — with an error page before the login hop (D-26). A request carrying `Sec-Fetch-Site: cross-site` is refused: the trigger is for AXIAM's own pages and bookmarks. The response carries no `InResponseTo` and goes to the SP's default registered ACS. Residual: a browser that sends no `Sec-Fetch-Site` header is not refused. Test: `idp_initiated_is_served_for_an_sp_that_opted_in_and_refused_otherwise`."
+      },
+      {
+       "number": 326,
+       "title": "The SSO routes reveal whether a tenant exists or serves SAML",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "D-20 makes the SAML IdP a per-tenant setting. An endpoint that answered a disabled tenant differently from a nonexistent one, or from a build without SAML, would enumerate tenants and their configuration.",
+       "mitigation": "Every route answers the empty `404` an unmounted path answers when the tenant does not exist, its path segment is not the canonical UUID spelling, or its effective `saml_idp_enabled` is off — decided before the body is read — and every other method and sub-path under the scope answers the same, so no `405` distinguishes a build with SAML from one without (D-20, D-27). Residual: the routes are rate-limited in a build with SAML and not in one without, so a flood tells the two builds apart (not tenants). Test: `every_sso_route_answers_an_indistinguishable_404_when_saml_is_off` (status and every header compared with an unmounted path, four tenant spellings, seven method/path pairs)."
+      },
+      {
+       "number": 327,
+       "title": "An issued assertion cannot be traced to the user, the SP and the sign-on",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Without a record, a tenant administrator cannot answer which user signed in to which SP when, or see that an SP is being refused.",
+       "mitigation": "Every assertion issued and every SAML failure response sent writes an audit row: `saml_idp.sso.issued` with the user, the SP's record id and the response id, or `saml_idp.sso.refused` with the SAML status. Refusals answered with an error page (a request that never proved it came from an SP) are logged with a fixed reason, not audited per tenant. The rows carry no `NameID`, `RelayState` or response. The `SessionIndex` in the assertion is the AXIAM session id (T23.2.2), tying it to the session record."
+      },
+      {
+       "number": 328,
+       "title": "A suspended account's OP session still obtains SAML assertions",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "An account-status change revokes no session. A locked, deactivated or deleted user whose browser still holds the OP cookie would keep signing in to every SAML SP for the session's lifetime — the defect T23.1.3 found at `/oauth2/authorize`.",
+       "mitigation": "The continue leg re-reads the account behind the resolved session and applies `account_may_act` through `AuthService::check_session_holder` — `Locked`, `Inactive`, `Anonymized` and `Deleted` refused, `PendingVerification` served (T-160, P23W1-03) — and treats a refused account as no session (`reauth`, then `AuthnFailed`); `SamlIdpIssuer::issue` applies the rule again. `allowed_groups` is read from the user's current groups. Tests: `a_suspended_account_is_not_served_and_a_pending_one_is`, `allowed_groups_decide_who_may_use_the_sp`."
+      },
+      {
+       "number": 329,
+       "title": "Script injection through the auto-post page",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The HTTP-POST binding page echoes the SP's `RelayState` verbatim and the ACS URL into a form; it is the one HTML page the API serves with values from a request in it.",
+       "mitigation": "Every value is HTML-escaped (`&`, `<`, `>`, `\"`, `'`). The page carries its own `Content-Security-Policy` — `default-src 'none'`, the one inline `submit()` under a per-response nonce, `form-action` the ACS origin only, `frame-ancestors 'none'`, `base-uri 'none'` — stricter than the global policy in every directive; the security-headers middleware writes the global policy only when a handler set none (D-27). `Cache-Control: no-store`. Tests: `post_binding_signed_end_to_end_verified_by_axiam_own_sp` (a `RelayState` of `relay&<x>` arrives escaped and round-trips), `security_headers::tests::the_global_policy_is_written_unless_the_handler_set_its_own`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "00b1c269-bd14-572b-a277-4946eed1f557",
+     "kind": "store",
+     "x": 1079,
+     "y": 834,
+     "w": 170,
+     "h": 80,
+     "name": "saml_authn_request (pending requests)",
+     "lines": [
+      "saml_authn_request",
+      "(pending requests)"
+     ],
+     "description": "Schema v73: AuthnRequests between the SSO endpoint's two legs — SP, resolved ACS URL, RelayState, ForceAuthn/IsPassive and the outbound instant — under SHA-256 digests of the handle and of the browser-binding value. Ten-minute rows, kept after consumption as the request-id replay guard; unique (tenant_id, replay_key) and handle_hash.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 330,
+       "title": "A database read yields a usable sign-on handle",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Pending rows name a user's SP, ACS URL and `RelayState` for ten minutes. If they stored the handle or the binding value, anyone who could read the table could complete another person's sign-on.",
+       "mitigation": "Only SHA-256 digests of the handle and of the binding value are stored, as `sso_handoff_code` stores its codes; a digest cannot be presented. Rows are tenant-scoped on every query, removed with their tenant in the tenant-delete transaction, and swept when expired (`saml_authn_request` on `/health/jobs`). Tests: `saml_authn_request_test` (cross-tenant read and consume refused, expiry and sweep, the tenant cascade); `v73_defines_the_pending_authn_request_table_additively` (no raw column)."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "53ad9895-e646-51e4-88b4-fc1e675e7cbc",
+     "kind": "process",
+     "x": 374,
+     "y": 794,
+     "w": 140,
+     "h": 140,
+     "name": "Directory sync job (full / incremental, safety valve)",
+     "lines": [
+      "Directory",
+      "sync job",
+      "(full /",
+      "incremental,",
+      "safety",
+      "valve)"
+     ],
+     "description": "axiam-directory's sync job (T23.3.5, D-31), last in each cleanup tick: incremental runs by modifyTimestamp / uSNChanged, a full reconciliation every 24 h, Inactive as the soft-delete, the safety valve. Reads the directory through the same pool, address guard and frame guard as sign-in; never creates, links, re-enables or deletes an account.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 344,
+       "title": "A directory that empties or disables at once deactivates the whole tenant",
+       "type": "Denial of service",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The sync job sets `Inactive` every account whose entry vanished or was disabled. A wrong `base_dn`, an outage that answers empty, a bind account stripped of rights, or a hostile directory administrator could make every entry look gone in one run.",
+       "mitigation": "D-31: a full run reads every answer before it writes anything, and the safety valve refuses to apply a run that would deactivate more than 10 % of the tenant's directory accounts and at least 5 of them — nothing is applied, `directory.sync_safety_valve` is audited once, and the job shows as failed in `GET /health/jobs` until the directory is fixed or the accounts really gone are deactivated by hand. A deactivated account keeps its row, marker and audit trail, and an administrator can re-enable it. Tests: `the_valve_trips_and_applies_nothing`, `the_valve_does_not_trip_under_its_floor`, `the_valve_does_not_trip_at_or_under_its_percentage`, `an_empty_directory_does_not_disable_the_tenant`, `a_failure_part_way_through_the_reads_applies_nothing`. Residual (D-31): incremental runs have no valve, so a directory that disables many accounts through changes the incremental search sees deactivates them run by run — the directory is the authority for those accounts' standing, and every deactivation is audited and reversible. The valve has no override in this cut; contract §30 says why."
+      },
+      {
+       "number": 345,
+       "title": "An incomplete or access-filtered answer is read as an entry having vanished",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Absence is an inference. A search that hit a size or time limit, was referred elsewhere, failed part-way or matched two entries — or was answered by a bind account that can no longer read part of the tree — looks, to a careless reader, like \"not there\".",
+       "mitigation": "Only a completed full run concludes \"vanished\", and only from an exactly-one lookup by the account's immutable identifier under `base_dn` that the directory answered with success and no entry; an error, a referral, a bound, an ambiguous answer or an identifier that cannot be asked for skips that account and owes a full run, and an incremental run never concludes it at all. Tests: `an_incremental_run_never_concludes_that_an_entry_vanished`, `a_service_account_without_read_rights_is_a_failure_not_a_vanishing`, `an_ambiguous_identifier_skips_the_account_and_is_not_a_vanishing`, `an_identifier_that_cannot_be_asked_for_is_skipped_not_vanished`, `an_unreachable_directory_changes_nothing_and_is_a_reported_failure`. Residual: an access-control change that hides entries from the bind account answers \"no such entry\" exactly as a deletion does; the valve catches it at scale (T-344), and below the valve those accounts are deactivated, audited, and re-enabled by an administrator."
+      },
+      {
+       "number": 346,
+       "title": "The sync job creates, links or re-enables accounts on the directory's say",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A job that acted on whatever the directory reports could revive an account an administrator disabled, create accounts nobody signed in with, or link a local account by name (T-334).",
+       "mitigation": "No such code path exists (D-31). The job reads only accounts already carrying `directory_external_id`, writes `Inactive` by compare-and-set from a live status and nothing else, never writes `Deleted` and never removes a row. An account the directory re-enables, or whose entry reappears, stays `Inactive`, and one `directory.account_reappeared` row says an administrator must act (deduplicated in the state row). Tests: `a_reappearing_entry_leaves_the_account_inactive_and_says_so_once`, `an_account_an_administrator_made_inactive_is_reported_never_reactivated`, `a_local_account_is_never_touched`, `no_row_is_removed_and_no_account_is_deleted`, `deactivating_sets_inactive_and_only_inactive`."
+      },
+      {
+       "number": 347,
+       "title": "A stored identifier or watermark carries filter syntax into the sync job's searches",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The sync job builds filters from values AXIAM stored — an account's directory identifier, the watermark — that first came from the directory. Formatted raw, a crafted `entryUUID` or watermark would widen a lookup into a match on many entries.",
+       "mitigation": "Values enter a filter only through the escape module: an `entryUUID` through RFC 4515 escaping, an `objectGUID` as its little-endian octets through the binary escaper (every byte `\\xx`), and a watermark only when it parses as a generalized time or a decimal USN — `changed_since_filter` refuses anything else and the run falls back to full; attribute names are fixed by the directory kind. Tests: `an_object_guid_lookup_reaches_the_server_as_little_endian_octets` (asserted on the filter the server parsed), `an_identifier_that_cannot_be_asked_for_is_skipped_not_vanished`, and the escape module's unit tests."
+      },
+      {
+       "number": 348,
+       "title": "A stale or foreign watermark makes incremental runs miss changes",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Active Directory's `uSNChanged` counts per domain controller, so a watermark taken from one server means nothing on another, and a load-balanced URL can reach a different one each time. A missed change is a disable that never arrives.",
+       "mitigation": "On Active Directory the watermark is `highestCommittedUSN` read from the rootDSE of the same connection and stored with its `dsServiceName`; a different server, a missing watermark or an unreadable rootDSE falls back to a full run. A full run happens every 24 hours regardless, and after any skipped account, bound hit or untrusted watermark. Tests: `the_active_directory_watermark_is_the_root_dse_usn_of_the_same_server`, `a_different_directory_server_falls_back_to_a_full_run`, `a_root_dse_without_a_usn_falls_back_to_a_full_run_and_keeps_doing_so`, `an_unreadable_root_dse_falls_back_to_a_full_run`, `an_incremental_run_over_the_bound_applies_the_prefix_and_owes_a_full_run`."
+      },
+      {
+       "number": 349,
+       "title": "The sync job exhausts the connector or the database, and every replica runs it",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A background job that walks every directory account of every tenant can crowd out sign-ins for the shared connector, and a deployment of several replicas runs every sweep once per replica.",
+       "mitigation": "The job runs last in each cleanup tick, one tenant at a time, only for tenants with an enabled directory that are due, on the same bounded pool, deadlines, address guard and frame cap as sign-in, with incremental searches bounded; an error ends that tenant's run and the others still run. Tests: `a_tenant_without_a_directory_or_with_it_disabled_is_skipped_without_a_connection`, `a_tenant_that_is_not_yet_due_is_left_alone`, `an_incremental_run_over_the_bound_applies_the_prefix_and_owes_a_full_run`. Residual: no sweep in the tree has a multi-replica guard, so every replica runs the job; its writes are idempotent or compare-and-set, but directory reads and attribute-refresh audit rows multiply by the replica count."
+      },
+      {
+       "number": 350,
+       "title": "A deactivation stopped part-way leaves the account able to act",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Deactivating is several writes: sessions, refresh tokens, memberships, the status. Done in the wrong order, a crash between them leaves an account marked `Inactive` that still holds a live session, or memberships that still grant roles.",
+       "mitigation": "Deactivation revokes sessions and refresh tokens first, through the repositories (so the validation cache and the revocation feed see it), then removes the directory's memberships with the decision-cache flush, then sets `Inactive`; `account_may_act` refuses `Inactive` on every path, passkeys and the OP cookie included. Stopped part-way, the account holds less than before, and the next run repeats what remains. Tests: `a_vanished_entry_deactivates_the_account_and_takes_back_what_the_directory_gave`, `a_second_run_changes_and_audits_nothing_more`."
+      },
+      {
+       "number": 351,
+       "title": "The sync job overwrites a decision an administrator made during the run",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A run reads first and writes later. An administrator who suspends, deactivates or erases an account in between could have that decision overwritten by a write based on the earlier read.",
+       "mitigation": "The status write is a compare-and-set from a live status to `Inactive`: an account an administrator changed in the meantime to a status that is not live is left as the administrator left it, an erased account is never touched, and nothing the job does re-enables. Tests: `deactivating_does_not_overwrite_a_deleted_account`, `pending_and_locked_accounts_are_deactivated_when_their_entry_vanishes`, `an_account_an_administrator_made_inactive_is_reported_never_reactivated`."
+      },
+      {
+       "number": 352,
+       "title": "A directory rename takes over another account's username or email",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The job keeps a directory account's username and email in step with its entry. A directory administrator who renames an entry to a colleague's name or address would, applied blindly, collide with — or capture the reset mail of — another account.",
+       "mitigation": "Changes pass the same cleaners as provisioning (T-335) and the same lowercased collision probe over both columns of every other account of the tenant, tombstones included; a colliding change is skipped and audited (`directory.sync_attribute_skipped`) while the rest is applied, and a case-only change to the account's own name is allowed. Tests: `a_colliding_change_is_skipped_and_audited_and_the_rest_is_applied`, `a_case_only_change_to_ones_own_name_is_applied`, `the_collision_probe_can_leave_one_account_out`. Residual: a name no account holds is free, so the directory can rename an account to any unused name — as it could have named the entry in the first place."
+      },
+      {
+       "number": 353,
+       "title": "An outsider's failed binds become a permanent deactivation through the sync job",
+       "type": "Denial of service",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "OpenLDAP's `ppolicy` writes `pwdAccountLockedTime` when failed binds pass its threshold — something anyone guessing at the directory can provoke. Read as \"disabled\", that turns a temporary lockout into a permanent `Inactive`, because sync never re-enables (T-346): a denial of service on any account an outsider can name.",
+       "mitigation": "D-31 as amended after T23.3.5: on OpenLDAP only ppolicy's permanent-lock value `000001010000Z` is a disable, and any other value is a temporary lockout that leaves the account alone; on Active Directory only `userAccountControl` bit `0x2` is a disable, and `lockoutTime` is not read. An unreadable value never deactivates. Tests: `a_temporary_lockout_leaves_the_account_active_in_a_full_run`, `a_temporary_lockout_leaves_the_account_active_in_an_incremental_run`, `an_open_ldap_locked_time_deactivates_the_account_the_same_way`, `an_active_directory_account_with_the_disabled_bit_is_deactivated`, `an_unreadable_disabled_attribute_never_deactivates`."
+      },
+      {
+       "number": 355,
+       "title": "A deactivation cannot be traced to the run and the reason that caused it",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "An account that stops working because a background job decided so needs an answer to \"why, and when\" that does not depend on the directory still showing what it showed then.",
+       "mitigation": "Every change the job makes is a row on the append-only audit log carrying identifiers and reasons, never names or values: `directory.account_deactivated` (`reason` vanished or disabled, `run` full or incremental), `directory.account_updated` (the fields, not their values), `directory.sync_attribute_skipped`, `directory.sync_user_skipped`, `directory.groups_mapped`, `directory.sync_safety_valve`, and one `directory.sync_run` row of counts per full run; job health records each run. Tests: `a_full_run_writes_one_summary_row_of_counts`, `a_vanished_entry_deactivates_the_account_and_takes_back_what_the_directory_gave`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "2994dd70-ce2c-50ac-b49f-72d1f7dfd235",
+     "kind": "store",
+     "x": 1269,
+     "y": 604,
+     "w": 170,
+     "h": 80,
+     "name": "directory_sync_state (watermark, last run)",
+     "lines": [
+      "directory_sync_state",
+      "(watermark, last run)"
+     ],
+     "description": "Schema v75, one row per tenant, deleted with the tenant: the watermark and the server it belongs to, the last full run and attempt, the last result, and the account ids already reported as reappeared. No personal data.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 354,
+       "title": "The sync state row exposes personal data or another tenant's directory",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "The job keeps state between runs. A row that held names, addresses or DNs of people, or that one tenant's reads could reach, would be a second copy of directory data with its own exposure.",
+       "mitigation": "One row per tenant (schema v75) holding a watermark, the identity of the server it belongs to, timestamps, the last result and account ids — no name, address or person's DN; read and written by tenant id only, and deleted in the tenant's delete transaction. Tests: `tenants_cannot_read_each_others_state`, `a_tenants_state_goes_with_the_tenant`, `the_reported_list_is_trimmed_to_its_cap_keeping_the_newest`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "6c7796cb-edff-5c81-aa70-06e97fe3ee19",
+     "kind": "store",
+     "x": 1269,
+     "y": 719,
+     "w": 170,
+     "h": 80,
+     "name": "user accounts & member_of (source)",
+     "lines": [
+      "user accounts &",
+      "member_of (source)"
+     ],
+     "description": "The user rows the directory path writes — a just-in-time account created marked (D-29), the linking marker (D-18), the sync job's Inactive status and refreshed attributes — and member_of edges, where source = directory marks the memberships the group mapping owns (schema v74).",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 341,
+       "title": "A manual membership is removed by the directory, or a directory one is mistaken for manual",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Administrators add members by hand and the mapping adds them from the directory, on the same edges. A mapping that removed whatever it no longer saw would delete hand-made memberships; one that could not tell the two apart would sweep a manual edge, or let a directory edge outlive the directory's say.",
+       "mitigation": "Every edge the mapping writes carries `member_of.source = directory` (schema v74; the datastore admits no other owner value, and an edge without the field reads as manual). The mapping removes only directory-sourced edges the directory no longer backs, never touches or duplicates a manual edge, and leaves a manual edge of the same pair as it is; removals run before additions, so a stop part-way leaves less access. Tests: `a_manual_membership_is_untouched_by_every_application`, `a_manual_membership_of_the_same_pair_is_left_alone_and_never_removed`, `removing_a_directory_membership_removes_only_that_edge`, `the_datastore_admits_no_owner_but_directory`, `apply_backed_groups_reports_what_it_did_and_leaves_manual_edges`. Residual: an administrator's `add_member` on a pair the directory already owns is a conflict, not a promotion to manual, so that membership leaves with the directory — the safe direction (`add_member_on_a_directory_edge_is_still_a_conflict`)."
       }
      ],
      "open": 0
@@ -4437,15 +5066,248 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "SurrealDB (private network)",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "7d696844-4832-50fc-875a-20131322325c",
+     "path": "M952.7,622.1 L1102.3,719",
+     "name": "unseal active signing key",
+     "description": "SamlIdpCredentialService::get_active_signing_key: the one read that selects the ciphertext; the key is opened into a Zeroizing buffer for one issuance.",
+     "label": "unseal active signing key",
+     "labelLines": [
+      "unseal active signing key"
+     ],
+     "lx": 1027.5,
+     "ly": 670.5,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "f92614c0-f205-5e5f-9730-1b48f5a720cb",
+     "path": "M830.9,614.3 L199,918",
+     "name": "signed SAML response (HTTP-POST)",
+     "description": "Base64 of the samlp:Response, auto-posted by the user's browser to the registered ACS URL, with RelayState echoed verbatim (at most 80 bytes).",
+     "label": "signed SAML response (HTTP-POST via the browser)",
+     "labelLines": [
+      "signed SAML response (HTTP-POST via",
+      "the browser)"
+     ],
+     "lx": 515,
+     "ly": 766.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS (SAML HTTP-POST binding)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "86f8777a-f3dc-5554-8c11-a5915843dd41",
+     "path": "M199,942.2 L624.9,874.9",
+     "name": "AuthnRequest (HTTP-Redirect / HTTP-POST, via the browser)",
+     "description": "The SP's AuthnRequest, carried by the user's browser: a DEFLATEd query parameter (Redirect, optionally signed over the query) or a form post (POST, optionally signed enveloped), with RelayState. Crosses the AXIAM ↔ SAML service provider boundary.",
+     "label": "AuthnRequest (HTTP-Redirect / HTTP-POST, via the browser)",
+     "labelLines": [
+      "AuthnRequest (HTTP-Redirect /",
+      "HTTP-POST, via the browser)"
+     ],
+     "lx": 411.9,
+     "ly": 908.5,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS (SAML bindings)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "55ea167f-3347-575f-8690-1f8ca464a0b9",
+     "path": "M167.8,384 L642.3,816.8",
+     "name": "continue leg: OP cookie + binding cookie",
+     "description": "GET /saml/v2/{tenant}/sso/continue?handle=…: a top-level navigation carrying the SameSite=Lax OP-session cookie (minted at /saml/v2/{tenant}/sso since T23.2.3) and the per-handle binding cookie; the return leg of the login hop.",
+     "label": "continue leg: OP cookie + binding cookie",
+     "labelLines": [
+      "continue leg: OP cookie + binding",
+      "cookie"
+     ],
+     "lx": 405.1,
+     "ly": 600.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 325,
+       "title": "RelayState and the pending handle are recorded in request logs",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "The HTTP-Redirect binding carries `RelayState` (and `SAMLRequest`) in the query string, and the continue leg carries the pending handle there. The request-tracing middleware records the request target, query included, as it does for every route.",
+       "mitigation": "**Closed 2026-10-04 (W3 F4 review, P23W3-03).** `axiam-server` wraps the application in `TracingLogger::<RedactingRootSpanBuilder>` (`axiam_api_rest::middleware::request_span`): the default builder's field set, span name and target, with `http.target` recorded as the path and every query **value** replaced by `[redacted]` unless its parameter is on a short allow-list of structural ones (tenant, organization and client ids, protocol switches, pagination), and a `{token}` path segment redacted too; parameter names stay. An allow-list rather than a deny-list, so a parameter added later is redacted until someone decides otherwise. The same change takes `/oauth2/authorize`'s `state` and `login_hint`, `end_session`'s `id_token_hint`, password-reset, GDPR-cancellation and export tokens and administrators' search terms out of the request log, which the default builder recorded on every route (with the shipped `axiam=info` filter the root span is recorded only where an operator enables `tracing_actix_web`). Unchanged: the SSO handlers never log `SAMLRequest`, `SAMLResponse`, `RelayState`, the handle, the binding value or the OP cookie, the audit middleware records paths only, and a handle is useless without the browser's binding cookie (T-322) and single-use. Tests: `request_span::tests` (each sensitive parameter redacted and each structural one kept, the export token redacted from the path, and a request through `TracingLogger` whose recorded span carries the redacted target and never the handle) and `t9_4_the_request_logging_layer_records_no_headers_at_all` (the server installs this builder, and the builder reads no header but `User-Agent`)."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "0cb2b6b5-fab7-5f04-bac9-6abe03099111",
+     "path": "M764,865.5 L1079,872.2",
+     "name": "hold / consume pending request (X6)",
+     "description": "CREATE under the replay index on the first leg; a read on the second; the guarded UPDATE plus nonce read-back that consumes the handle exactly once before issuing.",
+     "label": "hold / consume pending request (X6)",
+     "labelLines": [
+      "hold / consume pending request (X6)"
+     ],
+     "lx": 921.5,
+     "ly": 868.8,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "371da1a7-3637-565b-8c77-5b7b69034023",
+     "path": "M734.7,807 L853.3,641",
+     "name": "checked request + resolved session",
+     "description": "The SP row, the resolved ACS URL, InResponseTo, RelayState, the session, the account (account_may_act), groups and roles, and the unsealed credential, handed to SamlIdpIssuer::issue in a blocking task.",
+     "label": "checked request + resolved session",
+     "labelLines": [
+      "checked request + resolved session"
+     ],
+     "lx": 794,
+     "ly": 724,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "fc29364c-ec65-5863-ba0e-8bdb23ac0f36",
+     "path": "M379.9,835.9 L199,756.8",
+     "name": "sync searches",
+     "description": "",
+     "label": "sync searches: by identifier, by watermark, rootDSE (LDAPS / StartTLS)",
+     "labelLines": [
+      "sync searches: by identifier, by",
+      "watermark, rootDSE (LDAPS /",
+      "StartTLS)"
+     ],
+     "lx": 289.4,
+     "ly": 796.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "LDAP over TLS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "3cab2c3b-a0e3-527b-8d9c-f6c4702469e0",
+     "path": "M199,756.8 L379.9,835.9",
+     "name": "sync entries + watermark",
+     "description": "",
+     "label": "entries + watermark",
+     "labelLines": [
+      "entries + watermark"
+     ],
+     "lx": 289.4,
+     "ly": 796.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "LDAP over TLS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "7ad160e9-27fe-5fe7-973a-d9bb6ed74961",
+     "path": "M510.9,843.5 L1079,670",
+     "name": "sync: read config + decrypt bind secret",
+     "description": "",
+     "label": "read config + decrypt bind secret",
+     "labelLines": [
+      "read config + decrypt bind secret"
+     ],
+     "lx": 795,
+     "ly": 756.8,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "61f7d0d2-6d12-56e2-a2c0-484166cfd156",
+     "path": "M512,847.6 L1269,664.5",
+     "name": "sync: read / write run state",
+     "description": "",
+     "label": "read / write run state",
+     "labelLines": [
+      "read / write run state"
+     ],
+     "lx": 890.5,
+     "ly": 756.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "7e78b413-27fd-5738-b8b9-ffc1bd9485be",
+     "path": "M513.5,856 L1269,768.8",
+     "name": "sync: deactivate, revoke, unmap, refresh",
+     "description": "",
+     "label": "deactivate (compare-and-set), revoke, unmap, refresh attributes",
+     "labelLines": [
+      "deactivate (compare-and-set),",
+      "revoke, unmap, refresh attributes"
+     ],
+     "lx": 891.3,
+     "ly": 812.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "7d593dc0-6b7f-53bd-82bb-0dd4a569a55d",
+     "path": "M761.7,601.9 L1269,736.5",
+     "name": "sign-in: provision, link, map groups",
+     "description": "",
+     "label": "JIT create, link, apply group mapping",
+     "labelLines": [
+      "JIT create, link, apply group",
+      "mapping"
+     ],
+     "lx": 1015.3,
+     "ly": 669.2,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 44,
-   "open": 2,
+   "total": 97,
+   "open": 4,
    "bySeverity": {
-    "High": 17,
-    "Medium": 17,
-    "Critical": 7,
-    "Low": 3
+    "High": 37,
+    "Medium": 38,
+    "Critical": 13,
+    "Low": 9
    }
   },
   {

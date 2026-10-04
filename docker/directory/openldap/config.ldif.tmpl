@@ -1,0 +1,75 @@
+# cn=config for the e2e directory, loaded with `slapadd -n 0`.
+# @LDAPI_UID@, @LDAPI_GID@ and @ADMIN_HASH@ are filled in by entrypoint.sh.
+
+dn: cn=config
+objectClass: olcGlobal
+cn: config
+olcLogLevel: stats
+olcPidFile: /tmp/e2e/run/slapd.pid
+olcArgsFile: /tmp/e2e/run/slapd.args
+olcTLSCACertificateFile: /tmp/e2e/tls/ca.pem
+olcTLSCertificateFile: /tmp/e2e/tls/server.pem
+olcTLSCertificateKeyFile: /tmp/e2e/tls/server.key
+# TLS 1.2 floor, like the connector's. No plaintext simple bind: a bind that did
+# not arrive over TLS (ssf >= 128) is refused by the server too, so a client that
+# skipped StartTLS would fail here for a second reason.
+olcTLSProtocolMin: 3.3
+olcSecurity: simple_bind=128
+
+dn: cn=module{0},cn=config
+objectClass: olcModuleList
+cn: module{0}
+olcModulePath: /usr/lib/ldap
+olcModuleLoad: back_mdb
+olcModuleLoad: ppolicy
+
+dn: cn=schema,cn=config
+objectClass: olcSchemaConfig
+cn: schema
+
+include: file:///etc/ldap/schema/core.ldif
+include: file:///etc/ldap/schema/cosine.ldif
+include: file:///etc/ldap/schema/inetorgperson.ldif
+include: file:///etc/ldap/schema/ppolicy.ldif
+
+dn: olcDatabase={-1}frontend,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcFrontendConfig
+olcDatabase: {-1}frontend
+
+dn: olcDatabase={0}config,cn=config
+objectClass: olcDatabaseConfig
+olcDatabase: {0}config
+olcAccess: {0}to * by dn.exact=gidNumber=@LDAPI_GID@+uidNumber=@LDAPI_UID@,cn=peercred,cn=external,cn=auth manage by * none
+
+dn: olcDatabase={1}mdb,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcMdbConfig
+olcDatabase: {1}mdb
+olcDbDirectory: /tmp/e2e/db
+olcSuffix: dc=example,dc=test
+olcRootDN: cn=admin,dc=example,dc=test
+olcRootPW: @ADMIN_HASH@
+olcDbMaxSize: 104857600
+olcDbIndex: objectClass eq
+olcDbIndex: uid eq
+olcDbIndex: mail eq
+olcDbIndex: member eq
+olcDbIndex: entryUUID eq
+olcDbIndex: entryCSN eq
+# What a read-only bind account should look like (docs/deployment/README.md):
+# `reader` may read the user and group subtrees and nothing else; nobody reads a
+# password; a user changes nothing about themselves here.
+# {0} is the container's own administrator over ldapi (e2e-mutate.sh): the
+# tests use it to add, lock and delete entries, and no network client ever is it.
+olcAccess: {0}to * by dn.exact=gidNumber=@LDAPI_GID@+uidNumber=@LDAPI_UID@,cn=peercred,cn=external,cn=auth manage by * break
+olcAccess: {1}to attrs=userPassword by anonymous auth by * none
+olcAccess: {2}to dn.subtree="dc=example,dc=test" by dn.exact="cn=reader,dc=example,dc=test" read by * none
+
+dn: olcOverlay={0}ppolicy,olcDatabase={1}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcPPolicyConfig
+olcOverlay: {0}ppolicy
+olcPPolicyDefault: cn=default,ou=policies,dc=example,dc=test
+olcPPolicyHashCleartext: FALSE
+olcPPolicyUseLockout: TRUE

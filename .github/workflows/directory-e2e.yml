@@ -1,0 +1,89 @@
+name: Directory E2E
+
+# G-3 / T23.3.6: the LDAP / Active Directory identity source against a REAL
+# OpenLDAP and a REAL Samba AD domain controller. Every other test of the
+# feature runs against an in-process directory AXIAM's authors scripted; this
+# job is the oracle for what the connector assumes about LDAP.
+#
+# What it runs: `crates/axiam-server/tests/directory_e2e.rs`, gated by
+# AXIAM_E2E_DIRECTORY=1 (without it the tests print SKIPPED, which is why the
+# CI `test` job needs no containers). With the variable set a missing or
+# unreachable server is a FAILURE, never a skip: this job cannot go green by
+# not running the thing it exists for.
+#
+# Why a workflow of its own, and a paths filter
+# ---------------------------------------------
+# It builds two images' worth of containers and a domain controller provisions
+# itself on first start, so it should not run on every PR. The usual caveat about
+# a workflow-level `paths:` filter (a *required* check that never reports blocks
+# the PR; see surreal-race-probe.yml) does not apply: this check is not marked
+# required, so a PR that does not touch the directory code simply does not run
+# it. If it is ever made required, replace the filter with a `detect` job as that
+# workflow does.
+#
+# Local equivalent: docker/directory/README.md.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/axiam-directory/**"
+      - "crates/axiam-auth/src/service/directory*"
+      - "crates/axiam-api-rest/src/handlers/directory.rs"
+      - "crates/axiam-server/tests/directory_e2e.rs"
+      - "crates/axiam-server/src/cleanup.rs"
+      - "docker/directory/**"
+      - "docker/docker-compose.directory.yml"
+      - "scripts/gen-directory-e2e-secrets.sh"
+      - ".github/workflows/directory-e2e.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  directory-e2e:
+    name: OpenLDAP + Samba AD
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMPOSE: docker compose -f docker/docker-compose.directory.yml --env-file docker/.secrets/directory/env
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de  # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libxmlsec1-dev libxml2-dev
+
+      # A throwaway CA, both servers' certificates and every password, minted
+      # for this run into docker/.secrets/directory (gitignored). Nothing is
+      # committed and nothing is a literal.
+      - name: Mint the run's CA, certificates and passwords
+        run: bash scripts/gen-directory-e2e-secrets.sh
+
+      # `--wait` returns when both healthchecks pass: slapd up with the seed
+      # loaded, and Samba provisioned, seeded and listening on LDAPS.
+      - name: Start OpenLDAP and Samba AD
+        run: $COMPOSE up -d --wait
+        timeout-minutes: 10
+
+      - name: Directory e2e (both servers)
+        run: cargo test -p axiam-server --test directory_e2e -- --test-threads=4
+        env:
+          AXIAM_E2E_DIRECTORY: "1"
+
+      - name: Directory logs on failure
+        if: failure()
+        run: $COMPOSE logs --no-color --tail=200
+
+      - name: Tear down
+        if: always()
+        run: $COMPOSE down -v

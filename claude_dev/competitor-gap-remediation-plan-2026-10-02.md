@@ -780,6 +780,51 @@ fan-out.
 > Observed and carried to F4: in JIT's lost-race branch the group mapping runs
 > before the status check, so it can re-add directory memberships to an
 > `Inactive` account (they grant nothing while it is `Inactive`).
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.7, 2026-10-03/04** (`7fdd540`,
+> `b26d2f5`, `a2d5e4f`; Opus 5.5). **T-300 closed** per D-19 and **D-32**. The
+> IP classifier moved to `axiam_core::ip_class` (one classifier for every
+> outbound guard; `axiam_pki::ssrf` re-exports it). `axiam_directory::address::
+> guard` resolves the host once and refuses it unless every address passes:
+> loopback, unspecified, link-local (incl. `169.254.169.254`), multicast,
+> special-purpose and their IPv4-mapped forms always; this host's addresses on
+> the REST or gRPC port; private ranges unless the operator's
+> `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS` lists them; IPv6-literal URLs.
+> It runs at write time (`guard_url`, for T23.3.8) and at every connection
+> (pool, user bind, group lookup, sync), and the socket is connected to the
+> vetted address while TLS checks the hostname, so rebinding cannot reach
+> loopback. **Frame cap (P23W2-10):** `ldap3` does its own TLS, so a counter
+> beneath it would see ciphertext; AXIAM now performs StartTLS and TLS itself
+> and hands `ldap3` one end of a Unix socket pair, relaying each directory
+> message only after checking its declared length against
+> `AXIAM__DIRECTORY__MAX_MESSAGE_BYTES` (2 MiB default) before allocating,
+> definite lengths, element containment, nesting ≤ 16, and the envelope shape.
+> Threat model **2.23.0**: the *Directory sync job* element, two stores,
+> **T-331 … T-355** (355 threats, 337 mitigated, 18 open; **T-332 open**: with
+> JIT on, an unknown name reaches the directory and no AXIAM per-name counter
+> stops it); T-295 and T-302 amended. **Contract 1.54, §30 Directory
+> configuration**: `get`, `set` (PUT), `update` (PATCH), `delete`,
+> `link_account`, `get_sync_status` under `/api/v1/tenants/{tenant_id}/
+> directory`, `bind_secret` write-only and `Sensitive<T>`, `validate` and the
+> guard on every write, the P23W2-01 rule as `400`, the `opaque_mode =
+> required` exclusion as `409` both ways, `503` without the encryption key, a
+> `directory_admin` rate-limit bucket, audit rows that record
+> `connection_moved` and never the secret; §29 stays reserved for G-2. Tests:
+> 13 connector-guard tests (each refused class at guard and at connect,
+> rebinding, the pinned address, the hostname TLS check over it, an over-long
+> length, 20 000 nesting levels, an envelope `ldap3` would panic on), 19 unit
+> tests, 5 classifier tests; every earlier directory suite green.
+>
+> What the plan did not anticipate. `lber` recurses without a depth bound, so
+> a few tens of KB of nesting overflowed the stack and aborted the whole
+> process, and `ldap3`'s decoder `expect`s on short envelopes (**T-331**,
+> High, closed by the relay). The relay needs Unix sockets (AXIAM ships Linux
+> only; elsewhere the connector refuses). The `url` crate does not parse IPv4
+> hosts for `ldap`/`ldaps`, so the guard parses them. Own listeners are
+> recognised by port on a local address only, so another replica's pod IP or a
+> Service looping back is a stated residual of the allow-list. Deleting or
+> disabling a directory leaves its accounts' sessions and passkeys working and
+> stops deprovisioning; §30 documents it, and it is carried to F4.
 
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned

@@ -5,7 +5,8 @@
 //! unique index backs it — so the latest step-up replaces the earlier one, and
 //! a row lives [`STEP_UP_RECORD_TTL_MINUTES`] minutes. `take` deletes in the
 //! same statement that returns the row, so a record is consumed exactly once
-//! however many return legs race for it.
+//! however many return legs race for it, and never by a return leg made in the
+//! session the step-up was asked of (F4 W4 P23W4-02).
 //!
 //! The row holds ids and one `acr` URN: no credential, no address.
 
@@ -106,17 +107,21 @@ impl<C: Connection> SsfStepUpRepository for SurrealSsfStepUpRepository<C> {
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
+        current_session_id: Uuid,
         now: DateTime<Utc>,
     ) -> AxiamResult<Option<SsfStepUp>> {
+        // A return leg in the session the step-up was asked of leaves the record
+        // for the real one (F4 W4 P23W4-02): the guard is in the one statement.
         let mut result = self
             .db
             .current()
             .query(
                 "DELETE ssf_step_up WHERE tenant_id = $tenant_id AND user_id = $user_id \
-                 RETURN BEFORE",
+                 AND previous_session_id != $current_session_id RETURN BEFORE",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
+            .bind(("current_session_id", current_session_id.to_string()))
             .await
             .map_err(DbError::from)?;
         let rows: Vec<StepUpRow> = result.take(0).map_err(DbError::from)?;

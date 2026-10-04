@@ -1323,7 +1323,10 @@ async fn a_return_with_the_same_acr_emits_nothing() {
     assert_eq!(su.record_count().await, 0, "and the record is spent");
 }
 
-/// The same session coming back is nothing stepped up, whatever its level.
+/// The same session coming back is nothing stepped up, whatever its level —
+/// and, since F4 W4 (P23W4-02), it does not spend the record either: the
+/// session the step-up was asked of is not the one that will come back from
+/// it, so a return leg in that session is not the return of this step-up.
 #[actix_rt::test]
 async fn the_same_session_returning_emits_nothing() {
     let su = step_up_world().await;
@@ -1336,6 +1339,58 @@ async fn the_same_session_returning_emits_nothing() {
     assert_eq!(status, 302);
 
     assert!(su.told().is_empty());
+    assert_eq!(
+        su.record_count().await,
+        1,
+        "a return leg in the session that was asked to step up does not spend the record"
+    );
+}
+
+/// F4 W4 P23W4-02 (T-404): the return-leg marker is a query parameter anyone
+/// can put on a link. A page that sends the user's browser to
+/// `/oauth2/authorize?axiam_login_hop=1` — no client, or a request the
+/// authorization endpoint refuses — must not spend the user's step-up record
+/// (which would suppress the `assurance-level-change` the real return leg
+/// should produce), and must not produce one either.
+#[actix_rt::test]
+async fn a_return_leg_the_authorization_endpoint_refuses_spends_nothing() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("forged-return").await;
+    let (_, first_token) = su.session(user, vec![Amr::Pwd]).await;
+    assert_eq!(su.ask_for_mfa(&app, &first_token).await.0, 302);
+    assert_eq!(su.record_count().await, 1);
+
+    // Mid step-up: the user now holds an MFA session; a third-party page
+    // navigates the browser to the return-leg marker with no valid request.
+    let (_, second_token) = su.session(user, mfa_evidence()).await;
+    for forged in [
+        "/oauth2/authorize?axiam_login_hop=1".to_owned(),
+        format!(
+            "/oauth2/authorize?axiam_login_hop=1&response_type=code&client_id=no-such-client\
+             &redirect_uri={RP_CALLBACK}&scope=openid"
+        ),
+        format!(
+            "/oauth2/authorize?axiam_login_hop=1&response_type=code&client_id={}\
+             &redirect_uri=https://attacker.example.test/cb&scope=openid",
+            su.client_id
+        ),
+    ] {
+        let resp = test::call_service(
+            &app,
+            request(Method::GET, &forged, Some(&second_token)).to_request(),
+        )
+        .await;
+        assert_ne!(resp.status().as_u16(), 500);
+    }
+    assert!(su.told().is_empty(), "a refused request tells nobody");
+    assert_eq!(su.record_count().await, 1, "and spends nothing");
+
+    // The real return leg still produces the event.
+    let (status, location) = su.return_leg(&app, &second_token).await;
+    assert_eq!(status, 302);
+    assert!(location.starts_with(RP_CALLBACK));
+    assert_eq!(su.told().len(), 1);
     assert_eq!(su.record_count().await, 0);
 }
 

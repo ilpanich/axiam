@@ -280,11 +280,13 @@ async fn ssf_step_up_begin<C: Connection + Clone>(
 /// `change_direction` from the published order, `initiating_entity: user`).
 ///
 /// Nothing is told for: no record (never written, another user's, expired or
-/// already consumed), the same session coming back (nothing was stepped up), a
-/// request with no readable session (the new level is unknown), or an equal
-/// `acr`. Nothing travels in `return_to`, so there is nothing for a relying
-/// party to forge or replay; the marker query parameter only says a return leg
-/// is being made, and the record it can consume is the caller's own.
+/// already consumed), the same session coming back (nothing was stepped up, and
+/// the record is left for the real return leg), a request with no readable
+/// session (the new level is unknown), or an equal `acr`. Nothing travels in
+/// `return_to`, so there is nothing for a relying party to forge or replay; the
+/// marker query parameter only says a return leg is being made, the record it
+/// can consume is the caller's own, and the caller runs this only for a request
+/// the authorization service accepted (F4 W4 P23W4-02).
 ///
 /// Never fails the request.
 async fn ssf_step_up_return_leg<C: Connection + Clone>(
@@ -306,10 +308,14 @@ async fn ssf_step_up_return_leg<C: Connection + Clone>(
     {
         return;
     }
+    // Taken only by a return leg in **another** session than the one the
+    // step-up was asked of (F4 W4 P23W4-02): the same session coming back has
+    // stepped nothing up, and must not spend the record the real return leg
+    // will need.
     let record = match state
         .ssf
         .step_up_repo
-        .take(tenant_id, user_id, chrono::Utc::now())
+        .take(tenant_id, user_id, session_id, chrono::Utc::now())
         .await
     {
         Ok(Some(record)) => record,
@@ -330,6 +336,8 @@ async fn ssf_step_up_return_leg<C: Connection + Clone>(
         return;
     };
     if record.previous_session_id == session_id {
+        // Unreachable through `take`, which leaves such a record in place; kept
+        // so the rule does not depend on the repository alone.
         return;
     }
     state
@@ -1419,16 +1427,11 @@ pub async fn authorize<C: Connection + Clone>(
     let session_acr = session_evidence
         .auth_time
         .map(|_| axiam_oauth2::acr::acr_for(&session_evidence.amr));
-    if axiam_oauth2::login_hop::is_return_leg(q.login_hop.as_deref()) {
-        ssf_step_up_return_leg(
-            &state,
-            user.tenant_id,
-            user.user_id,
-            user.session_id,
-            session_acr,
-        )
-        .await;
-    }
+    // Whether this is a login hop's return leg. The step-up record is consumed
+    // only once the authorization service has accepted the request — client,
+    // `redirect_uri` and the rest (F4 W4 P23W4-02, T-404) — never on the marker
+    // alone, which any page can put on a link.
+    let return_leg = axiam_oauth2::login_hop::is_return_leg(q.login_hop.as_deref());
 
     // B5. The pushed copy wins; the query string's copies are IGNORED, not
     // merged and not refused.
@@ -1854,7 +1857,21 @@ pub async fn authorize<C: Connection + Clone>(
     // interaction hop comes back to the endpoint the request arrived at.
     let authorize_path = authorize_path_of(&http_req);
 
-    let outcome = match state.oauth2.authorize_service.authorize(req).await {
+    let authorized = state.oauth2.authorize_service.authorize(req).await;
+    // G-5 (D-53 (1)), after the request is known to be a valid one: the return
+    // leg of a step-up tells SSF receivers the level changed. A request the
+    // service refused consumes nothing (F4 W4 P23W4-02).
+    if return_leg && authorized.is_ok() {
+        ssf_step_up_return_leg(
+            &state,
+            user.tenant_id,
+            user.user_id,
+            user.session_id,
+            session_acr,
+        )
+        .await;
+    }
+    let outcome = match authorized {
         Ok(axiam_oauth2::authorize::AuthorizeOutcome::Interact(interaction)) => {
             // W4 — the honour lane asked for an interaction. It rides W3's
             // login hop: same `return_to`, same validation on both sides, same

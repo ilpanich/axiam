@@ -967,6 +967,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A page can no longer spend a user's step-up record (F4 W4 P23W4-02, closes
+  T-404's residual).** `/oauth2/authorize` consumed the `ssf_step_up` row on the
+  return-leg marker alone, before validating the client and `redirect_uri`, and
+  in the session that was asked to step up, so any page could suppress the
+  user's `assurance-level-change`. The row is now consumed only for a request
+  the authorization service accepted, and only by a return leg in another
+  session than the one the step-up was asked of.
+
 - **SSF stream writes no longer undo each other (F4 W4 P23W4-01, adds T-406;
   threat model 2.30.0).** Every stream write was read-modify-write, so a
   receiver's `PATCH`, `PUT` or status write that overlapped an administrator's

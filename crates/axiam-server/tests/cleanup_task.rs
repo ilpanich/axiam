@@ -1758,7 +1758,7 @@ async fn an_erasure_removes_the_persons_ssf_step_up_record() {
 
     assert!(
         step_ups
-            .take(tenant_id, erased.id, Utc::now())
+            .take(tenant_id, erased.id, Uuid::new_v4(), Utc::now())
             .await
             .unwrap()
             .is_none(),
@@ -1766,7 +1766,7 @@ async fn an_erasure_removes_the_persons_ssf_step_up_record() {
     );
     assert!(
         step_ups
-            .take(tenant_id, bystander.id, Utc::now())
+            .take(tenant_id, bystander.id, Uuid::new_v4(), Utc::now())
             .await
             .unwrap()
             .is_some(),

@@ -3485,13 +3485,20 @@ pub trait SsfStepUpRepository: Send + Sync {
         now: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
-    /// Consume the user's record: it is deleted whether or not it is still
-    /// valid, and returned only when unexpired at `now`. Atomic — two
-    /// concurrent takes cannot both receive it.
+    /// Consume the user's record for a return leg made in `current_session_id`:
+    /// it is deleted whether or not it is still valid, and returned only when
+    /// unexpired at `now`. Atomic — two concurrent takes cannot both receive it.
+    ///
+    /// A record whose `previous_session_id` **is** `current_session_id` is left
+    /// in place and `None` returned (F4 W4 P23W4-02, T-404): that session is the
+    /// one the step-up was asked of, so a return leg made in it stepped nothing
+    /// up, and spending the record there would cost the real return leg its
+    /// event.
     fn take(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
+        current_session_id: Uuid,
         now: DateTime<Utc>,
     ) -> impl Future<Output = AxiamResult<Option<crate::models::ssf::SsfStepUp>>> + Send;
 

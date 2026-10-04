@@ -57,12 +57,16 @@ async fn a_record_is_taken_once_and_then_it_is_gone() {
     repo.put(&written, Utc::now()).await.unwrap();
 
     assert_eq!(
-        repo.take(tenant, user, Utc::now()).await.unwrap(),
+        repo.take(tenant, user, Uuid::new_v4(), Utc::now())
+            .await
+            .unwrap(),
         Some(written),
         "the record comes back as written"
     );
     assert_eq!(
-        repo.take(tenant, user, Utc::now()).await.unwrap(),
+        repo.take(tenant, user, Uuid::new_v4(), Utc::now())
+            .await
+            .unwrap(),
         None,
         "consumed: a second take finds nothing"
     );
@@ -80,7 +84,9 @@ async fn the_latest_record_replaces_the_earlier_one_for_a_user() {
 
     assert_eq!(rows(&db, tenant).await, 1, "one row per (tenant, user)");
     assert_eq!(
-        repo.take(tenant, user, Utc::now()).await.unwrap(),
+        repo.take(tenant, user, Uuid::new_v4(), Utc::now())
+            .await
+            .unwrap(),
         Some(latest)
     );
 }
@@ -94,17 +100,23 @@ async fn a_record_is_one_users_in_one_tenant_only() {
     repo.put(&written, Utc::now()).await.unwrap();
 
     assert_eq!(
-        repo.take(tenant, other_user, Utc::now()).await.unwrap(),
+        repo.take(tenant, other_user, Uuid::new_v4(), Utc::now())
+            .await
+            .unwrap(),
         None,
         "another user's take finds nothing"
     );
     assert_eq!(
-        repo.take(other_tenant, user, Utc::now()).await.unwrap(),
+        repo.take(other_tenant, user, Uuid::new_v4(), Utc::now())
+            .await
+            .unwrap(),
         None,
         "another tenant's take finds nothing"
     );
     assert_eq!(
-        repo.take(tenant, user, Utc::now()).await.unwrap(),
+        repo.take(tenant, user, Uuid::new_v4(), Utc::now())
+            .await
+            .unwrap(),
         Some(written),
         "and neither disturbed the record"
     );
@@ -121,7 +133,12 @@ async fn an_expired_record_is_consumed_and_returns_nothing() {
 
     let after_expiry =
         put_at + Duration::minutes(STEP_UP_RECORD_TTL_MINUTES) + Duration::seconds(1);
-    assert_eq!(repo.take(tenant, user, after_expiry).await.unwrap(), None);
+    assert_eq!(
+        repo.take(tenant, user, Uuid::new_v4(), after_expiry)
+            .await
+            .unwrap(),
+        None
+    );
     assert_eq!(
         rows(&db, tenant).await,
         0,
@@ -133,7 +150,12 @@ async fn an_expired_record_is_consumed_and_returns_nothing() {
         .await
         .unwrap();
     let inside = put_at + Duration::minutes(STEP_UP_RECORD_TTL_MINUTES) - Duration::seconds(1);
-    assert!(repo.take(tenant, user, inside).await.unwrap().is_some());
+    assert!(
+        repo.take(tenant, user, Uuid::new_v4(), inside)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -243,7 +265,7 @@ async fn both_erasure_paths_remove_the_persons_record() {
         "the administrator's delete took the person's record"
     );
     assert!(
-        repo.take(tenant, people[0], Utc::now())
+        repo.take(tenant, people[0], Uuid::new_v4(), Utc::now())
             .await
             .unwrap()
             .is_none()
@@ -264,10 +286,36 @@ async fn both_erasure_paths_remove_the_persons_record() {
         "the Art. 17 anonymisation took the other's"
     );
     assert!(
-        repo.take(tenant, people[2], Utc::now())
+        repo.take(tenant, people[2], Uuid::new_v4(), Utc::now())
             .await
             .unwrap()
             .is_some(),
         "the third person's record is untouched"
+    );
+}
+
+/// F4 W4 P23W4-02 (T-404): a return leg made in the session the step-up was
+/// asked of stepped nothing up, and leaves the record for the real one.
+#[tokio::test]
+async fn a_take_in_the_asking_session_leaves_the_record() {
+    let (db, repo) = setup().await;
+    let (tenant, user) = (Uuid::new_v4(), Uuid::new_v4());
+    let written = record(tenant, user, SINGLE);
+    repo.put(&written, Utc::now()).await.unwrap();
+
+    assert_eq!(
+        repo.take(tenant, user, written.previous_session_id, Utc::now())
+            .await
+            .unwrap(),
+        None,
+        "nothing for the asking session"
+    );
+    assert_eq!(rows(&db, tenant).await, 1, "and the record is still there");
+    assert_eq!(
+        repo.take(tenant, user, Uuid::new_v4(), Utc::now())
+            .await
+            .unwrap(),
+        Some(written),
+        "a return leg in a new session takes it"
     );
 }

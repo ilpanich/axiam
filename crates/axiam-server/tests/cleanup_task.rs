@@ -1616,3 +1616,194 @@ async fn the_second_clock_does_not_touch_an_initial_access_token_tenant() {
             .is_ok()
     );
 }
+
+// ---------------------------------------------------------------------------
+// G-5 (T23.5.3, D-52): an erasure is reported to the SSF port as an
+// `account-purged`, with the account as it was **before** the write.
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::ssf::{SsfFuture, SsfSystemAccountSink};
+use axiam_server::cleanup::run_erasure_pipeline_reporting;
+
+/// The port, recording `(tenant, user id, address, status)` as it was told.
+#[derive(Default)]
+struct RecordingPurgeSink {
+    inactive: bool,
+    purged: std::sync::Mutex<Vec<(Uuid, Uuid, String, axiam_core::models::user::UserStatus)>>,
+}
+
+impl SsfSystemAccountSink for RecordingPurgeSink {
+    fn is_active(&self) -> bool {
+        !self.inactive
+    }
+
+    fn account_disabled<'a>(&'a self, _tenant_id: Uuid, _user: &'a User) -> SsfFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn account_purged<'a>(&'a self, tenant_id: Uuid, user: &'a User) -> SsfFuture<'a, ()> {
+        Box::pin(async move {
+            self.purged.lock().unwrap().push((
+                tenant_id,
+                user.id,
+                user.email.clone(),
+                user.status.clone(),
+            ));
+        })
+    }
+}
+
+async fn user_due_for_erasure(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    name: &str,
+) -> User {
+    let users = SurrealUserRepository::new(db.clone());
+    let user = users
+        .create(CreateUser {
+            tenant_id,
+            username: name.into(),
+            email: format!("{name}@example.com"),
+            password: test_password(),
+            metadata: None,
+        })
+        .await
+        .expect("create user");
+    users
+        .mark_deletion_pending(
+            tenant_id,
+            user.id,
+            Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("mark deletion pending");
+    users.get_by_id(tenant_id, user.id).await.expect("reload")
+}
+
+#[tokio::test]
+async fn an_erasure_reports_the_account_as_it_was_before_the_write() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let users = SurrealUserRepository::new(db.clone());
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let proofs = SurrealErasureProofRepository::new(db.clone());
+    let user = user_due_for_erasure(&db, tenant_id, "purge_reported").await;
+    let sink = RecordingPurgeSink::default();
+
+    run_erasure_pipeline_reporting(
+        &audit,
+        &proofs,
+        &users,
+        tenant_id,
+        user.id,
+        "DELETED_USER_ssf000000000001",
+        "hashed_ssf_email",
+        Some(&sink),
+    )
+    .await
+    .expect("the erasure succeeds");
+
+    let told = sink.purged.lock().unwrap().clone();
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].0, tenant_id);
+    assert_eq!(told[0].1, user.id);
+    // The address the receivers need is the one the erasure then destroyed.
+    assert_eq!(told[0].2, "purge_reported@example.com");
+    let after = users.get_by_id(tenant_id, user.id).await.expect("reload");
+    assert_eq!(after.email, "hashed_ssf_email");
+}
+
+#[tokio::test]
+async fn an_erasure_that_never_got_as_far_as_anonymizing_reports_nothing() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let users = SurrealUserRepository::new(db.clone());
+    let proofs = SurrealErasureProofRepository::new(db.clone());
+    let user = user_due_for_erasure(&db, tenant_id, "purge_aborted").await;
+    let sink = RecordingPurgeSink::default();
+
+    // `pseudonymize_actor` fails first: the account is untouched and still due.
+    let result = run_erasure_pipeline_reporting(
+        &FailingAuditRepo,
+        &proofs,
+        &users,
+        tenant_id,
+        user.id,
+        "DELETED_USER_ssf000000000002",
+        "hashed",
+        Some(&sink),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(sink.purged.lock().unwrap().is_empty());
+    assert!(
+        users
+            .get_by_id(tenant_id, user.id)
+            .await
+            .expect("reload")
+            .deletion_pending
+    );
+}
+
+/// A proof that fails to write leaves an anonymized account no sweep selects
+/// again: the report is sent at the anonymization, not held for the proof.
+#[tokio::test]
+async fn an_erasure_whose_proof_fails_to_write_is_still_reported() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let users = SurrealUserRepository::new(db.clone());
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let user = user_due_for_erasure(&db, tenant_id, "purge_proofless").await;
+    let sink = RecordingPurgeSink::default();
+
+    let result = run_erasure_pipeline_reporting(
+        &audit,
+        &FailingErasureProofRepo,
+        &users,
+        tenant_id,
+        user.id,
+        "DELETED_USER_ssf000000000003",
+        "hashed",
+        Some(&sink),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(sink.purged.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn no_sink_or_an_inactive_one_changes_nothing_about_the_erasure() {
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let users = SurrealUserRepository::new(db.clone());
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let proofs = SurrealErasureProofRepository::new(db.clone());
+
+    let inactive = RecordingPurgeSink {
+        inactive: true,
+        ..RecordingPurgeSink::default()
+    };
+    for (name, sink) in [
+        ("purge_no_sink", None),
+        (
+            "purge_inactive",
+            Some(&inactive as &dyn SsfSystemAccountSink),
+        ),
+    ] {
+        let user = user_due_for_erasure(&db, tenant_id, name).await;
+        run_erasure_pipeline_reporting(
+            &audit,
+            &proofs,
+            &users,
+            tenant_id,
+            user.id,
+            &format!("DELETED_USER_{name}"),
+            &format!("hashed_{name}"),
+            sink,
+        )
+        .await
+        .expect("the erasure succeeds");
+        assert_eq!(erasure_proof_count(&db, tenant_id, user.id).await, 1);
+    }
+    assert!(inactive.purged.lock().unwrap().is_empty());
+}

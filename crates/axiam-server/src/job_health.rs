@@ -39,6 +39,8 @@ pub const SWEEP_JOBS: &[&str] = &[
     "saml_logout_run",
     // G-3 (T23.3.5): the directory sync job.
     "directory_sync",
+    // G-5 (T23.5.3): the SSF poll/hold buffer's seven-day expiry.
+    "ssf_event_buffer",
     "amqp_nonce_replay",
     "gdpr_purge",
     "gdpr_export",
@@ -156,7 +158,9 @@ mod tests {
     #[test]
     fn the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered() {
         let source = include_str!("cleanup.rs");
-        for job in ["saml_sp_session", "saml_logout_run"] {
+        // T23.5.3 (T-395): the SSF buffer's expiry sweep is in the same loop and
+        // the same list, so `/health/jobs` shows it from boot.
+        for job in ["saml_sp_session", "saml_logout_run", "ssf_event_buffer"] {
             let recorded = source.match_indices("&self.job_health,").any(|(at, _)| {
                 let rest = &source[at + "&self.job_health,".len()..];
                 rest.trim_start().starts_with(&format!("\"{job}\""))
@@ -171,6 +175,7 @@ mod tests {
         let names: Vec<_> = tracker.snapshot().into_iter().map(|s| s.name).collect();
         assert!(names.iter().any(|n| n == "saml_sp_session"));
         assert!(names.iter().any(|n| n == "saml_logout_run"));
+        assert!(names.iter().any(|n| n == "ssf_event_buffer"));
     }
 
     #[test]

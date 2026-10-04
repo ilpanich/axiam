@@ -896,6 +896,12 @@ async fn main() -> std::io::Result<()> {
     amqp.declare_webhook_topology()
         .await
         .expect("Failed to declare webhook AMQP topology");
+    // G-5 / T23.5.3: the SSF push kind of the shared dispatcher (D-36) gets its
+    // own sibling queues (`axiam.ssf_push`, `.retry`, `.dlq`); declaring them
+    // changes nothing for the webhook queues above.
+    amqp.declare_outbound_topology(OutboundKind::SsfPush)
+        .await
+        .expect("Failed to declare SSF push AMQP topology");
     tracing::info!("RabbitMQ connected and queues declared");
 
     // LIVE pooled-connection reference — registered in `AppState` so handlers
@@ -986,7 +992,19 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
-    let session_repo = SurrealSessionRepository::new(pool.handle_for_repo());
+    // G-5 / T23.5.3 (D-52): the session repository reports every revocation to a
+    // sink that is bound to the SSF emitter once the emitter exists (it needs the
+    // outbox, which needs the broker); until then it is inactive and the
+    // repository issues the queries it always did. The directory sync's
+    // deactivation reports through the second.
+    let ssf_session_sink: Arc<
+        axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SessionRevocationSink>,
+    > = Arc::default();
+    let ssf_account_sink: Arc<
+        axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SsfSystemAccountSink>,
+    > = Arc::default();
+    let session_repo = SurrealSessionRepository::new(pool.handle_for_repo())
+        .with_revocation_sink(ssf_session_sink.clone());
     let session_repo = match revocation_feed_ttl {
         Some(ttl) => session_repo.with_revocation_feed(ttl),
         None => session_repo,
@@ -1678,6 +1696,20 @@ async fn main() -> std::io::Result<()> {
     // header cannot be stored and everything else works.
     let ssf_stream_repo =
         axiam_db::SurrealSsfStreamRepository::new(pool.handle_for_repo(), webhook_enc_key);
+    // T23.5.3 — the poll/hold buffer and the one emitter every change site calls
+    // (D-52). The emitter does nothing until the outbox is bound (below, once the
+    // broker's publisher exists); the two ports are bound to it now.
+    let ssf_event_buffer_repo =
+        axiam_db::SurrealSsfEventBufferRepository::new(pool.handle_for_repo());
+    let ssf_emitter = axiam_api_rest::ssf_emitter::SsfEmitter::new(
+        ssf_stream_repo.clone(),
+        tenant_repo.clone(),
+        settings_repo.clone(),
+        user_repo.clone(),
+        config.auth.clone(),
+    );
+    ssf_session_sink.bind(Arc::new(ssf_emitter.clone()));
+    ssf_account_sink.bind(Arc::new(ssf_emitter.clone()));
 
     // G7: resolve the deployment rate-limit posture BEFORE validation and
     // before `config.rate_limit` / `config.grpc` are cloned into the App
@@ -2338,6 +2370,72 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Webhook consumer spawned");
     }
 
+    // G-5 / T23.5.3 — the SSF push kind of the same dispatcher (D-36): one
+    // publisher channel for enqueueing events and for the consumer's TTL-delayed
+    // retries, the outbox every producer submits to (D-48), and a consumer
+    // supervisor that is the webhook one's copy (the duplication is known and
+    // carried to F4). Retry env vars are `AXIAM__SSF_PUSH__*`.
+    let ssf_publisher = {
+        let channel = amqp
+            .create_publisher_channel()
+            .await
+            .expect("Failed to create AMQP SSF push publisher channel");
+        axiam_amqp::AmqpOutboundPublisher::new(channel)
+    };
+    let ssf_outbox: Arc<dyn axiam_core::models::ssf::SsfOutbox> =
+        Arc::new(axiam_oauth2::ssf_delivery::SsfOutboxService::new(
+            ssf_event_buffer_repo.clone(),
+            Arc::new(ssf_publisher.clone()),
+        ));
+    ssf_emitter.bind_outbox(Arc::clone(&ssf_outbox));
+    {
+        let mut ssf_deliverers = OutboundDeliverers::new();
+        ssf_deliverers
+            .register(Arc::new(axiam_oauth2::ssf_delivery::SsfPushDeliverer::new(
+                ssf_stream_repo.clone(),
+                ssf_event_buffer_repo.clone(),
+                config.auth.clone(),
+            )))
+            .expect("Failed to register the SSF push deliverer");
+        let ssf_publisher_for_consumer = ssf_publisher.clone();
+        let ssf_audit_repo = audit_repo.clone();
+        let ssf_retry_cfg = OutboundRetryConfig::from_env_for(OutboundKind::SsfPush);
+        let ssf_amqp = Arc::clone(&amqp);
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(1);
+            let max_backoff = Duration::from_secs(30);
+            loop {
+                match ssf_amqp.create_channel().await {
+                    Ok(ssf_channel) => {
+                        backoff = Duration::from_secs(1);
+                        if let Err(e) = run_outbound_consumer(
+                            ssf_channel,
+                            OutboundKind::SsfPush,
+                            &ssf_deliverers,
+                            &ssf_publisher_for_consumer,
+                            &ssf_audit_repo,
+                            ssf_retry_cfg,
+                        )
+                        .await
+                        {
+                            tracing::error!(error = %e, "SSF push AMQP consumer failed");
+                        }
+                        tracing::warn!("SSF push AMQP consumer exited — reconnecting");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to (re)create SSF push consumer channel — retrying"
+                        );
+                    }
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+            }
+        });
+        tracing::info!("SSF push consumer spawned");
+    }
+
     // Spawn AMQP mail consumer on a background task (D-14).
     // Only spawned when AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is present; otherwise
     // mail delivery is disabled and a warning was logged at startup (T-5-key-absent).
@@ -2767,7 +2865,15 @@ async fn main() -> std::io::Result<()> {
         directory_sync_state_repo.clone(),
         Arc::clone(&directory_group_mapper) as _,
         Arc::clone(&directory_audit_sink) as _,
-    )));
+    )
+    // G-5 (D-52): a directory deactivation is an SSF `account-disabled`.
+    .with_ssf_sink(ssf_account_sink.clone())))
+    // G-5 (T23.5.3): the buffer's seven-day sweep, and the `account-purged` of an
+    // erasure.
+    .with_ssf(
+        Arc::new(ssf_event_buffer_repo.clone()),
+        ssf_account_sink.clone(),
+    );
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared
@@ -2945,12 +3051,16 @@ async fn main() -> std::io::Result<()> {
             client: Arc::clone(directory_authenticator.client()),
         },
         saml_idp: saml_idp_state,
-        // G-5 / T23.5.2 — the stream registry seals push credentials under the
-        // key webhook secrets use (D-49). The outbox is T23.5.3's: until it is
-        // wired, verification answers 503 and no event is produced.
+        // G-5 / T23.5.2, T23.5.3 — the stream registry seals push credentials under
+        // the key webhook secrets use (D-49); the outbox routes every produced
+        // event to the dispatcher or the poll buffer (D-48).
         ssf: bundles::SsfState {
             stream_repo: ssf_stream_repo,
-            outbox: None,
+            buffer_repo: ssf_event_buffer_repo,
+            outbox: Some(ssf_outbox),
+            emitter: ssf_emitter,
+            session_sink: ssf_session_sink,
+            account_sink: ssf_account_sink,
         },
     };
 

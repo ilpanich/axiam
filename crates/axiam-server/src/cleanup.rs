@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use axiam_amqp::MailOutboundPublisher;
 use axiam_api_rest::handlers::gdpr::write_erasure_audit_with_dlq;
+use axiam_api_rest::ssf_emitter::{InitiatingEntity, with_cause};
 use axiam_auth::AuthService;
 use axiam_auth::crypto::{encrypt_separate, gdpr_pseudonym};
 use axiam_core::error::AxiamError;
@@ -21,13 +22,14 @@ use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::gdpr::CreateErasureProof;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
 use axiam_core::models::settings::{DCR_UNAUTHORIZED_CLIENT_TTL_SECS, DynamicRegistrationMode};
+use axiam_core::models::ssf::SsfSystemAccountSink;
 use axiam_core::repository::{
     AccountDeletionRepository, AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter,
     AuditLogRepository, ConsentRepository, ErasureProofRepository, ExportJobRepository,
     FederationLinkRepository, FederationLoginStateRepository, GroupRepository, MailPublisher,
     Pagination, PasswordHistoryRepository, PendingSamlRequestRepository, RoleRepository,
-    SamlLogoutRunRepository, SamlSpSessionRepository, SessionRepository, SsoHandoffCodeRepository,
-    TenantRepository, UserRepository, WebauthnCredentialRepository,
+    SamlLogoutRunRepository, SamlSpSessionRepository, SessionRepository, SsfEventBufferRepository,
+    SsoHandoffCodeRepository, TenantRepository, UserRepository, WebauthnCredentialRepository,
 };
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
@@ -131,6 +133,12 @@ pub struct CleanupTask<C: Connection> {
     /// G-3 (T23.3.5): the directory sync job. `None` — the default — runs no
     /// sync; a test harness that exercises other sweeps leaves it out.
     directory_sync: Option<Arc<DirectorySyncJob<C>>>,
+    /// G-5 (T23.5.3, D-48): the SSF poll/hold buffer, whose expired rows the
+    /// `ssf_event_buffer` sweep removes. `None` runs no sweep.
+    ssf_buffer_repo: Option<Arc<axiam_db::SurrealSsfEventBufferRepository<C>>>,
+    /// G-5 (D-52): tells SSF receivers an account was purged (the account as it
+    /// was before the erasure). `None` — the default — tells nobody.
+    ssf_sink: Option<Arc<dyn SsfSystemAccountSink>>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -567,6 +575,42 @@ where
     EP: ErasureProofRepository,
     U: UserRepository,
 {
+    erasure_steps(
+        audit_repo,
+        erasure_proof_repo,
+        user_repo,
+        tenant_id,
+        user_id,
+        pseudonym,
+        email_hash,
+        None,
+    )
+    .await
+}
+
+/// The three steps of [`run_erasure_pipeline`], with the SSF report (G-5, D-52)
+/// between the second and the third.
+///
+/// The report follows the anonymization because that is the write that makes the
+/// account gone — whether or not the erasure proof is then written. A proof that
+/// fails to write leaves an anonymized account that no sweep selects again, so a
+/// report that waited for the proof would never be sent.
+#[allow(clippy::too_many_arguments)]
+async fn erasure_steps<A, EP, U>(
+    audit_repo: &A,
+    erasure_proof_repo: &EP,
+    user_repo: &U,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    pseudonym: &str,
+    email_hash: &str,
+    report: Option<(&dyn SsfSystemAccountSink, axiam_core::models::user::User)>,
+) -> Result<(), AxiamError>
+where
+    A: AuditLogRepository,
+    EP: ErasureProofRepository,
+    U: UserRepository,
+{
     // FATAL now (was: `if let Err(e) = ... { tracing::warn!(...) }`).
     audit_repo
         .pseudonymize_actor(tenant_id, user_id, pseudonym)
@@ -579,6 +623,11 @@ where
         .anonymize_user(tenant_id, user_id, email_hash, pseudonym)
         .await?;
 
+    // G-5 (D-52): the account is gone; tell the receivers what it was.
+    if let Some((sink, user)) = report {
+        sink.account_purged(tenant_id, &user).await;
+    }
+
     // Written STRICTLY LAST — only reached once every step above succeeded.
     erasure_proof_repo
         .create(CreateErasureProof {
@@ -590,6 +639,56 @@ where
         .await?;
 
     Ok(())
+}
+
+/// [`run_erasure_pipeline`] and an SSF `account-purged` for the erased account
+/// (G-5, D-52), sent once the account has been anonymized.
+///
+/// The account is read **before** the pipeline writes anything: the erasure
+/// replaces the address, and the event's subject (`iss_sub`, or the address on
+/// an `email` stream) is resolved from what the account was. Nothing is read
+/// when no sink is attached or it is inactive. A failed erasure that did not get
+/// as far as anonymizing reports nothing: the account is still there and still
+/// due, and the next sweep tries again.
+///
+/// # Errors
+///
+/// Those of [`run_erasure_pipeline`]; the sink never adds one.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_erasure_pipeline_reporting<A, EP, U>(
+    audit_repo: &A,
+    erasure_proof_repo: &EP,
+    user_repo: &U,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    pseudonym: &str,
+    email_hash: &str,
+    sink: Option<&dyn SsfSystemAccountSink>,
+) -> Result<(), AxiamError>
+where
+    A: AuditLogRepository,
+    EP: ErasureProofRepository,
+    U: UserRepository,
+{
+    let report = match sink {
+        Some(sink) if sink.is_active() => user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .ok()
+            .map(|user| (sink, user)),
+        _ => None,
+    };
+    erasure_steps(
+        audit_repo,
+        erasure_proof_repo,
+        user_repo,
+        tenant_id,
+        user_id,
+        pseudonym,
+        email_hash,
+        report,
+    )
+    .await
 }
 
 /// The Art. 15 `profile` section of one user's export.
@@ -711,8 +810,25 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             settings_repo,
             job_health,
             directory_sync: None,
+            ssf_buffer_repo: None,
+            ssf_sink: None,
             shutdown,
         }
+    }
+
+    /// Run the SSF sweep and report erasures to SSF receivers (G-5, T23.5.3).
+    ///
+    /// A builder step for the reason [`Self::with_directory_sync`] is one: the
+    /// absence has a meaning and the constructor's list is long enough.
+    #[must_use]
+    pub fn with_ssf(
+        mut self,
+        buffer_repo: Arc<axiam_db::SurrealSsfEventBufferRepository<C>>,
+        sink: Arc<dyn SsfSystemAccountSink>,
+    ) -> Self {
+        self.ssf_buffer_repo = Some(buffer_repo);
+        self.ssf_sink = Some(sink);
+        self
     }
 
     /// Run the directory sync job on this scheduler (G-3, T23.3.5, D-31).
@@ -828,6 +944,16 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         &self.job_health,
                         "revocation_feed",
                         self.sweep_revocation_feed().await,
+                        tracing::Level::DEBUG,
+                    );
+
+                    // G-5 (T23.5.3, D-48): events held for a poll or paused SSF
+                    // stream for more than seven days. DEBUG: an expired event
+                    // is one nobody can still act on.
+                    Self::record(
+                        &self.job_health,
+                        "ssf_event_buffer",
+                        self.sweep_ssf_event_buffer().await,
                         tracing::Level::DEBUG,
                     );
 
@@ -968,6 +1094,18 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         repo.prune_expired(Utc::now()).await
     }
 
+    /// Remove SSF buffer rows past their `expires_at` (G-5, T23.5.3, D-48).
+    ///
+    /// A size bound, not a correctness one: the poll endpoint and the resume
+    /// read only unexpired rows, so a sweep that never ran would serve the
+    /// right answer over a table that grows. `Ok(0)` without a buffer.
+    async fn sweep_ssf_event_buffer(&self) -> Result<u64, AxiamError> {
+        let Some(repo) = &self.ssf_buffer_repo else {
+            return Ok(0);
+        };
+        repo.delete_expired(Utc::now()).await
+    }
+
     // -----------------------------------------------------------------------
     // Dynamic client registration sweeps (T21.4)
     // -----------------------------------------------------------------------
@@ -1096,7 +1234,23 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     }
 
     /// Run the full purge pipeline for a single user.
+    ///
+    /// G-5 (D-52): the session revocations and the `account-purged` event are
+    /// one cause, and the platform's own (`system`).
     async fn purge_single_user(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        pepper: [u8; 32],
+    ) -> Result<(), AxiamError> {
+        with_cause(
+            Some(InitiatingEntity::System),
+            self.purge_single_user_inner(user_id, tenant_id, pepper),
+        )
+        .await
+    }
+
+    async fn purge_single_user_inner(
         &self,
         user_id: Uuid,
         tenant_id: Uuid,
@@ -1185,7 +1339,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         // never ran, so the user stays due for a retry via
         // `find_due_for_purge`, and NO erasure proof is ever written for an
         // incomplete erasure.
-        run_erasure_pipeline(
+        run_erasure_pipeline_reporting(
             self.audit_repo.as_ref(),
             self.erasure_proof_repo.as_ref(),
             self.user_repo.as_ref(),
@@ -1193,6 +1347,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             user_id,
             &pseudonym,
             &email_hash,
+            self.ssf_sink.as_deref(),
         )
         .await?;
 

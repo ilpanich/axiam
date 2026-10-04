@@ -26,8 +26,8 @@
 //! 1. Add one line to the `outbound_kinds!` invocation below:
 //!    `SsfPush => "ssf_push"`. The slug fixes the kind's queue names
 //!    (`axiam.ssf_push`, `.retry`, `.dlq`), its env-var prefix
-//!    (`AXIAM__SSF_PUSH__MAX_ATTEMPTS`, `..._BACKOFF_BASE_MS`,
-//!    `..._BACKOFF_CEILING_MS`) and its audit action prefix
+//!    (`AXIAM__<SLUG>__MAX_ATTEMPTS`, `…__BACKOFF_BASE_MS`,
+//!    `…__BACKOFF_CEILING_MS`, with the slug upper-cased) and its audit action prefix
 //!    (`ssf_push.delivery_succeeded`, `.delivery_attempt`, `.delivery_failed`).
 //! 2. Implement [`OutboundDeliverer`] in the crate that owns the protocol,
 //!    returning that kind from [`OutboundDeliverer::kind`].

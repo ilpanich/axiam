@@ -605,6 +605,30 @@ security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 > never registered in job health (carried to F4). T-377's wording says `SigAlg`
 > must match, where the code refuses a mismatch by signature failure (wording
 > for F4). All SLO tests use a synthetic SP; T23.2.7 is the real-SP oracle.
+>
+> **EXECUTED (partly) — G-2, W4: T23.2.6, 2026-10-04** (`997603b`, `6e83a1b`;
+> Sonnet 5.5; frontend only, run in a worktree in parallel with T23.5.2). The
+> console page *SAML Service Providers* at `/saml` (sidebar *Identity*), nav
+> entry and route gated on `saml_sp:read`, with its Playwright permission-matrix
+> entry. A typed client for the eleven §29 operations. The IdP panel shows the
+> entity id, a copyable metadata URL, the SSO and SLO locations and whether the
+> IdP is available, enabled and serving, with what to do when it is not. SP
+> list (search, pagination), create and edit of every input member — `entity_id`
+> read-only on edit, `encrypt_assertions` disabled and always written `false`
+> (D-42) — and delete behind a confirmation. Metadata import is a parse to a
+> draft shown with its fingerprints and warnings, the unverified-signature
+> warning first, saved only by an explicit save (D-41). Signing credentials:
+> list, issue, promote and retire behind confirmations that say what they do,
+> gated on `saml_idp:credential`. The client-side validator mirrors only the
+> write-time rules that need no network; `400`/`404`/`409`/`503` messages are
+> shown verbatim past the generic redactor, with a private-key block blanked.
+> The `saml_admin` row of the frontend coverage matrix is covered. Tests: 68
+> client and form tests, 53 page tests; the whole vitest suite (2 166), lint,
+> `tsc`, the Playwright type check and `check-frontend-coverage.py` green.
+>
+> What the plan did not anticipate. Nothing in the console turns
+> `saml_idp_enabled` on: the panel explains the setting, but the layered
+> setting has no form control yet (carried to F4).
 
 **Target.** AXIAM issues SAML 2.0 assertions to registered service providers,
 per tenant: IdP metadata, Web Browser SSO profile with HTTP-Redirect and
@@ -1153,6 +1177,43 @@ the authorization server, the same class as T-272 to T-280).
 > `#[ignore]`d (no broker here); CI's e2e stack exercises delivery. The server's
 > consumer supervisor loop is still inline, so each new kind copies about 30
 > lines.
+>
+> **EXECUTED (partly) — G-5, W4: T23.5.2, 2026-10-04** (`bc03a57`, `c41942f`,
+> `1bd123c`, `7f9ce33`, `5f1c00b`, `b1c44c2`, `c975c9a`; Opus 5.5). The
+> transmitter core per **D-44 … D-51** (SSF 1.0 final, CAEP 1.0, RISC 1.0).
+> Schema **v77**: `ssf_stream` (audience unique across the deployment, D-47;
+> the receiver's `Authorization` header sealed under `pki_encryption_key`,
+> never projected, D-49), `ssf_event_buffer`, and the disable-only layered
+> switch `ssf_enabled`, default off (D-45). `axiam_oauth2::ssf`: the six event
+> shapes, `prepare_event` resolving the subject per stream at production
+> (`iss_sub`, or `email` only for an address D-25 vouches for, else not sent,
+> D-46), and `sign_set` at delivery — EdDSA with the deployment key (D-13),
+> `typ: secevent+jwt`, no `exp`, no `sub`, one event, signed only against the
+> stream as it then is (D-48, D-51). Routes: the administrator's stream
+> registry (namespace `ssf`, `ssf_streams:read`/`ssf_streams:write`, bucket
+> `ssf_admin`), the receiver's stream API at `/ssf/v1/*` under an
+> `ssf.manage` client-credentials token bound by `receiver_client_id` (D-50:
+> one `404` for anything not its own, the administrator's status not
+> overridable, verification at most every 60 s, claimed in the datastore), and
+> discovery at `/.well-known/ssf-configuration` in both issuer forms (one empty
+> `404` for unknown tenant, malformed id or switch off). `OutboundKind::SsfPush`
+> added; the outbox port is declared and verification answers `503` until
+> T23.5.3 wires delivery. **Contract 1.56, §32** (§31 stays G-6's, D-44).
+> OpenAPI and the registry regenerated. Threat model **2.27.0** (401 threats,
+> 382 mitigated, 19 open): **T-385 … T-401** entered, those whose controls
+> landed Mitigated with their tests; **T-392, T-394, T-395** stay Open for
+> T23.5.3 (push transport, poll buffer, event production) and **T-388** until
+> the receiver helper ships. Tests: 23 `ssf` unit tests, 11 repository tests,
+> 19 HTTP tests, the M2M management suite extended (14).
+>
+> What the plan did not anticipate. Neither event source G-5 names can be
+> tailed: the revocation feed publishes unlinkable hashes by design (T-39) and
+> most audit actions are the middleware's `{METHOD} {path}`, so **D-52** has
+> events emitted where the change happens, through one emitter, for T23.5.3.
+> Residuals for F4: an audience can be squatted before its owner registers it;
+> an erased user's subject member can outlive the erasure in the buffer for up
+> to seven days; a receiver token is not re-checked against a deleted OAuth2
+> client within its 15-minute life.
 
 **Target.** AXIAM transmits CAEP `session-revoked`,
 `credential-change`, `assurance-level-change` and RISC `account-disabled`,

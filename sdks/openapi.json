@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:0e9c77675ca459fdf677585bdb2f27629d775977076db0e26deab11e95548430"
+    "x-axiam-spec-digest": "sha256:ba38450f2a47a689e602133558a0c241ded53ed9699a350917d7d6fb1044ce3e"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -13854,6 +13854,78 @@
         }
       }
     },
+    "/ssf/v1/poll/{stream_id}": {
+      "post": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`POST /ssf/v1/poll/{stream_id}` — RFC 8936 poll delivery (D-48).",
+        "description": "The receiver's token, as on the stream API, and the same single `404` for a\nstream that is not its own. In this order: the acknowledgements, then the\nreported errors, then the next SETs — so an event acknowledged here is not\nreturned by this same call. An unacknowledged event comes back on the next\npoll (at-least-once); a SET is **signed now**, against the stream as it is\nnow, so a stream paused or disabled meanwhile answers an empty `sets`.",
+        "operationId": "poll_events",
+        "parameters": [
+          {
+            "name": "stream_id",
+            "in": "path",
+            "description": "The poll stream",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SsfPollRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The oldest held SETs, up to maxEvents, and whether more are held",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfPollResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed body, a negative maxEvents, too many ack or setErrs entries, or a push stream"
+          },
+          "401": {
+            "description": "No valid token"
+          },
+          "403": {
+            "description": "Not an OAuth2 client token with the ssf.manage scope"
+          },
+          "404": {
+            "description": "No such stream for this receiver"
+          },
+          "413": {
+            "description": "The body is over 32 KiB"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/ssf/v1/status": {
       "get": {
         "tags": [
@@ -23282,6 +23354,88 @@
           "https://schemas.openid.net/secevent/risc/event-type/account-enabled",
           "https://schemas.openid.net/secevent/risc/event-type/account-purged"
         ]
+      },
+      "SsfPollRequest": {
+        "type": "object",
+        "description": "`POST /ssf/v1/poll/{stream_id}` body (RFC 8936 §2.2). Every member is\noptional; an empty body is `{}`.",
+        "properties": {
+          "ack": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `jti`s of SETs the receiver processed: exactly those rows of this\nstream are deleted."
+          },
+          "maxEvents": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The most SETs to return, clamped to 100. `0` acknowledges only."
+          },
+          "returnImmediately": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` answers at once, possibly with no SETs; `false` (the default)\nwaits up to 30 s for one."
+          },
+          "setErrs": {
+            "type": "object",
+            "description": "SETs the receiver could not accept: each is deleted and audited.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SsfSetError"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SsfPollResponse": {
+        "type": "object",
+        "description": "`POST /ssf/v1/poll/{stream_id}` answer (RFC 8936 §2.3).",
+        "required": [
+          "sets",
+          "moreAvailable"
+        ],
+        "properties": {
+          "moreAvailable": {
+            "type": "boolean",
+            "description": "Whether more are held than were returned."
+          },
+          "sets": {
+            "type": "object",
+            "description": "The compact SETs by `jti`: the oldest held events, up to `maxEvents`,\nsigned now, against the stream as it is now.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SsfSetError": {
+        "type": "object",
+        "description": "One `setErrs` entry (RFC 8936 §2.4).",
+        "required": [
+          "err"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free text from the receiver. Accepted and **not stored**."
+          },
+          "err": {
+            "type": "string",
+            "description": "An RFC 8935 §2.4 error code."
+          }
+        }
       },
       "SsfStatusActor": {
         "type": "string",

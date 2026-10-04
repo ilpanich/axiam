@@ -814,8 +814,8 @@ pub struct SsfPollRequest {
 /// `POST /ssf/v1/poll/{stream_id}` answer (RFC 8936 §2.3).
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SsfPollResponse {
-    /// The compact SETs by `jti`, oldest first. Signed now, against the stream
-    /// as it is now.
+    /// The compact SETs by `jti`: the oldest held events, up to `maxEvents`,
+    /// signed now, against the stream as it is now.
     #[schema(value_type = std::collections::HashMap<String, String>)]
     pub sets: serde_json::Map<String, serde_json::Value>,
     /// Whether more are held than were returned.
@@ -853,9 +853,9 @@ fn empty_poll_response() -> HttpResponse {
     path = "/ssf/v1/poll/{stream_id}",
     tag = "ssf-receiver",
     params(("stream_id" = String, Path, description = "The poll stream")),
-    request_body(content = SsfPollRequest, description = "Every member optional; an empty body is {}"),
+    request_body = Option<SsfPollRequest>,
     responses(
-        (status = 200, description = "The next SETs, oldest first, and whether more are held", body = SsfPollResponse),
+        (status = 200, description = "The oldest held SETs, up to maxEvents, and whether more are held", body = SsfPollResponse),
         (status = 400, description = "A malformed body, a negative maxEvents, too many ack or \
                                       setErrs entries, or a push stream"),
         (status = 401, description = "No valid token"),

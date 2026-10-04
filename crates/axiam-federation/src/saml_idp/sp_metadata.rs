@@ -42,7 +42,10 @@
 //! **Trusted from an unsigned document: nothing.** A `ds:Signature` in it is not
 //! evaluated — there is no anchor, and evaluating it against a certificate the
 //! same document carries would be circular — and its presence is reported as a
-//! warning. `validUntil` and `cacheDuration` are ignored. The SHA-256
+//! warning. `validUntil` and `cacheDuration` are ignored (D-54: a `cacheDuration` on the
+//! `SPSSODescriptor` is dropped from the parsed tree before `samael` reads it, and an
+//! `AssertionConsumerService` with no `index` is given the lowest unused one — each
+//! with a warning). The SHA-256
 //! fingerprints of the certificates are returned for the administrator to compare
 //! out of band. AXIAM never re-reads an SP's metadata on its own.
 
@@ -240,11 +243,98 @@ pub fn parse_sp_metadata(document: &[u8]) -> Result<SpMetadataDraft, MetadataErr
         return Err(refused);
     }
 
-    let descriptor: EntityDescriptorType = text.parse().map_err(|_| refused)?;
+    // D-54: two things `samael`'s types cannot read, normalised on the parsed
+    // tree (never by rewriting bytes). A document needing neither goes to
+    // `samael` exactly as it arrived.
+    let (normalised, normalisation_warnings) = normalise_tree(&doc, &root);
+    let parsed_text = normalised.as_deref().unwrap_or(text);
+
+    let descriptor: EntityDescriptorType = parsed_text.parse().map_err(|_| refused)?;
     let EntityDescriptorType::EntityDescriptor(entity) = descriptor else {
         return Err(refused);
     };
-    draft_from(&entity, text)
+    let mut draft = draft_from(&entity, text)?;
+    draft.warnings.splice(0..0, normalisation_warnings);
+    Ok(draft)
+}
+
+/// What `samael` cannot type, fixed on the libxml tree (D-54): the `cacheDuration`
+/// of the `SPSSODescriptor` (an ISO-8601 duration where `samael` wants an
+/// integer — D-41 never uses it, and the draft has no cache field) is dropped,
+/// and an `AssertionConsumerService` with no `index` (`samael` requires one) gets
+/// the lowest unused non-negative index in document order. An `index` that is
+/// present is left alone: a malformed one is still refused by `samael`.
+///
+/// Returns the re-serialised document when something changed, else `None`, and a
+/// warning for each change that names it, so the administrator sees what was
+/// altered before saving.
+fn normalise_tree(
+    doc: &libxml::tree::Document,
+    root: &libxml::tree::Node,
+) -> (Option<String>, Vec<String>) {
+    let in_metadata = |node: &libxml::tree::Node, name: &str| {
+        node.get_name() == name
+            && node
+                .get_namespace()
+                .is_some_and(|ns| ns.get_href() == NS_METADATA)
+    };
+    let mut warnings = Vec::new();
+    let mut changed = false;
+    for mut descriptor in root
+        .get_child_elements()
+        .into_iter()
+        .filter(|n| in_metadata(n, "SPSSODescriptor"))
+    {
+        if descriptor.has_attribute("cacheDuration")
+            && descriptor.remove_attribute("cacheDuration").is_ok()
+        {
+            changed = true;
+            warnings.push(
+                "the SPSSODescriptor's cacheDuration was ignored: AXIAM never re-reads an SP's \
+                 metadata on its own"
+                    .to_string(),
+            );
+        }
+        let acs: Vec<libxml::tree::Node> = descriptor
+            .get_child_elements()
+            .into_iter()
+            .filter(|n| in_metadata(n, "AssertionConsumerService"))
+            .collect();
+        let mut used: std::collections::BTreeSet<u64> = acs
+            .iter()
+            .filter_map(|n| n.get_attribute("index")?.trim().parse::<u64>().ok())
+            .collect();
+        for mut endpoint in acs {
+            if endpoint.has_attribute("index") {
+                continue;
+            }
+            let index = (0u64..).find(|i| !used.contains(i)).unwrap_or(0);
+            if endpoint.set_attribute("index", &index.to_string()).is_ok() {
+                used.insert(index);
+                changed = true;
+                warnings.push(format!(
+                    "the AssertionConsumerService at {} has no index: it was given index \
+                     {index}",
+                    endpoint
+                        .get_attribute("Location")
+                        .map_or_else(|| "(no Location)".to_string(), |l| acs_location_label(&l)),
+                ));
+            }
+        }
+    }
+    (changed.then(|| doc.to_string()), warnings)
+}
+
+/// A `Location` as it goes into a warning: trimmed, free of control characters,
+/// cut to 200 characters. It is the SP's own text, shown to the administrator who
+/// imported that SP's document.
+fn acs_location_label(location: &str) -> String {
+    location
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect()
 }
 
 /// Map one `EntityDescriptor` to a draft.
@@ -711,6 +801,151 @@ mod tests {
             1,
         );
         assert!(parse(&harmless).is_ok());
+    }
+
+    // --- D-54: what samael cannot type, normalised on the parsed tree ---
+
+    fn acs_with(attrs: &str, location: &str) -> String {
+        format!(
+            "<md:AssertionConsumerService \
+             Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\" \
+             Location=\"{location}\"{attrs}/>"
+        )
+    }
+
+    #[test]
+    fn an_iso_8601_cache_duration_on_the_sp_descriptor_is_dropped_with_a_warning() {
+        for duration in ["PT1H", "P0Y0M0DT1H0M0S"] {
+            let xml = metadata(
+                "",
+                &format!(" cacheDuration=\"{duration}\""),
+                &acs_with(
+                    " index=\"0\" isDefault=\"true\"",
+                    "https://sp.example.test/acs",
+                ),
+            );
+            let draft = parse(&xml).expect("the document is read with the duration dropped");
+            assert_eq!(draft.service_provider.acs_urls.len(), 1);
+            assert_eq!(draft.service_provider.acs_urls[0].index, 0);
+            assert!(
+                draft
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("cacheDuration") && w.contains("SPSSODescriptor")),
+                "a warning names the attribute"
+            );
+            assert_eq!(draft.warnings.len(), 1, "and nothing else is warned");
+        }
+    }
+
+    #[test]
+    fn a_cache_duration_on_the_entity_descriptor_is_not_touched_and_not_warned() {
+        let xml = metadata(
+            " cacheDuration=\"PT1H\"",
+            "",
+            &acs_with(" index=\"0\"", "https://sp.example.test/acs"),
+        );
+        let draft = parse(&xml).expect("the entity-level duration was never a problem");
+        assert!(draft.warnings.iter().all(|w| !w.contains("cacheDuration")));
+    }
+
+    #[test]
+    fn a_missing_index_is_defaulted_around_the_existing_ones_and_warned() {
+        let xml = metadata(
+            "",
+            "",
+            &format!(
+                "{}{}{}{}",
+                acs_with(
+                    " index=\"0\" isDefault=\"true\"",
+                    "https://sp.example.test/a"
+                ),
+                acs_with("", "https://sp.example.test/b"),
+                acs_with(" index=\"2\"", "https://sp.example.test/c"),
+                acs_with("", "https://sp.example.test/d"),
+            ),
+        );
+        let draft = parse(&xml).expect("the document is read with indexes supplied");
+        let indexes: Vec<(String, u16)> = draft
+            .service_provider
+            .acs_urls
+            .iter()
+            .map(|e| (e.url.clone(), e.index))
+            .collect();
+        assert_eq!(
+            indexes,
+            vec![
+                ("https://sp.example.test/a".to_string(), 0),
+                ("https://sp.example.test/b".to_string(), 1),
+                ("https://sp.example.test/c".to_string(), 2),
+                ("https://sp.example.test/d".to_string(), 3),
+            ],
+            "the lowest unused index, in document order"
+        );
+        let warned: Vec<&String> = draft
+            .warnings
+            .iter()
+            .filter(|w| w.contains("has no index"))
+            .collect();
+        assert_eq!(warned.len(), 2, "one warning per defaulted endpoint");
+        assert!(warned[0].contains("https://sp.example.test/b") && warned[0].contains("index 1"));
+        assert!(warned[1].contains("https://sp.example.test/d") && warned[1].contains("index 3"));
+    }
+
+    #[test]
+    fn an_index_that_is_present_but_invalid_is_still_refused() {
+        for bad in ["abc", "-1", "1.5", ""] {
+            let xml = metadata(
+                "",
+                "",
+                &acs_with(&format!(" index=\"{bad}\""), "https://sp.example.test/acs"),
+            );
+            assert_eq!(
+                parse(&xml),
+                Err(MetadataError::NotSpMetadata),
+                "index {bad:?} is refused, not defaulted"
+            );
+        }
+    }
+
+    #[test]
+    fn markup_and_foreign_encodings_are_still_refused_on_the_original_bytes_with_the_new_cases_present()
+     {
+        let acs = acs_with("", "https://sp.example.test/acs");
+        let with_dtd = format!(
+            "<!DOCTYPE x [<!ENTITY e \"v\">]>{}",
+            metadata("", " cacheDuration=\"PT1H\"", &acs)
+        );
+        assert_eq!(parse(&with_dtd), Err(MetadataError::NotSpMetadata));
+        let foreign = metadata("", " cacheDuration=\"PT1H\"", &acs).replace("UTF-8", "ISO-8859-1");
+        assert_eq!(parse(&foreign), Err(MetadataError::NotSpMetadata));
+        let entity = metadata("", " cacheDuration=\"PT1H\"", &acs)
+            .replace("https://sp.example.test/acs", "&e;");
+        assert_eq!(parse(&entity), Err(MetadataError::NotSpMetadata));
+    }
+
+    #[test]
+    fn a_document_with_neither_attribute_is_read_exactly_as_before() {
+        let (signing, _) = cert_b64();
+        let xml = metadata(
+            "",
+            " AuthnRequestsSigned=\"true\"",
+            &format!("{}{ACS_POST}", key_descriptor(Some("signing"), &signing)),
+        );
+        let draft = parse(&xml).expect("a good document");
+        // What the code did before D-54: samael on the original text, nothing in front.
+        let EntityDescriptorType::EntityDescriptor(entity) = xml.parse().unwrap() else {
+            panic!("an entity descriptor");
+        };
+        let before = draft_from(&entity, &xml).expect("the draft as it was");
+        assert_eq!(draft, before, "an identical draft");
+        assert!(
+            draft
+                .warnings
+                .iter()
+                .all(|w| !w.contains("cacheDuration") && !w.contains("has no index")),
+            "no spurious warning"
+        );
     }
 
     #[test]

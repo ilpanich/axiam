@@ -29,6 +29,7 @@ import { TenantsPage } from "@/pages/tenants/TenantsPage";
 import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { AttestationPolicyPage } from "@/pages/settings/AttestationPolicyPage";
 import { DirectoryPage } from "@/pages/directory/DirectoryPage";
+import { SamlPage } from "@/pages/saml/SamlPage";
 import { ProfilePage } from "@/pages/profile/ProfilePage";
 import { ChangePasswordPage } from "@/pages/profile/ChangePasswordPage";
 import { MfaManagementPage } from "@/pages/profile/MfaManagementPage";
@@ -302,6 +303,16 @@ export const router = createBrowserRouter([
             path: "directory",
             element: <DirectoryPage />,
             handle: { crumb: "Directory" },
+          },
+        ],
+      },
+      {
+        element: <ProtectedRoute permission="saml_sp:read" />,
+        children: [
+          {
+            path: "saml",
+            element: <SamlPage />,
+            handle: { crumb: "SAML Service Providers" },
           },
         ],
       },

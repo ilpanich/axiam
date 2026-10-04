@@ -635,6 +635,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hint. A hinted `end_session` is unchanged. Threat T-290; T-237 and T-238
   amended; model 2.19.0.
 
+- **Admin console: the *SAML Service Providers* page (T23.2.6, G-2, contract
+  §29).** One page per tenant at `/saml` (sidebar *Identity*), its nav entry and
+  its route both gated on `saml_sp:read`, over the eleven §29 routes; no server,
+  contract or threat-model change. **Identity provider panel**: the entity id, the
+  metadata URL (copyable), the sign-on and logout URLs, and whether SAML is
+  available in the build, enabled for the tenant and serving metadata, with what
+  to do when it is not. **Service providers** (`saml_sp:write` for every write): a
+  searchable, paginated list; manual entry and edit of every
+  `SamlServiceProviderInput` member, with the ACS allow-list (binding, index,
+  default), the SLO pair, NameID format, `sign_responses`, the two SP
+  certificates as PEM, signed-request and IdP-initiated switches, the attribute
+  mappings and an `allowed_groups` picker over the tenant's groups. The **entity
+  id is read-only on edit** (D-42) and is taken from the stored registration, not
+  the form; **`encrypt_assertions` is shown disabled ("not yet supported") and the
+  form has no member that could send it as `true`**; an edit re-reads the
+  registration and sends a full `PUT`; delete asks first and says it ends no
+  session. **Import from metadata**: paste, upload or an `https` URL into
+  `parse_sp_metadata`, shown as a **draft** with its fingerprints and warnings and
+  the *signature not verified* warning in front, edited in the ordinary form and
+  saved only by the explicit save through `create_service_provider`; both or
+  neither of XML and URL is refused before any request. **Signing credentials**
+  (`saml_idp:credential` for all three actions): status, fingerprint, validity and
+  serial; issue from the organization's active CAs into `active` or `next` for 1
+  to 730 days (default 365); promote behind a confirmation that service providers
+  must have fetched the new metadata; retire behind a confirmation that retiring
+  the **active** credential stops SAML sign-on for the whole tenant at once. The
+  `400`, `404`, `409` and `503` messages are shown verbatim, past the generic
+  redactor. The `saml_admin` row of the frontend coverage matrix is now *covered*,
+  and the Playwright permission matrix has the `/saml` route. The
+  `saml_idp_enabled` setting has no console control yet; the page says so and
+  points to the settings API. Tests: 121 across the service, the form logic and the
+  page (fixtures built at run time).
+
 ### Changed
 
 - **The SAML assertion's `SessionIndex` is a per-SP random token, not the AXIAM

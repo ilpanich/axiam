@@ -31,6 +31,7 @@ import {
   MonitorSmartphone,
   ShieldCheck,
   FolderTree,
+  FileKey2,
 } from "lucide-react";
 
 interface NavItem {
@@ -221,6 +222,15 @@ export const navSections: NavSection[] = [
         label: "Directory",
         icon: <FolderTree size={18} />,
         requiredPermission: "directory:read",
+      },
+      {
+        // G-2: AXIAM as a SAML 2.0 identity provider for this tenant: the
+        // service-provider registry and the signing credential. Acts on the
+        // caller's own tenant only, like the pages beside it.
+        to: "/saml",
+        label: "SAML Service Providers",
+        icon: <FileKey2 size={18} />,
+        requiredPermission: "saml_sp:read",
       },
     ],
   },

@@ -131,6 +131,14 @@ export const INVALIDATION_GRAPH: Record<string, readonly string[]> = {
   // does, and deleting it removes the status altogether.
   "directory-config": ["directory-config", "directory-sync-status"],
 
+  // G-2: the IdP panel's readiness (`metadata_served`, which slots are filled)
+  // is a function of the signing credentials listed beside it, so every
+  // credential write (issue, promote, retire) refreshes both. The
+  // service-provider list is self-contained: the readiness view does not count
+  // registrations.
+  "saml-idp-credentials": ["saml-idp-credentials", "saml-idp"],
+  "saml-service-providers": ["saml-service-providers"],
+
   // MFA state is shown both on the user's own profile and on their admin page.
   mfaMethods: ["mfaMethods", "user-mfa", "currentUser"],
   "user-mfa": ["user-mfa", "mfaMethods", "user"],

@@ -70,6 +70,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry is unchanged apart from its spec digest. **Contract §32 amended in
   place before 1.56 ships (no version bump)** to say all of the above; the
   `axiam.ssf_push` queues are in `docs/api/asyncapi.yml`.
+- **The Shared Signals Framework transmitter in the documentation (T23.5.4,
+  G-5, contract 1.56 §32).** The website's *Integrate* section gains **Shared
+  Signals (SSF) transmitter**, after the SAML identity provider page: the six
+  CAEP and RISC events as EdDSA-signed SETs with no `exp` that a receiver must
+  de-duplicate on `jti`; the disable-only `ssf_enabled` switch and discovery in
+  both issuer forms (an empty `404` when off); registering a receiver
+  (`ssf_streams:read` / `ssf_streams:write`, the deployment-unique audience,
+  `subject_format`, the write-only sealed `Authorization` header that never follows
+  the endpoint to another origin, `receiver_client_id` with `ssf.manage`); the
+  receiver's `/ssf/v1/*` API, what it may change, the statuses and who may set
+  them, verification every 60 s, poll and push including which responses retry and
+  which dead-letter; what triggers each event; the buffer and dead-letter bounds,
+  the retry and rate-limit variables; privacy; and what is not supported. The
+  settings page lists `ssf_enabled`, and the revocation-feed, back-channel logout
+  and *Federation* pages link to it. The SDK receiver helper and the `ssf`
+  management namespace remain the post-merge fan-out of D-35.
+
 - **The SAML identity provider in the documentation: website page, contract
   amendment (T23.2.9, G-2, contract 1.55).** The website's *Integrate* section
   gains **AXIAM as a SAML identity provider**: what a per-tenant IdP offers

@@ -1144,6 +1144,10 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       },
       {
         type: "p",
+        text: "Nor is it the channel that tells downstream applications about a change in AXIAM — a session revoked, an account disabled. That is the [Shared Signals (SSF) transmitter](#/docs/ssf), in the other direction: AXIAM sends events to the receivers you register.",
+      },
+      {
+        type: "p",
         text: "There is one adjacent place where an external identity *can* create a local user, and it is worth knowing it is a different mechanism: cross-domain token exchange, where a partner's IdP presents a subject token. That trust configuration carries a subject-mapping setting with two values.",
       },
       {

@@ -555,6 +555,10 @@ export const OPERATE_PAGES: DocPage[] = [
             "Whether the tenant answers as a SAML 2.0 identity provider at `/saml/v2/{tenant}/…`; off, every one of those routes answers the same empty `404`. Default `false`. An **organization** field a tenant may only *disable*, like `sensitive_scopes_enabled`, because issuing identity assertions on behalf of the organization's tenants is the organization's decision. It is a capability, not a grant: each service provider still has to be registered. See [AXIAM as a SAML identity provider](#/docs/saml-idp).",
           ],
           [
+            "ssf_enabled",
+            "Whether the tenant answers as a Shared Signals Framework transmitter: off, `/.well-known/ssf-configuration` answers an empty `404`, a receiver's stream API sees no stream and no event is produced. Default `false`. An **organization** field a tenant may only *disable*, like `saml_idp_enabled`. Registering streams does not depend on it. See [Shared Signals (SSF) transmitter](#/docs/ssf).",
+          ],
+          [
             "default_locale",
             "The language the sign-in and consent pages are served in when the request expresses no preference. Refused for a tag the build does not ship — five locales are bundled, and a setting naming a sixth would render as a silent fall back to English rather than as the error it is.",
           ],

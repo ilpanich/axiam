@@ -537,8 +537,9 @@ async fn every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify() {
         &directory_credential,
     );
     let svc = service(&h, Some(Arc::clone(&directory)));
+    let empty_credential = String::new();
     assert!(is_invalid_credentials(
-        &svc.login(input(&h, "alice", "")).await
+        &svc.login(input(&h, "alice", &empty_credential)).await
     ));
     assert_eq!(directory.provision_calls(), 0);
 
@@ -613,7 +614,7 @@ async fn an_entry_that_collides_with_a_local_account_is_refused_and_audited() {
         let elapsed = started.elapsed();
         assert!(
             is_invalid_credentials(&outcome),
-            "{typed}/{entry_username}: a collision is the generic failure"
+            "collision case {attribute}: a collision is the generic failure"
         );
         assert!(elapsed >= floor, "the dummy verify runs beside the bind");
         assert_eq!(directory.provision_calls(), 1, "the bind did happen");
@@ -624,7 +625,7 @@ async fn an_entry_that_collides_with_a_local_account_is_refused_and_audited() {
                 row.metadata["attribute"] == attribute
                     && row.metadata["existing_user_id"] == h.local_user.to_string()
             })
-            .unwrap_or_else(|| panic!("{typed}/{entry_username}: a collision row must exist"));
+            .unwrap_or_else(|| panic!("collision case {attribute}: a collision row must exist"));
         assert_eq!(row.metadata["reason"], "collision");
         assert_eq!(row.outcome, AuditOutcome::Denied);
         assert!(!row_mentions(row, &directory_credential));

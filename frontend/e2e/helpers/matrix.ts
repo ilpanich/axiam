@@ -72,6 +72,8 @@ export const NAV_DESTINATIONS: NavDestination[] = [
   { path: "/scim-tokens", label: "SCIM Provisioning", navPermission: "scim_tokens:list", routePermission: "scim_tokens:list" },
   { path: "/service-accounts", label: "Service Accounts", navPermission: "service_accounts:list", routePermission: "service_accounts:list" },
   { path: "/federation", label: "Federation", navPermission: "federation:list", routePermission: "federation:list" },
+  // G-3 (Phase 23): the tenant's LDAP / Active Directory identity source.
+  { path: "/directory", label: "Directory", navPermission: "directory:read", routePermission: "directory:read" },
   { path: "/organizations", label: "Organizations", navPermission: "organizations:list", routePermission: "organizations:list", organizationOnly: true },
   { path: "/tenants", label: "Tenants", navPermission: "tenants:list", routePermission: "tenants:list" },
   { path: "/certificates", label: "Certificates", navPermission: "certificates:list", routePermission: "certificates:list" },

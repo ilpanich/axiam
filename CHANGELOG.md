@@ -78,6 +78,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespaces; `PATCH` bodies are classified `sparse`); the ports follow from
   the merge commit (§30.10).
 
+- **SDK contract 1.55: §29 SAML service provider registration (T23.2.8,
+  G-2).** The normative management surface for AXIAM as a SAML 2.0 identity
+  provider, ahead of the routes (T23.2.5 implements them and regenerates
+  `openapi.json` and `management-registry.json`): a §27 namespace `saml` under
+  `/api/v1/tenants/{tenant_id}/saml` with eleven operations — `get_idp`;
+  `list_service_providers` (paginated), `create_service_provider`,
+  `get_service_provider`, `update_service_provider` (a **replacement**) and
+  `delete_service_provider`; `parse_sp_metadata`, which turns an uploaded or
+  server-fetched SP metadata document into a draft and stores nothing (fetched
+  only through the SSRF guard, any DTD refused, nothing trusted from an unsigned
+  document); and `list_idp_credentials`, `issue_idp_credential`,
+  `promote_idp_credential` (one transaction: `next` → `active`, the old
+  `active` → `retired`) and `retire_idp_credential`. Nothing is `Sensitive`, and
+  `SamlIdpCredential` has no key member. Every write runs
+  `validate_saml_service_provider`; `encrypt_assertions` and an SP signing
+  certificate the SSO endpoint could not use are refused; `entity_id` is unique
+  per tenant and immutable; the routes exist in every build and do not depend on
+  `saml_idp_enabled` (`parse_sp_metadata` alone answers `503` without SAML);
+  permissions `saml_sp:read`, `saml_sp:write` and `saml_idp:credential`; human
+  principals only; a rate-limit bucket `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN`;
+  audit rows; no retry of writes; seven portable tests per SDK. Decisions D-37 …
+  D-42 pin the rest of W4's SAML work: a per-SP random `SessionIndex` recorded
+  before signing (closing T-312 when single logout lands), single logout's
+  bindings, verification, narrow signing and revoke-then-propagate chain, the
+  IdP metadata document (unsigned, `active` then `next`, the D-20 `404` without
+  a credential), SP metadata import, and the credential verbs. The design
+  document gains a §8e *SAML 2.0 Identity Provider* chapter. Non-breaking /
+  additive; **re-sync `CONTRACT.md` for 1.55 in all eleven SDK repositories**
+  from the merged commit.
+
+- **Threat model 2.25.0 (T23.2.8, G-2).** The SAML identity provider's
+  remaining elements — the SP registry store and its management routes (SP
+  metadata import as an SSRF and XXE surface), the IdP metadata endpoint, and the
+  single-logout endpoint with the `saml_sp_session` and `saml_logout_run` stores
+  — and **T-357 … T-384**, all entered **Open**: twenty-seven because the
+  controls they name are specified and not yet built (T23.2.5 and T23.2.4 close
+  them, each with the tests its mitigation lists), and T-380 — a service
+  provider's own session outliving an AXIAM session that ends by anything but a
+  logout chain — because it is an accepted trade-off (no SAML browser back
+  channel). T-309 and T-312 are amended to the decisions that close them. 384
+  threats, 340 mitigated / 44 open; `threatTop` corrected to 384.
+
 - **SDK contract 1.54: §30 directory configuration (T23.3.7, G-3).** The
   normative management surface for a tenant's LDAP / Active Directory identity
   source, ahead of the routes (T23.3.8 implements them and regenerates

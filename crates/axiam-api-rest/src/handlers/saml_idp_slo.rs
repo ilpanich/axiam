@@ -517,7 +517,7 @@ async fn handle_request<C: Connection + Clone>(
 
     let run = match end_sessions(cx, run, &sessions, Some(sp.id)).await {
         Ok(run) => run,
-        Err(page) => return page,
+        Err(page) => return *page,
     };
     next_hop(cx, run).await
 }
@@ -570,13 +570,15 @@ async fn resolve_participants<C: Connection + Clone>(
 /// `AuthService::logout`, which feeds the revocation feed — and plan the chain
 /// that tells every **other** SP of those sessions (D-39). Revokes first.
 ///
-/// `Err` is the page to answer with when a session could not be revoked.
+/// `Err` is the page to answer with when a session could not be revoked —
+/// boxed, since `HttpResponse` is past `clippy::result_large_err`'s threshold
+/// and the success path should not carry its width.
 async fn end_sessions<C: Connection + Clone>(
     cx: &Ctx<'_, C>,
     run: SamlLogoutRun,
     sessions: &[(Uuid, Uuid)],
     initiator_sp: Option<Uuid>,
-) -> Result<SamlLogoutRun, HttpResponse> {
+) -> Result<SamlLogoutRun, Box<HttpResponse>> {
     let (state, tenant_id) = (cx.state, cx.tenant_id);
     let mut failed = false;
     for (session_id, user_id) in sessions {
@@ -605,7 +607,7 @@ async fn end_sessions<C: Connection + Clone>(
         for cookie in clear_cookies(state, tenant_id) {
             let _ = page.add_cookie(&cookie);
         }
-        return Err(page);
+        return Err(Box::new(page));
     }
 
     let session_ids: Vec<Uuid> = sessions.iter().map(|(session, _)| *session).collect();
@@ -1039,7 +1041,7 @@ pub async fn sso_logout<C: Connection + Clone>(
     };
     let run = match end_sessions(&cx, run, &[(session.id, session.user_id)], None).await {
         Ok(run) => run,
-        Err(page) => return page,
+        Err(page) => return *page,
     };
     next_hop(&cx, run).await
 }

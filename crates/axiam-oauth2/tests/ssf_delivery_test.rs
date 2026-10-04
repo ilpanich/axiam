@@ -640,14 +640,16 @@ async fn no_connection_is_retried() {
     assert!(matches!(outcome, DeliveryOutcome::Retry { .. }));
 }
 
-/// D-49: no redirect is followed. The guard would follow one after re-running
-/// itself on the `Location`; this deliverer refuses the second hop, so the SET
-/// and the credential reach nobody the administrator did not name.
+/// D-49, D-53 (9): no redirect is followed. The deliverer fetches through
+/// `guarded_fetch_no_redirect`, which makes the one hop and returns the `3xx`
+/// as the answer without resolving or fetching its `Location`, so the SET and
+/// the credential reach nobody the administrator did not name; the attempt is
+/// a retry (the administrator may fix the endpoint).
 #[tokio::test]
 async fn a_redirect_is_not_followed() {
     let w = world().await;
-    // A public address literal: the guard admits it, so the only thing between
-    // the SET and that host is the deliverer's own refusal. Nothing is sent.
+    // A public address literal as the `Location`: nothing about the target is
+    // judged, because nothing is sent there. One request reaches the receiver.
     let receiver = Receiver::start(307).await;
     receiver.set_reply(Reply {
         status: 307,
@@ -666,8 +668,12 @@ async fn a_redirect_is_not_followed() {
     assert_eq!(receiver.requests().len(), 1);
 }
 
+/// A redirect to an address the deliverer *could* reach (a loopback receiver,
+/// admitted by the test seam on the first hop) is not followed either: the
+/// target sees nothing, which a guard that judged the second hop would not
+/// show.
 #[tokio::test]
-async fn a_redirect_to_a_private_address_is_refused_by_the_guard_too() {
+async fn a_redirect_to_a_reachable_receiver_is_not_followed_either() {
     let w = world().await;
     let sink = Receiver::start(202).await;
     let receiver = Receiver::start(302).await;
@@ -690,8 +696,8 @@ async fn a_redirect_to_a_private_address_is_refused_by_the_guard_too() {
     );
 }
 
-/// T-392: at delivery the production deliverer — `guarded_fetch` with
-/// `allow_private = false` — refuses an endpoint that resolves to an internal
+/// T-392: at delivery the production deliverer — `guarded_fetch_no_redirect`
+/// with `allow_private = false` — refuses an endpoint that resolves to an internal
 /// address, by literal and by name, and nothing reaches the listener.
 #[tokio::test]
 async fn the_address_guard_refuses_an_internal_endpoint_at_delivery() {

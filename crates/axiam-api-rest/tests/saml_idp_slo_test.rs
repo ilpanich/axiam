@@ -137,21 +137,21 @@ fn test_password() -> String {
     axiam_test_support::test_password()
 }
 
-// Test-only Ed25519 keypair with no real-world value. nosemgrep
+/// The deployment's Ed25519 pair, generated once per test binary: no key is
+/// written down in this file (F4 W4, CodeQL hygiene).
+fn jwt_pair() -> &'static (String, String) {
+    static PAIR: OnceLock<(String, String)> = OnceLock::new();
+    PAIR.get_or_init(|| {
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("ed25519 keypair");
+        (pair.serialize_pem(), pair.public_key_pem())
+    })
+}
+
 fn auth_config() -> AuthConfig {
+    let (private_pem, public_pem) = jwt_pair().clone();
     AuthConfig {
-        jwt_private_key_pem: concat!(
-            "-----BEGIN PRIVATE KEY-----\n",
-            "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n",
-            "-----END PRIVATE KEY-----"
-        )
-        .into(),
-        jwt_public_key_pem: concat!(
-            "-----BEGIN PUBLIC KEY-----\n",
-            "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
-            "-----END PUBLIC KEY-----"
-        )
-        .into(),
+        jwt_private_key_pem: private_pem,
+        jwt_public_key_pem: public_pem,
         access_token_lifetime_secs: 900,
         refresh_token_lifetime_secs: SESSION_SECS,
         jwt_issuer: "axiam-test".into(),

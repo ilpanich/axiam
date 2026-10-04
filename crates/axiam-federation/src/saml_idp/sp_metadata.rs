@@ -1203,7 +1203,7 @@ mod fetch_tests {
     #[tokio::test]
     async fn a_success_is_the_body_and_a_failure_is_a_category_never_the_body() {
         let server = MockServer::start().await;
-        let secret = marker();
+        let probe = marker();
         Mock::given(method("GET"))
             .and(path("/ok"))
             .respond_with(ResponseTemplate::new(200).set_body_string("<doc/>"))
@@ -1211,7 +1211,7 @@ mod fetch_tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/boom"))
-            .respond_with(ResponseTemplate::new(500).set_body_string(secret.clone()))
+            .respond_with(ResponseTemplate::new(500).set_body_string(probe.clone()))
             .mount(&server)
             .await;
         let base = server.uri();
@@ -1225,7 +1225,7 @@ mod fetch_tests {
             .await
             .unwrap_err();
         assert_eq!(refused, MetadataError::FetchFailed);
-        assert!(!format!("{refused:?} {refused}").contains(&secret));
+        assert!(!format!("{refused:?} {refused}").contains(&probe));
         let missing = fetch_sp_metadata(&format!("{base}/absent"), true)
             .await
             .unwrap_err();

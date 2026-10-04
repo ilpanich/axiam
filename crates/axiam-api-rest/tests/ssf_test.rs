@@ -3252,7 +3252,7 @@ async fn totp_enrolment_and_an_mfa_reset_are_credential_changes() {
         request(Method::POST, "/api/v1/auth/mfa/enroll", Some(&token)),
     )
     .await;
-    assert_eq!(status, 200, "{text}");
+    assert_eq!(status, 200, "the TOTP enrolment");
     let secret =
         totp_rs::Secret::try_from_base32(json_of(&text)["secret_base32"].as_str().unwrap())
             .unwrap()

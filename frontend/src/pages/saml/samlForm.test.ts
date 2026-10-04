@@ -424,9 +424,9 @@ describe("samlErrorMessage", () => {
   });
 
   it("blanks a private-key block even in a verbatim message", () => {
-    const key = pemBlock("PRIVATE KEY");
-    const shown = samlErrorMessage(failure(400, "validation_error", `bad: ${key}`));
-    expect(shown).not.toContain(key.split("\n")[1]);
+    const block = pemBlock("PRIVATE KEY");
+    const shown = samlErrorMessage(failure(400, "validation_error", `bad: ${block}`));
+    expect(shown).not.toContain(block.split("\n")[1]);
     expect(shown).toContain("redacted");
   });
 

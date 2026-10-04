@@ -985,6 +985,77 @@ pub mod test_support {
         }
     }
 
+    /// What an SP's library reads out of an IdP metadata document.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct IdpMetadataSummary {
+        /// `EntityDescriptor/@entityID`.
+        pub entity_id: String,
+        /// Each `KeyDescriptor` as `(use, certificate)`, in document order, the
+        /// certificate as the base64 text of `X509Certificate`.
+        pub keys: Vec<(Option<String>, String)>,
+        /// Each `SingleSignOnService` as `(binding, location)`.
+        pub single_sign_on: Vec<(String, String)>,
+        /// The `NameIDFormat`s.
+        pub name_id_formats: Vec<String>,
+        /// How many `SingleLogoutService` elements the descriptor carries.
+        pub single_logout_services: usize,
+        /// Whether the descriptor carries a `validUntil`, a `cacheDuration` or a
+        /// `ds:Signature`.
+        pub has_validity_or_signature: bool,
+    }
+
+    /// Parse an IdP metadata document with `samael`'s metadata types — the
+    /// library this crate's own SP side uses to consume one (`fetch_idp_metadata`)
+    /// — and read out what an SP would.
+    ///
+    /// # Errors
+    ///
+    /// The parser's text, for a document it cannot read as one
+    /// `EntityDescriptor` with an `IDPSSODescriptor`.
+    pub fn parse_idp_metadata(xml: &str) -> Result<IdpMetadataSummary, String> {
+        let parsed: samael::metadata::EntityDescriptorType =
+            xml.parse().map_err(|e| format!("{e}"))?;
+        let entity = parsed
+            .iter()
+            .next()
+            .ok_or_else(|| "no EntityDescriptor".to_string())?;
+        let idp = entity
+            .idp_sso_descriptors
+            .as_ref()
+            .and_then(|d| d.first())
+            .ok_or_else(|| "no IDPSSODescriptor".to_string())?;
+        Ok(IdpMetadataSummary {
+            entity_id: entity.entity_id.clone().ok_or("no entityID")?,
+            keys: idp
+                .key_descriptors
+                .iter()
+                .map(|k| {
+                    (
+                        k.key_use.clone(),
+                        k.key_info
+                            .x509_data
+                            .as_ref()
+                            .and_then(|d| d.certificates.first().cloned())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+            single_sign_on: idp
+                .single_sign_on_services
+                .iter()
+                .map(|e| (e.binding.clone(), e.location.clone()))
+                .collect(),
+            name_id_formats: idp.name_id_formats.clone(),
+            single_logout_services: idp.single_logout_services.len(),
+            has_validity_or_signature: entity.valid_until.is_some()
+                || entity.cache_duration.is_some()
+                || entity.signature.is_some()
+                || idp.valid_until.is_some()
+                || idp.cache_duration.is_some()
+                || idp.signature.is_some(),
+        })
+    }
+
     /// The enveloped `ds:Signature` template for the element whose `ID` is `id`.
     #[must_use]
     pub fn signature_template(id: &str, cert_der: &[u8]) -> String {

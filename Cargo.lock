@@ -879,6 +879,7 @@ dependencies = [
  "sha2 0.11.0",
  "subtle",
  "surrealdb",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-test",

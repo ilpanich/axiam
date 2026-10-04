@@ -8,6 +8,7 @@
 //! | `POST /sso` | HTTP-POST binding: the same, as a form post |
 //! | `GET /sso/idp-initiated?sp=…[&RelayState=…]` | IdP-initiated sign-on, for an SP that opted in (D-3) |
 //! | `GET /sso/continue?handle=…` | the second leg: resolve the browser's session, hop to sign in if needed, issue |
+//! | `GET`/`HEAD /metadata` | the tenant's IdP metadata (T23.2.5, D-40), unauthenticated |
 //!
 //! # Two legs, and why
 //!
@@ -412,6 +413,72 @@ async fn post_failure<C: Connection + Clone>(
 // ---------------------------------------------------------------------------
 // First leg: SP-initiated, both bindings
 // ---------------------------------------------------------------------------
+
+/// `GET`/`HEAD /saml/v2/{tenant_id}/metadata` — the tenant's IdP metadata
+/// (T23.2.5, D-40).
+///
+/// Unauthenticated, `application/samlmetadata+xml`, one `EntityDescriptor` from
+/// a fixed template carrying the signing certificates of the `active` credential
+/// and then the `next` one (so an SP has the successor before any assertion is
+/// signed with it), and nothing else that varies. **Unsigned**, on purpose:
+/// signing it with the key it publishes would anchor nothing.
+///
+/// **D-20.** The tenant check runs before anything else and every way of having
+/// nothing to say — a build without SAML (no route at all), an unknown tenant, a
+/// non-canonical id, the setting off, no publishable credential — is the same
+/// empty [`not_found`]: a `503` for a missing credential would tell anyone that
+/// the tenant exists and serves SAML (T-368). The administrator sees readiness
+/// through `get_idp`.
+///
+/// `Cache-Control: public, max-age=3600` and a strong `ETag`; `If-None-Match`
+/// answers `304`. It reads the keyless credential list only, never the sealed
+/// key.
+pub async fn metadata<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
+    req: HttpRequest,
+    path: web::Path<String>,
+) -> HttpResponse {
+    use axiam_federation::saml_idp::idp_metadata::{
+        IDP_METADATA_CACHE_CONTROL, IDP_METADATA_MEDIA_TYPE, build_idp_metadata,
+        if_none_match_matches,
+    };
+    use axiam_federation::saml_idp::{idp_entity_id, idp_sso_url};
+
+    let Some((tenant_id, _org)) = tenant_serving_saml(&state, &path).await else {
+        return not_found().await;
+    };
+    let Ok(credentials) = state.saml_idp.credential_service.list(tenant_id).await else {
+        return not_found().await;
+    };
+    let base = state.auth_config.root_issuer();
+    let Some(document) = build_idp_metadata(
+        &idp_entity_id(base, tenant_id),
+        &idp_sso_url(base, tenant_id),
+        &credentials,
+    ) else {
+        return not_found().await;
+    };
+
+    let revalidated = req
+        .headers()
+        .get(actix_web::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| if_none_match_matches(v, &document.etag));
+    let mut response = if revalidated {
+        HttpResponse::NotModified()
+    } else {
+        HttpResponse::Ok()
+    };
+    response
+        .insert_header(("Cache-Control", IDP_METADATA_CACHE_CONTROL))
+        .insert_header(("ETag", document.etag.clone()));
+    if revalidated {
+        return response.finish();
+    }
+    response
+        .content_type(IDP_METADATA_MEDIA_TYPE)
+        .body(document.xml)
+}
 
 /// `GET /saml/v2/{tenant_id}/sso` — the HTTP-Redirect binding.
 pub async fn sso_redirect<C: Connection + Clone>(

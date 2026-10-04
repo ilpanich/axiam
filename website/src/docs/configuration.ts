@@ -418,6 +418,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "30",
           ],
           [
+            "AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the SAML service-provider registry API under /api/v1/tenants/{tenant_id}/saml: create, update and delete a service provider, parse-sp-metadata, and issue, promote and retire the IdP signing credential. Issuing generates an RSA-4096 key and parsing metadata makes an outbound request, so the limit bounds how fast an administrator \u2014 or a stolen administrator token \u2014 can burn CPU or use the server to reach an external host. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
             "Max /oauth2/end_session per minute. Never moved by a profile preset.",
             "30",

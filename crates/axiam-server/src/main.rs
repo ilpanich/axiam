@@ -1648,7 +1648,6 @@ async fn main() -> std::io::Result<()> {
     // the tenant signing-credential service (D-21: its keys are sealed through
     // the database custodian of the same custodian set the CAs use) and the
     // issuer, built on the deployment's root issuer and the pairwise key.
-    #[cfg(feature = "saml")]
     let saml_idp_state = bundles::SamlIdpState {
         sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(pool.handle_for_repo()),
         pending_repo: saml_pending_repo.clone(),
@@ -1657,6 +1656,7 @@ async fn main() -> std::io::Result<()> {
             Arc::clone(&ca_custodians),
             axiam_db::SurrealSamlIdpCredentialRepository::new(pool.handle_for_repo()),
         ),
+        #[cfg(feature = "saml")]
         issuer: Arc::new(axiam_federation::saml_idp::SamlIdpIssuer::new(
             config.auth.root_issuer(),
             config
@@ -2937,7 +2937,6 @@ async fn main() -> std::io::Result<()> {
             sync_state_repo: directory_sync_state_repo,
             client: Arc::clone(directory_authenticator.client()),
         },
-        #[cfg(feature = "saml")]
         saml_idp: saml_idp_state,
     };
 

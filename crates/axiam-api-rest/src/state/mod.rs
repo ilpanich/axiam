@@ -412,11 +412,11 @@ pub struct AppState<C: Connection + Clone> {
     ///
     /// See [`bundles::DirectoryState`].
     pub directory: bundles::DirectoryState<C>,
-    /// The SAML 2.0 identity provider (G-2, T23.2.3). Behind `saml`: a build
-    /// without it mounts no SAML route at all (D-20).
+    /// The SAML 2.0 identity provider (G-2, T23.2.3, T23.2.5): the registry and
+    /// credential routes of contract §29 exist in every build; the issuer, and
+    /// every browser route that uses it, only with `saml` (D-20, D-42).
     ///
     /// See [`bundles::SamlIdpState`].
-    #[cfg(feature = "saml")]
     pub saml_idp: bundles::SamlIdpState<C>,
 }
 
@@ -624,7 +624,6 @@ impl<C: Connection + Clone> AppState<C> {
             Arc::clone(&crypto_semaphore),
             Arc::clone(&ca_custodians),
         );
-        #[cfg(feature = "saml")]
         let saml_idp = bundles::SamlIdpState {
             sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(db.clone()),
             pending_repo: axiam_db::SurrealPendingSamlRequestRepository::new(db.clone()),
@@ -642,6 +641,7 @@ impl<C: Connection + Clone> AppState<C> {
             // No pairwise key in a test harness: a persistent `NameID` is then
             // refused (`Responder`), exactly as on a deployment without one. A
             // test that issues one replaces this field.
+            #[cfg(feature = "saml")]
             issuer: Arc::new(axiam_federation::saml_idp::SamlIdpIssuer::new(
                 auth_config.root_issuer(),
                 None,
@@ -872,7 +872,6 @@ impl<C: Connection + Clone> AppState<C> {
                 sync_state_repo: axiam_db::SurrealDirectorySyncStateRepository::new(db.clone()),
                 client: Arc::new(axiam_directory::DirectoryClient::default()),
             },
-            #[cfg(feature = "saml")]
             saml_idp,
         }
     }

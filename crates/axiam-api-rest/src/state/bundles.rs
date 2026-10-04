@@ -298,15 +298,16 @@ pub struct DirectoryState<C: Connection + Clone> {
     pub client: Arc<axiam_directory::DirectoryClient>,
 }
 
-/// The SAML 2.0 identity provider (G-2, T23.2.3): the service-provider
+/// The SAML 2.0 identity provider (G-2, T23.2.3, T23.2.5): the service-provider
 /// registry, the pending `AuthnRequest`s held across the login hop, the
 /// tenant's signing credential, and the issuer.
 ///
-/// Behind `saml`, like the routes that read it: the issuer is
-/// `axiam_federation::saml_idp`, which exists only in a build with
-/// `axiam-federation/saml` (see [`FederationState::saml_federation_service`]
-/// for why that gate is load-bearing).
-#[cfg(feature = "saml")]
+/// **Not behind `saml`** — contract §29's registry and credential routes are
+/// compiled into every build (D-42), and they need only the plain-data pieces
+/// below. The one member that exists only in a SAML build is the **issuer**, which
+/// is `axiam_federation::saml_idp` (see [`FederationState::saml_federation_service`]
+/// for why that gate is load-bearing): a build without `saml` mounts none of the
+/// browser routes that read it.
 #[derive(Clone)]
 pub struct SamlIdpState<C: Connection + Clone> {
     /// The tenant's registered service providers (T23.2.1).
@@ -316,6 +317,8 @@ pub struct SamlIdpState<C: Connection + Clone> {
     /// The tenant's signing credential, unsealed per issuance (D-21).
     pub credential_service: SamlIdpCredentialServiceT<C>,
     /// The deployment's issuer: the root issuer every IdP entity id is built
-    /// on, and the pairwise-identifier key (D-22). One per process.
+    /// on, and the pairwise-identifier key (D-22). One per process. Behind
+    /// `saml`, like the routes that issue with it.
+    #[cfg(feature = "saml")]
     pub issuer: Arc<axiam_federation::saml_idp::SamlIdpIssuer>,
 }

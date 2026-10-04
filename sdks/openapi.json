@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:9f8100940749e59a49e7735d296bc3516c1b5e912761ba1b63ff3ec7b682cbc3"
+    "x-axiam-spec-digest": "sha256:4727769d4a3bd8d401116ca44560a3e14981b09b1c92522b8f9b1584f8f5d220"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -10138,6 +10138,792 @@
         ]
       }
     },
+    "/api/v1/tenants/{tenant_id}/saml/idp": {
+      "get": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/saml/idp`",
+        "description": "The tenant's IdP as an SP will meet it, and whether it answers yet:\nreadiness is visible only here, never on the unauthenticated metadata route\n(T-368).",
+        "operationId": "get_idp",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tenant's SAML IdP: its URLs, whether SAML is available in this build and enabled for the tenant, and its credential slots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamlIdpInfo"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another tenant's IdP"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/saml/idp-credentials": {
+      "get": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/saml/idp-credentials`",
+        "operationId": "list_idp_credentials",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every credential of the tenant, newest first — public facts only, never a key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SamlIdpCredential"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another tenant's credentials"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`POST /api/v1/tenants/{tenant_id}/saml/idp-credentials`",
+        "description": "Generates an RSA-4096 key and a leaf under `issuer_ca_id` into an **empty**\nslot. Takes seconds. The key is sealed at rest and never returned.",
+        "operationId": "issue_idp_credential",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueSamlIdpCredential"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The credential was issued; the key is not returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamlIdpCredential"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validity_days` outside 1 to 730, or a CA that cannot sign (revoked, expired, imported or externally held)"
+          },
+          "403": {
+            "description": "Another tenant's credentials"
+          },
+          "404": {
+            "description": "No such CA within this caller's reach (another organization's or another tenant's)"
+          },
+          "409": {
+            "description": "The slot is occupied"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote": {
+      "post": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`POST /api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote`",
+        "description": "In **one transaction**, retires the `active` credential (its key destroyed)\nand makes the `next` one `active`. The id must be the tenant's current `next`\ncredential and inside its validity window.",
+        "operationId": "promote_idp_credential",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "credential_id",
+            "in": "path",
+            "description": "The tenant's current `next` credential",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The credential now active, and the one it replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamlIdpCredentialPromotion"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another tenant's credentials"
+          },
+          "404": {
+            "description": "No such credential in this tenant"
+          },
+          "409": {
+            "description": "The credential is not the current `next`, or is outside its validity window"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire": {
+      "post": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`POST /api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire`",
+        "description": "Retires a `next` or an `active` credential and destroys its key. Retiring the\n**`active`** one with no successor stops SAML sign-on for the whole tenant at\nonce — the incident response to a leaked key. Retiring a retired credential\nreturns it unchanged and writes no audit row.",
+        "operationId": "retire_idp_credential",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "credential_id",
+            "in": "path",
+            "description": "Credential ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The credential, retired (or as it already was)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamlIdpCredential"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another tenant's credentials"
+          },
+          "404": {
+            "description": "No such credential in this tenant"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/saml/parse-sp-metadata": {
+      "post": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`POST /api/v1/tenants/{tenant_id}/saml/parse-sp-metadata`",
+        "description": "**A parse to a draft, never a write.** Takes exactly one of `metadata_xml`\nand `metadata_url` and returns what a registration of that SP could look\nlike, the fingerprints of the certificates it carries and warnings. A URL is\nfetched once, through the SSRF guard (`https` only; loopback, private,\nlink-local and cloud-metadata addresses refused; every redirect hop checked);\na document is refused if it holds a DTD or entity declaration, is not UTF-8,\nis over 512 KiB, or is not exactly one `EntityDescriptor` with one SAML 2.0\n`SPSSODescriptor`. Every refusal is a generic message that never carries the\ndocument, a status line or an address. The document's own signature is not\nevaluated.",
+        "operationId": "parse_sp_metadata",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParseSamlSpMetadata"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A draft registration; nothing was stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamlSpMetadataDraft"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not exactly one of `metadata_xml` and `metadata_url`, or one of the generic refusals: `metadata_url refused`, `metadata fetch failed`, `not SAML service-provider metadata`"
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "This server was built without SAML support"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/saml/service-providers": {
+      "get": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/saml/service-providers`",
+        "operationId": "list_service_providers",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the tenant's service providers, oldest first; `search` matches display name, entity id and id, before paging",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A paginated result set.",
+                  "required": [
+                    "items",
+                    "total",
+                    "offset",
+                    "limit"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "A registered service provider, as stored.",
+                        "required": [
+                          "id",
+                          "tenant_id",
+                          "enabled",
+                          "display_name",
+                          "entity_id",
+                          "acs_urls",
+                          "name_id_format",
+                          "sign_responses",
+                          "encrypt_assertions",
+                          "want_authn_requests_signed",
+                          "allow_idp_initiated",
+                          "attribute_mappings",
+                          "allowed_groups",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "properties": {
+                          "acs_urls": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/components/schemas/AcsEndpoint"
+                            },
+                            "description": "See [`SamlServiceProviderInput::acs_urls`]."
+                          },
+                          "allow_idp_initiated": {
+                            "type": "boolean",
+                            "description": "See [`SamlServiceProviderInput::allow_idp_initiated`]."
+                          },
+                          "allowed_groups": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            "description": "See [`SamlServiceProviderInput::allowed_groups`]."
+                          },
+                          "attribute_mappings": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/components/schemas/AttributeMapping"
+                            },
+                            "description": "See [`SamlServiceProviderInput::attribute_mappings`]."
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When the SP was registered."
+                          },
+                          "display_name": {
+                            "type": "string",
+                            "description": "See [`SamlServiceProviderInput::display_name`]."
+                          },
+                          "enabled": {
+                            "type": "boolean",
+                            "description": "See [`SamlServiceProviderInput::enabled`]."
+                          },
+                          "encrypt_assertions": {
+                            "type": "boolean",
+                            "description": "See [`SamlServiceProviderInput::encrypt_assertions`]."
+                          },
+                          "entity_id": {
+                            "type": "string",
+                            "description": "See [`SamlServiceProviderInput::entity_id`]."
+                          },
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "Record id."
+                          },
+                          "name_id_format": {
+                            "$ref": "#/components/schemas/NameIdFormat",
+                            "description": "See [`SamlServiceProviderInput::name_id_format`]."
+                          },
+                          "sign_responses": {
+                            "type": "boolean",
+                            "description": "See [`SamlServiceProviderInput::sign_responses`]."
+                          },
+                          "slo_binding": {
+                            "oneOf": [
+                              {
+                                "$ref": "#/components/schemas/SamlBinding",
+                                "description": "See [`SamlServiceProviderInput::slo_binding`]."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "slo_url": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "See [`SamlServiceProviderInput::slo_url`]."
+                          },
+                          "sp_encryption_cert_pem": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "See [`SamlServiceProviderInput::sp_encryption_cert_pem`]."
+                          },
+                          "sp_signing_cert_pem": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "See [`SamlServiceProviderInput::sp_signing_cert_pem`]."
+                          },
+                          "tenant_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The owning tenant."
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When it was last replaced."
+                          },
+                          "want_authn_requests_signed": {
+                            "type": "boolean",
+                            "description": "See [`SamlServiceProviderInput::want_authn_requests_signed`]."
+                          }
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`POST /api/v1/tenants/{tenant_id}/saml/service-providers`",
+        "operationId": "create_service_provider",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SamlServiceProviderInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The service provider was registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamlServiceProvider"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A validator refusal, `encrypt_assertions: true`, a signing certificate the SSO endpoint cannot use, or an `allowed_groups` entry outside the tenant — the message names the rule"
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          },
+          "409": {
+            "description": "The tenant already has a service provider with this entity id"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}": {
+      "get": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}`",
+        "operationId": "get_service_provider",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "sp_id",
+            "in": "path",
+            "description": "Service provider ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The service provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamlServiceProvider"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          },
+          "404": {
+            "description": "No such service provider in this tenant"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`PUT /api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}` — a\n**replacement**: every member the body omits takes its default, it is not\nkept. `entity_id` is immutable.",
+        "operationId": "update_service_provider",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "sp_id",
+            "in": "path",
+            "description": "Service provider ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SamlServiceProviderInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The registration after the replacement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamlServiceProvider"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A validator refusal, one of the write-time refusals, or a changed `entity_id` (register a new service provider)"
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          },
+          "404": {
+            "description": "No such service provider in this tenant"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "saml"
+        ],
+        "summary": "`DELETE /api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}`",
+        "description": "Removes the registration and what the datastore holds for it, in one\ntransaction. Ends no session: users already signed in to the SP stay signed\nin there until their SP session ends.",
+        "operationId": "delete_service_provider",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "sp_id",
+            "in": "path",
+            "description": "Service provider ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The registration and its records are gone"
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          },
+          "404": {
+            "description": "No such service provider in this tenant"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/tenants/{tenant_id}/settings": {
       "get": {
         "tags": [
@@ -12820,6 +13606,35 @@
   },
   "components": {
     "schemas": {
+      "AcsEndpoint": {
+        "type": "object",
+        "description": "One `AssertionConsumerService` endpoint of a service provider.\n\nThe list of these is an **allow-list**, checked the way OAuth2 redirect\nURIs are: an `AuthnRequest` naming an ACS URL is honoured only when the URL\nequals one registered here, byte for byte. No globs, no prefix match.",
+        "required": [
+          "url",
+          "binding",
+          "index"
+        ],
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/SamlBinding",
+            "description": "The binding the endpoint accepts."
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The `index` an `AuthnRequest` may use instead of a URL. Unique per SP.",
+            "minimum": 0
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "Whether this is the SP's default endpoint. At most one is; when none is\nmarked, the first listed is the default (SAML Metadata §2.4.4.1)."
+          },
+          "url": {
+            "type": "string",
+            "description": "The endpoint URL."
+          }
+        }
+      },
       "ActorType": {
         "type": "string",
         "enum": [
@@ -13045,6 +13860,44 @@
           "none",
           "indirect",
           "direct_required"
+        ]
+      },
+      "AttributeMapping": {
+        "type": "object",
+        "description": "One entry of an SP's attribute mapping table.",
+        "required": [
+          "saml_name",
+          "source"
+        ],
+        "properties": {
+          "name_format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `NameFormat`, one of [`ATTRIBUTE_NAME_FORMATS`]. `None` leaves the\nattribute unqualified (`unspecified`)."
+          },
+          "saml_name": {
+            "type": "string",
+            "description": "The `Name` of the emitted `<saml:Attribute>`. Unique within one SP,\ncompared exactly (SAML attribute names are case-sensitive)."
+          },
+          "source": {
+            "$ref": "#/components/schemas/AttributeSource",
+            "description": "Where the value comes from."
+          }
+        }
+      },
+      "AttributeSource": {
+        "type": "string",
+        "description": "Where an attribute's value comes from.\n\nEvery variant has a real source today; a variant with none (a telephone\nnumber the OIDC `phone` scope gates behind its own consent, say) is\ndeliberately absent rather than mapped to an empty value.",
+        "enum": [
+          "username",
+          "email",
+          "display_name",
+          "given_name",
+          "family_name",
+          "groups",
+          "roles"
         ]
       },
       "AuditLogEntry": {
@@ -16185,6 +17038,36 @@
           }
         }
       },
+      "IssueSamlIdpCredential": {
+        "type": "object",
+        "description": "`POST …/saml/idp-credentials` body.",
+        "required": [
+          "issuer_ca_id",
+          "slot"
+        ],
+        "properties": {
+          "issuer_ca_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "An active signing CA the caller may issue from."
+          },
+          "slot": {
+            "$ref": "#/components/schemas/SamlIdpSlot",
+            "description": "The slot to fill; it must be empty."
+          },
+          "validity_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "1 to 730, default 365; never beyond the CA's own expiry.",
+            "default": 365,
+            "maximum": 730,
+            "minimum": 1
+          }
+        }
+      },
       "JobStatus": {
         "type": "object",
         "description": "The last-known outcome of one background sweep.\n\nT-129: a scheduled job that stops running is invisible. GDPR erasure and\ncertificate expiry are exactly the jobs whose *absence* is the incident —\nnothing errors, nothing 500s, deletions simply stop happening and the first\nsymptom is a regulator's question months later. Failures were already\nlogged, but a log line nobody greps for is not a control.",
@@ -16949,6 +17832,14 @@
             "minimum": 0
           }
         }
+      },
+      "NameIdFormat": {
+        "type": "string",
+        "description": "How the assertion's `NameID` is formed (per service provider).",
+        "enum": [
+          "persistent",
+          "email_address"
+        ]
       },
       "NotificationEventType": {
         "type": "string",
@@ -18240,6 +19131,26 @@
             ],
             "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
             "default": null
+          }
+        }
+      },
+      "ParseSamlSpMetadata": {
+        "type": "object",
+        "description": "`POST …/saml/parse-sp-metadata` body: **exactly one** of the two members.",
+        "properties": {
+          "metadata_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An `https` URL the server fetches the document from, once, through its\nSSRF guard."
+          },
+          "metadata_xml": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A metadata document, at most 512 KiB."
           }
         }
       },
@@ -19752,6 +20663,453 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "SamlBinding": {
+        "type": "string",
+        "description": "A SAML 2.0 protocol binding (SAML Bindings §3).\n\nThe response binding for Web Browser SSO is always [`Self::HttpPost`], but\nthe enum keeps both because SP metadata carries both, and an `slo_url` may\nuse either.",
+        "enum": [
+          "http_post",
+          "http_redirect"
+        ]
+      },
+      "SamlIdpCredential": {
+        "type": "object",
+        "description": "The tenant's IdP signing credential, **public facts only**.\n\nThere is no key on it and no field a key could be put in: the private key is\ngenerated by the server, sealed at rest, never returned by any route and\ndestroyed on retirement (D-21).",
+        "required": [
+          "id",
+          "tenant_id",
+          "issuer_ca_id",
+          "certificate_pem",
+          "serial",
+          "fingerprint",
+          "not_before",
+          "not_after",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "certificate_pem": {
+            "type": "string",
+            "description": "The leaf certificate, PEM. Public: it is what the metadata publishes."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the credential was issued."
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "Lower-case hex SHA-256 of the certificate's DER — what an SP\nadministrator compares out of band."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Credential id."
+          },
+          "issuer_ca_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The signing CA that issued the leaf."
+          },
+          "not_after": {
+            "type": "string",
+            "format": "date-time",
+            "description": "End of the certificate's validity (at most 730 days after the start)."
+          },
+          "not_before": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the certificate's validity."
+          },
+          "retired_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it was retired, or null."
+          },
+          "serial": {
+            "type": "string",
+            "description": "The certificate's serial, lower-case hex."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SamlIdpCredentialStatus",
+            "description": "`active`, `next` or `retired`. At most one `active` and one `next` per\ntenant."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The tenant it signs for."
+          }
+        }
+      },
+      "SamlIdpCredentialPromotion": {
+        "type": "object",
+        "description": "What promoting the `next` credential did.",
+        "required": [
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "$ref": "#/components/schemas/SamlIdpCredential",
+            "description": "The credential that is now `active`."
+          },
+          "retired": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SamlIdpCredential",
+                "description": "The one it replaced, now `retired`, or null when there was none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "SamlIdpCredentialStatus": {
+        "type": "string",
+        "description": "Where a signing credential is in its life. An open set: an SDK decodes a\nvalue it does not know without failing.",
+        "enum": [
+          "active",
+          "next",
+          "retired"
+        ]
+      },
+      "SamlIdpInfo": {
+        "type": "object",
+        "description": "The tenant's SAML IdP, as the administrator needs to see it before and while\nswitching it on: what an SP will be given, and whether it answers yet.",
+        "required": [
+          "tenant_id",
+          "saml_available",
+          "saml_idp_enabled",
+          "metadata_served",
+          "entity_id",
+          "metadata_url",
+          "sso_url",
+          "slo_url"
+        ],
+        "properties": {
+          "active_credential_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The `active` credential, or null."
+          },
+          "entity_id": {
+            "type": "string",
+            "description": "The IdP's entity id (the metadata URL itself)."
+          },
+          "metadata_served": {
+            "type": "boolean",
+            "description": "Whether `metadata_url` answers now: SAML is available, enabled for the\ntenant, and an `active` or `next` credential exists (D-40)."
+          },
+          "metadata_url": {
+            "type": "string",
+            "description": "Where the IdP metadata is served."
+          },
+          "next_credential_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The `next` credential, or null."
+          },
+          "saml_available": {
+            "type": "boolean",
+            "description": "Whether this server build serves SAML at all (it was built with the\n`saml` feature)."
+          },
+          "saml_idp_enabled": {
+            "type": "boolean",
+            "description": "The tenant's **effective** `saml_idp_enabled` setting (D-20). Written\nthrough the `settings` operations, not here."
+          },
+          "slo_url": {
+            "type": "string",
+            "description": "The single-logout endpoint."
+          },
+          "sso_url": {
+            "type": "string",
+            "description": "The single-sign-on endpoint."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The tenant."
+          }
+        }
+      },
+      "SamlIdpSlot": {
+        "type": "string",
+        "description": "Which slot a credential is issued into.",
+        "enum": [
+          "active",
+          "next"
+        ]
+      },
+      "SamlServiceProvider": {
+        "type": "object",
+        "description": "A registered service provider, as stored.",
+        "required": [
+          "id",
+          "tenant_id",
+          "enabled",
+          "display_name",
+          "entity_id",
+          "acs_urls",
+          "name_id_format",
+          "sign_responses",
+          "encrypt_assertions",
+          "want_authn_requests_signed",
+          "allow_idp_initiated",
+          "attribute_mappings",
+          "allowed_groups",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "acs_urls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AcsEndpoint"
+            },
+            "description": "See [`SamlServiceProviderInput::acs_urls`]."
+          },
+          "allow_idp_initiated": {
+            "type": "boolean",
+            "description": "See [`SamlServiceProviderInput::allow_idp_initiated`]."
+          },
+          "allowed_groups": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "See [`SamlServiceProviderInput::allowed_groups`]."
+          },
+          "attribute_mappings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttributeMapping"
+            },
+            "description": "See [`SamlServiceProviderInput::attribute_mappings`]."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the SP was registered."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "See [`SamlServiceProviderInput::display_name`]."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "See [`SamlServiceProviderInput::enabled`]."
+          },
+          "encrypt_assertions": {
+            "type": "boolean",
+            "description": "See [`SamlServiceProviderInput::encrypt_assertions`]."
+          },
+          "entity_id": {
+            "type": "string",
+            "description": "See [`SamlServiceProviderInput::entity_id`]."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Record id."
+          },
+          "name_id_format": {
+            "$ref": "#/components/schemas/NameIdFormat",
+            "description": "See [`SamlServiceProviderInput::name_id_format`]."
+          },
+          "sign_responses": {
+            "type": "boolean",
+            "description": "See [`SamlServiceProviderInput::sign_responses`]."
+          },
+          "slo_binding": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SamlBinding",
+                "description": "See [`SamlServiceProviderInput::slo_binding`]."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`SamlServiceProviderInput::slo_url`]."
+          },
+          "sp_encryption_cert_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`SamlServiceProviderInput::sp_encryption_cert_pem`]."
+          },
+          "sp_signing_cert_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`SamlServiceProviderInput::sp_signing_cert_pem`]."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was last replaced."
+          },
+          "want_authn_requests_signed": {
+            "type": "boolean",
+            "description": "See [`SamlServiceProviderInput::want_authn_requests_signed`]."
+          }
+        }
+      },
+      "SamlServiceProviderInput": {
+        "type": "object",
+        "description": "Everything an administrator supplies when registering or replacing a\nservice provider (`create` and `update` both take it; `update` is a full\nreplacement).\n\nEvery field but `entity_id`, `display_name` and `acs_urls` has a default, so\na client written against a later revision of this struct keeps working.",
+        "required": [
+          "display_name",
+          "entity_id",
+          "acs_urls"
+        ],
+        "properties": {
+          "acs_urls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AcsEndpoint"
+            },
+            "description": "The ACS allow-list. At least one, at most one default."
+          },
+          "allow_idp_initiated": {
+            "type": "boolean",
+            "description": "Whether IdP-initiated SSO is allowed for this SP (D-3). A per-SP\nopt-in, off by default: an unsolicited assertion has no `InResponseTo`\nto bind it to a request the SP made."
+          },
+          "allowed_groups": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Groups whose members may sign in to this SP. **Empty means every active\nuser of the tenant may.** Evaluated by the SSO endpoint (T23.2.3)."
+          },
+          "attribute_mappings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttributeMapping"
+            },
+            "description": "Attribute mapping table, at most [`MAX_ATTRIBUTE_MAPPINGS`] entries."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Human-readable name for the console."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the SP may sign in at all. A disabled SP stays registered but\nevery SSO request for it is refused."
+          },
+          "encrypt_assertions": {
+            "type": "boolean",
+            "description": "Encrypt assertions to the SP's encryption certificate (D-2). Off by\ndefault; requires [`Self::sp_encryption_cert_pem`]."
+          },
+          "entity_id": {
+            "type": "string",
+            "description": "The SP's `entityID`, unique per tenant. At most [`MAX_ENTITY_ID_BYTES`]."
+          },
+          "name_id_format": {
+            "$ref": "#/components/schemas/NameIdFormat",
+            "description": "`NameID` policy. Default: persistent, pairwise."
+          },
+          "sign_responses": {
+            "type": "boolean",
+            "description": "Sign the `<samlp:Response>` envelope as well as the assertion (which is\nsigned always). Default **`true`**: it costs nothing and many SPs\nrequire it."
+          },
+          "slo_binding": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SamlBinding",
+                "description": "The binding `slo_url` accepts. Set together with `slo_url`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Single-logout endpoint, if the SP supports it."
+          },
+          "sp_encryption_cert_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PEM certificate assertions are encrypted to. Required when\n`encrypt_assertions` is set."
+          },
+          "sp_signing_cert_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PEM certificate the SP signs its `AuthnRequest`s with."
+          },
+          "want_authn_requests_signed": {
+            "type": "boolean",
+            "description": "Refuse an `AuthnRequest` that is not signed by `sp_signing_cert_pem`.\nRequires that certificate."
+          }
+        }
+      },
+      "SamlSpMetadataDraft": {
+        "type": "object",
+        "description": "A parse of SP metadata: **a draft, not a registration**. Nothing is stored\nuntil the caller submits `service_provider` to `create_service_provider` or\n`update_service_provider`, and nothing in it is trusted because it came from\na document (D-41).",
+        "required": [
+          "service_provider",
+          "warnings"
+        ],
+        "properties": {
+          "encryption_certificate_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Lower-case hex SHA-256 of the encryption certificate's DER the draft\ncarries, or null."
+          },
+          "service_provider": {
+            "$ref": "#/components/schemas/SamlServiceProviderInput",
+            "description": "A body `create_service_provider` accepts unchanged (bar the rules that\nneed the datastore). `encrypt_assertions` is never set."
+          },
+          "signing_certificate_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Lower-case hex SHA-256 of the signing certificate's DER the draft\ncarries, or null."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What to know before submitting it. Human text; do not parse it."
           }
         }
       },
@@ -23472,6 +24830,10 @@
     {
       "name": "email-config",
       "description": "Organization and tenant email provider configuration"
+    },
+    {
+      "name": "saml",
+      "description": "SAML 2.0 identity provider — service-provider registry, SP metadata import and the IdP signing credential (CONTRACT §29)"
     },
     {
       "name": "directory",

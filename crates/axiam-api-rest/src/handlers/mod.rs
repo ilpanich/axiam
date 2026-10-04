@@ -28,6 +28,9 @@ pub mod pgp_keys;
 pub mod reactors;
 pub mod resources;
 pub mod roles;
+/// SAML IdP registry and credential management (contract §29): compiled into
+/// every build, so it is **not** behind `saml`.
+pub mod saml_admin;
 #[cfg(feature = "saml")]
 pub mod saml_idp;
 pub mod scim_tokens;

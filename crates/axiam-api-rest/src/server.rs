@@ -1351,6 +1351,97 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                 web::resource("/tenants/{tenant_id}/directory/sync-status")
                     .route(web::get().to(handlers::directory::get_sync_status::<C>)),
             )
+            // --- SAML 2.0 identity provider: service-provider registry and
+            // signing credential (G-2, T23.2.5, CONTRACT §29). Compiled into
+            // **every** build (D-42): only `parse-sp-metadata` needs `samael` and
+            // answers 503 without it. Reads are unlimited; each of the seven
+            // writes has a bucket of its own (plan §7 rule 6), under
+            // `saml_admin_per_min` — issuing generates an RSA-4096 key and parsing
+            // metadata makes an outbound request. `.to()` first: `Route::to` after
+            // `.wrap()` would replace the wrapped service and drop the limiter.
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/idp")
+                    .route(web::get().to(handlers::saml_admin::get_idp::<C>)),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/service-providers")
+                    .app_data(handlers::saml_admin::registry_json_config())
+                    .route(web::get().to(handlers::saml_admin::list_service_providers::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::saml_admin::create_service_provider::<C>)
+                            .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "saml_sp_create",
+                                rate_limit_cfg.saml_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/service-providers/{sp_id}")
+                    .app_data(handlers::saml_admin::registry_json_config())
+                    .route(web::get().to(handlers::saml_admin::get_service_provider::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::saml_admin::update_service_provider::<C>)
+                            .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "saml_sp_update",
+                                rate_limit_cfg.saml_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::saml_admin::delete_service_provider::<C>)
+                            .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "saml_sp_delete",
+                                rate_limit_cfg.saml_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/parse-sp-metadata")
+                    .app_data(handlers::saml_admin::parse_json_config())
+                    .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "saml_sp_parse",
+                        rate_limit_cfg.saml_admin_per_min,
+                    ))
+                    .route(web::post().to(handlers::saml_admin::parse_sp_metadata::<C>)),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/idp-credentials")
+                    .app_data(handlers::saml_admin::registry_json_config())
+                    .route(web::get().to(handlers::saml_admin::list_idp_credentials::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::saml_admin::issue_idp_credential::<C>)
+                            .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "saml_idp_credential_issue",
+                                rate_limit_cfg.saml_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote")
+                    .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "saml_idp_credential_promote",
+                        rate_limit_cfg.saml_admin_per_min,
+                    ))
+                    .route(web::post().to(handlers::saml_admin::promote_idp_credential::<C>)),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire")
+                    .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "saml_idp_credential_retire",
+                        rate_limit_cfg.saml_admin_per_min,
+                    ))
+                    .route(web::post().to(handlers::saml_admin::retire_idp_credential::<C>)),
+            )
             // --- Tenant security overrides (explicit {tenant_id} path segment,
             // same convention as the email-config trio above) ---
             .service(
@@ -1520,13 +1611,13 @@ pub fn build_cors(allowed_origins: &[String]) -> Cors {
     cors
 }
 
-/// The SAML 2.0 IdP's routes (T23.2.3, G-2): `/saml/v2/{tenant_id}/sso` (both
-/// bindings), `/sso/continue` and `/sso/idp-initiated`.
+/// The SAML 2.0 IdP's routes (T23.2.3, T23.2.5, G-2): `/saml/v2/{tenant_id}/sso`
+/// (both bindings), `/sso/continue`, `/sso/idp-initiated` and `/metadata`.
 ///
 /// **Rate limited (§7 rule 6)** with the browser-endpoint preset
 /// `end_session_per_min` — human-driven, unauthenticated, 30 per minute per
 /// address by default — under buckets of their own (`saml_idp_sso`,
-/// `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`), so a flood here
+/// `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`, `saml_idp_metadata`), so a flood here
 /// cannot spend `/oauth2/end_session`'s allowance or the reverse. Every route
 /// allocates state (a pending row) or does XML and signature work, which is
 /// what is being bounded.
@@ -1542,6 +1633,16 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
     use handlers::saml_idp;
     let per_min = rate_limit_cfg.end_session_per_min;
     web::scope("/saml/v2/{tenant_id}")
+        // T23.2.5, D-40: the IdP metadata. The same browser-endpoint preset, a
+        // bucket of its own, and the D-20 `404` for every other method.
+        .service(
+            web::resource("/metadata")
+                .wrap(build_governor(per_min))
+                .wrap(RateLimitShared::<C>::new("saml_idp_metadata", per_min))
+                .route(web::get().to(saml_idp::metadata::<C>))
+                .route(web::head().to(saml_idp::metadata::<C>))
+                .default_service(web::to(saml_idp::not_found)),
+        )
         .service(
             web::resource("/sso")
                 .wrap(build_governor(per_min))

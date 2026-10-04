@@ -187,6 +187,23 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "directory:link",
         "Link an existing local account to its directory entry (revokes its sessions and passkeys)",
     ),
+    // SAML 2.0 identity provider — service-provider registry and signing
+    // credential (G-2, T23.2.5, CONTRACT §29). `saml_idp:credential` is kept
+    // apart from `saml_sp:write` because one call can change or stop sign-on at
+    // every SP of the tenant at once (T-364): whoever may rename an SP must not,
+    // by that alone, be able to retire the signing key.
+    (
+        "saml_sp:read",
+        "Read the tenant's SAML IdP settings, its registered service providers and its signing credentials (never a key)",
+    ),
+    (
+        "saml_sp:write",
+        "Register, replace or delete SAML service providers, and import SP metadata into a draft",
+    ),
+    (
+        "saml_idp:credential",
+        "Issue, promote or retire the tenant's SAML IdP signing credential (retiring the active one stops SAML sign-on at once)",
+    ),
     // Tenants
     ("tenants:list", "List tenants within an organization"),
     ("tenants:get", "Retrieve a single tenant"),
@@ -340,6 +357,10 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
     // G-3: the bind secret is a human administrator's to enter (§30.3 rule 8),
     // and linking signs a person out everywhere.
     "directory",
+    // G-2: registering where a tenant's signed assertions go, and the key they
+    // are signed with, is a human administrator's act (§29.3 rule 9).
+    "saml_sp",
+    "saml_idp",
     "tenants",
     "organizations",
     "admin",
@@ -1141,6 +1162,63 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "GET",
         "/api/v1/tenants/{tenant_id}/directory/sync-status",
         "directory:read",
+    ),
+    // SAML 2.0 identity provider — registry and signing credential (G-2,
+    // T23.2.5, CONTRACT §29)
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/saml/idp",
+        "saml_sp:read",
+    ),
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/saml/service-providers",
+        "saml_sp:read",
+    ),
+    (
+        "POST",
+        "/api/v1/tenants/{tenant_id}/saml/service-providers",
+        "saml_sp:write",
+    ),
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}",
+        "saml_sp:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}",
+        "saml_sp:write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}",
+        "saml_sp:write",
+    ),
+    (
+        "POST",
+        "/api/v1/tenants/{tenant_id}/saml/parse-sp-metadata",
+        "saml_sp:write",
+    ),
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/saml/idp-credentials",
+        "saml_sp:read",
+    ),
+    (
+        "POST",
+        "/api/v1/tenants/{tenant_id}/saml/idp-credentials",
+        "saml_idp:credential",
+    ),
+    (
+        "POST",
+        "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote",
+        "saml_idp:credential",
+    ),
+    (
+        "POST",
+        "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire",
+        "saml_idp:credential",
     ),
     // WebAuthn Attestation Policy (X3 wave 3)
     (

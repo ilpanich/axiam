@@ -360,7 +360,7 @@ fn secret_buffer(secret: SecretString) -> Zeroizing<String> {
 /// integer `12345`, expected a string`), and on these routes that value may be
 /// the bind secret. `missing field` names a member of the schema, not a value,
 /// so it is kept as it is.
-fn scrub_serde_message(raw: &str) -> String {
+pub(crate) fn scrub_serde_message(raw: &str) -> String {
     if raw.starts_with("missing field") {
         return raw.to_string();
     }

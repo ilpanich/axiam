@@ -74,7 +74,12 @@ saml = ["axiam-federation/saml"]
 axiam-test-support = { workspace = true }
 actix-rt = { workspace = true }
 actix-http = { workspace = true }
-surrealdb = { workspace = true, features = ["kv-mem"] }
+surrealdb = { workspace = true, features = ["kv-mem", "kv-surrealkv"] }
+# T23.2.5: the promote race runs on the engine production runs (`surrealkv`), in a
+# temporary directory, because `kv-mem` occasionally admits two winners
+# (`axiam-db/tests/common`). Both are already in Cargo.lock through axiam-db's
+# own dev-dependencies, so no crate enters the graph.
+tempfile = "3"
 tokio-test = { workspace = true }
 totp-rs = { workspace = true }
 jsonwebtoken = { workspace = true }

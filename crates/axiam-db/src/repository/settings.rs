@@ -103,6 +103,10 @@ struct SettingsRow {
     // no such column, and absent resolves to *off*.
     #[surreal(default)]
     oidc_saml_idp_enabled: Option<bool>,
+    // SSF transmitter switch (V77 / G-5 / D-45). Absent — a pre-V77 row —
+    // resolves to *off*, like the SAML switch above.
+    #[surreal(default)]
+    oidc_ssf_enabled: Option<bool>,
     // Server certificate names (V67 / T22.14). The organization baseline of
     // the S-7 fence; absent — a pre-V67 row — reads as the empty list, which
     // refuses every `Server` request (I1). A tenant row carries the resolved
@@ -194,6 +198,10 @@ struct SettingsRowWithId {
     // no such column, and absent resolves to *off*.
     #[surreal(default)]
     oidc_saml_idp_enabled: Option<bool>,
+    // SSF transmitter switch (V77 / G-5 / D-45). Absent — a pre-V77 row —
+    // resolves to *off*, like the SAML switch above.
+    #[surreal(default)]
+    oidc_ssf_enabled: Option<bool>,
     // Server certificate names (V67 / T22.14). The organization baseline of
     // the S-7 fence; absent — a pre-V67 row — reads as the empty list, which
     // refuses every `Server` request (I1). A tenant row carries the resolved
@@ -293,6 +301,7 @@ fn decode_oidc(
     dcr: StoredDcrColumns<'_>,
     cimd_json: Option<&str>,
     saml_idp_enabled: Option<bool>,
+    ssf_enabled: Option<bool>,
 ) -> OidcPolicy {
     OidcPolicy {
         sensitive_scopes_enabled: enabled.unwrap_or(false),
@@ -331,6 +340,8 @@ fn decode_oidc(
         // pre-V72 row and reads as off, so there is no shape of stored data
         // that makes a tenant an identity provider by accident.
         saml_idp_enabled: saml_idp_enabled.unwrap_or(false),
+        // G-5 / D-45 — the strict direction: an absent column reads as off.
+        ssf_enabled: ssf_enabled.unwrap_or(false),
     }
 }
 
@@ -420,6 +431,7 @@ impl SettingsRowWithId {
                 },
                 self.oidc_cimd_json.as_deref(),
                 self.oidc_saml_idp_enabled,
+                self.oidc_ssf_enabled,
             ),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -469,6 +481,7 @@ oidc_dcr_max_clients = $oidc_dcr_max_clients, \
 oidc_dcr_unused_client_ttl_days = $oidc_dcr_unused_client_ttl_days, \
 oidc_cimd_json = $oidc_cimd_json, \
 oidc_saml_idp_enabled = $oidc_saml_idp_enabled, \
+oidc_ssf_enabled = $oidc_ssf_enabled, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -659,6 +672,11 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         bindings.push((
             "oidc_saml_idp_enabled",
             BindValue::Bool(settings.oidc.saml_idp_enabled),
+        ));
+        // G-5 / D-45 — fully resolved, like the SAML switch.
+        bindings.push((
+            "oidc_ssf_enabled",
+            BindValue::Bool(settings.oidc.ssf_enabled),
         ));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
@@ -856,6 +874,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                 },
                 row.oidc_cimd_json.as_deref(),
                 row.oidc_saml_idp_enabled,
+                row.oidc_ssf_enabled,
             ),
             created_at: row.created_at,
             updated_at: row.updated_at,

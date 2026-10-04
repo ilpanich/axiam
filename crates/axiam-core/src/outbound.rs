@@ -109,6 +109,14 @@ macro_rules! outbound_kinds {
 outbound_kinds! {
     /// HMAC-signed JSON POST to a tenant-registered webhook URL.
     Webhook => "webhook",
+    /// RFC 8935 push of one Security Event Token to an SSF receiver (G-5,
+    /// T23.5.2). `target_id` is the stream id, `delivery_id` the SET's `jti`
+    /// (as a UUID), `event_type` the event-type URI, and `payload` an
+    /// [`crate::models::ssf::SsfPendingEvent`] — the **unsigned** event: the
+    /// deliverer (`axiam-oauth2`, T23.5.3) re-reads the stream and signs at the
+    /// attempt, so a queued message never holds a signed SET and a stream
+    /// disabled in the meantime delivers nothing (D-48, D-51).
+    SsfPush => "ssf_push",
 }
 
 impl OutboundKind {
@@ -267,6 +275,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&OutboundKind::Webhook).unwrap(),
             "\"webhook\""
+        );
+    }
+
+    #[test]
+    fn ssf_push_slug_is_pinned() {
+        // T23.5.2 — the queue names (`axiam.ssf_push`, `.retry`, `.dlq`), the
+        // retry env-var prefix and the audit prefix all derive from this slug;
+        // it is pinned before anything is queued.
+        assert_eq!(OutboundKind::SsfPush.as_str(), "ssf_push");
+        assert_eq!(
+            serde_json::to_string(&OutboundKind::SsfPush).unwrap(),
+            "\"ssf_push\""
+        );
+        assert_eq!(
+            OutboundKind::ALL,
+            &[OutboundKind::Webhook, OutboundKind::SsfPush]
         );
     }
 

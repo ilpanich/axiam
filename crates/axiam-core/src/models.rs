@@ -41,6 +41,7 @@ pub mod server_names;
 pub mod service_account;
 pub mod session;
 pub mod settings;
+pub mod ssf;
 pub mod tenant;
 pub mod uma;
 pub mod user;

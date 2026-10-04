@@ -3321,6 +3321,93 @@ pub trait SamlServiceProviderRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// SSF streams (tenant-scoped) (G-5, T23.5.2)
+// ---------------------------------------------------------------------------
+
+/// Storage for the Shared Signals Framework stream registry; see
+/// [`crate::models::ssf`].
+///
+/// Every method but [`Self::create`]'s audience check is tenant-scoped: a
+/// stream of another tenant is not found, exactly as one that does not exist.
+/// The repository does not validate values (that is `axiam_oauth2::ssf`'s);
+/// it enforces only what needs the datastore — the deployment-wide audience
+/// uniqueness — and it seals the push `Authorization` header.
+pub trait SsfStreamRepository: Send + Sync {
+    /// Register a stream. `AlreadyExists` when **any** tenant's stream already
+    /// uses this audience (D-47).
+    fn create(
+        &self,
+        input: crate::models::ssf::NewSsfStream,
+    ) -> impl Future<Output = AxiamResult<crate::models::ssf::SsfStream>> + Send;
+
+    /// One stream. `NotFound` when it does not exist in this tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::ssf::SsfStream>> + Send;
+
+    /// One page of the tenant's streams, oldest first, narrowed by
+    /// [`Pagination::search`] over `audience`, `receiver_client_id`,
+    /// `description` and the id before `offset`/`limit`.
+    fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<crate::models::ssf::SsfStream>>> + Send;
+
+    /// The tenant's streams bound to one receiver client, oldest first.
+    fn list_for_receiver(
+        &self,
+        tenant_id: Uuid,
+        receiver_client_id: &str,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::ssf::SsfStream>>> + Send;
+
+    /// The tenant's streams that would carry `event` now: not `disabled`, and
+    /// the event both allowed and requested. What an event source iterates
+    /// (T23.5.3); a `paused` stream is included because its events are held.
+    fn list_for_event(
+        &self,
+        tenant_id: Uuid,
+        event: crate::models::ssf::SsfEventType,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::ssf::SsfStream>>> + Send;
+
+    /// Replace a stream's configuration. `NotFound` when it does not exist in
+    /// this tenant; `AlreadyExists` when the new audience is another stream's.
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        update: crate::models::ssf::SsfStreamUpdate,
+    ) -> impl Future<Output = AxiamResult<crate::models::ssf::SsfStream>> + Send;
+
+    /// Record a verification request at `now` **if** the last one was at least
+    /// `min_interval_secs` ago, atomically. `false` means too soon (`429`).
+    /// `NotFound` when the stream does not exist in this tenant.
+    fn claim_verification(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        now: DateTime<Utc>,
+        min_interval_secs: i64,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// The stored push `Authorization` header in plaintext, or `None` when the
+    /// stream has none. **The single path to the plaintext**; only the push
+    /// deliverer calls it. `NotFound` when the stream does not exist in this
+    /// tenant.
+    fn decrypt_authorization_header(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<Zeroizing<String>>>> + Send;
+
+    /// Remove a stream **and its poll buffer**, in one transaction. `NotFound`
+    /// when it does not exist in this tenant.
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // SAML IdP pending AuthnRequests (tenant-scoped) (G-2, T23.2.3)
 // ---------------------------------------------------------------------------
 

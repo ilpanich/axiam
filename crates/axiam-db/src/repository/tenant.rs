@@ -336,6 +336,10 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // `emailAddress` SP) and the logout runs the chain of a session that no
         // longer has a tenant. Neither is anything a later tenant may resume.
         //
+        // And its SSF streams and their buffered events (T23.5.2, schema v77):
+        // a stream holds a sealed credential to a receiver and a buffered event
+        // may hold a subject's email address; neither outlives the tenant.
+        //
         // The tenant's directory configuration goes with it (T23.3.1, G-3): it
         // holds an encrypted service-account credential for the tenant's
         // directory, and a deleted tenant must not leave that ciphertext
@@ -362,6 +366,8 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
                  DELETE saml_authn_request WHERE tenant_id = $id; \
                  DELETE saml_sp_session WHERE tenant_id = $id; \
                  DELETE saml_logout_run WHERE tenant_id = $id; \
+                 DELETE ssf_event_buffer WHERE tenant_id = $id; \
+                 DELETE ssf_stream WHERE tenant_id = $id; \
                  DELETE type::record('tenant', $id); \
                  COMMIT TRANSACTION;",
             )

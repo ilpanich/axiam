@@ -422,6 +422,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "saml_single_logout",
         sql: SCHEMA_V76,
     },
+    Migration {
+        version: 77,
+        name: "ssf_transmitter",
+        sql: SCHEMA_V77,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4146,9 +4151,180 @@ DEFINE INDEX IF NOT EXISTS idx_saml_logout_run_expires ON TABLE saml_logout_run
     COLUMNS expires_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v77 — T23.5.2 / G-5 / D-45 … D-52: the SSF transmitter
+// -----------------------------------------------------------------------
+//
+// Additive DDL only, nothing backfilled: no tenant transmits until an
+// organization turns the switch on and an administrator registers a stream.
+//
+// **`security_settings.oidc_ssf_enabled`** (D-45) is the layered `ssf_enabled`
+// switch, with the shape of `oidc_saml_idp_enabled` (v72): `option<bool>
+// DEFAULT false`, so a row written before this migration reads as *off*.
+//
+// **`ssf_stream`** is the registry of SSF streams, one SCHEMAFULL row each,
+// tenant-scoped — except for one index: `idx_ssf_stream_audience` is UNIQUE on
+// `audience` **alone**, across every tenant (D-47). Without per-tenant issuer
+// paths every tenant's SETs carry the deployment's `iss`, so the audience is
+// what keeps one tenant's SETs from verifying at another tenant's receiver;
+// the datastore, not the application, decides it. The push `Authorization`
+// header is AES-256-GCM ciphertext under `pki_encryption_key` (the key webhook
+// secrets use) with its nonce in its own column, and no read of the table
+// projects either (the repository's `PUBLIC_COLUMNS`). The enumerations are
+// asserted against the spellings the model writes; `events_allowed` and
+// `events_requested` hold event-type URIs, at most the six AXIAM transmits.
+//
+// **`ssf_event_buffer`** is the per-stream bounded buffer (D-48): events held
+// for a `paused` stream and events waiting to be polled by a `poll` stream,
+// unsigned (`pending_json` is an `SsfPendingEvent`; the SET is signed when it
+// is read). UNIQUE on `(tenant_id, stream_id, jti)`, so an event is buffered
+// once and an acknowledgement names exactly one row; `jti` is 32 lower-case
+// hex characters. The bound (1 000 per stream, oldest dropped) and the
+// retention (`expires_at`, seven days) are the application's, written by
+// T23.5.3. Rows go with their stream and with their tenant.
+const SCHEMA_V77: &str = "\
+DEFINE FIELD IF NOT EXISTS oidc_ssf_enabled ON TABLE security_settings
+    TYPE option<bool> DEFAULT false;
+DEFINE TABLE IF NOT EXISTS ssf_stream SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE ssf_stream TYPE string;
+DEFINE FIELD IF NOT EXISTS receiver_client_id ON TABLE ssf_stream TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS audience ON TABLE ssf_stream TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 512;
+DEFINE FIELD IF NOT EXISTS description ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS delivery_method ON TABLE ssf_stream TYPE string
+    ASSERT $value IN ['push', 'poll'];
+DEFINE FIELD IF NOT EXISTS endpoint_url ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS auth_header_ciphertext ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS auth_header_nonce ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS secret_key_version ON TABLE ssf_stream TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS events_allowed ON TABLE ssf_stream TYPE array<string>
+    ASSERT array::len($value) <= 6;
+DEFINE FIELD IF NOT EXISTS events_allowed.* ON TABLE ssf_stream TYPE string;
+DEFINE FIELD IF NOT EXISTS events_requested ON TABLE ssf_stream TYPE array<string>
+    ASSERT array::len($value) <= 6;
+DEFINE FIELD IF NOT EXISTS events_requested.* ON TABLE ssf_stream TYPE string;
+DEFINE FIELD IF NOT EXISTS subject_format ON TABLE ssf_stream TYPE string
+    ASSERT $value IN ['iss_sub', 'email'];
+DEFINE FIELD IF NOT EXISTS status ON TABLE ssf_stream TYPE string
+    ASSERT $value IN ['enabled', 'paused', 'disabled'];
+DEFINE FIELD IF NOT EXISTS status_reason ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status_actor ON TABLE ssf_stream TYPE string
+    ASSERT $value IN ['admin', 'receiver'];
+DEFINE FIELD IF NOT EXISTS last_verification_at ON TABLE ssf_stream TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE ssf_stream TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE ssf_stream TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_ssf_stream_audience ON TABLE ssf_stream
+    COLUMNS audience UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_ssf_stream_tenant ON TABLE ssf_stream
+    COLUMNS tenant_id;
+DEFINE INDEX IF NOT EXISTS idx_ssf_stream_receiver ON TABLE ssf_stream
+    COLUMNS tenant_id, receiver_client_id;
+DEFINE TABLE IF NOT EXISTS ssf_event_buffer SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE ssf_event_buffer TYPE string;
+DEFINE FIELD IF NOT EXISTS stream_id ON TABLE ssf_event_buffer TYPE string;
+DEFINE FIELD IF NOT EXISTS jti ON TABLE ssf_event_buffer TYPE string
+    ASSERT string::len($value) = 32;
+DEFINE FIELD IF NOT EXISTS event_uri ON TABLE ssf_event_buffer TYPE string;
+DEFINE FIELD IF NOT EXISTS pending_json ON TABLE ssf_event_buffer TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE ssf_event_buffer TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE ssf_event_buffer TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_ssf_event_buffer_jti ON TABLE ssf_event_buffer
+    COLUMNS tenant_id, stream_id, jti UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_ssf_event_buffer_stream ON TABLE ssf_event_buffer
+    COLUMNS tenant_id, stream_id, created_at;
+DEFINE INDEX IF NOT EXISTS idx_ssf_event_buffer_expires ON TABLE ssf_event_buffer
+    COLUMNS expires_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.5.2 / D-45, D-47, D-48 — v77 adds the stream registry, the event
+    /// buffer and the settings switch, additively, with the deployment-wide
+    /// audience index and the buffer's one-row-per-`jti` index.
+    #[test]
+    fn v77_defines_the_ssf_tables_and_the_switch_additively() {
+        assert!(SCHEMA_V77.contains(
+            "oidc_ssf_enabled ON TABLE security_settings\n    TYPE option<bool> DEFAULT false"
+        ));
+        for table in ["ssf_stream", "ssf_event_buffer"] {
+            assert!(
+                SCHEMA_V77.contains(&format!("DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL")),
+                "{table}"
+            );
+        }
+        // D-47: the audience is unique across tenants, not per tenant.
+        assert!(
+            SCHEMA_V77.contains(
+                "idx_ssf_stream_audience ON TABLE ssf_stream\n    COLUMNS audience UNIQUE"
+            )
+        );
+        // D-48: one row per (tenant, stream, jti).
+        assert!(SCHEMA_V77.contains(
+            "idx_ssf_event_buffer_jti ON TABLE ssf_event_buffer\n    COLUMNS tenant_id, stream_id, jti UNIQUE"
+        ));
+        assert!(SCHEMA_V77.contains("$value IN ['enabled', 'paused', 'disabled']"));
+        assert!(SCHEMA_V77.contains("$value IN ['push', 'poll']"));
+        assert!(SCHEMA_V77.contains("$value IN ['iss_sub', 'email']"));
+        assert!(SCHEMA_V77.contains("$value IN ['admin', 'receiver']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V77.contains(forbidden),
+                "v77 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V77
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v77 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("ssf_stream")
+                    || statement.contains("ssf_event_buffer")
+                    || statement.contains("oidc_ssf_enabled ON TABLE security_settings"),
+                "v77 defined something outside its tables: {statement}"
+            );
+        }
+    }
+
+    /// T-391 — the push header is stored only as ciphertext and nonce; there is
+    /// no plaintext column, and the buffer holds unsigned events, not SETs.
+    #[test]
+    fn v77_stores_the_push_header_sealed_and_no_signed_token() {
+        assert!(SCHEMA_V77.contains("auth_header_ciphertext ON TABLE ssf_stream"));
+        assert!(SCHEMA_V77.contains("auth_header_nonce ON TABLE ssf_stream"));
+        for forbidden in [
+            "authorization_header ON TABLE",
+            "auth_header ON TABLE",
+            "set_jws",
+            "signed_set",
+            "password",
+        ] {
+            assert!(!SCHEMA_V77.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    /// v77 takes the next number and keeps v76 as it was.
+    #[test]
+    fn v77_follows_v76_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| (76..=77).contains(&m.version))
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![(76, "saml_single_logout"), (77, "ssf_transmitter")]
+        );
+    }
 
     /// T23.2.4 / D-37, D-39 — v76 adds the participant record and the logout run,
     /// additively, with the two unique indexes the participant record is defined
@@ -4237,7 +4413,7 @@ mod tests {
     fn v76_follows_v75_in_the_registry() {
         let names: Vec<(u32, &str)> = MIGRATIONS
             .iter()
-            .filter(|m| m.version >= 75)
+            .filter(|m| (75..=76).contains(&m.version))
             .map(|m| (m.version, m.name))
             .collect();
         assert_eq!(
@@ -5082,8 +5258,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&76),
-            "v76 is the newest migration (T23.2.4 — SAML single logout: the participant record \
+            Some(&77),
+            "v77 is the newest migration (T23.5.2 — the SSF transmitter: `ssf_stream`, \
+             `ssf_event_buffer` and `security_settings.oidc_ssf_enabled`; v76 was T23.2.4 — SAML \
+             single logout: the participant record \
              `saml_sp_session` and the logout chain `saml_logout_run`; v75 was T23.3.5 — the \
              directory sync job's per-tenant state, \
              `directory_sync_state`; v74 was T23.3.4 — directory group mapping: \

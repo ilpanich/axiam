@@ -848,6 +848,11 @@ fn empty_poll_response() -> HttpResponse {
 /// returned by this same call. An unacknowledged event comes back on the next
 /// poll (at-least-once); a SET is **signed now**, against the stream as it is
 /// now, so a stream paused or disabled meanwhile answers an empty `sets`.
+///
+/// Without `returnImmediately` the call long-polls for up to 30 seconds; at most
+/// one long poll waits per stream per server instance, and a second concurrent
+/// request on the same stream is answered at once as if `returnImmediately` were
+/// true (D-53).
 #[utoipa::path(
     post,
     path = "/ssf/v1/poll/{stream_id}",

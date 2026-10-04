@@ -117,6 +117,10 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     "/ssf/v1/stream",
     "/ssf/v1/status",
     "/ssf/v1/verify",
+    // SSF 1.0 / RFC 8936 poll delivery (G-5, T23.5.3): the same extractor and
+    // the same reasoning; the stream is looked up for the token's client, so
+    // another client's stream id is a `404`.
+    "/ssf/v1/poll/{stream_id}",
 ];
 
 /// Returns true if `openapi_path` is covered by any `PUBLIC_PATHS` entry.

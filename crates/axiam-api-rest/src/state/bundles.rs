@@ -415,6 +415,16 @@ impl Drop for PollWaitGuard {
     }
 }
 
+impl<C: Connection + Clone> SsfState<C> {
+    /// Wire the outbox: producers (verification, a status change) and the
+    /// emitter — and through it both ports — send events to it. The emitter
+    /// keeps the first outbox it is given.
+    pub fn bind_outbox(&mut self, outbox: Arc<dyn axiam_core::models::ssf::SsfOutbox>) {
+        self.emitter.bind_outbox(outbox.clone());
+        self.outbox = Some(outbox);
+    }
+}
+
 #[cfg(test)]
 mod poll_waiter_tests {
     use super::*;
@@ -430,15 +440,5 @@ mod poll_waiter_tests {
         drop(first);
         assert!(waiters.try_enter(a).is_some(), "released on drop");
         assert_eq!(waiters.waiting(), 0);
-    }
-}
-
-impl<C: Connection + Clone> SsfState<C> {
-    /// Wire the outbox: producers (verification, a status change) and the
-    /// emitter — and through it both ports — send events to it. The emitter
-    /// keeps the first outbox it is given.
-    pub fn bind_outbox(&mut self, outbox: Arc<dyn axiam_core::models::ssf::SsfOutbox>) {
-        self.emitter.bind_outbox(outbox.clone());
-        self.outbox = Some(outbox);
     }
 }

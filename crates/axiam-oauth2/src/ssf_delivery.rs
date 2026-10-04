@@ -441,23 +441,28 @@ where
             // A 3xx is never followed, and is a retry: the administrator may
             // fix the endpoint.
             300..=399 => retry("the receiver answered with a redirect, which is not followed"),
-            400 => match read_capped_body(response, MAX_RESPONSE_BODY_BYTES)
-                .await
-                .ok()
-                .as_deref()
-                .and_then(rfc_8935_error)
-            {
-                Some(code) => dead(&format!("the receiver rejected the SET: {code}")),
-                // A 400 without a known code will not change on retry either.
-                None => dead("HTTP 400"),
+            400..=499 => match status {
+                400 => match read_capped_body(response, MAX_RESPONSE_BODY_BYTES)
+                    .await
+                    .ok()
+                    .as_deref()
+                    .and_then(rfc_8935_error)
+                {
+                    Some(code) => dead(&format!("the receiver rejected the SET: {code}")),
+                    // A 400 without a known code will not change on retry either.
+                    None => dead("HTTP 400"),
+                },
+                // The one 4xx that says the credential is wrong until someone
+                // fixes it.
+                401 | 403 => dead(&format!(
+                    "the receiver refused the push credential (HTTP {status})"
+                )),
+                // The 4xx that can pass: a receiver not ready, slow or limiting.
+                404 | 408 | 429 => retry(&format!("the receiver answered HTTP {status}")),
+                // Any other 4xx will not change on retry (D-53 (8)).
+                _ => dead(&format!("HTTP {status}")),
             },
-            // The one 4xx that says the credential is wrong until someone fixes it.
-            401 | 403 => dead(&format!(
-                "the receiver refused the push credential (HTTP {status})"
-            )),
-            404 | 408 | 429 | 500..=599 => retry(&format!("the receiver answered HTTP {status}")),
-            // Any other 4xx will not change on retry (D-53 (8)).
-            400..=499 => dead(&format!("HTTP {status}")),
+            500..=599 => retry(&format!("the receiver answered HTTP {status}")),
             // Anything else (1xx, an unassigned code) retries.
             _ => retry(&format!(
                 "the receiver answered an unexpected HTTP {status}"

@@ -1129,6 +1129,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// record, so a sweep that never ran would answer correctly over a table
     /// that keeps rows nobody will return for. `Ok(0)` without the repository.
     async fn sweep_ssf_step_up(&self) -> Result<u64, AxiamError> {
+        use axiam_core::repository::SsfStepUpRepository as _;
         let Some(repo) = &self.ssf_step_up_repo else {
             return Ok(0);
         };

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:04ac83c1af7d7a2eda89250f36a7a6a6890f0a92c43cf0553ea6ae049fe55fed"
+    "x-axiam-spec-digest": "sha256:c49f070b61e30598c5da099d179017f81b8a7bb79d7d799af0291ed6d7b94979"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -11517,7 +11517,7 @@
             "description": "No such stream in this tenant"
           },
           "409": {
-            "description": "The audience is already used by another SSF stream"
+            "description": "The audience is already used by another SSF stream, or the stream changed since it was read (reload it and retry)"
           },
           "429": {
             "description": "Rate limit"
@@ -14013,6 +14013,9 @@
           "404": {
             "description": "No such stream for this receiver"
           },
+          "409": {
+            "description": "The stream kept changing under this write; read it again and retry"
+          },
           "429": {
             "description": "Rate limit"
           }
@@ -14110,6 +14113,9 @@
           },
           "404": {
             "description": "No such stream for this receiver"
+          },
+          "409": {
+            "description": "The stream kept changing under this write; read it again and retry"
           },
           "429": {
             "description": "Rate limit"
@@ -14216,6 +14222,9 @@
           },
           "404": {
             "description": "No such stream for this receiver"
+          },
+          "409": {
+            "description": "The stream kept changing under this write; read it again and retry"
           },
           "429": {
             "description": "Rate limit"
@@ -14582,6 +14591,7 @@
             "type": "integer",
             "format": "int32",
             "description": "The `index` an `AuthnRequest` may use instead of a URL. Unique per SP.",
+            "maximum": 65535,
             "minimum": 0
           },
           "is_default": {

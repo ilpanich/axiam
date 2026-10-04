@@ -212,7 +212,7 @@ async fn delete_by_jti_removes_only_the_named_rows_of_this_stream() {
     assert_eq!(repo.count(foreign, a).await.unwrap(), 1);
     // A second acknowledgement of the same jti removes nothing.
     assert_eq!(
-        repo.delete_by_jti(tenant, a, &[acked.jti.clone()])
+        repo.delete_by_jti(tenant, a, std::slice::from_ref(&acked.jti))
             .await
             .unwrap(),
         0

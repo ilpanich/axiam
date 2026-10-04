@@ -55,3 +55,6 @@ rcgen = { workspace = true }
 # (resource, scope) pair the live engine would deny at mint time
 # (tests/uma_rpt_deny_property_test.rs).
 proptest = { workspace = true }
+# T23.5.3 — the SSF delivery tests run the real stream and buffer repositories on
+# an in-memory database and the real deliverer against a loopback receiver.
+surrealdb = { workspace = true, features = ["kv-mem"] }

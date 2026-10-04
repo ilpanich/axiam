@@ -28,6 +28,7 @@ pub mod redirect_uri;
 pub mod resource;
 pub mod sensitive;
 pub mod ssf;
+pub mod ssf_delivery;
 pub mod token;
 pub mod token_exchange;
 pub mod uma;

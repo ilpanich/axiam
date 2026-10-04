@@ -9502,7 +9502,11 @@ point. Counts of what a run did are in its audit rows (`directory.sync_run`,
    allowed networks) are each `400 validation_error`, whose `message` names the field and
    the rule — and never echoes the secret. The guard runs on `url` as written, so a write
    that does not change `url` still re-checks it: a name re-pointed since the last save is
-   caught on the next one.
+   caught on the next one. **One exception (D-33):** the address guard — not `validate` —
+   is skipped for a write whose resulting configuration is **disabled** (`enabled: false`),
+   since a disabled directory opens no connection; re-enabling runs it again. So a
+   directory whose name now resolves to a refused address can still be switched off with
+   `update {enabled: false}`, not only deleted.
 2. **Moving the connection requires the secret again (P23W2-01).** A `set` or `update`
    that changes **`url`, `start_tls`, `bind_dn` or `trust_anchors_pem`** without a
    `bind_secret` is `400 validation_error` ("…requires entering the bind secret again…")

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:2bc60df3e0257843c0562fb8333cd95328f44b6aa5be8c6483966dc36c2b7c13"
+    "x-axiam-spec-digest": "sha256:9f8100940749e59a49e7735d296bc3516c1b5e912761ba1b63ff3ec7b682cbc3"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -9879,7 +9879,7 @@
           "directory"
         ],
         "summary": "`POST /api/v1/tenants/{tenant_id}/directory/links` — link a local account to\nits directory entry (D-28).",
-        "description": "The directory resolves the entry from the account's own username; the caller\nsupplies only the account. Marks the account, deletes its WebAuthn\ncredentials, revokes its `User`-type certificates and then all its sessions\nand OAuth2 refresh tokens (TOTP is kept): **the owner is signed out\neverywhere**. Idempotent: an account already linked to that entry gets `200`\nwith `was_already_linked: true` and the revocations run again.",
+        "description": "The directory resolves the entry from the account's own username; the caller\nsupplies only the account. Marks the account, deletes its WebAuthn\ncredentials and federation links, revokes its `User`-type certificates and\nthen all its sessions\nand OAuth2 refresh tokens (TOTP is kept): **the owner is signed out\neverywhere**. Idempotent: an account already linked to that entry gets `200`\nwith `was_already_linked: true` and the revocations run again.",
         "operationId": "link_account",
         "parameters": [
           {

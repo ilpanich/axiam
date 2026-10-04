@@ -418,6 +418,10 @@ need a bounded revocation window, poll `GET /oauth2/revocations`.
 **Reopen condition.** A concrete adopter request. Not a competitor comparison:
 Keycloak and authentik offer the feature, and that alone does not reopen it.
 
+#### SAML single logout
+
+AXIAM as a SAML identity provider has its own logout, through the browser and signed at both ends; it ends the AXIAM session first and then the SAML service providers that hold it, and is described in [§8e.5](#8e5-single-logout). The OIDC endpoints above do not run it.
+
 ---
 
 ## 5. Authorization Engine
@@ -768,6 +772,40 @@ Six routes under `/api/v1/tenants/{tenant_id}/directory` (contract §30, OpenAPI
 
 ---
 
+## 8e. SAML 2.0 Identity Provider
+
+AXIAM issues SAML 2.0 assertions, per tenant, to the service providers (SPs) a tenant administrator registered (competitor-gap item **G-2**, Phase 23): IdP metadata, the Web Browser SSO profile on the HTTP-Redirect and HTTP-POST bindings, SP- and IdP-initiated sign-on, signed assertions (and optionally signed responses), attributes mapped from AXIAM's own data, and single logout wired into session revocation. AXIAM's side as a SAML **service provider** — consuming an external IdP's assertions — is the older `saml.rs` and is not this chapter. This chapter says where each part lives and links to the decisions that bind it; the reasoning is in the plan's decision table ([`competitor-gap-remediation-plan-2026-10-02.md`](competitor-gap-remediation-plan-2026-10-02.md) §8, D-2, D-3, D-20 … D-27, D-34, D-37 … D-42), the wire contract for the management surface in [`sdks/CONTRACT.md`](../sdks/CONTRACT.md) §29, and the threats in [`threat-model-stride.md`](threat-model-stride.md) (T-304 … T-330, T-357 … T-384). The registry routes, the metadata endpoint and single logout are specified here ahead of their code (W4: T23.2.5, then T23.2.4).
+
+### 8e.1 Placement
+
+No new crate; the layering table is unchanged. The plain data — `SamlServiceProvider` and the credential types — is in `axiam-core` (`models::saml_sp`, `models::saml_idp_credential`), the repositories in `axiam-db`, the write-time validator in `axiam_federation::saml_sp` (outside the `saml` feature: it parses URLs and X.509, no XML), the protocol in `axiam_federation::saml_idp` (behind `saml`, on `samael` and `libxml`/xmlsec), the credential's issuance in `axiam_pki::saml_signing`, and the routes in `axiam-api-rest`: the browser routes `/saml/v2/{tenant}/metadata`, `/sso` and `/slo` (behind `saml`, out of `openapi.json`) and the management routes `/api/v1/tenants/{tenant_id}/saml/…` (in every build, so in the spec — [D-42](competitor-gap-remediation-plan-2026-10-02.md)). The browser routes answer one indistinguishable empty `404` when the build lacks `saml` or the tenant's layered, disable-only setting `saml_idp_enabled` is off ([D-20](competitor-gap-remediation-plan-2026-10-02.md)); the entity id and every endpoint URL are one function of the deployment's public base URL and the path tenant.
+
+### 8e.2 The signing credential
+
+One RSA-4096 key per tenant signs with `rsa-sha256`/`sha256`; its leaf is issued by a signing CA of the tenant's organization with the `SamlSigning` profile (`digitalSignature`, `id-kp-documentSigning`, no SAN), an internal-only certificate type every certificate API refuses ([D-21](competitor-gap-remediation-plan-2026-10-02.md)). It lives in a `saml_idp_credential` row, never a `certificate` row, with the key sealed under `pki_encryption_key` through the database custodian; only the signer's lookup selects the ciphertext, and retiring destroys it. At most one `active` and one `next` credential per tenant, enforced by a unique index. **Rotation** is: issue into `next`, which the metadata publishes beside `active`; wait until the SPs have refreshed; **promote**, which in one transaction retires the old `active` and activates `next` ([D-42](competitor-gap-remediation-plan-2026-10-02.md), T-309). Retiring the `active` credential without a successor stops sign-on at once — the incident response to a leaked key, which SPs keep trusting until their administrators remove it (T-306).
+
+### 8e.3 Issuance
+
+`SamlIdpIssuer::issue` builds one assertion — bearer confirmation and `Conditions` of five minutes, audience the SP's entity id, `Recipient`/`Destination` the ACS URL used, `InResponseTo` only when SP-initiated, `AuthnInstant` the session's authentication time, an `AuthnContextClassRef` from the session's `amr` only (T-314) — and signs it always, then the response by policy (T23.2.2). It refuses unless the SP, user, session, groups, roles and credential all carry the path tenant (T-307), never signs a failure response (T-316), and re-verifies its own output. The `NameID` is a persistent pairwise HMAC under the dedicated `saml_pairwise_key` by default ([D-22](competitor-gap-remediation-plan-2026-10-02.md)), or an email address only when something vouched for it ([D-25](competitor-gap-remediation-plan-2026-10-02.md)). The `SessionIndex` is **per SP and random**, recorded with the `NameID` in `saml_sp_session` before the assertion is signed, so SLO can map it back while SPs cannot correlate it ([D-37](competitor-gap-remediation-plan-2026-10-02.md), T-312). Encryption (D-2) is refused rather than downgraded: an SP that asks for it gets `Responder`, and the registry refuses the flag until it is implemented.
+
+### 8e.4 Single sign-on
+
+`/saml/v2/{tenant}/sso` takes an `AuthnRequest` on either binding in two legs ([D-24](competitor-gap-remediation-plan-2026-10-02.md)): the first refuses everything decidable without a principal — size, DTDs, encodings, staleness, the issuer, any signature (Redirect over the exact octets, POST as the root's one enveloped signature), `Destination`, the ACS URL or index against the registration, the binding, a replayed `ID` — and holds the checked request under an opaque, browser-bound handle; the second resolves the OP cookie through the tenant-keyed lookup, applies `account_may_act`, hops to `/login` when it must (`ForceAuthn` bound to the request, `IsPassive` never hopping), consumes the handle on the X6 arbiter, records the participant and issues. Refusals before the ACS is known post nowhere; policy refusals after it are posted unsigned ([D-26](competitor-gap-remediation-plan-2026-10-02.md)). IdP-initiated sign-on is a per-SP opt-in, triggered by a same-site `GET …/sso/idp-initiated` (D-3, D-26). The auto-post page carries the one handler-set content-security policy ([D-27](competitor-gap-remediation-plan-2026-10-02.md)).
+
+### 8e.5 Single logout
+
+`/saml/v2/{tenant}/slo` receives `LogoutRequest`s and `LogoutResponse`s on both bindings with the SSO endpoint's receiver, and requires **every** SP message to be signed by the SP's registered certificate, verified on its own node, SHA-2 only ([D-38](competitor-gap-remediation-plan-2026-10-02.md)). A verified request ends the AXIAM sessions it names through `saml_sp_session` — OIDC back-channel logout to their clients, then `SessionRepository::invalidate`, which feeds the revocation feed — and only then tells the session's other SPs, one at a time through the browser, in a `saml_logout_run` chain that ends with a response to the initiating SP ([D-39](competitor-gap-remediation-plan-2026-10-02.md)). AXIAM signs its own logout messages only for a session's holder or a verified SP, with the detached query signature on the Redirect binding, so the tenant key mints no XML wrapping gadget (T-373). `/slo` never reads the OP cookie; it clears every copy. IdP-initiated logout is the same-site `GET …/sso/logout`, under the SSO path so the cookie reaches it. Sessions ended any other way — `/oauth2/end_session`, an administrator, a password reset — do not run a SAML chain, so SPs' own sessions outlive them (T-380, accepted; §4.5 for OIDC logout).
+
+### 8e.6 The SP registry and its management surface
+
+`SamlServiceProvider` rows (schema v72) hold the entity id (unique per tenant, immutable after create), the ACS allow-list (exact strings, the OAuth2 redirect-URI registration rule plus no `*`), the SLO endpoint, the `NameID` policy, response signing (there is no field to turn assertion signing off), the SP's certificates, attribute mappings and allowed groups. Eleven routes under `/api/v1/tenants/{tenant_id}/saml` ([`CONTRACT.md` §29](../sdks/CONTRACT.md), the §27 namespace `saml`): `get_idp`; the SP CRUD (`update` a replacement) through `validate_saml_service_provider` and four further refusals; `parse_sp_metadata`, which fetches an SP's metadata only through `guarded_fetch`, refuses any DTD on the bytes and returns a **draft** an administrator submits — nothing from an unsigned document is trusted or stored on its own ([D-41](competitor-gap-remediation-plan-2026-10-02.md)); and the credential's `list`, `issue`, `promote` and `retire`. Permissions `saml_sp:read`, `saml_sp:write` and `saml_idp:credential`; human administrators only, their own tenant only; writes rate-limited by `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN`; every change audited ([D-42](competitor-gap-remediation-plan-2026-10-02.md)). The routes work whatever `saml_idp_enabled` says, so a tenant is prepared before the IdP is switched on. The console's *SAML Service Providers* page (T23.2.6) is built on them.
+
+### 8e.7 IdP metadata
+
+`GET /saml/v2/{tenant}/metadata` publishes one unsigned `EntityDescriptor` from a fixed template: the signing certificates of the `active` and `next` credentials, the SSO and SLO locations for both bindings, the two `NameID` formats, no encryption key ([D-40](competitor-gap-remediation-plan-2026-10-02.md)). It answers the D-20 `404` when SAML is unavailable or off **and** when the tenant has no publishable credential, so the endpoint is no tenant oracle; it is cached for an hour with an `ETag` and rate-limited like the other browser routes.
+
+---
+
 ## 9. API Design
 
 ### 9.1 REST API Endpoints (Summary)
@@ -791,6 +829,7 @@ All tenant-scoped endpoints are prefixed with `/api/v1/tenants/:tenant_id/` or u
 | **OAuth2** | `/oauth2/authorize`, `/oauth2/token`, `/oauth2/revoke`, `/oauth2/introspect` | OAuth2 endpoints |
 | **OIDC** | `/.well-known/openid-configuration`, `/oauth2/userinfo`, `/oauth2/jwks` | OpenID Connect discovery and endpoints |
 | **Federation** | `GET/POST/PUT/DELETE /api/v1/federation` | IdP configuration management |
+| **SAML IdP** | `GET/POST/PUT/DELETE /api/v1/tenants/:tenant_id/saml/…`; browser routes `/saml/v2/:tenant_id/metadata`, `/sso`, `/slo` | SP registry, metadata import, signing-credential lifecycle (CONTRACT §29); the IdP itself ([§8e](#8e-saml-20-identity-provider)) |
 | **Audit** | `GET /api/v1/audit-logs` | Audit log query (read-only) |
 | **Settings** | `GET/PUT /api/v1/organizations/:org_id/settings`, `GET/PUT /api/v1/settings` | Org/tenant security settings |
 | **Password Reset** | `POST /auth/reset`, `POST /auth/reset/confirm` | Email-based password reset flow |

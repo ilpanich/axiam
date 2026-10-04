@@ -1727,13 +1727,15 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > asking session (**P23W4-02**, Low, T-404's residual closed); an unsignable held
 > event logged `ERROR` on every half-second look of a long poll (P23W4-03); CodeQL
 > hygiene, two key literals included (P23W4-04); `AcsEndpoint.index` bounded in
-> the published schema (P23W4-05). To file: five cleanup jobs never registered
-> in `/health/jobs` (P23W4-06, Low, pre-existing), no console control for
-> `saml_idp_enabled`/`ssf_enabled` and no SSF page (P23W4-07), the duplicated
-> consumer supervisor loop (P23W4-08), SLO untested against a real SP's logout
-> (P23W4-09), and — after a maintainer decision on requiring per-tenant issuers
-> for SSF — audience squatting where every tenant's SETs share one issuer
-> (P23W4-11, Low; T-390's residual corrected, receiver guidance on the website).
+> the published schema (P23W4-05). Filed: five cleanup jobs never registered
+> in `/health/jobs` (P23W4-06, Low, pre-existing, ilpanich/axiam#535), no console control for
+> `saml_idp_enabled`/`ssf_enabled` and no SSF page (P23W4-07, #536), the duplicated
+> consumer supervisor loop (P23W4-08, #537), SLO untested against a real SP's logout
+> (P23W4-09, #538), and audience squatting where every tenant's SETs share one
+> issuer (P23W4-11, Low, #539 — filed as a maintainer decision on requiring
+> per-tenant issuers for SSF before 1.56 ships; T-390's residual corrected,
+> receiver guidance on the website). SDK fan-out tracked per D-35: #540
+> (contract 1.53–1.55) and #541 (1.56); G-5's issue #542.
 > Accepted with reasons: an erased subject in the buffer or DLQ up to seven days, a receiver token outliving its client by up to
 > 15 minutes, the SSF primary and retry queues without TTL. Threat model
 > **2.30.0 — 406 threats, 389 mitigated / 17 open**. **Binding on W5:** a

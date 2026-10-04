@@ -221,6 +221,9 @@ pub struct AcsEndpoint {
     /// The binding the endpoint accepts.
     pub binding: SamlBinding,
     /// The `index` an `AuthnRequest` may use instead of a URL. Unique per SP.
+    // An unsigned 16-bit integer (contract §29.2), and the published schema says
+    // so (F4 W4 P23W4-05).
+    #[schema(minimum = 0, maximum = 65535)]
     pub index: u16,
     /// Whether this is the SP's default endpoint. At most one is; when none is
     /// marked, the first listed is the default (SAML Metadata §2.4.4.1).

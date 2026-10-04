@@ -1152,3 +1152,20 @@ mod discovery_alias_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod saml_schema_tests {
+    use super::api_doc;
+
+    /// F4 W4 P23W4-05: `AcsEndpoint.index` is a `u16` in the model and in
+    /// contract §29.2, so the published schema bounds it to `0..=65535`. Without
+    /// the maximum a generated SDK types it as an unbounded 32-bit integer and
+    /// learns of the bound from a `400`.
+    #[test]
+    fn the_acs_endpoint_index_is_bounded_to_sixteen_bits() {
+        let doc = serde_json::to_value(api_doc()).unwrap();
+        let index = &doc["components"]["schemas"]["AcsEndpoint"]["properties"]["index"];
+        assert_eq!(index["minimum"], 0, "{index}");
+        assert_eq!(index["maximum"], 65_535, "{index}");
+    }
+}

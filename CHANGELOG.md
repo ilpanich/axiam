@@ -894,6 +894,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OpenAPI: `AcsEndpoint.index` is published with `maximum: 65535` (F4 W4
+  P23W4-05).** The model and contract §29.2 say an unsigned 16-bit integer; the
+  schema said an unbounded `int32`, so a generated SDK accepted values the server
+  refuses with `400`.
+
 - **Directory just-in-time provisioning: a lost race checks the winner's status
   before mapping groups (F4 P23W3-05).** When two first sign-ins for one
   directory entry race, the loser continues with the winner's account. It now

@@ -9656,7 +9656,8 @@ build; the two ids null when the slot is empty.
    `retire_idp_credential`) — kept apart because one call can change or stop sign-on at
    every SP of the tenant. The `{tenant_id}` in the path must be the caller's tenant;
    another tenant is `403 authorization_denied`. A service-account token is not accepted
-   on this namespace in this revision (`403`): registering where a tenant's signed
+   on this namespace in this revision (`401`, as for every human-only family, S-9 and §30;
+   amended by D-43 before 1.55 shipped): registering where a tenant's signed
    assertions go is a human administrator's act.
 10. **Rate limiting.** The seven writes each have a per-IP bucket of their own,
     `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` (default 30 per minute per route): `429` per §2.

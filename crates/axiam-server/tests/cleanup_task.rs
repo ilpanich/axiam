@@ -1713,6 +1713,67 @@ async fn an_erasure_reports_the_account_as_it_was_before_the_write() {
     assert_eq!(after.email, "hashed_ssf_email");
 }
 
+/// D-53 (1): the Art. 17 erasure takes the person's SSF step-up record with the
+/// rest of what names them, and leaves another user's alone.
+#[tokio::test]
+async fn an_erasure_removes_the_persons_ssf_step_up_record() {
+    use axiam_core::models::ssf::SsfStepUp;
+    use axiam_core::repository::SsfStepUpRepository as _;
+
+    let db = setup_db().await;
+    let tenant_id = Uuid::new_v4();
+    let users = SurrealUserRepository::new(db.clone());
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let proofs = SurrealErasureProofRepository::new(db.clone());
+    let step_ups = axiam_db::SurrealSsfStepUpRepository::new(db.clone());
+    let erased = user_due_for_erasure(&db, tenant_id, "step_up_erased").await;
+    let bystander = user_due_for_erasure(&db, tenant_id, "step_up_bystander").await;
+    for user in [&erased, &bystander] {
+        step_ups
+            .put(
+                &SsfStepUp {
+                    tenant_id,
+                    user_id: user.id,
+                    previous_session_id: Uuid::new_v4(),
+                    previous_acr: "urn:axiam:acr:1fa".into(),
+                },
+                Utc::now(),
+            )
+            .await
+            .expect("record a step-up");
+    }
+
+    run_erasure_pipeline_reporting(
+        &audit,
+        &proofs,
+        &users,
+        tenant_id,
+        erased.id,
+        "DELETED_USER_ssf000000000009",
+        "hashed_step_up_email",
+        None,
+    )
+    .await
+    .expect("the erasure succeeds");
+
+    assert!(
+        step_ups
+            .take(tenant_id, erased.id, Utc::now())
+            .await
+            .unwrap()
+            .is_none(),
+        "the erased person's record went with the erasure"
+    );
+    assert!(
+        step_ups
+            .take(tenant_id, bystander.id, Utc::now())
+            .await
+            .unwrap()
+            .is_some(),
+        "another user's record is untouched"
+    );
+}
+
 #[tokio::test]
 async fn an_erasure_that_never_got_as_far_as_anonymizing_reports_nothing() {
     let db = setup_db().await;

@@ -907,10 +907,12 @@ impl<C: Connection + Clone> AppState<C> {
                 bundles::SsfState {
                     stream_repo,
                     buffer_repo: axiam_db::SurrealSsfEventBufferRepository::new(db.clone()),
+                    step_up_repo: axiam_db::SurrealSsfStepUpRepository::new(db.clone()),
                     outbox: None,
                     emitter,
                     session_sink: ssf_session_sink,
                     account_sink: ssf_account_sink,
+                    poll_waiters: Arc::default(),
                 }
             },
         }

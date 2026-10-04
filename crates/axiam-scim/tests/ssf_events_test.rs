@@ -2,7 +2,8 @@
 //!
 //! `active: false` disables an account that was not disabled, `active: true`
 //! enables one that was, a password write is a `credential-change` an
-//! administrator made, and the credentials the write revokes are
+//! administrator made, a `DELETE` is an `account-purged` whose subject was read
+//! before the write (D-53 (2)), and the credentials the write revokes are
 //! `session-revoked` events of the **same** cause (one `txn`). An unchanged
 //! status, a lock-out and a no-op patch tell nobody anything.
 //!
@@ -411,4 +412,54 @@ async fn a_patch_that_changes_nothing_that_matters_tells_nobody() {
         200
     );
     assert!(w.outbox.submitted.lock().unwrap().is_empty());
+}
+
+#[actix_rt::test]
+async fn a_scim_delete_is_an_account_purged_with_the_subject_captured_before_the_write() {
+    let w = world().await;
+    let app = app!(w);
+    let provisioner = w.user("admin", UserStatus::Active).await;
+    let token = w.token(provisioner);
+    let target = w.user("viewer", UserStatus::Active).await;
+    let session = w.session(target).await;
+
+    let req = test::TestRequest::delete()
+        .peer_addr(peer())
+        .uri(&format!("/scim/v2/Users/{target}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    let purged = w.of(SsfEventType::AccountPurged);
+    assert_eq!(purged.len(), 1);
+    assert_eq!(
+        purged[0].sub_id,
+        json!({"format": "iss_sub", "iss": ROOT_ISSUER, "sub": target.to_string()})
+    );
+    // RISC's `account-purged` carries no members; the revocations carry the
+    // initiator.
+    assert_eq!(purged[0].event, json!({}));
+    // The credentials the delete revokes are the same cause.
+    let revoked = w.of(SsfEventType::SessionRevoked);
+    assert_eq!(revoked.len(), 1);
+    assert_eq!(revoked[0].sub_id["session"]["id"], session.to_string());
+    assert_eq!(revoked[0].event["initiating_entity"], "admin");
+    assert!(purged[0].txn.is_some());
+    assert_eq!(purged[0].txn, revoked[0].txn, "one SCIM delete, one txn");
+}
+
+#[actix_rt::test]
+async fn a_scim_delete_of_a_user_that_does_not_exist_tells_nobody() {
+    let w = world().await;
+    let app = app!(w);
+    let provisioner = w.user("admin", UserStatus::Active).await;
+    let token = w.token(provisioner);
+
+    let req = test::TestRequest::delete()
+        .peer_addr(peer())
+        .uri(&format!("/scim/v2/Users/{}", Uuid::new_v4()))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 404);
+    assert!(w.of(SsfEventType::AccountPurged).is_empty());
 }

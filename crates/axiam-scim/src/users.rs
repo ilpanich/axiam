@@ -59,7 +59,7 @@ use uuid::Uuid;
 use axiam_api_rest::authz::AuthzData;
 use axiam_api_rest::extractors::client_info::{client_ip, user_agent};
 use axiam_api_rest::ssf_emitter::{
-    ChangeType, CredentialDetail, CredentialType, InitiatingEntity, with_cause,
+    ChangeType, CredentialDetail, CredentialType, InitiatingEntity, SsfSubject, with_cause,
 };
 use axiam_api_rest::state::AppState;
 
@@ -1063,6 +1063,15 @@ pub async fn delete<C: Connection + Clone>(
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
+    // G-5 (D-53 (2)): the subject of an `account-purged` is captured **before**
+    // the write — afterwards the row holds no address. A user that cannot be
+    // read is one the delete below refuses, so nothing is lost by `ok()`.
+    let purged_subject = state
+        .user_repo
+        .get_by_id(user.tenant_id(), id)
+        .await
+        .ok()
+        .map(|u| SsfSubject::from_user(&u));
     state.user_repo.delete(user.tenant_id(), id).await?;
 
     authz
@@ -1074,7 +1083,20 @@ pub async fn delete<C: Connection + Clone>(
     // SEC-098: `DELETE /Users/{id}` is a soft delete to `Inactive`, so without
     // this the offboarded account keeps a live session and a spendable refresh
     // token. This is the endpoint an IdP calls when someone leaves.
-    revoke_live_credentials(&state, user.tenant_id(), id, "scim.deleted").await;
+    //
+    // The revocations and the purge are one cause: one `txn`, an administrator
+    // as the initiating entity.
+    with_cause(Some(InitiatingEntity::Admin), async {
+        revoke_live_credentials(&state, user.tenant_id(), id, "scim.deleted").await;
+        if let Some(subject) = purged_subject {
+            state
+                .ssf
+                .emitter
+                .account_purged(user.tenant_id(), subject)
+                .await;
+        }
+    })
+    .await;
 
     state
         .emit_webhook(user.tenant_id(), "user.deleted", json!({ "id": id }))

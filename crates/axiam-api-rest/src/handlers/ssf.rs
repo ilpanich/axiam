@@ -957,6 +957,10 @@ pub async fn poll_events<C: Connection + Clone>(
     }
     let return_immediately = request.return_immediately.unwrap_or(false);
     let started = std::time::Instant::now();
+    // D-53 (11): one waiting long poll per stream per instance. The slot is
+    // taken the first time this request would wait, and released when it
+    // returns or is dropped; a request that finds it taken answers at once.
+    let mut wait_slot: Option<crate::state::bundles::PollWaitGuard> = None;
     loop {
         let held = state
             .ssf
@@ -998,6 +1002,12 @@ pub async fn poll_events<C: Connection + Clone>(
         }
         if return_immediately || started.elapsed() >= POLL_LONG_POLL_MAX {
             return Ok(empty_poll_response());
+        }
+        if wait_slot.is_none() {
+            wait_slot = state.ssf.poll_waiters.try_enter(stream.id);
+            if wait_slot.is_none() {
+                return Ok(empty_poll_response());
+            }
         }
         tokio::time::sleep(POLL_WAIT_STEP.min(POLL_LONG_POLL_MAX - started.elapsed())).await;
         // The stream as it is now: paused, disabled or gone while waiting.

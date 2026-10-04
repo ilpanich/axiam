@@ -1701,6 +1701,9 @@ async fn main() -> std::io::Result<()> {
     // broker's publisher exists); the two ports are bound to it now.
     let ssf_event_buffer_repo =
         axiam_db::SurrealSsfEventBufferRepository::new(pool.handle_for_repo());
+    // D-53 (1): the step-up record the honour lane writes and the return leg
+    // consumes; its ten-minute expiry is swept by the cleanup scheduler.
+    let ssf_step_up_repo = axiam_db::SurrealSsfStepUpRepository::new(pool.handle_for_repo());
     let ssf_emitter = axiam_api_rest::ssf_emitter::SsfEmitter::new(
         ssf_stream_repo.clone(),
         tenant_repo.clone(),
@@ -2872,6 +2875,7 @@ async fn main() -> std::io::Result<()> {
     // erasure.
     .with_ssf(
         Arc::new(ssf_event_buffer_repo.clone()),
+        Arc::new(ssf_step_up_repo.clone()),
         ssf_account_sink.clone(),
     );
     let cleanup_handle = tokio::spawn(cleanup.run());
@@ -3057,10 +3061,12 @@ async fn main() -> std::io::Result<()> {
         ssf: bundles::SsfState {
             stream_repo: ssf_stream_repo,
             buffer_repo: ssf_event_buffer_repo,
+            step_up_repo: ssf_step_up_repo,
             outbox: Some(ssf_outbox),
             emitter: ssf_emitter,
             session_sink: ssf_session_sink,
             account_sink: ssf_account_sink,
+            poll_waiters: Arc::default(),
         },
     };
 

@@ -84,6 +84,9 @@ pub const POLL_BUFFER_MAX_EVENTS: usize = 1000;
 pub const POLL_BUFFER_RETENTION_DAYS: i64 = 7;
 /// Most SETs one poll response carries (RFC 8936 `maxEvents` is clamped to it).
 pub const POLL_MAX_EVENTS_PER_RESPONSE: usize = 100;
+/// Minutes a step-up record lives (D-53 (1)): the time a person is given to
+/// complete the second factor the honour lane asked for.
+pub const STEP_UP_RECORD_TTL_MINUTES: i64 = 10;
 
 /// Longest `audience`, in bytes.
 pub const MAX_AUDIENCE_BYTES: usize = 512;
@@ -900,4 +903,27 @@ mod tests {
             pending
         );
     }
+}
+
+/// What the honour lane remembers, server-side, about a step-up it sent a user
+/// to perform (D-53 (1), schema v78's `ssf_step_up`): the session the user held
+/// and the `acr` that session achieved.
+///
+/// One row per `(tenant, user)`: a later step-up replaces an earlier one. It is
+/// written only for a step-up with a valid OP session, lives
+/// [`STEP_UP_RECORD_TTL_MINUTES`] minutes, and is consumed once, by the return
+/// leg that arrives with a **new** session of the same user — which is how the
+/// CAEP `assurance-level-change` event learns the level it came from without a
+/// marker in `return_to` that a relying party could forge or replay. It holds
+/// no credential: a session id names a row, it does not open one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SsfStepUp {
+    /// The tenant.
+    pub tenant_id: Uuid,
+    /// The user who was sent to step up.
+    pub user_id: Uuid,
+    /// The OP session the user held when sent.
+    pub previous_session_id: Uuid,
+    /// The `acr` URN that session achieved (one of the two AXIAM publishes).
+    pub previous_acr: String,
 }

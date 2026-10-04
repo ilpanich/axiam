@@ -211,6 +211,26 @@ impl AssuranceLevel {
             Self::MultiFactor => crate::oidc::ACR_MULTI_FACTOR,
         }
     }
+
+    /// The level of an authentication context class the honour lane derived.
+    #[must_use]
+    pub const fn from_acr(acr: crate::acr::Acr) -> Self {
+        match acr {
+            crate::acr::Acr::SingleFactor => Self::SingleFactor,
+            crate::acr::Acr::MultiFactor => Self::MultiFactor,
+        }
+    }
+
+    /// The level named by one of the two published `acr` URNs; `None` for
+    /// anything else.
+    #[must_use]
+    pub fn from_urn(urn: &str) -> Option<Self> {
+        match urn {
+            crate::oidc::ACR_SINGLE_FACTOR => Some(Self::SingleFactor),
+            crate::oidc::ACR_MULTI_FACTOR => Some(Self::MultiFactor),
+            _ => None,
+        }
+    }
 }
 
 /// RISC 1.0 §2.3 `reason`.

@@ -427,6 +427,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "ssf_transmitter",
         sql: SCHEMA_V77,
     },
+    Migration {
+        version: 78,
+        name: "ssf_step_up",
+        sql: SCHEMA_V78,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4237,9 +4242,90 @@ DEFINE INDEX IF NOT EXISTS idx_ssf_event_buffer_expires ON TABLE ssf_event_buffe
     COLUMNS expires_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v78 — T23.5.3 / G-5 / D-53 (1): the step-up record
+// -----------------------------------------------------------------------
+//
+// Additive DDL only. **`ssf_step_up`** is what the honour lane remembers about
+// a step-up it sent a user to perform: the OP session the user held and the
+// `acr` that session achieved, so the return leg that arrives with a new
+// session of the same user can emit CAEP `assurance-level-change` with a true
+// `previous_level` and consume the row (single use). UNIQUE on
+// `(tenant_id, user_id)`: one row per user, the latest step-up replacing the
+// earlier. Ten-minute `expires_at`, swept by the cleanup scheduler (job
+// `ssf_step_up`, registered in `/health/jobs`); the row goes with its tenant
+// (the tenant-delete transaction) and with its user (both erasure paths, by
+// `user_id`). It holds no credential and no address.
+const SCHEMA_V78: &str = "\
+DEFINE TABLE IF NOT EXISTS ssf_step_up SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE ssf_step_up TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE ssf_step_up TYPE string;
+DEFINE FIELD IF NOT EXISTS previous_session_id ON TABLE ssf_step_up TYPE string;
+DEFINE FIELD IF NOT EXISTS previous_acr ON TABLE ssf_step_up TYPE string
+    ASSERT $value IN ['urn:axiam:acr:1fa', 'urn:axiam:acr:mfa'];
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE ssf_step_up TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE ssf_step_up TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_ssf_step_up_user ON TABLE ssf_step_up
+    COLUMNS tenant_id, user_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_ssf_step_up_expires ON TABLE ssf_step_up
+    COLUMNS expires_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.5.3 / D-53 (1) — v78 adds the step-up record additively, one row per
+    /// `(tenant, user)`, with the expiry index the sweep reads.
+    #[test]
+    fn v78_defines_the_step_up_record_additively() {
+        assert!(SCHEMA_V78.contains("DEFINE TABLE IF NOT EXISTS ssf_step_up SCHEMAFULL"));
+        assert!(SCHEMA_V78.contains(
+            "idx_ssf_step_up_user ON TABLE ssf_step_up\n    COLUMNS tenant_id, user_id UNIQUE"
+        ));
+        assert!(
+            SCHEMA_V78
+                .contains("idx_ssf_step_up_expires ON TABLE ssf_step_up\n    COLUMNS expires_at")
+        );
+        assert!(SCHEMA_V78.contains("$value IN ['urn:axiam:acr:1fa', 'urn:axiam:acr:mfa']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V78.contains(forbidden),
+                "v78 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V78
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v78 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("ssf_step_up"),
+                "v78 defined something outside its table: {statement}"
+            );
+        }
+        // No credential, no address.
+        for forbidden in ["email", "token", "password", "secret"] {
+            assert!(!SCHEMA_V78.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    /// v78 takes the next number and keeps v77 as it was.
+    #[test]
+    fn v78_follows_v77_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| (77..=78).contains(&m.version))
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(names, vec![(77, "ssf_transmitter"), (78, "ssf_step_up")]);
+    }
 
     /// T23.5.2 / D-45, D-47, D-48 — v77 adds the stream registry, the event
     /// buffer and the settings switch, additively, with the deployment-wide
@@ -5258,8 +5344,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&77),
-            "v77 is the newest migration (T23.5.2 — the SSF transmitter: `ssf_stream`, \
+            Some(&78),
+            "v78 is the newest migration (T23.5.3 — the SSF step-up record `ssf_step_up`; \
+             v77 was T23.5.2 — the SSF transmitter: `ssf_stream`, \
              `ssf_event_buffer` and `security_settings.oidc_ssf_enabled`; v76 was T23.2.4 — SAML \
              single logout: the participant record \
              `saml_sp_session` and the logout chain `saml_logout_run`; v75 was T23.3.5 — the \

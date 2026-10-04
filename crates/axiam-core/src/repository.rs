@@ -3466,6 +3466,44 @@ pub trait SsfEventBufferRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// SSF step-up records (tenant-scoped) (G-5, T23.5.3, D-53 (1))
+// ---------------------------------------------------------------------------
+
+/// Where the honour lane remembers a step-up it sent a user to perform, so the
+/// return leg can tell SSF receivers the `acr` changed (schema v78's
+/// `ssf_step_up`; see [`crate::models::ssf::SsfStepUp`]).
+///
+/// At most one row per `(tenant, user)`, decided by a unique index. Every method
+/// is scoped by tenant: another tenant's row is not seen, taken or counted.
+pub trait SsfStepUpRepository: Send + Sync {
+    /// Record `record`, replacing any earlier one for the same `(tenant, user)`;
+    /// it expires [`crate::models::ssf::STEP_UP_RECORD_TTL_MINUTES`] minutes
+    /// after `now`.
+    fn put(
+        &self,
+        record: &crate::models::ssf::SsfStepUp,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Consume the user's record: it is deleted whether or not it is still
+    /// valid, and returned only when unexpired at `now`. Atomic — two
+    /// concurrent takes cannot both receive it.
+    fn take(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ssf::SsfStepUp>>> + Send;
+
+    /// How many records the tenant holds (expired ones included until swept).
+    fn count_for_tenant(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Remove every record whose `expires_at` is at or before `now`, in every
+    /// tenant; returns how many. The sweep job registered in `/health/jobs`.
+    fn delete_expired(&self, now: DateTime<Utc>) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // SAML IdP pending AuthnRequests (tenant-scoped) (G-2, T23.2.3)
 // ---------------------------------------------------------------------------
 

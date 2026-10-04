@@ -225,6 +225,125 @@ async fn resolve_session_evidence<C: Connection + Clone>(
     }
 }
 
+/// G-5 (D-53 (1)): remember a step-up the honour lane is sending `user_id` to
+/// perform — the session they hold and the `acr` it achieved — for the return
+/// leg to consume. One record per `(tenant, user)`, the latest replacing the
+/// earlier, ten minutes.
+///
+/// Written only when some stream would carry `assurance-level-change` (a tenant
+/// with SSF off, or nobody subscribed, keeps nothing), and never fails the
+/// request: a record that could not be written costs one event, not a sign-in.
+async fn ssf_step_up_begin<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+    previous: axiam_oauth2::acr::Acr,
+) {
+    use axiam_core::models::ssf::{SsfEventType, SsfStepUp};
+    use axiam_core::repository::SsfStepUpRepository as _;
+
+    if !state
+        .ssf
+        .emitter
+        .carries(tenant_id, SsfEventType::AssuranceLevelChange)
+        .await
+    {
+        return;
+    }
+    let record = SsfStepUp {
+        tenant_id,
+        user_id,
+        previous_session_id: session_id,
+        previous_acr: previous.as_str().to_owned(),
+    };
+    if let Err(error) = state
+        .ssf
+        .step_up_repo
+        .put(&record, chrono::Utc::now())
+        .await
+    {
+        tracing::warn!(
+            target: "axiam::ssf",
+            %tenant_id,
+            %user_id,
+            %error,
+            "a step-up could not be remembered; its assurance-level-change will not be sent"
+        );
+    }
+}
+
+/// G-5 (D-53 (1)): the return leg of a login hop. Consume the user's step-up
+/// record (single use, whatever comes of it) and, when this request's session is
+/// a **new** one whose `acr` differs from the recorded one, tell SSF receivers
+/// the assurance level changed (`previous_level` the recorded class,
+/// `change_direction` from the published order, `initiating_entity: user`).
+///
+/// Nothing is told for: no record (never written, another user's, expired or
+/// already consumed), the same session coming back (nothing was stepped up), a
+/// request with no readable session (the new level is unknown), or an equal
+/// `acr`. Nothing travels in `return_to`, so there is nothing for a relying
+/// party to forge or replay; the marker query parameter only says a return leg
+/// is being made, and the record it can consume is the caller's own.
+///
+/// Never fails the request.
+async fn ssf_step_up_return_leg<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    session_id: Uuid,
+    current: Option<axiam_oauth2::acr::Acr>,
+) {
+    use axiam_core::models::ssf::SsfEventType;
+    use axiam_core::repository::SsfStepUpRepository as _;
+    use axiam_oauth2::ssf::AssuranceLevel;
+
+    if !state
+        .ssf
+        .emitter
+        .carries(tenant_id, SsfEventType::AssuranceLevelChange)
+        .await
+    {
+        return;
+    }
+    let record = match state
+        .ssf
+        .step_up_repo
+        .take(tenant_id, user_id, chrono::Utc::now())
+        .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                target: "axiam::ssf",
+                %tenant_id,
+                %user_id,
+                %error,
+                "a step-up record could not be read; its assurance-level-change will not be sent"
+            );
+            return;
+        }
+    };
+    let (Some(current), Some(previous)) = (current, AssuranceLevel::from_urn(&record.previous_acr))
+    else {
+        return;
+    };
+    if record.previous_session_id == session_id {
+        return;
+    }
+    state
+        .ssf
+        .emitter
+        .assurance_level_changed(
+            tenant_id,
+            user_id,
+            previous,
+            AssuranceLevel::from_acr(current),
+        )
+        .await;
+}
+
 /// Record the outcome of a `prompt=none` authorization request (W4, plan §4.2).
 ///
 /// `prompt=none` is a **silent-authentication oracle**: a registered relying
@@ -1292,6 +1411,25 @@ pub async fn authorize<C: Connection + Clone>(
     // parameters came inline or through PAR.
     let session_evidence = resolve_session_evidence(&state, user.tenant_id, user.session_id).await;
 
+    // G-5 (D-53 (1)) — what this request's OP session achieved, captured before
+    // the evidence moves into the request. `None` without a readable session:
+    // nothing is then known about how the user authenticated, so nothing is
+    // remembered or told. The return leg that arrives with a new session of the
+    // user a step-up was recorded for tells SSF receivers the level changed.
+    let session_acr = session_evidence
+        .auth_time
+        .map(|_| axiam_oauth2::acr::acr_for(&session_evidence.amr));
+    if axiam_oauth2::login_hop::is_return_leg(q.login_hop.as_deref()) {
+        ssf_step_up_return_leg(
+            &state,
+            user.tenant_id,
+            user.user_id,
+            user.session_id,
+            session_acr,
+        )
+        .await;
+    }
+
     // B5. The pushed copy wins; the query string's copies are IGNORED, not
     // merged and not refused.
     //
@@ -1741,6 +1879,14 @@ pub async fn authorize<C: Connection + Clone>(
                 required_acr = ?interaction.required_acr,
                 "an authorization request on the honour lane needs an interaction"
             );
+            // G-5 (D-53 (1)): a step-up sends the user to raise the level of a
+            // session they hold. Remember which session and level, server-side,
+            // so the return leg can tell receivers the level changed.
+            if interaction.reason == axiam_oauth2::honour::Reason::AcrUnsatisfied
+                && let Some(acr) = session_acr
+            {
+                ssf_step_up_begin(&state, user.tenant_id, user.user_id, user.session_id, acr).await;
+            }
             // W7 — a consent hop marks its own return leg. Same `return_to`
             // machinery, same validation on both sides, one more marker; see
             // `login_hop::CONSENT_HOP_MARKER` for why sharing the login one

@@ -30,7 +30,7 @@ use axiam_core::models::oauth2_client::CreateOAuth2Client;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::role::{AssignmentScope, CreateRole};
 use axiam_core::models::service_account::CreateServiceAccount;
-use axiam_core::models::session::{CreateSession, Session};
+use axiam_core::models::session::{Amr, CreateSession, Session};
 use axiam_core::models::settings::{SetTenantOverride, system_defaults};
 use axiam_core::models::ssf::{
     NewSsfStream, SsfDeliveryMethod, SsfEventType, SsfFuture, SsfOutbox, SsfOutboxError,
@@ -43,16 +43,16 @@ use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, Webauthn
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, OAuth2ClientRepository, OrganizationRepository, Pagination,
     PermissionRepository, RoleRepository, ServiceAccountRepository, SessionRepository,
-    SettingsRepository, SsfEventBufferRepository, SsfStreamRepository, TenantRepository,
-    UserRepository, WebauthnCredentialRepository,
+    SettingsRepository, SsfEventBufferRepository, SsfStepUpRepository, SsfStreamRepository,
+    TenantRepository, UserRepository, WebauthnCredentialRepository,
 };
 use axiam_db::repository::{
     SurrealAuditLogRepository, SurrealGroupRepository, SurrealOAuth2ClientRepository,
     SurrealOrganizationRepository, SurrealPermissionRepository, SurrealResourceRepository,
     SurrealRoleRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
     SurrealSessionRepository, SurrealSettingsRepository, SurrealSsfEventBufferRepository,
-    SurrealSsfStreamRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebauthnCredentialRepository,
+    SurrealSsfStepUpRepository, SurrealSsfStreamRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use axiam_db::{seed_default_roles, seed_permissions};
 use axiam_test_support::test_password;
@@ -997,6 +997,496 @@ async fn an_admin_status_change_announces_the_new_status() {
     assert_eq!(event.event["status"], "enabled");
     // It signs: it announces the status the stream is in.
     assert!(axiam_oauth2::ssf::sign_set(&w.auth, announced_for, event).is_ok());
+}
+
+#[actix_rt::test]
+async fn a_status_change_is_not_announced_while_ssf_is_off_for_the_tenant() {
+    let w = world().await;
+    named_client(&w, w.tenant_id, RECEIVER, &["ssf.manage"]).await;
+    let stream = w
+        .stream(
+            w.tenant_id,
+            RECEIVER,
+            SsfDeliveryMethod::Poll,
+            SsfStreamStatus::Paused,
+        )
+        .await;
+    w.ssf_off_for(w.tenant_id).await;
+    let app = app!(w.state(), w);
+    let mut body = json!({
+        "receiver_client_id": RECEIVER,
+        "audience": stream.audience,
+        "delivery_method": "poll",
+        "events_allowed": [SsfEventType::SessionRevoked.uri()],
+        "status": "enabled",
+    });
+    // The administrator's write goes through: streams are registered before the
+    // switch is turned on.
+    let (status, text) = send(
+        &app,
+        request(
+            Method::PUT,
+            &format!("{}/{}", streams_uri(w.tenant_id), stream.id),
+            Some(&w.admin_token()),
+        )
+        .set_json(body.clone()),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+    assert!(
+        w.outbox.submitted.lock().unwrap().is_empty(),
+        "nothing is announced while the tenant's switch is off"
+    );
+
+    // The same change with the switch on is announced.
+    SurrealSettingsRepository::new(w.db.clone())
+        .set_tenant_override(
+            w.tenant_id,
+            SetTenantOverride {
+                ssf_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    body["status"] = json!("paused");
+    let (status, _) = send(
+        &app,
+        request(
+            Method::PUT,
+            &format!("{}/{}", streams_uri(w.tenant_id), stream.id),
+            Some(&w.admin_token()),
+        )
+        .set_json(body.clone()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    body["status"] = json!("enabled");
+    let (status, _) = send(
+        &app,
+        request(
+            Method::PUT,
+            &format!("{}/{}", streams_uri(w.tenant_id), stream.id),
+            Some(&w.admin_token()),
+        )
+        .set_json(body),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let submitted = w.outbox.submitted.lock().unwrap().clone();
+    assert!(
+        submitted
+            .iter()
+            .any(|(_, e)| e.event["status"] == "enabled"),
+        "the enabled status is announced once the switch is on"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// assurance-level-change: the step-up record (D-53 (1))
+// ---------------------------------------------------------------------------
+
+const ACR_1FA: &str = "urn:axiam:acr:1fa";
+const ACR_MFA: &str = "urn:axiam:acr:mfa";
+const RP_CALLBACK: &str = "https://rp.example.com/callback";
+
+/// A tenant whose receiver carries `assurance-level-change`, an honour-lane
+/// OAuth2 client, and the recording outbox in place of delivery.
+struct StepUpWorld {
+    w: World,
+    client_id: String,
+}
+
+async fn step_up_world() -> StepUpWorld {
+    let w = world().await;
+    w.repo()
+        .create(NewSsfStream {
+            tenant_id: w.tenant_id,
+            receiver_client_id: RECEIVER.into(),
+            audience: format!("https://rp.example.test/aud/{}", Uuid::new_v4().simple()),
+            description: None,
+            delivery_method: SsfDeliveryMethod::Poll,
+            endpoint_url: None,
+            authorization_header: None,
+            events_allowed: vec![SsfEventType::AssuranceLevelChange],
+            events_requested: vec![SsfEventType::AssuranceLevelChange],
+            subject_format: SsfSubjectFormat::IssSub,
+            status: SsfStreamStatus::Enabled,
+            status_reason: None,
+        })
+        .await
+        .unwrap();
+    let input: CreateOAuth2Client = serde_json::from_value(json!({
+        "tenant_id": w.tenant_id,
+        "name": "Step-up RP",
+        "redirect_uris": [RP_CALLBACK],
+        "grant_types": ["authorization_code"],
+        "scopes": ["openid"],
+        "authn_request_params": "honour",
+        "browser_sso": true,
+    }))
+    .expect("an honour-lane client");
+    let (client, _issued) = SurrealOAuth2ClientRepository::new(w.db.clone())
+        .create(input)
+        .await
+        .unwrap();
+    StepUpWorld {
+        w,
+        client_id: client.client_id,
+    }
+}
+
+impl StepUpWorld {
+    /// A session of `user` with the given evidence, and the token that arrives
+    /// as it (`jti` = the session id, the convention the authorize handler
+    /// reads).
+    async fn session(&self, user: Uuid, amr: Vec<Amr>) -> (Uuid, String) {
+        let session = SurrealSessionRepository::new(self.w.db.clone())
+            .create(CreateSession {
+                tenant_id: self.w.tenant_id,
+                user_id: user,
+                token_hash: axiam_auth::token::hash_refresh_token(&Uuid::new_v4().to_string()),
+                ip_address: None,
+                user_agent: None,
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                authenticated_at: chrono::Utc::now(),
+                amr,
+                browser_token_hash: None,
+            })
+            .await
+            .unwrap();
+        let token = issue_access_token(
+            user,
+            self.w.tenant_id,
+            self.w.org_id,
+            &[],
+            &self.w.auth,
+            session.id.to_string(),
+            AUD_USER,
+        )
+        .unwrap();
+        (session.id, token)
+    }
+
+    async fn user(&self, name: &str) -> Uuid {
+        active_user(
+            &self.w.db,
+            self.w.tenant_id,
+            &format!("{name}-{}", Uuid::new_v4().simple()),
+        )
+        .await
+    }
+
+    /// `GET /oauth2/authorize` as `token`; the status and the `Location`.
+    async fn authorize<S, B>(&self, app: &S, token: &str, extra: &str) -> (u16, String)
+    where
+        S: actix_web::dev::Service<
+                actix_http::Request,
+                Response = actix_web::dev::ServiceResponse<B>,
+                Error = actix_web::Error,
+            >,
+        B: actix_web::body::MessageBody,
+    {
+        let resp = test::call_service(
+            app,
+            request(
+                Method::GET,
+                &format!(
+                    "/oauth2/authorize?response_type=code&client_id={}&redirect_uri={RP_CALLBACK}\
+                     &scope=openid&state=step-up{extra}",
+                    self.client_id
+                ),
+                Some(token),
+            )
+            .to_request(),
+        )
+        .await;
+        let status = resp.status().as_u16();
+        let location = resp
+            .headers()
+            .get("Location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        (status, location)
+    }
+
+    /// The step-up request: the relying party wants multi-factor.
+    async fn ask_for_mfa<S, B>(&self, app: &S, token: &str) -> (u16, String)
+    where
+        S: actix_web::dev::Service<
+                actix_http::Request,
+                Response = actix_web::dev::ServiceResponse<B>,
+                Error = actix_web::Error,
+            >,
+        B: actix_web::body::MessageBody,
+    {
+        self.authorize(app, token, &format!("&acr_values={ACR_MFA}"))
+            .await
+    }
+
+    /// The return leg of the login hop: the marker the sign-in page adds, with
+    /// no acr preference left to satisfy.
+    async fn return_leg<S, B>(&self, app: &S, token: &str) -> (u16, String)
+    where
+        S: actix_web::dev::Service<
+                actix_http::Request,
+                Response = actix_web::dev::ServiceResponse<B>,
+                Error = actix_web::Error,
+            >,
+        B: actix_web::body::MessageBody,
+    {
+        self.authorize(app, token, "&axiam_login_hop=1").await
+    }
+
+    fn records(&self) -> SurrealSsfStepUpRepository<TestDb> {
+        SurrealSsfStepUpRepository::new(self.w.db.clone())
+    }
+
+    async fn record_count(&self) -> u64 {
+        self.records()
+            .count_for_tenant(self.w.tenant_id)
+            .await
+            .unwrap()
+    }
+
+    fn told(&self) -> Vec<SsfPendingEvent> {
+        self.w
+            .outbox
+            .submitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, e)| e.event_uri == SsfEventType::AssuranceLevelChange.uri())
+            .map(|(_, e)| e.clone())
+            .collect()
+    }
+}
+
+fn mfa_evidence() -> Vec<Amr> {
+    vec![Amr::Pwd, Amr::Otp, Amr::Mfa]
+}
+
+/// The upgrade: a password session sent to step up, back with an MFA session of
+/// the same user. One event, `previous_level` the password class, the direction
+/// from the published order, the user the initiator, the subject the user.
+#[actix_rt::test]
+async fn a_step_up_upgrade_emits_assurance_level_change_with_previous_level_and_direction() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("upgrade").await;
+    let (first, first_token) = su.session(user, vec![Amr::Pwd]).await;
+
+    let (status, location) = su.ask_for_mfa(&app, &first_token).await;
+    assert_eq!(status, 302);
+    assert!(location.starts_with("/login?"), "the step-up interaction");
+    assert_eq!(su.record_count().await, 1, "the Interact leg remembered it");
+    assert!(su.told().is_empty(), "nothing is told until the return leg");
+
+    let (second, second_token) = su.session(user, mfa_evidence()).await;
+    assert_ne!(first, second);
+    let (status, location) = su.return_leg(&app, &second_token).await;
+    assert_eq!(status, 302);
+    assert!(location.starts_with(RP_CALLBACK), "the code is issued");
+
+    let told = su.told();
+    assert_eq!(told.len(), 1, "one assurance-level-change");
+    let event = &told[0].event;
+    assert_eq!(event["namespace"], "urn:axiam:acr");
+    assert_eq!(event["previous_level"], ACR_1FA);
+    assert_eq!(event["current_level"], ACR_MFA);
+    assert_eq!(event["change_direction"], "increase");
+    assert_eq!(event["initiating_entity"], "user");
+    assert_eq!(
+        told[0].sub_id,
+        json!({"format": "iss_sub", "iss": ROOT_ISSUER, "sub": user.to_string()})
+    );
+    assert_eq!(su.record_count().await, 0, "the record was consumed");
+}
+
+/// "Only when the `acr` differs": a step-up that came back at the same level
+/// tells nobody — and the record is still spent.
+#[actix_rt::test]
+async fn a_return_with_the_same_acr_emits_nothing() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("same-acr").await;
+    let (_, first_token) = su.session(user, vec![Amr::Pwd]).await;
+    assert_eq!(su.ask_for_mfa(&app, &first_token).await.0, 302);
+    assert_eq!(su.record_count().await, 1);
+
+    let (_, second_token) = su.session(user, vec![Amr::Pwd]).await;
+    let (status, _) = su.return_leg(&app, &second_token).await;
+    assert_eq!(status, 302);
+
+    assert!(su.told().is_empty(), "1fa back to 1fa is not a change");
+    assert_eq!(su.record_count().await, 0, "and the record is spent");
+}
+
+/// The same session coming back is nothing stepped up, whatever its level.
+#[actix_rt::test]
+async fn the_same_session_returning_emits_nothing() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("same-session").await;
+    let (_, token) = su.session(user, vec![Amr::Pwd]).await;
+    assert_eq!(su.ask_for_mfa(&app, &token).await.0, 302);
+
+    let (status, _) = su.return_leg(&app, &token).await;
+    assert_eq!(status, 302);
+
+    assert!(su.told().is_empty());
+    assert_eq!(su.record_count().await, 0);
+}
+
+/// A different user's return leg neither emits nor spends the record.
+#[actix_rt::test]
+async fn a_different_users_return_leg_emits_nothing_and_leaves_the_record() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let (user, other) = (su.user("owner").await, su.user("other").await);
+    let (_, first_token) = su.session(user, vec![Amr::Pwd]).await;
+    assert_eq!(su.ask_for_mfa(&app, &first_token).await.0, 302);
+
+    let (_, others_token) = su.session(other, mfa_evidence()).await;
+    let (status, _) = su.return_leg(&app, &others_token).await;
+    assert_eq!(status, 302);
+    assert!(
+        su.told().is_empty(),
+        "another person's sign-in tells nothing"
+    );
+    assert_eq!(
+        su.record_count().await,
+        1,
+        "the owner's record is untouched"
+    );
+
+    // The owner's own return still works.
+    let (_, owners_new) = su.session(user, mfa_evidence()).await;
+    assert_eq!(su.return_leg(&app, &owners_new).await.0, 302);
+    assert_eq!(su.told().len(), 1);
+}
+
+/// An expired record is no record.
+#[actix_rt::test]
+async fn an_expired_record_emits_nothing() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("expired").await;
+    let (_, first_token) = su.session(user, vec![Amr::Pwd]).await;
+    assert_eq!(su.ask_for_mfa(&app, &first_token).await.0, 302);
+    su.w.db
+        .query("UPDATE ssf_step_up SET expires_at = time::now() - 1m")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (_, second_token) = su.session(user, mfa_evidence()).await;
+    assert_eq!(su.return_leg(&app, &second_token).await.0, 302);
+
+    assert!(su.told().is_empty(), "ten minutes had passed");
+    assert_eq!(su.record_count().await, 0);
+}
+
+/// Single use: a second return leg (a replay, or a second tab) finds nothing.
+#[actix_rt::test]
+async fn a_step_up_record_is_consumed_once() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("once").await;
+    let (_, first_token) = su.session(user, vec![Amr::Pwd]).await;
+    assert_eq!(su.ask_for_mfa(&app, &first_token).await.0, 302);
+
+    let (_, second_token) = su.session(user, mfa_evidence()).await;
+    assert_eq!(su.return_leg(&app, &second_token).await.0, 302);
+    assert_eq!(su.told().len(), 1);
+
+    let (_, third_token) = su.session(user, mfa_evidence()).await;
+    assert_eq!(su.return_leg(&app, &third_token).await.0, 302);
+    assert_eq!(su.return_leg(&app, &second_token).await.0, 302);
+    assert_eq!(su.told().len(), 1, "a replayed return leg tells nobody");
+}
+
+/// A later step-up replaces an earlier one: the return leg reports the level
+/// the **latest** step-up started from.
+#[actix_rt::test]
+async fn the_latest_step_up_replaces_the_earlier_one() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("latest").await;
+    let (_, first_token) = su.session(user, vec![Amr::Pwd]).await;
+    assert_eq!(su.ask_for_mfa(&app, &first_token).await.0, 302);
+    let (_, again_token) = su.session(user, vec![Amr::Pwd]).await;
+    assert_eq!(su.ask_for_mfa(&app, &again_token).await.0, 302);
+    assert_eq!(su.record_count().await, 1, "one record per user");
+
+    let (_, stepped) = su.session(user, mfa_evidence()).await;
+    assert_eq!(su.return_leg(&app, &stepped).await.0, 302);
+    assert_eq!(su.told().len(), 1);
+}
+
+/// "No OP session means no record": a request that arrives with no session
+/// behind it is sent to sign in, and nothing is remembered about a level that
+/// was never achieved.
+#[actix_rt::test]
+async fn without_a_valid_op_session_no_step_up_record_is_written() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("no-session").await;
+    // A token whose `jti` names no session row.
+    let token = issue_access_token(
+        user,
+        su.w.tenant_id,
+        su.w.org_id,
+        &[],
+        &su.w.auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+    )
+    .unwrap();
+
+    let (status, location) = su.ask_for_mfa(&app, &token).await;
+    assert_eq!(status, 302);
+    assert!(location.starts_with("/login?"), "sent to sign in");
+    assert_eq!(su.record_count().await, 0);
+
+    // …and the return leg of that hop has nothing to consume or tell.
+    let (_, new_token) = su.session(user, mfa_evidence()).await;
+    assert_eq!(su.return_leg(&app, &new_token).await.0, 302);
+    assert!(su.told().is_empty());
+}
+
+/// Only a step-up is remembered: `prompt=login` interacts too, with a valid
+/// session, and is not one.
+#[actix_rt::test]
+async fn an_interaction_that_is_not_a_step_up_writes_no_record() {
+    let su = step_up_world().await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("prompt-login").await;
+    let (_, token) = su.session(user, vec![Amr::Pwd]).await;
+
+    let (status, location) = su.authorize(&app, &token, "&prompt=login").await;
+    assert_eq!(status, 302);
+    assert!(location.starts_with("/login?"));
+    assert_eq!(su.record_count().await, 0);
+}
+
+/// D-45: with SSF off for the tenant nothing is produced, and nothing is
+/// remembered for a producer that will not be told.
+#[actix_rt::test]
+async fn with_ssf_off_for_the_tenant_no_step_up_record_is_written() {
+    let su = step_up_world().await;
+    su.w.ssf_off_for(su.w.tenant_id).await;
+    let app = app!(su.w.state(), su.w);
+    let user = su.user("ssf-off").await;
+    let (_, first_token) = su.session(user, vec![Amr::Pwd]).await;
+
+    assert_eq!(su.ask_for_mfa(&app, &first_token).await.0, 302);
+    assert_eq!(su.record_count().await, 0);
+    let (_, second_token) = su.session(user, mfa_evidence()).await;
+    assert_eq!(su.return_leg(&app, &second_token).await.0, 302);
+    assert!(su.told().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -2073,6 +2563,73 @@ async fn an_empty_poll_returns_at_once_or_waits_for_an_event() {
         axiam_api_rest::handlers::ssf::POLL_LONG_POLL_MAX,
         std::time::Duration::from_secs(30)
     );
+}
+
+/// D-53 (11): at most one long poll waits per stream per instance. A second one
+/// on the same stream answers at once; another stream's long poll still waits;
+/// and the slot is free again when the first one has answered.
+#[actix_rt::test]
+async fn a_second_long_poll_on_a_stream_answers_at_once_while_one_is_waiting() {
+    let w = world().await;
+    named_client(&w, w.tenant_id, RECEIVER, &["ssf.manage"]).await;
+    let stream = w
+        .stream(
+            w.tenant_id,
+            RECEIVER,
+            SsfDeliveryMethod::Poll,
+            SsfStreamStatus::Enabled,
+        )
+        .await;
+    let state = w.state();
+    let waiters = state.ssf.poll_waiters.clone();
+    let app = app!(state, w);
+    let token = w.receiver_token();
+
+    let event = held_event(&w, &stream);
+    let jti = event.jti.clone();
+    let writer_db = w.db.clone();
+    let writer_stream = stream.clone();
+    let waiters_seen = waiters.clone();
+    let second_answer = async {
+        // Let the first long poll reach its wait.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(waiters_seen.waiting(), 1, "the first long poll is waiting");
+        let began = std::time::Instant::now();
+        let (status, answer) = poll_with(&app, &token, stream.id, json!({})).await;
+        let took = began.elapsed();
+        assert_eq!(status, 200);
+        assert!(answer["sets"].as_object().unwrap().is_empty());
+        assert!(
+            took < std::time::Duration::from_millis(400),
+            "the second long poll did not wait one step"
+        );
+        // The first one is undisturbed: an event arriving now still reaches it.
+        SurrealSsfEventBufferRepository::new(writer_db)
+            .push(
+                writer_stream.tenant_id,
+                writer_stream.id,
+                &event,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+    };
+    let (first, ()) =
+        futures::future::join(poll_with(&app, &token, stream.id, json!({})), second_answer).await;
+    assert_eq!(first.0, 200);
+    assert!(first.1["sets"].as_object().unwrap().contains_key(&jti));
+    assert_eq!(waiters.waiting(), 0, "the slot is released with the answer");
+
+    // Free again: a long poll that finds an event answers, and a later one
+    // may wait.
+    buffer(&w)
+        .delete_by_jti(w.tenant_id, stream.id, &[jti])
+        .await
+        .unwrap();
+    let (status, answer) =
+        poll_with(&app, &token, stream.id, json!({"returnImmediately": true})).await;
+    assert_eq!(status, 200);
+    assert!(answer["sets"].as_object().unwrap().is_empty());
 }
 
 /// D-51: a paused stream answers an empty `sets` and keeps what it holds; a

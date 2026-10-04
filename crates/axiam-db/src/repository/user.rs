@@ -24,11 +24,13 @@ use crate::helpers::{CountRow, classify_write_error, parse_uuid, search_bind, se
 /// What both erasure paths remove besides the user row: the SAML single-logout
 /// state that names the person (T23.2.4, schema v76, D-37, T-381) — the
 /// participant rows (the `NameID` and `SessionIndex` each SP was given) and the
-/// logout runs (whose sessions ended). Keyed on `$tenant_id` and `$id`, the
-/// user's record id, which both statements bind.
+/// logout runs (whose sessions ended) — and the SSF step-up record (T23.5.3,
+/// schema v78, D-53 (1)) that names the user and the session they held. Keyed on
+/// `$tenant_id` and `$id`, the user's record id, which every statement binds.
 const SAML_ERASURE_STATEMENTS: &str = "\
     DELETE saml_sp_session WHERE tenant_id = $tenant_id AND user_id = $id; \
-    DELETE saml_logout_run WHERE tenant_id = $tenant_id AND user_id = $id; ";
+    DELETE saml_logout_run WHERE tenant_id = $tenant_id AND user_id = $id; \
+    DELETE ssf_step_up WHERE tenant_id = $tenant_id AND user_id = $id; ";
 
 /// DB-side row struct for queries where the UUID is already known.
 ///
@@ -824,7 +826,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        // BEGIN=0, UPDATE=1, then the two SAML deletes and COMMIT.
+        // BEGIN=0, UPDATE=1, then the SAML and SSF deletes and COMMIT.
         let rows: Vec<UserRow> = result.take(1).map_err(DbError::from)?;
         if rows.is_empty() {
             return Err(DbError::NotFound {

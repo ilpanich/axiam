@@ -453,7 +453,7 @@ fn changed_fields(old: &StoredStream, new: &SsfStreamUpdate) -> Vec<&'static str
 }
 
 /// SSF §8.1.5: a transmitter that changes a stream's status tells the
-/// receiver. Best effort: the change is made whether or not the event can be
+/// receiver — while the tenant's `ssf_enabled` is on (D-53 (3)). Best effort: the change is made whether or not the event can be
 /// submitted, and a missing outbox (delivery not wired) is not an error here.
 pub(crate) async fn announce_status<C: Connection + Clone>(
     state: &AppState<C>,
@@ -462,6 +462,25 @@ pub(crate) async fn announce_status<C: Connection + Clone>(
     let Some(outbox) = state.ssf.outbox.as_ref() else {
         return;
     };
+    // D-53 (3): the tenant's switch governs every event the transmitter sends,
+    // this one included. An administrator may register and change streams before
+    // switching SSF on (that is the point of the switch), but a receiver is told
+    // nothing until it is on; a tenant that cannot be read is one we do not
+    // guess about.
+    match crate::handlers::ssf::ssf_enabled_for(state, stream.tenant_id).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::warn!(
+                target: "axiam::ssf_admin",
+                tenant_id = %stream.tenant_id,
+                stream_id = %stream.id,
+                %error,
+                "the stream-updated event was not sent: the tenant's SSF switch could not be read"
+            );
+            return;
+        }
+    }
     let event = prepare_stream_updated(stream, Utc::now());
     if let Err(error) = outbox.submit(stream, &event).await {
         tracing::warn!(

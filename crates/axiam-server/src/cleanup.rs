@@ -136,6 +136,9 @@ pub struct CleanupTask<C: Connection> {
     /// G-5 (T23.5.3, D-48): the SSF poll/hold buffer, whose expired rows the
     /// `ssf_event_buffer` sweep removes. `None` runs no sweep.
     ssf_buffer_repo: Option<Arc<axiam_db::SurrealSsfEventBufferRepository<C>>>,
+    /// G-5 (T23.5.3, D-53 (1)): the step-up records, whose ten-minute expiry the
+    /// `ssf_step_up` sweep removes. `None` runs no sweep.
+    ssf_step_up_repo: Option<Arc<axiam_db::SurrealSsfStepUpRepository<C>>>,
     /// G-5 (D-52): tells SSF receivers an account was purged (the account as it
     /// was before the erasure). `None` — the default — tells nobody.
     ssf_sink: Option<Arc<dyn SsfSystemAccountSink>>,
@@ -811,6 +814,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             job_health,
             directory_sync: None,
             ssf_buffer_repo: None,
+            ssf_step_up_repo: None,
             ssf_sink: None,
             shutdown,
         }
@@ -824,9 +828,11 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     pub fn with_ssf(
         mut self,
         buffer_repo: Arc<axiam_db::SurrealSsfEventBufferRepository<C>>,
+        step_up_repo: Arc<axiam_db::SurrealSsfStepUpRepository<C>>,
         sink: Arc<dyn SsfSystemAccountSink>,
     ) -> Self {
         self.ssf_buffer_repo = Some(buffer_repo);
+        self.ssf_step_up_repo = Some(step_up_repo);
         self.ssf_sink = Some(sink);
         self
     }
@@ -954,6 +960,16 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         &self.job_health,
                         "ssf_event_buffer",
                         self.sweep_ssf_event_buffer().await,
+                        tracing::Level::DEBUG,
+                    );
+
+                    // G-5 (T23.5.3, D-53 (1)): step-up records nobody returned
+                    // for within ten minutes. DEBUG: an expired record is one
+                    // no return leg may use.
+                    Self::record(
+                        &self.job_health,
+                        "ssf_step_up",
+                        self.sweep_ssf_step_up().await,
                         tracing::Level::DEBUG,
                     );
 
@@ -1101,6 +1117,19 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     /// right answer over a table that grows. `Ok(0)` without a buffer.
     async fn sweep_ssf_event_buffer(&self) -> Result<u64, AxiamError> {
         let Some(repo) = &self.ssf_buffer_repo else {
+            return Ok(0);
+        };
+        repo.delete_expired(Utc::now()).await
+    }
+
+    /// Remove SSF step-up records past their ten-minute `expires_at` (G-5,
+    /// T23.5.3, D-53 (1)).
+    ///
+    /// A size bound, not a correctness one: `take` returns only an unexpired
+    /// record, so a sweep that never ran would answer correctly over a table
+    /// that keeps rows nobody will return for. `Ok(0)` without the repository.
+    async fn sweep_ssf_step_up(&self) -> Result<u64, AxiamError> {
+        let Some(repo) = &self.ssf_step_up_repo else {
             return Ok(0);
         };
         repo.delete_expired(Utc::now()).await

@@ -41,6 +41,8 @@ pub const SWEEP_JOBS: &[&str] = &[
     "directory_sync",
     // G-5 (T23.5.3): the SSF poll/hold buffer's seven-day expiry.
     "ssf_event_buffer",
+    // G-5 (T23.5.3, D-53 (1)): the step-up record's ten-minute expiry.
+    "ssf_step_up",
     "amqp_nonce_replay",
     "gdpr_purge",
     "gdpr_export",
@@ -160,7 +162,12 @@ mod tests {
         let source = include_str!("cleanup.rs");
         // T23.5.3 (T-395): the SSF buffer's expiry sweep is in the same loop and
         // the same list, so `/health/jobs` shows it from boot.
-        for job in ["saml_sp_session", "saml_logout_run", "ssf_event_buffer"] {
+        for job in [
+            "saml_sp_session",
+            "saml_logout_run",
+            "ssf_event_buffer",
+            "ssf_step_up",
+        ] {
             let recorded = source.match_indices("&self.job_health,").any(|(at, _)| {
                 let rest = &source[at + "&self.job_health,".len()..];
                 rest.trim_start().starts_with(&format!("\"{job}\""))
@@ -176,6 +183,7 @@ mod tests {
         assert!(names.iter().any(|n| n == "saml_sp_session"));
         assert!(names.iter().any(|n| n == "saml_logout_run"));
         assert!(names.iter().any(|n| n == "ssf_event_buffer"));
+        assert!(names.iter().any(|n| n == "ssf_step_up"));
     }
 
     #[test]

@@ -56,7 +56,7 @@ use axiam_db::{
     SurrealSettingsRepository, SurrealSsfStreamRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
-use axiam_oauth2::ssf::{SsfError, SsfEvent, prepare_event};
+use axiam_oauth2::ssf::{AssuranceLevel, SsfError, SsfEvent, prepare_event};
 // Re-exported so the crates above this one (SCIM) name the event vocabulary
 // through the emitter they call, without a dependency of their own on the
 // protocol crate.
@@ -285,6 +285,42 @@ impl<C: Connection + Clone> SsfEmitter<C> {
             &event,
             &SsfSubject::from_user(&user),
             &Self::txn(),
+        )
+        .await;
+    }
+
+    /// Whether some stream would carry `event_type` for the tenant right now:
+    /// an outbox is wired, the tenant's `ssf_enabled` is on and a stream is
+    /// registered for it. For a producer that has to *prepare* an event (D-53 (1)
+    /// remembers a step-up before it knows it will be told of one) and would
+    /// otherwise do that work for nobody.
+    pub async fn carries(&self, tenant_id: Uuid, event_type: SsfEventType) -> bool {
+        !self.streams_for(tenant_id, event_type).await.is_empty()
+    }
+
+    /// CAEP `assurance-level-change` (D-53 (1)): the `acr` class `user_id`'s
+    /// session achieved moved from `previous` to `current` by the user's own
+    /// step-up. The caller has already compared them: equal levels are not a
+    /// change and nothing is emitted for them.
+    pub async fn assurance_level_changed(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        previous: AssuranceLevel,
+        current: AssuranceLevel,
+    ) {
+        if previous == current {
+            return;
+        }
+        self.emit_for_user(
+            tenant_id,
+            user_id,
+            SsfEvent::AssuranceLevelChange {
+                current_level: current,
+                previous_level: Some(previous),
+                initiating_entity: Some(InitiatingEntity::User),
+                event_timestamp: Utc::now().timestamp(),
+            },
         )
         .await;
     }

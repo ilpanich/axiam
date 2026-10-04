@@ -343,6 +343,9 @@ pub struct SsfState<C: Connection + Clone> {
     /// The per-stream bounded buffer: what a poll stream's receiver reads and a
     /// paused stream holds (D-48).
     pub buffer_repo: axiam_db::SurrealSsfEventBufferRepository<C>,
+    /// What the honour lane remembers about a step-up it sent a user to perform
+    /// (D-53 (1)): written at the Interact leg, consumed once by the return leg.
+    pub step_up_repo: axiam_db::SurrealSsfStepUpRepository<C>,
     /// Where produced events go (D-48): push enqueue, the poll buffer, or
     /// nothing for a disabled stream. `None` when delivery is not wired (a
     /// harness that does not test it) — the verification endpoint then answers
@@ -359,6 +362,75 @@ pub struct SsfState<C: Connection + Clone> {
     /// The directory sync's `account-disabled` port, bound to [`Self::emitter`].
     pub account_sink:
         Arc<axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SsfSystemAccountSink>>,
+    /// The long polls currently waiting, one per stream (D-53 (11)).
+    pub poll_waiters: Arc<PollWaiters>,
+}
+
+/// The streams that have a long poll waiting **on this instance**.
+///
+/// A long poll holds a request open for up to thirty seconds; a receiver that
+/// opens many on one stream (a retry loop with no backoff, a bug) would hold as
+/// many connections for no benefit, since RFC 8936 has one receiver draining one
+/// stream in order. At most one waits per stream; a second answers at once.
+/// Per instance on purpose: an exact cross-instance count would need shared
+/// state for a bound that only has to be small.
+#[derive(Debug, Default)]
+pub struct PollWaiters {
+    waiting: std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>,
+}
+
+/// Holds a stream's wait slot; releases it when dropped — including when the
+/// request is cancelled because the receiver hung up.
+#[derive(Debug)]
+pub struct PollWaitGuard {
+    owner: Arc<PollWaiters>,
+    stream_id: uuid::Uuid,
+}
+
+impl PollWaiters {
+    /// Take `stream_id`'s wait slot, or `None` when a long poll already holds it.
+    #[must_use]
+    pub fn try_enter(self: &Arc<Self>, stream_id: uuid::Uuid) -> Option<PollWaitGuard> {
+        let mut waiting = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
+        waiting.insert(stream_id).then(|| PollWaitGuard {
+            owner: Arc::clone(self),
+            stream_id,
+        })
+    }
+
+    /// How many streams have a long poll waiting.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        self.waiting.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+impl Drop for PollWaitGuard {
+    fn drop(&mut self) {
+        self.owner
+            .waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.stream_id);
+    }
+}
+
+#[cfg(test)]
+mod poll_waiter_tests {
+    use super::*;
+
+    #[test]
+    fn one_slot_per_stream_released_on_drop() {
+        let waiters = Arc::new(PollWaiters::default());
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let first = waiters.try_enter(a).expect("the first takes the slot");
+        assert!(waiters.try_enter(a).is_none(), "the second finds it taken");
+        assert!(waiters.try_enter(b).is_some(), "another stream is free");
+        assert_eq!(waiters.waiting(), 1, "b's guard was a temporary");
+        drop(first);
+        assert!(waiters.try_enter(a).is_some(), "released on drop");
+        assert_eq!(waiters.waiting(), 0);
+    }
 }
 
 impl<C: Connection + Clone> SsfState<C> {

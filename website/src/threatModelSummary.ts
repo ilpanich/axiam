@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.27.0",
+ "version": "2.28.0",
  "diagramCount": 9,
  "total": 401,
- "open": 19,
- "mitigated": 382,
+ "open": 16,
+ "mitigated": 385,
  "areas": [
   {
    "id": 0,
@@ -99,7 +99,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 35,
-   "open": 5
+   "open": 2
   },
   {
    "id": 7,
@@ -133,12 +133,12 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Information disclosure",
    "total": 92,
-   "open": 7
+   "open": 6
   },
   {
    "name": "Denial of service",
    "total": 46,
-   "open": 4
+   "open": 2
   },
   {
    "name": "Elevation of privilege",
@@ -155,12 +155,12 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "High",
    "total": 174,
-   "open": 9
+   "open": 8
   },
   {
    "name": "Medium",
    "total": 159,
-   "open": 7
+   "open": 5
   },
   {
    "name": "Low",
@@ -270,16 +270,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Narrowed, not closed. `prod-up` now writes the read-only `axiam` policy from `docs/deployment/vault.md` §5.4 and issues a **scoped, periodic token** for the server, refusing to fall back to root if that fails; seeding keeps its own short-lived credential, because the seeding token and the serving token were never the same thing. Both the Compose stack and `k8s/vault/statefulset.yml` move from the `file` backend to **Raft**, which has a consistent backup story (`vault operator raft snapshot save`) and a migration path to three nodes that does not require a re-seed — a re-seed changes the OPAQUE setup key, i.e. a password reset for every user in every tenant. What remains **open** is auto-unseal, which cannot be closed from inside AXIAM: every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option whatever the hardware. `docs/deployment/vault.md` §5.3 and the Pi runbook §7.1 give the honest option table — GCP Cloud KMS at roughly $0.06 per key per month is the cheapest real answer — and state plainly that a deployment which configures none of them needs a human with three shares after every restart and is not production. A script that unseals from shares kept on the machine is explicitly **not** offered as an alternative: it removes the seal rather than automating it, and is strictly worse than Shamir because the shares are now in the one place an attacker already has. Two amendments since: the server's token is no longer strictly read-only — it holds `create`/`update` on the CA-key prefix, from the one policy file (T-232) — and the seeder that runs after unseal can no longer mistake a refused read for an empty Vault and mint fresh keys over the live ones (T-231). Vault itself runs unprivileged: the prod Compose stack chowns the Raft volume in a one-shot init container rather than running the process that holds every secret as root. Made **checkable** in 1.0.0-beta12 (R-7), the way H-4 made T-180's token scope checkable. `just vault-status` gains a Seal section from the unauthenticated `sys/seal-status` — so it answers even when the token is wrong and even when the Vault is sealed: it names the seal type, reads `OK` for any auto-unseal type, and for `shamir` says \"no auto-unseal; every restart needs t of n key shares, not production\" with the quorum quoted from the response. A Vault sealed at that instant gets its own line, because that is a state somebody is about to fix rather than a statement about the configured seal, and conflating the two would train an operator to ignore both; a request that fails reports `unknown`, never `OK`. `--strict` fails on an unconfirmed auto-unseal, and `just vault-status` still does not pass it so the dev stack's deliberate root-token-on-Shamir does not turn every local run red. **Status stays Open**: the control is a check, not a seal — nothing in this repository can configure auto-unseal, and R-7 does not pretend otherwise."
   },
   {
-   "number": 392,
-   "title": "The push endpoint is used to reach internal services",
-   "category": "Information disclosure",
-   "severity": "High",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "SSF transmitter (SET issuance, stream API, discovery)",
-   "residualRisk": "Write time is built: every endpoint an administrator or a receiver supplies is held to the webhook outbound address policy (D-49, `validate_push_endpoint`): `https` only, no credentials or fragment, no IP literal that is not globally routable (loopback, private, link-local, the metadata address, IPv4-mapped forms), no `localhost`, `*.local` or `*.internal`. Tests: `crates/axiam-oauth2/src/ssf.rs` `the_push_endpoint_policy_is_the_webhook_one`; `crates/axiam-api-rest/tests/ssf_test.rs` `every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule`, `a_receiver_cannot_repoint_its_endpoint_to_a_refused_address`. Open until T23.5.3's `SsfPush` deliverer sends every push only through `axiam_pki::ssrf::guarded_fetch` with `allow_private = false` (resolve, refuse, pin; no redirect followed; a capped response), with its test — a name that resolves to an internal address is only caught there."
-  },
-  {
    "number": 9,
    "title": "Connection flood exhausts ingress capacity",
    "category": "Denial of service",
@@ -328,26 +318,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Audit, webhooks, email & notifications",
    "element": "SET push / poll response",
    "residualRisk": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Open because the control is the receiver's: RFC 8417 §4.1 / contract §32.7 require it to remember the `jti`s it processed and refuse a repeat, and the receiver helper that does so ships in the SDKs only after the post-merge fan-out (D-35); a receiver that does not de-duplicate stays exposed for as long as it treats an old SET as news."
-  },
-  {
-   "number": 394,
-   "title": "A receiver is flooded with events",
-   "category": "Denial of service",
-   "severity": "Medium",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "SET push / poll response",
-   "residualRisk": "Specified (D-48, D-52): one SET per event per stream, only for the events the stream carries; push goes through the shared outbound dispatcher (D-36), which bounds retries per kind (`max_attempts`, exponential backoff with a ceiling, then the dead-letter queue) and delivers one attempt per message, so a receiver that is down receives a bounded number of attempts per event and never a retry storm; a paused stream receives nothing. Open until T23.5.3 lands the `SsfPush` deliverer and the event sources on that dispatcher with the retry, dead-letter and pause tests; the residual then is that a mass revocation is as many SETs as sessions, by design (SSF has no batching)."
-  },
-  {
-   "number": 395,
-   "title": "The poll buffer grows without bound",
-   "category": "Denial of service",
-   "severity": "Medium",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "ssf_stream + ssf_event_buffer",
-   "residualRisk": "Specified (D-48): at most 1 000 events per stream, the oldest dropped to admit the newest (SSF §8.1.2 permits dropping held events), a seven-day `expires_at` enforced by the sweeper, one row per `(tenant, stream, jti)` in the datastore, and the rows deleted with their stream and their tenant. Built so far: the table, its unique index and both cascades — `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_buffer_holds_one_row_per_jti`, `deleting_a_stream_removes_its_buffer_and_nothing_else`, `a_tenant_delete_removes_its_streams_and_buffers`. Open until T23.5.3 writes the buffer (bound, drop-oldest, expiry, acknowledgement) and registers its sweep in `/health/jobs`, with their tests."
   },
   {
    "number": 161,

@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shared Signals Framework transmitter: push and poll delivery and the event
+  sources (T23.5.3, G-5, D-48, D-49, D-51, D-52, contract §32.6).** AXIAM now
+  transmits. **Push (RFC 8935)**: the `SsfPush` deliverer
+  (`axiam_oauth2::ssf_delivery`) runs on the shared outbound dispatcher with
+  queues of its own (`axiam.ssf_push`, `.retry`, `.dlq`; retry variables
+  `AXIAM__SSF_PUSH__MAX_ATTEMPTS`, `…__BACKOFF_BASE_MS`,
+  `…__BACKOFF_CEILING_MS`). Each attempt re-reads the stream and signs against it
+  as it is then — gone or disabled dead-letters, paused or now poll goes to the
+  buffer — and POSTs `application/secevent+jwt` with the stored `Authorization`
+  header **only through `guarded_fetch` with `allow_private = false`**, no
+  redirect followed, a 64 KiB response cap. `2xx` is delivered; a `400` with an
+  RFC 8935 `err` (the code in the `ssf_push.delivery_failed` audit row), `401` and
+  `403` dead-letter; `404`, `408`, `429`, `5xx`, timeouts and connection failures
+  retry. **Poll (RFC 8936)**: `POST /ssf/v1/poll/{stream_id}` with the receiver's
+  `ssf.manage` token (the same one `404` for a stream that is not its own):
+  `maxEvents` clamped to 100, `returnImmediately` honoured (a long poll waits at
+  most 30 s), `ack` deletes exactly that stream's rows, each `setErrs` entry
+  deletes its row and writes an `ssf_stream.poll_set_error` audit row with the
+  RFC 8935 code, SETs are signed at poll time, a paused or disabled stream answers
+  an empty `sets`; bucket `ssf_poll` under `AXIAM__RATE_LIMIT__SSF_PER_MIN`. The
+  **buffer** keeps at most 1 000 events per stream (the oldest dropped), seven
+  days at most, one row per `jti`; its expiry sweep `ssf_event_buffer` is on
+  `/health/jobs`. Resuming a paused push stream releases its held events oldest
+  first. **Event sources** are emitted where the change happens, through one
+  emitter (a no-op with `ssf_enabled` off, one `txn` per operation):
+  `session-revoked` from the session repository's `invalidate`,
+  `invalidate_user_sessions` and `invalidate_user_sessions_except` (never from a
+  redemption or expiry, whether or not the revocation feed is on);
+  `credential-change` from a password change and reset, a SCIM password write, an
+  OPAQUE registration, TOTP confirmation, an MFA reset or method deletion and a
+  WebAuthn registration; `account-disabled` and `account-enabled` from an
+  administrator's status write, SCIM `active` and a directory deactivation;
+  `account-purged` from `DELETE /api/v1/users/{id}` and the GDPR erasure, with the
+  subject captured before the write. `openapi.json` regenerated (the poll route,
+  tag `ssf-receiver`); the management registry is unchanged apart from its spec
+  digest.
+
 - **Shared Signals Framework transmitter: the stream registry, SET issuance,
   the stream management API and discovery (T23.5.2, G-5, D-44 … D-52, contract
   1.56 §32).** AXIAM can now act as an SSF 1.0 transmitter of CAEP
@@ -832,6 +869,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the 16 KiB body limit on `PUT /oauth2/register/{client_id}`.
 
 ### Security
+
+- **SSF push cannot be aimed at an internal address, flood a receiver or grow a
+  buffer without bound (T23.5.3, closes T-392, T-394, T-395; threat model
+  2.28.0).** Every push goes through the shared SSRF guard with
+  `allow_private = false` and follows no redirect; retries are bounded by the
+  dispatcher and an answer that cannot change on retry dead-letters at once; the
+  poll buffer holds 1 000 events per stream for seven days and its sweep is on
+  `/health/jobs`. T-388 (replay) stays open until the SDK receiver helper
+  de-duplicates `jti`. 401 threats, 385 mitigated / 16 open.
 
 - **SSF transmitter threats T-385 … T-401 (T23.5.2, threat model 2.27.0).**
   Receiver impersonation, cross-tenant stream access, forged, replayed and

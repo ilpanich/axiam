@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.27.0",
+ "version": "2.28.0",
  "diagramCount": 9,
  "total": 401,
- "open": 19,
- "mitigated": 382,
+ "open": 16,
+ "mitigated": 385,
  "diagrams": [
   {
    "id": 0,
@@ -8020,9 +8020,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "The push endpoint is used to reach internal services",
        "type": "Information disclosure",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The push endpoint is chosen by a tenant administrator and, since SSF lets a receiver update its delivery, by the receiver. AXIAM POSTs to it from inside the deployment. Pointed at a metadata service, a loopback admin port or a private address, it turns the transmitter into a request forger with a credential attached.",
-       "mitigation": "Write time is built: every endpoint an administrator or a receiver supplies is held to the webhook outbound address policy (D-49, `validate_push_endpoint`): `https` only, no credentials or fragment, no IP literal that is not globally routable (loopback, private, link-local, the metadata address, IPv4-mapped forms), no `localhost`, `*.local` or `*.internal`. Tests: `crates/axiam-oauth2/src/ssf.rs` `the_push_endpoint_policy_is_the_webhook_one`; `crates/axiam-api-rest/tests/ssf_test.rs` `every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule`, `a_receiver_cannot_repoint_its_endpoint_to_a_refused_address`. Open until T23.5.3's `SsfPush` deliverer sends every push only through `axiam_pki::ssrf::guarded_fetch` with `allow_private = false` (resolve, refuse, pin; no redirect followed; a capped response), with its test — a name that resolves to an internal address is only caught there."
+       "mitigation": "Write time is built: every endpoint an administrator or a receiver supplies is held to the webhook outbound address policy (D-49, `validate_push_endpoint`): `https` only, no credentials or fragment, no IP literal that is not globally routable (loopback, private, link-local, the metadata address, IPv4-mapped forms), no `localhost`, `*.local` or `*.internal`. Tests: `crates/axiam-oauth2/src/ssf.rs` `the_push_endpoint_policy_is_the_webhook_one`; `crates/axiam-api-rest/tests/ssf_test.rs` `every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule`, `a_receiver_cannot_repoint_its_endpoint_to_a_refused_address`. **Built (T23.5.3, 2026-10-04).** At delivery every push goes through `guarded_fetch` — the shared `axiam_pki::ssrf` guard, reached as `axiam_federation::ssrf` — with `allow_private = false` and through nothing else: the name is resolved fresh, every address it resolves to must be globally routable, the validated address is pinned into the connection, `https` is required, the guard's own redirect following is cut off at the second hop (the deliverer refuses to build the request, so neither the SET nor the `Authorization` header reaches a host the administrator never named), the response body is read to at most 64 KiB, and every reason string that reaches the audit log is a fixed phrase — never a URL, a header or a response. A name an administrator registered that resolves to an internal address is caught here, which the write-time policy cannot do. Tests (T23.5.3): `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `the_address_guard_refuses_an_internal_endpoint_at_delivery` (127.0.0.1, `localhost`, `::1`, the metadata address and 10.0.0.5 are refused by the production deliverer with the listener untouched; a plaintext endpoint is dead-lettered before anything resolves), `a_redirect_is_not_followed` (a public target the guard would admit is not sent to), `a_redirect_to_a_private_address_is_refused_by_the_guard_too`, `the_response_body_is_capped`; `crates/axiam-oauth2/src/ssf_delivery.rs` `push_goes_through_guarded_fetch_and_nothing_else` (the production source holds one `guarded_fetch` call, no other HTTP client, and `allow_private` is set only by the hidden test seam), `a_transport_reason_never_carries_the_error_text`; `crates/axiam-api-rest/tests/ssf_test.rs` `the_address_guard_refuses_a_private_endpoint_at_delivery_end_to_end` (the production deliverer behind the real outbox, a name that resolves to the receiver's own loopback address). Residual: the guard honours the operator's `AXIAM__PKI__SSRF_ALLOWED_HOSTS` exception (SEC-107) here exactly as it does for webhooks, for the named host only and never for a metadata endpoint."
       },
       {
        "number": 393,
@@ -8070,7 +8070,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "One empty `404` for every way of having nothing to say — no or a malformed tenant id, an unknown tenant, a tenant whose effective `ssf_enabled` is off (the D-20 shape, D-45) — on both the root and the tenant-path form; the receiver API likewise answers a stream of a tenant whose transmitter is off as not found. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `discovery_answers_one_empty_404_for_every_way_of_having_nothing_to_say`, `with_the_transmitter_off_the_receiver_sees_no_stream`, `discovery_on_the_root_issuer_lists_the_endpoints_and_events`, `discovery_on_a_tenant_path_issuer_names_the_tenant_issuer`."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "380feb66-2da4-5fd3-aa96-231aa7263516",
@@ -8101,12 +8101,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "The poll buffer grows without bound",
        "type": "Denial of service",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Events for a poll stream, and for any paused stream, wait in `ssf_event_buffer` until they are acknowledged or the stream resumes. A receiver that never polls, or a stream paused and forgotten, would accumulate rows for ever and grow the datastore.",
-       "mitigation": "Specified (D-48): at most 1 000 events per stream, the oldest dropped to admit the newest (SSF §8.1.2 permits dropping held events), a seven-day `expires_at` enforced by the sweeper, one row per `(tenant, stream, jti)` in the datastore, and the rows deleted with their stream and their tenant. Built so far: the table, its unique index and both cascades — `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_buffer_holds_one_row_per_jti`, `deleting_a_stream_removes_its_buffer_and_nothing_else`, `a_tenant_delete_removes_its_streams_and_buffers`. Open until T23.5.3 writes the buffer (bound, drop-oldest, expiry, acknowledgement) and registers its sweep in `/health/jobs`, with their tests."
+       "mitigation": "Built (T23.5.3, 2026-10-04; D-48). `SurrealSsfEventBufferRepository` holds at most 1 000 events per stream and drops the **oldest** to admit the newest (SSF §8.1.2 permits dropping held events), keeps each at most seven days (`expires_at`), has one row per `(tenant, stream, jti)` in the datastore, and loses its rows with their stream and their tenant. The poll endpoint never serves an expired row and an acknowledgement deletes exactly the named rows of that stream; the `ssf_event_buffer` sweep removes what has expired and is registered in `/health/jobs` from boot, in the cleanup loop. Tests: `crates/axiam-db/tests/ssf_event_buffer_test.rs` `the_buffer_is_bounded_and_drops_the_oldest` (1 001 pushes leave 1 000, the first gone, another stream's buffer untouched), `expired_events_are_not_served_and_the_sweep_removes_them`, `a_jti_is_buffered_once`, `delete_by_jti_removes_only_the_named_rows_of_this_stream`; `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_buffer_holds_one_row_per_jti`, `deleting_a_stream_removes_its_buffer_and_nothing_else`, `a_tenant_delete_removes_its_streams_and_buffers`; `crates/axiam-api-rest/tests/ssf_test.rs` `a_narrowed_stream_and_an_expired_event_are_not_served`, `an_acknowledgement_drains_exactly_the_named_rows_of_that_stream`, `a_set_error_deletes_the_row_and_writes_an_audit_row_with_the_code`; `crates/axiam-server/src/job_health.rs` `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (extended: the sweep is in the cleanup loop and in `SWEEP_JOBS`). Residual: an erased user's subject member can outlive the erasure in a buffer for up to seven days (recorded at T23.5.2)."
       }
      ],
-     "open": 1
+     "open": 0
     }
    ],
    "edges": [
@@ -8377,9 +8377,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A receiver is flooded with events",
        "type": "Denial of service",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "One administrative act can produce many SETs — revoking every session of a user, disabling accounts in bulk, a directory sync that deactivates hundreds. Pushed without a bound, or retried without a ceiling against a receiver that is slow or down, they overload the receiver and the dispatcher's queue.",
-       "mitigation": "Specified (D-48, D-52): one SET per event per stream, only for the events the stream carries; push goes through the shared outbound dispatcher (D-36), which bounds retries per kind (`max_attempts`, exponential backoff with a ceiling, then the dead-letter queue) and delivers one attempt per message, so a receiver that is down receives a bounded number of attempts per event and never a retry storm; a paused stream receives nothing. Open until T23.5.3 lands the `SsfPush` deliverer and the event sources on that dispatcher with the retry, dead-letter and pause tests; the residual then is that a mass revocation is as many SETs as sessions, by design (SSF has no batching)."
+       "mitigation": "Built (T23.5.3, 2026-10-04; D-48, D-52). One SET per event per stream, and only for a stream that carries the event (the emitter lists `list_for_event`, then `prepare_event` checks again); push goes through the shared outbound dispatcher (D-36) as `OutboundKind::SsfPush` with queues of its own and the per-kind ceiling (`AXIAM__SSF_PUSH__MAX_ATTEMPTS`, exponential backoff with a ceiling, then the dead-letter queue), one attempt per message, so a receiver that is down receives a bounded number of attempts per event and never a retry storm. An answer that cannot change on retry — a `400` with an RFC 8935 error code, `401`, `403` — is dead-lettered at once instead of spending the budget. A paused stream receives nothing: its events are held in the bounded buffer; a disabled stream receives nothing and its queued events are dead-lettered. A retried push carries the byte-identical SET, one `jti`. Tests: `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `the_retryable_statuses_are_retried`, `a_400_with_an_rfc_8935_error_is_dead_lettered_with_the_code`, `a_refused_credential_is_dead_lettered`, `a_disabled_stream_delivers_nothing_and_a_queued_event_is_dead_lettered`, `a_paused_stream_moves_the_event_to_the_buffer_and_acknowledges`, `a_retried_push_carries_the_identical_set`, `resuming_a_paused_push_stream_enqueues_the_held_events_oldest_first`; `crates/axiam-api-rest/tests/ssf_test.rs` `a_logout_reports_session_revoked_to_the_streams_that_carry_it` (a disabled stream, another tenant's and one that did not ask for the event are not sent to), `a_disabled_stream_delivers_and_holds_nothing`, `a_paused_stream_holds_and_delivers_on_resume`, `nothing_is_emitted_with_the_transmitter_off_or_no_stream_registered`; the dispatcher's retry schedule, attempt ceiling and dead-letter queue are pinned by `axiam-amqp`'s outbound tests (T23.5.1). The residual is by design: a mass revocation is as many SETs as sessions (SSF has no batching), and a receiver that answers `2xx` slowly is sent every event."
       },
       {
        "number": 396,
@@ -8400,7 +8400,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "What travels is the **unsigned** pending event (D-48); the SET is signed by `sign_set` at the moment of delivery against the stream as it is then, and it refuses a stream that is not enabled or no longer carries the event — a disabled stream delivers nothing, a paused one holds, a narrowed one drops (D-51). The only event a non-enabled stream can sign is the stream-updated announcement of the status it is in (SSF §8.1.5). Tests: `crates/axiam-oauth2/src/ssf.rs` `no_set_for_a_disabled_or_paused_stream_or_an_event_it_does_not_carry`, `a_stream_updated_event_may_only_announce_the_current_status`; `crates/axiam-api-rest/tests/ssf_test.rs` `verification_needs_a_live_stream_and_a_wired_outbox`, `an_admin_status_change_announces_the_new_status`. T23.5.3's e2e test (a disabled stream delivers nothing) re-proves it end to end."
       }
      ],
-     "open": 2
+     "open": 1
     },
     {
      "id": "c18a02c4-5509-5935-9f28-9e14d95c1a2d",
@@ -8442,7 +8442,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 35,
-   "open": 5,
+   "open": 2,
    "bySeverity": {
     "Medium": 23,
     "High": 8,

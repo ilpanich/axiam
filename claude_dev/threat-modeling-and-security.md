@@ -22,6 +22,19 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-04 SSF delivery entry (Phase 23 T23.5.3, model 2.28.0 — no
+> threat enters).** The delivery half of the Shared Signals Framework
+> transmitter is built on the decisions T23.5.2 took — the `SsfPush` deliverer on
+> the shared dispatcher (every push through `guarded_fetch` with
+> `allow_private = false`, no redirect followed, the D-49 response mapping), the
+> poll endpoint and its bounded, expiring buffer with the sweep on
+> `/health/jobs`, the outbox, and the D-52 event sources — and the three entries
+> that waited for it close, each with the test files and names its mitigation now
+> carries: **T-392** (the push endpoint as an SSRF surface), **T-394** (a
+> receiver flooded with events) and **T-395** (the poll buffer). **T-388** stays
+> open until the SDK receiver helper that de-duplicates `jti` ships (D-35). The
+> model is **401 threats, 385 mitigated / 16 open**.
+>
 > **The 2026-10-04 SSF transmitter entry (Phase 23 T23.5.2, model 2.27.0 —
 > T-385 … T-401 enter).** AXIAM becomes a Shared Signals Framework transmitter
 > (G-5): a new external entity (the **SSF receiver**, in a boundary of its own),
@@ -932,7 +945,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
 | Threats identified | 401 |
-| Mitigated / Open | 382 / 19 |
+| Mitigated / Open | 385 / 16 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -998,7 +1011,8 @@ accepted T-380. The seventeen Shared Signals Framework entries of model 2.27.0
 with their tests, and four open — the push endpoint at delivery time, event
 flooding and the poll buffer until the delivery task lands (T-392, T-394, T-395),
 and SET replay until the SDK receiver helper that de-duplicates `jti` ships
-(T-388).
+(T-388). The delivery task has landed (T23.5.3, model 2.28.0): T-392, T-394 and
+T-395 are mitigated, leaving only T-388.
 
 ### Coverage by STRIDE category
 

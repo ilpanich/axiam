@@ -1158,6 +1158,43 @@ mod tests {
         assert_eq!(acs_origin("not a url"), None);
     }
 
+    /// F4 (W3 review, D-27): the auto-post page's own policy is narrower than
+    /// the global one everywhere but `script-src` (a per-response nonce) and
+    /// `form-action` (the ACS origin alone) — nothing may be loaded, framed or
+    /// re-based, and no directive is a wildcard or an `unsafe-` keyword.
+    #[test]
+    fn the_auto_post_policy_is_narrower_than_the_global_one() {
+        let binding = PostBinding {
+            acs_url: "https://sp.example.test/saml/acs?x=1".into(),
+            saml_response: "PHNhbWxwOlJlc3BvbnNlLz4=".into(),
+            relay_state: Some("rs-1".into()),
+        };
+        let page = post_page(&binding, None, Uuid::new_v4());
+        let csp = page
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .expect("the page sets its own policy")
+            .to_owned();
+        let directives: Vec<&str> = csp.split(';').map(str::trim).collect();
+        for required in [
+            "default-src 'none'",
+            "frame-ancestors 'none'",
+            "base-uri 'none'",
+            "form-action https://sp.example.test",
+        ] {
+            assert!(directives.contains(&required), "missing {required}");
+        }
+        assert!(
+            directives
+                .iter()
+                .any(|d| d.starts_with("script-src 'nonce-") && d.split(' ').count() == 2),
+            "script-src is one nonce and nothing else"
+        );
+        assert_eq!(directives.len(), 5, "no other directive widens the page");
+        assert!(!csp.contains('*') && !csp.contains("unsafe-"));
+    }
+
     #[test]
     fn a_handle_is_exactly_what_is_minted() {
         let minted = random_token();

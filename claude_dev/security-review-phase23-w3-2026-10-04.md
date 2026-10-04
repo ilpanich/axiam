@@ -586,7 +586,7 @@ need rotate nothing, but should review the audit log for SAML-federated
 sign-ins and just-in-time provisioned accounts whose subject had never signed in
 before, since the fix cannot detect past use. Nothing has been published by this review.
 
-### P23W3-11 (Medium) — the tenant email provider is held to no outbound address policy
+### P23W3-11 — filed as ilpanich/axiam#529 (Medium) — the tenant email provider is held to no outbound address policy
 
 `EmailConfigOverride.provider` at tenant scope lets a tenant administrator
 (`email_config:write`) set an SMTP `host`/`port` or an HTTP provider's
@@ -606,7 +606,7 @@ resolution-dependent refusals (the P23W3-04 lesson); rate-limit the test route.
 Tests: each refused class at save and at send, rebinding, the test endpoint's
 answer.
 
-### P23W3-07 (Low) — IdP metadata is neither signature-checked nor cached
+### P23W3-07 — filed as ilpanich/axiam#530 (Low) — IdP metadata is neither signature-checked nor cached
 
 `SamlFederationService::fetch_idp_metadata` fetches the IdP's metadata over
 HTTPS through the SSRF guard and uses its entity ID, SSO URL and binding; it
@@ -623,7 +623,7 @@ set; cache the parsed metadata honouring `validUntil`/`cacheDuration` with a cap
 audit a change of SSO URL host. Tests: a signed, an unsigned and a tampered
 document; the cache hit.
 
-### P23W3-08 (Low) — the SP verifier accepts SHA-1 and DTD-bearing responses
+### P23W3-08 — filed as ilpanich/axiam#531 (Low) — the SP verifier accepts SHA-1 and DTD-bearing responses
 
 The IdP receiver added in W3 restricts XML signatures to SHA-2
 (`reduce_xml_to_signed_with_allowed_algorithms`) and refuses any document
@@ -639,7 +639,7 @@ parsing, both in `handle_saml_response_for`; document the SHA-1 refusal as a
 behaviour change for IdPs still signing with it. Tests: a SHA-1-signed valid
 response refused, a DTD-bearing response refused before parsing.
 
-### P23W3-09 (Low) — `/oauth2/authorize` has no rate limiter
+### P23W3-09 — filed as ilpanich/axiam#532 (Low) — `/oauth2/authorize` has no rate limiter
 
 `server.rs` mounts `/oauth2/authorize` (bare and per-tenant) with no governor
 and no `RateLimitShared` bucket; T23.2.3 found it when the preset the plan
@@ -652,7 +652,7 @@ applies. Proposed: wrap both mounts with the browser-endpoint preset
 `oauth2_authorize`; pin it with a `429` test on both mounts; record it in
 `rate-limit-sizing.md`.
 
-### P23W3-10 (Low) — bind certificates to users (D-29 follow-up)
+### P23W3-10 — filed as ilpanich/axiam#533 (Low) — bind certificates to users (D-29 follow-up)
 
 No certificate row carries a user: a certificate authenticates as the service
 account it is bound to, and directory linking (D-28) revokes a user's `User`

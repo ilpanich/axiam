@@ -51,19 +51,23 @@ use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
 use uuid::Uuid;
 
-const TEST_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n-----END PRIVATE KEY-----"; // nosemgrep: generic.secrets.security.detected-private-key
-const TEST_PUBLIC_KEY: &str = "\
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
------END PUBLIC KEY-----";
+/// The JWT signing pair, generated once per process (never a key literal:
+/// CodeQL `rust/hard-coded-cryptographic-value`).
+fn jwt_keys() -> &'static (String, String) {
+    static KEYS: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("an Ed25519 pair");
+        (pair.serialize_pem(), pair.public_key_pem())
+    })
+}
 
 const ENTRY: &str = "6f9619ff-8b86-d011-b42d-00c04fc964ff";
 const OTHER_ENTRY: &str = "6f9619ff-8b86-d011-b42d-00c04fc964aa";
 
 fn config(hash_acquire_timeout_secs: u64) -> AuthConfig {
     AuthConfig {
-        jwt_private_key_pem: TEST_PRIVATE_KEY.into(),
-        jwt_public_key_pem: TEST_PUBLIC_KEY.into(),
+        jwt_private_key_pem: jwt_keys().0.clone(),
+        jwt_public_key_pem: jwt_keys().1.clone(),
         jwt_issuer: "axiam-test".into(),
         access_token_lifetime_secs: 900,
         refresh_token_lifetime_secs: 3600,

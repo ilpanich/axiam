@@ -947,8 +947,8 @@ mod tests {
     /// The other types keep exactly the profile S-7 gave them.
     #[test]
     fn the_saml_signing_profile_is_digital_signature_and_document_signing_only() {
-        for key in [KeyAlgorithm::Ed25519, KeyAlgorithm::Rsa4096] {
-            let p = LeafProfile::for_leaf(&CertificateType::SamlSigning, &key);
+        for algorithm in [KeyAlgorithm::Ed25519, KeyAlgorithm::Rsa4096] {
+            let p = LeafProfile::for_leaf(&CertificateType::SamlSigning, &algorithm);
             assert_eq!(p.key_usage, vec![LeafKeyUsage::DigitalSignature]);
             assert_eq!(
                 p.extended_key_usage,

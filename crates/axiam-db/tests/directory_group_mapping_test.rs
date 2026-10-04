@@ -36,10 +36,10 @@ use zeroize::Zeroizing;
 fn key() -> [u8; 32] {
     static KEY: OnceLock<[u8; 32]> = OnceLock::new();
     *KEY.get_or_init(|| {
-        let mut key = [0u8; 32];
-        key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
-        key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
-        key
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        bytes
     })
 }
 

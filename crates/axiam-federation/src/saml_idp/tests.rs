@@ -115,6 +115,15 @@ fn pairwise_key() -> PairwiseKey {
     PairwiseKey::new(*bytes)
 }
 
+/// A second pairwise key, distinct from [`pairwise_key`], minted at run time
+/// (never a literal: CodeQL `rust/hard-coded-cryptographic-value`).
+fn other_pairwise_key() -> PairwiseKey {
+    let mut b = [0u8; 32];
+    b[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    b[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    PairwiseKey::new(b)
+}
+
 fn issuer() -> SamlIdpIssuer {
     SamlIdpIssuer::new(BASE_URL, Some(pairwise_key()))
 }
@@ -669,10 +678,10 @@ fn with_response_signing_off_only_the_assertion_is_signed() {
 #[test]
 fn a_pkcs1_key_signs_too_and_a_key_that_does_not_match_the_certificate_is_refused() {
     let case = Case::new();
-    let mut key = signing_key();
-    key.private_key_pem = Zeroizing::new(material().key_pkcs1_pem.clone());
+    let mut signer = signing_key();
+    signer.private_key_pem = Zeroizing::new(material().key_pkcs1_pem.clone());
     let issued = issuer()
-        .issue(&case.req(), &key, Utc::now())
+        .issue(&case.req(), &signer, Utc::now())
         .expect("PKCS#1 PEM");
     assert!(verify_first_signature(&decode(&issued), material()));
 
@@ -689,10 +698,10 @@ fn a_pkcs1_key_signs_too_and_a_key_that_does_not_match_the_certificate_is_refuse
         "not a key",
         "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----",
     ] {
-        let mut key = signing_key();
-        key.private_key_pem = Zeroizing::new(garbage.to_owned());
+        let mut signer = signing_key();
+        signer.private_key_pem = Zeroizing::new(garbage.to_owned());
         assert_eq!(
-            issuer().issue(&case.req(), &key, Utc::now()),
+            issuer().issue(&case.req(), &signer, Utc::now()),
             Err(SamlIdpError::SigningFailed)
         );
     }
@@ -905,8 +914,8 @@ enum Placement {
 const EVIL_ID: &str = "_evil-assertion";
 
 fn signed(document: &str) -> String {
-    let key = signing_key();
-    let key_der = sign::private_key_der(&key).expect("der");
+    let signer = signing_key();
+    let key_der = sign::private_key_der(&signer).expect("der");
     sign::sign(document, &key_der).expect("signed gadget")
 }
 
@@ -1241,17 +1250,22 @@ fn the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation(
 
 #[test]
 fn the_pairwise_name_id_differs_across_sps_tenants_users_and_keys() {
-    let key = pairwise_key();
+    let derivation = pairwise_key();
     let user_id = Uuid::new_v4();
     let t = tenant();
-    let base = pairwise_name_id(&key, t, SP_ENTITY, user_id);
+    let base = pairwise_name_id(&derivation, t, SP_ENTITY, user_id);
     assert_eq!(base.len(), 64);
     assert!(base.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
     for other in [
-        pairwise_name_id(&key, t, "https://other-sp.example.test/metadata", user_id),
-        pairwise_name_id(&key, Uuid::new_v4(), SP_ENTITY, user_id),
-        pairwise_name_id(&key, t, SP_ENTITY, Uuid::new_v4()),
-        pairwise_name_id(&PairwiseKey::new([7; 32]), t, SP_ENTITY, user_id),
+        pairwise_name_id(
+            &derivation,
+            t,
+            "https://other-sp.example.test/metadata",
+            user_id,
+        ),
+        pairwise_name_id(&derivation, Uuid::new_v4(), SP_ENTITY, user_id),
+        pairwise_name_id(&derivation, t, SP_ENTITY, Uuid::new_v4()),
+        pairwise_name_id(&other_pairwise_key(), t, SP_ENTITY, user_id),
     ] {
         assert_ne!(base, other);
     }
@@ -1652,15 +1666,15 @@ fn a_credential_outside_its_validity_window_or_not_active_refuses_to_sign() {
 
 #[test]
 fn no_debug_output_carries_key_material() {
-    let key = signing_key();
-    let body = key
+    let signer = signing_key();
+    let body = signer
         .private_key_pem
         .lines()
         .nth(1)
         .expect("a base64 line")
         .to_owned();
     let issuer = issuer();
-    let shown = format!("{key:?} {issuer:?} {:?}", pairwise_key());
+    let shown = format!("{signer:?} {issuer:?} {:?}", pairwise_key());
     assert!(!shown.contains(&body));
     assert!(shown.contains("[REDACTED]"));
     // An error never carries a value either: its text is fixed.

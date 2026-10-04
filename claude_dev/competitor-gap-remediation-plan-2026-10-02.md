@@ -825,6 +825,45 @@ fan-out.
 > Service looping back is a stated residual of the allow-list. Deleting or
 > disabling a directory leaves its accounts' sessions and passkeys working and
 > stops deprovisioning; §30 documents it, and it is carried to F4.
+>
+> **EXECUTED (partly) — G-3, W3: T23.3.8, 2026-10-04** (`bda6b14`,
+> `1b69d2d`, `a8e6814`, `7214346`, `7396cfd`, `ee34f10`, `7cf3b4f`, `6397ca7`;
+> Sonnet 5.5). The §30 surface: `GET`/`PUT`/`PATCH`/`DELETE
+> /api/v1/tenants/{tenant_id}/directory`, `POST …/links` (D-28's linking) and
+> `GET …/sync-status`, behind `directory:read`, `directory:write` and
+> `directory:link`, human principals only, the four writes on a new
+> `directory_admin` rate-limit bucket (30/min). Every write runs, in order: the
+> `503` without `directory_encryption_key` when it carries a secret,
+> `config::validate`, the address guard on the URL as written (only when the
+> resulting configuration is enabled, **D-33**), the P23W2-01 rule as a `400`,
+> and the `opaque_mode = required` exclusion as a `409` — enforced both ways,
+> the settings writes (`set_effective`, `set_tenant_override`, `set_org` for
+> inheriting tenants) refusing `required` for a tenant with an enabled
+> directory. `bind_secret` is a `SecretString` on two request types and on no
+> response; the directory routes' own JSON error handler never echoes it;
+> audit rows carry changed field names, `connection_moved`, `secret_replaced`
+> and the live directory-account count. The console *Directory* page (secret
+> never pre-filled, asked again when the connection moves, group-mapping
+> picker over the tenant's groups, sync status, linking behind a confirmation),
+> the website *LDAP / Active Directory* page, the operator guide's *Managing a
+> tenant's directory* (with D-29's no-email note) and design-document **§8d**.
+> OpenAPI and the management registry regenerated (168 operations, 25
+> namespaces); §27.1 and §27.5 rows filled in. Tests: 27 HTTP tests (every
+> §30 answer, the guard and validate refusals, P23W2-01 on each connection
+> field and both verbs, both directions of the opaque-mode exclusion, the
+> secret absent from responses, logs and audit rows, D-33), 72 frontend tests;
+> `m2m_management_test` walks the new routes.
+>
+> What the plan did not anticipate. The repository's `update` demanded the
+> encryption key even without a secret, so a keyless deployment could not
+> switch a directory off; it now needs the key only to seal. The registry
+> script classified only `PUT`; `PATCH` is now `sparse`. §30's registry
+> `service_account` flag does not exist; machine refusal is the
+> `HUMAN_ONLY_FAMILIES` gate. The guard's two refusals ("private address
+> outside the allow-list" and "does not resolve") let a tenant administrator
+> probe internal names, bounded by the bucket — carried to F4 against T-300's
+> residual. The SAML IdP's handler had no frontend-coverage row; added
+> ("headless for now", T23.2.6 replaces it).
 
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned

@@ -1091,7 +1091,7 @@ with an F4 security review of the wave's diff against
 | T23.3.5 | Sync job: incremental, nightly full, soft-delete | Sonnet 5.5 | W3 |✓ |
 | T23.3.6 | OpenLDAP and Samba AD containers; e2e acceptance list | Sonnet 5.5 | W3 | |
 | T23.3.7 | Threat-model elements; contract §30 | Opus 5.5 | W3 |✓ |
-| T23.3.8 | CRUD routes, console *Directory* page, OpenAPI, website, design chapter | Sonnet 5.5 | W3 | |
+| T23.3.8 | CRUD routes, console *Directory* page, OpenAPI, website, design chapter | Sonnet 5.5 | W3 |✓ |
 | T23.4.1 | RFC 7592 client configuration endpoint; contract §28 addition; threat entry | Opus 5.5 | W1 | ✓ |
 | T23.5.1 | Shared outbound dispatcher extracted from the webhook engine | Sonnet 5.5 | W4 | |
 | T23.5.2 | SSF: streams, SET issuance, stream API authentication, discovery | Opus 5.5 | W4 | |

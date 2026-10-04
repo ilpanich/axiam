@@ -385,12 +385,30 @@ async fn rows_are_deleted_by_session_and_by_user_and_only_in_their_tenant() {
         .await
         .unwrap();
 
+    assert_eq!(repo.mark_ended(tenant, &[]).await.unwrap(), 0);
+    assert_eq!(
+        repo.mark_ended(tenant, &[s1, s2, Uuid::new_v4()])
+            .await
+            .unwrap(),
+        3,
+        "every row of every named session, however many sessions are named"
+    );
     assert_eq!(repo.delete_for_sessions(tenant, &[]).await.unwrap(), 0);
     assert_eq!(
         repo.delete_for_sessions(tenant, &[s1]).await.unwrap(),
         2,
         "both SPs' rows of session one"
     );
+    // Several sessions at once (a logout that ended more than one).
+    repo.record(new_row(tenant, s1, user, sp)).await.unwrap();
+    assert_eq!(
+        repo.delete_for_sessions(tenant, &[s1, s2, Uuid::new_v4()])
+            .await
+            .unwrap(),
+        2,
+        "the rows of both named sessions, and a session that has none"
+    );
+    repo.record(new_row(tenant, s2, user, sp)).await.unwrap();
     assert_eq!(
         rows_of(&db, "saml_sp_session", other_tenant).await,
         1,

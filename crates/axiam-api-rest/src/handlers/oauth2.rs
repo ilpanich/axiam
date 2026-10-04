@@ -5705,14 +5705,29 @@ fn clear_logout_cookies(
     config: &axiam_auth::config::AuthConfig,
     tenant_id: Uuid,
 ) {
-    let cookie_secure = config.cookie_secure;
-    response
-        .cookie(crate::middleware::csrf::clear_access_cookie(cookie_secure))
-        .cookie(crate::middleware::csrf::clear_refresh_cookie(cookie_secure))
-        .cookie(crate::middleware::csrf::clear_csrf_cookie(cookie_secure));
-    for cookie in crate::middleware::csrf::clear_op_session_cookies(tenant_id, config) {
+    for cookie in logout_cookies(config, tenant_id) {
         response.cookie(cookie);
     }
+}
+
+/// The removals [`clear_logout_cookies`] sets, as a list: the three API cookies
+/// and every OP-session copy a sign-in into `tenant_id` mints. One list for
+/// every logout that ends a browser's session, so the SAML single-logout
+/// endpoint (T23.2.4, D-39) clears exactly what `end_session` does.
+pub(crate) fn logout_cookies(
+    config: &axiam_auth::config::AuthConfig,
+    tenant_id: Uuid,
+) -> Vec<actix_web::cookie::Cookie<'static>> {
+    let cookie_secure = config.cookie_secure;
+    let mut cookies = vec![
+        crate::middleware::csrf::clear_access_cookie(cookie_secure),
+        crate::middleware::csrf::clear_refresh_cookie(cookie_secure),
+        crate::middleware::csrf::clear_csrf_cookie(cookie_secure),
+    ];
+    cookies.extend(crate::middleware::csrf::clear_op_session_cookies(
+        tenant_id, config,
+    ));
+    cookies
 }
 
 /// AXIAM's own logged-out page.
@@ -5724,7 +5739,10 @@ fn clear_logout_cookies(
 /// The removal cookies carry the same attributes as the ones they clear
 /// (`AuthConfig::cookie_secure`, D-18, for the API cookies; every OP copy for
 /// `tenant_id`, D-11).
-fn logged_out_page(config: &axiam_auth::config::AuthConfig, tenant_id: Uuid) -> HttpResponse {
+pub(crate) fn logged_out_page(
+    config: &axiam_auth::config::AuthConfig,
+    tenant_id: Uuid,
+) -> HttpResponse {
     let mut response = HttpResponse::Ok();
     response
         .append_header(("Cache-Control", "no-store"))
@@ -5742,7 +5760,7 @@ fn logged_out_page(config: &axiam_auth::config::AuthConfig, tenant_id: Uuid) -> 
 /// Spawned rather than awaited: the user's session is gone the moment this
 /// request returns, and making logout wait on N external HTTP calls would make
 /// it a hostage to the least reliable RP.
-async fn dispatch_backchannel_logout<C: Connection + Clone>(
+pub(crate) async fn dispatch_backchannel_logout<C: Connection + Clone>(
     state: &web::Data<AppState<C>>,
     tenant_id: Uuid,
     session_id: Uuid,

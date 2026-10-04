@@ -982,10 +982,11 @@ fn response_envelope(p: &EnvelopeParts<'_>) -> String {
     out
 }
 
-/// Fixtures for tests outside this crate (the SSO endpoint's HTTP tests and the
-/// e2e harness): what a service provider's SAML library does — generate a key,
-/// sign an `AuthnRequest` enveloped or over a Redirect query, deflate one.
-/// AXIAM never signs a request; nothing in a server path calls these.
+/// Fixtures for tests outside this crate (the SSO and SLO endpoints' HTTP tests
+/// and the e2e harness): what a service provider's SAML library does — generate a
+/// key, sign an `AuthnRequest`, `LogoutRequest` or `LogoutResponse` enveloped or
+/// over a Redirect query, deflate one. AXIAM never signs a message of an SP's;
+/// nothing in a server path calls these.
 #[doc(hidden)]
 pub mod test_support {
     use std::io::Write;
@@ -1153,6 +1154,21 @@ pub mod test_support {
     pub fn sign_octets(octets: &str, pkcs8_der: &[u8]) -> String {
         let pair = openssl::pkey::PKey::private_key_from_pkcs8(pkcs8_der).expect("key");
         let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &pair)
+            .expect("signer");
+        signer.update(octets.as_bytes()).expect("update");
+        STANDARD.encode(signer.sign_to_vec().expect("sign"))
+    }
+
+    /// RSA-SHA1 over `octets`, base64: a Redirect `Signature` a conforming IdP
+    /// must refuse (SHA-1 is never accepted).
+    ///
+    /// # Panics
+    ///
+    /// When OpenSSL fails.
+    #[must_use]
+    pub fn sign_octets_sha1(octets: &str, pkcs8_der: &[u8]) -> String {
+        let pair = openssl::pkey::PKey::private_key_from_pkcs8(pkcs8_der).expect("key");
+        let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha1(), &pair)
             .expect("signer");
         signer.update(octets.as_bytes()).expect("update");
         STANDARD.encode(signer.sign_to_vec().expect("sign"))

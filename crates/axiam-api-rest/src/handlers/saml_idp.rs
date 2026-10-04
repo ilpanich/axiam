@@ -495,7 +495,7 @@ pub async fn metadata<C: Connection + Clone>(
         IDP_METADATA_CACHE_CONTROL, IDP_METADATA_MEDIA_TYPE, build_idp_metadata,
         if_none_match_matches,
     };
-    use axiam_federation::saml_idp::{idp_entity_id, idp_sso_url};
+    use axiam_federation::saml_idp::{idp_entity_id, idp_slo_url, idp_sso_url};
 
     let Some((tenant_id, _org)) = tenant_serving_saml(&state, &path).await else {
         return not_found().await;
@@ -507,7 +507,8 @@ pub async fn metadata<C: Connection + Clone>(
     let Some(document) = build_idp_metadata(
         &idp_entity_id(base, tenant_id),
         &idp_sso_url(base, tenant_id),
-        None,
+        // T23.2.4: the SLO route exists, so the document advertises it (D-40).
+        Some(&idp_slo_url(base, tenant_id)),
         &credentials,
     ) else {
         return not_found().await;

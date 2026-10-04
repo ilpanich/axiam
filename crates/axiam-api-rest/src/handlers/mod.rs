@@ -33,6 +33,10 @@ pub mod roles;
 pub mod saml_admin;
 #[cfg(feature = "saml")]
 pub mod saml_idp;
+/// The SAML IdP's single-logout endpoint and the IdP-initiated logout trigger
+/// (T23.2.4). Behind `saml`, like the SSO endpoint it sits beside.
+#[cfg(feature = "saml")]
+pub mod saml_idp_slo;
 pub mod scim_tokens;
 pub mod scopes;
 pub mod service_accounts;

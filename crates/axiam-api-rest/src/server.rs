@@ -1611,16 +1611,18 @@ pub fn build_cors(allowed_origins: &[String]) -> Cors {
     cors
 }
 
-/// The SAML 2.0 IdP's routes (T23.2.3, T23.2.5, G-2): `/saml/v2/{tenant_id}/sso`
-/// (both bindings), `/sso/continue`, `/sso/idp-initiated` and `/metadata`.
+/// The SAML 2.0 IdP's routes (T23.2.3, T23.2.4, T23.2.5, G-2):
+/// `/saml/v2/{tenant_id}/sso` (both bindings), `/sso/continue`,
+/// `/sso/idp-initiated`, `/sso/logout`, `/slo` (both bindings) and `/metadata`.
 ///
 /// **Rate limited (§7 rule 6)** with the browser-endpoint preset
 /// `end_session_per_min` — human-driven, unauthenticated, 30 per minute per
 /// address by default — under buckets of their own (`saml_idp_sso`,
-/// `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`, `saml_idp_metadata`), so a flood here
-/// cannot spend `/oauth2/end_session`'s allowance or the reverse. Every route
-/// allocates state (a pending row) or does XML and signature work, which is
-/// what is being bounded.
+/// `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`, `saml_idp_metadata`,
+/// `saml_idp_slo`, `saml_idp_sso_logout`), so a flood here cannot spend
+/// `/oauth2/end_session`'s allowance or the reverse. Every route allocates state
+/// (a pending row, a logout run) or does XML and signature work, which is what is
+/// being bounded.
 ///
 /// **D-20.** Any other method on these paths, and any other path under the
 /// scope, answers [`handlers::saml_idp::not_found`] — the same empty `404` a
@@ -1630,7 +1632,7 @@ pub fn build_cors(allowed_origins: &[String]) -> Cors {
 fn saml_idp_scope<C: surrealdb::Connection + Clone>(
     rate_limit_cfg: &RateLimitConfig,
 ) -> impl actix_web::dev::HttpServiceFactory + 'static {
-    use handlers::saml_idp;
+    use handlers::{saml_idp, saml_idp_slo};
     let per_min = rate_limit_cfg.end_session_per_min;
     web::scope("/saml/v2/{tenant_id}")
         // T23.2.5, D-40: the IdP metadata. The same browser-endpoint preset, a
@@ -1666,6 +1668,25 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
                     per_min,
                 ))
                 .route(web::get().to(saml_idp::sso_idp_initiated::<C>))
+                .default_service(web::to(saml_idp::not_found)),
+        )
+        // T23.2.4, D-39: the IdP-initiated logout trigger. Under the SSO path, so
+        // the OP cookie reaches it; the browser-endpoint preset in a bucket of its
+        // own; the D-20 `404` for every other method.
+        .service(
+            web::resource("/sso/logout")
+                .wrap(build_governor(per_min))
+                .wrap(RateLimitShared::<C>::new("saml_idp_sso_logout", per_min))
+                .route(web::get().to(saml_idp_slo::sso_logout::<C>))
+                .default_service(web::to(saml_idp::not_found)),
+        )
+        // T23.2.4, D-38: single logout, both bindings, the one shared bucket.
+        .service(
+            web::resource("/slo")
+                .wrap(build_governor(per_min))
+                .wrap(RateLimitShared::<C>::new("saml_idp_slo", per_min))
+                .route(web::get().to(saml_idp_slo::slo_redirect::<C>))
+                .route(web::post().to(saml_idp_slo::slo_post::<C>))
                 .default_service(web::to(saml_idp::not_found)),
         )
         .default_service(web::to(saml_idp::not_found))

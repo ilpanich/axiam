@@ -309,6 +309,11 @@ impl<C: Connection> SamlSpSessionRepository for SurrealSamlSpSessionRepository<C
         Ok(models(rows)?.into_iter().next())
     }
 
+    // `$session_ids CONTAINS session_id` rather than `session_id IN $session_ids`
+    // in `mark_ended` and `delete_for_sessions`: on the engine in use the `IN`
+    // form, planned over the (tenant, session, SP) unique index, matched nothing
+    // once more than one value was bound — a chain that ended two sessions left
+    // both sessions' rows behind (`saml_slo_test` pins several at once).
     async fn mark_ended(&self, tenant_id: Uuid, session_ids: &[Uuid]) -> AxiamResult<u64> {
         if session_ids.is_empty() {
             return Ok(0);
@@ -319,7 +324,7 @@ impl<C: Connection> SamlSpSessionRepository for SurrealSamlSpSessionRepository<C
             .query(
                 "SELECT count() AS total FROM (UPDATE saml_sp_session \
                  SET ended_at = time::now() \
-                 WHERE tenant_id = $tenant_id AND session_id IN $session_ids) GROUP ALL",
+                 WHERE tenant_id = $tenant_id AND $session_ids CONTAINS session_id) GROUP ALL",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("session_ids", id_strings(session_ids)))
@@ -338,7 +343,7 @@ impl<C: Connection> SamlSpSessionRepository for SurrealSamlSpSessionRepository<C
             .current()
             .query(
                 "SELECT count() AS total FROM (DELETE saml_sp_session \
-                 WHERE tenant_id = $tenant_id AND session_id IN $session_ids \
+                 WHERE tenant_id = $tenant_id AND $session_ids CONTAINS session_id \
                  RETURN BEFORE) GROUP ALL",
             )
             .bind(("tenant_id", tenant_id.to_string()))

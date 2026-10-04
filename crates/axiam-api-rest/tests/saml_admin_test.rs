@@ -2920,9 +2920,21 @@ mod metadata {
                 "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
             ]
         );
-        assert!(
-            summary.single_logout.is_empty(),
-            "no SLO until the route exists"
+        // T23.2.4: both logout bindings, at the SLO endpoint, as an SP's library
+        // reads them — the document advertises a route that exists.
+        let slo = format!("{ROOT_ISSUER}/saml/v2/{tenant}/slo");
+        assert_eq!(
+            summary.single_logout,
+            vec![
+                (
+                    "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect".to_string(),
+                    slo.clone()
+                ),
+                (
+                    "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST".to_string(),
+                    slo
+                ),
+            ]
         );
         assert!(
             !summary.has_validity_or_signature,

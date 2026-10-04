@@ -45,6 +45,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subject captured before the write. `openapi.json` regenerated (the poll route,
   tag `ssf-receiver`); the management registry is unchanged apart from its spec
   digest.
+- **The SAML identity provider in the documentation: website page, contract
+  amendment (T23.2.9, G-2, contract 1.55).** The website's *Integrate* section
+  gains **AXIAM as a SAML identity provider**: what a per-tenant IdP offers
+  (SP-initiated and IdP-initiated sign-on, HTTP-Redirect and HTTP-POST, always-signed
+  assertions, a pairwise persistent `NameID`, a signing credential issued by the
+  tenant's CA with issue / promote / retire rotation, single logout), how to
+  register a service provider (the console's *SAML Service Providers* page or the
+  §29 API; metadata import is a parse to a draft), the metadata and endpoint paths
+  under `/saml/v2/{tenant}`, the `saml` build feature and the layered
+  `saml_idp_enabled` switch (an empty `404` when off), `AXIAM__AUTH__SAML_PAIRWISE_KEY`
+  (never change it), the rate-limit buckets, and what is not supported (assertion
+  encryption, signed metadata, the artifact and SOAP bindings, a SAML logout chain
+  from non-SAML logouts). The *Federation — SAML & OIDC* page no longer reads as
+  though AXIAM were only a service provider and links to it, the settings page lists
+  `saml_idp_enabled`, and the generated API index now carries the `saml` operations
+  (and places the `ssf` tags the generator refused). **Contract 1.55, amended before
+  it ships, no version bump:** §29's status text and §29.10 say the routes have
+  landed and that all eleven SDKs (Kotlin, Swift, C and C++ over REST included) are
+  in scope, §29.8 gains an eighth required test (`get_idp` readiness decoding, no
+  caching, the implicit tenant), and the breaking-changes log records the amendment
+  with D-43's `401`. The SDK ports remain the post-merge fan-out of D-35; one
+  tracking issue covers contract 1.53, 1.54 and 1.55 together.
 
 - **Shared Signals Framework transmitter: the stream registry, SET issuance,
   the stream management API and discovery (T23.5.2, G-5, D-44 … D-52, contract

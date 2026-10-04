@@ -3797,8 +3797,8 @@ absence rule (no key member on `SamlIdpCredential`), §29.3's call-site document
 
 > "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17, §19, §27, §28, §28.12, §29 and §30."
 
-No SDK may state it at contract 1.55, because the routes are not yet in `openapi.json`
-([§29.10](#§2910-per-sdk-posture)).
+An SDK states it only after porting it from the merge commit that carries the routes
+([§29.10](#§2910-per-sdk-posture)); none does yet.
 
 §32 (SSF stream registration, contract 1.56) is a §27 namespace too, stated by name for §32.5's
 wrapping and §32.3's call-site documentation:
@@ -3893,7 +3893,7 @@ recorded here until one exists.
   independent of `saml_idp_enabled`, with `parse_sp_metadata` alone `503` in a build
   without SAML; the permissions `saml_sp:read`, `saml_sp:write` and `saml_idp:credential`;
   human principals only; the bucket `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN`; audit rows;
-  no retry of writes; seven required tests per SDK. The browser routes (SSO, SLO, IdP
+  no retry of writes; seven required tests per SDK (eight after the amendment below). The browser routes (SSO, SLO, IdP
   metadata) stay out of SDK scope and out of `openapi.json`. §29 replaces the number §30
   reserved; §27.1 and §27.5 gain a note; the Conformance Statement gains §29's sentence.
 
@@ -3911,6 +3911,21 @@ recorded here until one exists.
     `retired` on the promotion; (5) `Page<T>` with `search` carried by the auto-pager, and a
     plain list for credentials; (6) no retry of the seven writes on `503`; (7) the
     `400`/`409`/`404`/`503` mapping.
+
+  - **Amended before 1.55 shipped (T23.2.9, G-2; D-43).** No version bump: no SDK has ported
+    §29 and 1.55 is unreleased, so the text is corrected in place (D-43 amended rule 9 the same way). (a)
+    §29.3 rule 9: a service-account token on the `saml` namespace is `401`, not `403` — the
+    shared human-only extractor answers `401` for every human-only family, as §30 says
+    (D-43). (b) §29's status paragraph, the Conformance Statement note and §29.10 no longer
+    say the routes are absent: T23.2.5 regenerated `openapi.json` and
+    `management-registry.json` (179 operations across 26 namespaces at that task, 184 across
+    27 with §32), and the eleven `saml` operations carry the ids of §29.1. (c) §29.8 gains an
+    **eighth required test** (`get_idp` readiness decoding, nullable credential ids, no
+    caching, the implicit tenant), so the count above, "seven required tests per SDK",
+    reads eight. (d) §29.10 states that all eleven SDKs are in scope — Kotlin, Swift, C and
+    C++ included, since §29 is management REST and they carry REST — and that the manifest
+    has no `saml` kind. The tracking issue for the post-merge ports covers 1.53 (§28.12),
+    1.54 (§30) and 1.55 (§29) together (D-35); §32 (1.56) is tracked separately.
 
 - **2026-10-04 (T23.3.7, G-3, contract 1.54)** — **non-breaking / additive.** A new
   section, [§30](#§30-directory-configuration-management-api-contract-154): the management
@@ -9486,10 +9501,11 @@ Flag, below). What this section adds is the administration: the per-tenant regis
 service providers, the import of an SP's metadata into a draft registration, and the
 lifecycle of the tenant's IdP signing credential, as one §27 namespace.
 
-**Status: the text leads the routes.** The server task that implements them (T23.2.5)
-regenerates `openapi.json` and `management-registry.json`; this section is normative over
-what it builds, and an SDK implements §29 from that merge commit, not before (§7 rule 1 of
-the plan; the 1.49 rule).
+**Status: the routes have landed.** The server task that implements them (T23.2.5)
+regenerated `openapi.json` and `management-registry.json` (the `saml` namespace, eleven
+operations, every one with the operation id of §29.1's first column); this section is
+normative over what it builds, and an SDK implements §29 from the merge commit of the
+branch that carries both, not from a draft (§7 rule 1 of the plan; the 1.49 rule; D-35).
 
 ### §29.1 Canonical operation set
 
@@ -9760,7 +9776,7 @@ first call already promoted; `create_service_provider` repeated is a `409` on th
 
 ### §29.8 Required tests
 
-Seven per SDK that ships the namespace, against a mocked HTTP server:
+Eight per SDK that ships the namespace, against a mocked HTTP server:
 
 1. **Replacement.** `update_service_provider` sends `PUT` with a body carrying every
    `SamlServiceProviderInput` member; the SDK's input type cannot be built without
@@ -9788,6 +9804,12 @@ Seven per SDK that ships the namespace, against a mocked HTTP server:
    conflict` on `create_service_provider` and on `promote_idp_credential` is
    `ConflictError`; a `404 not_found` on `get_service_provider` is `NotFoundError`; a `503`
    on `parse_sp_metadata` is `NetworkError`.
+8. **Readiness is read, not cached.** A mocked `get_idp` body carrying all ten members of
+   `SamlIdpInfo`, with `active_credential_id` present and `next_credential_id` null,
+   decodes with the null kept distinct from an absent member; two successive calls issue
+   two requests (§29.9); and, with the client's tenant configured, the call is made without
+   a `tenant_id` argument and the mock sees the configured tenant in the path (§27.4
+   rule 3).
 
 The server task adds its own tests for every rule in §29.3; they are not an SDK's to
 duplicate.
@@ -9804,14 +9826,22 @@ way to read the IdP's private key, because none exists. It does not cache
 
 ### §29.10 Per-SDK posture
 
-**No SDK implements §29 at contract 1.55.** The server task's merge (T23.2.5) regenerates
-`openapi.json` and `management-registry.json`; the ports follow from that merge commit, one
-PR per repository, as the post-merge fan-out of D-35, and this table is filled in by the
-review that reads them (§28.10's rule). An SDK that ships the namespace states it by name —
-"§27 and §29" — rather than letting its §27 claim widen silently (Conformance Statement),
-even though its §27 generator will produce the eleven operations on its own once the
-registry carries them: §29.2's absence rule, §29.3's call-site documentation and §29.8's
-tests are what the claim adds.
+**No SDK implements §29 at contract 1.55.** The server task's merge (T23.2.5) regenerated
+`openapi.json` and `management-registry.json`, so the ports can now be made; they follow
+from the merge commit of the wave's pull request, one PR per repository, as the post-merge
+fan-out of D-35, and this table is filled in by the review that reads them (§28.10's
+rule). An SDK that ships the namespace states it by name — "§27 and §29" — rather than
+letting its §27 claim widen silently (Conformance Statement), even though its §27
+generator will produce the eleven operations on its own once the registry carries them:
+§29.2's absence rule, §29.3's call-site documentation and §29.8's tests are what the claim
+adds.
+
+**All eleven SDKs are in scope, and the transport does not split them.** §29 is management
+REST (§27), so Kotlin, Swift, C and C++ — which carry the REST surface only (§1–§7,
+§9–§11) — implement it exactly as the seven full-surface SDKs do: §27.10 records that all
+eleven implement the imperative management surface, and there is no gRPC or AMQP form of
+any §29 operation. No SDK runs the browser flow (§29.9). §27.6's manifest has no `saml`
+kind in this revision, so no SDK's declarative layer is touched by §29.
 
 ## §30 Directory configuration (management API, contract 1.54)
 

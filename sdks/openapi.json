@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:c49f070b61e30598c5da099d179017f81b8a7bb79d7d799af0291ed6d7b94979"
+    "x-axiam-spec-digest": "sha256:672f10090fc04f2ef68f9bfc46df29f9447703dfced39eaaa2b58359fb7e1ea6"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -194,7 +194,7 @@
             }
           },
           "404": {
-            "description": "Nothing to describe: an unknown tenant, or one whose transmitter is off (indistinguishable)"
+            "description": "Nothing to describe: an unknown tenant, or one whose transmitter is off or inactive — `ssf_enabled` off, or a deployment of several tenants without per-tenant issuers (D-55) — (indistinguishable)"
           },
           "429": {
             "description": "Rate limit"
@@ -233,7 +233,7 @@
             }
           },
           "404": {
-            "description": "Nothing to describe (indistinguishable)"
+            "description": "Nothing to describe: an unknown tenant, or one whose transmitter is off (indistinguishable)"
           },
           "429": {
             "description": "Rate limit"
@@ -5872,7 +5872,7 @@
             }
           },
           "400": {
-            "description": "Settings are internally inconsistent, or enable OPAQUE on a server holding no OPAQUE keys"
+            "description": "Settings are internally inconsistent, enable OPAQUE on a server holding no OPAQUE keys, or turn ssf_enabled on while the deployment holds more than one tenant and serves no per-tenant issuers (D-55)"
           },
           "409": {
             "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory)"
@@ -9734,7 +9734,7 @@
             }
           },
           "400": {
-            "description": "Override violates org baseline, or enables OPAQUE on a server holding no OPAQUE keys"
+            "description": "Override violates org baseline, enables OPAQUE on a server holding no OPAQUE keys, or turns ssf_enabled on while the deployment's tenants share one issuer (D-55)"
           },
           "409": {
             "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory)"
@@ -11209,7 +11209,8 @@
                           "status",
                           "status_actor",
                           "created_at",
-                          "updated_at"
+                          "updated_at",
+                          "transmitter_active"
                         ],
                         "properties": {
                           "audience": {
@@ -11304,6 +11305,17 @@
                             "type": "string",
                             "format": "uuid",
                             "description": "The owning tenant."
+                          },
+                          "transmitter_active": {
+                            "type": "boolean",
+                            "description": "Whether the tenant's transmitter is active: its `ssf_enabled` is on and\nthe deployment does not make every tenant share one issuer (D-55). A\nstream of an inactive transmitter is kept, and carries nothing."
+                          },
+                          "transmitter_inactive_reason": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Why the transmitter is inactive, when it is."
                           },
                           "updated_at": {
                             "type": "string",
@@ -19632,6 +19644,14 @@
             "type": "boolean",
             "description": "G-5 / D-45 — whether the tenant is a Shared Signals Framework\ntransmitter: its `/.well-known/ssf-configuration` is served, its\nreceivers can use the stream management API, and events are signed and\ntransmitted on its streams. Default **`false`**.\n\n**Disable-only**, with the shape of [`Self::saml_idp_enabled`]: sending\nsecurity events about the organization's users to third parties is the\norganization's decision. Streams can be registered while it is off; they\ncarry nothing until it is on.",
             "example": false
+          },
+          "ssf_inactive_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "**Read-only**, D-55: set on a settings response when `ssf_enabled` is on\nbut the transmitter is inactive anyway, saying why — the deployment holds\nmore than one tenant and serves no per-tenant issuers. Never stored.",
+            "readOnly": true
           }
         }
       },
@@ -23497,7 +23517,8 @@
           "status",
           "status_actor",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "transmitter_active"
         ],
         "properties": {
           "audience": {
@@ -23592,6 +23613,17 @@
             "type": "string",
             "format": "uuid",
             "description": "The owning tenant."
+          },
+          "transmitter_active": {
+            "type": "boolean",
+            "description": "Whether the tenant's transmitter is active: its `ssf_enabled` is on and\nthe deployment does not make every tenant share one issuer (D-55). A\nstream of an inactive transmitter is kept, and carries nothing."
+          },
+          "transmitter_inactive_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the transmitter is inactive, when it is."
           },
           "updated_at": {
             "type": "string",

@@ -711,6 +711,63 @@ Notification rules are configurable per org/tenant. Notifications are delivered 
 
 ---
 
+## 8d. Directory Identity Source (LDAP / Active Directory)
+
+A tenant can federate an existing LDAP or Active Directory server (competitor-gap item **G-3**, Phase 23): users sign in with their directory password, accounts are provisioned just in time, and directory groups map onto AXIAM groups, so roles and permissions keep working. AXIAM is **read-only** against the directory and has no Kerberos / SPNEGO path. This chapter says where each part lives and links to the decisions that bind it; the reasoning is in the plan's decision table ([`competitor-gap-remediation-plan-2026-10-02.md`](competitor-gap-remediation-plan-2026-10-02.md) §8), the wire contract in [`sdks/CONTRACT.md`](../sdks/CONTRACT.md) §30, the operator's view in [`docs/deployment/README.md`](../docs/deployment/README.md), the threats in [`threat-model-stride.md`](threat-model-stride.md) (T-291 … T-303, T-331 … T-355).
+
+### 8d.1 Placement
+
+`axiam-directory` is a layer-3 crate beside `axiam-federation` (a federation protocol with the same dependency shape), placed in the layering table and [`crate-layering.md`](crate-layering.md) in the commit that created it, and opted into `missing_docs` from its first commit. It uses `ldap3` over `rustls` (no OpenSSL) and has no feature flag. The sign-in path, which lives in `axiam-auth` (layer 1), reaches it through ports declared in `axiam-core` (`DirectoryAuthenticator`, `DirectoryGroupMapper`, `DirectoryAuditSink`) that `axiam-server` implements and injects, so no production dependency points outward. `axiam-api-rest` (layer 6) depends on the crate only to call its validation and address guard on a write.
+
+### 8d.2 Configuration and the bind secret
+
+One `directory_config` row per tenant (schema v70, group mappings v74): URL (`ldaps://`, or `ldap://` with StartTLS — plaintext is refused), bind DN, base DN, the user-filter template (one `{username}`, in value position), the attribute map, group search base, filter and member attribute, nesting depth, the mapping table, sync interval, `jit_provisioning` and per-tenant trust anchors. `kind` (`open_ldap` | `active_directory`) chooses **defaults only**.
+
+The bind secret is encrypted at rest in the row with AES-256-GCM, a fresh nonce per write, under the optional deployment key `directory_encryption_key`, exactly as the per-tenant SMTP password is ([D-15](competitor-gap-remediation-plan-2026-10-02.md)). It is **write-only through every interface**: no read returns it, no response type has a member for it, a flag that says one is set, or a hash of it, request bodies `Debug`-print `[REDACTED]`, and only `decrypt_bind_secret` — called at bind time — yields the plaintext. Without the key the feature is unavailable: a write that carries a secret is `503`, while reads, `DELETE` and the sync status still work.
+
+### 8d.3 Sign-in: the bind path
+
+```
+POST /auth/login ──▶ AXIAM lockout (brute-force counters, in front of the directory)
+                      │  account carries directory_external_id?
+                      ▼
+                    service bind (bind_dn, pooled, bounded per tenant)
+                      │  search base_dn with the RFC 4515-escaped login name → exactly one entry
+                      ▼
+                    bind AS that entry with the typed password (fresh connection, never pooled)
+                      │  success only if the entry's id equals the account's marker
+                      ▼
+                    group mapping (D-30) → session / MFA proceed as for any user, amr = [pwd]
+```
+
+A directory account is marked by one column, `user.directory_external_id` (`entryUUID` or `objectGUID`, schema v71, unique per tenant; [D-18](competitor-gap-remediation-plan-2026-10-02.md), amended by D-29): the directory is then the **only** authority for its password. There is **no fallback to a local hash**; every local password door (change, reset request and confirm, OPAQUE login and enrolment, the SCIM password write, gRPC `ValidateCredentials`) refuses such an account. Only an invalid-credentials answer moves the AXIAM counter, a locked account never reaches the directory (AXIAM cannot be used to lock accounts in AD), every failure is the generic sign-in failure at the cost of the dummy Argon2id verify, and an empty password is refused before any packet is sent. Filters are built through one escape function and never by formatting; referrals are neither followed nor matched; TLS is mandatory, verified against the tenant's anchors (or the public roots, never both) with the URL's host as the name.
+
+### 8d.4 Just-in-time provisioning
+
+With `jit_provisioning` on, a first successful sign-in for a name that matches **no local account** creates one in a single write: `Active` (the directory vouches for it), marked, holding an unusable password hash. Profile values from the entry are cleaned, not repaired (control and bidirectional characters, length), and an entry **without a usable e-mail address is refused** with the generic failure and a `directory.jit_refused` audit row, because a placeholder would be released as a `NameID` and as the OIDC `email` ([D-29](competitor-gap-remediation-plan-2026-10-02.md)). JIT **never links** a colliding local account ([D-28](competitor-gap-remediation-plan-2026-10-02.md)): a directory administrator cannot take over `admin` by creating a matching entry.
+
+### 8d.5 Linking an existing account
+
+Linking is the explicit administrator act (`POST …/directory/links`, permission `directory:link`): the directory resolves the entry from the account's own username, the account is marked, and everything it held that authenticates without the directory deciding is retired — passkeys deleted, `User`-type certificates revoked (by the D-29 convention, since no certificate is bound to a user), then all sessions and OAuth2 refresh tokens, last, so anything issued before the mark is swept. TOTP is kept. The order is safe to stop in and to retry; a repeat on an account already linked to that entry is `200` with `was_already_linked`. There is no unlink.
+
+### 8d.6 Group mapping
+
+An explicit table only: `{ directory_group_dn, group_id }`, at most 500, every group of the same tenant, DNs compared after RFC 4514 normalisation ([D-30](competitor-gap-remediation-plan-2026-10-02.md)). No match by name, no AXIAM group created from a directory one. The mapping **owns only the memberships it made** (`member_of.source = directory`, schema v74) and never touches one added by hand. Resolution is `memberOf` (AD) or a reverse `member` search (OpenLDAP), nested to `group_nesting_depth` with cycle detection and a hard cap of 1 000 groups, over the service connection. It runs on every successful directory sign-in before the session is issued, and by the sync job; a lookup that fails or hits a cap **refuses the sign-in** rather than keep memberships that may have been revoked. A change flushes the authorization decision cache for the user.
+
+### 8d.7 The sync job
+
+A job on the cleanup scheduler (`directory_sync` in job health), one tenant at a time, only for enabled directories ([D-31](competitor-gap-remediation-plan-2026-10-02.md)). A **full run** (first, every 24 h, and after any skipped account) looks up every marked account by its immutable id and is the only run that concludes "vanished"; an **incremental run** reads `modifyTimestamp` / `uSNChanged` from a watermark (AD: `highestCommittedUSN`, with a fall-back to full on a `dsServiceName` change). A vanished or directory-disabled account becomes **`Inactive`** — never `Deleted`, never a hard delete — with its sessions revoked and its directory-sourced memberships removed. Sync **never re-enables, creates or links**. A full run that would deactivate more than 10 % of the tenant's directory accounts (and at least 5) applies nothing and reports `safety_valve`. State (watermark, server, last result) is the per-tenant `directory_sync_state` row (schema v75), deleted with its configuration and its tenant.
+
+### 8d.8 The connector: address guard and frame cap
+
+A tenant administrator chooses the host, so the connector holds it to a deployment rule before it opens a socket ([D-19, D-32](competitor-gap-remediation-plan-2026-10-02.md); T-300, T-295, T-331). The host is resolved **once**; loopback, unspecified, link-local (the metadata address included), multicast, special-purpose and IPv4-mapped forms are always refused, as are AXIAM's own listeners and IPv6-literal URLs; a private address needs `AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS`. The socket is connected to the vetted address while TLS checks the host name, so a rebinding name cannot reach loopback. Because `ldap3` does its own TLS, a frame cap beneath it would see ciphertext: AXIAM performs StartTLS and the handshake itself and hands `ldap3` one end of a Unix socket pair, a **relay** that checks each directory message (declared length against `AXIAM__DIRECTORY__MAX_MESSAGE_BYTES`, well-formed, bounded depth) before forwarding it.
+
+### 8d.9 The management surface
+
+Six routes under `/api/v1/tenants/{tenant_id}/directory` (contract §30, OpenAPI tag `directory`, the §27 namespace `directory`): `GET`, `PUT` (replace), `PATCH` (sparse), `DELETE`, `POST …/links`, `GET …/sync-status`; permissions `directory:read`, `directory:write` and `directory:link`; a human administrator only (no service-account token); the caller's own tenant only. **Every write**, in order: `503` if it carries a secret and there is no key; `axiam_directory::config::validate`; the address guard on the URL as written (so a re-pointed name is caught by an unrelated write); the **P23W2-01 rule** — moving the URL, StartTLS, bind DN or trust anchors without the secret is a `400`, checked against the stored row in the same statement as the write; and a `409` if an enabled directory would sit under an effective `opaque_mode = required` (the settings writes refuse the other direction). The four writes share a per-IP rate-limit bucket (`AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN`, 30). Audit rows `directory.config_created` / `_updated` / `_deleted` record the actor, the **names** of the changed fields, `connection_moved`, `secret_replaced` and, on a disable or delete, the count of live directory accounts — never the secret nor an anchor's content. Disabling or deleting stops the directory and only that: sessions, refresh tokens and passkeys already held keep working until they expire or an administrator deactivates the accounts. The console's **Directory** page and the website's *LDAP / Active Directory* page are the readable front doors; the normative text stays in §30 and the deployment guide.
+
+---
+
 ## 9. API Design
 
 ### 9.1 REST API Endpoints (Summary)

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:4727769d4a3bd8d401116ca44560a3e14981b09b1c92522b8f9b1584f8f5d220"
+    "x-axiam-spec-digest": "sha256:67cae880de57ea056f8924f7ba2b4f246444a1468ddd4646d00c2b0f16244e59"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -159,6 +159,84 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/.well-known/ssf-configuration": {
+      "get": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`GET /.well-known/ssf-configuration` — SSF 1.0 §7 transmitter metadata.",
+        "operationId": "ssf_configuration",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "The tenant whose transmitter metadata is asked for",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSF transmitter metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfConfiguration"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing to describe: an unknown tenant, or one whose transmitter is off (indistinguishable)"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        }
+      }
+    },
+    "/.well-known/ssf-configuration/t/{tenant_id}": {
+      "get": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`GET /.well-known/ssf-configuration/t/{tenant_id}` — the same metadata at\nthe SSF §7.2 insertion form of the tenant issuer `{root}/t/{tenant_id}`.\nMounted only where the deployment serves tenant issuers.",
+        "operationId": "ssf_configuration_tenant_path",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "The tenant this issuer names",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSF transmitter metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfConfiguration"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing to describe (indistinguishable)"
+          },
+          "429": {
+            "description": "Rate limit"
           }
         }
       }
@@ -11046,6 +11124,463 @@
         ]
       }
     },
+    "/api/v1/tenants/{tenant_id}/ssf/streams": {
+      "get": {
+        "tags": [
+          "ssf"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/ssf/streams`",
+        "operationId": "list_streams",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the tenant's SSF streams, oldest first; `search` matches audience, receiver client id, description and id, before paging",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A paginated result set.",
+                  "required": [
+                    "items",
+                    "total",
+                    "offset",
+                    "limit"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "A registered SSF stream, as the management API returns it. **The push\n`Authorization` header is never returned**; `authorization_header_set` says\nwhether one is stored.",
+                        "required": [
+                          "id",
+                          "tenant_id",
+                          "receiver_client_id",
+                          "audience",
+                          "delivery_method",
+                          "authorization_header_set",
+                          "events_allowed",
+                          "events_requested",
+                          "events_delivered",
+                          "subject_format",
+                          "status",
+                          "status_actor",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "properties": {
+                          "audience": {
+                            "type": "string",
+                            "description": "The SET `aud`. Unique across the deployment."
+                          },
+                          "authorization_header_set": {
+                            "type": "boolean",
+                            "description": "Whether a push `Authorization` header is stored."
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When the stream was registered."
+                          },
+                          "delivery_method": {
+                            "$ref": "#/components/schemas/SsfDeliveryMethod",
+                            "description": "`push` (RFC 8935) or `poll` (RFC 8936)."
+                          },
+                          "description": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "A description."
+                          },
+                          "endpoint_url": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The push endpoint, or null for a poll stream."
+                          },
+                          "events_allowed": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/components/schemas/SsfEventType"
+                            },
+                            "description": "The event types the receiver may have."
+                          },
+                          "events_delivered": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/components/schemas/SsfEventType"
+                            },
+                            "description": "What the stream carries: the intersection of the two."
+                          },
+                          "events_requested": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/components/schemas/SsfEventType"
+                            },
+                            "description": "The event types the receiver asked for (a subset of `events_allowed`)."
+                          },
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The stream id, also the SSF `stream_id`."
+                          },
+                          "last_verification_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "date-time",
+                            "description": "When the receiver last asked for a verification event, or null."
+                          },
+                          "receiver_client_id": {
+                            "type": "string",
+                            "description": "The OAuth2 `client_id` whose client-credentials token (scope\n`ssf.manage`) is this stream's receiver on the stream management API."
+                          },
+                          "status": {
+                            "$ref": "#/components/schemas/SsfStreamStatus",
+                            "description": "`enabled`, `paused` or `disabled`."
+                          },
+                          "status_actor": {
+                            "$ref": "#/components/schemas/SsfStatusActor",
+                            "description": "Who set the status: `admin` or `receiver`."
+                          },
+                          "status_reason": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Why, if anyone said."
+                          },
+                          "subject_format": {
+                            "$ref": "#/components/schemas/SsfSubjectFormat",
+                            "description": "`iss_sub` (default) or `email`."
+                          },
+                          "tenant_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The owning tenant."
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When it was last written."
+                          }
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "ssf"
+        ],
+        "summary": "`POST /api/v1/tenants/{tenant_id}/ssf/streams`",
+        "operationId": "create_stream",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsfStreamInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The stream was registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfStream"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value rule or the receiver binding — the message names the rule"
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          },
+          "409": {
+            "description": "The audience is already used by an SSF stream"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "A push authorization header was given and the deployment cannot seal it"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}": {
+      "get": {
+        "tags": [
+          "ssf"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}`",
+        "operationId": "get_stream",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "stream_id",
+            "in": "path",
+            "description": "Stream ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stream",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfStream"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          },
+          "404": {
+            "description": "No such stream in this tenant"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "ssf"
+        ],
+        "summary": "`PUT /api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}` — a\n**replacement**: an omitted optional member takes its default, except the\nheader, which absent keeps.",
+        "operationId": "update_stream",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "stream_id",
+            "in": "path",
+            "description": "Stream ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsfStreamInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stream's new configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfStream"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value rule, the receiver binding, or a move of the push endpoint to another origin without the authorization header"
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          },
+          "404": {
+            "description": "No such stream in this tenant"
+          },
+          "409": {
+            "description": "The audience is already used by another SSF stream"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "A push authorization header was given and the deployment cannot seal it"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "ssf"
+        ],
+        "summary": "`DELETE /api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}` — the stream\nand its buffered events.",
+        "operationId": "delete_stream",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "stream_id",
+            "in": "path",
+            "description": "Stream ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The stream and its buffered events were deleted"
+          },
+          "403": {
+            "description": "Another tenant's registry"
+          },
+          "404": {
+            "description": "No such stream in this tenant"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/tenants/{tenant_id}/webauthn/attestation-policy": {
       "get": {
         "tags": [
@@ -13317,6 +13852,358 @@
             }
           }
         }
+      }
+    },
+    "/ssf/v1/status": {
+      "get": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`GET /ssf/v1/status`",
+        "operationId": "get_stream_status",
+        "parameters": [
+          {
+            "name": "stream_id",
+            "in": "query",
+            "description": "The stream",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stream's status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfStreamStatusView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid token"
+          },
+          "403": {
+            "description": "Not an OAuth2 client token with the ssf.manage scope"
+          },
+          "404": {
+            "description": "No such stream for this receiver"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`POST /ssf/v1/status`",
+        "operationId": "update_stream_status",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsfStatusUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stream's new status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfStreamStatusView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unknown status or an over-long reason"
+          },
+          "401": {
+            "description": "No valid token"
+          },
+          "403": {
+            "description": "Not a receiver token, or an administrator set this status"
+          },
+          "404": {
+            "description": "No such stream for this receiver"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/ssf/v1/stream": {
+      "get": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`GET /ssf/v1/stream` — the receiver's stream, or all of them.",
+        "operationId": "get_stream_configuration",
+        "parameters": [
+          {
+            "name": "stream_id",
+            "in": "query",
+            "description": "One stream; omit for every stream of this receiver",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stream configuration, or an array of them",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfStreamConfiguration"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid token"
+          },
+          "403": {
+            "description": "Not an OAuth2 client token with the ssf.manage scope"
+          },
+          "404": {
+            "description": "No such stream for this receiver"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`PUT /ssf/v1/stream` — replace the receiver-supplied members; an absent\none is deleted.",
+        "operationId": "replace_stream_configuration",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReceiverStreamUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The replaced configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfStreamConfiguration"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "As for PATCH, or no delivery"
+          },
+          "401": {
+            "description": "No valid token"
+          },
+          "403": {
+            "description": "Not an OAuth2 client token with the ssf.manage scope"
+          },
+          "404": {
+            "description": "No such stream for this receiver"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "The header cannot be stored on this deployment"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`POST /ssf/v1/stream` — refused: streams are registered by an\nadministrator (SSF §8.1.1.1 allows `403`).",
+        "operationId": "create_stream_refused",
+        "responses": {
+          "401": {
+            "description": "No valid token"
+          },
+          "403": {
+            "description": "Always: streams are registered by a tenant administrator"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`DELETE /ssf/v1/stream` — refused for the receiver's own stream (an\nadministrator deletes streams); `404` for any other.",
+        "operationId": "delete_stream_refused",
+        "parameters": [
+          {
+            "name": "stream_id",
+            "in": "query",
+            "description": "The stream",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "No valid token"
+          },
+          "403": {
+            "description": "Streams are deleted by a tenant administrator"
+          },
+          "404": {
+            "description": "No such stream for this receiver"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`PATCH /ssf/v1/stream` — change the receiver-supplied members present.",
+        "operationId": "patch_stream_configuration",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReceiverStreamUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsfStreamConfiguration"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A transmitter-supplied member that does not match, an event beyond the administrator's allowance, a delivery method change, a refused endpoint, or a move to another origin without the authorization header"
+          },
+          "401": {
+            "description": "No valid token"
+          },
+          "403": {
+            "description": "Not an OAuth2 client token with the ssf.manage scope"
+          },
+          "404": {
+            "description": "No such stream for this receiver"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "The header cannot be stored on this deployment"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/ssf/v1/verify": {
+      "post": {
+        "tags": [
+          "ssf-receiver"
+        ],
+        "summary": "`POST /ssf/v1/verify` — have a verification event transmitted.",
+        "operationId": "request_verification",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsfVerificationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The verification event was submitted for delivery"
+          },
+          "400": {
+            "description": "An over-long state, or a disabled stream"
+          },
+          "401": {
+            "description": "No valid token"
+          },
+          "403": {
+            "description": "Not an OAuth2 client token with the ssf.manage scope"
+          },
+          "404": {
+            "description": "No such stream for this receiver"
+          },
+          "429": {
+            "description": "Sooner than min_verification_interval, or the route's limit"
+          },
+          "503": {
+            "description": "Event delivery is not available on this deployment"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/t/{tenant_id}/.well-known/openid-configuration": {
@@ -18594,7 +19481,7 @@
       },
       "OidcPolicy": {
         "type": "object",
-        "description": "OpenID Connect surface controls (X7 G8, plan §4.6/§4.8; T21.4).\n\nSettings that are not password rules, here because this is the\norg-baseline-plus-tenant-override surface every other per-tenant control\nlives on. They are not all of the same kind as each other, and which is\nwhich is the whole of what [`validate_tenant_override`] and\n[`clamp_overrides_to_org`] read, so it is set out rather than inferred.\n\n**Ordered** — a tenant may be stricter than its organization and never more\npermissive:\n\n* [`Self::sensitive_scopes_enabled`], validated **disable-only** — the\n  mirror image of `mfa_enforced`, because releasing personal data is the\n  less-restrictive direction, so a tenant can turn its organization's\n  decision off but never on.\n* [`Self::saml_idp_enabled`], validated **disable-only** exactly like\n  [`Self::sensitive_scopes_enabled`] (D-20): a tenant may turn its\n  organization's `true` off and never its `false` on.\n* [`Self::dynamic_registration`], on the ladder\n  `disabled` → `initial_access_token` → `anonymous`: a tenant may move down\n  it and never up.\n* [`Self::dcr_max_clients`] and [`Self::dcr_unused_client_ttl_days`], on the\n  ordinary `tenant <= org` rule — with the wrinkle that `0` on the second\n  means *never sweep*, which is the longest window of all and is handled by\n  [`dcr_ttl_strictness`].\n\n**Not ordered**, therefore never validated against the baseline and never\nclamped:\n\n* [`Self::default_locale`]. A language is a presentation preference; there\n  is no sense in which Italian is stricter than French.\n* [`Self::dcr_allowed_scopes`], [`Self::dcr_allowed_redirect_hosts`] and\n  [`Self::external_client_allowed_resources`]. Each names per-tenant\n  resources — *this* tenant's MCP servers, *this* tenant's callback hosts —\n  and there is no sense in which one such list is stricter than another. A\n  subset rule would force an organization to enumerate every tenant's\n  resource servers in its own baseline before any tenant could name one.\n\nThe model's rule is \"a tenant may only be more restrictive\", which binds\nevery field that *has* a restrictiveness; a field that has none cannot\nviolate it.\n\nOne cross-field interlock spans both groups and is checked on the resolved\npolicy rather than on either input: see [`validate_dcr_policy`].",
+        "description": "OpenID Connect surface controls (X7 G8, plan §4.6/§4.8; T21.4).\n\nSettings that are not password rules, here because this is the\norg-baseline-plus-tenant-override surface every other per-tenant control\nlives on. They are not all of the same kind as each other, and which is\nwhich is the whole of what [`validate_tenant_override`] and\n[`clamp_overrides_to_org`] read, so it is set out rather than inferred.\n\n**Ordered** — a tenant may be stricter than its organization and never more\npermissive:\n\n* [`Self::sensitive_scopes_enabled`], validated **disable-only** — the\n  mirror image of `mfa_enforced`, because releasing personal data is the\n  less-restrictive direction, so a tenant can turn its organization's\n  decision off but never on.\n* [`Self::saml_idp_enabled`], validated **disable-only** exactly like\n  [`Self::sensitive_scopes_enabled`] (D-20): a tenant may turn its\n  organization's `true` off and never its `false` on.\n* [`Self::ssf_enabled`], validated **disable-only** the same way (D-45).\n* [`Self::dynamic_registration`], on the ladder\n  `disabled` → `initial_access_token` → `anonymous`: a tenant may move down\n  it and never up.\n* [`Self::dcr_max_clients`] and [`Self::dcr_unused_client_ttl_days`], on the\n  ordinary `tenant <= org` rule — with the wrinkle that `0` on the second\n  means *never sweep*, which is the longest window of all and is handled by\n  [`dcr_ttl_strictness`].\n\n**Not ordered**, therefore never validated against the baseline and never\nclamped:\n\n* [`Self::default_locale`]. A language is a presentation preference; there\n  is no sense in which Italian is stricter than French.\n* [`Self::dcr_allowed_scopes`], [`Self::dcr_allowed_redirect_hosts`] and\n  [`Self::external_client_allowed_resources`]. Each names per-tenant\n  resources — *this* tenant's MCP servers, *this* tenant's callback hosts —\n  and there is no sense in which one such list is stricter than another. A\n  subset rule would force an organization to enumerate every tenant's\n  resource servers in its own baseline before any tenant could name one.\n\nThe model's rule is \"a tenant may only be more restrictive\", which binds\nevery field that *has* a restrictiveness; a field that has none cannot\nviolate it.\n\nOne cross-field interlock spans both groups and is checked on the resolved\npolicy rather than on either input: see [`validate_dcr_policy`].",
         "required": [
           "sensitive_scopes_enabled"
         ],
@@ -18658,6 +19545,11 @@
           "sensitive_scopes_enabled": {
             "type": "boolean",
             "description": "Whether `address` and `phone` may be registered on a client, requested\nat the authorization endpoint, and released at UserInfo (X7 G8).\n\n**Off unless an organization turns it on.** The two scopes release a\npostal address and a telephone number — categories of personal data\nAXIAM has no other use for — so the deployment that has never thought\nabout them releases nothing, and the operator who has thought about\nthem says so once, at the organization level, where the lawful basis\nfor holding the data was decided.\n\nThe switch is a *capability*, not a grant: with it on, a client still\nhas to register the scope, the request still has to ask for it, and the\nuser still has to have consented. It is the first of four gates, and it\nis the only one an operator can close for everybody at once."
+          },
+          "ssf_enabled": {
+            "type": "boolean",
+            "description": "G-5 / D-45 — whether the tenant is a Shared Signals Framework\ntransmitter: its `/.well-known/ssf-configuration` is served, its\nreceivers can use the stream management API, and events are signed and\ntransmitted on its streams. Default **`false`**.\n\n**Disable-only**, with the shape of [`Self::saml_idp_enabled`]: sending\nsecurity events about the organization's users to third parties is the\norganization's decision. Streams can be registered while it is off; they\ncarry nothing until it is on.",
+            "example": false
           }
         }
       },
@@ -19875,6 +20767,112 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "ReceiverDelivery": {
+        "type": "object",
+        "description": "`delivery` in a receiver's update.",
+        "properties": {
+          "authorization_header": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `Authorization` header AXIAM sends to the push endpoint. Write-only."
+          },
+          "endpoint_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A push stream's new endpoint; a poll stream may only repeat its own."
+          },
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The delivery-method URI. It must be the stream's: the method is the\nadministrator's."
+          }
+        }
+      },
+      "ReceiverStreamUpdate": {
+        "type": "object",
+        "description": "A receiver's `PATCH` or `PUT` body on the configuration endpoint (SSF\n§8.1.1.3, §8.1.1.4). Transmitter-supplied members may be present and must\nthen match.",
+        "properties": {
+          "aud": {
+            "description": "Must match, if present (a string, or an array of that one string)."
+          },
+          "delivery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReceiverDelivery",
+                "description": "The delivery settings the receiver may supply."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A description."
+          },
+          "events_delivered": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Must match the value before the update, if present."
+          },
+          "events_requested": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The events the receiver wants. Unknown URIs are ignored; a known one\nthe administrator did not allow is refused."
+          },
+          "events_supported": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Must match, if present."
+          },
+          "iss": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Must match, if present."
+          },
+          "min_verification_interval": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Must match, if present."
+          },
+          "stream_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stream to change. Required."
           }
         }
       },
@@ -21883,6 +22881,11 @@
             },
             "description": "S-7 — defaulted to empty, so an API client written before the field\nlands on \"no `Server` certificate is issued\" (I1)."
           },
+          "ssf_enabled": {
+            "type": "boolean",
+            "description": "G-5 / D-45 — defaulted, so an API client written before the SSF\ntransmitter existed lands on `false`, which is what every deployment did\nbefore (I1).",
+            "example": false
+          },
           "webauthn_user_verification": {
             "type": "string",
             "example": "preferred"
@@ -22159,6 +23162,485 @@
           },
           "username": {
             "type": "string"
+          }
+        }
+      },
+      "SsfAuthorizationScheme": {
+        "type": "object",
+        "description": "One entry of `authorization_schemes` (SSF §7.1.1).",
+        "required": [
+          "spec_urn"
+        ],
+        "properties": {
+          "spec_urn": {
+            "type": "string",
+            "description": "`urn:ietf:rfc:6749`: an OAuth 2.0 client-credentials token carrying\nthe `ssf.manage` scope."
+          }
+        }
+      },
+      "SsfConfiguration": {
+        "type": "object",
+        "description": "`/.well-known/ssf-configuration` (SSF 1.0 §7.1).",
+        "required": [
+          "spec_version",
+          "issuer",
+          "jwks_uri",
+          "delivery_methods_supported",
+          "configuration_endpoint",
+          "status_endpoint",
+          "verification_endpoint",
+          "authorization_schemes",
+          "default_subjects",
+          "events_supported"
+        ],
+        "properties": {
+          "authorization_schemes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SsfAuthorizationScheme"
+            },
+            "description": "How a receiver authenticates to the three endpoints and to poll."
+          },
+          "configuration_endpoint": {
+            "type": "string",
+            "description": "The stream configuration endpoint."
+          },
+          "default_subjects": {
+            "type": "string",
+            "description": "`ALL`: every subject appropriate for a stream is on it (there is no\nadd/remove-subject endpoint)."
+          },
+          "delivery_methods_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Push (RFC 8935) and poll (RFC 8936)."
+          },
+          "events_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The event types AXIAM transmits (an extension member; SSF §7.1 allows\nother claims)."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "The tenant's issuer, identical to every SET's `iss`."
+          },
+          "jwks_uri": {
+            "type": "string",
+            "description": "Where the deployment key is published."
+          },
+          "spec_version": {
+            "type": "string",
+            "description": "`1_0`."
+          },
+          "status_endpoint": {
+            "type": "string",
+            "description": "The stream status endpoint."
+          },
+          "verification_endpoint": {
+            "type": "string",
+            "description": "The verification endpoint."
+          }
+        }
+      },
+      "SsfDeliveryMethod": {
+        "type": "string",
+        "description": "How SETs reach the receiver.",
+        "enum": [
+          "push",
+          "poll"
+        ]
+      },
+      "SsfDeliveryView": {
+        "type": "object",
+        "description": "The `delivery` member of a stream configuration as AXIAM returns it. The\n`authorization_header` is never returned.",
+        "required": [
+          "method",
+          "endpoint_url"
+        ],
+        "properties": {
+          "endpoint_url": {
+            "type": "string",
+            "description": "The push endpoint (receiver-supplied) or the poll endpoint\n(transmitter-supplied)."
+          },
+          "method": {
+            "type": "string",
+            "description": "The delivery-method URI."
+          }
+        }
+      },
+      "SsfEventType": {
+        "type": "string",
+        "description": "The six event types AXIAM transmits (G-5).\n\nStored and sent as their event-type URIs; [`Self::ALL`] is the canonical\norder every list AXIAM returns is sorted in.",
+        "enum": [
+          "https://schemas.openid.net/secevent/caep/event-type/session-revoked",
+          "https://schemas.openid.net/secevent/caep/event-type/credential-change",
+          "https://schemas.openid.net/secevent/caep/event-type/assurance-level-change",
+          "https://schemas.openid.net/secevent/risc/event-type/account-disabled",
+          "https://schemas.openid.net/secevent/risc/event-type/account-enabled",
+          "https://schemas.openid.net/secevent/risc/event-type/account-purged"
+        ]
+      },
+      "SsfStatusActor": {
+        "type": "string",
+        "description": "Who set a stream's current status. A status an administrator set to\nanything but `enabled` cannot be changed by the receiver (D-51).",
+        "enum": [
+          "admin",
+          "receiver"
+        ]
+      },
+      "SsfStatusUpdate": {
+        "type": "object",
+        "description": "`POST /ssf/v1/status` body (SSF §8.1.2.2).",
+        "required": [
+          "stream_id",
+          "status"
+        ],
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why; at most 256 bytes."
+          },
+          "status": {
+            "type": "string",
+            "description": "`enabled`, `paused` or `disabled`."
+          },
+          "stream_id": {
+            "type": "string",
+            "description": "The stream."
+          }
+        }
+      },
+      "SsfStream": {
+        "type": "object",
+        "description": "A registered SSF stream, as the management API returns it. **The push\n`Authorization` header is never returned**; `authorization_header_set` says\nwhether one is stored.",
+        "required": [
+          "id",
+          "tenant_id",
+          "receiver_client_id",
+          "audience",
+          "delivery_method",
+          "authorization_header_set",
+          "events_allowed",
+          "events_requested",
+          "events_delivered",
+          "subject_format",
+          "status",
+          "status_actor",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "audience": {
+            "type": "string",
+            "description": "The SET `aud`. Unique across the deployment."
+          },
+          "authorization_header_set": {
+            "type": "boolean",
+            "description": "Whether a push `Authorization` header is stored."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the stream was registered."
+          },
+          "delivery_method": {
+            "$ref": "#/components/schemas/SsfDeliveryMethod",
+            "description": "`push` (RFC 8935) or `poll` (RFC 8936)."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A description."
+          },
+          "endpoint_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The push endpoint, or null for a poll stream."
+          },
+          "events_allowed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SsfEventType"
+            },
+            "description": "The event types the receiver may have."
+          },
+          "events_delivered": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SsfEventType"
+            },
+            "description": "What the stream carries: the intersection of the two."
+          },
+          "events_requested": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SsfEventType"
+            },
+            "description": "The event types the receiver asked for (a subset of `events_allowed`)."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The stream id, also the SSF `stream_id`."
+          },
+          "last_verification_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the receiver last asked for a verification event, or null."
+          },
+          "receiver_client_id": {
+            "type": "string",
+            "description": "The OAuth2 `client_id` whose client-credentials token (scope\n`ssf.manage`) is this stream's receiver on the stream management API."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SsfStreamStatus",
+            "description": "`enabled`, `paused` or `disabled`."
+          },
+          "status_actor": {
+            "$ref": "#/components/schemas/SsfStatusActor",
+            "description": "Who set the status: `admin` or `receiver`."
+          },
+          "status_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, if anyone said."
+          },
+          "subject_format": {
+            "$ref": "#/components/schemas/SsfSubjectFormat",
+            "description": "`iss_sub` (default) or `email`."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was last written."
+          }
+        }
+      },
+      "SsfStreamConfiguration": {
+        "type": "object",
+        "description": "A stream configuration (SSF 1.0 §8.1.1) as the receiver reads it.",
+        "required": [
+          "stream_id",
+          "iss",
+          "aud",
+          "delivery",
+          "events_supported",
+          "events_requested",
+          "events_delivered",
+          "min_verification_interval"
+        ],
+        "properties": {
+          "aud": {
+            "type": "string",
+            "description": "The SET audience."
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/SsfDeliveryView",
+            "description": "The delivery method and endpoint."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The description."
+          },
+          "events_delivered": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the stream carries."
+          },
+          "events_requested": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the receiver asked for."
+          },
+          "events_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the administrator allowed this receiver."
+          },
+          "iss": {
+            "type": "string",
+            "description": "The tenant's issuer."
+          },
+          "min_verification_interval": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds between two verification requests."
+          },
+          "stream_id": {
+            "type": "string",
+            "description": "The stream id."
+          }
+        }
+      },
+      "SsfStreamInput": {
+        "type": "object",
+        "description": "`create_stream` and `update_stream` (a **replacement**) body.",
+        "required": [
+          "receiver_client_id",
+          "audience",
+          "delivery_method",
+          "events_allowed"
+        ],
+        "properties": {
+          "audience": {
+            "type": "string",
+            "description": "1–512 bytes; unique across the deployment."
+          },
+          "authorization_header": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "**Write-only.** The `Authorization` header value AXIAM sends to a push\nendpoint. On update, absent keeps the stored one — except that moving\nthe endpoint to another origin requires it again."
+          },
+          "clear_authorization_header": {
+            "type": "boolean",
+            "description": "On update: remove the stored header. Refused together with\n`authorization_header`."
+          },
+          "delivery_method": {
+            "$ref": "#/components/schemas/SsfDeliveryMethod",
+            "description": "`push` or `poll`."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "At most 256 bytes."
+          },
+          "endpoint_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for `push` (an `https` URL under the outbound address policy),\nrefused for `poll`."
+          },
+          "events_allowed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SsfEventType"
+            },
+            "description": "1–6 event types."
+          },
+          "events_requested": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SsfEventType"
+            },
+            "description": "A subset of `events_allowed`; absent means all of them. The receiver may\nnarrow it later, never widen it."
+          },
+          "receiver_client_id": {
+            "type": "string",
+            "description": "An OAuth2 client of the tenant with the `client_credentials` grant and\nthe `ssf.manage` scope."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SsfStreamStatus",
+            "description": "`enabled` by default."
+          },
+          "status_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "At most 256 bytes."
+          },
+          "subject_format": {
+            "$ref": "#/components/schemas/SsfSubjectFormat",
+            "description": "`iss_sub` by default."
+          }
+        }
+      },
+      "SsfStreamStatus": {
+        "type": "string",
+        "description": "A stream's SSF status (SSF 1.0 §8.1.2), with AXIAM's meaning pinned by D-51.",
+        "enum": [
+          "enabled",
+          "paused",
+          "disabled"
+        ]
+      },
+      "SsfStreamStatusView": {
+        "type": "object",
+        "description": "A stream's status (SSF §8.1.2.1).",
+        "required": [
+          "stream_id",
+          "status"
+        ],
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, if anyone said."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SsfStreamStatus",
+            "description": "`enabled`, `paused` or `disabled`."
+          },
+          "stream_id": {
+            "type": "string",
+            "description": "The stream."
+          }
+        }
+      },
+      "SsfSubjectFormat": {
+        "type": "string",
+        "description": "Which RFC 9493 subject identifier names the user in the SETs of a stream\n(D-46).",
+        "enum": [
+          "iss_sub",
+          "email"
+        ]
+      },
+      "SsfVerificationRequest": {
+        "type": "object",
+        "description": "`POST /ssf/v1/verify` body (SSF §8.1.4.2).",
+        "required": [
+          "stream_id"
+        ],
+        "properties": {
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Echoed in the verification event; at most 1 024 bytes."
+          },
+          "stream_id": {
+            "type": "string",
+            "description": "The stream."
           }
         }
       },
@@ -22631,6 +24113,13 @@
               "type": "string"
             },
             "description": "S-7 — tighten-only: every entry must be covered by an organization\nentry. An empty list means this tenant issues no `Server` certificate\nat all, which is different from an absent field (inherit the\norganization's list)."
+          },
+          "ssf_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "G-5 / D-45 — disable-only, like `saml_idp_enabled`; see\n[`OidcPolicy::ssf_enabled`]."
           },
           "webauthn_user_verification": {
             "type": [
@@ -24834,6 +26323,14 @@
     {
       "name": "saml",
       "description": "SAML 2.0 identity provider — service-provider registry, SP metadata import and the IdP signing credential (CONTRACT §29)"
+    },
+    {
+      "name": "ssf",
+      "description": "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §31)"
+    },
+    {
+      "name": "ssf-receiver",
+      "description": "Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §31.6)"
     },
     {
       "name": "directory",

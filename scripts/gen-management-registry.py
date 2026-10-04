@@ -68,6 +68,9 @@ EXCLUDED_TAGS: dict[str, str] = {
     "uma": "§20 UMA 2.0 protection API and ticket grant",
     "webauthn": "§24 WebAuthn ceremonies -- credential I/O, not administration",
     "federation-sso": "§12 public SSO entry points, driven by the RP helpers",
+    "ssf-receiver": "§31.6 the SSF 1.0 receiver protocol -- transmitter metadata and the "
+                    "stream management API a relying party's receiver calls with its own "
+                    "client-credentials token (ssf.manage), not administration",
     "device": "§14 device-grant user-interaction endpoints",
 }
 
@@ -442,6 +445,20 @@ NAMESPACES: dict[str, dict[str, Any]] = {
              "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire"),
         ],
     },
+    "ssf": {
+        "doc": "A tenant's Shared Signals Framework streams (CONTRACT §31): which "
+               "receiver -- an OAuth2 client of the tenant -- receives which CAEP and "
+               "RISC security events, as SETs pushed to its endpoint or polled. The "
+               "receiver's own protocol (transmitter metadata, the SSF stream "
+               "management API, polling) is not in this registry.",
+        "operations": [
+            ("list_streams", "GET", "/api/v1/tenants/{tenant_id}/ssf/streams"),
+            ("create_stream", "POST", "/api/v1/tenants/{tenant_id}/ssf/streams"),
+            ("get_stream", "GET", "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}"),
+            ("update_stream", "PUT", "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}"),
+            ("delete_stream", "DELETE", "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}"),
+        ],
+    },
     "settings": {
         "doc": "Effective settings, and the organization/tenant layers they "
                "resolve from.",
@@ -565,6 +582,11 @@ SENSITIVE_FIELDS: frozenset[tuple[str, str]] = frozenset({
     # version an SDK ships.
     ("SetDirectoryConfig", "bind_secret"),
     ("UpdateDirectoryConfig", "bind_secret"),
+    # T23.5.2 / CONTRACT §31.5. The Authorization header AXIAM presents to an SSF
+    # receiver's push endpoint: a credential to a third party, write-only, sealed
+    # at rest (D-49) and on no response. `SsfStreamInput` is the body of both
+    # `ssf.create_stream` and `ssf.update_stream`.
+    ("SsfStreamInput", "authorization_header"),
 })
 
 

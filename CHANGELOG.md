@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SDK contract 1.54: §30 directory configuration (T23.3.7, G-3).** The
+  normative management surface for a tenant's LDAP / Active Directory identity
+  source, ahead of the routes (T23.3.8 implements them and regenerates
+  `openapi.json` and `management-registry.json`): a §27 namespace `directory` —
+  `get`, `set` (replace), `update` (sparse), `delete`, `link_account` (D-28) and
+  `get_sync_status` under `/api/v1/tenants/{tenant_id}/directory` — with the
+  write-only `bind_secret` **`Sensitive<T>`** in every SDK from the first
+  version and never returned; every write validated and run through the address
+  guard (`400 validation_error` naming the rule, IPv6-literal hosts included);
+  moving the connection (`url`, `start_tls`, `bind_dn`, `trust_anchors_pem`)
+  without the secret a `400` (P23W2-01); an enabled directory and
+  `opaque_mode = required` refused together, both ways (`409`); `503` without
+  `directory_encryption_key`; the permissions `directory:read`,
+  `directory:write` and `directory:link`; a rate-limit bucket
+  `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN`; audit rows that record that the
+  connection moved and never the secret; no retry of writes; six portable tests
+  per SDK. No safety-valve override in this cut (§30.3 rule 7 says why). §29 is
+  reserved for G-2's SAML service-provider registration. Non-breaking /
+  additive; **re-sync `CONTRACT.md` for 1.54 in all eleven SDK repositories**
+  from the merged commit.
+
 - **Directory sources: the sync job (T23.3.5, G-3, D-31).** A background job on
   the cleanup scheduler (`directory_sync` in `GET /health/jobs`, last in each
   tick, one tenant at a time, only tenants whose directory is enabled) keeps

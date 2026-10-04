@@ -1673,6 +1673,12 @@ async fn main() -> std::io::Result<()> {
         )),
     };
 
+    // G-5 / T23.5.2 — the SSF stream registry. Push credentials are sealed
+    // under the key webhook secrets use (D-49); without it a stream with a push
+    // header cannot be stored and everything else works.
+    let ssf_stream_repo =
+        axiam_db::SurrealSsfStreamRepository::new(pool.handle_for_repo(), webhook_enc_key);
+
     // G7: resolve the deployment rate-limit posture BEFORE validation and
     // before `config.rate_limit` / `config.grpc` are cloned into the App
     // factory and the gRPC task. `AXIAM__RATE_LIMIT__PROFILE` (default
@@ -2939,6 +2945,13 @@ async fn main() -> std::io::Result<()> {
             client: Arc::clone(directory_authenticator.client()),
         },
         saml_idp: saml_idp_state,
+        // G-5 / T23.5.2 — the stream registry seals push credentials under the
+        // key webhook secrets use (D-49). The outbox is T23.5.3's: until it is
+        // wired, verification answers 503 and no event is produced.
+        ssf: bundles::SsfState {
+            stream_repo: ssf_stream_repo,
+            outbox: None,
+        },
     };
 
     // X4 — accept subject tokens from trusted external IdPs.

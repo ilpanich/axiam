@@ -42,6 +42,8 @@ pub mod scopes;
 pub mod service_accounts;
 pub mod sessions;
 pub mod settings;
+pub mod ssf;
+pub mod ssf_admin;
 pub mod tenants;
 pub mod uma;
 pub mod users;

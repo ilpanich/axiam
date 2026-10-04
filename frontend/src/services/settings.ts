@@ -192,6 +192,12 @@ export interface OidcPolicy {
    * SAML service-provider console page gives it a control.
    */
   saml_idp_enabled?: boolean;
+  /**
+   * G-5 / D-45 — whether the tenant is a Shared Signals Framework transmitter.
+   * Off unless an organization turns it on; carried through unedited (no
+   * console control yet), so a settings save never switches it off.
+   */
+  ssf_enabled?: boolean;
   dynamic_registration: DynamicRegistrationMode;
   /** May not contain `address` or `phone` — see `validateDcrPolicy`. */
   dcr_allowed_scopes: string[];
@@ -228,6 +234,7 @@ export function readOidcPolicy(s: {
     sensitive_scopes_enabled: o?.sensitive_scopes_enabled ?? false,
     default_locale: o?.default_locale ?? null,
     saml_idp_enabled: o?.saml_idp_enabled ?? false,
+    ssf_enabled: o?.ssf_enabled ?? false,
     dynamic_registration: o?.dynamic_registration ?? "disabled",
     dcr_allowed_scopes: o?.dcr_allowed_scopes ?? [],
     dcr_allowed_redirect_hosts: o?.dcr_allowed_redirect_hosts ?? [],

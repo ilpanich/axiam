@@ -204,6 +204,17 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "saml_idp:credential",
         "Issue, promote or retire the tenant's SAML IdP signing credential (retiring the active one stops SAML sign-on at once)",
     ),
+    // Shared Signals Framework transmitter — the stream registry (G-5,
+    // T23.5.2, CONTRACT §31). A stream decides which third party receives
+    // security events about the tenant's users and where they are pushed.
+    (
+        "ssf_streams:read",
+        "Read the tenant's SSF streams (the push authorization header is never returned)",
+    ),
+    (
+        "ssf_streams:write",
+        "Register, replace or delete SSF streams: which receiver gets which security events, and where they are pushed",
+    ),
     // Tenants
     ("tenants:list", "List tenants within an organization"),
     ("tenants:get", "Retrieve a single tenant"),
@@ -361,6 +372,10 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
     // are signed with, is a human administrator's act (§29.3 rule 9).
     "saml_sp",
     "saml_idp",
+    // G-5: deciding which third party receives security events about the
+    // tenant's users, and the credential they are pushed with, is a human
+    // administrator's act (§31.3).
+    "ssf_streams",
     "tenants",
     "organizations",
     "admin",
@@ -472,6 +487,12 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // §2 makes it the document a resource server fetches *before* it holds any
     // credential, and it carries only endpoint URLs the deployment publishes.
     "/.well-known/uma2-configuration",
+    // G-5 / T23.5.2 — SSF 1.0 §7.2 transmitter metadata, unauthenticated by
+    // specification, at the root form (`?tenant_id=`) and, where the
+    // deployment serves tenant issuers, the path-insertion form. Both answer
+    // the same empty `404` for every way of having nothing to say (D-45).
+    "/.well-known/ssf-configuration",
+    "/.well-known/ssf-configuration/t/*",
     "/oauth2/jwks",
     // T-39/T-143. Public for the same reason as the JWKS beside it: a route
     // guard fetches it before it holds any credential, and it carries only
@@ -1219,6 +1240,32 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "POST",
         "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire",
         "saml_idp:credential",
+    ),
+    // SSF stream registry (G-5, T23.5.2, CONTRACT §31)
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/ssf/streams",
+        "ssf_streams:read",
+    ),
+    (
+        "POST",
+        "/api/v1/tenants/{tenant_id}/ssf/streams",
+        "ssf_streams:write",
+    ),
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}",
+        "ssf_streams:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}",
+        "ssf_streams:write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}",
+        "ssf_streams:write",
     ),
     // WebAuthn Attestation Policy (X3 wave 3)
     (

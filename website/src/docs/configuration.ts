@@ -423,6 +423,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "30",
           ],
           [
+            "AXIAM__RATE_LIMIT__SSF_PER_MIN",
+            "Max requests per minute, per IP, to each route of the Shared Signals Framework receiver surface: the stream management API (/ssf/v1/stream, /ssf/v1/status, /ssf/v1/verify) and both /.well-known/ssf-configuration forms. One bucket per route, checked before the receiver's token; each stream also enforces its own 60-second min_verification_interval. Never moved by a profile preset.",
+            "60",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the SSF stream registry API under /api/v1/tenants/{tenant_id}/ssf/streams: create, update and delete a stream. Each write can repoint where a tenant's security events, and the push credential, are sent. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
             "Max /oauth2/end_session per minute — and the same preset for the SAML identity provider's browser endpoints (sign-on, metadata, single logout /slo and the logout trigger), each in a bucket of its own so a flood on one cannot spend another's allowance. Never moved by a profile preset.",
             "30",

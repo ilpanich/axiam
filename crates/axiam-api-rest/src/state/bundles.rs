@@ -329,3 +329,19 @@ pub struct SamlIdpState<C: Connection + Clone> {
     #[cfg(feature = "saml")]
     pub issuer: Arc<axiam_federation::saml_idp::SamlIdpIssuer>,
 }
+
+/// The Shared Signals Framework transmitter (G-5, T23.5.2): the stream registry
+/// and the outbox events go to.
+///
+/// In every build; it reads nothing behind a feature.
+#[derive(Clone)]
+pub struct SsfState<C: Connection + Clone> {
+    /// The tenant's registered streams; seals the push `Authorization` header
+    /// under `pki_encryption_key`.
+    pub stream_repo: axiam_db::SurrealSsfStreamRepository<C>,
+    /// Where produced events go (D-48): push enqueue, the poll buffer, or
+    /// nothing for a disabled stream. `None` until delivery is wired (T23.5.3),
+    /// and in a harness that does not test it — the verification endpoint then
+    /// answers `503`.
+    pub outbox: Option<Arc<dyn axiam_core::models::ssf::SsfOutbox>>,
+}

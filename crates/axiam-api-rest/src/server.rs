@@ -648,6 +648,59 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     .route(web::delete().to(handlers::uma::delete_resource_set::<C>)),
             ),
     );
+    // G-5 / T23.5.2 — SSF 1.0 §7 transmitter metadata, at the host root like
+    // every `.well-known` document, and the stream management API (§8) under
+    // `/ssf/v1`. Every route has a bucket of its own (plan §7 rule 6), under
+    // `ssf_per_min`; the stream API is behind `AuthzMiddleware` (a token is
+    // required) and its handlers take the receiver token, as the UMA
+    // protection API does. `.to()` before `.wrap()` on a route, so the limiter
+    // is not dropped.
+    cfg.service(
+        web::resource("/.well-known/ssf-configuration")
+            .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+            .wrap(RateLimitShared::<C>::new(
+                "ssf_configuration",
+                rate_limit_cfg.ssf_per_min,
+            ))
+            .route(web::get().to(handlers::ssf::ssf_configuration::<C>)),
+    );
+    cfg.service(
+        web::scope("/ssf/v1")
+            .wrap(AuthzMiddleware)
+            .app_data(web::JsonConfig::default().limit(32_768))
+            .service(
+                web::resource("/stream")
+                    .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ssf_stream",
+                        rate_limit_cfg.ssf_per_min,
+                    ))
+                    .route(web::get().to(handlers::ssf::get_stream_configuration::<C>))
+                    .route(web::post().to(handlers::ssf::create_stream_refused))
+                    .route(web::patch().to(handlers::ssf::patch_stream_configuration::<C>))
+                    .route(web::put().to(handlers::ssf::replace_stream_configuration::<C>))
+                    .route(web::delete().to(handlers::ssf::delete_stream_refused::<C>)),
+            )
+            .service(
+                web::resource("/status")
+                    .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ssf_status",
+                        rate_limit_cfg.ssf_per_min,
+                    ))
+                    .route(web::get().to(handlers::ssf::get_stream_status::<C>))
+                    .route(web::post().to(handlers::ssf::update_stream_status::<C>)),
+            )
+            .service(
+                web::resource("/verify")
+                    .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ssf_verify",
+                        rate_limit_cfg.ssf_per_min,
+                    ))
+                    .route(web::post().to(handlers::ssf::request_verification::<C>)),
+            ),
+    );
     cfg.service(oauth2_scope::<C>(rate_limit_cfg, revocation_feed_enabled));
     // T21.6 — the per-tenant path issuer form, mounted only where
     // `AXIAM__AUTH__TENANT_ISSUER_PATHS` is set. Everything under `/t/` is the
@@ -679,6 +732,17 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
         cfg.route(
             "/.well-known/openid-configuration/t/{tenant_id}",
             web::get().to(handlers::oauth2::discovery_oidc_tenant_path::<C>),
+        );
+        // G-5 / T23.5.2 — SSF 1.0 §7.2: the well-known segment inserted
+        // between the host and the tenant issuer's path.
+        cfg.service(
+            web::resource("/.well-known/ssf-configuration/t/{tenant_id}")
+                .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                .wrap(RateLimitShared::<C>::new(
+                    "ssf_configuration_tenant",
+                    rate_limit_cfg.ssf_per_min,
+                ))
+                .route(web::get().to(handlers::ssf::ssf_configuration_tenant_path::<C>)),
         );
     }
     let api_scope = web::scope("/api/v1")
@@ -1441,6 +1505,47 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         rate_limit_cfg.saml_admin_per_min,
                     ))
                     .route(web::post().to(handlers::saml_admin::retire_idp_credential::<C>)),
+            )
+            // --- SSF stream registry (G-5, T23.5.2, CONTRACT §31). Works
+            // whatever the tenant's `ssf_enabled` says (D-45). Reads are
+            // unlimited; each of the three writes has a bucket of its own under
+            // `ssf_admin_per_min`. `.to()` first, then `.wrap()`.
+            .service(
+                web::resource("/tenants/{tenant_id}/ssf/streams")
+                    .app_data(handlers::ssf_admin::json_config())
+                    .route(web::get().to(handlers::ssf_admin::list_streams::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::ssf_admin::create_stream::<C>)
+                            .wrap(build_governor(rate_limit_cfg.ssf_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "ssf_stream_create",
+                                rate_limit_cfg.ssf_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/ssf/streams/{stream_id}")
+                    .app_data(handlers::ssf_admin::json_config())
+                    .route(web::get().to(handlers::ssf_admin::get_stream::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::ssf_admin::update_stream::<C>)
+                            .wrap(build_governor(rate_limit_cfg.ssf_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "ssf_stream_update",
+                                rate_limit_cfg.ssf_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::ssf_admin::delete_stream::<C>)
+                            .wrap(build_governor(rate_limit_cfg.ssf_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "ssf_stream_delete",
+                                rate_limit_cfg.ssf_admin_per_min,
+                            )),
+                    ),
             )
             // --- Tenant security overrides (explicit {tenant_id} path segment,
             // same convention as the email-config trio above) ---

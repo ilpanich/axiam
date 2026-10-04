@@ -418,6 +418,10 @@ pub struct AppState<C: Connection + Clone> {
     ///
     /// See [`bundles::SamlIdpState`].
     pub saml_idp: bundles::SamlIdpState<C>,
+    /// The Shared Signals Framework transmitter (G-5, T23.5.2).
+    ///
+    /// See [`bundles::SsfState`].
+    pub ssf: bundles::SsfState<C>,
 }
 
 /// Assemble the OPAQUE server keys, requiring **both** or neither.
@@ -875,6 +879,13 @@ impl<C: Connection + Clone> AppState<C> {
                 client: Arc::new(axiam_directory::DirectoryClient::default()),
             },
             saml_idp,
+            // No sealing key and no outbox: a stream with a push header cannot
+            // be stored and verification answers 503, as on a deployment
+            // without either; a test that needs them replaces this field.
+            ssf: bundles::SsfState {
+                stream_repo: axiam_db::SurrealSsfStreamRepository::new(db.clone(), None),
+                outbox: None,
+            },
         }
     }
 }

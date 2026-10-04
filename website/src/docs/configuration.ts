@@ -413,6 +413,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "5",
           ],
           [
+            "AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the tenant directory (LDAP / Active Directory) management API: PUT, PATCH and DELETE on /api/v1/tenants/{tenant_id}/directory and POST .../directory/links. Each write resolves a tenant-chosen host name, and linking opens directory connections, so the limit bounds how fast an administrator \u2014 or a stolen administrator token \u2014 can use the routes as a resolver. One bucket per route (the three configuration methods share one, linking has its own); reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
             "Max /oauth2/end_session per minute. Never moved by a profile preset.",
             "30",

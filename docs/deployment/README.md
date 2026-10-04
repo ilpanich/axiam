@@ -230,7 +230,7 @@ never in git):
 | `AXIAM__AUTH__PKI_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting CA signing private keys at rest. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting SAML/OIDC federation client secrets at rest (SECHRD-09). Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, hex) encrypting email/SMTP provider secrets at rest. Generate with `openssl rand -hex 32`. |
-| `AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY` | **Optional.** AES-256-GCM key (32 bytes, hex) encrypting each tenant's LDAP / Active Directory bind secret at rest. Without it the directory feature is unavailable: creating or updating a directory configuration is refused with an error naming this key, and the server still starts. Generate with `openssl rand -hex 32`. |
+| `AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY` | **Optional.** AES-256-GCM key (32 bytes, hex) encrypting each tenant's LDAP / Active Directory bind secret at rest. Without it the directory feature is unavailable: a directory write that carries a bind secret (every create, every move of the connection) is refused with `503`, the log line — not the response — names this key, reads, `DELETE` and the sync status still answer, and the server still starts. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__SAML_PAIRWISE_KEY` | **Optional, and must never change once set.** HMAC-SHA256 key (32 bytes, hex) deriving the persistent, pairwise SAML `NameID` the SAML identity provider gives each user at each service provider (D-22). Without it a sign-on to a service provider whose `NameID` policy is the persistent default is refused (`Responder`); an `emailAddress` service provider still works, and the server still starts. **Rotating or losing it gives every user a new, unknown account at every such service provider** — treat it like a database you cannot rebuild, and back it up with the secret store. Independent of the SAML signing credential, so rotating the credential changes no identifier. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` | HMAC-SHA256 pepper (32 bytes, hex) used to pseudonymize audit-log actor identities on GDPR erasure. Generate with `openssl rand -hex 32`. |
 | `AXIAM__AUTH__PEPPER` | Server pepper (plain string). Prepended before Argon2id password hashing, **and** keys client-secret hashing (OBS-1). **Mandatory in a release build** — the server refuses to start without it. Generate a long random string, e.g. `openssl rand -base64 32`. |
@@ -242,9 +242,10 @@ reuse the same value across environments.
 
 ### What a tenant's directory needs (LDAP / Active Directory)
 
-The full guide arrives with the management routes; until then, three things an
-operator must know before pointing AXIAM at a directory (and, after them, what
-the sync job does):
+Three things an operator must know before pointing AXIAM at a directory, then
+[how a tenant administrator manages it](#managing-a-tenants-directory) (routes,
+console, and what each action does), then what the address guard and the sync job
+do:
 
 - **A read-only bind account.** AXIAM binds as `bind_dn` only to search for the
   user signing in, then binds as that user to check the password. It never adds,
@@ -270,6 +271,104 @@ the sync job does):
 AXIAM's lockout applies in front of the directory, so set the tenant's
 `max_failed_login_attempts` **below** the directory's own lockout threshold:
 AXIAM then stops binding before the directory would lock the account.
+
+#### Managing a tenant's directory
+
+A tenant administrator configures the directory under
+`/api/v1/tenants/{tenant_id}/directory` (OpenAPI tag `directory`, contract
+[§30](../../sdks/CONTRACT.md)) or on the console's **Directory** page, which
+sits with the tenant's other configuration pages. The caller's own tenant only:
+another tenant's id is `403`. Three permissions, seeded like every other and held
+by the `admin` and `super-admin` roles: `directory:read` (read the configuration
+and the sync status), `directory:write` (create, replace, edit, delete) and
+`directory:link` (link an account — kept apart because it acts on a person, not on
+the configuration). A service-account token is refused on all of them: the bind
+secret is a human administrator's to enter.
+
+| Action | Route | Notes |
+|---|---|---|
+| read | `GET …/directory` | `404` until one is saved. The bind secret is never returned, and nothing says whether one is set. |
+| create / replace | `PUT …/directory` | `201` or `200`. A replacement resets every member it omits to its default. |
+| edit | `PATCH …/directory` | Sparse: only the members sent change; `null` clears `group_base_dn` or `group_filter`. |
+| delete | `DELETE …/directory` | Removes the configuration and its sync state. See below. |
+| link | `POST …/directory/links` | `{"user_id": …}`; see below. |
+| sync status | `GET …/directory/sync-status` | Last result and times; the counts of what a run did are in its audit rows. |
+
+**Every write is checked before anything is stored**: by the same validation the
+sign-in path trusts (plaintext URL, userinfo, a filter without exactly one
+`{username}`, an over-long secret, a trust anchor that is not a CA certificate, a
+malformed or foreign-tenant group mapping, out-of-range depth or interval) and by
+the address guard above, **on the URL as written** — so a name that was re-pointed
+since the last save is caught by the next write even if the URL did not change.
+Each refusal is a `400` that names the rule and never echoes the secret. An
+IPv6-literal URL is one of them: it can never be certificate-checked, so name the
+directory by host name. Disabling a directory is a write too, and is checked the
+same way; `DELETE` resolves nothing and always works.
+
+**Moving the connection needs the secret again.** A write that changes `url`,
+`start_tls`, `bind_dn` or `trust_anchors_pem` without a `bind_secret` is a `400`
+(P23W2-01): a kept secret sent to a new host, through a trust anchor the editor
+chose, is the secret handed to whoever runs that host. The console asks for the
+secret again as soon as any of those four fields is edited, and the audit row
+records that the connection moved. A write that leaves them alone — a filter, the
+sync interval, enabling or disabling — needs no secret.
+
+**A directory and `opaque_mode = required` never coexist.** Under `required` the
+tenant refuses `/auth/login` before reading a password, so directory accounts could
+not sign in. Saving an *enabled* directory under an effective `required` is `409`,
+and so is a settings write (tenant, tenant override, or the organization baseline
+for the tenants that inherit it) that would make `required` true for a tenant with
+an enabled directory. A disabled configuration may coexist; enabling it is then
+the refused write.
+
+**Accounts whose entry has no usable e-mail address cannot be provisioned.** A
+local account must have an e-mail address, and AXIAM does not invent one: a
+placeholder would be released as the user's e-mail `NameID` and as the OIDC
+`email` claim. With `jit_provisioning` on, a first sign-in for an entry whose
+mapped e-mail attribute is missing, empty or unusable is the ordinary
+invalid-credentials failure (the user sees nothing different from a wrong
+password) and the audit log gets a `directory.jit_refused` row with the reason
+`unusable_attributes`. Active Directory entries without `mail` are the usual
+case: fill the attribute in the directory, or map `user_attribute_map.email` to
+an attribute every entry has. The same applies to a username that is missing, too
+long, or holds control or bidirectional-override characters.
+
+**Linking an existing local account** (`directory:link`). Just-in-time
+provisioning only ever creates accounts, for login names that match no local
+account — it never turns an existing account into a directory account, so a
+directory administrator cannot take over a local `admin` by creating a matching
+entry. Linking is the explicit act that does: the directory finds the entry from
+the account's *own* username (you name only the account), the account is marked,
+its password hash is replaced by one nobody holds, and everything it held that
+authenticates without the directory deciding is retired — its passkeys and
+security keys are deleted, its `User`-type certificates revoked, and all its
+sessions and OAuth2 refresh tokens revoked. TOTP is kept. **The owner is signed
+out everywhere.** Linking an account that is already linked to that entry is `200`
+with `was_already_linked: true` and repeats the revocations (the way an
+interrupted link is completed); an entry linked to another account, an account
+linked to a different entry, or a tenant with no enabled directory is `409`; no
+single entry is `404`; the directory not answering is `503`. There is no unlink.
+
+**Disabling or deleting a directory stops the directory, and only that.** Directory
+accounts can no longer sign in with a password (there is no fallback to a local
+hash) and the sync job stops for the tenant, so a later disable in the directory
+no longer reaches AXIAM. Sessions, refresh tokens and passkeys those accounts
+already hold keep working until they expire or an administrator deactivates the
+accounts. The audit row (`directory.config_updated` with `enabled` false, or
+`directory.config_deleted`) records how many live directory accounts the tenant
+had, so you can see what was left behind.
+
+**Audit.** `directory.config_created`, `directory.config_updated` and
+`directory.config_deleted` carry the actor, the **names** of the fields that
+changed, `connection_moved`, `secret_replaced` and, on a delete or disable, the
+count of live directory accounts. A refused write that names an address-guard or
+P23W2-01 rule is audited too, with the `rule`. No row ever carries the secret or
+the content of a trust anchor.
+
+**Without `AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY`** the feature is unavailable: a
+write that carries a bind secret is `503`; reading, deleting and the sync status
+still work, and so does a write that carries no secret (for example switching a
+directory off).
 
 #### Where a directory may be: the address guard and the frame cap
 
@@ -318,8 +417,8 @@ name re-pointed after the configuration was saved is caught at the next one.
 
 A refused address shows up as the generic sign-in failure for the user and a
 `warn` line for you (`directory authentication could not be performed`, with
-the rule in `reason`); once the management routes ship, saving such a URL is
-refused with a `400` naming the rule.
+the rule in `reason`); saving such a URL is refused with a `400` naming the rule,
+and the refusal is written to the audit log with the rule (never the secret).
 
 #### Sync: what the job disables, and what it never does
 
@@ -702,6 +801,7 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | Max `/oauth2/device_authorization` requests per minute per IP (default `12`). |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | Max `/api/v1/device/verify` + `/device/decide` requests per minute per IP (default `10`). Bounded by the user-code brute-force assertion in `RateLimitConfig::validate`. |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | Max `POST /oauth2/register` (RFC 7591 dynamic client registration) requests per minute per IP (default `5` — the smallest limit in AXIAM). It is the only endpoint that **writes** for a caller holding no credential, and every accepted request allocates a client row that counts against the tenant's `dcr_max_clients`, so the thing being limited is an anonymous party's ability to fill a tenant's client table — not throughput. The honest traffic is one person registering one MCP client once. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [`docs/admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md). |
+| `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` | Max writes per minute per IP to the tenant directory management API — `PUT`, `PATCH`, `DELETE` on `/api/v1/tenants/{tenant_id}/directory` and `POST …/directory/links` (default `30`). Each write resolves a tenant-chosen host name (the address guard), and linking opens directory connections, so the limit bounds how fast an administrator, or a stolen administrator token, can use the routes as a resolver. One bucket per route: the configuration resource's three methods share one, the link route has its own. Reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Managing a tenant's directory](#managing-a-tenants-directory). |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |

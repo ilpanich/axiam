@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory management routes, console page and docs (T23.3.8, G-3).** The
+  six §30 routes exist: `GET`/`PUT`/`PATCH`/`DELETE`
+  `/api/v1/tenants/{tenant_id}/directory`, `POST …/directory/links` (wraps the
+  D-28 linking function; the owner is signed out everywhere) and `GET
+  …/directory/sync-status`, OpenAPI tag `directory`, the permissions
+  `directory:read`, `directory:write` and `directory:link` (service-account
+  tokens refused, another tenant's id `403`). **Every write** runs
+  `axiam_directory::config::validate` and the address guard on the URL as
+  written (a name re-pointed since the last save is caught by an unrelated
+  write), each refusal a `400` naming the rule — IPv6-literal hosts, loopback,
+  link-local and the metadata address, unresolvable names and unlisted private
+  addresses included; **moving `url`, `start_tls`, `bind_dn` or the trust
+  anchors without the `bind_secret` is a `400`** on `PUT` and `PATCH` (F4
+  P23W2-01); an enabled directory and an effective `opaque_mode = required` are
+  refused together in **both** directions (`409`: the directory write, and the
+  tenant, tenant-override and organization settings writes); a write that
+  carries a secret is `503` without `directory_encryption_key` (the response
+  does not name the key; reads, `DELETE`, the sync status and a write with no
+  secret still work — the repository's `update` now needs the key only to seal).
+  The bind secret is write-only on exactly two request types, and these routes
+  have their own JSON error handler so a body in which it has the wrong type is
+  not echoed in the `400`. Audit rows `directory.config_created`,
+  `directory.config_updated` and `directory.config_deleted` carry the actor, the
+  names of the changed fields, `connection_moved`, `secret_replaced` and, on a
+  delete or disable, the count of live directory accounts; a refusal by the
+  guard or by P23W2-01 is audited with its rule; never the secret, never an
+  anchor's content. New per-IP rate-limit bucket
+  `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` (default 30, never preset) on the
+  four writes. `UserRepository::count_live_directory_accounts` is new. The admin
+  console gains a per-tenant **Directory** page (view, create, replace, edit,
+  delete; the secret write-only and re-asked when the URL, StartTLS, bind DN or
+  trust anchors change; group-mapping table; sync status; link an account), the
+  website's *Integrate* section an *LDAP / Active Directory* page, the design
+  document a directory chapter, and the deployment guide a *Managing a tenant's
+  directory* section — including that an entry without a usable e-mail address
+  cannot be provisioned (D-29). `sdks/openapi.json` and
+  `sdks/management-registry.json` are regenerated (168 operations, 25
+  namespaces; `PATCH` bodies are classified `sparse`); the ports follow from
+  the merge commit (§30.10).
+
 - **SDK contract 1.54: §30 directory configuration (T23.3.7, G-3).** The
   normative management surface for a tenant's LDAP / Active Directory identity
   source, ahead of the routes (T23.3.8 implements them and regenerates

@@ -7443,6 +7443,7 @@ AXIAM never holds, and the response has no key field to return.
 | `federation` | 9 | `list_configs`, `create_config`, `get_config`, `update_config`, `delete_config`, `list_user_links`, `delete_link`, `oidc_authorize`, `oidc_callback` |
 | `notification_rules` | 5 | `list`, `create`, `get`, `update`, `delete` |
 | `email_config` | 8 | `get_org`, `set_org`, `delete_org`, `test_org`, `get_tenant`, `set_tenant`, `delete_tenant`, `test_tenant` |
+| `directory` | 6 | `get`, `set`, `update`, `delete`, `link_account`, `get_sync_status` |
 | `settings` | 7 | `get_org`, `set_org`, `get_effective`, `set_effective`, `get_tenant_override`, `set_tenant_override`, `delete_tenant_override` |
 | `scim_tokens` | 3 | `list`, `create`, `revoke` |
 | `reactors` | 6 | `list`, `create`, `get`, `update`, `delete`, `list_events` |
@@ -7450,6 +7451,11 @@ AXIAM never holds, and the response has no key field to return.
 | `audit` | 2 | `list`, `list_system` |
 | `privacy` | 7 | `request_export`, `download_export`, `request_delete`, `cancel_delete`, `list_consents`, `grant_scope_consent`, `withdraw_scope_consent` |
 | `platform` | 4 | `health`, `ready`, `mds_status`, `mds_refresh` |
+
+Contract 1.54 adds the `directory` namespace ([§30](#§30-directory-configuration-management-api-contract-154)),
+which brings the registry to 168 operations across 25 namespaces. The figures quoted elsewhere
+in §27 were last re-rendered at 1.51 and are not re-rendered here; the registry is the
+authority ([§27.0](#§270-the-boundary)).
 
 ### §27.2 The surface is namespaced, not flat
 
@@ -7659,7 +7665,7 @@ synchronous and asynchronous twins ships them for all 162 operations or for none
 
 ### §27.5 `Sensitive<T>` applicability
 
-Fifteen operations carry secret material. The registry names them and the exact fields,
+Seventeen operations carry secret material. The registry names them and the exact fields,
 under `sensitive_request_fields` / `sensitive_response_fields`, so this is a generated
 property of the surface rather than a list somebody remembers to update.
 
@@ -7680,6 +7686,8 @@ property of the surface rather than a list somebody remembers to update.
 | `federation.update_config` | request | `client_secret` | As above. |
 | `scim_tokens.create` | response | `provisioning_token` | The plaintext provisioning handle. Shown once, never retrievable. |
 | `oauth2_clients.create_registration_token` | response | `initial_access_token` | The RFC 7591 §1.2 initial access token a registering client presents as `Authorization: Bearer`. Shown once, never retrievable; `list_registration_tokens` returns metadata only. (contract 1.50) |
+| `directory.set` | request | `bind_secret` | The credential of the customer's directory service account. Write-only: never returned, on no response. (contract 1.54, [§30.5](#§305-sensitivet-applicability)) |
+| `directory.update` | request | `bind_secret` | As above; absent keeps the stored secret, and moving the connection without it is a `400` ([§30.3](#§303-server-rules-every-sdk-can-observe-normative) rule 2). (contract 1.54) |
 
 **RFC 7592's `registration_access_token` (contract 1.53) is Sensitive too, and is not in
 this table only because no §27 operation carries it**: it is returned by the protocol
@@ -7691,8 +7699,8 @@ first build.
 
 **The directory bind secret (contract 1.54) is Sensitive too**: `bind_secret` on the
 `directory.set` and `directory.update` requests, the only two places it appears, from the first
-version any SDK ships ([§30.5](#§305-sensitivet-applicability)). The table gains the two rows
-when the server task adds the routes and the registry names the fields.
+version any SDK ships ([§30.5](#§305-sensitivet-applicability)). The table above carries the two
+rows; the registry names the fields under `sensitive_request_fields`.
 
 **`certificates.sign_csr` (contract 1.45) is deliberately absent from this table.** Its
 response is a plain `Certificate`, with no `private_key_pem` field and no other sensitive
@@ -9385,12 +9393,12 @@ the administration: one directory configuration per tenant, read and written as 
 namespace, the explicit act that links an existing local account to its directory entry,
 and a read-only view of the background sync job.
 
-**Status at contract 1.54: the text leads the routes.** The server routes, their OpenAPI
-operations and their `management-registry.json` entries are added by the server task that
-follows this contract revision (T23.3.8), which regenerates both files; this section pins
-what that task implements and what every SDK then ships. No SDK can implement §30 against
-the 1.54 `openapi.json`, and none is expected to until the regenerated files are re-synced
-(§30.10).
+**Status: the routes now follow the text.** The server routes, their OpenAPI operations and
+their `management-registry.json` entries landed with the server task that followed this
+contract revision (T23.3.8), which regenerated both files; this section pins what that task
+implemented and what every SDK then ships. An SDK implements §30 against the regenerated
+`openapi.json` and `management-registry.json` from that merge commit, and none had yet when
+it landed (§30.10).
 
 ### §30.1 Canonical operation set
 
@@ -9657,10 +9665,10 @@ accounts: §1 `login` is unchanged.
 
 ### §30.10 Per-SDK posture
 
-**No SDK implements §30 at contract 1.54**, and none can until the server task's merge
-regenerates `openapi.json` and `management-registry.json`. The ports follow from that
-merge commit, one PR per repository, and this table is filled in by the review that reads
-them (§28.10's rule). An SDK that ships the namespace states it by name — "§27 and §30" —
+**No SDK implements §30 yet.** The server task's merge (T23.3.8) regenerated
+`openapi.json` and `management-registry.json`, so the ports can now be made; they follow
+from that merge commit, one PR per repository, and this table is filled in by the review
+that reads them (§28.10's rule). An SDK that ships the namespace states it by name — "§27 and §30" —
 rather than letting its §27 claim widen silently (Conformance Statement), even though its
 §27 generator will produce the six operations on its own once the registry carries them:
 §30.3's call-site documentation and §30.5's wrapping are what the claim adds.

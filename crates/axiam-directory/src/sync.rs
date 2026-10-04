@@ -86,6 +86,7 @@ use axiam_core::models::directory_sync::{
     AUDIT_GROUPS_MAPPED, AUDIT_SYNC_ATTRIBUTE_SKIPPED, AUDIT_SYNC_RUN, AUDIT_SYNC_SAFETY_VALVE,
     AUDIT_SYNC_USER_SKIPPED, DirectorySyncResult, DirectorySyncState,
 };
+use axiam_core::models::ssf::SsfSystemAccountSink;
 use axiam_core::models::user::{UpdateUser, User, UserStatus};
 use axiam_core::repository::{
     DirectoryConfigRepository, DirectorySyncStateRepository, RefreshTokenRepository,
@@ -431,6 +432,9 @@ pub struct DirectorySync<R, U, S, T, Z> {
     mapper: SharedDirectoryGroupMapper,
     audit: SharedDirectoryAuditSink,
     limits: SyncLimits,
+    /// G-5 (D-52): told when the job deactivates an account, so an SSF
+    /// `account-disabled` can follow. `None` — the default — tells nobody.
+    ssf_sink: Option<Arc<dyn SsfSystemAccountSink>>,
 }
 
 /// What a full run read, before it writes anything.
@@ -486,7 +490,18 @@ where
             mapper,
             audit,
             limits: SyncLimits::default(),
+            ssf_sink: None,
         }
+    }
+
+    /// Report the accounts this job deactivates to `sink` (G-5, D-52): after the
+    /// status change committed, once per account, never failing the run. Only
+    /// a deactivation is reported — sync never re-enables an account (D-31), so
+    /// there is no `account-enabled` to send for a reappearance.
+    #[must_use]
+    pub fn with_ssf_sink(mut self, sink: Arc<dyn SsfSystemAccountSink>) -> Self {
+        self.ssf_sink = Some(sink);
+        self
     }
 
     /// Replace the bounds (tests shrink them).
@@ -1107,6 +1122,9 @@ where
             .await
         {
             Ok(Some(_)) => {
+                if let Some(sink) = &self.ssf_sink {
+                    sink.account_disabled(tenant_id, user).await;
+                }
                 self.record(
                     tenant_id,
                     AUDIT_ACCOUNT_DEACTIVATED,

@@ -682,13 +682,25 @@ pub trait SessionRevocationSink: Send + Sync {
     ) -> SsfFuture<'a, ()>;
 }
 
-/// The port a background job that deactivates accounts on its own account
-/// reports through (D-52: a directory deactivation, `system`). Same contract
-/// as [`SessionRevocationSink`]: after the change committed, never failing it.
+/// The port the platform's own background jobs report an account's end through
+/// (D-52): a directory deactivation (`system`) and a GDPR erasure. Same
+/// contract as [`SessionRevocationSink`]: after the change committed, never
+/// failing it.
 pub trait SsfSystemAccountSink: Send + Sync {
-    /// The account of `user` was set `Inactive` by the platform itself.
-    /// `user` is the account as it was **before** the change.
+    /// Whether the sink will do anything. A job reads an account to name it
+    /// only when this is `true`.
+    fn is_active(&self) -> bool {
+        true
+    }
+
+    /// The account of `user` was set `Inactive` by the platform itself. `user` is
+    /// the account as it was **before** the change.
     fn account_disabled<'a>(&'a self, tenant_id: Uuid, user: &'a User) -> SsfFuture<'a, ()>;
+
+    /// The account of `user` was erased (RISC `account-purged`). `user` is the
+    /// account as it was **before** the erasure destroyed its address, so the
+    /// caller reads it first.
+    fn account_purged<'a>(&'a self, tenant_id: Uuid, user: &'a User) -> SsfFuture<'a, ()>;
 }
 
 /// A sink bound **after** the objects that hold it exist.
@@ -739,9 +751,20 @@ impl SessionRevocationSink for Late<dyn SessionRevocationSink> {
 }
 
 impl SsfSystemAccountSink for Late<dyn SsfSystemAccountSink> {
+    fn is_active(&self) -> bool {
+        self.get().is_some_and(|inner| inner.is_active())
+    }
+
     fn account_disabled<'a>(&'a self, tenant_id: Uuid, user: &'a User) -> SsfFuture<'a, ()> {
         match self.get() {
             Some(inner) => inner.account_disabled(tenant_id, user),
+            None => Box::pin(async {}),
+        }
+    }
+
+    fn account_purged<'a>(&'a self, tenant_id: Uuid, user: &'a User) -> SsfFuture<'a, ()> {
+        match self.get() {
+            Some(inner) => inner.account_purged(tenant_id, user),
             None => Box::pin(async {}),
         }
     }

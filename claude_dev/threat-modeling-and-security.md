@@ -849,7 +849,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
 | Threats identified | 355 |
-| Mitigated / Open | 338 / 17 |
+| Mitigated / Open | 339 / 16 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -865,7 +865,7 @@ optimistic closed one.
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 60 | 0 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 96 | 5 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 96 | 4 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
 | Audit, webhooks, email & notifications | 18 | 1 |
@@ -875,11 +875,11 @@ optimistic closed one.
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. AXIAM's own request path
-— authentication, authorization, tokens, PKI, federation — carries **four** open
-items, and none is a defect. The directory identity source carries none: its
-last open item — with just-in-time provisioning on, a sign-in for a name AXIAM
-holds no account for reached the directory with no AXIAM counter in front of it
-(T-332) — closed with a failure counter per tenant and login name, as the
+— authentication, authorization, tokens, PKI, federation — carries **three**
+open items, and none is a defect. The directory identity source carries none:
+its last open item — with just-in-time provisioning on, a sign-in for a name
+AXIAM holds no account for reached the directory with no AXIAM counter in front
+of it (T-332) — closed with a failure counter per tenant and login name, as the
 trade-off before it, a tenant's directory host held to no address policy
 (T-300), closed with the connector's address guard. Three entered with the SAML
 identity provider's issuer: a leaked signing key outlives its retirement at
@@ -888,19 +888,20 @@ for a promote verb (T-309), and a `SessionIndex` shared by every SP of one
 sign-on lets colluding SPs correlate it (T-312); a fourth that entered with it —
 whether an email `NameID` may carry an address AXIAM never verified — was
 decided by the SSO endpoint, which asserts an address only when it was verified
-or the account activated (T-313). The SSO endpoint adds one Low item: a
-`RelayState` and the pending sign-on handle reach the request log through the
-request tracer's record of the query string, as `/oauth2/authorize`'s `state`
-already does (T-325). The one it briefly carried, the 60-second grace a rotated
-refresh token keeps, was recorded open at 1.0.0-beta13 rather than absorbed and
-then closed by a decision: the grace now applies only to the FAPI 2.0 profile
-that requires it and sender-constrains every token, and a rotated token
-presented again is marked and audited whichever way it is answered (T-254). And
-the two Medium items that had sat on the token service and on the SDK route
-guard since the first version of the model — the fifteen-minute revocation
-window, seen from each side — closed together at 1.0.0-beta14, when the optional
-revocation feed the server publishes gained a poller in all eleven SDKs (T-39,
-T-143).
+or the account activated (T-313). The Low item the SSO endpoint added — a
+`RelayState` and the pending sign-on handle reaching the request log through the
+request tracer's record of the query string (T-325) — closed when the tracer
+began redacting query values, which also took `/oauth2/authorize`'s `state`,
+reset tokens and search terms out of the log. The one it briefly carried, the
+60-second grace a rotated refresh token keeps, was recorded open at 1.0.0-beta13
+rather than absorbed and then closed by a decision: the grace now applies only
+to the FAPI 2.0 profile that requires it and sender-constrains every token, and
+a rotated token presented again is marked and audited whichever way it is
+answered (T-254). And the two Medium items that had sat on the token service and
+on the SDK route guard since the first version of the model — the fifteen-minute
+revocation window, seen from each side — closed together at 1.0.0-beta14, when
+the optional revocation feed the server publishes gained a poller in all eleven
+SDKs (T-39, T-143).
 
 ### Coverage by STRIDE category
 
@@ -915,7 +916,7 @@ the category recorded against it in the model.
 | Spoofing | 84 | 4 |
 | Tampering | 70 | 1 |
 | Repudiation | 8 | 0 |
-| Information disclosure | 80 | 8 |
+| Information disclosure | 80 | 7 |
 | Denial of service | 39 | 3 |
 | Elevation of privilege | 74 | 1 |
 
@@ -926,11 +927,11 @@ the category recorded against it in the model.
 | Critical | 41 | 2 |
 | High | 161 | 8 |
 | Medium | 137 | 5 |
-| Low | 16 | 2 |
+| Low | 16 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 17 still-open items are listed one by one in
+the weight the control carries. The 16 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -2161,7 +2162,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 17 of
+Every threat the model does not record as mitigated, most severe first — 16 of
 355. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
@@ -2186,7 +2187,6 @@ each.
 | T-309 — Sign-on stops when the active credential expires or is retired before a successor is in place | Medium | saml_idp_credential (sealed signing key) · *Federation — SAML SP & OIDC relying party* |
 | T-312 — Service providers link a user across SPs, or back to the AXIAM account | Medium | SAML assertion issuer (saml_idp) · *Federation — SAML SP & OIDC relying party* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
-| T-325 — RelayState and the pending handle are recorded in request logs | Low | continue leg: OP cookie + binding cookie · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,

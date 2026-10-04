@@ -34,6 +34,7 @@ use std::time::Duration;
 use actix_web::{App, HttpServer, web};
 use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher, WebhookPublisher};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
+use axiam_api_rest::middleware::request_span::RedactingRootSpanBuilder;
 use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
 use axiam_api_rest::state::AppState;
 use axiam_api_rest::state::bundles;
@@ -2952,7 +2953,10 @@ async fn main() -> std::io::Result<()> {
         let rl = rate_limit_cfg.clone();
         App::new()
             .wrap(SecurityHeadersMiddleware)
-            .wrap(TracingLogger::default())
+            // F4 P23W3-03 (T-325): the default builder's field set, with query
+            // values (a SAML handle, `RelayState`, `state`, a reset token) and
+            // `{token}` path segments redacted from `http.target`.
+            .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
             .wrap(audit_middleware.clone())
             .wrap(build_cors(&server_config.cors_allowed_origins))
             // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce

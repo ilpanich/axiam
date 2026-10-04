@@ -56,8 +56,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.24.0",
  "diagramCount": 9,
  "total": 355,
- "open": 17,
- "mitigated": 338,
+ "open": 16,
+ "mitigated": 339,
  "areas": [
   {
    "id": 0,
@@ -81,7 +81,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
    "total": 96,
-   "open": 5
+   "open": 4
   },
   {
    "id": 4,
@@ -133,7 +133,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Information disclosure",
    "total": 80,
-   "open": 8
+   "open": 7
   },
   {
    "name": "Denial of service",
@@ -165,7 +165,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Low",
    "total": 16,
-   "open": 2
+   "open": 1
   }
  ],
  "openRisks": [
@@ -328,16 +328,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Federation — SAML SP & OIDC relying party",
    "element": "Attribute mapping & JIT provisioning",
    "residualRisk": "Off by default (linked_only refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit."
-  },
-  {
-   "number": 325,
-   "title": "RelayState and the pending handle are recorded in request logs",
-   "category": "Information disclosure",
-   "severity": "Low",
-   "diagramId": 3,
-   "area": "Federation — SAML SP & OIDC relying party",
-   "element": "continue leg: OP cookie + binding cookie",
-   "residualRisk": "Partly mitigated. The SSO handlers never log `SAMLRequest`, `SAMLResponse`, `RelayState`, the handle, the binding value or the OP cookie — refusals are logged as a fixed reason, the tenant and the SP's record id — and the audit middleware records the path without the query. A logged handle is useless without the browser's binding cookie (T-322) and is single-use. Open because `tracing-actix-web`'s root span records the full request target on every route, the same exposure `/oauth2/authorize`'s `state` already has; trimming the query from the root span is a deployment-wide logging change for the F4 review to decide."
   }
  ]
 };

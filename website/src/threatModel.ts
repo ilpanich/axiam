@@ -18,8 +18,8 @@ export const THREAT_MODEL: ThreatModel = {
  "version": "2.24.0",
  "diagramCount": 9,
  "total": 355,
- "open": 17,
- "mitigated": 338,
+ "open": 16,
+ "mitigated": 339,
  "diagrams": [
   {
    "id": 0,
@@ -5136,12 +5136,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "RelayState and the pending handle are recorded in request logs",
        "type": "Information disclosure",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The HTTP-Redirect binding carries `RelayState` (and `SAMLRequest`) in the query string, and the continue leg carries the pending handle there. The request-tracing middleware records the request target, query included, as it does for every route.",
-       "mitigation": "Partly mitigated. The SSO handlers never log `SAMLRequest`, `SAMLResponse`, `RelayState`, the handle, the binding value or the OP cookie — refusals are logged as a fixed reason, the tenant and the SP's record id — and the audit middleware records the path without the query. A logged handle is useless without the browser's binding cookie (T-322) and is single-use. Open because `tracing-actix-web`'s root span records the full request target on every route, the same exposure `/oauth2/authorize`'s `state` already has; trimming the query from the root span is a deployment-wide logging change for the F4 review to decide."
+       "mitigation": "**Closed 2026-10-04 (W3 F4 review, P23W3-03).** `axiam-server` wraps the application in `TracingLogger::<RedactingRootSpanBuilder>` (`axiam_api_rest::middleware::request_span`): the default builder's field set, span name and target, with `http.target` recorded as the path and every query **value** replaced by `[redacted]` unless its parameter is on a short allow-list of structural ones (tenant, organization and client ids, protocol switches, pagination), and a `{token}` path segment redacted too; parameter names stay. An allow-list rather than a deny-list, so a parameter added later is redacted until someone decides otherwise. The same change takes `/oauth2/authorize`'s `state` and `login_hint`, `end_session`'s `id_token_hint`, password-reset, GDPR-cancellation and export tokens and administrators' search terms out of the request log, which the default builder recorded on every route (with the shipped `axiam=info` filter the root span is recorded only where an operator enables `tracing_actix_web`). Unchanged: the SSO handlers never log `SAMLRequest`, `SAMLResponse`, `RelayState`, the handle, the binding value or the OP cookie, the audit middleware records paths only, and a handle is useless without the browser's binding cookie (T-322) and single-use. Tests: `request_span::tests` (each sensitive parameter redacted and each structural one kept, the export token redacted from the path, and a request through `TracingLogger` whose recorded span carries the redacted target and never the handle) and `t9_4_the_request_logging_layer_records_no_headers_at_all` (the server installs this builder, and the builder reads no header but `User-Agent`)."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "0cb2b6b5-fab7-5f04-bac9-6abe03099111",
@@ -5293,7 +5293,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 96,
-   "open": 5,
+   "open": 4,
    "bySeverity": {
     "High": 37,
     "Medium": 38,

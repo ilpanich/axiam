@@ -796,11 +796,27 @@ async fn t9_4_the_request_logging_layer_records_no_headers_at_all() {
     // span builder with a custom one, this is the line that has to be edited,
     // and editing it is where the question "does this record Authorization?"
     // gets asked again.
+    //
+    // F4 P23W3-03 (T-325) replaced the default builder with
+    // `RedactingRootSpanBuilder`, which records the default's field set with
+    // query values redacted. The question is asked again here, of its source:
+    // it reads exactly one header, `User-Agent`.
     let source = include_str!("../../axiam-server/src/main.rs");
     assert!(
-        source.contains("TracingLogger::default()"),
-        "the request-logging layer is no longer tracing-actix-web's default root span builder; \
-         re-verify that its replacement records no Authorization header (W8 / T9.4)"
+        source.contains("TracingLogger::<RedactingRootSpanBuilder>::new()"),
+        "the request-logging layer is no longer the redacting root span builder; \
+         re-verify that its replacement records no Authorization header (W8 / T9.4) \
+         and no query value (T-325)"
+    );
+    let builder = include_str!("../src/middleware/request_span.rs");
+    let headers_read: Vec<&str> = builder
+        .match_indices(".get(\"")
+        .map(|(at, _)| builder[at + 6..].split('"').next().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        headers_read,
+        vec!["User-Agent"],
+        "the root span builder reads a header other than User-Agent"
     );
     assert!(
         !source.contains("AUTHORIZATION"),

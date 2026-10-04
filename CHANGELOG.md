@@ -601,6 +601,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Request logs no longer carry credentials from the query string (F4
+  P23W3-03, closes T-325).** The request tracer (`tracing-actix-web`'s default
+  root span) recorded every request's full target, so the SAML SSO endpoint's
+  pending sign-on `handle`, `RelayState` and `SAMLRequest`, `/oauth2/authorize`'s
+  `state` and `login_hint`, `end_session`'s `id_token_hint`, password-reset and
+  GDPR tokens and administrators' search terms reached the request log wherever
+  an operator enabled the tracer's span (the shipped `axiam=info` filter does
+  not). `axiam-server` now installs `RedactingRootSpanBuilder`: the same fields,
+  span name and target, with every query value recorded as `[redacted]` unless
+  its parameter is one of a short list of structural ones (tenant, organization
+  and client ids, `response_type`, `scope`, `prompt`, pagination and the like),
+  and the `{token}` segment of `/account/export/{token}` redacted too. Parameter
+  names stay. Threat model 2.24.0: T-325 closed. Tests: `request_span::tests`
+  (three), and `t9_4_the_request_logging_layer_records_no_headers_at_all`, now
+  pinning the new builder and that it reads no header but `User-Agent`.
+
 - **Directory sources: a lockout for login names AXIAM holds no account for (F4
   P23W3-02, closes T-332).** With just-in-time provisioning on, a sign-in for an
   unknown name is answered by the tenant's directory, and no AXIAM counter stood

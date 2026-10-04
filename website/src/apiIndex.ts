@@ -23,9 +23,9 @@ export interface ApiGroup {
 }
 
 /** The API version the document was exported from. */
-export const API_VERSION = "1.0.0-beta16";
-export const API_OPERATION_COUNT = 229;
-export const API_PATH_COUNT = 162;
+export const API_VERSION = "1.0.0-beta17";
+export const API_OPERATION_COUNT = 239;
+export const API_PATH_COUNT = 167;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -295,6 +295,12 @@ export const API_INDEX: ApiGroup[] = [
     "summary": "A request carrying an access token authorizes as its subject."
    },
    {
+    "method": "GET",
+    "path": "/oauth2/authorize/logout",
+    "summary": "Reached by `end_session`'s `302` when no `id_token_hint` named a session.",
+    "public": true
+   },
+   {
     "method": "POST",
     "path": "/oauth2/device_authorization",
     "summary": "Build an OAuth2 JSON error response with the appropriate HTTP status.",
@@ -329,6 +335,21 @@ export const API_INDEX: ApiGroup[] = [
     "path": "/oauth2/register",
     "summary": "",
     "public": true
+   },
+   {
+    "method": "GET",
+    "path": "/oauth2/register/{client_id}",
+    "summary": "Returns the client information response without the token: only its digest is stored, and the token is rotated on `PUT`, never on read."
+   },
+   {
+    "method": "PUT",
+    "path": "/oauth2/register/{client_id}",
+    "summary": "A full replacement, held to the same `validate` a registration is under the tenant's current policy, and the management token rotates: the response carries the new one, once, and the presented one is dead."
+   },
+   {
+    "method": "DELETE",
+    "path": "/oauth2/register/{client_id}",
+    "summary": "Deletes the row through a delete conditional on the token, so the management token dies with it and a second `DELETE` is `401`; then revokes every refresh token issued to the client."
    },
    {
     "method": "GET",
@@ -369,7 +390,7 @@ export const API_INDEX: ApiGroup[] = [
  {
   "id": "api-federation",
   "label": "Federation",
-  "blurb": "SAML service provider and OIDC relying-party configuration, and the SSO entry points.",
+  "blurb": "SAML service provider and OIDC relying-party configuration, the SSO entry points, and a tenant's LDAP / Active Directory identity source.",
   "operations": [
    {
     "method": "POST",
@@ -457,6 +478,36 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/api/v1/federation/oidc/callback",
     "summary": "Handles the callback from the external OIDC provider after user authentication."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/tenants/{tenant_id}/directory",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/tenants/{tenant_id}/directory",
+    "summary": "A replacement resets every omitted optional member to its default."
+   },
+   {
+    "method": "PATCH",
+    "path": "/api/v1/tenants/{tenant_id}/directory",
+    "summary": ""
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/tenants/{tenant_id}/directory",
+    "summary": "Removes the configuration and its sync state."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/tenants/{tenant_id}/directory/links",
+    "summary": "The directory resolves the entry from the account's own username; the caller supplies only the account."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/tenants/{tenant_id}/directory/sync-status",
+    "summary": ""
    }
   ]
  },

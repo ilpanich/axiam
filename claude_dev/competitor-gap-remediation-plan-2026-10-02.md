@@ -575,6 +575,36 @@ security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 > named a future env var the config-key check took for a real one (fixed). The
 > SP-delete cascade has a named hook (`SP_DELETE_CASCADE`) for T23.2.4's
 > `saml_sp_session` rows.
+>
+> **EXECUTED (partly) — G-2, W4: T23.2.4, 2026-10-04** (`876932c`, `ffdc69a`,
+> `0ac64cf`, `6255cbe`, `2ce8ab5`; Sonnet 5.5). Single logout per **D-37 …
+> D-39**. Schema **v76**: `saml_sp_session` (the per-SP participant record) and
+> `saml_logout_run`, cascaded on SP delete, tenant delete and both erasure
+> paths, and swept by two jobs registered in job health. The SSO continue leg
+> records the participant before signing and asserts a random per-SP
+> `SessionIndex`; the session id left the XML (**T-312 closed**).
+> `/saml/v2/{t}/slo` (Redirect and POST) accepts only messages signed by the
+> SP's registered certificate, verified over the exact query octets or per
+> node — `verify_signed_xml` is never called — refuses replays by
+> `{sp_id}:{ID}`, revokes whole sessions first (back-channel logout, then
+> `AuthService::logout`, so the revocation feed shows it), then propagates
+> sequentially through the browser with detached Redirect / enveloped POST
+> signatures, ending in `Success` or `PartialLogout` at the initiator; every
+> verified answer clears the OP and API cookies. `GET /saml/v2/{t}/sso/logout`
+> is the IdP-initiated trigger (cross-site `403`). Metadata gained the SLO
+> locations; buckets `saml_idp_slo`, `saml_idp_sso_logout`. Threat model
+> **2.26.0** (384 threats, 369 mitigated, 15 open): T-366, T-370 … T-379,
+> T-381 … T-384 Mitigated with their tests; T-380 stays the accepted Open. Tests:
+> 26 route tests, 16 logout unit tests, 17 repository tests, 3 schema tests,
+> cascade extensions.
+>
+> What the plan did not anticipate. SurrealDB's `session_id IN $ids` on the
+> compound unique index matched nothing for several values, so multi-session
+> deletes left rows; the queries use `$ids CONTAINS session_id`, with a
+> multi-session test (siblings carried to F4). Five older cleanup jobs were
+> never registered in job health (carried to F4). T-377's wording says `SigAlg`
+> must match, where the code refuses a mismatch by signature failure (wording
+> for F4). All SLO tests use a synthetic SP; T23.2.7 is the real-SP oracle.
 
 **Target.** AXIAM issues SAML 2.0 assertions to registered service providers,
 per tenant: IdP metadata, Web Browser SSO profile with HTTP-Redirect and

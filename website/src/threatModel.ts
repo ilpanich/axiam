@@ -18,8 +18,8 @@ export const THREAT_MODEL: ThreatModel = {
  "version": "2.25.0",
  "diagramCount": 9,
  "total": 384,
- "open": 44,
- "mitigated": 340,
+ "open": 31,
+ "mitigated": 353,
  "diagrams": [
   {
    "id": 0,
@@ -4304,12 +4304,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Sign-on stops when the active credential expires or is retired before a successor is in place",
        "type": "Denial of service",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Because the signer refuses an expired credential (T-308), a tenant whose credential reaches `not_after` stops issuing assertions to every SP, and so does one whose administrator retires the active credential. SPs pin the certificate, so a successor must be published in metadata before it signs, or every SP rejects its first assertion.",
-       "mitigation": "Open until rotation exists in code. Decided (T23.2.8, 2026-10-04): contract §29 and D-42 give T23.2.5 an `issue_idp_credential` into the `next` slot and a `promote_idp_credential` that, in one transaction, retires the old `active` and activates `next`, refused unless the id is the current `next` and inside its validity window; D-40 makes the metadata endpoint publish `active` and then `next`, so an SP has the successor before it signs, with `Cache-Control: max-age=3600`; §29 `get_idp` and `list_idp_credentials` show `not_after` so an administrator sees expiry coming. Closes when T23.2.5 lands with the promote and metadata tests. Residual after that: a tenant that never rotates stops at `not_after`, and retiring the active credential without a successor stops sign-on at once — deliberate, as the incident response to T-306. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29 and D-42: an `issue_idp_credential` into the `next` slot and a `promote_idp_credential` that, in one transaction, retires the old `active` and activates `next`, refused unless the id is the current `next` and inside its validity window; D-40 makes the metadata endpoint publish `active` and then `next`, so an SP has the successor before it signs, with `Cache-Control: max-age=3600`; §29 `get_idp` and `list_idp_credentials` show `not_after` so an administrator sees expiry coming. Tests (T23.2.5): `saml_admin_test.rs::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key`, `::a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing`, `::a_promotion_repeated_with_a_stale_page_is_a_409`, `::metadata::the_document_parses_back_with_samael_active_before_next_and_never_a_retired_key` and `::metadata::a_promotion_changes_what_is_published`; in `axiam-db`, `saml_idp_credential_test.rs::of_concurrent_promotions_exactly_one_wins`. Residual: a tenant that never rotates stops at `not_after`, and retiring the active credential without a successor stops sign-on at once — deliberate, as the incident response to T-306. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "7443c8b5-68b4-5ac9-bd3d-f39cdb1d21be",
@@ -4679,84 +4679,84 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A principal registers, edits or deletes service providers it should not, or another tenant's",
        "type": "Elevation of privilege",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The SP registry decides where a tenant's signed assertions may be delivered and which users each SP receives. A caller who could write it for a tenant it does not administer, or with a weaker permission than registration deserves, could register an SP of its own and receive assertions for the tenant's users, or delete a production SP.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Contract §29.3 rule 9 and D-42: the routes live under `/api/v1/tenants/{tenant_id}/saml` and the path tenant must be the caller's (another tenant's id is `403`); reads need `saml_sp:read`, SP writes and `parse_sp_metadata` `saml_sp:write`, the credential writes `saml_idp:credential`; service-account tokens are refused on the whole namespace in this revision, so registering where assertions go stays a human administrator's act; every repository call is tenant-keyed. Closes when T23.2.5 lands with route tests for another tenant's id, each missing permission and a service-account token."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29.3 rule 9 and D-42: the routes live under `/api/v1/tenants/{tenant_id}/saml` and the path tenant must be the caller's (another tenant's id is `403`); reads need `saml_sp:read`, SP writes and `parse_sp_metadata` `saml_sp:write`, the credential writes `saml_idp:credential`; service-account tokens are refused on the whole namespace in this revision, so registering where assertions go stays a human administrator's act; every repository call is tenant-keyed. Tests (T23.2.5): `saml_admin_test.rs::another_tenants_id_is_403_on_all_eleven`, `::each_operation_needs_its_own_permission_and_no_other`, `::a_service_account_token_is_refused_on_all_eleven` (the extractor's `401`, as on every human-only route)."
       },
       {
        "number": 358,
        "title": "A registration admits a delivery target, certificate or option the IdP cannot hold to its rules",
        "type": "Tampering",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Every later SSO and SLO decision trusts the registry. A write path that skipped the validator, accepted an ACS or SLO URL that is a glob, plaintext or fragment-bearing, stored a certificate the SSO endpoint cannot use, or accepted `encrypt_assertions` while encryption is unimplemented would turn into ACS redirection (T-318), a signing SP whose requests can never verify, or an SP refused at every sign-on.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Contract §29.3 rules 1–3 and D-42: every create and update runs `validate_saml_service_provider` (the redirect-URI rule shared with OAuth2 clients, no `*`, unique URLs and indexes, one default, exactly one `CERTIFICATE` block that parses, a private key refused by name) and then four refusals of its own — `encrypt_assertions: true` (D-2), an `sp_signing_cert_pem` the SSO endpoint's decoder (`pem_cert_to_der`) refuses or whose key is not RSA ≥ 2048 or ECDSA P-256/384/521, an `allowed_groups` entry outside the tenant, and a changed `entity_id` (the pairwise `NameID` is keyed on it, D-22). The SSO endpoint still re-checks the ACS on every use (`check_acs_url`). Closes when T23.2.5 lands with a refusal test per rule on create and on update."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29.3 rules 1–3 and D-42: every create and update runs `validate_saml_service_provider` (the redirect-URI rule shared with OAuth2 clients, no `*`, unique URLs and indexes, one default, exactly one `CERTIFICATE` block that parses, a private key refused by name) and then four refusals of its own — `encrypt_assertions: true` (D-2), an `sp_signing_cert_pem` the SSO endpoint's decoder (`pem_cert_to_der`) refuses or whose key is not RSA ≥ 2048 or ECDSA P-256/384/521, an `allowed_groups` entry outside the tenant, and a changed `entity_id` (the pairwise `NameID` is keyed on it, D-22). The SSO endpoint still re-checks the ACS on every use (`check_acs_url`). Tests (T23.2.5): `saml_admin_test.rs::every_validator_refusal_is_a_400_validation_error_naming_the_rule` (each validator rule, on create and on update), `::each_d42_refusal_is_a_400_on_create_and_on_update`, `::the_certificates_the_endpoint_can_use_are_accepted_expired_ones_included`; in `axiam-federation`, `saml_sp::write_refusal_tests` (RSA, ECDSA on P-256, P-384 and P-521, Ed25519, secp256k1 and garbage)."
       },
       {
        "number": 359,
        "title": "SP metadata import makes the server fetch an internal or metadata-service address",
        "type": "Elevation of privilege",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "`parse_sp_metadata` accepts a URL chosen by an administrator, or by whoever holds an administrator's token. Fetched naively, it would reach cloud-metadata credentials, internal admin interfaces or AXIAM itself from the server's network position, and an error that echoed the response would read them back.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-41: `https` only, fetched only through `axiam_pki::ssrf::guarded_fetch` with `allow_private = false` — the name resolved once and the connection pinned to the vetted address, loopback, private, link-local and metadata addresses refused, every redirect hop re-validated, the transport cap and timeout — then the 512 KiB document cap; one fetch per call, no credentials sent, and no periodic refresh. A failure answers one of three generic messages and never the body, status line or resolved address (T-356's lesson), so the route cannot read an internal response; refusals are audited by category. Permission `saml_sp:write` and the `SAML_ADMIN_PER_MIN` bucket bound who and how often. Closes when T23.2.5 lands with tests for a loopback, a private, a link-local and an `http` URL, a redirect to loopback, and an error body never echoed."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-41: `https` only, fetched only through `axiam_pki::ssrf::guarded_fetch` with `allow_private = false` — the name resolved once and the connection pinned to the vetted address, loopback, private, link-local and metadata addresses refused, every redirect hop re-validated, the transport cap and timeout — then the 512 KiB document cap; one fetch per call, no credentials sent, and no periodic refresh. A failure answers one of three generic messages and never the body, status line or resolved address (T-356's lesson), so the route cannot read an internal response; refusals are audited by category. Permission `saml_sp:write` and the `SAML_ADMIN_PER_MIN` bucket bound who and how often. Tests (T23.2.5): `saml_admin_test.rs::parse::a_url_is_refused_by_the_guard_with_a_message_that_names_no_address` (`http`, loopback, private, link-local, IPv6 and credentialed URLs); in `axiam-federation`, `saml_idp::sp_metadata::fetch_tests::without_the_seam_every_loopback_private_and_plain_http_url_is_refused`, `::a_success_is_the_body_and_a_failure_is_a_category_never_the_body` (an error body is never echoed) and `::the_response_is_capped_and_a_redirect_is_re_validated_strictly` (a redirect hop is held to the production rule); in `axiam-pki`, `ssrf::tests::ssrf_rejects_redirect_to_internal`."
       },
       {
        "number": 360,
        "title": "XML external entities, entity expansion or a parser differential in imported SP metadata",
        "type": "Tampering",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "An SP metadata document is attacker-influenced XML (an upload, or whatever a URL serves). A DTD with external entities reads local files or makes requests; nested internal entities exhaust memory; a non-UTF-8 encoding can hide a declaration from a byte-level check.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-41: the receiver's rule, unchanged — `refuse_markup_declarations` (any `<!` other than a comment or CDATA) and `refuse_other_encodings` (a NUL, or a declared encoding other than UTF-8) on the bytes before any parser sees them, so there is no entity to expand; a 512 KiB cap; then `samael`'s metadata types, which open no network. Exactly one `EntityDescriptor` with one SAML 2.0 `SPSSODescriptor` is accepted; an aggregate is refused. Closes when T23.2.5 lands with tests for a `<!DOCTYPE>`, an `<!ENTITY>`, a UTF-16 document, an oversized one and an `EntitiesDescriptor`."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-41: the receiver's rule, unchanged — `refuse_markup_declarations` (any `<!` other than a comment or CDATA) and `refuse_other_encodings` (a NUL, or a declared encoding other than UTF-8) on the bytes before any parser sees them, so there is no entity to expand; a 512 KiB cap; then `samael`'s metadata types, which open no network. Exactly one `EntityDescriptor` with one SAML 2.0 `SPSSODescriptor` is accepted; an aggregate is refused. Tests (T23.2.5): `saml_admin_test.rs::parse::dtd_xxe_encoding_aggregate_and_oversize_documents_are_refused_with_one_generic_message` (`<!DOCTYPE>`, `<!ENTITY>`, an entity bomb, a declared UTF-16 encoding, an `EntitiesDescriptor`, an oversized document); in `axiam-federation`, `saml_idp::sp_metadata::tests::a_dtd_an_entity_and_a_declared_foreign_encoding_are_refused_on_the_bytes` (UTF-16 on the wire included), `::an_aggregate_a_wrong_root_two_sp_descriptors_and_a_non_saml2_one_are_refused` and `::an_oversize_document_and_a_deeply_nested_one_are_refused`."
       },
       {
        "number": 361,
        "title": "Unsigned SP metadata decides what the IdP trusts",
        "type": "Spoofing",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "SP metadata is usually unsigned and fetched over a path the administrator does not control. If its ACS endpoints and certificates were stored as fetched — or refreshed from the URL later — whoever could alter the document in transit or on the SP's host would redirect assertions or substitute the key AXIAM verifies the SP's requests with.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-41: import is a parse to a draft, never a write; nothing is stored until an administrator submits the draft through `create_service_provider` or `update_service_provider`, where the validator and §29's refusals apply as to a manual entry. The document's own signature is not evaluated (there is no anchor, and its own certificate would be circular) and the draft warns so; the certificates' SHA-256 fingerprints are returned for out-of-band comparison; `validUntil` and `cacheDuration` are ignored; `encrypt_assertions` is never set; and AXIAM never re-reads an SP's metadata on its own. Closes when T23.2.5 lands with tests that parsing stores nothing and that a signed document is reported unverified."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-41: import is a parse to a draft, never a write; nothing is stored until an administrator submits the draft through `create_service_provider` or `update_service_provider`, where the validator and §29's refusals apply as to a manual entry. The document's own signature is not evaluated (there is no anchor, and its own certificate would be circular) and the draft warns so; the certificates' SHA-256 fingerprints are returned for out-of-band comparison; `validUntil` and `cacheDuration` are ignored; `encrypt_assertions` is never set; and AXIAM never re-reads an SP's metadata on its own. Tests (T23.2.5): `saml_admin_test.rs::parse::good_metadata_becomes_a_draft_that_create_accepts_unchanged_and_nothing_is_stored` (a parse stores nothing, `encrypt_assertions` is never set, the fingerprints come back) and `::parse::a_document_signature_is_reported_as_not_verified`."
       },
       {
        "number": 362,
        "title": "Registry and credential changes cannot be traced to an administrator",
        "type": "Repudiation",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "A changed ACS list, a new SP certificate or a promoted, retired or newly issued signing credential changes who receives assertions and which key SPs must trust. Without a record, a malicious or mistaken change cannot be attributed or reconstructed.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Contract §29.3 rule 11 and D-42: `saml_sp.created`, `saml_sp.updated` (the names of the changed fields, `acs_changed`, `certificate_changed`), `saml_sp.deleted`, `saml_sp.metadata_parsed` (source, URL host, outcome), `saml_idp.credential_issued`, `saml_idp.credential_promoted` and `saml_idp.credential_retired` (ids, slot, fingerprint), each with the actor, on the append-only audit trail; never a certificate's or a document's content. Closes when T23.2.5 lands with a test per audit action."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29.3 rule 11 and D-42: `saml_sp.created`, `saml_sp.updated` (the names of the changed fields, `acs_changed`, `certificate_changed`), `saml_sp.deleted`, `saml_sp.metadata_parsed` (source, URL host, outcome), `saml_idp.credential_issued`, `saml_idp.credential_promoted` and `saml_idp.credential_retired` (ids, slot, fingerprint), each with the actor, on the append-only audit trail; never a certificate's or a document's content. Tests (T23.2.5): `saml_admin_test.rs::every_sp_write_leaves_an_audit_row_with_names_and_no_certificate` (`saml_sp.created`, `.updated`, `.deleted`), `::parse::good_metadata_becomes_a_draft_that_create_accepts_unchanged_and_nothing_is_stored` and `::parse::a_url_is_refused_by_the_guard_with_a_message_that_names_no_address` (`saml_sp.metadata_parsed`, success and refusal), `::issuing_fills_an_empty_slot_with_a_keyless_answer_and_a_sealed_key` (`saml_idp.credential_issued`), `::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key` (`saml_idp.credential_promoted`) and `::retire_works_on_next_and_active_and_is_idempotent` (`saml_idp.credential_retired`)."
       },
       {
        "number": 363,
        "title": "The management routes are used to burn CPU or to amplify outbound requests",
        "type": "Denial of service",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "`issue_idp_credential` generates an RSA-4096 key (seconds of CPU) and `parse_sp_metadata` makes an outbound request per call. A loop with a stolen administrator token could exhaust the shared process or use AXIAM to hammer an external host.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-42: every write has a per-IP bucket of its own (`AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN`, default 30 per route); issuance checks the slot before generating a key, so an occupied slot costs no key generation (T23.2.1), and a free slot can only be refilled by retiring — which is audited and destroys a key; a metadata fetch is one request with `guarded_fetch`'s timeout and caps and no retry. Closes when T23.2.5 lands with the bucket wired and a test that an occupied slot answers `409` without generating."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-42: every write has a per-IP bucket of its own (`AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN`, default 30 per route); issuance checks the slot before generating a key, so an occupied slot costs no key generation (T23.2.1), and a free slot can only be refilled by retiring — which is audited and destroys a key; a metadata fetch is one request with `guarded_fetch`'s timeout and caps and no retry. Tests (T23.2.5): `saml_admin_test.rs::the_seven_writes_have_a_bucket_each_pinned_at_30_and_reads_have_none` and `::an_occupied_slot_is_409_before_any_key_is_generated`."
       },
       {
        "number": 364,
        "title": "A credential write races, half-applies or is made by a principal who may only edit SPs",
        "type": "Tampering",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Rotation is two moves — the old active out, the next in. Done as two calls it leaves a moment with no signer (every sign-on fails) or, done in the other order, a database that briefly holds two active keys; a stale console could promote a credential other than the one its operator saw; and a permission shared with ordinary SP edits would let whoever may rename an SP stop sign-on at every SP of the tenant.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-42: `promote_idp_credential/{credential_id}` requires that the id is the tenant's current `next` and inside its validity window (`409` otherwise) and retires the old `active` (destroying its key) and activates `next` in one transaction, a repository method of its own; the slots stay enforced by the UNIQUE index (D-21); issue writes only into an empty slot; the three credential writes need `saml_idp:credential`, separate from `saml_sp:write`. Retiring the active credential without a successor is allowed on purpose (the incident response to T-306) and the console must warn. Closes when T23.2.5 lands with tests for a promote of a non-`next` id, an expired `next`, the transaction (no state with two or zero signers observable), and the permission split."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-42: `promote_idp_credential/{credential_id}` requires that the id is the tenant's current `next` and inside its validity window (`409` otherwise) and retires the old `active` (destroying its key) and activates `next` in one transaction, a repository method of its own; the slots stay enforced by the UNIQUE index (D-21); issue writes only into an empty slot; the three credential writes need `saml_idp:credential`, separate from `saml_sp:write`. Retiring the active credential without a successor is allowed on purpose (the incident response to T-306) and the console must warn. Tests (T23.2.5): `saml_admin_test.rs::a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing` (a non-`next` id, an expired and a not-yet-valid `next`), `::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key`, `::a_promotion_repeated_with_a_stale_page_is_a_409`, `::of_two_concurrent_promotions_exactly_one_wins` (on `surrealkv`) and `::each_operation_needs_its_own_permission_and_no_other` (the permission split); in `axiam-db`, `saml_idp_credential_test.rs::of_concurrent_promotions_exactly_one_wins` and `::a_promotion_that_cannot_happen_changes_nothing`."
       },
       {
        "number": 365,
        "title": "A management response or error carries the IdP signing key or its sealed form",
        "type": "Information disclosure",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The credential routes are the first API to expose the `saml_idp_credential` table. A response type derived from the stored row, or an error that formatted it, could hand the tenant's signing key — or its ciphertext and custody — to anyone with read access, and with it the ability to sign as the tenant at every SP.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Contract §29.2 and D-42: `SamlIdpCredential` on the wire is a response type of its own with the public facts only (certificate, serial, fingerprint, dates, status, issuer CA) — no key, no ciphertext, no custody — built from `SamlIdpCredential`, which carries no key field, and never from `SealedSamlIdpCredential`; only the signer calls `get_active_sealed`. The core type derives no `Serialize`, so a route cannot expose the row by accident. SDKs must drop an undeclared key member (§29.5). Closes when T23.2.5 lands with a test that no credential response or error contains `PRIVATE KEY` or the ciphertext."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29.2 and D-42: `SamlIdpCredential` on the wire is a response type of its own with the public facts only (certificate, serial, fingerprint, dates, status, issuer CA) — no key, no ciphertext, no custody — built from `SamlIdpCredential`, which carries no key field, and never from `SealedSamlIdpCredential`; only the signer calls `get_active_sealed`. The core type derives no `Serialize`, so a route cannot expose the row by accident. SDKs must drop an undeclared key member (§29.5). Tests (T23.2.5): `saml_admin_test.rs::the_credential_list_is_a_bare_array_newest_first_and_carries_no_key`, `::issuing_fills_an_empty_slot_with_a_keyless_answer_and_a_sealed_key`, `::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key`, `::retire_works_on_next_and_active_and_is_idempotent`, `::a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing` (the error bodies) and `::the_spec_has_the_eleven_operations_and_a_credential_with_no_key_member` — each asserts that no answer contains `PRIVATE KEY`, a key column name or the sealed bytes."
       }
      ],
-     "open": 9
+     "open": 0
     },
     {
      "id": "2d150b0e-0535-5769-8bdc-0c75f7669c8e",
@@ -4806,30 +4806,30 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "An SP pins a key or endpoints that are not the tenant's",
        "type": "Spoofing",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "SPs trust whatever certificate the IdP metadata carries. A document built from request input, served for the wrong tenant, or with stale or extra keys would make an SP trust an attacker's key or send users somewhere else.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-40: one fixed template, every value escaped; `entityID` and every location from `idp_entity_id`/`idp_sso_url`/`idp_slo_url` of the path tenant only (T-307); one `KeyDescriptor use=\"signing\"` per publishable credential — `active`, then `next` — read through the keyless `list`; no encryption key; `SingleLogoutService` only once the route exists. Unsigned by decision: signing with the published key anchors nothing and would mint another signed document (T-316); trust comes from TLS to the deployment's origin and the fingerprint §29 shows. Residual: an SP that fetches metadata over a path an attacker controls is outside AXIAM's reach. Closes when T23.2.5 lands with a test pinning the document (both keys, no retired one, no encryption key, URLs per tenant)."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-40: one fixed template, every value escaped; `entityID` and every location from `idp_entity_id`/`idp_sso_url`/`idp_slo_url` of the path tenant only (T-307); one `KeyDescriptor use=\"signing\"` per publishable credential — `active`, then `next` — read through the keyless `list`; no encryption key; `SingleLogoutService` only once the route exists. Unsigned by decision: signing with the published key anchors nothing and would mint another signed document (T-316); trust comes from TLS to the deployment's origin and the fingerprint §29 shows. Residual: an SP that fetches metadata over a path an attacker controls is outside AXIAM's reach. Tests (T23.2.5): `saml_admin_test.rs::metadata::the_document_parses_back_with_samael_active_before_next_and_never_a_retired_key` (both keys, `active` first, no retired one, no encryption key, no `SingleLogoutService`), `::metadata::each_tenant_publishes_its_own_urls_and_keys` and `::metadata::a_promotion_changes_what_is_published`; in `axiam-federation`, `saml_idp::idp_metadata::tests` (the template carries what D-40 names and nothing else, every value escaped)."
       },
       {
        "number": 368,
        "title": "The metadata endpoint reveals whether a tenant exists, serves SAML or has a credential",
        "type": "Information disclosure",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The metadata route is unauthenticated. Different answers for an unknown tenant, a tenant with SAML off, a build without SAML and a tenant without a credential would let anyone enumerate tenants and their SAML posture.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-40 with D-20/D-27: the same empty `404` for every one of those cases and for a non-canonical tenant id, decided before anything is read, on every method and sub-path (`default_service`); no `503` for a missing credential. Readiness is visible only to the tenant's administrator through §29 `get_idp`. Residual as T-326: a flood tells a build with SAML from one without (429 against 404). Closes when T23.2.5 lands with the 404 matrix."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-40 with D-20/D-27: the same empty `404` for every one of those cases and for a non-canonical tenant id, decided before anything is read, on every method and sub-path (`default_service`); no `503` for a missing credential. Readiness is visible only to the tenant's administrator through §29 `get_idp`. Residual as T-326: a flood tells a build with SAML from one without (429 against 404). Tests (T23.2.5): `saml_admin_test.rs::metadata::the_three_d20_404s_are_indistinguishable_from_each_other_and_from_an_unmounted_path` (an unknown tenant, a non-canonical id, the setting off, only a retired credential, no credential, sub-paths and every other method)."
       },
       {
        "number": 369,
        "title": "A metadata request flood loads the database and the process",
        "type": "Denial of service",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Every metadata request reads the tenant's settings and credentials and renders XML, unauthenticated.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-40: a per-route governor with the `end_session_per_min` preset and the shared bucket `saml_idp_metadata`; at most two certificates per document; `Cache-Control: public, max-age=3600` and a strong `ETag` so SPs and caches revalidate cheaply (`304`). Closes when T23.2.5 lands with the limiter wired."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-40: a per-route governor with the `end_session_per_min` preset and the shared bucket `saml_idp_metadata`; at most two certificates per document; `Cache-Control: public, max-age=3600` and a strong `ETag` so SPs and caches revalidate cheaply (`304`). Tests (T23.2.5): `saml_admin_test.rs::metadata::the_metadata_route_is_rate_limited_with_a_bucket_of_its_own` and `::metadata::the_etag_revalidates_with_304_and_head_answers_like_get`."
       }
      ],
-     "open": 3
+     "open": 0
     },
     {
      "id": "98615ed3-7338-5a0e-a46a-c202a2371450",
@@ -6023,7 +6023,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 125,
-   "open": 32,
+   "open": 19,
    "bySeverity": {
     "High": 44,
     "Medium": 51,

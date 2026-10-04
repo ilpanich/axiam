@@ -1022,21 +1022,43 @@ async fn every_validator_refusal_is_a_400_validation_error_naming_the_rule() {
             "allowed_groups",
         ),
     ];
-    for (label, body, names) in cases {
-        let (status, refusal) = create_sp(&app, &w, body).await;
-        assert_eq!(status, 400, "{label}");
-        assert_eq!(refusal["error"], "validation_error", "{label}");
+    for (label, body, names) in &cases {
+        let (status, refusal) = create_sp(&app, &w, body.clone()).await;
+        assert_eq!(status, 400, "create: {label}");
+        assert_eq!(refusal["error"], "validation_error", "create: {label}");
         assert!(
             message_of(&refusal).contains(names),
-            "{label}: the message names the rule"
+            "create: {label}: the message names the rule"
         );
         assert!(
             !refusal.to_string().contains("BEGIN"),
-            "{label}: the message never echoes a certificate or a key"
+            "create: {label}: the message never echoes a certificate or a key"
         );
     }
     // Nothing a refusal did is in the registry.
     assert!(w.sps().list(w.tenant_id).await.unwrap().is_empty());
+
+    // The same rules on update: every case is refused for a stored registration
+    // too (each body keeps the stored entity id, so it is the rule that refuses).
+    let (status, stored) = create_sp(&app, &w, sp_body(SP_ENTITY)).await;
+    assert_eq!(status, 201);
+    let id = stored["id"].as_str().unwrap().to_string();
+    for (label, body, names) in &cases {
+        let (status, refusal) = put_sp(&app, &w, &id, body.clone()).await;
+        assert_eq!(status, 400, "update: {label}");
+        assert_eq!(refusal["error"], "validation_error", "update: {label}");
+        assert!(
+            message_of(&refusal).contains(names),
+            "update: {label}: the message names the rule"
+        );
+        assert!(!refusal.to_string().contains("BEGIN"), "update: {label}");
+    }
+    let intact = w.sps().get(w.tenant_id, id.parse().unwrap()).await.unwrap();
+    assert_eq!(
+        intact.display_name, "Payroll",
+        "no refused update changed the registration"
+    );
+    assert!(w.audit_rows("saml_sp.updated").await.is_empty());
 }
 
 #[actix_rt::test]
@@ -1828,7 +1850,7 @@ async fn a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing() {
         ("a retired credential", gone.id),
         ("a next credential past its window", expired.id),
     ] {
-        let (status, refusal, _) = post_json(
+        let (status, refusal, text) = post_json(
             &app,
             &w,
             &format!("idp-credentials/{id}/promote"),
@@ -1837,6 +1859,7 @@ async fn a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing() {
         .await;
         assert_eq!(status, 409, "{label}");
         assert_eq!(refusal["error"], "conflict", "{label}");
+        assert_keyless(label, &text, &[&active, &gone, &expired]);
     }
     w.credentials()
         .retire(w.tenant_id, expired.id)
@@ -3072,6 +3095,16 @@ mod metadata {
                 assert!(test::read_body(resp).await.is_empty(), "{label} ({method})");
             }
         }
+        // Sub-paths of the metadata route are that same 404 too.
+        for tail in ["/extra", "/", "/sso"] {
+            let uri = format!("{}{tail}", metadata_uri(w.tenant_id));
+            let resp = test::call_service(&app, anonymous(Method::GET, &uri).to_request()).await;
+            assert_eq!(
+                fingerprint(&resp),
+                expected,
+                "GET {tail} under the metadata route"
+            );
+        }
         // Every other method, for a tenant that does serve, is that same 404.
         for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
             let resp = test::call_service(
@@ -3083,6 +3116,47 @@ mod metadata {
                 fingerprint(&resp),
                 expected,
                 "{method} on the metadata route"
+            );
+        }
+    }
+
+    /// T-367: a document is the path tenant's own — its entity id and SSO
+    /// locations are built from that tenant's id, and its keys are that
+    /// tenant's credentials, never another's.
+    #[actix_rt::test]
+    async fn each_tenant_publishes_its_own_urls_and_keys() {
+        let w = world().await;
+        let app = app!(w.state(), w);
+        let mine = w
+            .install(w.tenant_id, SamlIdpCredentialStatus::Active, -10, 300)
+            .await;
+        let theirs = w
+            .install(w.other_tenant_id, SamlIdpCredentialStatus::Active, -10, 300)
+            .await;
+        for (tenant, own, other) in [
+            (w.tenant_id, &mine, &theirs),
+            (w.other_tenant_id, &theirs, &mine),
+        ] {
+            let resp = test::call_service(
+                &app,
+                anonymous(Method::GET, &metadata_uri(tenant)).to_request(),
+            )
+            .await;
+            assert_eq!(resp.status().as_u16(), 200);
+            let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+            let summary = parse_idp_metadata(&body).unwrap();
+            assert_eq!(
+                summary.entity_id,
+                format!("{ROOT_ISSUER}/saml/v2/{tenant}/metadata")
+            );
+            assert!(summary.single_sign_on.iter().all(|(_, location)| *location == format!("{ROOT_ISSUER}/saml/v2/{tenant}/sso")));
+            assert_eq!(
+                summary.keys,
+                vec![(Some("signing".to_string()), der_b64(&own.cert_pem))]
+            );
+            assert!(
+                !body.contains(&der_b64(&other.cert_pem)),
+                "another tenant's certificate"
             );
         }
     }

@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SAML IdP registry and credential routes, IdP metadata and SP metadata import
+  (T23.2.5, G-2, contract §29).** Eleven routes under
+  `/api/v1/tenants/{tenant_id}/saml`, OpenAPI tag `saml`, **compiled into every
+  build** and independent of the tenant's `saml_idp_enabled` (only
+  `parse-sp-metadata` needs `samael` and answers `503` without it):
+  `get_idp` (the IdP's URLs, whether SAML is available and enabled, the credential
+  slots), the service-provider registry (list with `search`, create, get, replace,
+  delete) and the signing credential (list newest first, issue, promote, retire).
+  Every SP write runs the validator and then the four D-42 refusals —
+  `encrypt_assertions: true`, an `sp_signing_cert_pem` the SSO endpoint cannot use
+  (undecodable, RSA under 2048 bits, anything but RSA or ECDSA on P-256, P-384 or
+  P-521), a changed `entity_id` on update, an `allowed_groups` entry outside the
+  tenant — each a `400 validation_error` naming the rule; a repeated `entity_id`
+  and an occupied slot are `409 conflict`, and an occupied slot is refused
+  **before any key is generated**. **Promote** retires the `active` credential
+  (its key destroyed) and makes `next` active in **one transaction**, refused
+  unless the id is the current `next` and inside its validity window (`409`);
+  of two concurrent promotions one wins. **Retire** works on `next` and `active`
+  and is idempotent. `SamlIdpCredential` is a response type of its own — no key,
+  no ciphertext, no custody. **`parse-sp-metadata` parses to a draft and never
+  writes** (D-41): exactly one of `metadata_xml` and `metadata_url`; a URL is
+  fetched once, only through the SSRF guard (`https`, no loopback, private,
+  link-local or cloud-metadata address, every redirect hop checked); a document
+  with any DTD or entity declaration, a non-UTF-8 encoding, over 512 KiB, an
+  aggregate or anything but one `EntityDescriptor` with one SAML 2.0
+  `SPSSODescriptor` is refused with one of three generic messages that never
+  carry the document, a status line or an address; the document's own signature
+  is reported, not evaluated; `encrypt_assertions` is never set. **`GET`/`HEAD
+  /saml/v2/{tenant_id}/metadata`** serves the tenant's IdP metadata (D-40):
+  unauthenticated, unsigned, a fixed escaped template with the `active` and then
+  the `next` signing certificate and no encryption key, `Cache-Control: public,
+  max-age=3600`, a strong `ETag` and `304`; a tenant with SAML off, an unknown or
+  non-canonical id, no publishable credential and a build without SAML all answer
+  the same empty `404`. The permissions are `saml_sp:read`, `saml_sp:write` and
+  `saml_idp:credential` (human principals only: a service-account token is
+  refused with the `401` every human-only route answers; another tenant's id is
+  `403`); the seven writes each have a per-IP bucket under
+  `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` (default 30, never preset), the
+  metadata route the `end_session_per_min` preset in the bucket
+  `saml_idp_metadata`; seven audit actions (`saml_sp.created`, `.updated`,
+  `.deleted`, `.metadata_parsed`; `saml_idp.credential_issued`, `.promoted`,
+  `.retired`) carry the actor, ids, the names of what changed and fingerprints,
+  never a certificate or a document. Deleting a service provider now removes what
+  the datastore holds for it (its pending sign-on requests) in the same
+  transaction. `idp_entity_id`, `idp_sso_url` and `idp_slo_url` moved out of the
+  `saml`-gated module. `openapi.json` and `management-registry.json` are
+  regenerated (179 operations, 26 namespaces). Threat model: T-357 … T-365,
+  T-367 … T-369 and T-309 are Mitigated (353 mitigated / 31 open); T-366 stays
+  open until T23.2.4 adds the rows its cascade must also remove. A revoked or
+  expired issuing CA is now a `400` on `issue_idp_credential` (the generic
+  certificate routes keep their existing answer).
+
 - **Directory e2e against a real OpenLDAP and a real Samba AD DC (T23.3.6,
   G-3).** The oracle for the whole G-3 stack: `docker/docker-compose.directory.yml`
   brings up OpenLDAP (slapd with ppolicy, TLS 1.2 floor, a read-only bind

@@ -26,7 +26,7 @@ use axiam_db::{
     SurrealSessionRepository, SurrealUserRepository, run_migrations,
 };
 use axiam_directory::{
-    ClientLimits, DirectoryClient, DirectorySync, RepositoryDirectoryAuthenticator,
+    AddressPolicy, ClientLimits, DirectoryClient, DirectorySync, RepositoryDirectoryAuthenticator,
     RepositoryGroupMapper,
 };
 use axiam_server::cleanup::{CleanupTask, DirectorySyncJob, sweep_directories};
@@ -58,13 +58,20 @@ async fn fixture() -> Fixture {
     let config = SurrealDirectoryConfigRepository::new(db.clone(), Some(encryption_material()));
     let authenticator = Arc::new(RepositoryDirectoryAuthenticator::with_client(
         config.clone(),
-        Arc::new(DirectoryClient::new(ClientLimits {
+        Arc::new(
+            DirectoryClient::new(ClientLimits {
             acquire_timeout: Duration::from_millis(300),
             connect_timeout: Duration::from_millis(500),
             operation_timeout: Duration::from_millis(500),
             authentication_deadline: Duration::from_secs(2),
             ..ClientLimits::default()
-        })),
+        })
+        // The "unreachable" directory is a closed port on localhost. Since
+        // T23.3.7 the production policy refuses loopback outright (that would
+        // read as misconfigured); admitting it here keeps this suite about an
+        // outage, which is what it tests.
+        .with_address_policy(Arc::new(AddressPolicy::new().admitting_loopback_for_tests())),
+        ),
     ));
     let job = DirectorySync::new(
         config.clone(),

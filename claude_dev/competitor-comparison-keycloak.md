@@ -58,7 +58,7 @@ question.
 | Client ID Metadata Document | **Yes** | Experimental | [K3] |
 | MCP authorization server | **Yes**, end to end | Documentation for MCP integration; CIMD experimental | [K15] |
 | SCIM 2.0 server | Yes | Yes — promoted to supported in 26.8 (the specification table still reads "Tech Preview") | [K3][K15] |
-| SAML 2.0 | SP only | IdP and broker | [K3][K17] |
+| SAML 2.0 | IdP (G-2, Phase 23) and SP | IdP and broker | [K3][K17] |
 | LDAP/AD, Kerberos federation | LDAP/AD yes (G-3, Phase 23; read-only, JIT, group mapping, sync); Kerberos no (D-1) | Yes | [K18] |
 | Social login | Google, GitHub, Microsoft, Apple, generic OIDC/OAuth2 | Large catalogue (Google, GitHub, Microsoft, LinkedIn, …) | [K17] |
 | Verifiable credentials | No — design written, implementation gated on a go/no-go (G-9) | OID4VCI **preview**, OID4VP **experimental** (26.8) | [K15] |
@@ -76,7 +76,8 @@ question.
 
 1. **SAML 2.0 identity provider.** Keycloak signs SAML for any service
    provider [K17]. Enterprise SaaS still depends on it, and AXIAM only
-   consumes SAML.
+   consumes SAML. *Closed by G-2 (Phase 23, W4): AXIAM is a per-tenant SAML
+   2.0 IdP with SSO, SLO and a signing credential from the tenant's own CA.*
 2. **LDAP/AD and Kerberos federation.** This is the most common reason
    organizations pick Keycloak [K18]. *Closed for LDAP/AD by G-3 (Phase 23,
    2026-10-04, [remediation plan](competitor-gap-remediation-plan-2026-10-02.md));
@@ -156,6 +157,7 @@ all shipped. They now appear in §2 as parity or advantage.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-04 | G-2 (SAML 2.0 identity provider) complete on the Phase 23 W4 branch: per-tenant IdP with SP- and IdP-initiated Web Browser SSO over HTTP-Redirect and HTTP-POST, always-signed assertions under a tenant credential issued by the tenant's own CA (issue / promote / retire), a pairwise persistent `NameID` by default, per-SP `SessionIndex` and single logout tied to session revocation and the revocation feed, IdP metadata, SP metadata import as a reviewed draft, the SP registry API (contract §29) and console page; round-tripped with samael as a reference SP and with a real Keycloak 26.7.0 brokering to AXIAM. Assertion encryption and the artifact binding stay out (D-2). | — |
 | 2026-10-04 | G-5 (Shared Signals Framework transmitter) complete on the Phase 23 W4 branch: SSF 1.0 with CAEP `session-revoked`, `credential-change`, `assurance-level-change` and RISC `account-disabled` / `account-enabled` / `account-purged` as EdDSA-signed SETs, push (RFC 8935) through the outbound address guard and poll (RFC 8936), the receiver's stream management API under an `ssf.manage` client credential, discovery, administrator-registered streams (contract §32). The optional SDK receiver helper follows the merge (D-35). | — |
 | 2026-10-04 | G-3 (LDAP / Active Directory identity source) complete on the Phase 23 W3 branch: bind-as-user over mandatory TLS, JIT provisioning, explicit group mapping with nesting, incremental and nightly sync with soft-delete, the address guard, the management API (contract §30) and the console page; tested against a real OpenLDAP and a real Samba AD DC. Kerberos stays out of scope (D-1), so the row reads LDAP/AD yes, Kerberos no. | — |
 | 2026-10-02 | Baseline written. Since the run-5 baseline (26.7.0): SCIM promoted to supported, so the Track B premise "Keycloak only via extensions" is obsolete and SCIM is now parity. Token-exchange delegation is preview, and impersonation tokens carry `act`. OID4VCI is preview and OID4VP experimental. Stateless multi-cluster is supported. Login failures are persisted by default. 26.7.1–26.7.5 shipped about 56 CVE fixes. | [K15][K20] |

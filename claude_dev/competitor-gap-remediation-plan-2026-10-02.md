@@ -651,6 +651,40 @@ security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 > `AcsEndpoint.index` as `int32` without a maximum where the model is `u16`
 > (carried to F4). The API-index generator refused the unplaced `ssf` tags; a
 > *Shared signals* domain was added.
+>
+> **EXECUTED — G-2, W4: T23.2.7, 2026-10-04** (`b2df09f`, `1a2f57f`, `4fc54e1`;
+> after D-54: `0ba0b93`, `42a8774`, `53e636a`; Sonnet 5.5). The end-to-end
+> oracle. **`samael` as the reference SP** (`saml_idp_e2e_test`, 10 tests +
+> 1 plain-build): SP-initiated sign-on over POST and Redirect with signed
+> requests, validated by samael as an SP validates (signature under the
+> metadata certificate, audience, `Destination`, `InResponseTo`,
+> `NotOnOrAfter`), and refused by it under every wrong expectation; the
+> production credential (RSA-4096, documentSigning) issued through the real
+> route; IdP-initiated sign-on accepted only by an SP that opted in; the
+> pairwise `NameID` stable per SP and distinct across SPs and users; SLO over
+> both bindings revoking the session and appearing in `GET
+> /oauth2/revocations`, the `LogoutResponse` verified by samael; a replayed
+> request ID refused; eight ACS variants outside the registry refused with
+> nothing posted; the same `404` as an unmounted path on metadata, SSO and SLO
+> with the switch off, and the routes absent from a build without `saml`.
+> **Keycloak 26.7.0 brokering to AXIAM** (`saml_idp_keycloak_roundtrip_test`,
+> 2 tests, `#[ignore]`, wired into CI's compose job): AXIAM's metadata imported
+> into Keycloak, Keycloak's SP descriptor registered through
+> `parse_sp_metadata` unmodified, sign-on over both bindings ending in an
+> authorization code with the mapped claims; Keycloak refuses a tampered, a
+> cross-browser and a replayed response. **D-54**: an ISO-8601 `cacheDuration`
+> on `SPSSODescriptor` and an ACS without `index` are normalised on the libxml
+> tree with a draft warning (6 unit tests; the HTTP pin flipped to a sign-on);
+> the website says an SP must sign with a SHA-256 or stronger digest. **No
+> defect in AXIAM's IdP was found by either SP.** **G-2 is complete.**
+>
+> What the plan did not anticipate. `quay.io` is blocked by this
+> environment's egress policy, so the Keycloak round trip ran against the same
+> version from the Maven Central distribution (2 passed, twice), not the
+> compose container; the CI step has not run yet. Keycloak's own descriptor
+> needed none of D-54. samael's default signature template digests with
+> SHA-1, which AXIAM refuses by design. Not covered: a Keycloak-initiated
+> logout and AXIAM's front-channel SLO towards Keycloak's `SingleLogoutService`.
 
 **Target.** AXIAM issues SAML 2.0 assertions to registered service providers,
 per tenant: IdP metadata, Web Browser SSO profile with HTTP-Redirect and

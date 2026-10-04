@@ -58,7 +58,7 @@ would turn it into an application-portal product.
 | RP-initiated / back-channel logout | Yes | Yes | [A15] |
 | Front-channel logout | No — declined by design (D-6); back-channel logout shipped | Yes | [A15] |
 | OpenID certification | Not yet (conformance suites run and published) | **OpenID Certified** for OP and logout profiles (2026.8) | [A5] |
-| SAML 2.0 | Service provider only | IdP **and** SP; WS-Federation (enterprise) | [A5][A16] |
+| SAML 2.0 | IdP (G-2, Phase 23) **and** SP | IdP **and** SP; WS-Federation (enterprise) | [A5][A16] |
 | SCIM 2.0 | Inbound endpoint (RFC 7643/7644) | Inbound SCIM source **and** outbound SCIM provider | [A17][A18] |
 | LDAP / Kerberos as user source | LDAP/AD yes (G-3, Phase 23; nested groups, sync); Kerberos no (D-1) | Yes | [A16] |
 | LDAP / RADIUS / proxy / RAC outposts | No | Yes (RADIUS EAP-TLS enterprise) | [A2] |
@@ -88,7 +88,8 @@ not authentik's.
 2. **SAML 2.0 identity provider.** AXIAM consumes SAML but cannot issue it
    (`crates/axiam-federation/src/saml.rs` is SP-only). Authentik, Keycloak and
    Zitadel all act as SAML IdPs; many enterprise SaaS products still require
-   it.
+   it. *Closed by G-2 (Phase 23, W4): AXIAM is a per-tenant SAML 2.0 IdP with
+   SSO, SLO and a signing credential from the tenant's own CA.*
 3. **LDAP / Active Directory as a user source.** Authentik syncs LDAP
    (nested groups since 2026.8) and Kerberos [A5][A16]. *Closed for LDAP/AD by
    G-3 (Phase 23, 2026-10-04, [remediation plan](competitor-gap-remediation-plan-2026-10-02.md)),
@@ -161,6 +162,7 @@ unreliable. Adding it as a benchmark target is the honest way to settle that.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-04 | G-2 (SAML 2.0 identity provider) complete on the Phase 23 W4 branch: per-tenant IdP with SP- and IdP-initiated Web Browser SSO over HTTP-Redirect and HTTP-POST, always-signed assertions under a tenant credential issued by the tenant's own CA (issue / promote / retire), a pairwise persistent `NameID` by default, per-SP `SessionIndex` and single logout tied to session revocation and the revocation feed, IdP metadata, SP metadata import as a reviewed draft, the SP registry API (contract §29) and console page; round-tripped with samael as a reference SP and with a real Keycloak 26.7.0 brokering to AXIAM. Assertion encryption and the artifact binding stay out (D-2). | — |
 | 2026-10-04 | G-5 (Shared Signals Framework transmitter) complete on the Phase 23 W4 branch: SSF 1.0 with CAEP `session-revoked`, `credential-change`, `assurance-level-change` and RISC `account-disabled` / `account-enabled` / `account-purged` as EdDSA-signed SETs, push (RFC 8935) through the outbound address guard and poll (RFC 8936), the receiver's stream management API under an `ssf.manage` client credential, discovery, administrator-registered streams (contract §32). The optional SDK receiver helper follows the merge (D-35). | — |
 | 2026-10-04 | G-3 (LDAP / Active Directory identity source) complete on the Phase 23 W3 branch: bind-as-user over mandatory TLS, JIT provisioning, explicit group mapping with nesting, incremental and nightly sync with soft-delete, the address guard, the management API (contract §30) and the console page; tested against a real OpenLDAP and a real Samba AD DC. Kerberos stays out of scope (D-1), so the row reads LDAP/AD yes, Kerberos no. | — |
 | 2026-10-02 | Baseline written. Recent authentik changes already folded in: 2026.8 adds token exchange with on-behalf-of, DCR, OpenID certification, agent accounts (enterprise) and the Rust server; the 2026.11 draft removes multi-tenancy. | [A5][A7] |

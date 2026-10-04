@@ -1707,6 +1707,43 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > rate-limited; T23.2.5 refuses `encrypt_assertions` and an unparseable SP
 > certificate and fetches SP metadata only through `guarded_fetch`; a second
 > CSP-setting page must pass the D-27 pin; new ids start at T-357.
+>
+> **W4 F4, 2026-10-04:** [`security-review-phase23-w4-2026-10-04.md`](security-review-phase23-w4-2026-10-04.md).
+> Eleven findings, no merge blocker after fixes. **D-38's single logout holds**
+> under adversarial review (every SP message verified per node or over the exact
+> Redirect octets, `verify_signed_xml` nowhere in production code, replay,
+> resolution, revocation through `AuthService::logout`, registered destinations
+> only); so do the §29 registry and credential routes, metadata import with
+> D-54's tree rewrite, SET issuance (no `sub`, no `exp`, now pinned against every
+> verifier AXIAM runs), `guarded_fetch_no_redirect` (line for line
+> `guarded_fetch`'s first hop) and the D-36 webhook topology. Fixed on the
+> branch, all wave-introduced: SSF stream writes were read-modify-write, so a
+> receiver's write overlapping an administrator's put back the status,
+> allowance, binding or subject format the administrator had just changed — a
+> `disabled` included — and the push deliverer could send a header supplied for
+> a new endpoint to the old one; writes are now conditional on their version
+> (**P23W4-01**, Low, new **T-406**); the step-up record could be spent by any
+> page through the return-leg marker before the request was validated and in the
+> asking session (**P23W4-02**, Low, T-404's residual closed); an unsignable held
+> event logged `ERROR` on every half-second look of a long poll (P23W4-03); CodeQL
+> hygiene, two key literals included (P23W4-04); `AcsEndpoint.index` bounded in
+> the published schema (P23W4-05). To file: five cleanup jobs never registered
+> in `/health/jobs` (P23W4-06, Low, pre-existing), no console control for
+> `saml_idp_enabled`/`ssf_enabled` and no SSF page (P23W4-07), the duplicated
+> consumer supervisor loop (P23W4-08), SLO untested against a real SP's logout
+> (P23W4-09), and — after a maintainer decision on requiring per-tenant issuers
+> for SSF — audience squatting where every tenant's SETs share one issuer
+> (P23W4-11, Low; T-390's residual corrected, receiver guidance on the website).
+> Accepted with reasons: an erased subject in the buffer or DLQ up to seven days, a receiver token outliving its client by up to
+> 15 minutes, the SSF primary and retry queues without TTL. Threat model
+> **2.30.0 — 406 threats, 389 mitigated / 17 open**. **Binding on W5:** a
+> registry with two writers writes conditionally on the version it read; every
+> credential-bearing outbound request goes through `guarded_fetch_no_redirect`
+> with `allow_private = false`, its credential sealed, write-only and never
+> following its endpoint to another origin; a new outbound kind keeps the webhook
+> topology untouched, gets a seven-day DLQ TTL when it holds personal data and no
+> third copy of the supervisor loop; a marker parameter consumes nothing before
+> its request is validated; new ids start at T-407.
 
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This

@@ -34,7 +34,10 @@
 > the step-up record is consumed only after the authorization request is
 > validated, and never in the session that was asked to step up, so no page can
 > spend it. **T-403** and **T-405** are amended: an unsignable held event is
-> logged once per poll, not on every look of a long poll. The model is **406
+> logged once per poll, not on every look of a long poll. **T-390**'s residual is
+> corrected: where the deployment serves no per-tenant issuers, an audience a
+> tenant squats before its owner registers it can reach a receiver that adopted a
+> conventional audience and accepts unauthenticated pushes. The model is **406
 > threats, 389 mitigated / 17 open**.
 >
 > **The 2026-10-04 SSF delivery threat entries (Phase 23 T23.5.4, model

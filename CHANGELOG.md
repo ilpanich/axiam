@@ -972,6 +972,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Phase 23 W4 security review (F4).**
+  `claude_dev/security-review-phase23-w4-2026-10-04.md`: single logout (D-38),
+  the SAML SP registry and credential routes, SP metadata import with D-54's
+  tree rewrite, SET issuance, the SSF receiver API, push and poll delivery and
+  the event sources reviewed adversarially. Five fixes (P23W4-01 … -05, above),
+  pins for SET token confusion at every verifier and for the wave's multi-value
+  `IN` queries. T-370 and T-377 now state the Redirect `SigAlg` rule exactly;
+  T-390's residual is corrected (audience squatting where every tenant's SETs
+  share one issuer, P23W4-11, a decision for the maintainer) and the website's
+  SSF page tells receivers to take `aud` from their stream and require the push
+  `Authorization` header. Threat model 2.30.0: 406 threats, 389 mitigated / 17
+  open.
+
 - **A long poll logs an unsignable held event once (F4 W4 P23W4-03).** When the
   deployment key could not sign a held SSF event, `POST /ssf/v1/poll/{id}`
   logged it at `ERROR` on every half-second look of a long poll — about sixty

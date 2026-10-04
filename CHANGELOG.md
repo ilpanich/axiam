@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory e2e against a real OpenLDAP and a real Samba AD DC (T23.3.6,
+  G-3).** The oracle for the whole G-3 stack: `docker/docker-compose.directory.yml`
+  brings up OpenLDAP (slapd with ppolicy, TLS 1.2 floor, a read-only bind
+  account) and a Samba Active Directory domain controller, each seeded with
+  people, a direct and a nested group, a disabled entry (ppolicy's permanent lock
+  `000001010000Z`; `userAccountControl` bit `0x2`) and an entry whose name holds
+  filter metacharacters, on fixed private addresses so the T23.3.7 address guard
+  and its allow-list are exercised rather than bypassed. The CA, both
+  certificates and every password are generated at run time by
+  `scripts/gen-directory-e2e-secrets.sh` into the gitignored
+  `docker/.secrets/directory/`; nothing is committed. Images are pinned by
+  digest. `crates/axiam-server/tests/directory_e2e.rs` (gated by
+  `AXIAM_E2E_DIRECTORY=1`; without it every test prints `SKIPPED`, with it a
+  missing server is a failure) configures the directory through the §30 routes
+  and drives `POST /api/v1/auth/login`, the group mapper, a real authorization
+  engine and `sweep_directories` against **both** servers: login with JIT
+  creating the account `Active` and marked, a role on a mapped AXIAM group
+  effective for the directory member, an unmapped directory group granting
+  nothing, a nested group, a disabled account refused with the unknown-user
+  answer, seven filter-injection payloads refused (each presented with the real
+  password of the entry it would select unescaped) and the metacharacter entry
+  signing in only under its exact name, a plaintext URL (and loopback, an
+  unlisted private range, the metadata address) refused at config time, StartTLS
+  accepted, an untrusted server certificate refused, and the sync job
+  deactivating a vanished or directory-disabled user as `Inactive` with the row
+  kept and its sessions revoked. New workflow `.github/workflows/directory-e2e.yml`
+  runs it on `workflow_dispatch` and on pull requests touching the directory
+  code. How to run it locally: `docker/directory/README.md`.
+
 - **Directory management routes, console page and docs (T23.3.8, G-3).** The
   six §30 routes exist: `GET`/`PUT`/`PATCH`/`DELETE`
   `/api/v1/tenants/{tenant_id}/directory`, `POST …/directory/links` (wraps the

@@ -272,6 +272,12 @@ AXIAM's lockout applies in front of the directory, so set the tenant's
 `max_failed_login_attempts` **below** the directory's own lockout threshold:
 AXIAM then stops binding before the directory would lock the account.
 
+**Checked against real servers.** The connector, the group mapper and the sync job
+are exercised against a containerised OpenLDAP and a Samba Active Directory domain
+controller by `crates/axiam-server/tests/directory_e2e.rs` (CI workflow
+`directory-e2e.yml`); to run it yourself, or to see exactly what directory shape
+it assumes, read [`docker/directory/README.md`](../../docker/directory/README.md).
+
 #### Managing a tenant's directory
 
 A tenant administrator configures the directory under

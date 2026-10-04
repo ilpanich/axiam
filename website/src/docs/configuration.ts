@@ -424,7 +424,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__RATE_LIMIT__SSF_PER_MIN",
-            "Max requests per minute, per IP, to each route of the Shared Signals Framework receiver surface: the stream management API (/ssf/v1/stream, /ssf/v1/status, /ssf/v1/verify) and both /.well-known/ssf-configuration forms. One bucket per route, checked before the receiver's token; each stream also enforces its own 60-second min_verification_interval. Never moved by a profile preset.",
+            "Max requests per minute, per IP, to each route of the Shared Signals Framework receiver surface: the stream management API (/ssf/v1/stream, /ssf/v1/status, /ssf/v1/verify, /ssf/v1/poll/{stream_id}) and both /.well-known/ssf-configuration forms. One bucket per route, checked before the receiver's token; each stream also enforces its own 60-second min_verification_interval. Never moved by a profile preset.",
             "60",
           ],
           [

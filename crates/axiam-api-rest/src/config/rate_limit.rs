@@ -522,8 +522,10 @@ pub struct RateLimitConfig {
     pub saml_admin_per_min: u32,
     /// Max requests per minute per IP to each route of the Shared Signals
     /// Framework **receiver** surface — the stream management API
-    /// (`/ssf/v1/stream`, `/ssf/v1/status`, `/ssf/v1/verify`) and the two
-    /// `/.well-known/ssf-configuration` forms (default: 60 — G-5, T23.5.2,
+    /// (`/ssf/v1/stream`, `/ssf/v1/status`, `/ssf/v1/verify`), the poll
+    /// endpoint (`/ssf/v1/poll/{stream_id}`, T23.5.3 — a long poll holds a
+    /// request for up to 30 s, so an honest receiver makes two a minute) and the
+    /// two `/.well-known/ssf-configuration` forms (default: 60 — G-5, T23.5.2,
     /// plan §7 rule 6, CONTRACT §32). Deliberately **not** part of
     /// [`MachineLimitPreset`]: a receiver reconfigures a stream at deploy time
     /// and asks for a verification event rarely (every stream also has its own

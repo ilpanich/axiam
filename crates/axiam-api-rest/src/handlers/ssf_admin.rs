@@ -109,6 +109,21 @@ pub struct SsfStream {
     pub created_at: DateTime<Utc>,
     /// When it was last written.
     pub updated_at: DateTime<Utc>,
+    /// Whether the tenant's transmitter is active: its `ssf_enabled` is on and
+    /// the deployment does not make every tenant share one issuer (D-55). A
+    /// stream of an inactive transmitter is kept, and carries nothing.
+    pub transmitter_active: bool,
+    /// Why the transmitter is inactive, when it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transmitter_inactive_reason: Option<String>,
+}
+
+impl SsfStream {
+    fn with_status(mut self, inactive: Option<&str>) -> Self {
+        self.transmitter_active = inactive.is_none();
+        self.transmitter_inactive_reason = inactive.map(str::to_owned);
+        self
+    }
 }
 
 impl From<StoredStream> for SsfStream {
@@ -133,6 +148,8 @@ impl From<StoredStream> for SsfStream {
             last_verification_at: s.last_verification_at,
             created_at: s.created_at,
             updated_at: s.updated_at,
+            transmitter_active: true,
+            transmitter_inactive_reason: None,
         }
     }
 }
@@ -529,8 +546,13 @@ pub async fn list_streams<C: Connection + Clone>(
         .stream_repo
         .list_page(tenant_id, query.into_inner())
         .await?;
+    let inactive = crate::handlers::ssf::transmitter_status(&state, tenant_id).await?;
     Ok(HttpResponse::Ok().json(PaginatedResult {
-        items: page.items.into_iter().map(SsfStream::from).collect(),
+        items: page
+            .items
+            .into_iter()
+            .map(|s| SsfStream::from(s).with_status(inactive))
+            .collect(),
         total: page.total,
         offset: page.offset,
         limit: page.limit,
@@ -616,7 +638,10 @@ pub async fn create_stream<C: Connection + Clone>(
         }),
     )
     .await;
-    Ok(HttpResponse::Created().json(SsfStream::from(created)))
+    Ok(HttpResponse::Created().json(
+        SsfStream::from(created)
+            .with_status(crate::handlers::ssf::transmitter_status(&state, tenant_id).await?),
+    ))
 }
 
 /// `GET /api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}`
@@ -647,7 +672,10 @@ pub async fn get_stream<C: Connection + Clone>(
     let (tenant_id, stream_id) = path.into_inner();
     require_own_tenant(&user, tenant_id, "read an SSF stream")?;
     let stream = state.ssf.stream_repo.get(tenant_id, stream_id).await?;
-    Ok(HttpResponse::Ok().json(SsfStream::from(stream)))
+    Ok(HttpResponse::Ok().json(
+        SsfStream::from(stream)
+            .with_status(crate::handlers::ssf::transmitter_status(&state, tenant_id).await?),
+    ))
 }
 
 /// `PUT /api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}` — a
@@ -765,7 +793,10 @@ pub async fn update_stream<C: Connection + Clone>(
     if old.status == SsfStreamStatus::Paused && updated.status == SsfStreamStatus::Enabled {
         crate::handlers::ssf::release_held(&state, &updated).await;
     }
-    Ok(HttpResponse::Ok().json(SsfStream::from(updated)))
+    Ok(HttpResponse::Ok().json(
+        SsfStream::from(updated)
+            .with_status(crate::handlers::ssf::transmitter_status(&state, tenant_id).await?),
+    ))
 }
 
 /// `DELETE /api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}` — the stream

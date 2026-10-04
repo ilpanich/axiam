@@ -3895,6 +3895,22 @@ recorded here until one exists.
     `…__BACKOFF_CEILING_MS` and the seven-day lifetime of the push dead-letter queue. None of it
     changes a management shape, an operation or a required test.
 
+  - **Amended before 1.56 shipped (F4 W4 P23W4-11; D-55, maintainer decision on
+    ilpanich/axiam#539).** No version bump: no SDK has ported §32 and 1.56 is unreleased, so the
+    text is corrected in place. (a) **§32.3 rule 13**, new: SSF requires per-tenant issuers in a
+    deployment of more than one tenant. With `AXIAM__AUTH__TENANT_ISSUER_PATHS` off and more
+    than one tenant (counted across organizations), SSF behaves for every tenant as with
+    `ssf_enabled` off — discovery `404`, no stream on the receiver API, nothing produced, held,
+    verified or signed, a queued push dead-lettered, a poll answering nothing — and turning
+    `ssf_enabled` on is `400` naming the cause; the count is cached for at most 60 s, a change
+    is logged once at `WARN` and audited as `ssf.inactive_shared_issuer`. Rule 9 points at it;
+    §32.6's discovery, receiver API, push and emitter paragraphs say it. (b) **§32.2**:
+    `SsfStream` gains the read-only `transmitter_active` and `transmitter_inactive_reason`, and
+    §32.8 test 3 decodes them; the §27 settings response gains the read-only
+    `oidc.ssf_inactive_reason`. Both are additive response members, so the operation set and
+    the number of required tests are unchanged. `openapi.json` and
+    `management-registry.json` are regenerated in the same fix.
+
 - **2026-10-04 (T23.2.8, G-2, contract 1.55)** — **non-breaking / additive.** A new
   section, [§29](#§29-saml-service-provider-registration-management-api-contract-155): the
   management surface for AXIAM as a SAML 2.0 identity provider, as a §27 namespace `saml`
@@ -10174,9 +10190,9 @@ rather than letting its §27 claim widen silently (Conformance Statement), even 
 **Requirement level: §32.1 – §32.5 SHOULD, as part of §27 (a namespace `ssf`); §32.7 the
 receiver helper SHOULD in the seven full-surface SDKs (Rust, TypeScript, Python, Java, C#, PHP,
 Go) and MAY in Kotlin, Swift, C and C++. Additive; nothing in §1–§30 changes.**
-Server design: plan item G-5 and decisions D-44 … D-52 in the plan's decision table
+Server design: plan item G-5 and decisions D-44 … D-53 and D-55 in the plan's decision table
 ([`competitor-gap-remediation-plan-2026-10-02.md`](../claude_dev/competitor-gap-remediation-plan-2026-10-02.md)
-§8). Threat model: T-385 … T-401. **§31 is reserved** for G-6's outbound SCIM management, which
+§8). Threat model: T-385 … T-406. **§31 is reserved** for G-6's outbound SCIM management, which
 the plan named first (D-44).
 
 AXIAM can act as a **Shared Signals Framework transmitter** for a tenant (competitor-gap item
@@ -10237,6 +10253,8 @@ defaulted from the client's configured tenant per §27.4 rule 3.
 | `status_actor` | `"admin"` \| `"receiver"` | Who set the status. |
 | `last_verification_at` | RFC 3339 \| null | The receiver's last verification request. |
 | `created_at`, `updated_at` | RFC 3339 | |
+| `transmitter_active` | bool | Read-only. Whether the tenant's transmitter is active: its `ssf_enabled` is on **and** the shared-issuer gate does not hold (§32.3 rule 13). A stream of an inactive transmitter is kept and carries nothing. |
+| `transmitter_inactive_reason` | string, absent when active | Read-only. Why the transmitter is inactive. Text for a person: an SDK MUST NOT parse it. |
 
 Every string enum, and the event-type URIs, are **open**: an SDK MUST decode a value it does not
 know without failing and MUST NOT send one it does not know. An SDK SHOULD model event types as
@@ -10289,7 +10307,8 @@ together with `authorization_header` and on create.
 9. **The routes do not depend on the tenant's `ssf_enabled`** (D-45): an administrator
    registers streams before switching the transmitter on. The setting — a disable-only layered
    setting like `saml_idp_enabled`, default `false`, written through §27's `settings`
-   operations — governs everything a receiver sees (§32.6) and whether any event is sent.
+   operations — governs everything a receiver sees (§32.6) and whether any event is sent, and
+   so does the deployment-wide gate of rule 13.
 10. **Authorization.** `ssf_streams:read` (`list_streams`, `get_stream`) and
     `ssf_streams:write` (the three writes). The `{tenant_id}` in the path must be the caller's
     (`403`). A service-account token is `401`, as on every human-only family: deciding which
@@ -10299,6 +10318,30 @@ together with `authorization_header` and on create.
     `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` (default 30): `429` per §2. Reads are not limited.
 12. **Audit.** `ssf_stream.created`, `ssf_stream.updated` (the **names** of the changed
     members), `ssf_stream.deleted`; never the header.
+13. **SSF requires per-tenant issuers in a deployment of more than one tenant** (D-55, F4 W4
+    P23W4-11). Without per-tenant issuers (`AXIAM__AUTH__TENANT_ISSUER_PATHS` off) every
+    tenant's SETs would carry the same `iss` and be signed by the same key, so a tenant that
+    registered another tenant's receiver audience first — rule 3 cannot stop that — could push
+    SETs that receiver accepts. The **shared-issuer gate** holds when per-tenant issuers are
+    off **and** the deployment holds more than one tenant, counted across every organization
+    (an organization's own scope tenant is not counted beside its standard tenants, and an
+    organization with none counts as one). While it holds, SSF behaves for **every** tenant
+    exactly as with `ssf_enabled` off: discovery answers its one empty `404`, the receiver API
+    sees no stream, nothing is produced, held or verified, and no SET is signed — a push
+    already queued is dead-lettered and a poll answers nothing (§32.6). The check is made where
+    an event is produced, where a SET is signed and at discovery, never only when something is
+    written. **Turning `ssf_enabled` on** — at the organization or as a tenant override —
+    while the gate holds is `400 validation_error`, its `message` naming `ssf_enabled` and the
+    cause; turning it off, and a write that leaves it as it was, are accepted. The stream routes
+    keep working (rule 9): every `SsfStream` they return carries `transmitter_active: false`
+    and the reason (§32.2), and the §27 `settings` reads and writes carry the read-only
+    `oidc.ssf_inactive_reason` while `ssf_enabled` is on but the gate holds. The tenant count is
+    read from the datastore and reused for at most **60 seconds**; a tenant or organization
+    created or deleted through one server instance takes effect on that instance at once, and on
+    the others within that minute. A change of the gate's state is logged once at `WARN` and
+    audited as `ssf.inactive_shared_issuer` in every tenant whose `ssf_enabled` is on — never
+    per event. A single-tenant deployment keeps the root issuer, which no other tenant shares,
+    and a deployment that serves per-tenant issuers is never gated.
 
 ### §32.4 Error mapping
 
@@ -10328,8 +10371,8 @@ form `GET {root}/.well-known/ssf-configuration/t/{tenant_id}` for the issuer
 `configuration_endpoint`, `status_endpoint`, `verification_endpoint`,
 `authorization_schemes` (`[{"spec_urn": "urn:ietf:rfc:6749"}]`), `default_subjects` `"ALL"`
 and the extension member `events_supported`. There are no add/remove-subject endpoints. An
-unknown tenant, a malformed id and a tenant whose `ssf_enabled` is off all answer the same
-empty `404`.
+unknown tenant, a malformed id, a tenant whose `ssf_enabled` is off and every tenant while the
+shared-issuer gate holds (§32.3 rule 13) all answer the same empty `404`.
 
 **The stream management API** — `{root}/ssf/v1/stream` (`GET` one stream by `stream_id` or the
 receiver's list, `PATCH`, `PUT`; `POST` and `DELETE` are `403`: streams are an administrator's),
@@ -10337,10 +10380,10 @@ receiver's list, `PATCH`, `PUT`; `POST` and `DELETE` are `403`: streams are an a
 poll endpoint `{root}/ssf/v1/poll/{stream_id}` (RFC 8936). Each takes a bearer access
 token issued to the receiver's OAuth2 client by the client-credentials grant with the
 `ssf.manage` scope (`403` otherwise); a stream bound to another client, another tenant's, or
-one in a tenant whose transmitter is off answers the same `404`. A receiver may narrow its
-`events_requested` (never beyond `events_allowed`), change its `description`, repoint a push
-endpoint under §32.3 rules 1 and 5 and supply the push `authorization_header`; the method, the
-audience and the subject format are the administrator's. A receiver's `PATCH`, `PUT` and
+one in a tenant whose transmitter is off or inactive (§32.3 rule 13) answers the same `404`. A
+receiver may narrow its `events_requested` (never beyond `events_allowed`), change its
+`description`, repoint a push endpoint under §32.3 rules 1 and 5 and supply the push
+`authorization_header`; the method, the audience and the subject format are the administrator's. A receiver's `PATCH`, `PUT` and
 status `POST` are each decided against the stream as read for the request and written only
 if no other write — an administrator's — landed in between; when one did, the server decides
 again from a fresh read (so an administrator's `disabled` is never undone by a receiver's
@@ -10411,6 +10454,8 @@ A message that is dead-lettered waits in `axiam.ssf_push.dlq`, which discards it
 days** (`x-message-ttl`, D-53): it holds an unsigned event and so a subject. A retried push
 carries the byte-identical SET, one `jti`; the attempt re-reads the stream and signs against it as
 it is then (D-51), so a stream disabled meanwhile sends nothing and a paused one holds the event.
+While the shared-issuer gate holds (§32.3 rule 13) an attempt dead-letters its message before
+anything is signed, sent or held, whatever the stream's status.
 
 **The poll endpoint in detail** (RFC 8936; every reply here is `200` with the body above unless a
 status is named). A request body is optional — an empty one is `{}` — and at most 32 KiB
@@ -10430,7 +10475,8 @@ stream is answered at once, as if `returnImmediately` were true. A receiver that
 therefore keeps one connection open, not many.
 
 **What is emitted, and from where** (D-52, D-53). One emitter, a no-op while the tenant's
-`ssf_enabled` is off, one `txn` for every SET one operation produces:
+`ssf_enabled` is off or the shared-issuer gate holds (§32.3 rule 13), one `txn` for every SET
+one operation produces:
 
 | Event | Emitted by |
 |---|---|
@@ -10439,7 +10485,7 @@ therefore keeps one connection open, not many.
 | `assurance-level-change` | the honour lane's **step-up**: when an authorization request needs a higher `acr` and the browser presents a valid OP session, the server remembers (ten minutes, one record per user, the latest replacing) the session and its `acr`; the return leg that arrives with a **new** session of the same user consumes the record once and emits **only when the `acr` differs** — `previous_level` the old one, `change_direction` from the published order (`1fa` < `mfa`), `initiating_entity` `user`. No marker travels in `return_to`, so there is nothing for a relying party to forge or replay; no earlier session, another user, an expired record or the same session emit nothing |
 | `account-disabled`, `account-enabled` | an administrator's status write, SCIM `active`, and — for `account-disabled` only — a directory deactivation. **The directory sync never re-enables an account** (D-31), so `account-enabled` comes from the administrator and SCIM alone |
 | `account-purged` | `DELETE /api/v1/users/{id}`, SCIM `DELETE /Users/{id}` (the same tombstone) and the GDPR erasure; the subject is the account as it was **before** the write |
-| `stream-updated` | an administrator's or receiver's status change, announced only while the tenant's `ssf_enabled` is on |
+| `stream-updated` | an administrator's or receiver's status change, announced only while the tenant's `ssf_enabled` is on and the shared-issuer gate does not hold |
 
 A lock-out is not an `account-disabled`; an unchanged status, a no-op patch and an equal `acr`
 tell nobody anything.
@@ -10507,7 +10553,9 @@ applies. An SDK MAY offer a synchronous `verify_set` that takes an already-fetch
    carries `"authorization_header": "<value>"` decodes to a value whose every stringification
    lacks it, and the type has no accessor for it.
 3. **Open decoding.** An `SsfStream` with an unknown `status`, `delivery_method`,
-   `subject_format`, `status_actor` and an unknown event-type URI decodes.
+   `subject_format`, `status_actor` and an unknown event-type URI decodes, and so does one
+   with `transmitter_active: false` and a `transmitter_inactive_reason`, and one without the
+   reason.
 4. **Pagination.** `list_streams` returns `Page<T>` with `total`; the auto-pager carries
    `search` on every request.
 5. **No retry.** A `503` to each of the three writes: exactly one request, `NetworkError`.

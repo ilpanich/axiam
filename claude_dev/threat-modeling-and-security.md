@@ -22,6 +22,20 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-04 D-55 entry (Phase 23 W4, P23W4-11, model 2.31.0 — no
+> count changes).** The maintainer decided P23W4-11 (option (b) of
+> ilpanich/axiam#539): **SSF requires per-tenant issuers in a deployment of more
+> than one tenant.** With `AXIAM__AUTH__TENANT_ISSUER_PATHS` off and more than
+> one tenant, counted across every organization, SSF behaves for every tenant
+> exactly as with `ssf_enabled` off — discovery answers its empty `404`, the
+> receiver API sees no stream, nothing is produced, held or verified, and
+> `sign_set` refuses, so a queued push is dead-lettered and a poll answers
+> nothing — and turning `ssf_enabled` on is `400` naming the cause. **T-390**
+> (Mitigated) cites the new tests; its residual is the cross-replica delay of up
+> to 60 s (the cached tenant count; a tenant created on the same instance takes
+> effect at once), and a single-tenant deployment keeps the root issuer, which
+> needs no gate. The model stays at **406 threats, 389 mitigated / 17 open**.
+>
 > **The 2026-10-04 W4 F4 security review entry (Phase 23, model 2.30.0).** One
 > threat enters, Mitigated on arrival. **T-406**: every SSF stream write was
 > read-modify-write, so a receiver's write that overlapped an administrator's put

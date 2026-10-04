@@ -23,10 +23,13 @@ use axiam_core::outbound::{
     OutboundMessage, OutboundPublisher,
 };
 use axiam_core::repository::{SsfEventBufferRepository, SsfStreamRepository};
-use axiam_db::repository::{SurrealSsfEventBufferRepository, SurrealSsfStreamRepository};
+use axiam_db::repository::{
+    SurrealOrganizationRepository, SurrealSsfEventBufferRepository, SurrealSsfStreamRepository,
+    SurrealTenantRepository,
+};
 use axiam_oauth2::ssf::{
-    InitiatingEntity, SsfEvent, SsfSubject, delivery_id_of, prepare_event, prepare_stream_updated,
-    prepare_verification,
+    InitiatingEntity, SsfEvent, SsfIssuerGate, SsfSubject, delivery_id_of, prepare_event,
+    prepare_stream_updated, prepare_verification,
 };
 use axiam_oauth2::ssf_delivery::{
     RFC_8935_ERROR_CODES, SET_CONTENT_TYPE, SsfOutboxService, SsfPushDeliverer,
@@ -77,21 +80,31 @@ fn credential() -> String {
 }
 
 struct World {
+    db: Surreal<Db>,
     streams: Streams,
     buffer: Buffer,
     auth: AuthConfig,
     tenant: Uuid,
+    /// D-55, reading the world's datastore (no tenant row unless a test adds
+    /// some): open.
+    gate: Arc<SsfIssuerGate>,
 }
 
 async fn world() -> World {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
     axiam_db::run_migrations(&db).await.unwrap();
+    let auth = config();
     World {
         streams: SurrealSsfStreamRepository::new(db.clone(), Some(sealing())),
-        buffer: SurrealSsfEventBufferRepository::new(db),
-        auth: config(),
+        buffer: SurrealSsfEventBufferRepository::new(db.clone()),
+        gate: Arc::new(SsfIssuerGate::new(
+            auth.tenant_issuer_paths,
+            Arc::new(SurrealTenantRepository::new(db.clone())),
+        )),
+        auth,
         tenant: Uuid::new_v4(),
+        db,
     }
 }
 
@@ -139,12 +152,22 @@ impl World {
     }
 
     fn deliverer(&self) -> SsfPushDeliverer<Streams, Buffer> {
-        SsfPushDeliverer::new(self.streams.clone(), self.buffer.clone(), self.auth.clone())
-            .admitting_private_networks_for_tests()
+        SsfPushDeliverer::new(
+            self.streams.clone(),
+            self.buffer.clone(),
+            self.auth.clone(),
+            self.gate.clone(),
+        )
+        .admitting_private_networks_for_tests()
     }
 
     fn production_deliverer(&self) -> SsfPushDeliverer<Streams, Buffer> {
-        SsfPushDeliverer::new(self.streams.clone(), self.buffer.clone(), self.auth.clone())
+        SsfPushDeliverer::new(
+            self.streams.clone(),
+            self.buffer.clone(),
+            self.auth.clone(),
+            self.gate.clone(),
+        )
     }
 
     fn pending(&self, stream: &SsfStream, event: &SsfEvent) -> SsfPendingEvent {
@@ -1286,7 +1309,7 @@ async fn a_credential_supplied_for_a_new_endpoint_never_reaches_the_old_one() {
         moved_to: new.url(),
         new_header: new_header.clone(),
     };
-    let deliverer = SsfPushDeliverer::new(moving, w.buffer.clone(), w.auth.clone())
+    let deliverer = SsfPushDeliverer::new(moving, w.buffer.clone(), w.auth.clone(), w.gate.clone())
         .admitting_private_networks_for_tests();
 
     let outcome = deliverer
@@ -1304,4 +1327,93 @@ async fn a_credential_supplied_for_a_new_endpoint_never_reaches_the_old_one() {
         matches!(outcome, DeliveryOutcome::Retry { .. }),
         "a stream that changed during the attempt is retried"
     );
+}
+
+// ---------------------------------------------------------------------------
+// D-55 (F4 W4 P23W4-11): one issuer shared by several tenants signs nothing
+// ---------------------------------------------------------------------------
+
+impl World {
+    /// Two tenants in the deployment (of one organization, created through this
+    /// process's repositories).
+    async fn two_tenants(&self) {
+        use axiam_core::models::organization::CreateOrganization;
+        use axiam_core::models::tenant::{CreateTenant, TenantKind};
+        use axiam_core::repository::{OrganizationRepository, TenantRepository};
+        let org = SurrealOrganizationRepository::new(self.db.clone())
+            .create(CreateOrganization {
+                name: "D-55".into(),
+                slug: format!("d55-{}", Uuid::new_v4().simple()),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        for slug in ["first", "second"] {
+            SurrealTenantRepository::new(self.db.clone())
+                .create(CreateTenant {
+                    organization_id: org.id,
+                    kind: TenantKind::Standard,
+                    name: slug.into(),
+                    slug: slug.into(),
+                    metadata: None,
+                })
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// D-55: with tenant issuer paths off and two tenants, a message queued before
+/// (or after) is dead-lettered — nothing is signed, sent or held — on an
+/// enabled stream and on a paused one alike.
+#[tokio::test]
+async fn while_tenants_share_one_issuer_a_queued_push_is_dead_lettered_unsigned() {
+    let w = world().await;
+    let receiver = Receiver::start(202).await;
+    let stream = w.push_stream(&receiver, Some(credential())).await;
+    let paused = w
+        .stream(
+            SsfDeliveryMethod::Push,
+            SsfStreamStatus::Paused,
+            Some(receiver.url()),
+            None,
+        )
+        .await;
+    let messages = [
+        w.message(&stream, &w.pending(&stream, &revoked())),
+        w.message(&paused, &w.pending(&paused, &revoked())),
+    ];
+    w.two_tenants().await;
+
+    for message in &messages {
+        let outcome = w.deliverer().deliver_attempt(message).await.unwrap();
+        assert!(
+            matches!(&outcome, DeliveryOutcome::DeadLetter { reason } if reason.contains("D-55")),
+            "dead-lettered by the gate"
+        );
+    }
+    assert!(receiver.requests().is_empty(), "nothing was sent");
+    assert_eq!(
+        w.buffer.count(w.tenant, paused.id).await.unwrap(),
+        0,
+        "nothing was held"
+    );
+}
+
+/// With tenant issuer paths on, the same deployment of two tenants delivers.
+#[tokio::test]
+async fn with_tenant_issuers_two_tenants_still_deliver() {
+    let mut w = world().await;
+    w.auth.tenant_issuer_paths = true;
+    w.gate = Arc::new(SsfIssuerGate::new(
+        true,
+        Arc::new(SurrealTenantRepository::new(w.db.clone())),
+    ));
+    w.two_tenants().await;
+    let receiver = Receiver::start(202).await;
+    let stream = w.push_stream(&receiver, None).await;
+    let message = w.message(&stream, &w.pending(&stream, &revoked()));
+    let outcome = w.deliverer().deliver_attempt(&message).await.unwrap();
+    assert!(matches!(outcome, DeliveryOutcome::Delivered { .. }));
+    assert_eq!(receiver.requests().len(), 1);
 }

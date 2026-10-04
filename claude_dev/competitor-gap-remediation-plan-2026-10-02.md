@@ -1732,13 +1732,14 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > `saml_idp_enabled`/`ssf_enabled` and no SSF page (P23W4-07, #536), the duplicated
 > consumer supervisor loop (P23W4-08, #537), SLO untested against a real SP's logout
 > (P23W4-09, #538), and audience squatting where every tenant's SETs share one
-> issuer (P23W4-11, Low, #539 — filed as a maintainer decision on requiring
-> per-tenant issuers for SSF before 1.56 ships; T-390's residual corrected,
-> receiver guidance on the website). SDK fan-out tracked per D-35: #540
+> issuer (P23W4-11, Low, #539 — filed as a maintainer decision; the maintainer
+> chose option (b), D-55, and it is **Fixed** — `D55FIXCOMMIT`: SSF requires
+> per-tenant issuers in a deployment of more than one tenant, contract §32
+> amended before 1.56 ships, T-390 amended at model 2.31.0). SDK fan-out tracked per D-35: #540
 > (contract 1.53–1.55) and #541 (1.56); G-5's issue #542.
 > Accepted with reasons: an erased subject in the buffer or DLQ up to seven days, a receiver token outliving its client by up to
 > 15 minutes, the SSF primary and retry queues without TTL. Threat model
-> **2.30.0 — 406 threats, 389 mitigated / 17 open**. **Binding on W5:** a
+> **2.31.0 — 406 threats, 389 mitigated / 17 open**. **Binding on W5:** a
 > registry with two writers writes conditionally on the version it read; every
 > credential-bearing outbound request goes through `guarded_fetch_no_redirect`
 > with `allow_private = false`, its credential sealed, write-only and never

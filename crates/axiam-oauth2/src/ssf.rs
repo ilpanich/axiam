@@ -44,11 +44,13 @@
 
 use axiam_auth::config::AuthConfig;
 use axiam_core::models::ssf::{
-    MAX_AUDIENCE_BYTES, MAX_AUTHORIZATION_HEADER_BYTES, MAX_DESCRIPTION_BYTES,
-    MAX_ENDPOINT_URL_BYTES, MAX_STATUS_REASON_BYTES, MIN_VERIFICATION_INTERVAL_SECS,
-    POLL_DELIVERY_METHOD_URI, PUSH_DELIVERY_METHOD_URI, SSF_SPEC_VERSION, STREAM_UPDATED_EVENT_URI,
-    SecretChange, SsfDeliveryMethod, SsfEventType, SsfPendingEvent, SsfStream, SsfStreamStatus,
-    SsfStreamUpdate, SsfSubjectFormat, VERIFICATION_EVENT_URI,
+    DeploymentTenants, Late, MAX_AUDIENCE_BYTES, MAX_AUTHORIZATION_HEADER_BYTES,
+    MAX_DESCRIPTION_BYTES, MAX_ENDPOINT_URL_BYTES, MAX_STATUS_REASON_BYTES,
+    MIN_VERIFICATION_INTERVAL_SECS, POLL_DELIVERY_METHOD_URI, PUSH_DELIVERY_METHOD_URI,
+    SHARED_ISSUER_TENANT_COUNT_TTL_SECS, SSF_SPEC_VERSION, STREAM_UPDATED_EVENT_URI, SecretChange,
+    SharedIssuerObserver, SsfDeliveryMethod, SsfEventType, SsfPendingEvent, SsfStream,
+    SsfStreamStatus, SsfStreamUpdate, SsfSubjectFormat, VERIFICATION_EVENT_URI,
+    shared_issuer_gate_holds,
 };
 use axiam_core::models::user::{User, UserStatus};
 use chrono::{DateTime, Utc};
@@ -106,6 +108,11 @@ pub enum SsfError {
     /// The deployment key could not sign.
     #[error("the SET could not be signed: {0}")]
     Signing(String),
+    /// D-55: the deployment holds more than one tenant and serves no per-tenant
+    /// issuers, so every tenant's SETs would carry the same `iss` and key. SSF
+    /// is inactive for every tenant; nothing is signed.
+    #[error("SSF is inactive: the deployment's tenants share one issuer (D-55)")]
+    SharedIssuer,
 }
 
 // ---------------------------------------------------------------------------
@@ -699,9 +706,15 @@ fn check_signable(stream: &SsfStream, pending: &SsfPendingEvent) -> Result<(), S
 /// audience, or a key that cannot sign.
 pub fn sign_set(
     config: &AuthConfig,
+    issuer: SharedIssuerCheck,
     stream: &SsfStream,
     pending: &SsfPendingEvent,
 ) -> Result<String, SsfError> {
+    // D-55, checked here and not only where events are produced: a message
+    // queued before the gate started to hold is never signed.
+    if issuer.holds() {
+        return Err(SsfError::SharedIssuer);
+    }
     check_signable(stream, pending)?;
     if stream.audience.trim().is_empty() {
         return Err(SsfError::NoAudience);
@@ -740,13 +753,14 @@ pub fn sign_set(
 /// Those of the two steps.
 pub fn issue_set(
     config: &AuthConfig,
+    issuer: SharedIssuerCheck,
     stream: &SsfStream,
     event: &SsfEvent,
     subject: &SsfSubject,
     txn: Option<&str>,
 ) -> Result<String, SsfError> {
     let pending = prepare_event(config, stream, event, subject, txn, Utc::now())?;
-    sign_set(config, stream, &pending)
+    sign_set(config, issuer, stream, &pending)
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,9 +1261,176 @@ pub fn apply_receiver_update(
     Ok(update)
 }
 
+// ---------------------------------------------------------------------------
+// D-55: SSF requires per-tenant issuers in a multi-tenant deployment
+// ---------------------------------------------------------------------------
+
+/// The D-55 decision [`sign_set`] needs: whether the deployment's tenants would
+/// share one issuer. Obtained from [`SsfIssuerGate::check`] in the server, or
+/// evaluated from the two facts the rule reads ([`Self::evaluate`]); there is no
+/// way to say "allowed" without stating them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedIssuerCheck {
+    holds: bool,
+}
+
+impl SharedIssuerCheck {
+    /// D-55 from its facts: tenant issuer paths, and the deployment's tenant
+    /// count ([`axiam_core::models::ssf::DeploymentTenants`]).
+    #[must_use]
+    pub const fn evaluate(tenant_issuer_paths: bool, deployment_tenants: u64) -> Self {
+        Self {
+            holds: shared_issuer_gate_holds(tenant_issuer_paths, deployment_tenants),
+        }
+    }
+
+    /// Whether the gate holds — SSF is then inactive for every tenant.
+    #[must_use]
+    pub const fn holds(self) -> bool {
+        self.holds
+    }
+}
+
+struct CachedTenantCount {
+    at: std::time::Instant,
+    generation: u64,
+    count: u64,
+}
+
+/// The D-55 gate: *tenant issuer paths off **and** more than one tenant in the
+/// deployment*. While it holds, SSF behaves for every tenant exactly as with
+/// `ssf_enabled` off — checked where events are produced, where a SET is
+/// signed and at discovery, never only when something is written.
+///
+/// The tenant count is read from the datastore and reused for at most
+/// [`SHARED_ISSUER_TENANT_COUNT_TTL_SECS`] seconds; a tenant or an organization
+/// created or deleted through this process changes the repository's generation
+/// and so invalidates it at once. Another replica sees the change within the TTL
+/// (T-390's residual). A change of state is logged once per process at `WARN`
+/// and handed to the bound [`SharedIssuerObserver`] (the audit writer).
+pub struct SsfIssuerGate {
+    tenant_issuer_paths: bool,
+    tenants: std::sync::Arc<dyn DeploymentTenants>,
+    cached: std::sync::Mutex<Option<CachedTenantCount>>,
+    state: std::sync::Mutex<Option<bool>>,
+    observer: Late<dyn SharedIssuerObserver>,
+}
+
+impl std::fmt::Debug for SsfIssuerGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsfIssuerGate")
+            .field("tenant_issuer_paths", &self.tenant_issuer_paths)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SsfIssuerGate {
+    /// The gate of a deployment that does (`true`) or does not serve per-tenant
+    /// issuers, counting tenants through `tenants`.
+    #[must_use]
+    pub fn new(tenant_issuer_paths: bool, tenants: std::sync::Arc<dyn DeploymentTenants>) -> Self {
+        Self {
+            tenant_issuer_paths,
+            tenants,
+            cached: std::sync::Mutex::new(None),
+            state: std::sync::Mutex::new(None),
+            observer: Late::default(),
+        }
+    }
+
+    /// Bind the observer told of a change of state. The first binding stays.
+    pub fn bind_observer(&self, observer: std::sync::Arc<dyn SharedIssuerObserver>) -> bool {
+        self.observer.bind(observer)
+    }
+
+    /// Forget the cached count: the next [`Self::check`] reads the datastore.
+    pub fn invalidate(&self) {
+        *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// The deployment's tenant count, from the cache when it is fresh and of the
+    /// current generation.
+    async fn deployment_tenants(&self) -> axiam_core::error::AxiamResult<u64> {
+        // Read the generation before the count: a tenant created while the
+        // query runs leaves the stored reading stale, not falsely fresh.
+        let generation = self.tenants.generation();
+        let ttl = std::time::Duration::from_secs(SHARED_ISSUER_TENANT_COUNT_TTL_SECS);
+        if let Some(cached) = self
+            .cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|c| c.generation == generation && c.at.elapsed() < ttl)
+        {
+            return Ok(cached.count);
+        }
+        let count = self.tenants.count_for_shared_issuer().await?;
+        *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(CachedTenantCount {
+            at: std::time::Instant::now(),
+            generation,
+            count,
+        });
+        Ok(count)
+    }
+
+    /// D-55 now. With tenant issuer paths on the gate never holds and nothing
+    /// is read. A count that cannot be read is an error: callers fail closed.
+    ///
+    /// # Errors
+    ///
+    /// The datastore's, when the tenant count cannot be read.
+    pub async fn check(&self) -> axiam_core::error::AxiamResult<SharedIssuerCheck> {
+        if self.tenant_issuer_paths {
+            return Ok(SharedIssuerCheck::evaluate(true, 0));
+        }
+        let count = self.deployment_tenants().await?;
+        let check = SharedIssuerCheck::evaluate(false, count);
+        self.note(check.holds(), count);
+        Ok(check)
+    }
+
+    /// Log and report a change of state, once per change in this process. The
+    /// first reading of a process is a change only when the gate holds.
+    fn note(&self, holds: bool, count: u64) {
+        let previous = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if *state == Some(holds) {
+                return;
+            }
+            state.replace(holds)
+        };
+        if previous.is_none() && !holds {
+            return;
+        }
+        if holds {
+            tracing::warn!(
+                target: "axiam::ssf",
+                deployment_tenants = count,
+                "SSF is inactive for every tenant: the deployment holds more than one tenant \
+                 and does not serve per-tenant issuers (D-55)"
+            );
+        } else {
+            tracing::warn!(
+                target: "axiam::ssf",
+                deployment_tenants = count,
+                "SSF is active again: the deployment no longer holds more than one tenant (D-55)"
+            );
+        }
+        if let Some(observer) = self.observer.get() {
+            let observer = std::sync::Arc::clone(observer);
+            tokio::spawn(async move { observer.gate_changed(holds).await });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D-55's facts for a deployment of one tenant: the gate is open.
+    fn one_tenant() -> SharedIssuerCheck {
+        SharedIssuerCheck::evaluate(false, 1)
+    }
     use axiam_core::models::ssf::SsfStatusActor;
     use jsonwebtoken::{DecodingKey, Validation};
     use std::sync::OnceLock;
@@ -1360,6 +1541,7 @@ mod tests {
         let who = subject(true);
         let set = issue_set(
             &cfg,
+            one_tenant(),
             &s,
             &sample(SsfEventType::AccountDisabled),
             &who,
@@ -1397,6 +1579,7 @@ mod tests {
         let s = stream(SsfStreamStatus::Enabled, SsfSubjectFormat::IssSub);
         let set = issue_set(
             &cfg,
+            one_tenant(),
             &s,
             &sample(SsfEventType::AccountPurged),
             &subject(true),
@@ -1424,6 +1607,7 @@ mod tests {
         let s = stream(SsfStreamStatus::Enabled, SsfSubjectFormat::IssSub);
         let set = issue_set(
             &cfg,
+            one_tenant(),
             &s,
             &sample(SsfEventType::AccountEnabled),
             &subject(true),
@@ -1450,6 +1634,7 @@ mod tests {
                 let s = stream(SsfStreamStatus::Enabled, format);
                 let set = issue_set(
                     &cfg,
+                    one_tenant(),
                     &s,
                     &sample(SsfEventType::SessionRevoked),
                     &subject(true),
@@ -1519,8 +1704,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            sign_set(&cfg, &s, &p).unwrap(),
-            sign_set(&cfg, &s, &p).unwrap()
+            sign_set(&cfg, one_tenant(), &s, &p).unwrap(),
+            sign_set(&cfg, one_tenant(), &s, &p).unwrap()
         );
     }
 
@@ -1559,7 +1744,8 @@ mod tests {
         let s = stream(SsfStreamStatus::Enabled, SsfSubjectFormat::IssSub);
         for (event, shape) in expect {
             assert_eq!(sample(event).payload(), shape, "{event:?}");
-            let set = issue_set(&cfg, &s, &sample(event), &subject(true), None).unwrap();
+            let set =
+                issue_set(&cfg, one_tenant(), &s, &sample(event), &subject(true), None).unwrap();
             let claims = verify(&set, &cfg, &s.audience, "https://id.example.test").unwrap();
             assert_eq!(claims["events"][event.uri()], shape, "{event:?} in the SET");
         }
@@ -1646,7 +1832,15 @@ mod tests {
         );
 
         // The member in a signed SET is the same object.
-        let set = issue_set(&cfg, &e, &sample(SsfEventType::AccountPurged), &who, None).unwrap();
+        let set = issue_set(
+            &cfg,
+            one_tenant(),
+            &e,
+            &sample(SsfEventType::AccountPurged),
+            &who,
+            None,
+        )
+        .unwrap();
         let claims = verify(&set, &cfg, &e.audience, iss).unwrap();
         assert_eq!(claims["sub_id"], by_mail);
     }
@@ -1659,6 +1853,7 @@ mod tests {
         assert_eq!(
             issue_set(
                 &cfg,
+                one_tenant(),
                 &e,
                 &sample(SsfEventType::AccountDisabled),
                 &pending,
@@ -1671,6 +1866,7 @@ mod tests {
         assert_eq!(
             issue_set(
                 &cfg,
+                one_tenant(),
                 &e,
                 &sample(SsfEventType::AccountDisabled),
                 &no_address,
@@ -1683,6 +1879,7 @@ mod tests {
         assert!(
             issue_set(
                 &cfg,
+                one_tenant(),
                 &s,
                 &sample(SsfEventType::AccountDisabled),
                 &pending,
@@ -1748,7 +1945,14 @@ mod tests {
         let mut who = subject(true);
         who.session_id = None;
         assert_eq!(
-            issue_set(&cfg, &s, &sample(SsfEventType::SessionRevoked), &who, None),
+            issue_set(
+                &cfg,
+                one_tenant(),
+                &s,
+                &sample(SsfEventType::SessionRevoked),
+                &who,
+                None
+            ),
             Err(SsfError::SessionRequired)
         );
     }
@@ -1761,7 +1965,7 @@ mod tests {
         let paused = stream(SsfStreamStatus::Paused, SsfSubjectFormat::IssSub);
         for event in SsfEventType::ALL {
             assert_eq!(
-                issue_set(&cfg, &disabled, &sample(event), &who, None),
+                issue_set(&cfg, one_tenant(), &disabled, &sample(event), &who, None),
                 Err(SsfError::StreamDisabled),
                 "{event:?}"
             );
@@ -1769,7 +1973,7 @@ mod tests {
             let held =
                 prepare_event(&cfg, &paused, &sample(event), &who, None, Utc::now()).unwrap();
             assert_eq!(
-                sign_set(&cfg, &paused, &held),
+                sign_set(&cfg, one_tenant(), &paused, &held),
                 Err(SsfError::StreamNotEnabled)
             );
         }
@@ -1786,16 +1990,26 @@ mod tests {
         )
         .unwrap();
         s.status = SsfStreamStatus::Disabled;
-        assert_eq!(sign_set(&cfg, &s, &queued), Err(SsfError::StreamDisabled));
+        assert_eq!(
+            sign_set(&cfg, one_tenant(), &s, &queued),
+            Err(SsfError::StreamDisabled)
+        );
         // Narrowed in the meantime: dropped.
         s.status = SsfStreamStatus::Enabled;
         s.events_requested = vec![SsfEventType::SessionRevoked];
         assert_eq!(
-            sign_set(&cfg, &s, &queued),
+            sign_set(&cfg, one_tenant(), &s, &queued),
             Err(SsfError::EventNotDelivered)
         );
         assert_eq!(
-            issue_set(&cfg, &s, &sample(SsfEventType::AccountPurged), &who, None),
+            issue_set(
+                &cfg,
+                one_tenant(),
+                &s,
+                &sample(SsfEventType::AccountPurged),
+                &who,
+                None
+            ),
             Err(SsfError::EventNotDelivered)
         );
     }
@@ -1806,7 +2020,7 @@ mod tests {
         let s = stream(SsfStreamStatus::Enabled, SsfSubjectFormat::Email);
         let state = Uuid::new_v4().to_string();
         let p = prepare_verification(&s, Some(&state), Utc::now()).unwrap();
-        let set = sign_set(&cfg, &s, &p).unwrap();
+        let set = sign_set(&cfg, one_tenant(), &s, &p).unwrap();
         let claims = verify(&set, &cfg, &s.audience, "https://id.example.test").unwrap();
         assert_eq!(
             claims["sub_id"],
@@ -1822,7 +2036,10 @@ mod tests {
         assert_eq!(bare.event, json!({}));
         // Not for another stream, and not for a disabled one.
         let other = stream(SsfStreamStatus::Enabled, SsfSubjectFormat::IssSub);
-        assert_eq!(sign_set(&cfg, &other, &p), Err(SsfError::WrongStream));
+        assert_eq!(
+            sign_set(&cfg, one_tenant(), &other, &p),
+            Err(SsfError::WrongStream)
+        );
         let disabled = stream(SsfStreamStatus::Disabled, SsfSubjectFormat::IssSub);
         assert_eq!(
             prepare_verification(&disabled, None, Utc::now()),
@@ -1841,7 +2058,7 @@ mod tests {
             json!({"status": "disabled", "reason": "maintenance"})
         );
         // The announcement of a disable goes out after the disable.
-        let set = sign_set(&cfg, &s, &p).unwrap();
+        let set = sign_set(&cfg, one_tenant(), &s, &p).unwrap();
         let claims = verify(&set, &cfg, &s.audience, "https://id.example.test").unwrap();
         assert_eq!(
             claims["events"][STREAM_UPDATED_EVENT_URI]["status"],
@@ -1849,7 +2066,10 @@ mod tests {
         );
         // But not once the stream is something else.
         s.status = SsfStreamStatus::Enabled;
-        assert_eq!(sign_set(&cfg, &s, &p), Err(SsfError::StreamNotEnabled));
+        assert_eq!(
+            sign_set(&cfg, one_tenant(), &s, &p),
+            Err(SsfError::StreamNotEnabled)
+        );
     }
 
     #[test]
@@ -1862,6 +2082,7 @@ mod tests {
         assert_eq!(ssf_issuer(&paths, s.tenant_id), tenant_iss);
         let set = issue_set(
             &paths,
+            SharedIssuerCheck::evaluate(true, 2),
             &s,
             &sample(SsfEventType::AccountEnabled),
             &subject(true),
@@ -2169,5 +2390,154 @@ mod tests {
             authorization_header: Some(header.clone()),
         };
         assert!(!format!("{d:?}").contains(&header));
+    }
+
+    // -----------------------------------------------------------------------
+    // D-55 (F4 W4 P23W4-11): SSF requires per-tenant issuers when the
+    // deployment holds more than one tenant
+    // -----------------------------------------------------------------------
+
+    /// The rule, from its two facts.
+    #[test]
+    fn the_shared_issuer_gate_holds_only_without_paths_and_with_two_tenants() {
+        assert!(!SharedIssuerCheck::evaluate(false, 0).holds());
+        assert!(!SharedIssuerCheck::evaluate(false, 1).holds());
+        assert!(SharedIssuerCheck::evaluate(false, 2).holds());
+        assert!(SharedIssuerCheck::evaluate(false, 40).holds());
+        assert!(!SharedIssuerCheck::evaluate(true, 2).holds());
+        assert!(!SharedIssuerCheck::evaluate(true, 40).holds());
+    }
+
+    /// `sign_set` refuses while the gate holds, whatever the stream: a message
+    /// queued before it started to hold is never signed.
+    #[test]
+    fn sign_set_refuses_while_the_shared_issuer_gate_holds() {
+        let cfg = config(false);
+        let s = stream(SsfStreamStatus::Enabled, SsfSubjectFormat::IssSub);
+        let p = prepare_event(
+            &cfg,
+            &s,
+            &sample(SsfEventType::AccountEnabled),
+            &subject(true),
+            None,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            sign_set(&cfg, SharedIssuerCheck::evaluate(false, 2), &s, &p),
+            Err(SsfError::SharedIssuer)
+        );
+        assert!(sign_set(&cfg, SharedIssuerCheck::evaluate(false, 1), &s, &p).is_ok());
+        let paths = config(true);
+        assert!(sign_set(&paths, SharedIssuerCheck::evaluate(true, 2), &s, &p).is_ok());
+    }
+
+    /// With per-tenant issuers, a SET of tenant A does not verify as tenant B's:
+    /// the issuer, not the audience alone, tells them apart.
+    #[test]
+    fn with_tenant_issuers_a_set_of_one_tenant_does_not_verify_as_anothers() {
+        let paths = config(true);
+        let a = stream(SsfStreamStatus::Enabled, SsfSubjectFormat::IssSub);
+        let b = stream(SsfStreamStatus::Enabled, SsfSubjectFormat::IssSub);
+        assert_ne!(a.tenant_id, b.tenant_id);
+        let set = issue_set(
+            &paths,
+            SharedIssuerCheck::evaluate(true, 2),
+            &a,
+            &sample(SsfEventType::AccountDisabled),
+            &subject(true),
+            None,
+        )
+        .unwrap();
+        let a_iss = ssf_issuer(&paths, a.tenant_id);
+        let b_iss = ssf_issuer(&paths, b.tenant_id);
+        assert_ne!(a_iss, b_iss);
+        assert!(verify(&set, &paths, &a.audience, &a_iss).is_ok());
+        assert!(verify(&set, &paths, &a.audience, &b_iss).is_err());
+    }
+
+    /// A counter the gate reads: a count and a generation the test moves.
+    #[derive(Default)]
+    struct Counted {
+        count: std::sync::atomic::AtomicU64,
+        generation: std::sync::atomic::AtomicU64,
+        reads: std::sync::atomic::AtomicU64,
+    }
+
+    impl DeploymentTenants for Counted {
+        fn count_for_shared_issuer(
+            &self,
+        ) -> axiam_core::models::ssf::SsfFuture<'_, axiam_core::error::AxiamResult<u64>> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.reads.fetch_add(1, SeqCst);
+            let count = self.count.load(SeqCst);
+            Box::pin(async move { Ok(count) })
+        }
+        fn generation(&self) -> u64 {
+            self.generation.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[derive(Default)]
+    struct Told(std::sync::Mutex<Vec<bool>>);
+
+    impl SharedIssuerObserver for Told {
+        fn gate_changed(&self, holds: bool) -> axiam_core::models::ssf::SsfFuture<'_, ()> {
+            self.0.lock().unwrap().push(holds);
+            Box::pin(async {})
+        }
+    }
+
+    /// The count is cached, a new generation (a tenant created in this process)
+    /// invalidates it at once, and each change of state is reported once.
+    #[tokio::test]
+    async fn the_gate_caches_the_count_follows_the_generation_and_reports_each_change_once() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let counted = std::sync::Arc::new(Counted::default());
+        counted.count.store(1, SeqCst);
+        let gate = SsfIssuerGate::new(false, counted.clone());
+        let told = std::sync::Arc::new(Told::default());
+        assert!(gate.bind_observer(told.clone()));
+
+        assert!(!gate.check().await.unwrap().holds());
+        assert!(!gate.check().await.unwrap().holds());
+        assert_eq!(
+            counted.reads.load(SeqCst),
+            1,
+            "the second check used the cache"
+        );
+
+        // A second tenant, created through this process: no wait for the TTL.
+        counted.count.store(2, SeqCst);
+        counted.generation.fetch_add(1, SeqCst);
+        assert!(gate.check().await.unwrap().holds());
+        assert!(gate.check().await.unwrap().holds());
+        assert_eq!(counted.reads.load(SeqCst), 2);
+
+        // Created on another replica: the cache answers until it expires or is
+        // invalidated.
+        counted.count.store(1, SeqCst);
+        assert!(gate.check().await.unwrap().holds());
+        gate.invalidate();
+        assert!(!gate.check().await.unwrap().holds());
+
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *told.0.lock().unwrap(),
+            vec![true, false],
+            "one report per change, none for the first open reading"
+        );
+    }
+
+    /// With per-tenant issuers the gate never holds and never reads the count.
+    #[tokio::test]
+    async fn with_tenant_issuers_the_gate_never_reads_the_count() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let counted = std::sync::Arc::new(Counted::default());
+        counted.count.store(9, SeqCst);
+        let gate = SsfIssuerGate::new(true, counted.clone());
+        assert!(!gate.check().await.unwrap().holds());
+        assert_eq!(counted.reads.load(SeqCst), 0);
     }
 }

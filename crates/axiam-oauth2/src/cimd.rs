@@ -978,6 +978,7 @@ mod tests {
             cimd,
             saml_idp_enabled: false,
             ssf_enabled: false,
+            ssf_inactive_reason: None,
         }
     }
 

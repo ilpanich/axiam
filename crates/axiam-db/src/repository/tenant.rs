@@ -13,6 +13,24 @@ use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{CountRow, classify_write_error, paginate, take_first_or_not_found};
 
+/// D-55: bumped whenever this process creates or deletes a tenant or an
+/// organization, **after** the write commits, so a tenant count cached at an
+/// earlier generation is known to be stale at once (the SSF shared-issuer gate,
+/// `axiam_oauth2::ssf::SsfIssuerGate`). Process-wide on purpose: every repository
+/// handle of the process writes the same datastore.
+static TENANT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record that the set of tenants or organizations changed (D-55).
+pub(crate) fn bump_tenant_generation() {
+    TENANT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The current tenant generation (D-55).
+#[must_use]
+pub fn tenant_generation() -> u64 {
+    TENANT_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 fn parse_status(s: &str) -> Result<TenantStatus, DbError> {
     match s {
         "Active" => Ok(TenantStatus::Active),
@@ -198,6 +216,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // Statement 0 is the CREATE, statement 1 is the RELATE.
         let rows: Vec<TenantRow> = result.take(0).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "tenant", &id_str)?;
+        bump_tenant_generation();
 
         Ok(row.into_tenant(id)?)
     }
@@ -378,6 +397,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .check()
             .map_err(DbError::from)?;
 
+        bump_tenant_generation();
         Ok(())
     }
 
@@ -424,5 +444,36 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         Ok(paginate(items, count_rows, &pagination))
+    }
+}
+
+/// D-55: the deployment's tenant count for the SSF shared-issuer gate — the
+/// standard tenants of every organization, or the organizations if there are
+/// more of those (see [`axiam_core::models::ssf::DeploymentTenants`]).
+impl<C: Connection> axiam_core::models::ssf::DeploymentTenants for SurrealTenantRepository<C> {
+    fn count_for_shared_issuer(&self) -> axiam_core::models::ssf::SsfFuture<'_, AxiamResult<u64>> {
+        Box::pin(async move {
+            // An absent `kind` is a standard tenant (rows older than
+            // organization scope), so the test is "not the organization's own".
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "SELECT count() AS total FROM tenant \
+                         WHERE kind = NONE OR kind != 'organization' GROUP ALL; \
+                     SELECT count() AS total FROM organization GROUP ALL",
+                )
+                .await
+                .map_err(DbError::from)?;
+            let tenants: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+            let organizations: Vec<CountRow> = result.take(1).map_err(DbError::from)?;
+            let tenants = tenants.first().map_or(0, |r| r.total);
+            let organizations = organizations.first().map_or(0, |r| r.total);
+            Ok(tenants.max(organizations))
+        })
+    }
+
+    fn generation(&self) -> u64 {
+        tenant_generation()
     }
 }

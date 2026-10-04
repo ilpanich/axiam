@@ -39,8 +39,9 @@ use axiam_auth::token::SubjectKind;
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::ssf::{
-    MIN_VERIFICATION_INTERVAL_SECS, POLL_MAX_EVENTS_PER_RESPONSE, SSF_MANAGE_SCOPE, SecretChange,
-    SsfDeliveryMethod, SsfStatusActor, SsfStream, SsfStreamStatus, SsfStreamUpdate,
+    MIN_VERIFICATION_INTERVAL_SECS, POLL_MAX_EVENTS_PER_RESPONSE, SHARED_ISSUER_INACTIVE_REASON,
+    SSF_MANAGE_SCOPE, SecretChange, SsfDeliveryMethod, SsfStatusActor, SsfStream, SsfStreamStatus,
+    SsfStreamUpdate,
 };
 use axiam_core::repository::{
     AuditLogRepository, SettingsRepository, SsfEventBufferRepository, SsfStreamRepository,
@@ -94,23 +95,46 @@ const MAX_JTI_BYTES: usize = 64;
 // The tenant switch
 // ---------------------------------------------------------------------------
 
-/// Whether `tenant_id` exists and its effective `ssf_enabled` is on. An
-/// unknown tenant is `false`, never an error a caller could tell apart.
+/// Whether `tenant_id` exists, its effective `ssf_enabled` is on **and** the
+/// D-55 gate does not hold. An unknown tenant is `false`, never an error a
+/// caller could tell apart. Discovery, the receiver API, verification and the
+/// stream-updated announcement all ask this, so the gate makes SSF behave
+/// exactly as `ssf_enabled` off for every tenant.
 pub(crate) async fn ssf_enabled_for<C: Connection + Clone>(
     state: &AppState<C>,
     tenant_id: Uuid,
 ) -> Result<bool, AxiamError> {
+    Ok(transmitter_status(state, tenant_id).await?.is_none())
+}
+
+/// Why the tenant's transmitter is inactive, or `None` when it is active: the
+/// tenant does not exist, its `ssf_enabled` is off, or the D-55 gate holds.
+pub(crate) async fn transmitter_status<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+) -> Result<Option<&'static str>, AxiamError> {
     let tenant = match state.tenant_repo.get_by_id(tenant_id).await {
         Ok(tenant) => tenant,
-        Err(AxiamError::NotFound { .. }) => return Ok(false),
+        Err(AxiamError::NotFound { .. }) => return Ok(Some(NO_SUCH_TENANT)),
         Err(other) => return Err(other),
     };
     let settings = state
         .settings_repo
         .get_effective_settings(tenant.organization_id, tenant_id)
         .await?;
-    Ok(settings.oidc.ssf_enabled)
+    if !settings.oidc.ssf_enabled {
+        return Ok(Some(SWITCH_OFF));
+    }
+    if state.ssf.gate.check().await?.holds() {
+        return Ok(Some(SHARED_ISSUER_INACTIVE_REASON));
+    }
+    Ok(None)
 }
+
+/// [`transmitter_status`]'s answer for a tenant that does not exist.
+const NO_SUCH_TENANT: &str = "the tenant does not exist";
+/// [`transmitter_status`]'s answer for a tenant whose switch is off.
+pub(crate) const SWITCH_OFF: &str = "ssf_enabled is off for this tenant";
 
 // ---------------------------------------------------------------------------
 // Discovery
@@ -151,7 +175,9 @@ async fn discovery_for<C: Connection + Clone>(
     responses(
         (status = 200, description = "SSF transmitter metadata", body = SsfConfiguration),
         (status = 404, description = "Nothing to describe: an unknown tenant, or one whose \
-                                      transmitter is off (indistinguishable)"),
+                                      transmitter is off or inactive — `ssf_enabled` off, or a \
+                                      deployment of several tenants without per-tenant issuers \
+                                      (D-55) — (indistinguishable)"),
         (status = 429, description = "Rate limit"),
     ),
 )]
@@ -172,7 +198,8 @@ pub async fn ssf_configuration<C: Connection + Clone>(
     params(("tenant_id" = Uuid, Path, description = "The tenant this issuer names")),
     responses(
         (status = 200, description = "SSF transmitter metadata", body = SsfConfiguration),
-        (status = 404, description = "Nothing to describe (indistinguishable)"),
+        (status = 404, description = "Nothing to describe: an unknown tenant, or one whose \
+                                      transmitter is off (indistinguishable)"),
         (status = 429, description = "Rate limit"),
     ),
 )]
@@ -1010,6 +1037,9 @@ pub async fn poll_events<C: Connection + Clone>(
     // not once per look (F4 W4 P23W4-03).
     let mut signing_failure_logged = false;
     loop {
+        // D-55 at signing, on every look: a gate that started to hold while
+        // this poll waited signs nothing.
+        let issuer = state.ssf.gate.check().await?;
         let held = state
             .ssf
             .buffer_repo
@@ -1020,7 +1050,7 @@ pub async fn poll_events<C: Connection + Clone>(
             let mut sets = serde_json::Map::new();
             let mut unsignable: Vec<String> = Vec::new();
             for pending in held.iter().take(max_events) {
-                match sign_set(&state.auth_config, &stream, pending) {
+                match sign_set(&state.auth_config, issuer, &stream, pending) {
                     Ok(set) => {
                         sets.insert(pending.jti.clone(), serde_json::Value::String(set));
                     }
@@ -1032,6 +1062,9 @@ pub async fn poll_events<C: Connection + Clone>(
                             tracing::error!(target: "axiam::ssf", stream_id = %stream.id, "a held SSF event could not be signed");
                         }
                     }
+                    // D-55 started to hold while this poll waited: nothing is
+                    // signed, and the poll answers as a switched-off stream.
+                    Err(SsfError::SharedIssuer) => return Err(no_such_stream()),
                     // The stream no longer carries it (narrowed meanwhile) or it
                     // can never be signed for this stream: drop it.
                     Err(_) => unsignable.push(pending.jti.clone()),

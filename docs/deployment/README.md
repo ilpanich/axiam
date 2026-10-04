@@ -1678,6 +1678,17 @@ The path is **derived, never configured**. There is no per-tenant issuer
 setting: a deployment sets the root issuer and the tenant path follows from it,
 which is why the boot check above still insists the root be a bare URL.
 
+**The Shared Signals transmitter needs it on a deployment of more than one
+tenant** (D-55). A Security Event Token carries the tenant's issuer as `iss`,
+so without per-tenant issuers every tenant's SETs would carry the root issuer
+and the same key, and a receiver could not tell one tenant's from another's.
+While the flag is off and the deployment holds more than one tenant (counted
+across every organization), SSF is inactive for every tenant, exactly as if
+`ssf_enabled` were off, and turning `ssf_enabled` on is refused with `400`. The
+tenant count is re-read at least once a minute, and at once on the instance that
+creates a tenant. A single-tenant deployment keeps the root issuer. See
+[contract §32.3 rule 13](../../sdks/CONTRACT.md#§323-server-rules-every-sdk-can-observe-normative).
+
 ### The three discovery forms
 
 With the flag set, all three of the conventional ways a client turns an issuer

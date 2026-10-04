@@ -55,6 +55,7 @@ use axiam_db::repository::{
     SurrealUserRepository, SurrealWebauthnCredentialRepository,
 };
 use axiam_db::{seed_default_roles, seed_permissions};
+use axiam_oauth2::ssf::{SharedIssuerCheck, SsfIssuerGate};
 use axiam_test_support::test_password;
 use serde_json::{Value, json};
 use surrealdb::Surreal;
@@ -143,7 +144,8 @@ struct World {
     db: Surreal<TestDb>,
     org_id: Uuid,
     tenant_id: Uuid,
-    other_tenant_id: Uuid,
+    /// The second tenant of a two-tenant world ([`world_of`]).
+    other_tenant_id: Option<Uuid>,
     admin: Uuid,
     auth: AuthConfig,
     authz: Arc<dyn AuthzChecker>,
@@ -271,7 +273,14 @@ async fn client_in(db: &Surreal<TestDb>, tenant_id: Uuid, name: &str, scopes: &[
     client.client_id
 }
 
-async fn world_with(tenant_paths: bool) -> World {
+/// A world of `tenants` tenants (1 or 2) in one organization whose baseline has
+/// SSF on, with `tenant_paths` as the deployment's issuer mode.
+///
+/// D-55: SSF is off for every tenant of a deployment of more than one tenant
+/// without per-tenant issuers, so a world that needs SSF *and* a second tenant
+/// runs with paths on; two tenants with paths off is a world in which only the
+/// stream registry works.
+async fn world_of(tenants: usize, tenant_paths: bool) -> World {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
     axiam_db::run_migrations(&db).await.unwrap();
@@ -290,7 +299,11 @@ async fn world_with(tenant_paths: bool) -> World {
         .await
         .unwrap();
     let tenant_id = tenant_in(&db, org.id, "ssf-home").await;
-    let other_tenant_id = tenant_in(&db, org.id, "ssf-other").await;
+    let other_tenant_id = if tenants > 1 {
+        Some(tenant_in(&db, org.id, "ssf-other").await)
+    } else {
+        None
+    };
     let admin = active_user(&db, tenant_id, "admin").await;
     SurrealRoleRepository::new(db.clone())
         .assign_to_user(
@@ -321,11 +334,45 @@ async fn world_with(tenant_paths: bool) -> World {
     }
 }
 
+/// One tenant, the root issuer.
 async fn world() -> World {
-    world_with(false).await
+    world_of(1, false).await
+}
+
+/// Two tenants with per-tenant issuers: SSF works for both.
+async fn world_with(tenant_paths: bool) -> World {
+    world_of(2, tenant_paths).await
 }
 
 impl World {
+    /// The second tenant; only a two-tenant world has one.
+    fn other_tenant(&self) -> Uuid {
+        self.other_tenant_id.expect("a two-tenant world")
+    }
+
+    /// The D-55 reading for this world, as the transmitter makes it.
+    fn issuer_check(&self) -> SharedIssuerCheck {
+        let tenants = if self.other_tenant_id.is_some() { 2 } else { 1 };
+        SharedIssuerCheck::evaluate(self.auth.tenant_issuer_paths, tenants)
+    }
+
+    /// A D-55 gate over this world's datastore, as the server builds one.
+    fn gate(&self) -> Arc<SsfIssuerGate> {
+        Arc::new(SsfIssuerGate::new(
+            self.auth.tenant_issuer_paths,
+            Arc::new(SurrealTenantRepository::new(self.db.clone())),
+        ))
+    }
+
+    /// The issuer this world's SETs carry for the home tenant.
+    fn issuer(&self) -> String {
+        if self.auth.tenant_issuer_paths {
+            format!("{ROOT_ISSUER}/t/{}", self.tenant_id)
+        } else {
+            ROOT_ISSUER.to_owned()
+        }
+    }
+
     fn token_for(&self, user_id: Uuid) -> String {
         issue_access_token(
             user_id,
@@ -448,7 +495,7 @@ fn permissive_limits() -> RateLimitConfig {
 
 macro_rules! app {
     ($state:expr, $w:expr) => {
-        app!($state, $w, permissive_limits(), false)
+        app!($state, $w, permissive_limits(), $w.auth.tenant_issuer_paths)
     };
     ($state:expr, $w:expr, $limits:expr, $paths:expr) => {
         test::init_service(
@@ -758,12 +805,13 @@ async fn every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule()
 
 #[actix_rt::test]
 async fn an_audience_is_unique_across_tenants_and_a_header_needs_the_sealing_key() {
-    let w = world().await;
+    // Two tenants and one issuer (D-55): SSF is off, the registry still works.
+    let w = world_of(2, false).await;
     named_client(&w, w.tenant_id, RECEIVER, &["ssf.manage"]).await;
     // The other tenant already uses the audience.
     let taken = w
         .stream(
-            w.other_tenant_id,
+            w.other_tenant(),
             RECEIVER,
             SsfDeliveryMethod::Poll,
             SsfStreamStatus::Enabled,
@@ -850,7 +898,8 @@ async fn moving_the_endpoint_to_another_origin_needs_the_header_again() {
 
 #[actix_rt::test]
 async fn each_operation_needs_its_permission_its_tenant_and_a_human() {
-    let w = world().await;
+    // Two tenants and one issuer (D-55): SSF is off, the registry still works.
+    let w = world_of(2, false).await;
     named_client(&w, w.tenant_id, RECEIVER, &["ssf.manage"]).await;
     let stream = w
         .stream(
@@ -894,7 +943,7 @@ async fn each_operation_needs_its_permission_its_tenant_and_a_human() {
         &app,
         request(
             Method::GET,
-            &streams_uri(w.other_tenant_id),
+            &streams_uri(w.other_tenant()),
             Some(&w.admin_token()),
         ),
     )
@@ -996,7 +1045,7 @@ async fn an_admin_status_change_announces_the_new_status() {
     );
     assert_eq!(event.event["status"], "enabled");
     // It signs: it announces the status the stream is in.
-    assert!(axiam_oauth2::ssf::sign_set(&w.auth, announced_for, event).is_ok());
+    assert!(axiam_oauth2::ssf::sign_set(&w.auth, w.issuer_check(), announced_for, event).is_ok());
 }
 
 #[actix_rt::test]
@@ -1585,7 +1634,8 @@ async fn the_receiver_api_needs_a_client_token_with_the_scope() {
 
 #[actix_rt::test]
 async fn another_receivers_or_another_tenants_stream_is_not_found() {
-    let w = world().await;
+    // Two tenants need their own issuers for SSF to run (D-55).
+    let w = world_with(true).await;
     let mine = w
         .stream(
             w.tenant_id,
@@ -1605,7 +1655,7 @@ async fn another_receivers_or_another_tenants_stream_is_not_found() {
     // Same client_id string, another tenant.
     let foreign = w
         .stream(
-            w.other_tenant_id,
+            w.other_tenant(),
             RECEIVER,
             SsfDeliveryMethod::Push,
             SsfStreamStatus::Enabled,
@@ -1924,7 +1974,7 @@ async fn the_verification_event_is_submitted_signed_on_delivery_and_rate_limited
     );
 
     // Signed as delivery will sign it, it verifies against the published JWKS.
-    let set = axiam_oauth2::ssf::sign_set(&w.auth, for_stream, event).unwrap();
+    let set = axiam_oauth2::ssf::sign_set(&w.auth, w.issuer_check(), for_stream, event).unwrap();
     let jwks = axiam_oauth2::oidc::build_jwks(&w.auth.jwt_public_key_pem).unwrap();
     let key = jsonwebtoken::DecodingKey::from_ed_components(&jwks.keys[0].x).unwrap();
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
@@ -2124,15 +2174,15 @@ async fn discovery_on_a_tenant_path_issuer_names_the_tenant_issuer() {
 #[actix_rt::test]
 async fn discovery_answers_one_empty_404_for_every_way_of_having_nothing_to_say() {
     let w = world_with(true).await;
-    w.ssf_off_for(w.other_tenant_id).await;
+    w.ssf_off_for(w.other_tenant()).await;
     let app = app!(w.state(), w, permissive_limits(), true);
     let mut answers = Vec::new();
     for uri in [
         format!(
             "/.well-known/ssf-configuration?tenant_id={}",
-            w.other_tenant_id
+            w.other_tenant()
         ),
-        format!("/.well-known/ssf-configuration/t/{}", w.other_tenant_id),
+        format!("/.well-known/ssf-configuration/t/{}", w.other_tenant()),
         format!(
             "/.well-known/ssf-configuration?tenant_id={}",
             Uuid::new_v4()
@@ -2332,7 +2382,7 @@ fn verify_set(w: &World, set: &str, audience: &str) -> Value {
     validation.required_spec_claims.clear();
     validation.validate_exp = false;
     validation.set_audience(&[audience]);
-    validation.set_issuer(&[ROOT_ISSUER]);
+    validation.set_issuer(&[w.issuer()]);
     jsonwebtoken::decode::<Value>(set, &key, &validation)
         .expect("the SET verifies against the JWKS")
         .claims
@@ -2794,7 +2844,8 @@ async fn a_narrowed_stream_and_an_expired_event_are_not_served() {
 
 #[actix_rt::test]
 async fn the_poll_endpoint_is_the_receivers_alone() {
-    let w = world().await;
+    // Two tenants need their own issuers for SSF to run (D-55).
+    let w = world_with(true).await;
     named_client(&w, w.tenant_id, RECEIVER, &["ssf.manage"]).await;
     named_client(&w, w.tenant_id, OTHER_RECEIVER, &["ssf.manage"]).await;
     let poll_stream = w
@@ -2815,7 +2866,7 @@ async fn the_poll_endpoint_is_the_receivers_alone() {
         .await;
     let foreign = w
         .stream(
-            w.other_tenant_id,
+            w.other_tenant(),
             RECEIVER,
             SsfDeliveryMethod::Poll,
             SsfStreamStatus::Enabled,
@@ -3038,7 +3089,8 @@ impl World {
 
 #[actix_rt::test]
 async fn a_logout_reports_session_revoked_to_the_streams_that_carry_it() {
-    let w = world().await;
+    // Two tenants need their own issuers for SSF to run (D-55).
+    let w = world_with(true).await;
     let carrying = w
         .stream(
             w.tenant_id,
@@ -3065,7 +3117,7 @@ async fn a_logout_reports_session_revoked_to_the_streams_that_carry_it() {
     )
     .await;
     w.stream(
-        w.other_tenant_id,
+        w.other_tenant(),
         RECEIVER,
         SsfDeliveryMethod::Push,
         SsfStreamStatus::Enabled,
@@ -3115,14 +3167,14 @@ async fn a_logout_reports_session_revoked_to_the_streams_that_carry_it() {
             pending.sub_id,
             json!({
                 "format": "complex",
-                "user": {"format": "iss_sub", "iss": ROOT_ISSUER, "sub": user.to_string()},
+                "user": {"format": "iss_sub", "iss": w.issuer(), "sub": user.to_string()},
                 "session": {"format": "opaque", "id": session.id.to_string()},
             })
         );
         assert!(pending.txn.is_some());
         // It verifies against the JWKS once signed as delivery will sign it.
         if stream.status == SsfStreamStatus::Enabled {
-            let set = sign_set(&w.auth, stream, pending).unwrap();
+            let set = sign_set(&w.auth, w.issuer_check(), stream, pending).unwrap();
             let claims = verify_set(&w, &set, &stream.audience);
             assert_eq!(claims["sub_id"]["session"]["id"], session.id.to_string());
         }
@@ -3679,7 +3731,7 @@ impl World {
 
     fn loopback_dispatcher(&self) -> InProcessDispatcher {
         InProcessDispatcher::new(
-            SsfPushDeliverer::new(self.repo(), buffer(self), self.auth.clone())
+            SsfPushDeliverer::new(self.repo(), buffer(self), self.auth.clone(), self.gate())
                 .admitting_private_networks_for_tests(),
         )
     }
@@ -3983,8 +4035,12 @@ async fn the_address_guard_refuses_a_private_endpoint_at_delivery_end_to_end() {
         .unwrap();
 
     let user = active_user(&w.db, w.tenant_id, "alice").await;
-    let dispatcher =
-        InProcessDispatcher::new(SsfPushDeliverer::new(w.repo(), buffer(&w), w.auth.clone()));
+    let dispatcher = InProcessDispatcher::new(SsfPushDeliverer::new(
+        w.repo(),
+        buffer(&w),
+        w.auth.clone(),
+        w.gate(),
+    ));
     let app = app!(w.delivering_state(&dispatcher), w);
     logout_in(&app, &w, user).await;
 

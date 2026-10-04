@@ -91,6 +91,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
 
         let rows: Vec<OrganizationRow> = result.take(0).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "organization", &id_str)?;
+        crate::repository::tenant::bump_tenant_generation();
 
         Ok(Organization {
             id,
@@ -217,6 +218,7 @@ impl<C: Connection> OrganizationRepository for SurrealOrganizationRepository<C> 
             }
             .into());
         }
+        crate::repository::tenant::bump_tenant_generation();
         Ok(())
     }
 

@@ -505,6 +505,18 @@ pub struct OidcPolicy {
     #[serde(default)]
     #[schema(example = false)]
     pub ssf_enabled: bool,
+    /// **Read-only**, D-55: set on a settings response when `ssf_enabled` is on
+    /// but the transmitter is inactive anyway, saying why — the deployment holds
+    /// more than one tenant and serves no per-tenant issuers. Never stored.
+    //
+    // Never stored: the datastore decoder and every constructor leave it
+    // `None`, the settings handlers set it on the response only, and no
+    // request body is this type (the writes take `SetOrgSettings` and
+    // `TenantSettingsOverride`). Not `skip_deserializing`: utoipa would then
+    // drop the field from the published schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(read_only)]
+    pub ssf_inactive_reason: Option<String>,
 }
 
 /// See [`DEFAULT_DCR_MAX_CLIENTS`]. A function because `serde(default = ..)`
@@ -1452,6 +1464,7 @@ pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
         cimd: input.cimd.clone(),
         saml_idp_enabled: input.saml_idp_enabled,
         ssf_enabled: input.ssf_enabled,
+        ssf_inactive_reason: None,
     };
     violations.extend(validate_dcr_policy(&oidc));
     // T21.5 — the same argument, for the mechanism that reaches further: a
@@ -1599,6 +1612,7 @@ pub fn effective_settings(
                 .saml_idp_enabled
                 .unwrap_or(org.oidc.saml_idp_enabled),
             ssf_enabled: tenant_override.ssf_enabled.unwrap_or(org.oidc.ssf_enabled),
+            ssf_inactive_reason: None,
             default_locale: tenant_override
                 .default_locale
                 .clone()
@@ -2609,6 +2623,7 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
             cimd: input.cimd.clone(),
             saml_idp_enabled: input.saml_idp_enabled,
             ssf_enabled: input.ssf_enabled,
+            ssf_inactive_reason: None,
         },
         created_at: now,
         updated_at: now,

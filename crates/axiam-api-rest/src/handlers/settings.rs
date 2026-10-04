@@ -317,6 +317,41 @@ async fn reconcile_tenant_overrides<C: Connection + Clone>(
     }
 }
 
+// -----------------------------------------------------------------------
+// D-55: SSF requires per-tenant issuers in a multi-tenant deployment
+// -----------------------------------------------------------------------
+
+/// Refuse turning `ssf_enabled` on (`turning_on`: the write makes it true where
+/// it was false) while the D-55 gate holds, with a `400` naming the cause. A
+/// write that leaves it as it was is not refused, so an organization that had
+/// SSF on can still change its other settings.
+async fn refuse_ssf_while_issuer_shared<C: Connection + Clone>(
+    state: &AppState<C>,
+    turning_on: bool,
+) -> Result<(), AxiamApiError> {
+    if turning_on && state.ssf.gate.check().await?.holds() {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: format!(
+                "ssf_enabled: {}",
+                axiam_core::models::ssf::SHARED_ISSUER_INACTIVE_REASON
+            ),
+        }));
+    }
+    Ok(())
+}
+
+/// Say on a settings response that SSF is on but inactive, and why (D-55).
+async fn annotate_ssf<C: Connection + Clone>(
+    state: &AppState<C>,
+    mut settings: SecuritySettings,
+) -> Result<SecuritySettings, AxiamApiError> {
+    if settings.oidc.ssf_enabled && state.ssf.gate.check().await?.holds() {
+        settings.oidc.ssf_inactive_reason =
+            Some(axiam_core::models::ssf::SHARED_ISSUER_INACTIVE_REASON.to_owned());
+    }
+    Ok(settings)
+}
+
 /// `GET /api/v1/organizations/{org_id}/settings`
 #[utoipa::path(
     get,
@@ -359,7 +394,7 @@ pub async fn get_org_settings<C: Connection + Clone>(
     }
 
     let settings = state.settings_repo.get_org_settings(org_id).await?;
-    Ok(HttpResponse::Ok().json(settings))
+    Ok(HttpResponse::Ok().json(annotate_ssf(&state, settings).await?))
 }
 
 /// `PUT /api/v1/organizations/{org_id}/settings`
@@ -375,8 +410,10 @@ pub async fn get_org_settings<C: Connection + Clone>(
         (status = 200, description = "Organization settings updated",
          body = SecuritySettings),
         (status = 400,
-         description = "Settings are internally inconsistent, or enable OPAQUE \
-                        on a server holding no OPAQUE keys"),
+         description = "Settings are internally inconsistent, enable OPAQUE \
+                        on a server holding no OPAQUE keys, or turn ssf_enabled on \
+                        while the deployment holds more than one tenant and serves \
+                        no per-tenant issuers (D-55)"),
         (status = 409,
          description = "opaque_mode `required` would coexist with an enabled \
                         directory (LDAP / Active Directory)"),
@@ -440,6 +477,15 @@ pub async fn set_org_settings<C: Connection + Clone>(
         refuse_incomplete_opaque_coverage(&state, &tenants).await?;
     }
 
+    // D-55: turning SSF on while the deployment's tenants would share one
+    // issuer is refused, before anything is written.
+    let ssf_was_on = state
+        .settings_repo
+        .get_org_settings(org_id)
+        .await
+        .is_ok_and(|current| current.oidc.ssf_enabled);
+    refuse_ssf_while_issuer_shared(&state, input.ssf_enabled && !ssf_was_on).await?;
+
     let settings = state.settings_repo.set_org_settings(org_id, input).await?;
 
     // Switching OPAQUE on at the organization switches it on for every tenant
@@ -455,7 +501,7 @@ pub async fn set_org_settings<C: Connection + Clone>(
     // "propagated to all the already existing ones" has to mean.
     reconcile_tenant_overrides(&state, &settings, &tenants).await;
 
-    Ok(HttpResponse::Ok().json(settings))
+    Ok(HttpResponse::Ok().json(annotate_ssf(&state, settings).await?))
 }
 
 /// `GET /api/v1/settings`
@@ -484,7 +530,7 @@ pub async fn get_tenant_settings<C: Connection + Clone>(
         .settings_repo
         .get_effective_settings(user.org_id, user.tenant_id)
         .await?;
-    Ok(HttpResponse::Ok().json(settings))
+    Ok(HttpResponse::Ok().json(annotate_ssf(&state, settings).await?))
 }
 
 /// `PUT /api/v1/settings`
@@ -500,9 +546,11 @@ pub async fn get_tenant_settings<C: Connection + Clone>(
     responses(
         (status = 200, description = "Tenant settings updated",
          body = SecuritySettings),
-        (status = 400, description = "Override violates org baseline, or \
+        (status = 400, description = "Override violates org baseline, \
                                       enables OPAQUE on a server holding no \
-                                      OPAQUE keys"),
+                                      OPAQUE keys, or turns ssf_enabled on while \
+                                      the deployment's tenants share one issuer \
+                                      (D-55)"),
         (status = 409,
          description = "opaque_mode `required` would coexist with an enabled \
                         directory (LDAP / Active Directory)"),
@@ -540,6 +588,17 @@ pub async fn set_tenant_settings<C: Connection + Clone>(
     // from (scope, scope_id) and uses that as the canonical ID.
     let merged = effective_settings(&org, &overrides, user.tenant_id, Uuid::nil());
 
+    // D-55: an override that turns SSF on for this tenant is refused while the
+    // deployment's tenants would share one issuer.
+    if merged.oidc.ssf_enabled && overrides.ssf_enabled == Some(true) {
+        let was_on = state
+            .settings_repo
+            .get_effective_settings(user.org_id, user.tenant_id)
+            .await
+            .is_ok_and(|current| current.oidc.ssf_enabled);
+        refuse_ssf_while_issuer_shared(&state, !was_on).await?;
+    }
+
     // G-3: an effective `required` and an enabled directory never coexist.
     if merged.opaque.opaque_mode == OpaqueMode::Required {
         let tenant = state.tenant_repo.get_by_id(user.tenant_id).await?;
@@ -555,7 +614,7 @@ pub async fn set_tenant_settings<C: Connection + Clone>(
         provision_opaque_setup(&state, user.tenant_id, result.opaque.opaque_suite).await;
     }
 
-    Ok(HttpResponse::Ok().json(result))
+    Ok(HttpResponse::Ok().json(annotate_ssf(&state, result).await?))
 }
 
 // -----------------------------------------------------------------------
@@ -680,6 +739,15 @@ pub async fn set_tenant_override<C: Connection + Clone>(
     // unrelated override against is not gated twice — the organization write
     // already established coverage for it.
     let would_be = effective_settings(&org, &overrides, tenant_id, Uuid::nil());
+    // D-55, as on `PUT /api/v1/settings`.
+    if would_be.oidc.ssf_enabled && overrides.ssf_enabled == Some(true) {
+        let was_on = state
+            .settings_repo
+            .get_effective_settings(user.org_id, tenant_id)
+            .await
+            .is_ok_and(|current| current.oidc.ssf_enabled);
+        refuse_ssf_while_issuer_shared(&state, !was_on).await?;
+    }
     // G-3: an effective `required` and an enabled directory never coexist,
     // whichever layer made it `required`.
     if would_be.opaque.opaque_mode == OpaqueMode::Required {

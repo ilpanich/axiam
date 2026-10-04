@@ -342,6 +342,7 @@ fn decode_oidc(
         saml_idp_enabled: saml_idp_enabled.unwrap_or(false),
         // G-5 / D-45 — the strict direction: an absent column reads as off.
         ssf_enabled: ssf_enabled.unwrap_or(false),
+        ssf_inactive_reason: None,
     }
 }
 

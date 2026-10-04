@@ -364,6 +364,10 @@ pub struct SsfState<C: Connection + Clone> {
         Arc<axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SsfSystemAccountSink>>,
     /// The long polls currently waiting, one per stream (D-53 (11)).
     pub poll_waiters: Arc<PollWaiters>,
+    /// D-55: SSF requires per-tenant issuers in a deployment of more than one
+    /// tenant. Asked where events are produced, where a SET is signed and at
+    /// discovery; shared with the emitter and the push deliverer.
+    pub gate: Arc<axiam_oauth2::ssf::SsfIssuerGate>,
 }
 
 /// The streams that have a long poll waiting **on this instance**.

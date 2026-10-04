@@ -556,7 +556,7 @@ export const OPERATE_PAGES: DocPage[] = [
           ],
           [
             "ssf_enabled",
-            "Whether the tenant answers as a Shared Signals Framework transmitter: off, `/.well-known/ssf-configuration` answers an empty `404`, a receiver's stream API sees no stream and no event is produced. Default `false`. An **organization** field a tenant may only *disable*, like `saml_idp_enabled`. Registering streams does not depend on it. See [Shared Signals (SSF) transmitter](#/docs/ssf).",
+            "Whether the tenant answers as a Shared Signals Framework transmitter: off, `/.well-known/ssf-configuration` answers an empty `404`, a receiver's stream API sees no stream and no event is produced. Default `false`. An **organization** field a tenant may only *disable*, like `saml_idp_enabled`. Registering streams does not depend on it. On a deployment of more than one tenant without per-tenant issuers SSF is inactive whatever it says, turning it on is refused with `400`, and a settings response carries the read-only `oidc.ssf_inactive_reason`. See [Shared Signals (SSF) transmitter](#/docs/ssf#enable).",
           ],
           [
             "default_locale",

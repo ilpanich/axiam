@@ -56,7 +56,7 @@ use axiam_db::{
     SurrealSettingsRepository, SurrealSsfStreamRepository, SurrealTenantRepository,
     SurrealUserRepository,
 };
-use axiam_oauth2::ssf::{AssuranceLevel, SsfError, SsfEvent, prepare_event};
+use axiam_oauth2::ssf::{AssuranceLevel, SsfError, SsfEvent, SsfIssuerGate, prepare_event};
 // Re-exported so the crates above this one (SCIM) name the event vocabulary
 // through the emitter they call, without a dependency of their own on the
 // protocol crate.
@@ -132,6 +132,9 @@ pub struct SsfEmitter<C: Connection + Clone> {
     user_repo: SurrealUserRepository<C>,
     auth_config: AuthConfig,
     outbox: Arc<Late<dyn SsfOutbox>>,
+    /// D-55: while the deployment's tenants would share one issuer nothing is
+    /// produced, for any tenant.
+    gate: Arc<SsfIssuerGate>,
 }
 
 impl<C: Connection + Clone> SsfEmitter<C> {
@@ -142,6 +145,7 @@ impl<C: Connection + Clone> SsfEmitter<C> {
         settings_repo: SurrealSettingsRepository<C>,
         user_repo: SurrealUserRepository<C>,
         auth_config: AuthConfig,
+        gate: Arc<SsfIssuerGate>,
     ) -> Self {
         Self {
             stream_repo,
@@ -150,6 +154,7 @@ impl<C: Connection + Clone> SsfEmitter<C> {
             user_repo,
             auth_config,
             outbox: Arc::new(Late::default()),
+            gate,
         }
     }
 
@@ -176,7 +181,7 @@ impl<C: Connection + Clone> SsfEmitter<C> {
                 return false;
             }
         };
-        match self
+        let switch_on = match self
             .settings_repo
             .get_effective_settings(tenant.organization_id, tenant_id)
             .await
@@ -184,6 +189,18 @@ impl<C: Connection + Clone> SsfEmitter<C> {
             Ok(settings) => settings.oidc.ssf_enabled,
             Err(error) => {
                 tracing::warn!(target: "axiam::ssf", %tenant_id, %error, "SSF emission could not read the settings");
+                false
+            }
+        };
+        if !switch_on {
+            return false;
+        }
+        // D-55: the deployment's tenants would share one issuer — nothing is
+        // produced, as with the switch off. A count that cannot be read is off.
+        match self.gate.check().await {
+            Ok(issuer) => !issuer.holds(),
+            Err(error) => {
+                tracing::warn!(target: "axiam::ssf", %tenant_id, %error, "SSF emission could not count the deployment's tenants");
                 false
             }
         }
@@ -441,5 +458,132 @@ impl<C: Connection + Clone> SsfSystemAccountSink for SsfEmitter<C> {
             tenant_id,
             SsfSubject::from_user(user),
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D-55: the audit row of a shared issuer
+// ---------------------------------------------------------------------------
+
+/// Writes `ssf.inactive_shared_issuer` once per tenant whose `ssf_enabled` is
+/// on, when the D-55 gate starts to hold (the deployment's tenants would share
+/// one issuer, so SSF is inactive for every one of them). Bound to the gate,
+/// which calls it once per change per process — never per event.
+pub struct SharedIssuerAudit<C: Connection + Clone> {
+    org_repo: axiam_db::SurrealOrganizationRepository<C>,
+    tenant_repo: SurrealTenantRepository<C>,
+    settings_repo: SurrealSettingsRepository<C>,
+    audit_repo: axiam_db::SurrealAuditLogRepository<C>,
+}
+
+impl<C: Connection + Clone> SharedIssuerAudit<C> {
+    /// The audit writer over these repositories.
+    pub fn new(
+        org_repo: axiam_db::SurrealOrganizationRepository<C>,
+        tenant_repo: SurrealTenantRepository<C>,
+        settings_repo: SurrealSettingsRepository<C>,
+        audit_repo: axiam_db::SurrealAuditLogRepository<C>,
+    ) -> Self {
+        Self {
+            org_repo,
+            tenant_repo,
+            settings_repo,
+            audit_repo,
+        }
+    }
+
+    /// Every tenant of every organization, page by page.
+    async fn every_tenant(&self) -> Result<Vec<axiam_core::models::tenant::Tenant>, AxiamError> {
+        use axiam_core::repository::{OrganizationRepository, Pagination};
+        const PAGE: u64 = 100;
+        let mut tenants = Vec::new();
+        let mut offset = 0;
+        loop {
+            let orgs = self
+                .org_repo
+                .list(Pagination {
+                    offset,
+                    limit: PAGE,
+                    search: None,
+                })
+                .await?;
+            let got = orgs.items.len() as u64;
+            for org in orgs.items {
+                let mut tenant_offset = 0;
+                loop {
+                    let page = self
+                        .tenant_repo
+                        .list_by_organization(
+                            org.id,
+                            Pagination {
+                                offset: tenant_offset,
+                                limit: PAGE,
+                                search: None,
+                            },
+                        )
+                        .await?;
+                    let n = page.items.len() as u64;
+                    tenants.extend(page.items);
+                    tenant_offset += n;
+                    if n < PAGE {
+                        break;
+                    }
+                }
+            }
+            offset += got;
+            if got < PAGE {
+                return Ok(tenants);
+            }
+        }
+    }
+}
+
+impl<C: Connection + Clone> axiam_core::models::ssf::SharedIssuerObserver for SharedIssuerAudit<C> {
+    fn gate_changed(&self, holds: bool) -> SsfFuture<'_, ()> {
+        Box::pin(async move {
+            use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+            use axiam_core::models::ssf::{
+                AUDIT_SSF_INACTIVE_SHARED_ISSUER, SHARED_ISSUER_INACTIVE_REASON,
+            };
+            use axiam_core::repository::AuditLogRepository;
+            if !holds {
+                return;
+            }
+            let tenants = match self.every_tenant().await {
+                Ok(tenants) => tenants,
+                Err(error) => {
+                    tracing::warn!(target: "axiam::ssf", %error, "the D-55 audit could not list the tenants");
+                    return;
+                }
+            };
+            for tenant in tenants {
+                let on = self
+                    .settings_repo
+                    .get_effective_settings(tenant.organization_id, tenant.id)
+                    .await
+                    .is_ok_and(|s| s.oidc.ssf_enabled);
+                if !on {
+                    continue;
+                }
+                if let Err(error) = self
+                    .audit_repo
+                    .append(CreateAuditLogEntry {
+                        tenant_id: tenant.id,
+                        actor_id: Uuid::nil(),
+                        actor_type: ActorType::System,
+                        action: AUDIT_SSF_INACTIVE_SHARED_ISSUER.into(),
+                        resource_id: None,
+                        outcome: AuditOutcome::Failure,
+                        ip_address: None,
+                        metadata: Some(serde_json::json!({
+                            "reason": SHARED_ISSUER_INACTIVE_REASON,
+                        })),
+                    })
+                    .await
+                {
+                    tracing::warn!(target: "axiam::ssf", tenant_id = %tenant.id, %error, "the D-55 audit row could not be written");
+                }
+            }
+        })
     }
 }

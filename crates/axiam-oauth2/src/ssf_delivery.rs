@@ -24,6 +24,7 @@
 //!
 //! | The stream, at the attempt | Outcome |
 //! |---|---|
+//! | any stream, while the D-55 gate holds (tenant issuer paths off, more than one tenant) | dead-letter — nothing is signed, sent or held |
 //! | gone | dead-letter |
 //! | `disabled` | dead-letter — nothing is signed or sent |
 //! | `paused`, or now a poll stream | the event goes to the buffer; the message is acknowledged |
@@ -84,7 +85,11 @@ use axiam_federation::ssrf::{SsrfError, guarded_fetch_no_redirect, read_capped_b
 use chrono::Utc;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 
-use crate::ssf::{SsfError, delivery_id_of, sign_set};
+use crate::ssf::{SsfError, SsfIssuerGate, delivery_id_of, sign_set};
+
+/// The dead-letter reason of a message the D-55 gate stops.
+const SHARED_ISSUER_DEAD_LETTER: &str =
+    "SSF is inactive: the deployment's tenants share one issuer (D-55)";
 
 /// RFC 8935 §2: the media type of a pushed SET.
 pub const SET_CONTENT_TYPE: &str = "application/secevent+jwt";
@@ -279,6 +284,9 @@ pub struct SsfPushDeliverer<S, B> {
     streams: S,
     buffer: B,
     auth_config: AuthConfig,
+    /// D-55: while the deployment's tenants would share one issuer, nothing is
+    /// signed, sent or held; a queued message is dead-lettered.
+    gate: Arc<SsfIssuerGate>,
     /// The guarded fetch's `allow_private`. **Always `false`** except for the
     /// integration tests' loopback receiver, which turn it on through
     /// [`Self::admitting_private_networks_for_tests`] and nothing else.
@@ -292,11 +300,12 @@ where
 {
     /// The production deliverer: every push goes through `guarded_fetch_no_redirect` with
     /// `allow_private = false`.
-    pub fn new(streams: S, buffer: B, auth_config: AuthConfig) -> Self {
+    pub fn new(streams: S, buffer: B, auth_config: AuthConfig, gate: Arc<SsfIssuerGate>) -> Self {
         Self {
             streams,
             buffer,
             auth_config,
+            gate,
             allow_private: false,
         }
     }
@@ -335,6 +344,20 @@ where
             }
         };
 
+        // D-55, before anything is held or signed: while the deployment's
+        // tenants share one issuer SSF is off for every tenant, so a queued
+        // message is dead-lettered — not held, not retried.
+        let issuer = match self.gate.check().await {
+            Ok(issuer) => issuer,
+            Err(_) => {
+                return Err(OutboundError::Delivery(
+                    "the deployment's tenants could not be counted".into(),
+                ));
+            }
+        };
+        if issuer.holds() {
+            return Ok(dead(SHARED_ISSUER_DEAD_LETTER));
+        }
         let announcement = pending.event_uri == STREAM_UPDATED_EVENT_URI;
         if !announcement {
             match stream.status {
@@ -352,8 +375,9 @@ where
         }
 
         // Signed against the stream as it is *now*, or not at all.
-        let set = match sign_set(&self.auth_config, &stream, &pending) {
+        let set = match sign_set(&self.auth_config, issuer, &stream, &pending) {
             Ok(set) => zeroize::Zeroizing::new(set),
+            Err(SsfError::SharedIssuer) => return Ok(dead(SHARED_ISSUER_DEAD_LETTER)),
             Err(SsfError::Signing(_)) => {
                 return Err(OutboundError::Delivery(
                     "the SET could not be signed".into(),

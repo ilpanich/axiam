@@ -985,6 +985,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Authorization` header. Threat model 2.30.0: 406 threats, 389 mitigated / 17
   open.
 
+- **SSF requires per-tenant issuers in a multi-tenant deployment (F4 W4 P23W4-11, D-55, #539; threat model 2.31.0, T-390).** With `AXIAM__AUTH__TENANT_ISSUER_PATHS` off and more than one tenant, SSF is inactive for every tenant — discovery `404`, no stream on the receiver API, nothing produced or signed, a queued push dead-lettered, a poll answering nothing — and turning `ssf_enabled` on is `400` naming the cause; streams and settings say why (`transmitter_active`, `oidc.ssf_inactive_reason`), a change is logged once at `WARN` and audited as `ssf.inactive_shared_issuer`. Contract §32 amended in place (1.56).
+
 - **A long poll logs an unsignable held event once (F4 W4 P23W4-03).** When the
   deployment key could not sign a held SSF event, `POST /ssf/v1/poll/{id}`
   logged it at `ERROR` on every half-second look of a long poll — about sixty

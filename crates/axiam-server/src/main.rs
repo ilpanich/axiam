@@ -1704,12 +1704,29 @@ async fn main() -> std::io::Result<()> {
     // D-53 (1): the step-up record the honour lane writes and the return leg
     // consumes; its ten-minute expiry is swept by the cleanup scheduler.
     let ssf_step_up_repo = axiam_db::SurrealSsfStepUpRepository::new(pool.handle_for_repo());
+    // D-55: SSF requires per-tenant issuers in a deployment of more than one
+    // tenant. One gate for the process: the emitter, the poll endpoint,
+    // discovery and the push deliverer ask it; a change is audited per tenant
+    // with SSF on.
+    let ssf_gate = Arc::new(axiam_oauth2::ssf::SsfIssuerGate::new(
+        config.auth.tenant_issuer_paths,
+        Arc::new(tenant_repo.clone()),
+    ));
+    ssf_gate.bind_observer(Arc::new(
+        axiam_api_rest::ssf_emitter::SharedIssuerAudit::new(
+            org_repo.clone(),
+            tenant_repo.clone(),
+            settings_repo.clone(),
+            audit_repo.clone(),
+        ),
+    ));
     let ssf_emitter = axiam_api_rest::ssf_emitter::SsfEmitter::new(
         ssf_stream_repo.clone(),
         tenant_repo.clone(),
         settings_repo.clone(),
         user_repo.clone(),
         config.auth.clone(),
+        ssf_gate.clone(),
     );
     ssf_session_sink.bind(Arc::new(ssf_emitter.clone()));
     ssf_account_sink.bind(Arc::new(ssf_emitter.clone()));
@@ -2398,6 +2415,7 @@ async fn main() -> std::io::Result<()> {
                 ssf_stream_repo.clone(),
                 ssf_event_buffer_repo.clone(),
                 config.auth.clone(),
+                ssf_gate.clone(),
             )))
             .expect("Failed to register the SSF push deliverer");
         let ssf_publisher_for_consumer = ssf_publisher.clone();
@@ -3067,6 +3085,7 @@ async fn main() -> std::io::Result<()> {
             session_sink: ssf_session_sink,
             account_sink: ssf_account_sink,
             poll_waiters: Arc::default(),
+            gate: ssf_gate,
         },
     };
 

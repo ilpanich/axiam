@@ -895,12 +895,25 @@ impl<C: Connection + Clone> AppState<C> {
             // without either; a test that needs them replaces this field.
             ssf: {
                 let stream_repo = axiam_db::SurrealSsfStreamRepository::new(db.clone(), None);
+                // D-55: the gate reads this harness's datastore like a
+                // deployment's, and audits a change like one.
+                let gate = Arc::new(axiam_oauth2::ssf::SsfIssuerGate::new(
+                    auth_config_for_ssf.tenant_issuer_paths,
+                    Arc::new(SurrealTenantRepository::new(db.clone())),
+                ));
+                gate.bind_observer(Arc::new(crate::ssf_emitter::SharedIssuerAudit::new(
+                    SurrealOrganizationRepository::new(db.clone()),
+                    SurrealTenantRepository::new(db.clone()),
+                    SurrealSettingsRepository::new(db.clone()),
+                    SurrealAuditLogRepository::new(db.clone()),
+                )));
                 let emitter = crate::ssf_emitter::SsfEmitter::new(
                     stream_repo.clone(),
                     SurrealTenantRepository::new(db.clone()),
                     SurrealSettingsRepository::new(db.clone()),
                     SurrealUserRepository::new(db.clone()),
                     auth_config_for_ssf,
+                    gate.clone(),
                 );
                 ssf_session_sink.bind(Arc::new(emitter.clone()));
                 ssf_account_sink.bind(Arc::new(emitter.clone()));
@@ -913,6 +926,7 @@ impl<C: Connection + Clone> AppState<C> {
                     session_sink: ssf_session_sink,
                     account_sink: ssf_account_sink,
                     poll_waiters: Arc::default(),
+                    gate,
                 }
             },
         }

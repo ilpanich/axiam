@@ -938,3 +938,58 @@ pub struct SsfStepUp {
     /// The `acr` URN that session achieved (one of the two AXIAM publishes).
     pub previous_acr: String,
 }
+
+// ---------------------------------------------------------------------------
+// D-55: SSF requires per-tenant issuers in a multi-tenant deployment
+// ---------------------------------------------------------------------------
+
+/// How long a reading of the deployment's tenant count may be reused (D-55: at
+/// most 60 s). A tenant created through this process invalidates it at once
+/// ([`DeploymentTenants::generation`]); another replica learns of it within
+/// this bound.
+pub const SHARED_ISSUER_TENANT_COUNT_TTL_SECS: u64 = 60;
+
+/// The audit action written, once per tenant whose SSF switch is on, when the
+/// D-55 gate starts to hold.
+pub const AUDIT_SSF_INACTIVE_SHARED_ISSUER: &str = "ssf.inactive_shared_issuer";
+
+/// Why SSF is inactive under D-55, as the `400`, the stream view and the
+/// settings API say it.
+pub const SHARED_ISSUER_INACTIVE_REASON: &str = "SSF is inactive: this deployment holds more \
+     than one tenant and does not serve per-tenant issuers \
+     (AXIAM__AUTH__TENANT_ISSUER_PATHS), so every tenant's SETs would carry the same issuer \
+     and key (D-55)";
+
+/// Whether the D-55 gate holds: tenant issuer paths are off **and** the
+/// deployment holds more than one tenant. While it holds, SSF behaves for every
+/// tenant exactly as with `ssf_enabled` off.
+#[must_use]
+pub const fn shared_issuer_gate_holds(tenant_issuer_paths: bool, deployment_tenants: u64) -> bool {
+    !tenant_issuer_paths && deployment_tenants > 1
+}
+
+/// The datastore's answer to "how many tenants does this deployment hold" for
+/// D-55, and a generation that changes whenever this process creates or deletes
+/// a tenant or an organization.
+///
+/// The count is the number of **standard** tenants across every organization,
+/// or the number of organizations if that is larger. An organization's own
+/// scope tenant is not counted beside its standard tenants: the principals in
+/// it already reach every tenant of their organization, so a shared issuer
+/// gives them nothing they lack; a second organization always counts, since
+/// nothing ties its administrators to the first's.
+pub trait DeploymentTenants: Send + Sync {
+    /// The count, read from the datastore.
+    fn count_for_shared_issuer(&self) -> SsfFuture<'_, crate::error::AxiamResult<u64>>;
+
+    /// A value that changes whenever this process creates or deletes a tenant
+    /// or an organization. A cached count read at another generation is stale.
+    fn generation(&self) -> u64;
+}
+
+/// Told when the D-55 gate starts or stops holding, once per change per
+/// process — the audit writer (`ssf.inactive_shared_issuer`) binds here.
+pub trait SharedIssuerObserver: Send + Sync {
+    /// `holds` is the new state.
+    fn gate_changed(&self, holds: bool) -> SsfFuture<'_, ()>;
+}

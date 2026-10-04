@@ -35,7 +35,8 @@ test says so.
 ## 0. Summary
 
 Five findings were fixed on the branch, all wave-introduced or siblings the
-wave's own changes missed. The one that matters is **P23W4-01** (Low): every SSF
+wave's own changes missed, and a sixth (P23W4-11) after the maintainer's
+decision on it. The one that matters is **P23W4-01** (Low): every SSF
 stream write was read-modify-write, so a receiver's write that overlapped an
 administrator's put back the status, allowance, receiver binding or subject
 format the administrator had just changed — a `disabled` that D-51 says only an
@@ -50,8 +51,9 @@ session that was asked to step up. **P23W4-03** turns an unsignable held event's
 literals, a TOTP secret in an assertion message, stale test descriptions);
 P23W4-05 bounds `AcsEndpoint.index` in the published schema. One decision goes
 to the maintainer: audience squatting is not harmless where SETs share one
-issuer (P23W4-11, Low; T-390's residual corrected, receiver guidance on the
-website).
+issuer (P23W4-11, Low, ilpanich/axiam#539). The maintainer chose option (b),
+recorded as D-55, and it is fixed: SSF requires per-tenant issuers in a
+deployment of more than one tenant.
 
 **D-38's single logout holds.** Every SP message is verified against its
 registered certificate, per node on the POST binding (the receiver's placement
@@ -74,13 +76,16 @@ issuance held against token confusion at every verifier AXIAM runs, now pinned
 | **P23W4-08** | The server's consumer supervisor loop is copied per outbound kind (webhook, `ssf_push`); G-6 would add a third copy. | Informational | `axiam-server` `main.rs`; D-36 | **Reported** (ilpanich/axiam#537) (maintainability) |
 | **P23W4-09** | Untested: a Keycloak-initiated logout towards AXIAM, and AXIAM's front-channel SLO towards a real SP's `SingleLogoutService`. All SLO tests use a synthetic SP or samael. | Informational | SLO; T-370 … T-380 | **Reported** (ilpanich/axiam#538) (coverage) |
 | **P23W4-10** | SSF residuals: an erased subject can stay in the buffer or the push DLQ up to seven days (T-402); a receiver token outlives its OAuth2 client's deletion by up to 15 minutes; the primary and retry `ssf_push` queues have no TTL. | Low | SSF; T-402, T-385 | **Accepted** (§10) |
-| **P23W4-11** | Audience squatting is not harmless everywhere D-47 says it is: without per-tenant issuers every tenant's SETs share `iss` and the key, so a receiver that adopts a conventional audience before its stream exists and accepts unauthenticated pushes would accept SETs a squatting tenant pushes, about subjects it chooses (an email subject included). | Low | SSF; T-390, D-45, D-47 | **Reported** (ilpanich/axiam#539) — T-390's residual corrected, receiver guidance on the website; whether SSF should require per-tenant issuers is the maintainer's decision |
+| **P23W4-11** | Audience squatting is not harmless everywhere D-47 says it is: without per-tenant issuers every tenant's SETs share `iss` and the key, so a receiver that adopts a conventional audience before its stream exists and accepts unauthenticated pushes would accept SETs a squatting tenant pushes, about subjects it chooses (an email subject included). | Low | SSF; T-390, D-45, D-47 | **Fixed** — `D55FIXCOMMIT` (D-55, maintainer decision on ilpanich/axiam#539) — reported as ilpanich/axiam#539, the maintainer chose option (b): SSF requires per-tenant issuers in a deployment of more than one tenant (T-390 amended, model 2.31.0) |
 
-**Verdict on merge.** Nothing open blocks W4. The five fixes are in and pinned,
-the threat model is at **2.30.0 — 406 threats, 389 mitigated / 17 open** — and
-the three artifacts and the website agree. P23W4-06 … -09 and -11 should be filed
-before the phase's PR merges (§14); P23W4-11 needs a maintainer decision first. The OpenAPI spec is regenerated (`72a3d57`: the SSF
-`409`s and `AcsEndpoint.index`'s maximum).
+**Verdict on merge.** Nothing open blocks W4. The six fixes are in and pinned —
+P23W4-11 the sixth, after the maintainer's decision on ilpanich/axiam#539 (D-55) —
+the threat model is at **2.31.0 — 406 threats, 389 mitigated / 17 open** — and
+the three artifacts and the website agree. P23W4-06 … -09 are filed
+(ilpanich/axiam#535 … #538, §14), and #539 closes with the PR that carries its
+fix. The OpenAPI spec is regenerated (`72a3d57`: the SSF `409`s and
+`AcsEndpoint.index`'s maximum; again with D-55's fix: `transmitter_active`,
+`oidc.ssf_inactive_reason` and the `400` and `404` descriptions).
 
 ---
 
@@ -584,14 +589,19 @@ open)*, no diff left):
 | Renamed redirect test | **T-392** amended (citation) | `96a2c6b` |
 | `SigAlg` rule and log wording | **T-370**, **T-377** amended | documentation commit |
 | Audience squatting without per-tenant issuers | **T-390** amended (residual corrected) | documentation commit |
+| SSF requires per-tenant issuers in a multi-tenant deployment (D-55) | **T-390** amended again (Mitigated with the D-55 tests; residual: the cross-replica delay of up to 60 s; a single-tenant deployment needs no gate), model **2.31.0** | `D55FIXCOMMIT` |
+
+Model **2.31.0** (P23W4-11's fix, D-55) changes no count: T-390 stays
+Mitigated and cites the new tests; `gen-threat-model.mjs` still prints *406
+threats (389 mitigated, 17 open)*.
 
 Every W4 surface maps to an element: the SP registry and §29 routes (T-357 …
 T-365), IdP metadata (T-366 … T-369), SLO and its stores (T-370 … T-384), the
 SSF receiver, transmitter, store and flows (T-385 … T-406). Counts: STRIDE
 *Tampering* 81, severity *Low* 29 (1 open), diagram *Audit, webhooks, email &
 notifications* 40 threats / 3 open, open register 17. Reported findings
-(P23W4-06 … -09, -11) are pre-existing, gaps or a decision; their entries should
-be amended when they are acted on.
+(P23W4-06 … -09) are pre-existing or gaps; their entries should be amended
+when they are acted on. P23W4-11, the decision, was acted on: D-55, model 2.31.0.
 
 ---
 
@@ -733,6 +743,8 @@ Keycloak supports, the AXIAM session gone from `/oauth2/revocations`, and
 Keycloak's session gone.
 
 ### P23W4-11 (Low) — SSF audience squatting where SETs share one issuer (decision first)
+
+**Fixed** — `D55FIXCOMMIT` (D-55, maintainer decision on ilpanich/axiam#539). The maintainer chose option (b) below: while `AXIAM__AUTH__TENANT_ISSUER_PATHS` is off and the deployment holds more than one tenant, SSF behaves for every tenant as with `ssf_enabled` off — checked at production, at signing and at discovery — and turning `ssf_enabled` on is `400`. Tests: `crates/axiam-api-rest/tests/ssf_shared_issuer_test.rs`, `ssf_shared_issuer_log_test.rs`, `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `while_tenants_share_one_issuer_a_queued_push_is_dead_lettered_unsigned`, `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_shared_issuer_count_spans_organizations_and_moves_the_generation`, and the gate's unit tests in `crates/axiam-oauth2/src/ssf.rs`. The issue body as filed follows.
 
 D-47 makes a stream's audience unique across the deployment so that one tenant
 cannot collect SETs addressed to another tenant's receiver. It does not stop a

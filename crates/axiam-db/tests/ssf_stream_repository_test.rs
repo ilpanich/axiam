@@ -703,3 +703,74 @@ async fn a_write_prepared_from_an_overtaken_read_does_not_land() {
         Err(AxiamError::NotFound { .. })
     ));
 }
+
+/// D-55 (F4 W4 P23W4-11): the deployment's tenant count the SSF shared-issuer
+/// gate reads. It spans every organization, leaves out an organization's own
+/// scope tenant (its principals already reach every tenant of their
+/// organization), counts an organization with no standard tenant, and every
+/// create or delete through the repositories moves the generation so a cached
+/// count is known to be stale at once.
+#[tokio::test]
+async fn the_shared_issuer_count_spans_organizations_and_moves_the_generation() {
+    use axiam_core::models::ssf::DeploymentTenants;
+    let db = setup().await;
+    let orgs = SurrealOrganizationRepository::new(db.clone());
+    let tenants = SurrealTenantRepository::new(db.clone());
+    assert_eq!(tenants.count_for_shared_issuer().await.unwrap(), 0);
+
+    let org = |slug: &str| CreateOrganization {
+        name: slug.into(),
+        slug: format!("{slug}-{}", Uuid::new_v4().simple()),
+        metadata: None,
+    };
+    let tenant = |org_id: Uuid, kind: TenantKind| CreateTenant {
+        organization_id: org_id,
+        name: "t".into(),
+        slug: format!("t-{}", Uuid::new_v4().simple()),
+        metadata: None,
+        kind,
+    };
+
+    let before = tenants.generation();
+    let first = orgs.create(org("first")).await.unwrap();
+    assert!(
+        tenants.generation() > before,
+        "an organization create moves it"
+    );
+    tenants
+        .create(tenant(first.id, TenantKind::Organization))
+        .await
+        .unwrap();
+    let before = tenants.generation();
+    let home = tenants
+        .create(tenant(first.id, TenantKind::Standard))
+        .await
+        .unwrap();
+    assert!(tenants.generation() > before, "a tenant create moves it");
+    assert_eq!(
+        tenants.count_for_shared_issuer().await.unwrap(),
+        1,
+        "one standard tenant beside its organization's scope is one"
+    );
+
+    let second = orgs.create(org("second")).await.unwrap();
+    assert_eq!(
+        tenants.count_for_shared_issuer().await.unwrap(),
+        2,
+        "a second organization counts even with no standard tenant yet"
+    );
+    tenants
+        .create(tenant(second.id, TenantKind::Standard))
+        .await
+        .unwrap();
+    tenants
+        .create(tenant(first.id, TenantKind::Standard))
+        .await
+        .unwrap();
+    assert_eq!(tenants.count_for_shared_issuer().await.unwrap(), 3);
+
+    let before = tenants.generation();
+    tenants.delete(home.id).await.unwrap();
+    assert!(tenants.generation() > before, "a tenant delete moves it");
+    assert_eq!(tenants.count_for_shared_issuer().await.unwrap(), 2);
+}

@@ -1287,7 +1287,8 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Signed with the key you already publish.** Each SET is a JWT signed EdDSA with the deployment's key, found at the tenant's JWKS (`jwks_uri` in the discovery document), the same key that signs ID tokens. There is **one** key per deployment; AXIAM has no per-tenant signing keys. The JOSE `typ` is `secevent+jwt`, which is what stops a SET passing as an access token.",
           "**No `exp`.** SSF forbids it, so a SET never expires. A receiver decides how long a SET is news by its `iat`, and **must de-duplicate on `jti`**: the same event can arrive twice (see [delivery guarantees](#/docs/ssf#guarantees)).",
           "**One tenant, one issuer.** `iss` is the tenant's issuer — `{root}/t/{tenant}` where the deployment serves per-tenant issuers (see [Per-tenant issuers](#/docs/oauth2#tenant-issuers)), the root issuer otherwise — and is identical to the `issuer` in the discovery document.",
-          "**What tells tenants apart.** Where the deployment does not serve per-tenant issuers, every tenant's SETs carry the same `iss` and the same key, and only the audience — unique across the deployment — separates them. A receiver should therefore take its `aud` from its own stream (`GET /ssf/v1/stream`) rather than from a convention such as its own URL, and should require the push `Authorization` header it supplied: an administrator of another tenant who registered that audience first could otherwise push SETs the receiver accepts. A deployment hosting tenants that do not trust one another should serve per-tenant issuers.",
+          "**Several tenants need per-tenant issuers.** Without per-tenant issuers every tenant's SETs would carry the same `iss` and the same key, and an administrator of one tenant who registered another tenant's receiver audience first could push SETs that receiver accepts. So **a deployment that holds more than one tenant must serve per-tenant issuers (`AXIAM__AUTH__TENANT_ISSUER_PATHS`) for SSF to run**: without them SSF is inactive for every tenant, exactly as if `ssf_enabled` were off (see [Switch it on](#/docs/ssf#enable)). A single-tenant deployment keeps the root issuer; nobody else shares it.",
+          "**What a receiver should check.** Verify `iss` against the issuer of the tenant you registered with — it is what tells tenants apart — take your `aud` from your own stream (`GET /ssf/v1/stream`) rather than from a convention such as your own URL, and require the push `Authorization` header you supplied. An audience is unique across the deployment, but another tenant can register yours before you do; your own registration then fails with `409`, and the checks above keep its SETs from being accepted as yours.",
         ],
       },
       { type: "h", id: "enable", text: "Switch it on" },
@@ -1300,6 +1301,10 @@ export const INTEGRATE_PAGES: DocPage[] = [
         text: "With the setting off, discovery answers an empty `404`, the receiver's stream API sees no stream at all, and nothing is produced. Registering streams does **not** depend on it, so you can register every receiver first and switch the transmitter on last.",
       },
       {
+        type: "warn",
+        text: "**More than one tenant: per-tenant issuers first.** While the deployment holds more than one tenant (counted across every organization) and does not serve per-tenant issuers, SSF is **inactive for every tenant**, whatever `ssf_enabled` says: discovery is `404`, receivers see no stream, nothing is produced or signed, a push already queued is dead-lettered and a poll returns nothing. Turning `ssf_enabled` on is refused with `400` naming the cause; the stream registry keeps working, and a stream and the settings API say why SSF is inactive. Set `AXIAM__AUTH__TENANT_ISSUER_PATHS=true` to run SSF. The tenant count is re-read at least once a minute: the instance that creates a second tenant stops SSF at once, other instances within a minute. The change is logged once at `WARN` and audited as `ssf.inactive_shared_issuer` in every tenant with SSF on.",
+      },
+      {
         type: "table",
         headers: ["Discovery URL", "Where"],
         rows: [
@@ -1309,7 +1314,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Discovery is unauthenticated, as SSF requires. An unknown tenant, a malformed id and a tenant whose switch is off all answer the **same empty `404`**, so the route does not tell anyone which tenants exist or transmit. The document lists the supported events, the two delivery methods, the stream, status and verification endpoints, and `default_subjects` of `ALL`.",
+        text: "Discovery is unauthenticated, as SSF requires. An unknown tenant, a malformed id, a tenant whose switch is off and every tenant while SSF is inactive for want of per-tenant issuers all answer the **same empty `404`**, so the route does not tell anyone which tenants exist or transmit. The document lists the supported events, the two delivery methods, the stream, status and verification endpoints, and `default_subjects` of `ALL`.",
       },
       { type: "h", id: "register", text: "Register a receiver (administrator)" },
       {
@@ -1330,7 +1335,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           },
           {
             title: "Switch the transmitter on",
-            body: "Turn `ssf_enabled` on for the tenant. Until then discovery is `404` and the receiver cannot see the stream. Give the receiver its `client_id` and secret, and the discovery URL.",
+            body: "Turn `ssf_enabled` on for the tenant. Until then discovery is `404` and the receiver cannot see the stream. On a deployment of several tenants this needs per-tenant issuers first, or it is refused with `400`. Give the receiver its `client_id` and secret, and the discovery URL.",
           },
         ],
       },
@@ -1469,7 +1474,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "triggers", text: "What triggers each event" },
       {
         type: "p",
-        text: "Events are produced at the place where the change happens, for every stream that carries that event type, and only while `ssf_enabled` is on. A cause that produces several events (a password reset's `credential-change` and `session-revoked`) shares one `txn` value.",
+        text: "Events are produced at the place where the change happens, for every stream that carries that event type, and only while `ssf_enabled` is on and SSF is active (see [Switch it on](#/docs/ssf#enable)). A cause that produces several events (a password reset's `credential-change` and `session-revoked`) shares one `txn` value.",
       },
       {
         type: "table",

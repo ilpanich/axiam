@@ -627,6 +627,8 @@ impl<C: Connection + Clone> AppState<C> {
         let saml_idp = bundles::SamlIdpState {
             sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(db.clone()),
             pending_repo: axiam_db::SurrealPendingSamlRequestRepository::new(db.clone()),
+            participant_repo: axiam_db::SurrealSamlSpSessionRepository::new(db.clone()),
+            logout_run_repo: axiam_db::SurrealSamlLogoutRunRepository::new(db.clone()),
             credential_service: axiam_pki::saml_signing::SamlIdpCredentialService::new(
                 CertService::new(
                     ca_cert_repo.clone(),

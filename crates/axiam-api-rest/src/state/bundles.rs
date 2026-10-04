@@ -314,6 +314,13 @@ pub struct SamlIdpState<C: Connection + Clone> {
     pub sp_repo: axiam_db::SurrealSamlServiceProviderRepository<C>,
     /// `AuthnRequest`s between the SSO endpoint's two legs (schema v73).
     pub pending_repo: axiam_db::SurrealPendingSamlRequestRepository<C>,
+    /// Which service providers hold which session, with the `NameID` and the
+    /// per-SP `SessionIndex` each was given (schema v76, D-37). Written by the
+    /// SSO endpoint's second leg before it signs; read by single logout.
+    pub participant_repo: axiam_db::SurrealSamlSpSessionRepository<C>,
+    /// Logout runs: the replay guard of a `LogoutRequest` and the state of the
+    /// front-channel chain (schema v76, D-38, D-39).
+    pub logout_run_repo: axiam_db::SurrealSamlLogoutRunRepository<C>,
     /// The tenant's signing credential, unsealed per issuance (D-21).
     pub credential_service: SamlIdpCredentialServiceT<C>,
     /// The deployment's issuer: the root issuer every IdP entity id is built

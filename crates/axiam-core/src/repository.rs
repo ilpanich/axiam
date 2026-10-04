@@ -3314,9 +3314,9 @@ pub trait SamlServiceProviderRepository: Send + Sync {
     ) -> impl Future<Output = AxiamResult<SamlServiceProvider>> + Send;
 
     /// Remove a service provider **and everything the datastore holds for it**,
-    /// in one transaction (T-366): today its pending `AuthnRequest`s, and — added
-    /// by T23.2.4 in the same statement — the `saml_sp_session` rows D-37 keeps
-    /// per SP. `NotFound` when it does not exist in this tenant.
+    /// in one transaction (T-366): its pending `AuthnRequest`s and the
+    /// `saml_sp_session` rows D-37 keeps per SP (T23.2.4). `NotFound` when it
+    /// does not exist in this tenant.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
@@ -3364,6 +3364,164 @@ pub trait PendingSamlRequestRepository: Send + Sync {
     > + Send;
 
     /// Remove every expired row, in every tenant; returns how many.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SAML IdP participants and logout runs (tenant-scoped) (G-2, T23.2.4)
+// ---------------------------------------------------------------------------
+
+/// The record of which service providers hold which AXIAM session, with the
+/// `NameID` and per-SP `SessionIndex` each was given (D-37); see
+/// [`crate::models::saml_slo`].
+///
+/// Every method takes the `tenant_id`; a row of another tenant is not found,
+/// exactly as one that does not exist.
+pub trait SamlSpSessionRepository: Send + Sync {
+    /// Record that `input.sp_id` is given `input.session_index` for
+    /// `input.session_id`, or read back the row the session already has for that
+    /// SP — the row whose `SessionIndex` the assertion must carry. On a read-back
+    /// the `NameID` and its format are refreshed to the values now being asserted
+    /// and the **original index is kept**. Never creates a second row for one
+    /// (tenant, session, SP): decided by a unique index, so two concurrent
+    /// sign-ons to one SP in one session agree on one index.
+    fn record(
+        &self,
+        input: crate::models::saml_slo::NewSamlSpSession,
+    ) -> impl Future<Output = AxiamResult<crate::models::saml_slo::SamlSpSession>> + Send;
+
+    /// The row an SP holds under `session_index`, or `None`. The key SLO resolves
+    /// a `LogoutRequest` by: tenant, the verified issuer's SP, the index.
+    fn get_by_index(
+        &self,
+        tenant_id: Uuid,
+        sp_id: Uuid,
+        session_index: &str,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::saml_slo::SamlSpSession>>> + Send;
+
+    /// Every row an SP holds for one `NameID` value (the request that names no
+    /// `SessionIndex`), at most 100, oldest first.
+    fn list_for_sp_name_id(
+        &self,
+        tenant_id: Uuid,
+        sp_id: Uuid,
+        name_id: &str,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::saml_slo::SamlSpSession>>> + Send;
+
+    /// Every row of one AXIAM session, oldest first.
+    fn list_for_session(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::saml_slo::SamlSpSession>>> + Send;
+
+    /// One row by record id, or `None`.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::saml_slo::SamlSpSession>>> + Send;
+
+    /// Mark the rows of these sessions as belonging to a logout that is under
+    /// way: the sweeper leaves them alone for one run lifetime, so a chain that
+    /// has revoked its sessions still finds them. Returns how many rows.
+    fn mark_ended(
+        &self,
+        tenant_id: Uuid,
+        session_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete the rows of these sessions (the end of a logout run). Returns how
+    /// many.
+    fn delete_for_sessions(
+        &self,
+        tenant_id: Uuid,
+        session_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every row of one user (erasure). Returns how many.
+    fn delete_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Remove, in every tenant, the rows whose session has expired, and those
+    /// whose session row is gone (unless a logout run ended it within one run
+    /// lifetime); returns how many.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+/// Logout runs: the replay guard of a `LogoutRequest` and the state of the
+/// front-channel chain (D-38, D-39); see [`crate::models::saml_slo`].
+///
+/// Every method takes the `tenant_id`.
+pub trait SamlLogoutRunRepository: Send + Sync {
+    /// Claim a run. [`AxiamError::ReplayDetected`] when the initiating SP already
+    /// used this request `ID` in this tenant, decided by a unique index so two
+    /// concurrent copies of one request cannot both proceed. An IdP-initiated run
+    /// has nothing to replay and never collides.
+    fn claim(
+        &self,
+        input: crate::models::saml_slo::NewSamlLogoutRun,
+    ) -> impl Future<Output = AxiamResult<crate::models::saml_slo::SamlLogoutRun>> + Send;
+
+    /// Record what the run ended and whom it must tell, after the sessions are
+    /// revoked. Returns the run as stored.
+    fn plan(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        plan: crate::models::saml_slo::SamlLogoutPlan,
+    ) -> impl Future<Output = AxiamResult<crate::models::saml_slo::SamlLogoutRun>> + Send;
+
+    /// Move the chain on: the queue that remains, the SP the browser now goes to
+    /// and the SHA-256 of that request's `ID`, the partial flag and the count of
+    /// SPs told.
+    fn progress(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        progress: crate::models::saml_slo::SamlLogoutProgress,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Consume the outstanding request whose `ID` hashes to `request_hash`:
+    /// `Some` for exactly one caller, `None` for every other (consumed, expired,
+    /// unknown, addressed to another SP, or lost the race). The X6 two-layer
+    /// arbiter. `sp_id` is the SP that answered: a response from any other SP
+    /// consumes nothing.
+    fn consume_response(
+        &self,
+        tenant_id: Uuid,
+        request_hash: &str,
+        sp_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::saml_slo::SamlLogoutRun>>> + Send;
+
+    /// One run, or `None`.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::saml_slo::SamlLogoutRun>>> + Send;
+
+    /// Mark the chain ended. The row stays, with its replay key, until it
+    /// expires.
+    fn finish(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        partial: bool,
+        sps_told: u32,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete every run of one user (erasure). Returns how many.
+    fn delete_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Remove every expired run, in every tenant; returns how many.
     fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 

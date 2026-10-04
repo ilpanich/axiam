@@ -417,6 +417,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "directory_sync_state",
         sql: SCHEMA_V75,
     },
+    Migration {
+        version: 76,
+        name: "saml_single_logout",
+        sql: SCHEMA_V76,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4051,9 +4056,195 @@ DEFINE INDEX IF NOT EXISTS idx_directory_sync_state_tenant ON TABLE directory_sy
     COLUMNS tenant_id UNIQUE;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v76 — T23.2.4 / G-2 / D-37, D-39: SAML single logout
+// -----------------------------------------------------------------------
+//
+// Additive DDL only: two new tables, nothing backfilled (no assertion was
+// issued with a per-SP index before this migration, and no logout chain
+// existed).
+//
+// **`saml_sp_session`** is the participant record (D-37): one row per (tenant,
+// AXIAM session, service provider), written by the SSO endpoint's second leg
+// before the assertion is signed. It holds the `NameID` and the `SessionIndex`
+// the SP was given, so a logout can be mapped back (a pairwise `NameID` is an
+// HMAC and cannot be reversed). `idx_saml_sp_session_participant` is UNIQUE on
+// `(tenant_id, session_id, sp_id)` — a second sign-on to one SP in one session
+// reuses the row — and `idx_saml_sp_session_index` is UNIQUE on
+// `(tenant_id, sp_id, session_index)` — the key SLO resolves a request by, which
+// no two rows of one SP can share. The index is 32 CSPRNG bytes, base64url
+// without padding, written by the application; the datastore only refuses an
+// empty one. `ended_at` is set when a logout revokes the session, so the
+// sweeper leaves the row alone for one run lifetime while the chain still needs
+// it. The row's `expires_at` is the session's, so it never outlives it.
+//
+// **`saml_logout_run`** is the replay guard of a `LogoutRequest` and the state of
+// the front-channel chain (D-38, D-39). `idx_saml_logout_run_replay` is UNIQUE
+// on `(tenant_id, replay_key)`, where `replay_key` is `{sp_id}:{request id}` (or
+// `idp:{row id}` for an IdP-initiated run), so a replayed request is refused by
+// the datastore for the row's whole ten-minute life — longer than the window an
+// `IssueInstant` is accepted in. `current_request_hash` is the SHA-256 of the
+// one outbound request `ID` the browser carries: **never the raw `ID`** (T-383).
+// `queue` and `session_ids` hold record ids, never a `NameID`; `queue` is
+// capped at 32, the same bound the application enforces.
+const SCHEMA_V76: &str = "\
+DEFINE TABLE IF NOT EXISTS saml_sp_session SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS sp_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS sp_entity_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS name_id ON TABLE saml_sp_session TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS name_id_format ON TABLE saml_sp_session TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS session_index ON TABLE saml_sp_session TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_sp_session TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE saml_sp_session TYPE datetime;
+DEFINE FIELD IF NOT EXISTS ended_at ON TABLE saml_sp_session TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_session_participant ON TABLE saml_sp_session
+    COLUMNS tenant_id, session_id, sp_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_session_index ON TABLE saml_sp_session
+    COLUMNS tenant_id, sp_id, session_index UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_session_user ON TABLE saml_sp_session
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_session_expires ON TABLE saml_sp_session
+    COLUMNS expires_at;
+DEFINE TABLE IF NOT EXISTS saml_logout_run SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_logout_run TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS initiator_sp_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS initiator_request_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS initiator_relay_state ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS replay_key ON TABLE saml_logout_run TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS queue ON TABLE saml_logout_run TYPE array<string>
+    ASSERT array::len($value) <= 32;
+DEFINE FIELD IF NOT EXISTS queue.* ON TABLE saml_logout_run TYPE string;
+DEFINE FIELD IF NOT EXISTS session_ids ON TABLE saml_logout_run TYPE array<string>
+    ASSERT array::len($value) <= 100;
+DEFINE FIELD IF NOT EXISTS session_ids.* ON TABLE saml_logout_run TYPE string;
+DEFINE FIELD IF NOT EXISTS current_sp_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS current_request_hash ON TABLE saml_logout_run TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) = 64;
+DEFINE FIELD IF NOT EXISTS consumption_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE saml_logout_run TYPE string
+    ASSERT $value IN ['active', 'finished'];
+DEFINE FIELD IF NOT EXISTS partial ON TABLE saml_logout_run TYPE bool;
+DEFINE FIELD IF NOT EXISTS sessions_ended ON TABLE saml_logout_run TYPE int;
+DEFINE FIELD IF NOT EXISTS sps_told ON TABLE saml_logout_run TYPE int;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_logout_run TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE saml_logout_run TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_saml_logout_run_replay ON TABLE saml_logout_run
+    COLUMNS tenant_id, replay_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_logout_run_request ON TABLE saml_logout_run
+    COLUMNS tenant_id, current_request_hash;
+DEFINE INDEX IF NOT EXISTS idx_saml_logout_run_user ON TABLE saml_logout_run
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_saml_logout_run_expires ON TABLE saml_logout_run
+    COLUMNS expires_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.2.4 / D-37, D-39 — v76 adds the participant record and the logout run,
+    /// additively, with the two unique indexes the participant record is defined
+    /// by and the replay guard the run is.
+    #[test]
+    fn v76_defines_the_participant_record_and_the_logout_run_additively() {
+        for table in ["saml_sp_session", "saml_logout_run"] {
+            assert!(
+                SCHEMA_V76.contains(&format!("DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL")),
+                "{table}"
+            );
+        }
+        // D-37: one row per (tenant, session, SP), and an index no two rows of one
+        // SP share.
+        assert!(SCHEMA_V76.contains(
+            "idx_saml_sp_session_participant ON TABLE saml_sp_session
+    COLUMNS tenant_id, session_id, sp_id UNIQUE"
+        ));
+        assert!(SCHEMA_V76.contains(
+            "idx_saml_sp_session_index ON TABLE saml_sp_session
+    COLUMNS tenant_id, sp_id, session_index UNIQUE"
+        ));
+        // D-38: the replay guard of a LogoutRequest ID, per tenant.
+        assert!(SCHEMA_V76.contains(
+            "idx_saml_logout_run_replay ON TABLE saml_logout_run
+    COLUMNS tenant_id, replay_key UNIQUE"
+        ));
+        assert!(SCHEMA_V76.contains("array::len($value) <= 32"));
+        assert!(SCHEMA_V76.contains("$value IN ['active', 'finished']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V76.contains(forbidden),
+                "v76 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V76
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v76 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("saml_sp_session") || statement.contains("saml_logout_run"),
+                "v76 defined something outside its two tables: {statement}"
+            );
+        }
+    }
+
+    /// T-383 — the run stores a digest of the outbound request `ID`, never the
+    /// `ID`, and holds no `NameID`; the participant record holds no credential.
+    #[test]
+    fn v76_stores_digests_and_record_ids_only_where_it_must() {
+        assert!(SCHEMA_V76.contains(
+            "current_request_hash ON TABLE saml_logout_run TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) = 64"
+        ));
+        for forbidden in [
+            "current_request_id",
+            "outbound_id",
+            "request_id ON TABLE saml_logout_run TYPE string",
+        ] {
+            assert!(!SCHEMA_V76.contains(forbidden), "{forbidden}");
+        }
+        let run_part = &SCHEMA_V76[SCHEMA_V76
+            .find("DEFINE TABLE IF NOT EXISTS saml_logout_run")
+            .unwrap()..];
+        assert!(
+            !run_part.contains("name_id"),
+            "the run's queue is record ids: no NameID is copied into it"
+        );
+        for credential in ["password", "secret", "key_material", "private"] {
+            assert!(
+                !SCHEMA_V76.contains(credential),
+                "v76 must hold no {credential}"
+            );
+        }
+    }
+
+    /// v76 takes the next number and keeps v75 as it was.
+    #[test]
+    fn v76_follows_v75_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| m.version >= 75)
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![(75, "directory_sync_state"), (76, "saml_single_logout")]
+        );
+    }
 
     /// T23.3.5 / D-31 — v75 adds one table, additively, one row per tenant, with
     /// no personal data column and the last result held to the four spellings.
@@ -4103,7 +4294,7 @@ mod tests {
     fn v75_follows_v74_in_the_registry() {
         let names: Vec<(u32, &str)> = MIGRATIONS
             .iter()
-            .filter(|m| m.version >= 74)
+            .filter(|m| (74..=75).contains(&m.version))
             .map(|m| (m.version, m.name))
             .collect();
         assert_eq!(
@@ -4172,7 +4363,7 @@ mod tests {
         }
         let names: Vec<(u32, &str)> = MIGRATIONS
             .iter()
-            .filter(|m| m.version >= 72)
+            .filter(|m| (72..=75).contains(&m.version))
             .map(|m| (m.version, m.name))
             .collect();
         assert_eq!(
@@ -4891,8 +5082,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&75),
-            "v75 is the newest migration (T23.3.5 — the directory sync job's per-tenant state, \
+            Some(&76),
+            "v76 is the newest migration (T23.2.4 — SAML single logout: the participant record \
+             `saml_sp_session` and the logout chain `saml_logout_run`; v75 was T23.3.5 — the \
+             directory sync job's per-tenant state, \
              `directory_sync_state`; v74 was T23.3.4 — directory group mapping: \
              `directory_config.group_mappings` and `member_of.source`; v73 was T23.2.3's \
              pending SAML AuthnRequests, v72 was T23.2.1 — the SAML identity provider's storage; \

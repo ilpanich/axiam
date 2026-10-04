@@ -165,14 +165,13 @@ const SET_CLAUSE: &str = "enabled = $enabled, display_name = $display_name, \
 /// `$tenant_id` and `$id` (the SP's record id, as the string those tables store
 /// in `sp_id`).
 ///
-/// **T23.2.4 adds its statement here** — `DELETE saml_sp_session WHERE
-/// tenant_id = $tenant_id AND sp_id = $id;` — in the commit that creates the
-/// table, so the cascade and the table arrive together and the delete test
-/// (`deleting_an_sp_removes_what_the_datastore_holds_for_it`) is extended with
-/// it. Nothing else may be written for an SP outside this constant without
-/// extending it.
+/// The pending `AuthnRequest`s, and (T23.2.4, schema v76, D-37) the participant
+/// rows `saml_sp_session` — a stale participation must not be able to drive a
+/// logout, or hold a `NameID`, for an SP that no longer exists (T-366). Nothing
+/// else may be written for an SP outside this constant without extending it.
 const SP_DELETE_CASCADE: &str = "\
     DELETE saml_authn_request WHERE tenant_id = $tenant_id AND sp_id = $id; \
+    DELETE saml_sp_session WHERE tenant_id = $tenant_id AND sp_id = $id; \
     ";
 
 /// SurrealDB implementation of [`SamlServiceProviderRepository`].

@@ -331,6 +331,11 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         // short-lived, but a row naming a deleted tenant's SP and ACS URL is
         // nothing a later tenant should be able to resume.
         //
+        // And its SAML single-logout state (T23.2.4, schema v76): the participant
+        // rows hold the `NameID` each SP was given (an email address at an
+        // `emailAddress` SP) and the logout runs the chain of a session that no
+        // longer has a tenant. Neither is anything a later tenant may resume.
+        //
         // The tenant's directory configuration goes with it (T23.3.1, G-3): it
         // holds an encrypted service-account credential for the tenant's
         // directory, and a deleted tenant must not leave that ciphertext
@@ -355,6 +360,8 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
                  DELETE saml_service_provider WHERE tenant_id = $id; \
                  DELETE saml_idp_credential WHERE tenant_id = $id; \
                  DELETE saml_authn_request WHERE tenant_id = $id; \
+                 DELETE saml_sp_session WHERE tenant_id = $id; \
+                 DELETE saml_logout_run WHERE tenant_id = $id; \
                  DELETE type::record('tenant', $id); \
                  COMMIT TRANSACTION;",
             )

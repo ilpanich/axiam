@@ -620,11 +620,15 @@ async fn groups_outside_tenant_names_exactly_the_ones_that_are_not_the_tenants()
 #[tokio::test]
 async fn deleting_an_sp_removes_what_the_datastore_holds_for_it() {
     use axiam_core::models::saml_authn_request::NewPendingSamlRequest;
-    use axiam_core::repository::PendingSamlRequestRepository;
-    use axiam_db::repository::SurrealPendingSamlRequestRepository;
+    use axiam_core::models::saml_slo::NewSamlSpSession;
+    use axiam_core::repository::{PendingSamlRequestRepository, SamlSpSessionRepository};
+    use axiam_db::repository::{
+        SurrealPendingSamlRequestRepository, SurrealSamlSpSessionRepository,
+    };
     let db = setup().await;
     let sps = repo(&db);
     let pending = SurrealPendingSamlRequestRepository::new(db.clone());
+    let participants = SurrealSamlSpSessionRepository::new(db.clone());
     let tenant = Uuid::new_v4();
     let doomed = sps
         .create(tenant, minimal("https://doomed.example.com/m"))
@@ -671,6 +675,37 @@ async fn deleting_an_sp_removes_what_the_datastore_holds_for_it() {
     }
     assert_eq!(rows(&db, doomed.id).await, 2);
 
+    // T23.2.4 (D-37, schema v76): the participant rows the SP holds for sessions.
+    let session = Uuid::new_v4();
+    let participant = |sp_id: Uuid| NewSamlSpSession {
+        tenant_id: tenant,
+        session_id: session,
+        user_id: Uuid::new_v4(),
+        sp_id,
+        sp_entity_id: "https://sp.example.com/m".into(),
+        name_id: format!("name-{}", Uuid::new_v4().simple()),
+        name_id_format: "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent".into(),
+        session_index: format!("idx-{}", Uuid::new_v4().simple()),
+        expires_at: now + chrono::Duration::hours(1),
+    };
+    participants.record(participant(doomed.id)).await.unwrap();
+    let kept_participant = participants.record(participant(kept.id)).await.unwrap();
+    async fn participant_rows(db: &Surreal<Db>, sp: Uuid) -> usize {
+        let mut result = db
+            .query("SELECT count() AS n FROM saml_sp_session WHERE sp_id = $sp GROUP ALL")
+            .bind(("sp", sp.to_string()))
+            .await
+            .unwrap();
+        use surrealdb_types::SurrealValue;
+        #[derive(Debug, SurrealValue)]
+        struct Count {
+            n: usize,
+        }
+        let counted: Vec<Count> = result.take(0).unwrap();
+        counted.first().map_or(0, |c| c.n)
+    }
+    assert_eq!(participant_rows(&db, doomed.id).await, 1);
+
     // Another tenant's delete of the id removes nothing at all.
     assert!(matches!(
         sps.delete(Uuid::new_v4(), doomed.id).await,
@@ -681,6 +716,11 @@ async fn deleting_an_sp_removes_what_the_datastore_holds_for_it() {
         2,
         "a refused delete cascades nothing"
     );
+    assert_eq!(
+        participant_rows(&db, doomed.id).await,
+        1,
+        "a refused delete takes no participant row either"
+    );
     assert!(sps.get(tenant, doomed.id).await.is_ok());
 
     sps.delete(tenant, doomed.id).await.unwrap();
@@ -689,7 +729,21 @@ async fn deleting_an_sp_removes_what_the_datastore_holds_for_it() {
         0,
         "its pending requests went with it"
     );
+    assert_eq!(
+        participant_rows(&db, doomed.id).await,
+        0,
+        "its participant rows (D-37) went with it, in the same transaction"
+    );
     assert_eq!(rows(&db, kept.id).await, 1, "another SP's requests did not");
+    assert_eq!(
+        participants
+            .get(tenant, kept_participant.id)
+            .await
+            .unwrap()
+            .map(|row| row.sp_id),
+        Some(kept.id),
+        "nor did another SP's participant row"
+    );
     assert!(
         pending
             .get_pending(tenant, &kept_request.handle_hash)
@@ -697,6 +751,4 @@ async fn deleting_an_sp_removes_what_the_datastore_holds_for_it() {
             .unwrap()
             .is_some()
     );
-    // T23.2.4 extends `SP_DELETE_CASCADE` with `saml_sp_session` and this test
-    // with the rows of that table.
 }

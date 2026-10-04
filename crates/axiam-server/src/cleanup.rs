@@ -26,8 +26,8 @@ use axiam_core::repository::{
     AuditLogRepository, ConsentRepository, ErasureProofRepository, ExportJobRepository,
     FederationLinkRepository, FederationLoginStateRepository, GroupRepository, MailPublisher,
     Pagination, PasswordHistoryRepository, PendingSamlRequestRepository, RoleRepository,
-    SessionRepository, SsoHandoffCodeRepository, TenantRepository, UserRepository,
-    WebauthnCredentialRepository,
+    SamlLogoutRunRepository, SamlSpSessionRepository, SessionRepository, SsoHandoffCodeRepository,
+    TenantRepository, UserRepository, WebauthnCredentialRepository,
 };
 use axiam_db::{
     SurrealAccountDeletionRepository, SurrealAmqpNonceRepository, SurrealAssertionReplayRepository,
@@ -78,6 +78,11 @@ pub struct CleanupTask<C: Connection> {
     // until they expire (they are the request-id replay guard), so the sweep
     // is what bounds the table.
     saml_pending_repo: Arc<axiam_db::SurrealPendingSamlRequestRepository<C>>,
+    // T23.2.4: the SAML single-logout stores (schema v76). The participant rows
+    // are swept once their session has expired or is gone (a logout that just
+    // ended it keeps them for one run lifetime), the logout runs once expired.
+    saml_participant_repo: Arc<axiam_db::SurrealSamlSpSessionRepository<C>>,
+    saml_logout_run_repo: Arc<axiam_db::SurrealSamlLogoutRunRepository<C>>,
     // NEW-4: AMQP nonce replay store sweep.
     amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
     // GDPR purge sweep (D-05/D-06/D-08).
@@ -633,6 +638,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         state_repo: Arc<SurrealFederationLoginStateRepository<C>>,
         sso_handoff_code_repo: Arc<SurrealSsoHandoffCodeRepository<C>>,
         saml_pending_repo: Arc<axiam_db::SurrealPendingSamlRequestRepository<C>>,
+        saml_participant_repo: Arc<axiam_db::SurrealSamlSpSessionRepository<C>>,
+        saml_logout_run_repo: Arc<axiam_db::SurrealSamlLogoutRunRepository<C>>,
         amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
         user_repo: Arc<SurrealUserRepository<C>>,
         auth_svc: Arc<AuthSvc<C>>,
@@ -676,6 +683,8 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             state_repo,
             sso_handoff_code_repo,
             saml_pending_repo,
+            saml_participant_repo,
+            saml_logout_run_repo,
             amqp_nonce_repo,
             user_repo,
             auth_svc,
@@ -756,6 +765,22 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         &self.job_health,
                         "saml_authn_request",
                         self.saml_pending_repo.cleanup_expired().await,
+                        tracing::Level::DEBUG,
+                    );
+
+                    // T23.2.4: the SAML single-logout participant rows and logout
+                    // runs. Each is its own job in `/health/jobs`, so a stuck
+                    // sweep of one is not hidden by the other.
+                    Self::record(
+                        &self.job_health,
+                        "saml_sp_session",
+                        self.saml_participant_repo.cleanup_expired().await,
+                        tracing::Level::DEBUG,
+                    );
+                    Self::record(
+                        &self.job_health,
+                        "saml_logout_run",
+                        self.saml_logout_run_repo.cleanup_expired().await,
                         tracing::Level::DEBUG,
                     );
 

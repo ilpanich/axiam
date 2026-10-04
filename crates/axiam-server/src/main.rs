@@ -1454,6 +1454,12 @@ async fn main() -> std::io::Result<()> {
     // keeps it bounded either way.
     let saml_pending_repo =
         axiam_db::SurrealPendingSamlRequestRepository::new(pool.handle_for_repo());
+    // T23.2.4 — the single-logout stores (schema v76): which SPs hold which
+    // session, and the logout chain. Built in every build for the same reason.
+    let saml_participant_repo =
+        axiam_db::SurrealSamlSpSessionRepository::new(pool.handle_for_repo());
+    let saml_logout_run_repo =
+        axiam_db::SurrealSamlLogoutRunRepository::new(pool.handle_for_repo());
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
     // B3: process-wide in-process cache for AXIAM's OWN `GET /oauth2/jwks`
@@ -1651,6 +1657,8 @@ async fn main() -> std::io::Result<()> {
     let saml_idp_state = bundles::SamlIdpState {
         sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(pool.handle_for_repo()),
         pending_repo: saml_pending_repo.clone(),
+        participant_repo: saml_participant_repo.clone(),
+        logout_run_repo: saml_logout_run_repo.clone(),
         credential_service: axiam_pki::saml_signing::SamlIdpCredentialService::new(
             cert_service.clone(),
             Arc::clone(&ca_custodians),
@@ -2690,6 +2698,9 @@ async fn main() -> std::io::Result<()> {
         "saml_assertion_replay",
         "federation_login_state",
         "saml_authn_request",
+        // G-2 (T23.2.4): the single-logout stores.
+        "saml_sp_session",
+        "saml_logout_run",
         // G-3 (T23.3.5): the directory sync job. Registered like the others, so a
         // deployment where it has never run once still lists it.
         "directory_sync",
@@ -2719,6 +2730,8 @@ async fn main() -> std::io::Result<()> {
         Arc::new(federation_login_state_repo.clone()),
         Arc::new(sso_handoff_code_repo.clone()),
         Arc::new(saml_pending_repo.clone()),
+        Arc::new(saml_participant_repo.clone()),
+        Arc::new(saml_logout_run_repo.clone()),
         Arc::new(amqp_nonce_repo.clone()),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),

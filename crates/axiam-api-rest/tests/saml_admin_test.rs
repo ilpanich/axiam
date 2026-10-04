@@ -1289,16 +1289,17 @@ async fn a_body_that_cannot_be_read_is_a_validation_error_that_echoes_nothing() 
 }
 
 /// T-366: deleting an SP removes what the datastore holds for it, in the same
-/// transaction — over HTTP, with a pending `AuthnRequest` of its own and one of
-/// another SP's. (T23.2.4 extends the cascade, and this test, with the
-/// `saml_sp_session` rows.)
+/// transaction — over HTTP, with a pending `AuthnRequest` and a participant row
+/// (`saml_sp_session`, D-37) of its own and one of each of another SP's.
 #[actix_rt::test]
 async fn deleting_an_sp_over_http_removes_its_pending_requests_and_only_its_own() {
     use axiam_core::models::saml_authn_request::NewPendingSamlRequest;
-    use axiam_core::repository::PendingSamlRequestRepository;
+    use axiam_core::models::saml_slo::NewSamlSpSession;
+    use axiam_core::repository::{PendingSamlRequestRepository, SamlSpSessionRepository};
     let w = world().await;
     let state = w.state();
     let pending = state.saml_idp.pending_repo.clone();
+    let participants = state.saml_idp.participant_repo.clone();
     let app = app!(state, w);
     let (_, doomed) = create_sp(&app, &w, sp_body("https://doomed.example.test/m")).await;
     let (_, kept) = create_sp(&app, &w, sp_body("https://kept.example.test/m")).await;
@@ -1320,9 +1321,38 @@ async fn deleting_an_sp_over_http_removes_its_pending_requests_and_only_its_own(
     let kept_request = request(kept["id"].as_str().unwrap());
     pending.create(doomed_request.clone()).await.unwrap();
     pending.create(kept_request.clone()).await.unwrap();
+    let session = Uuid::new_v4();
+    let participant = |sp_id: &str| NewSamlSpSession {
+        tenant_id: w.tenant_id,
+        session_id: session,
+        user_id: Uuid::new_v4(),
+        sp_id: sp_id.parse().unwrap(),
+        sp_entity_id: SP_ENTITY.into(),
+        name_id: format!("name-{}", Uuid::new_v4().simple()),
+        name_id_format: "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent".into(),
+        session_index: format!("idx-{}", Uuid::new_v4().simple()),
+        expires_at: now + Duration::hours(1),
+    };
+    participants
+        .record(participant(doomed["id"].as_str().unwrap()))
+        .await
+        .unwrap();
+    participants
+        .record(participant(kept["id"].as_str().unwrap()))
+        .await
+        .unwrap();
 
     let (status, _) = send(&app, request_to_delete(&w, doomed["id"].as_str().unwrap())).await;
     assert_eq!(status, 204);
+    let left = participants
+        .list_for_session(w.tenant_id, session)
+        .await
+        .unwrap();
+    assert_eq!(
+        left.iter().map(|r| r.sp_id.to_string()).collect::<Vec<_>>(),
+        vec![kept["id"].as_str().unwrap().to_owned()],
+        "the deleted SP's participant row went with it, and only that one"
+    );
     assert!(
         pending
             .get_pending(w.tenant_id, &doomed_request.handle_hash)

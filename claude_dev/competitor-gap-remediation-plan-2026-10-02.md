@@ -514,6 +514,37 @@ security-bearing); Sonnet 5.5 for the harness, judgements and submission.
 > `encrypt_assertions` and validate that a signing SP's certificate parses (the
 > endpoint answers `sp_certificate` otherwise). For T23.2.7: `test_support` in
 > `saml_idp` (doc-hidden) signs requests the way an SP library does.
+>
+> **EXECUTED (partly) — G-2, W4: T23.2.8, 2026-10-04** (`e79b4cb`, `afa9637`,
+> `f1a832f`, `5ef1aad`, `cd96669`; Opus 5.5; documentation and decisions only,
+> run in a worktree in parallel with T23.5.1). **D-37 … D-42** settle what W4's
+> Sonnet tasks needed: a per-SP `SessionIndex` in a `saml_sp_session` row (D-37,
+> closes T-312 when T23.2.4 lands, and the record SLO needs anyway, since the
+> pairwise `NameID` cannot be reversed); the SLO protocol on both bindings, every
+> SP message signed by its registered certificate and verified per node or over
+> the exact query octets, AXIAM signing its own logout messages only for verified
+> or holder-initiated logouts and with a detached signature on Redirect (D-38);
+> whole-session revocation first, then sequential front-channel propagation in a
+> `saml_logout_run`, the OP cookie cleared blind and an IdP-initiated trigger at
+> `/sso/logout` (D-39); unsigned IdP metadata with active then next credentials
+> and the D-20 `404` when nothing is publishable (D-40); SP metadata import as a
+> parse to a draft, never a write, URL fetches only through `guarded_fetch`, and
+> nothing trusted from an unsigned document (D-41); the §29 routes compiled in
+> every build, with the write-time refusals the validator lacked (D-42).
+> **Contract 1.55, §29 SAML service provider registration** (11 operations,
+> namespace `saml`, permissions `saml_sp:read`, `saml_sp:write`,
+> `saml_idp:credential`, a `saml_admin` bucket). Threat model **2.25.0**:
+> **T-357 … T-384** entered *Open* because their controls are specified but not
+> yet built (T23.2.5 and T23.2.4 flip them); T-380 (a revocation outside SAML
+> reaches no SP) is an accepted Open; T-309 and T-312 amended. Design document
+> **§8e**.
+>
+> What the plan did not anticipate. The committed OpenAPI is exported without
+> `saml`, so gated registry routes would reach no SDK (hence D-42). `/slo` can
+> never see the OP cookie (its path is scoped to `/sso`, and a cross-site POST
+> carries no `Lax` cookie). `entity_id` must be immutable, because the pairwise
+> identifier is keyed on it. The IdP URL functions sit in the gated module and
+> move. Until W4's later tasks land, the site shows 44 open threats.
 
 **Target.** AXIAM issues SAML 2.0 assertions to registered service providers,
 per tenant: IdP metadata, Web Browser SSO profile with HTTP-Redirect and
@@ -1040,6 +1071,28 @@ section.
 the authorization server, the same class as T-272 to T-280).
 
 ### G-5 — Shared Signals Framework transmitter — **P2**
+
+> **EXECUTED (partly) — G-5, W4: T23.5.1, 2026-10-04** (`212b314`, `9b90d7d`;
+> Sonnet 5.5). The shared outbound dispatcher per **D-36**, with no behaviour
+> change. `axiam_core::outbound`: `OutboundMessage`, `OutboundKind` (only
+> `Webhook`; a new kind is one line in a macro that fixes its queue names, env
+> vars and audit prefix), and the object-safe ports `OutboundPublisher` and
+> `OutboundDeliverer` (one attempt → delivered, retry or dead-letter).
+> `axiam-amqp` holds the generic topology, publisher, retry policy and consumer
+> loop. The webhook kind keeps today's queues, declare arguments, env vars and
+> its exact `WebhookMessage` wire bytes through a per-kind codec (a generic
+> envelope would have broken in-flight messages and a rolling upgrade), pinned
+> by tests; the webhook deliverer stays in `axiam-api-rest`. Tests: 26 new
+> `axiam-amqp` tests (topology names and arguments byte for byte, retry env
+> vars, the wire format both ways, the loop's ack, retry with TTL, DLQ, error
+> mapping, unregistered kind, failed republish), 5 core tests, 6 api-rest
+> tests; every existing webhook suite passes unchanged; OpenAPI byte-identical.
+>
+> What the plan did not anticipate. RabbitMQ refuses to redeclare a queue with
+> other arguments, so the argument set is pinned too. The live-broker test stays
+> `#[ignore]`d (no broker here); CI's e2e stack exercises delivery. The server's
+> consumer supervisor loop is still inline, so each new kind copies about 30
+> lines.
 
 **Target.** AXIAM transmits CAEP `session-revoked`,
 `credential-change`, `assurance-level-change` and RISC `account-disabled`,

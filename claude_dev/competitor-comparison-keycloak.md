@@ -59,7 +59,7 @@ question.
 | MCP authorization server | **Yes**, end to end | Documentation for MCP integration; CIMD experimental | [K15] |
 | SCIM 2.0 server | Yes | Yes — promoted to supported in 26.8 (the specification table still reads "Tech Preview") | [K3][K15] |
 | SAML 2.0 | SP only | IdP and broker | [K3][K17] |
-| LDAP/AD, Kerberos federation | No | Yes | [K18] |
+| LDAP/AD, Kerberos federation | LDAP/AD yes (G-3, Phase 23; read-only, JIT, group mapping, sync); Kerberos no (D-1) | Yes | [K18] |
 | Social login | Google, GitHub, Microsoft, Apple, generic OIDC/OAuth2 | Large catalogue (Google, GitHub, Microsoft, LinkedIn, …) | [K17] |
 | Verifiable credentials | No — design written, implementation gated on a go/no-go (G-9) | OID4VCI **preview**, OID4VP **experimental** (26.8) | [K15] |
 | Shared Signals (CAEP/RISC) | No | Experimental | [K15] |
@@ -78,8 +78,9 @@ question.
    provider [K17]. Enterprise SaaS still depends on it, and AXIAM only
    consumes SAML.
 2. **LDAP/AD and Kerberos federation.** This is the most common reason
-   organizations pick Keycloak [K18]. Without it, AXIAM cannot front an
-   existing directory.
+   organizations pick Keycloak [K18]. *Closed for LDAP/AD by G-3 (Phase 23,
+   2026-10-04, [remediation plan](competitor-gap-remediation-plan-2026-10-02.md));
+   Kerberos (SPNEGO) remains declined for now (D-1).*
 3. **Certification.** Keycloak lists FAPI 2.0 as passed [K3]. AXIAM's
    conformance runs (`docs/conformance/`, latest 2026-09-25) still show open
    modules. Closing them and submitting (roadmap X5/X7) turns an engineering
@@ -154,6 +155,7 @@ all shipped. They now appear in §2 as parity or advantage.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-04 | G-3 (LDAP / Active Directory identity source) complete on the Phase 23 W3 branch: bind-as-user over mandatory TLS, JIT provisioning, explicit group mapping with nesting, incremental and nightly sync with soft-delete, the address guard, the management API (contract §30) and the console page; tested against a real OpenLDAP and a real Samba AD DC. Kerberos stays out of scope (D-1), so the row reads LDAP/AD yes, Kerberos no. | — |
 | 2026-10-02 | Baseline written. Since the run-5 baseline (26.7.0): SCIM promoted to supported, so the Track B premise "Keycloak only via extensions" is obsolete and SCIM is now parity. Token-exchange delegation is preview, and impersonation tokens carry `act`. OID4VCI is preview and OID4VP experimental. Stateless multi-cluster is supported. Login failures are persisted by default. 26.7.1–26.7.5 shipped about 56 CVE fixes. | [K15][K20] |
 | 2026-10-03 | G-9: verifiable-credentials design written (design only, go/no-go in its §13); the row and P2 item 4 point at it. G-4: RFC 7592 shipped on the Phase 23 W1 branch, so the dynamic-registration cell names both RFCs. | — |
 | 2026-10-02 | G-12 (front-channel logout) declined and recorded in the design document (D-6); row and gap list updated. Revisit only on an adopter request. | — |

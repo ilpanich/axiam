@@ -864,6 +864,34 @@ fan-out.
 > probe internal names, bounded by the bucket — carried to F4 against T-300's
 > residual. The SAML IdP's handler had no frontend-coverage row; added
 > ("headless for now", T23.2.6 replaces it).
+>
+> **EXECUTED — G-3, W3: T23.3.6, 2026-10-04** (`94733bd`, `73d82f4`,
+> `f5bfc4f`; Sonnet 5.5). The oracle for T23.3.2: `docker/docker-compose.
+> directory.yml` runs a real OpenLDAP (slapd 2.4.57) and a real Samba AD DC
+> (Samba 4.23), pinned by digest, on their own bridge network, with the CA,
+> certificates and every password minted at run time by
+> `scripts/gen-directory-e2e-secrets.sh` into a gitignored directory.
+> `crates/axiam-server/tests/directory_e2e.rs` (gated by
+> `AXIAM_E2E_DIRECTORY=1`; a missing stack is a failure once asked for) drives
+> the real §30 routes, `/api/v1/auth/login`, the authorization engine and
+> `sweep_directories`: 18 tests, each scenario on both servers — JIT login,
+> role through a mapped group (an unmapped `admins` grants nothing), nested
+> group and depth 0, the disabled account answered as an unknown user, seven
+> filter-injection payloads presented with the password of the entry each
+> would select if unescaped (and the unescaped filter shown to match), the
+> metacharacter entry by exact name only, the config-time refusals (plaintext,
+> loopback, private outside the allow-list, metadata), an untrusted
+> certificate, StartTLS, and sync deactivating a vanished and a disabled
+> entry's account to `Inactive` with its sessions revoked. Ran green in the
+> W3 container, and again for the orchestrator. CI:
+> `.github/workflows/directory-e2e.yml` on directory paths and on dispatch. The
+> real servers exposed **no defect** in the G-3 code; a real AD's
+> configuration-partition search reference is ignored as T23.3.2 designed.
+>
+> **G-3 is complete for Phase 23** (issue #522). The three comparisons flip
+> their LDAP/AD rows with a dated change-log line; Kerberos stays declined
+> (D-1). Open and carried: T-332 (no per-name counter in front of JIT binds),
+> the allow-list residual of T-300, and the items the W3 F4 review takes.
 
 **Target.** A tenant can federate an existing LDAP or Active Directory
 directory: users authenticate with their directory password, are provisioned

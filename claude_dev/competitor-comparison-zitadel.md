@@ -54,7 +54,7 @@ support, LDAP as an external IdP and the polish of a mature hosted product.
 | OPAQUE (RFC 9807) | **Yes** (opt-in) | No | — |
 | RP-initiated / back-channel logout | Yes | Yes | [Z7][Z13] |
 | SAML 2.0 | SP only | **IdP** (and SAML external IdPs) | [Z14][Z15] |
-| External IdPs | OIDC, OAuth2, SAML, Google, GitHub, Microsoft, Apple | OIDC, OAuth2, JWT, SAML, **LDAP**, Azure AD, GitHub, GitLab, Google, Apple, Zitadel | [Z15] |
+| External IdPs | OIDC, OAuth2, SAML, **LDAP / Active Directory** (G-3), Google, GitHub, Microsoft, Apple | OIDC, OAuth2, JWT, SAML, **LDAP**, Azure AD, GitHub, GitLab, Google, Apple, Zitadel | [Z15] |
 | SCIM 2.0 server | Yes (users and groups) | **Preview**; users documented | [Z16] |
 | Extension model | Reactors (external AMQP actors, any SDK language), HMAC-signed webhooks | Actions v2: signed webhook/call targets on request, response, function and event | [Z17] |
 | APIs | REST, gRPC, AMQP | gRPC, connectRPC and REST for every resource (management-oriented) | [Z1] |
@@ -71,8 +71,9 @@ support, LDAP as an external IdP and the polish of a mature hosted product.
    metadata [Z14]. Keycloak and Authentik also act as SAML IdPs. AXIAM is
    the only one of the four that cannot.
 2. **LDAP as an identity source.** Zitadel offers LDAP among its external
-   IdP types [Z15]. This gap is shared with the Keycloak comparison and has
-   the same consequence: AXIAM cannot sit in front of an existing directory.
+   IdP types [Z15]. *Closed by G-3 (Phase 23, 2026-10-04,
+   [remediation plan](competitor-gap-remediation-plan-2026-10-02.md)): AXIAM
+   now sits in front of an existing LDAP or Active Directory directory.*
 
 **P2 — valuable, not blocking**
 
@@ -136,6 +137,7 @@ support, LDAP as an external IdP and the polish of a mature hosted product.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-04 | G-3 (LDAP / Active Directory identity source) complete on the Phase 23 W3 branch: bind-as-user over mandatory TLS, JIT provisioning, explicit group mapping with nesting, incremental and nightly sync with soft-delete, the address guard, the management API (contract §30) and the console page; tested against a real OpenLDAP and a real Samba AD DC. The external-IdP row now lists LDAP / Active Directory and P1 item 2 is closed. | — |
 | 2026-10-02 | Baseline written. Since the run-5 baseline (v4.16.2): v4.17.0 added RFC 7591/7592 dynamic client registration, "Sign in with Zitadel" and native app links for passkeys. v4.17.2 fixed token-exchange downscoping. v4.18.0 was withdrawn ("skip this release"). v4.19.2 made session-cookie signing mandatory (breaking change). Several critical and high advisories were fixed. The CIMD pull request is still open. `zitadel/nextgen` appeared as the preview of the next major version. | [Z9][Z10][Z19][Z20] |
 | 2026-10-03 | G-4 (RFC 7592) shipped on the Phase 23 W1 branch: the dynamic-registration row is parity and P2 item 4 is closed. G-15: AXIAM's agent-identity story is documented, so the `zitadel/nextgen` watch item now has a named counterpart. | — |
 | 2026-10-02 | G-12 (front-channel logout) declined and recorded in the design document (D-6). This comparison has no front-channel row or gap-list entry, so none changed. Revisit only on an adopter request. | — |

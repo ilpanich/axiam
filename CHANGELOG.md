@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attributes, and links the pairwise `NameID`; a tampered response, a response for
   another browser's request and a replay are refused. `saml_idp::test_support`
   re-exports `samael` and `openssl` so the harness needs no new dev-dependency.
+  **SP metadata normalisation (D-54):** `parse_sp_metadata` now reads SP metadata
+  that `samael` could not type. On the libxml tree, after every byte-level refusal,
+  an ISO-8601 `cacheDuration` on the `SPSSODescriptor` is dropped and an
+  `AssertionConsumerService` with no `index` is given the lowest unused
+  non-negative index in document order, each with a draft warning that names it;
+  an `index` that is present but invalid is still refused, and a document needing
+  neither yields the same draft as before. The website's SAML IdP page now says an
+  SP must sign with a SHA-256 or stronger digest (`samael`'s default signature
+  template uses SHA-1, which AXIAM refuses).
 
 - **Shared Signals Framework transmitter: push and poll delivery and the event
   sources (T23.5.3, G-5, D-48, D-49, D-51, D-52, D-53, contract §32.6).** AXIAM now

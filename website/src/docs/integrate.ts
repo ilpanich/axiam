@@ -1115,7 +1115,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
         steps: [
           {
             title: "Import the SP's metadata, or enter it by hand",
-            body: "`parse-sp-metadata` takes either an uploaded document or an `https` URL and returns a **draft** registration with the certificate fingerprints and a list of warnings. It stores nothing. AXIAM fetches a URL only through its outbound address guard, refuses any document that declares a DTD or entity, and takes nothing as trusted from an unsigned document — a signature in it is reported, not evaluated. You review the draft, then save it.",
+            body: "`parse-sp-metadata` takes either an uploaded document or an `https` URL and returns a **draft** registration with the certificate fingerprints and a list of warnings. It stores nothing. AXIAM fetches a URL only through its outbound address guard, refuses any document that declares a DTD or entity, and takes nothing as trusted from an unsigned document — a signature in it is reported, not evaluated. Two things that real SP metadata carries and a strict XML reader rejects are normalised on the parsed document, each with a warning in the draft: a `cacheDuration` on the `SPSSODescriptor` is dropped, and an `AssertionConsumerService` with no `index` is given the lowest unused one. You review the draft, then save it.",
             code: 'POST /api/v1/tenants/{tenant_id}/saml/parse-sp-metadata\n{ "metadata_url": "https://wiki.example.com/saml/metadata" }',
           },
           {
@@ -1135,7 +1135,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "`PUT` is a **replacement**: any member you leave out takes its default, it is not kept. Read the registration, change what you need, and send the whole thing back. The attribute table maps AXIAM's `username`, `email`, `display_name`, `given_name`, `family_name`, `groups` and `roles` onto the attribute names the SP expects. If an SP signs its requests, register its certificate; with `want_authn_requests_signed` an unsigned request is refused, and a logout request from an SP is accepted only when it is signed by that certificate.",
+        text: "`PUT` is a **replacement**: any member you leave out takes its default, it is not kept. Read the registration, change what you need, and send the whole thing back. The attribute table maps AXIAM's `username`, `email`, `display_name`, `given_name`, `family_name`, `groups` and `roles` onto the attribute names the SP expects. If an SP signs its requests, register its certificate; with `want_authn_requests_signed` an unsigned request is refused, and a logout request from an SP is accepted only when it is signed by that certificate. **The SP must sign with a SHA-256 or stronger digest**: AXIAM refuses SHA-1 on signed requests, and `samael`'s default `Signature::template` uses a SHA-1 digest, so an SP built on it has to set the digest to SHA-256.",
       },
       { type: "h", id: "credential", text: "The signing credential" },
       {

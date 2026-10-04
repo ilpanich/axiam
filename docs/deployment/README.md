@@ -299,11 +299,14 @@ sign-in path trusts (plaintext URL, userinfo, a filter without exactly one
 `{username}`, an over-long secret, a trust anchor that is not a CA certificate, a
 malformed or foreign-tenant group mapping, out-of-range depth or interval) and by
 the address guard above, **on the URL as written** — so a name that was re-pointed
-since the last save is caught by the next write even if the URL did not change.
+since the last save is caught by the next write that leaves the directory
+**enabled**, even if the URL did not change. A write whose resulting configuration
+is *disabled* skips the guard (a disabled directory opens no connection), so you
+can always switch a directory off without deleting it; validation and the
+secret-again rule still apply, and re-enabling runs the guard.
 Each refusal is a `400` that names the rule and never echoes the secret. An
 IPv6-literal URL is one of them: it can never be certificate-checked, so name the
-directory by host name. Disabling a directory is a write too, and is checked the
-same way; `DELETE` resolves nothing and always works.
+directory by host name. `DELETE` resolves nothing and always works.
 
 **Moving the connection needs the secret again.** A write that changes `url`,
 `start_tls`, `bind_dn` or `trust_anchors_pem` without a `bind_secret` is a `400`

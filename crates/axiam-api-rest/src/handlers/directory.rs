@@ -17,7 +17,9 @@
 //! 2. **`config::validate`** — the same function the bind path trusts. The
 //!    repository does not run it (F4 §12 item 3).
 //! 3. **The address guard** on `url` *as written*, even when it did not change:
-//!    a name re-pointed since the last save is caught on the next write (T-300).
+//!    a name re-pointed since the last save is caught on the next write (T-300) —
+//!    for a write whose resulting configuration is **enabled** (D-33); a write
+//!    that leaves it disabled opens no connection and skips it.
 //!    An IPv6 literal, an unresolvable host, loopback, link-local, the metadata
 //!    service, AXIAM's own listener and an unlisted private address are each a
 //!    `400` naming the rule.
@@ -631,8 +633,19 @@ async fn write_config<C: Connection + Clone>(
     //    and the rule and never a value.
     validate_config(&input).map_err(AxiamError::from)?;
 
-    // 3. The address guard, on the URL as written.
-    if let Err(error) = state.directory.client.guard(&input.url).await {
+    // 3. The address guard, on the URL as written — for a write whose
+    //    *resulting* configuration is enabled (D-33). A disabled directory opens
+    //    no connection, so an administrator can always switch one off, even when
+    //    its stored name has since been re-pointed to a refused address; the
+    //    connect-time guard still covers anything that does connect, and
+    //    re-enabling runs this check. `validate` above and P23W2-01 below apply
+    //    to every write, enabled or not.
+    let guarded: Result<(), GuardError> = if input.enabled {
+        state.directory.client.guard(&input.url).await.map(|_| ())
+    } else {
+        Ok(())
+    };
+    if let Err(error) = guarded {
         audit(
             state,
             http_req,

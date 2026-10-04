@@ -908,7 +908,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Every write is validated and the host is checked before anything is stored, on the URL **as written** — so a name that was re-pointed since the last save is caught by the next write even if the URL did not change. A refusal is a `400` that names the rule and never echoes the secret.",
+        text: "Every write is validated and the host is checked before anything is stored, on the URL **as written** — so a name that was re-pointed since the last save is caught by the next write that leaves the directory enabled, even if the URL did not change (a write that leaves it disabled opens no connection and skips the host check, so a directory can always be switched off). A refusal is a `400` that names the rule and never echoes the secret.",
       },
       { type: "h", id: "secret", text: "The bind secret is write-only" },
       {

@@ -1168,7 +1168,7 @@ async fn the_address_guard_refuses_each_class_as_a_400_naming_the_rule() {
 }
 
 #[actix_rt::test]
-async fn a_write_that_does_not_change_the_url_still_re_checks_it() {
+async fn a_write_that_leaves_the_directory_enabled_re_checks_the_url_even_if_it_did_not_change() {
     let w = world().await;
     let app = app!(w.state(true), w.auth, w.authz);
     let (status, _, _) = put_config(&app, &w, config_body(Some(&bind_value()))).await;
@@ -1177,13 +1177,61 @@ async fn a_write_that_does_not_change_the_url_still_re_checks_it() {
     // The name is re-pointed after the save, as a rebinding would.
     w.names.point("ldap.example.com", "127.0.0.1");
     let (status, refusal, _) =
-        patch_config(&app, &w, serde_json::json!({ "enabled": false })).await;
-    assert_eq!(status, 400, "an unrelated PATCH is caught by the guard");
+        patch_config(&app, &w, serde_json::json!({ "jit_provisioning": true })).await;
+    assert_eq!(
+        status, 400,
+        "an unrelated enabled PATCH is caught by the guard"
+    );
     assert!(message_of(&refusal).contains("loopback"));
     let (status, _, _) = put_config(&app, &w, config_body(None)).await;
-    assert_eq!(status, 400, "and so is an unrelated PUT");
+    assert_eq!(status, 400, "and so is an unrelated enabled PUT");
+}
 
-    // DELETE does not resolve anything, so an administrator can always remove it.
+/// D-33: a write whose resulting configuration is disabled opens no connection,
+/// so it skips the guard — an administrator can always switch the connector off —
+/// and re-enabling runs it.
+#[actix_rt::test]
+async fn a_directory_whose_name_was_re_pointed_can_be_switched_off_and_not_back_on() {
+    let w = world().await;
+    let app = app!(w.state(true), w.auth, w.authz);
+    let (status, _, _) = put_config(&app, &w, config_body(Some(&bind_value()))).await;
+    assert_eq!(status, 201);
+    w.names.point("ldap.example.com", "127.0.0.1");
+
+    let (status, off, _) = patch_config(&app, &w, serde_json::json!({ "enabled": false })).await;
+    assert_eq!(status, 200, "PATCH enabled=false skips the guard");
+    assert_eq!(off["enabled"], false);
+
+    // A PUT that leaves it disabled is the same.
+    let mut disabled = config_body(None);
+    disabled["enabled"] = false.into();
+    let (status, _, _) = put_config(&app, &w, disabled).await;
+    assert_eq!(status, 200, "PUT enabled=false skips the guard");
+
+    // Validation still runs on a disabled write.
+    let (status, refusal, _) =
+        patch_config(&app, &w, serde_json::json!({ "user_filter": "(uid=bob)" })).await;
+    assert_eq!(status, 400);
+    assert!(message_of(&refusal).contains("{username}"));
+
+    // Re-enabling runs the guard and names the rule.
+    let (status, refusal, _) = patch_config(&app, &w, serde_json::json!({ "enabled": true })).await;
+    assert_eq!(status, 400, "PATCH enabled=true runs the guard");
+    assert!(message_of(&refusal).contains("loopback"));
+    let (_, stored) = get_json(&app, &w, "").await;
+    assert_eq!(stored["enabled"], false, "and changed nothing");
+    let mut enabled = config_body(None);
+    enabled["enabled"] = true.into();
+    let (status, _, _) = put_config(&app, &w, enabled).await;
+    assert_eq!(status, 400, "PUT enabled=true runs the guard");
+
+    // The name comes back to a good address: re-enabling works.
+    w.names.point("ldap.example.com", "93.184.216.34");
+    let (status, on, _) = patch_config(&app, &w, serde_json::json!({ "enabled": true })).await;
+    assert_eq!(status, 200);
+    assert_eq!(on["enabled"], true);
+
+    // DELETE resolves nothing either.
     let (status, _) = send(
         &app,
         request(
@@ -1194,6 +1242,43 @@ async fn a_write_that_does_not_change_the_url_still_re_checks_it() {
     )
     .await;
     assert_eq!(status, 204);
+}
+
+/// A disabled write that moves the connection still needs the secret (P23W2-01),
+/// and the skipped guard does not make it any easier to move one unguarded.
+#[actix_rt::test]
+async fn a_disabled_write_that_moves_the_url_without_the_secret_is_still_the_p23w2_01_400() {
+    let w = world().await;
+    let app = app!(w.state(true), w.auth, w.authz);
+    let (status, _, _) = put_config(&app, &w, config_body(Some(&bind_value()))).await;
+    assert_eq!(status, 201);
+
+    let (status, refusal, _) = patch_config(
+        &app,
+        &w,
+        serde_json::json!({ "enabled": false, "url": "ldaps://other.example.com" }),
+    )
+    .await;
+    assert_eq!(status, 400, "PATCH");
+    assert!(message_of(&refusal).contains("bind secret again"));
+
+    let mut body = config_body(None);
+    body["enabled"] = false.into();
+    body["url"] = "ldaps://other.example.com".into();
+    let (status, refusal, _) = put_config(&app, &w, body).await;
+    assert_eq!(status, 400, "PUT");
+    assert!(message_of(&refusal).contains("bind secret again"));
+    let (_, stored) = get_json(&app, &w, "").await;
+    assert_eq!(stored["url"], "ldaps://ldap.example.com", "nothing moved");
+    assert_eq!(stored["enabled"], true);
+
+    // With the secret it is an ordinary write, and the disabled result skips the guard.
+    let mut body = config_body(Some(&bind_value()));
+    body["enabled"] = false.into();
+    body["url"] = "ldaps://nowhere.example.com".into();
+    let (status, moved, _) = put_config(&app, &w, body).await;
+    assert_eq!(status, 200, "a disabled write with the secret is accepted");
+    assert_eq!(moved["url"], "ldaps://nowhere.example.com");
 }
 
 // ---------------------------------------------------------------------------

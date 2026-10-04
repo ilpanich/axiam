@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SAML 2.0 IdP end-to-end tests: a `samael` reference SP and a real Keycloak
+  (T23.2.7, G-2).** Tests only; no server, contract or OpenAPI change.
+  `saml_idp_e2e_test` drives the production route table with a service provider
+  built from `samael`'s SP-side API (it builds and signs the `AuthnRequest`,
+  parses and validates the `Response`): SP-initiated login on the HTTP-POST binding
+  (signed request, IdP credential issued through the administrator route) and on
+  HTTP-Redirect (`signed_redirect`), IdP-initiated login, the attribute mapping,
+  the pairwise `NameID` (stable for one SP, different for two SPs and two users),
+  single logout from a `samael`-built `LogoutRequest` on both bindings (session
+  revoked, `GET /oauth2/revocations` shows it, the `LogoutResponse`'s detached
+  signature verifies under `samael`'s URL verifier), a replayed `AuthnRequest` ID,
+  an ACS URL outside the registry and its near-miss spellings, the D-20 `404` on
+  metadata, SSO and SLO for a tenant without the feature (and the routes absent
+  in a build without `saml`), and `samael` refusing the same response under each
+  wrong expectation. `saml_idp_keycloak_roundtrip_test` (`#[ignore]`, run by CI's
+  compose job beside the X4 step) imports AXIAM's IdP metadata into a real
+  Keycloak realm, registers Keycloak's exported SP metadata through
+  `parse_sp_metadata` and `create_service_provider`, and carries a broker login
+  both ways through a cookie-jar client, on both AuthnRequest bindings, signed:
+  Keycloak accepts the response, issues tokens whose claims are the SAML
+  attributes, and links the pairwise `NameID`; a tampered response, a response for
+  another browser's request and a replay are refused. `saml_idp::test_support`
+  re-exports `samael` and `openssl` so the harness needs no new dev-dependency.
+
 - **Shared Signals Framework transmitter: push and poll delivery and the event
   sources (T23.5.3, G-5, D-48, D-49, D-51, D-52, D-53, contract §32.6).** AXIAM now
   transmits. **Push (RFC 8935)**: the `SsfPush` deliverer

@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shared Signals Framework transmitter: the stream registry, SET issuance,
+  the stream management API and discovery (T23.5.2, G-5, D-44 … D-52, contract
+  1.56 §32).** AXIAM can now act as an SSF 1.0 transmitter of CAEP
+  `session-revoked`, `credential-change` and `assurance-level-change` and RISC
+  `account-disabled`, `account-enabled` and `account-purged` events; push and
+  poll delivery and the event sources follow in T23.5.3, so nothing is
+  transmitted yet. **Management** (namespace `ssf`, tag `ssf`):
+  `GET`/`POST /api/v1/tenants/{tenant_id}/ssf/streams` and
+  `GET`/`PUT`/`DELETE …/ssf/streams/{stream_id}`, permissions
+  `ssf_streams:read` / `ssf_streams:write` (human-only), each write validated —
+  the push endpoint held to the webhook outbound address policy, the receiver
+  bound to an OAuth2 client of the tenant with the `client_credentials` grant
+  and the new scope **`ssf.manage`**, the audience **unique across the
+  deployment** (`409`), the push `Authorization` header write-only and sealed
+  under `pki_encryption_key` (`503` without it), and never following the endpoint
+  to another origin. **Receiver protocol** (tag `ssf-receiver`):
+  `/.well-known/ssf-configuration?tenant_id=` and, with tenant issuer paths,
+  `/.well-known/ssf-configuration/t/{tenant_id}` (one empty `404` for every way of
+  having nothing to say); the SSF stream management API `/ssf/v1/stream`
+  (`GET`, `PATCH`, `PUT`; `POST`/`DELETE` `403`), `/ssf/v1/status` and
+  `/ssf/v1/verify`, authenticated by the receiver's client-credentials token with
+  `ssf.manage`, every other stream the same `404`. **SETs**
+  (`axiam_oauth2::ssf`): `typ: secevent+jwt`, EdDSA with the deployment key's
+  `kid`, the tenant's issuer, the stream's audience, a 128-bit CSPRNG `jti`, no
+  `sub`, no `exp`, one event; `iss_sub` subjects by default, `email` only on the
+  administrator's choice and only for an address AXIAM vouches for; signed only
+  at delivery for an enabled stream that carries the event. A disable-only
+  layered setting **`ssf_enabled`** (default `false`) switches a tenant's
+  transmitter on. `OutboundKind::SsfPush` (`ssf_push`) is declared for the push
+  deliverer. Schema **v77**: `ssf_stream`, `ssf_event_buffer` and
+  `security_settings.oidc_ssf_enabled`, deleted with their tenant (the buffer
+  with its stream too). New rate-limit knobs `AXIAM__RATE_LIMIT__SSF_PER_MIN`
+  (60, one bucket per receiver route and discovery form) and
+  `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` (30, one per write). `openapi.json` and
+  `management-registry.json` regenerated (184 operations across 27 namespaces);
+  contract 1.56 adds §32 with the optional receiver helper (`verify_set`,
+  `poll`) for the seven full-surface SDKs.
+
 - **SAML 2.0 identity provider: single logout (T23.2.4, G-2, D-37 … D-39).**
   `GET`/`POST /saml/v2/{tenant_id}/slo` (HTTP-Redirect and HTTP-POST, a
   `LogoutRequest` or a `LogoutResponse`) and the IdP-initiated trigger
@@ -794,6 +832,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the 16 KiB body limit on `PUT /oauth2/register/{client_id}`.
 
 ### Security
+
+- **SSF transmitter threats T-385 … T-401 (T23.5.2, threat model 2.27.0).**
+  Receiver impersonation, cross-tenant stream access, forged, replayed and
+  confused SETs, a SET misaddressed through an audience shared across tenants,
+  the push credential, push-endpoint SSRF, API and event flooding, the poll
+  buffer, subject-identifier linkability, a receiver widening its events,
+  delivery after a stream was disabled, attribution, the receiver binding and
+  discovery as an oracle. Thirteen are mitigated with their tests; T-392, T-394
+  and T-395 stay open until T23.5.3 builds delivery on the decided controls, and
+  T-388 (replay) until the SDK receiver helper de-duplicates `jti`. 401 threats,
+  382 mitigated / 19 open.
 
 - **Single logout cannot be forged, replayed or aimed at another session
   (T23.2.4, closes T-366, T-370 … T-379, T-381 … T-384; T-312).** The tenant's

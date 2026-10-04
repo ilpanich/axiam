@@ -22,6 +22,17 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-04 SAML IdP single-logout entry (Phase 23 T23.2.4, model
+> 2.26.0 — no threat enters).** Sixteen threats close, each with the test files
+> and names its mitigation now carries: **T-366** (the SP delete cascade now also
+> removes the `saml_sp_session` rows), **T-370 … T-379** and **T-381 … T-384** —
+> single logout on both bindings, the IdP-initiated trigger, the participant
+> record and the logout chain that T23.2.8 specified are built — and **T-312**,
+> the cross-SP correlation through a shared `SessionIndex`, which a per-SP random
+> index recorded before signing closes (the residual, `AuthnInstant`, is recorded
+> in its mitigation). **T-380** stays open: it is an accepted trade-off. The model
+> is **384 threats, 369 mitigated / 15 open**.
+>
 > **The 2026-10-04 SAML IdP registry routes entry (Phase 23 T23.2.5, model
 > 2.25.0 — no threat enters).** Thirteen threats close, each with the test files
 > and names its mitigation now carries: **T-357 … T-365 and T-367 … T-369** — the
@@ -962,7 +973,9 @@ the metadata endpoint and single logout land — all but T-380, a service
 provider's own session outliving the AXIAM session, which is accepted. The
 registry routes, SP metadata import and the metadata endpoint have landed
 (T23.2.5): T-357 … T-365 and T-367 … T-369 are mitigated, and so is the rotation
-window, T-309; single logout, and T-366 with it, has not.
+window, T-309. Single logout has landed too (T23.2.4): T-366, T-370 … T-379,
+T-381 … T-384 and the per-SP `SessionIndex`, T-312, are mitigated, leaving only the
+accepted T-380.
 
 ### Coverage by STRIDE category
 
@@ -974,25 +987,25 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 90 | 8 |
-| Tampering | 77 | 5 |
-| Repudiation | 10 | 1 |
-| Information disclosure | 86 | 10 |
-| Denial of service | 43 | 4 |
-| Elevation of privilege | 78 | 3 |
+| Spoofing | 90 | 4 |
+| Tampering | 77 | 1 |
+| Repudiation | 10 | 0 |
+| Information disclosure | 86 | 6 |
+| Denial of service | 43 | 2 |
+| Elevation of privilege | 78 | 2 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
 | Critical | 41 | 2 |
-| High | 168 | 10 |
-| Medium | 150 | 13 |
-| Low | 25 | 6 |
+| High | 168 | 8 |
+| Medium | 150 | 4 |
+| Low | 25 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 31 still-open items are listed one by one in
+the weight the control carries. The 15 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -2253,33 +2266,16 @@ each.
 | T-135 — Dependency-confusion or typosquatted SDK package | High | Integrator / developer · *Client SDKs & admin UI integration surface* |
 | T-146 — Long-lived client secret committed to a repository | High | SDK configuration (client secrets, CA bundles) · *Client SDKs & admin UI integration surface* |
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
-| T-372 — XML external entities, entity expansion or a decompression bomb in a logout message | High | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
-| T-373 — A logout message signed by the tenant's key is harvested as a signature-wrapping gadget | High | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
-| T-312 — Service providers link a user across SPs, or back to the AXIAM account | Medium | SAML assertion issuer (saml_idp) · *Federation — SAML SP & OIDC relying party* |
-| T-366 — A registry row is read or written across tenants, or outlives the SP it described | Medium | saml_service_provider (SP registry) · *Federation — SAML SP & OIDC relying party* |
-| T-370 — A forged LogoutRequest ends another user's sessions | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
-| T-371 — A captured logout message is replayed | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
-| T-374 — A flood or an endless chain exhausts the SLO endpoint | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
-| T-375 — The SLO endpoint delivers messages or the browser to a location an SP never registered | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
-| T-379 — An SP's logout reaches sessions it never took part in, or another tenant's | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
-| T-381 — The participant table links a person's sessions to the SPs they use | Medium | saml_sp_session (per-SP SessionIndex) · *Federation — SAML SP & OIDC relying party* |
-| T-382 — An assertion is issued whose session SLO cannot find | Medium | saml_sp_session (per-SP SessionIndex) · *Federation — SAML SP & OIDC relying party* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
-| T-376 — A logout cannot be traced to the SP, the sessions and the outcome | Low | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
-| T-377 — Logout messages, NameIDs and RelayState are recorded in request logs | Low | LogoutRequest / LogoutResponse (Redirect / POST, via the browser) · *Federation — SAML SP & OIDC relying party* |
-| T-378 — A third-party page signs the visitor out of AXIAM and every SP | Low | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
-| T-383 — A database read yields a usable logout-chain identifier | Low | saml_logout_run (logout chains) · *Federation — SAML SP & OIDC relying party* |
-| T-384 — Participant and logout-chain rows accumulate without bound | Low | saml_sp_session (per-SP SessionIndex) · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
-gaps on the SDK and distribution side, or — T-366 and T-370 … T-384 but T-380 —
-controls specified for SAML routes and stores that do not exist yet. The rest of this section is the same
+or gaps on the SDK and distribution side. The rest of this section is the same
 list read as a checklist — what to do about each, grouped by who does it.
 
 **Platform & operations**

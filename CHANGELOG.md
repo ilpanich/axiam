@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SAML 2.0 identity provider: single logout (T23.2.4, G-2, D-37 … D-39).**
+  `GET`/`POST /saml/v2/{tenant_id}/slo` (HTTP-Redirect and HTTP-POST, a
+  `LogoutRequest` or a `LogoutResponse`) and the IdP-initiated trigger
+  `GET /saml/v2/{tenant_id}/sso/logout`, behind `saml`, on the D-20 `404`, with
+  the `end_session_per_min` preset in the buckets `saml_idp_slo` and
+  `saml_idp_sso_logout`. **Every message from an SP is signed by its registered
+  certificate**: the Redirect binding over the exact query octets (RSA-SHA-2
+  only), the POST binding as the root's one enveloped signature verified on that
+  node (SHA-1 refused); `verify_signed_xml` is never called; an SP with no
+  certificate cannot initiate, and its `LogoutResponse` only advances the chain.
+  A verified request ends **whole AXIAM sessions** — the ones the SP participates
+  in, by (tenant, SP, `SessionIndex`) and then the `NameID` value and format, or
+  by `NameID` when it names no index — through OIDC back-channel logout and then
+  `AuthService::logout`, so `GET /oauth2/revocations` shows them; no match is
+  `Success`. The other SPs of those sessions are then told, one at a time
+  through the browser, a signed `LogoutRequest` on their registered binding (a
+  **detached** query signature on Redirect, so no XML signature exists to harvest;
+  an enveloped one on POST, re-verified, through the one auto-post page); each
+  answer is consumed once on the X6 arbiter and only from the SP the request went
+  to; at most 32 SPs; the run ends with a signed `LogoutResponse` (`Success`, or
+  `PartialLogout` when an SP has no endpoint, answered unsigned or not `Success`,
+  or the cap was hit) to the initiator. AXIAM signs nothing for an unverified
+  request. Every answer to a verified message clears every OP-cookie copy and the
+  API cookies; `/slo` never reads the OP cookie. The trigger answers `403` to
+  `Sec-Fetch-Site: cross-site`. Audit `saml_idp.logout` (never a `NameID`). The
+  IdP metadata now advertises `SingleLogoutService` for both bindings. Schema
+  **v76**: `saml_sp_session` (the participant record) and `saml_logout_run` (the
+  replay guard and the chain); both are deleted with their tenant, their SP and
+  by both erasure paths, swept by the cleanup scheduler and listed on
+  `/health/jobs`. Threat model **2.26.0**: **T-366, T-370 … T-379, T-381 … T-384
+  and T-312 Mitigated**, each citing its tests (369 mitigated, 15 open); T-380
+  stays open, accepted. No contract or OpenAPI change: these are browser routes.
+
 - **SAML IdP registry and credential routes, IdP metadata and SP metadata import
   (T23.2.5, G-2, contract §29).** Eleven routes under
   `/api/v1/tenants/{tenant_id}/saml`, OpenAPI tag `saml`, **compiled into every
@@ -604,6 +637,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The SAML assertion's `SessionIndex` is a per-SP random token, not the AXIAM
+  session id (T23.2.4, D-37, closes T-312).** SPs that compared notes could
+  correlate one person's sessions through a `SessionIndex` that was the same at
+  every SP of a sign-on. The SSO endpoint's second leg now records — or reads
+  back — a `saml_sp_session` row (the `NameID` the SP is given and 32 CSPRNG
+  bytes, base64url) after the handle is consumed and **before anything is
+  signed**, and the assertion carries that index; a second sign-on to the same SP
+  in one session reuses it. A failed write is a `Responder` failure with no
+  assertion. `SsoIssuance` gains `session_index` and `IssuedResponse.session_index`
+  is a string. An SP that stored the session id as a `SessionIndex` sees a new
+  value on its next sign-on.
+
 - **An email `NameID` is issued only for an address something vouches for
   (T23.2.3, D-25, T-313).** The SAML IdP asserts a user's email — as the
   `NameID` of an `emailAddress` service provider, or as an `email` attribute —
@@ -716,6 +761,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the 16 KiB body limit on `PUT /oauth2/register/{client_id}`.
 
 ### Security
+
+- **Single logout cannot be forged, replayed or aimed at another session
+  (T23.2.4, closes T-366, T-370 … T-379, T-381 … T-384; T-312).** The tenant's
+  signing key signs a logout message only for a session whose holder ended it or
+  for a verified SP request — never for anyone else — and on the Redirect
+  binding with a detached query signature, so no `ds:Signature` over a logout
+  message exists to be lifted into an assertion (T-316's constraint, T-373).
+  Every SP message is verified per node with the D-23 placement rule or over the
+  exact query octets; a replayed request `ID`, a foreign or replayed
+  `InResponseTo`, a wrong `Destination`, a stale `IssueInstant`, an `EncryptedID`
+  and more than 32 `SessionIndex` values are refused; an SP reaches only the
+  sessions it took part in, under the `NameID` it was given, in its own tenant.
+  Threat model 2.26.0 (369 mitigated, 15 open); the tests each mitigation cites
+  are in `saml_idp_slo_test.rs`, `saml_slo_test.rs` and `saml_idp_sso_test.rs`.
 
 - **Directory management: the address guard's answer to a host name no longer
   maps internal DNS (F4 P23W3-04, adds T-356).** A `PUT` or `PATCH` on

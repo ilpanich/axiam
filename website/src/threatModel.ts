@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.25.0",
+ "version": "2.26.0",
  "diagramCount": 9,
  "total": 384,
- "open": 31,
- "mitigated": 353,
+ "open": 15,
+ "mitigated": 369,
  "diagrams": [
   {
    "id": 0,
@@ -4232,9 +4232,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Service providers link a user across SPs, or back to the AXIAM account",
        "type": "Information disclosure",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "A `NameID` that is the same at every SP, or derivable from the user id, lets SPs that compare notes — or an attacker who breaches two of them — follow a person across services the person kept apart, and hands every SP an AXIAM internal identifier.",
-       "mitigation": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. Open because `SessionIndex` is still the AXIAM session id at every SP of one sign-on. Decided (T23.2.8, 2026-10-04, D-37): a per-SP random `SessionIndex` recorded in `saml_sp_session` before signing and mapped back by the SLO endpoint by (tenant, SP, index) and then `NameID`, so SLO and the revocation feed still revoke the same session. Closes when T23.2.4 lands; the residual then is `AuthnInstant`, the session's authentication time at every SP, which colluding SPs can compare (T-314 forbids misstating it)."
+       "mitigation": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. **Built (T23.2.4, 2026-10-04).** D-37: a per-SP random `SessionIndex` (32 CSPRNG bytes, base64url) recorded in `saml_sp_session` before signing and mapped back by the SLO endpoint by (tenant, SP, index) and then `NameID`, so SLO and the revocation feed still revoke the same session; the session id no longer reaches the XML. Tests (T23.2.4): `saml_idp_sso_test.rs::the_assertion_carries_a_per_sp_index_that_is_not_the_session_id` (one session, two SPs: two indexes, neither the session id, the session id nowhere in either assertion; a second sign-on to one SP reuses its index), `saml_idp::tests::the_authn_statement_carries_the_per_sp_index_instant_and_class` and, in `axiam-db`, `saml_slo_test.rs::an_index_resolves_for_its_own_sp_and_tenant_only`. Residual: `AuthnInstant` is the session's authentication time at every SP, which colluding SPs can compare (T-314 forbids misstating it)."
       },
       {
        "number": 313,
@@ -4273,7 +4273,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The tenant's key signs one shape of document only: a response carrying exactly one assertion (T-311). Failure responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`, `RequestDenied`, `InvalidNameIDPolicy`) carry no assertion and are never signed, which SAML Profiles §4.1.3.5 permits, and they have no status message or detail. Tests: `failure_responses_are_status_only_unsigned_and_echo_what_can_be_echoed`, `axiam_own_sp_refuses_a_failure_response`. Constraint for T23.2.4: a signed `LogoutRequest` or `LogoutResponse` is exactly such a document, so SLO signing needs its own decision rather than reusing this key by default. Decided for SLO (T23.2.8, 2026-10-04, D-38): AXIAM signs a logout message only for a session holder or in reply to a verified SP request, detached over the query on HTTP-Redirect so no XML signature exists to harvest; recorded as T-373."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "2a2a1983-07c2-5847-a3d0-7de61be737f2",
@@ -4778,12 +4778,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A registry row is read or written across tenants, or outlives the SP it described",
        "type": "Tampering",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The `saml_service_provider` table holds every tenant's SP registrations side by side. A query that lost its tenant key would let one tenant's SSO request match another tenant's SP; a delete that left the SP's session records behind would let a stale participation drive a logout.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** Every repository method is tenant-keyed and `entity_id` is unique per tenant (T23.2.1, Mitigated at the repository); rows go with their tenant in the tenant-delete transaction. D-37 and §29.3 rule 5: deleting an SP deletes its `saml_sp_session` rows in the same transaction. The registry holds no secret (certificates are public), so a read discloses configuration, not credentials. Closes when T23.2.5 lands with the delete cascade test (T23.2.4 adds the table it cascades to)."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** Every repository method is tenant-keyed and `entity_id` is unique per tenant (T23.2.1, Mitigated at the repository); rows go with their tenant in the tenant-delete transaction. D-37 and §29.3 rule 5: deleting an SP deletes its pending `AuthnRequest`s and its `saml_sp_session` rows in the same transaction (`SP_DELETE_CASCADE`), so a stale participation can never drive a logout or keep a `NameID` for an SP that no longer exists; the registry holds no secret (certificates are public). Tests (T23.2.4): in `axiam-db`, `saml_service_provider_test.rs::deleting_an_sp_removes_what_the_datastore_holds_for_it` (the pending requests and the participant rows of the deleted SP are gone, another SP's stay, a refused delete cascades nothing), `saml_slo_test.rs::deleting_an_sp_removes_its_participant_rows_and_only_its_own` and `::deleting_a_tenant_removes_both_tables_rows_and_only_its_own`; over HTTP, `saml_admin_test.rs::deleting_an_sp_over_http_removes_its_pending_requests_and_only_its_own`; the repository tenant-isolation tests of T23.2.1 in `saml_service_provider_test.rs`."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "e7c6d16d-b27f-5884-b98a-d3b974004b47",
@@ -4852,81 +4852,81 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A forged LogoutRequest ends another user's sessions",
        "type": "Spoofing",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Whoever can make a browser deliver a `LogoutRequest` naming a user's `NameID` and `SessionIndex` could sign that user out everywhere; done across a tenant, it is a mass sign-out.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38: every `LogoutRequest` must be signed by the issuing SP's registered certificate — HTTP-Redirect over the exact octets received, RSA-SHA-2 only; HTTP-POST as the one enveloped signature of the root, verified on that node by xmlsec with SHA-1 refused; `verify_signed_xml` is never used — and an SP without a certificate cannot start a logout; `Destination` must be the tenant's SLO URL and `IssueInstant` fresh. D-37: the request resolves only sessions recorded for that SP whose `NameID` matches. Closes when T23.2.4 lands with tests for an unsigned, a wrongly signed, a misplaced-signature, a SHA-1, a wrong-`Destination` and a stale request, each ending nothing."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38: every `LogoutRequest` must be signed by the issuing SP's registered certificate — HTTP-Redirect over the exact octets received, RSA-SHA-2 only; HTTP-POST as the one enveloped signature of the root, verified on that node by xmlsec with SHA-1 refused; `verify_signed_xml` is never used — and an SP without a certificate cannot start a logout; `Destination` must be present and byte-equal to the tenant's SLO URL, `IssueInstant` fresh, `NotOnOrAfter` unexpired. A disabled SP's key ends nothing. D-37: the request resolves only sessions recorded for that SP whose `NameID` matches. Anything refused gets an error page that posts nowhere, sets no cookie and signs nothing. Tests (T23.2.4), over HTTP in `saml_idp_slo_test.rs`: `unsigned_wrong_key_tampered_and_sha1_requests_are_refused_on_both_bindings`, `a_misplaced_or_wrong_binding_signature_is_refused` (inside `Extensions`, inside the `NameID`, beside a second signature, a half signature, an enveloped signature on the Redirect binding), `field_level_refusals_hold_on_both_bindings` (wrong and missing `Destination`, stale and future `IssueInstant`, expired `NotOnOrAfter`, `EncryptedID`, `BaseID`, 33 `SessionIndex` values, an empty `NameID`) and `an_sp_without_a_certificate_a_disabled_sp_and_an_unknown_issuer_cannot_initiate`; in `axiam-federation`, `saml_idp::logout::tests::a_signature_anywhere_but_the_roots_own_child_is_refused` and `::a_redirect_query_carries_one_message_and_is_signed_over_that_parameter`. Every refusal test asserts the session, the participant row and the run table are untouched."
       },
       {
        "number": 371,
        "title": "A captured logout message is replayed",
        "type": "Spoofing",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Logout messages travel through the browser and can be captured. A replayed `LogoutRequest` could end a session created after it; a replayed `LogoutResponse` could advance or confuse a logout chain.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38: a `LogoutRequest` `ID` is single-use per SP (`replay_key` `{sp_id}:{ID}`, UNIQUE per tenant) for longer than the five-minute `IssueInstant` window; D-39: each outbound request `ID` is 256 random bits, stored as a digest and consumed once on the X6 arbiter when its response arrives, from the SP it was sent to. Closes when T23.2.4 lands with replay tests for both message kinds."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38: a `LogoutRequest` `ID` is single-use per SP — `replay_key` `{sp_id}:{ID}`, UNIQUE per tenant in `saml_logout_run`, claimed before anything is resolved or revoked and kept after the run finishes, for the row's ten minutes, longer than the five-minute `IssueInstant` window; D-39: each outbound request `ID` is 256 random bits, stored as a digest and consumed once on the X6 two-layer arbiter when its response arrives, from the SP it was sent to. Tests (T23.2.4): `saml_idp_slo_test.rs::a_replayed_request_id_is_refused_and_ends_no_later_session` (both bindings; the replay of a request naming no index does not end a session created after it) and `::a_replayed_or_foreign_in_response_to_is_refused` (a response from the wrong SP, an unknown id, a replay after the chain moved on and after it ended); in `axiam-db`, `saml_slo_test.rs::a_request_id_is_single_use_per_sp_even_after_the_run_finished`, `::an_outbound_request_is_consumed_once_by_the_sp_it_went_to` and `::concurrent_responses_yield_exactly_one_winner` (100 rounds of 8 racers on surrealkv)."
       },
       {
        "number": 372,
        "title": "XML external entities, entity expansion or a decompression bomb in a logout message",
        "type": "Tampering",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The SLO endpoint parses SP-supplied XML, DEFLATE-compressed on the Redirect binding, before it knows who sent it.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38: T23.2.3's receiver, unchanged — 96 KiB encoded and 64 KiB decoded caps, inflating stopped one byte past the cap, any markup declaration and any non-UTF-8 encoding refused on the bytes, libxml without recovery or network — before any lookup. Closes when T23.2.4 lands with the receiver's refusal tests run against `/slo`."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38: T23.2.3's receiver, unchanged — 96 KiB encoded and 64 KiB decoded caps, inflating stopped one byte past the cap, any markup declaration and any non-UTF-8 encoding refused on the bytes, libxml without recovery or network — before any lookup; the tenant check and the D-20 `404` run before the body is read. Tests (T23.2.4): `saml_idp_slo_test.rs::xxe_and_a_decompression_bomb_are_refused_before_any_lookup` (an external entity on both bindings and a 16 MiB bomb on the Redirect binding, each refused with no run claimed and nothing touched); in `axiam-federation`, `saml_idp::logout::tests::a_dtd_or_entity_is_refused_before_parsing`, plus the receiver's own refusal tests (`saml_idp::request::tests`)."
       },
       {
        "number": 373,
        "title": "A logout message signed by the tenant's key is harvested as a signature-wrapping gadget",
        "type": "Spoofing",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "T-316's constraint: an SP verifier that checks only the first signature, or binds a reference by name, can be fed any document the tenant's key signed, placed ahead of a forged assertion. Signed logout messages are such documents, and SLO exists to produce them.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38: AXIAM signs a `LogoutRequest` only for a session its holder ended or a verified SP request ended, and a `LogoutResponse` only in reply to a verified request — never for an unauthenticated party, so obtaining one needs a session (whose holder can already obtain signed responses for their own account) or an SP's key. On HTTP-Redirect the signature is the detached query signature, so no XML signature exists to harvest, and import prefers Redirect (D-41); on HTTP-POST it is enveloped like the assertion's (root child, one reference to the root `ID`) and re-verified before sending. AXIAM's own SP verifier refuses misplaced signatures (D-23). Closes when T23.2.4 lands with tests that no logout message is signed for an unverified request and that a Redirect-binding message carries no `ds:Signature`."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38: AXIAM signs a `LogoutRequest` only for a session its holder ended or a verified SP request ended, and a `LogoutResponse` only in reply to a verified request — never for an unauthenticated party, so obtaining one needs a session (whose holder can already obtain signed responses for their own account) or an SP's key. On HTTP-Redirect the signature is the detached query signature, so no XML signature exists to harvest; on HTTP-POST it is enveloped like the assertion's (root child, one reference to the root `ID`) and re-verified before sending. AXIAM's own SP verifier refuses misplaced signatures (D-23). Tests (T23.2.4): `saml_idp_slo_test.rs::the_other_sps_receive_signed_logout_requests_in_sequence_and_a_partial_run_ends_in_partial_logout` (every Redirect-bound message is verified against the tenant credential's certificate and carries no `Signature` in its document; every POST-bound one carries exactly one enveloped signature that verifies) and `::a_full_run_ends_in_success_to_the_initiator`; the refusal tests of T-370 and `::an_sp_without_a_certificate_a_disabled_sp_and_an_unknown_issuer_cannot_initiate`, whose `assert_refused` checks that an unverified message gets no redirect, no form, no cookie and so nothing signed; in `axiam-federation`, `saml_idp::logout::tests::a_redirect_logout_request_has_a_detached_signature_and_no_xml_signature`, `::a_post_logout_request_is_enveloped_and_verifies_under_the_roots_own_signature`, `::a_logout_response_is_signed_on_both_bindings_and_reports_success_or_partial` and `::nothing_is_signed_for_an_input_that_is_not_in_order`."
       },
       {
        "number": 374,
        "title": "A flood or an endless chain exhausts the SLO endpoint",
        "type": "Denial of service",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "`/slo` and the logout trigger are unauthenticated, parse XML and verify signatures; a logout chain could be driven through many SPs.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38/D-39: the tenant check and D-20 `404` before the body is read; per-route governors with the `end_session_per_min` preset and the buckets `saml_idp_slo` and `saml_idp_sso_logout`; the receiver's size caps; at most 32 `SessionIndex` elements per request and 32 SPs per chain, then `PartialLogout`; runs expire after ten minutes. Closes when T23.2.4 lands with the limiters wired and the caps tested."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38/D-39: the tenant check and D-20 `404` before the body is read; per-route governors with the `end_session_per_min` preset and the buckets `saml_idp_slo` and `saml_idp_sso_logout`; the receiver's size caps; at most 32 `SessionIndex` elements per request and 32 SPs per chain, then `PartialLogout`; runs expire after ten minutes and are swept. Tests (T23.2.4): `saml_idp_slo_test.rs::the_slo_route_is_rate_limited` and `::the_logout_trigger_is_rate_limited_in_a_bucket_of_its_own` (each bucket at a limit of 1, and `/slo` keeps its own allowance), `::a_run_is_capped_at_32_service_providers_and_is_partial_past_it` (33 participants: 32 taken, the run partial from the start), `::field_level_refusals_hold_on_both_bindings` (33 `SessionIndex` values refused, 32 served) and `::slo_and_the_logout_trigger_answer_an_indistinguishable_404_when_saml_is_off`; in `axiam-federation`, `saml_idp::logout::tests::at_most_32_session_indexes_are_read`; in `axiam-db`, `saml_slo_test.rs::expired_runs_are_swept_and_a_runs_user_rows_are_erased`."
       },
       {
        "number": 375,
        "title": "The SLO endpoint delivers messages or the browser to a location an SP never registered",
        "type": "Tampering",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "A logout endpoint that took its destination from a message — a response location, a `RelayState`, a post-logout parameter — would be an open redirector and could post signed logout messages to an attacker.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-38/D-39: outbound messages go only to the SP's registered `slo_url` on its registered `slo_binding`, the final response only to the initiating SP's registered `slo_url`; an SP's `RelayState` (≤ 80 bytes) is echoed to that SP only; the IdP-initiated trigger ends on AXIAM's own page with no redirect parameter; the POST binding renders through the D-27 auto-post page (`form-action` = the `slo_url` origin), so no second CSP setter appears. Closes when T23.2.4 lands with tests that a request naming another location is answered at the registered one."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38/D-39: outbound messages go only to the SP's registered `slo_url` on its registered `slo_binding`, the final response only to the initiating SP's registered `slo_url`; an SP's `RelayState` (≤ 80 bytes) is echoed to that SP only; the IdP-initiated trigger ends on AXIAM's own page with no redirect parameter; the POST binding renders through the D-27 auto-post page (`form-action` = the `slo_url` origin), so no second setter of a content-security policy appears. Tests (T23.2.4): `saml_idp_slo_test.rs::a_message_naming_another_location_is_answered_at_the_registered_one` (hostile extensions and a URL as `RelayState`, both bindings, the form's policy naming only the registered origin) and `::the_trigger_reads_no_destination_from_its_query`, and the destination assertions of the propagation tests; in `axiam-api-rest`, `middleware::security_headers::tests::exactly_one_handler_sets_its_own_policy` (still exactly one) and `handlers::saml_idp::tests::the_auto_post_policy_is_narrower_than_the_global_one`."
       },
       {
        "number": 376,
        "title": "A logout cannot be traced to the SP, the sessions and the outcome",
        "type": "Repudiation",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "A user disputing that they were signed out, or an administrator investigating a mass sign-out, needs to know which SP asked, which sessions ended and which SPs were told.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-39: an audit row `saml_idp.logout` per logout (initiator, SP, outcome, sessions ended, SPs told, partial), never a `NameID`; session revocation itself is recorded as every logout is. Closes when T23.2.4 lands with an audit test."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-39: an audit row `saml_idp.logout` per logout phase — `sessions_ended` when the sessions are revoked (initiator, SP, sessions ended, SPs queued) and `completed` when the chain ends (SPs told, partial, outcome) — never a `NameID`, a `SessionIndex` or a session id; session revocation itself is recorded as every logout is. Tests (T23.2.4): `saml_idp_slo_test.rs::the_other_sps_receive_signed_logout_requests_in_sequence_and_a_partial_run_ends_in_partial_logout` (both rows, their phases and counts, and none of the principals' `NameID`s or indexes in either), `::a_full_run_ends_in_success_to_the_initiator` (outcome `success`) and `::the_idp_initiated_trigger_revokes_clears_the_cookies_and_propagates` (initiator `idp`)."
       },
       {
        "number": 378,
        "title": "A third-party page signs the visitor out of AXIAM and every SP",
        "type": "Spoofing",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The IdP-initiated trigger acts on the browser's own OP cookie; a cross-site page that could navigate a visitor to it would end the visitor's session and their SP sessions — a nuisance, at scale a denial of service.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-39: `GET /saml/v2/{t}/sso/logout` is refused with `403` for `Sec-Fetch-Site: cross-site` (D-26's rule) and acts only on the session the browser's own OP cookie names, resolved through the tenant-keyed lookup; `/slo` itself acts only on signed SP requests. Residual as D-26: a browser that sends no fetch metadata is admitted. Closes when T23.2.4 lands with the cross-site refusal test."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-39: `GET /saml/v2/{t}/sso/logout` is refused with `403` for `Sec-Fetch-Site: cross-site` (D-26's rule) and acts only on the session the browser's own OP cookie names, resolved through the tenant-keyed lookup; `/slo` itself acts only on signed SP requests and never reads the cookie. Residual as D-26: a browser that sends no fetch metadata is admitted. Tests (T23.2.4): `saml_idp_slo_test.rs::the_trigger_refuses_cross_site_and_resolves_the_cookie_in_its_own_tenant_only` (the cross-site trigger is refused with nothing ended and nothing cleared; with no cookie only the page is shown; another tenant's cookie names nothing here), `::the_idp_initiated_trigger_revokes_clears_the_cookies_and_propagates` and `::slo_never_reads_the_op_cookie`."
       },
       {
        "number": 379,
        "title": "An SP's logout reaches sessions it never took part in, or another tenant's",
        "type": "Elevation of privilege",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "SLO ends whole sessions. If an SP could name any session — by a guessed index, by another SP's index, by a `NameID` alone or across tenants — one compromised SP could sign anyone out of everything.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-37/D-39: sessions are resolved by (path tenant, the verified issuer's SP, `SessionIndex`) in `saml_sp_session`, and the row's `NameID` value and format must equal the request's; with no index, only the sessions recorded for that SP and that `NameID`. Indexes are 256-bit random per SP. Closes when T23.2.4 lands with tests for another SP's index, a mismatched `NameID` and another tenant's path."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-37/D-39: sessions are resolved by (path tenant, the verified issuer's SP, `SessionIndex`) in `saml_sp_session`, and the row's `NameID` value and format must equal the request's; with no index, only the sessions recorded for that SP and that `NameID`. Indexes are 256-bit random per SP. Tests (T23.2.4): `saml_idp_slo_test.rs::only_the_sessions_the_sp_participates_in_end_and_only_for_the_right_name_id` (another SP's index, a mismatched `NameID` value, a mismatched and an absent format, an unknown principal — each answered `Success`, each ending nothing; then the right request ends only its own session), `::a_request_without_an_index_ends_every_session_the_sp_holds_for_that_name_id` and `::another_tenants_path_ends_nothing` (an SP unknown to the other tenant is refused; one registered there with the same entity id and certificate finds no row under that tenant); in `axiam-db`, `saml_slo_test.rs::an_index_resolves_for_its_own_sp_and_tenant_only` and `::list_for_sp_name_id_is_scoped_to_the_sp_and_the_name_id`."
       },
       {
        "number": 380,
@@ -4938,7 +4938,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Accepted design trade-off (D-38, D-39). SAML has no back channel through the browser; the SOAP binding that would provide one is not implemented. What bounds it: SLO revokes the AXIAM session first, so a broken chain never keeps an AXIAM session alive; assertions are valid for five minutes and single-use; a revoked session or a suspended account obtains no new assertion (T-328), so the SP session cannot be renewed through AXIAM; and the SP's own session lifetime is the SP administrator's to set. A later decision may add SOAP back-channel logout or drive a chain from `end_session`."
       }
      ],
-     "open": 10
+     "open": 1
     },
     {
      "id": "a2a0c721-f0d1-5524-a648-bf8002e851f5",
@@ -4960,30 +4960,30 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "The participant table links a person's sessions to the SPs they use",
        "type": "Information disclosure",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "`saml_sp_session` records, per live session, which SPs the user signed in to and the `NameID` each received — an email address at an `emailAddress` SP. A dump, or rows kept after the session or the person is gone, would disclose that history.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-37: rows are tenant-scoped, deleted when SLO revokes their session, swept once the session has expired or is gone, deleted with their SP and their tenant, and removed by both erasure paths by `user_id`; they hold no credential (a `SessionIndex` alone ends nothing, since a logout request must be signed). Closes when T23.2.4 lands with the sweep, cascade and erasure tests."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-37: rows are tenant-scoped, deleted when the logout chain that revoked their session ends, swept once the session has expired or is gone (a logout that just ended it keeps them for one run lifetime), deleted with their SP and their tenant, and removed by both erasure paths by `user_id`; they hold no credential (a `SessionIndex` alone ends nothing, since a logout request must be signed). Tests (T23.2.4), in `axiam-db`: `saml_slo_test.rs::the_sweeper_removes_expired_rows_and_rows_of_sessions_that_are_gone`, `::deleting_a_tenant_removes_both_tables_rows_and_only_its_own`, `::deleting_an_sp_removes_its_participant_rows_and_only_its_own`, `::both_erasure_paths_remove_the_persons_rows` (the administrator's `delete` and the Art. 17 `anonymize_user`), `::rows_are_deleted_by_session_and_by_user_and_only_in_their_tenant` and the schema test `v76_stores_digests_and_record_ids_only_where_it_must` (no credential column); over HTTP, `saml_idp_slo_test.rs::an_sp_initiated_logout_on_the_redirect_binding_revokes_the_session_and_the_feed_shows_it` (no row left when the chain ends)."
       },
       {
        "number": 382,
        "title": "An assertion is issued whose session SLO cannot find",
        "type": "Tampering",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "If the SSO leg signed before recording which SP got which `SessionIndex`, a failed or lost write would leave an SP holding a session no logout can reach.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-37: the continue leg writes (or reads back) the participant row after consuming the handle and before signing; the issuer takes its `SessionIndex` from the row; a failed write answers `Responder` and issues nothing. Closes when T23.2.4 lands with a test that a failed participant write yields no assertion."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-37: the continue leg writes (or reads back) the participant row after consuming the handle and before signing; the issuer takes its `SessionIndex` from the row and the endpoint compares what was issued with what was recorded; a failed write answers `Responder` and issues nothing. Tests (T23.2.4): `saml_idp_sso_test.rs::a_failed_participant_write_yields_no_assertion` (the datastore refuses every participant write: a failure response with no assertion and no row) and `::the_assertion_carries_a_per_sp_index_that_is_not_the_session_id`; in `axiam-federation`, `saml_idp::tests::the_authn_statement_carries_the_per_sp_index_instant_and_class`."
       },
       {
        "number": 384,
        "title": "Participant and logout-chain rows accumulate without bound",
        "type": "Denial of service",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Every sign-on to an SP writes a row and every logout a run; without expiry the tables grow with traffic.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-37/D-39: one participant row per (session, SP), refreshed rather than duplicated; runs expire after ten minutes; both tables are swept by the cleanup scheduler and reported on `/health/jobs`. Closes when T23.2.4 lands with the sweep tests."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-37/D-39: one participant row per (session, SP), refreshed rather than duplicated; runs expire after ten minutes; both tables are swept by the cleanup scheduler and reported on `/health/jobs` as `saml_sp_session` and `saml_logout_run`. Tests (T23.2.4): in `axiam-db`, `saml_slo_test.rs::the_sweeper_removes_expired_rows_and_rows_of_sessions_that_are_gone`, `::expired_runs_are_swept_and_a_runs_user_rows_are_erased`, `::a_second_sign_on_to_one_sp_in_one_session_keeps_the_first_index` and `::concurrent_records_for_one_session_and_sp_agree_on_one_index`; over HTTP, `saml_idp_sso_test.rs::the_assertion_carries_a_per_sp_index_that_is_not_the_session_id` (a second sign-on adds no row); in `axiam-server`, `job_health::tests::the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered`."
       }
      ],
-     "open": 3
+     "open": 0
     },
     {
      "id": "ba9784ec-399d-526d-8530-f9541a09249a",
@@ -5005,12 +5005,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A database read yields a usable logout-chain identifier",
        "type": "Information disclosure",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "A logout run names the next SP's outbound request. If the store kept the raw request `ID`, someone who could read it could forge the matching `LogoutResponse` and steer the chain.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** D-39: the outbound request `ID` is stored as its SHA-256 digest, consumed once, and accepted only from the SP it was sent to (with its signature when it registered a certificate); runs are tenant-scoped, expire after ten minutes and go with their tenant. A forged response could at most continue a logout already under way. Closes when T23.2.4 lands with a test that the table holds no raw `ID`."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-39: the outbound request `ID` is stored as its SHA-256 digest, consumed once, and accepted only from the SP it was sent to (with its signature when it registered a certificate); runs are tenant-scoped, expire after ten minutes and go with their tenant. A forged response could at most continue a logout already under way. Tests (T23.2.4): in `axiam-db`, `saml_slo_test.rs::the_run_holds_a_digest_of_the_outbound_id_and_no_name_id` and the schema test `v76_stores_digests_and_record_ids_only_where_it_must`; over HTTP in `saml_idp_slo_test.rs`, `the_other_sps_receive_signed_logout_requests_in_sequence_and_a_partial_run_ends_in_partial_logout` (the stored run holds the digest and the serialised table never contains the `ID`), `::a_replayed_or_foreign_in_response_to_is_refused` (only the SP the request went to can consume it) and `::non_success_answers_make_the_run_partial_and_unverified_ones_are_refused_unconsumed` (an unsigned or wrong-key answer from an SP with a certificate is refused and consumes nothing)."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "84aeaa23-2930-5ea3-8269-d1e7fd183781",
@@ -5847,12 +5847,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Logout messages, NameIDs and RelayState are recorded in request logs",
        "type": "Information disclosure",
        "severity": "Low",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "On the HTTP-Redirect binding a `LogoutRequest` — with its `NameID`, possibly an email address — and `RelayState` travel in the query string, which request tracing records.",
-       "mitigation": "**Specified, not yet built (T23.2.8, 2026-10-04).** The W3 F4 request tracer (`RedactingRootSpanBuilder`) already redacts every query value not on `KEPT_QUERY_PARAMETERS`; D-38 adds no SLO parameter to that list, and the handlers log no message, `NameID`, `RelayState` or cookie. Closes when T23.2.4 lands with a test that `/slo`'s recorded target carries `[redacted]` for `SAMLRequest`, `SAMLResponse`, `RelayState`, `SigAlg` and `Signature`."
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** The W3 F4 request tracer (`RedactingRootSpanBuilder`) redacts every query value not on `KEPT_QUERY_PARAMETERS`; D-38 adds no SLO parameter to that list (`SigAlg`, an algorithm URI, was already a kept structural parameter), and the handlers log no message, `NameID`, `RelayState` or cookie. Tests (T23.2.4): `saml_idp_slo_test.rs::the_request_log_records_no_message_parameter_of_slo` (the real `/slo` route through the tracer: `SAMLRequest`, `SAMLResponse`, `RelayState` and `Signature` are recorded as `[redacted]` and no value reaches the log) and, in `axiam-api-rest`, `middleware::request_span::tests::the_single_logout_parameters_are_redacted_and_none_was_added_to_the_kept_list`."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "4eb779bc-f741-50dc-898c-4cd860b2cab4",
@@ -6023,7 +6023,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 125,
-   "open": 19,
+   "open": 3,
    "bySeverity": {
     "High": 44,
     "Medium": 51,

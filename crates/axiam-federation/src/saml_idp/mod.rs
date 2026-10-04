@@ -63,9 +63,11 @@
 //! An SP registered with `encrypt_assertions` is **refused** with `Responder`
 //! ([`SamlIdpError::EncryptionUnsupported`]) — never silently sent plaintext.
 
+pub mod idp_metadata;
 mod pairwise;
 pub mod request;
 mod sign;
+pub mod sp_metadata;
 pub mod xml;
 
 #[cfg(test)]
@@ -121,43 +123,11 @@ pub const AUTHN_CONTEXT_UNSPECIFIED: &str = "urn:oasis:names:tc:SAML:2.0:ac:clas
 // The IdP's identifiers
 // ---------------------------------------------------------------------------
 
-/// The tenant's IdP entity id: `{public_base_url}/saml/v2/{tenant_id}/metadata`.
-///
-/// **The one definition.** The `Issuer` of every response and assertion, the
-/// metadata document's `entityID` (T23.2.5) and anything else that names the
-/// IdP must come from here, so they cannot disagree. `public_base_url` is the
-/// deployment's public root, `AuthConfig::root_issuer()` — the value the OIDC
-/// issuer and the T21.6 per-tenant issuers are built on — with or without a
-/// trailing slash. `tenant_id` is the tenant **of the request path**, never one
-/// read from a stored row.
-///
-/// The entity id is the metadata URL itself, the common convention that lets an
-/// SP administrator paste one URL and fetch the metadata from it.
-#[must_use]
-pub fn idp_entity_id(public_base_url: &str, tenant_id: Uuid) -> String {
-    idp_endpoint(public_base_url, tenant_id, "metadata")
-}
-
-/// The tenant's SSO endpoint, `{public_base_url}/saml/v2/{tenant_id}/sso`, for
-/// the metadata `SingleSignOnService` locations (T23.2.5).
-#[must_use]
-pub fn idp_sso_url(public_base_url: &str, tenant_id: Uuid) -> String {
-    idp_endpoint(public_base_url, tenant_id, "sso")
-}
-
-/// The tenant's SLO endpoint, `{public_base_url}/saml/v2/{tenant_id}/slo`, for
-/// the metadata `SingleLogoutService` locations (T23.2.5).
-#[must_use]
-pub fn idp_slo_url(public_base_url: &str, tenant_id: Uuid) -> String {
-    idp_endpoint(public_base_url, tenant_id, "slo")
-}
-
-fn idp_endpoint(public_base_url: &str, tenant_id: Uuid, leaf: &str) -> String {
-    format!(
-        "{}/saml/v2/{tenant_id}/{leaf}",
-        public_base_url.trim_end_matches('/')
-    )
-}
+// Defined in `crate::saml_idp_urls`, which is **not** behind the `saml` feature,
+// so contract §29's `get_idp` computes the same strings in a build without
+// SAML. Re-exported here, where the issuer, the SSO endpoint and the metadata
+// document have always imported them from.
+pub use crate::saml_idp_urls::{idp_entity_id, idp_slo_url, idp_sso_url};
 
 // ---------------------------------------------------------------------------
 // Status codes and errors

@@ -468,3 +468,235 @@ async fn a_tenant_delete_that_fails_on_the_registry_is_reported_and_removes_noth
     assert!(tenants.get_by_id(tenant).await.is_ok());
     assert_eq!(registry.list(tenant).await.unwrap().len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// T23.2.5: paging with search, the group fence, the delete cascade
+// ---------------------------------------------------------------------------
+
+fn named(entity_id: &str, display_name: &str) -> SamlServiceProviderInput {
+    SamlServiceProviderInput {
+        display_name: display_name.into(),
+        ..minimal(entity_id)
+    }
+}
+
+#[tokio::test]
+async fn list_page_pages_oldest_first_and_counts_matches_not_rows() {
+    use axiam_core::repository::Pagination;
+    let db = setup().await;
+    let repo = repo(&db);
+    let tenant = Uuid::new_v4();
+    let mut ids = Vec::new();
+    for n in 0..5 {
+        ids.push(
+            repo.create(
+                tenant,
+                named(
+                    &format!("https://sp{n}.example.com/m"),
+                    &format!("Alpha {n}"),
+                ),
+            )
+            .await
+            .unwrap()
+            .id,
+        );
+    }
+    let beta = repo
+        .create(tenant, named("https://beta.example.com/m", "Beta Billing"))
+        .await
+        .unwrap();
+    repo.create(
+        Uuid::new_v4(),
+        named("https://other.example.com/m", "Alpha Other"),
+    )
+    .await
+    .unwrap();
+
+    let page = |offset, limit, search: Option<&str>| Pagination {
+        offset,
+        limit,
+        search: search.map(str::to_owned),
+    };
+    let first = repo.list_page(tenant, page(0, 2, None)).await.unwrap();
+    assert_eq!(first.total, 6);
+    assert_eq!((first.offset, first.limit), (0, 2));
+    assert_eq!(
+        first.items.iter().map(|s| s.id).collect::<Vec<_>>(),
+        ids[..2]
+    );
+    let last = repo.list_page(tenant, page(4, 10, None)).await.unwrap();
+    assert_eq!(last.items.len(), 2, "rows 4 and 5 of 6");
+    assert_eq!(last.items[1].id, beta.id);
+
+    // The term narrows BEFORE paging, so `total` counts matches: display name
+    // (case-insensitive), entity id, and the record id.
+    let alpha = repo
+        .list_page(tenant, page(0, 2, Some("  ALPHA ")))
+        .await
+        .unwrap();
+    assert_eq!(alpha.total, 5);
+    assert_eq!(alpha.items.len(), 2);
+    let by_entity = repo
+        .list_page(tenant, page(0, 10, Some("beta.example")))
+        .await
+        .unwrap();
+    assert_eq!(by_entity.total, 1);
+    let by_id = repo
+        .list_page(tenant, page(0, 10, Some(&beta.id.to_string())))
+        .await
+        .unwrap();
+    assert_eq!(
+        by_id.items.iter().map(|s| s.id).collect::<Vec<_>>(),
+        vec![beta.id]
+    );
+    let none = repo
+        .list_page(tenant, page(0, 10, Some("nothing-matches")))
+        .await
+        .unwrap();
+    assert_eq!((none.total, none.items.len()), (0, 0));
+    // Tenant scope: the other tenant's "Alpha Other" is in neither answer.
+    assert!(
+        repo.list_page(Uuid::new_v4(), page(0, 10, None))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn groups_outside_tenant_names_exactly_the_ones_that_are_not_the_tenants() {
+    use axiam_core::models::group::CreateGroup;
+    use axiam_core::repository::GroupRepository;
+    use axiam_db::repository::SurrealGroupRepository;
+    let db = setup().await;
+    let repo = repo(&db);
+    let groups = SurrealGroupRepository::new(db.clone());
+    let tenant = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let mine = groups
+        .create(CreateGroup {
+            tenant_id: tenant,
+            name: "mine".into(),
+            description: String::new(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let theirs = groups
+        .create(CreateGroup {
+            tenant_id: other,
+            name: "theirs".into(),
+            description: String::new(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let missing = Uuid::new_v4();
+
+    assert!(
+        repo.groups_outside_tenant(tenant, &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.groups_outside_tenant(tenant, &[mine, mine])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repo.groups_outside_tenant(tenant, &[mine, theirs, missing, theirs])
+            .await
+            .unwrap(),
+        vec![theirs, missing],
+        "another tenant's group is outside, like one that does not exist; order kept, no repeats"
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_sp_removes_what_the_datastore_holds_for_it() {
+    use axiam_core::models::saml_authn_request::NewPendingSamlRequest;
+    use axiam_core::repository::PendingSamlRequestRepository;
+    use axiam_db::repository::SurrealPendingSamlRequestRepository;
+    let db = setup().await;
+    let sps = repo(&db);
+    let pending = SurrealPendingSamlRequestRepository::new(db.clone());
+    let tenant = Uuid::new_v4();
+    let doomed = sps
+        .create(tenant, minimal("https://doomed.example.com/m"))
+        .await
+        .unwrap();
+    let kept = sps
+        .create(tenant, minimal("https://kept.example.com/m"))
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now();
+    let request = |sp_id: Uuid, request_id: &str| NewPendingSamlRequest {
+        tenant_id: tenant,
+        sp_id,
+        request_id: Some(request_id.into()),
+        acs_url: "https://doomed.example.com/acs".into(),
+        relay_state: None,
+        force_authn: false,
+        is_passive: false,
+        handle_hash: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+        binding_hash: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+        created_at: now,
+        expires_at: now + chrono::Duration::minutes(10),
+    };
+    let doomed_hash = request(doomed.id, "_a");
+    pending.create(doomed_hash.clone()).await.unwrap();
+    pending.create(request(doomed.id, "_b")).await.unwrap();
+    let kept_request = request(kept.id, "_a");
+    pending.create(kept_request.clone()).await.unwrap();
+
+    async fn rows(db: &Surreal<Db>, sp: Uuid) -> usize {
+        let mut result = db
+            .query("SELECT count() AS n FROM saml_authn_request WHERE sp_id = $sp GROUP ALL")
+            .bind(("sp", sp.to_string()))
+            .await
+            .unwrap();
+        use surrealdb_types::SurrealValue;
+        #[derive(Debug, SurrealValue)]
+        struct Count {
+            n: usize,
+        }
+        let counted: Vec<Count> = result.take(0).unwrap();
+        counted.first().map_or(0, |c| c.n)
+    }
+    assert_eq!(rows(&db, doomed.id).await, 2);
+
+    // Another tenant's delete of the id removes nothing at all.
+    assert!(matches!(
+        sps.delete(Uuid::new_v4(), doomed.id).await,
+        Err(AxiamError::NotFound { .. })
+    ));
+    assert_eq!(
+        rows(&db, doomed.id).await,
+        2,
+        "a refused delete cascades nothing"
+    );
+    assert!(sps.get(tenant, doomed.id).await.is_ok());
+
+    sps.delete(tenant, doomed.id).await.unwrap();
+    assert_eq!(
+        rows(&db, doomed.id).await,
+        0,
+        "its pending requests went with it"
+    );
+    assert_eq!(rows(&db, kept.id).await, 1, "another SP's requests did not");
+    assert!(
+        pending
+            .get_pending(tenant, &kept_request.handle_hash)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // T23.2.4 extends `SP_DELETE_CASCADE` with `saml_sp_session` and this test
+    // with the rows of that table.
+}

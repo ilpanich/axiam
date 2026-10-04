@@ -259,7 +259,7 @@ pub fn refuse_markup_declarations(document: &str) -> Result<(), RequestError> {
 /// # Errors
 ///
 /// [`RequestError::Malformed`].
-fn refuse_other_encodings(document: &str) -> Result<(), RequestError> {
+pub fn refuse_other_encodings(document: &str) -> Result<(), RequestError> {
     if document.contains('\0') {
         return Err(RequestError::Malformed);
     }

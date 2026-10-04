@@ -34,6 +34,8 @@ use surrealdb::engine::local::{Db, Mem};
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
 
+mod common;
+
 async fn setup() -> Surreal<Db> {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
@@ -494,4 +496,290 @@ async fn a_tenant_delete_that_fails_on_the_credentials_is_reported_and_removes_n
     assert!(tenants.get_by_id(tenant).await.is_ok());
     assert_eq!(repo.list(tenant).await.unwrap().len(), 1);
     assert_eq!(registry.list(tenant).await.unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// promote (T23.2.5, D-42)
+// ---------------------------------------------------------------------------
+
+/// A credential whose validity window is `[from, to]` around now.
+fn windowed(
+    tenant_id: Uuid,
+    status: SamlIdpCredentialStatus,
+    not_before: chrono::DateTime<Utc>,
+    not_after: chrono::DateTime<Utc>,
+) -> StoreSamlIdpCredential {
+    StoreSamlIdpCredential {
+        not_before,
+        not_after,
+        ..store(tenant_id, status, ciphertext())
+    }
+}
+
+/// The key columns of every row of the tenant, straight from the datastore.
+async fn key_columns(db: &Surreal<Db>, tenant: Uuid) -> Vec<(String, bool, bool)> {
+    #[derive(Debug, SurrealValue)]
+    struct Raw {
+        status: String,
+        encrypted_private_key: Option<surrealdb_types::Bytes>,
+        key_locator: Option<String>,
+    }
+    let mut result = db
+        .query(
+            "SELECT status, encrypted_private_key, key_locator FROM saml_idp_credential \
+             WHERE tenant_id = $t ORDER BY created_at ASC",
+        )
+        .bind(("t", tenant.to_string()))
+        .await
+        .unwrap();
+    let rows: Vec<Raw> = result.take(0).unwrap();
+    rows.into_iter()
+        .map(|r| {
+            (
+                r.status,
+                r.encrypted_private_key.is_some(),
+                r.key_locator.is_some(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn promote_makes_next_active_retires_the_old_active_and_destroys_its_key() {
+    let db = setup().await;
+    let repo = repo(&db);
+    let tenant = Uuid::new_v4();
+    let old = repo
+        .create(store(tenant, SamlIdpCredentialStatus::Active, ciphertext()))
+        .await
+        .unwrap();
+    let next_cipher = ciphertext();
+    let next = repo
+        .create(store(
+            tenant,
+            SamlIdpCredentialStatus::Next,
+            next_cipher.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let promotion = repo.promote(tenant, next.id, Utc::now()).await.unwrap();
+    assert_eq!(promotion.active.id, next.id);
+    assert_eq!(promotion.active.status, SamlIdpCredentialStatus::Active);
+    let retired = promotion.retired.expect("the old active is returned");
+    assert_eq!(retired.id, old.id);
+    assert_eq!(retired.status, SamlIdpCredentialStatus::Retired);
+    assert!(retired.retired_at.is_some());
+    assert!(promotion.active.retired_at.is_none());
+
+    // The signer now finds the promoted credential, with its own key intact.
+    let signer = repo.get_active_sealed(tenant).await.unwrap().unwrap();
+    assert_eq!(signer.credential.id, next.id);
+    assert_eq!(
+        signer.key.ciphertext.as_deref(),
+        Some(next_cipher.as_slice())
+    );
+    // The `next` slot is free again, and the old key is gone from its row.
+    repo.create(store(tenant, SamlIdpCredentialStatus::Next, ciphertext()))
+        .await
+        .expect("the next slot is empty after a promotion");
+    let columns = key_columns(&db, tenant).await;
+    let retired_row = columns
+        .iter()
+        .find(|c| c.0 == "retired")
+        .expect("one retired");
+    assert!(
+        !retired_row.1 && !retired_row.2,
+        "the retired row holds no key material"
+    );
+    assert_eq!(columns.iter().filter(|c| c.0 == "active").count(), 1);
+}
+
+#[tokio::test]
+async fn promote_with_no_active_credential_returns_none_for_retired() {
+    let db = setup().await;
+    let repo = repo(&db);
+    let tenant = Uuid::new_v4();
+    let next = repo
+        .create(store(tenant, SamlIdpCredentialStatus::Next, ciphertext()))
+        .await
+        .unwrap();
+    let promotion = repo.promote(tenant, next.id, Utc::now()).await.unwrap();
+    assert_eq!(promotion.active.id, next.id);
+    assert!(promotion.retired.is_none());
+    assert_eq!(repo.get_active(tenant).await.unwrap().unwrap().id, next.id);
+}
+
+#[tokio::test]
+async fn a_promotion_that_cannot_happen_changes_nothing() {
+    let db = setup().await;
+    let repo = repo(&db);
+    let tenant = Uuid::new_v4();
+    let now = Utc::now();
+    let active = repo
+        .create(store(tenant, SamlIdpCredentialStatus::Active, ciphertext()))
+        .await
+        .unwrap();
+    let retired = {
+        let created = repo
+            .create(windowed(
+                tenant,
+                SamlIdpCredentialStatus::Next,
+                now - Duration::days(1),
+                now + Duration::days(30),
+            ))
+            .await
+            .unwrap();
+        repo.retire(tenant, created.id).await.unwrap()
+    };
+    let expired_next = repo
+        .create(windowed(
+            tenant,
+            SamlIdpCredentialStatus::Next,
+            now - Duration::days(40),
+            now - Duration::days(10),
+        ))
+        .await
+        .unwrap();
+    let before = repo.list(tenant).await.unwrap();
+    let keys_before = key_columns(&db, tenant).await;
+
+    // Not the `next` credential: the active one, a retired one.
+    for id in [active.id, retired.id] {
+        assert!(
+            matches!(
+                repo.promote(tenant, id, now).await,
+                Err(AxiamError::Conflict { .. })
+            ),
+            "only the current next may be promoted"
+        );
+    }
+    // The `next` credential, but outside its window: expired, and not yet valid.
+    assert!(matches!(
+        repo.promote(tenant, expired_next.id, now).await,
+        Err(AxiamError::Conflict { .. })
+    ));
+    assert!(matches!(
+        repo.promote(tenant, expired_next.id, now - Duration::days(60))
+            .await,
+        Err(AxiamError::Conflict { .. })
+    ));
+    // Not this tenant's, and not anyone's.
+    assert!(matches!(
+        repo.promote(Uuid::new_v4(), expired_next.id, now).await,
+        Err(AxiamError::NotFound { .. })
+    ));
+    assert!(matches!(
+        repo.promote(tenant, Uuid::new_v4(), now).await,
+        Err(AxiamError::NotFound { .. })
+    ));
+
+    assert_eq!(repo.list(tenant).await.unwrap(), before, "no row changed");
+    assert_eq!(
+        key_columns(&db, tenant).await,
+        keys_before,
+        "no key was touched"
+    );
+    assert_eq!(
+        repo.get_active(tenant).await.unwrap().unwrap().id,
+        active.id
+    );
+}
+
+#[tokio::test]
+async fn the_window_is_closed_at_not_before_and_open_at_not_after() {
+    let db = setup().await;
+    let repo = repo(&db);
+    let tenant = Uuid::new_v4();
+    let now = Utc::now();
+    let next = repo
+        .create(windowed(
+            tenant,
+            SamlIdpCredentialStatus::Next,
+            now,
+            now + Duration::days(1),
+        ))
+        .await
+        .unwrap();
+    // `not_before <= now`: the instant itself is inside; a moment earlier is not.
+    assert!(matches!(
+        repo.promote(tenant, next.id, next.not_before - Duration::seconds(1))
+            .await,
+        Err(AxiamError::Conflict { .. })
+    ));
+    // `now < not_after`: the last instant is outside.
+    assert!(matches!(
+        repo.promote(tenant, next.id, next.not_after).await,
+        Err(AxiamError::Conflict { .. })
+    ));
+    repo.promote(tenant, next.id, next.not_before)
+        .await
+        .unwrap();
+}
+
+/// Of concurrent promotions of one `next` credential exactly one wins and the
+/// others are told `Conflict` — never two winners, never a state with two
+/// signers or none. On the engine production runs: `kv-mem` aborts contended
+/// attempts and occasionally misses the conflict (`tests/common`).
+#[tokio::test]
+async fn of_concurrent_promotions_exactly_one_wins() {
+    let db = common::serialising_db().await;
+    for round in 0..25 {
+        let tenant = Uuid::new_v4();
+        let repo = SurrealSamlIdpCredentialRepository::new(db.handle());
+        repo.create(store(tenant, SamlIdpCredentialStatus::Active, ciphertext()))
+            .await
+            .unwrap();
+        let next = repo
+            .create(store(tenant, SamlIdpCredentialStatus::Next, ciphertext()))
+            .await
+            .unwrap();
+
+        let racers = (0..4).map(|_| {
+            let repo = SurrealSamlIdpCredentialRepository::new(db.handle());
+            let id = next.id;
+            tokio::spawn(async move { repo.promote(tenant, id, Utc::now()).await })
+        });
+        let outcomes: Vec<_> = futures_join_all(racers).await;
+        let winners = outcomes.iter().filter(|o| o.is_ok()).count();
+        let conflicts = outcomes
+            .iter()
+            .filter(|o| matches!(o, Err(AxiamError::Conflict { .. })))
+            .count();
+        assert_eq!(winners, 1, "round {round}: exactly one promotion wins");
+        assert_eq!(
+            conflicts,
+            3,
+            "round {round}: the rest are told Conflict, got {:?}",
+            outcomes
+                .iter()
+                .filter_map(|o| o.as_ref().err())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
+
+        let all = repo.list(tenant).await.unwrap();
+        let active: Vec<_> = all
+            .iter()
+            .filter(|c| c.status == SamlIdpCredentialStatus::Active)
+            .collect();
+        assert_eq!(active.len(), 1, "round {round}: exactly one signer");
+        assert_eq!(active[0].id, next.id);
+        assert_eq!(
+            all.iter()
+                .filter(|c| c.status == SamlIdpCredentialStatus::Retired)
+                .count(),
+            1
+        );
+    }
+}
+
+/// `futures::future::join_all` without the dependency: await the handles in turn.
+async fn futures_join_all<T>(handles: impl Iterator<Item = tokio::task::JoinHandle<T>>) -> Vec<T> {
+    let handles: Vec<_> = handles.collect();
+    let mut out = Vec::new();
+    for handle in handles {
+        out.push(handle.await.expect("racer panicked"));
+    }
+    out
 }

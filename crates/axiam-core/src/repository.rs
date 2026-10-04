@@ -49,7 +49,10 @@ use crate::models::{
     reactor::{CreateReactor, Reactor, UpdateReactor},
     resource::{CreateResource, Resource, UpdateResource},
     role::{AssignmentScope, CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole},
-    saml_idp_credential::{SamlIdpCredential, SealedSamlIdpCredential, StoreSamlIdpCredential},
+    saml_idp_credential::{
+        SamlIdpCredential, SamlIdpCredentialPromotion, SealedSamlIdpCredential,
+        StoreSamlIdpCredential,
+    },
     saml_sp::{SamlServiceProvider, SamlServiceProviderInput},
     scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
@@ -3281,6 +3284,25 @@ pub trait SamlServiceProviderRepository: Send + Sync {
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<SamlServiceProvider>>> + Send;
 
+    /// One page of the tenant's service providers, oldest first, narrowed by
+    /// [`Pagination::search`] over `display_name`, `entity_id` and the record id
+    /// **before** `offset`/`limit` (`total` counts matches, not rows).
+    fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<SamlServiceProvider>>> + Send;
+
+    /// Which of `groups` are **not** groups of this tenant, in the order given
+    /// and without duplicates. Empty means every one is. The registry's
+    /// `allowed_groups` write-time rule (D-42) asks this; the repository does
+    /// not enforce it on `create`/`update`.
+    fn groups_outside_tenant(
+        &self,
+        tenant_id: Uuid,
+        groups: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send;
+
     /// Replace a service provider's configuration (a full replacement, not a
     /// patch). `NotFound` when it does not exist in this tenant;
     /// `AlreadyExists` when the new `entity_id` is another SP's.
@@ -3291,8 +3313,10 @@ pub trait SamlServiceProviderRepository: Send + Sync {
         input: SamlServiceProviderInput,
     ) -> impl Future<Output = AxiamResult<SamlServiceProvider>> + Send;
 
-    /// Remove a service provider. `NotFound` when it does not exist in this
-    /// tenant.
+    /// Remove a service provider **and everything the datastore holds for it**,
+    /// in one transaction (T-366): today its pending `AuthnRequest`s, and — added
+    /// by T23.2.4 in the same statement — the `saml_sp_session` rows D-37 keeps
+    /// per SP. `NotFound` when it does not exist in this tenant.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
 }
 
@@ -3403,6 +3427,23 @@ pub trait SamlIdpCredentialRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<SamlIdpCredential>> + Send;
+
+    /// Promote the tenant's `next` credential `id` to `active`, and retire the
+    /// credential that was `active` (its key destroyed, as in [`Self::retire`]),
+    /// **in one transaction** (D-42): no state with two signers or none is ever
+    /// visible, and a promotion that cannot happen changes nothing.
+    ///
+    /// `Conflict` unless `id` is the tenant's current `next` credential and
+    /// `now` lies inside its validity window (`not_before <= now < not_after`),
+    /// so a stale page cannot promote something else. `NotFound` when `id` is not
+    /// this tenant's. Of two concurrent promotions of one `next`, one wins and
+    /// the other is `Conflict`.
+    fn promote(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<SamlIdpCredentialPromotion>> + Send;
 }
 
 // ---------------------------------------------------------------------------

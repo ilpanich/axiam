@@ -100,6 +100,18 @@ pub struct SamlIdpCredential {
     pub retired_at: Option<DateTime<Utc>>,
 }
 
+/// What a promotion did (D-42): the credential now `active`, and the one it
+/// replaced, now `retired` — `None` when the tenant had no active credential.
+///
+/// Both are without key material, like every [`SamlIdpCredential`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamlIdpCredentialPromotion {
+    /// The former `next` credential, now `active`.
+    pub active: SamlIdpCredential,
+    /// The former `active` credential, now `retired` with its key destroyed.
+    pub retired: Option<SamlIdpCredential>,
+}
+
 /// A private key as the datastore holds it: sealed, with the custody that
 /// sealed it.
 ///

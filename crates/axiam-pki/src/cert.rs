@@ -59,6 +59,16 @@ pub enum IssuingScope {
     Organization,
 }
 
+/// The refusal text for an issuing CA that is revoked or otherwise not active.
+///
+/// A constant because [`crate::saml_signing`] recognises it: the SAML signing
+/// credential's route turns it into a `400`, where the certificate routes have
+/// always answered it as a `Certificate` error.
+pub(crate) const CA_NOT_ACTIVE: &str = "CA certificate is not active";
+/// The refusal text for an issuing CA outside its validity window. See
+/// [`CA_NOT_ACTIVE`].
+pub(crate) const CA_NOT_VALID: &str = "CA certificate is expired or not yet valid";
+
 /// Hard cap for leaf certificate validity: 825 days (~27 months).
 ///
 /// Aligns with CA/Browser Forum Baseline Requirements and Apple/Mozilla
@@ -228,17 +238,13 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         }
 
         if ca_cert.status != CertificateStatus::Active {
-            return Err(AxiamError::Certificate(
-                "CA certificate is not active".into(),
-            ));
+            return Err(AxiamError::Certificate(CA_NOT_ACTIVE.into()));
         }
 
         // Validate CA certificate validity window
         let now = Utc::now();
         if now < ca_cert.not_before || now > ca_cert.not_after {
-            return Err(AxiamError::Certificate(
-                "CA certificate is expired or not yet valid".into(),
-            ));
+            return Err(AxiamError::Certificate(CA_NOT_VALID.into()));
         }
 
         // Fetch the signing key from whichever custodian this CA's row names —

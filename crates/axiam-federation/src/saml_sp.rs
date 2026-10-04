@@ -264,6 +264,119 @@ pub fn validate_saml_service_provider(input: &SamlServiceProviderInput) -> Axiam
     }
 }
 
+// ---------------------------------------------------------------------------
+// D-42 — what a write must satisfy beyond the validator
+// ---------------------------------------------------------------------------
+
+/// The smallest RSA modulus an SP's request-signing certificate may carry, in
+/// bits.
+pub const MIN_SP_RSA_BITS: usize = 2048;
+
+/// NIST curves an SP's ECDSA request-signing certificate may use, by OID: P-256,
+/// P-384, P-521 (the three xmlsec verifies with `ecdsa-sha256/384/512`).
+const SP_EC_CURVE_OIDS: [&str; 3] = ["1.2.840.10045.3.1.7", "1.3.132.0.34", "1.3.132.0.35"];
+
+/// Why the SSO endpoint could not use `pem` as an SP's request-signing
+/// certificate, or `None` when it can. The text names the rule and never the
+/// certificate.
+///
+/// *Could not use* means one of: its decoder, [`crate::cert::pem_cert_to_der`] —
+/// the very function the SSO endpoint calls, so the two cannot disagree — refuses
+/// it; it is not X.509; or its public key is one no verifier AXIAM runs can use:
+/// RSA under [`MIN_SP_RSA_BITS`] bits, or anything but RSA or ECDSA on P-256,
+/// P-384 or P-521. (An ECDSA certificate verifies HTTP-POST requests only; the
+/// HTTP-Redirect binding is RSA-only, which contract §29 says.) A certificate's
+/// validity dates are **not** judged: SAML trusts a registered key as a key.
+#[must_use]
+pub fn sp_signing_certificate_refusal(pem: &str) -> Option<String> {
+    const FIELD: &str = "sp_signing_cert_pem";
+    let Ok(der) = crate::cert::pem_cert_to_der(pem) else {
+        return Some(format!(
+            "{FIELD} is not a certificate the SSO endpoint can decode"
+        ));
+    };
+    let Ok((_, cert)) = X509Certificate::from_der(&der) else {
+        return Some(format!("{FIELD} is not a parseable X.509 certificate"));
+    };
+    let spki = cert.public_key();
+    match spki.parsed() {
+        Ok(x509_parser::public_key::PublicKey::RSA(rsa)) => {
+            // Bits of the modulus, without the DER sign byte or leading zeros.
+            let significant: &[u8] = rsa
+                .modulus
+                .iter()
+                .position(|b| *b != 0)
+                .map_or(&[][..], |at| &rsa.modulus[at..]);
+            let bits = significant.first().map_or(0, |top| {
+                significant.len() * 8 - top.leading_zeros() as usize
+            });
+            (bits < MIN_SP_RSA_BITS)
+                .then(|| format!("{FIELD}: an RSA key must be at least {MIN_SP_RSA_BITS} bits"))
+        }
+        Ok(x509_parser::public_key::PublicKey::EC(_)) => {
+            let curve = spki
+                .algorithm
+                .parameters
+                .as_ref()
+                .and_then(|p| p.as_oid().ok())
+                .map(|oid| oid.to_id_string());
+            curve
+                .is_none_or(|oid| !SP_EC_CURVE_OIDS.contains(&oid.as_str()))
+                .then(|| format!("{FIELD}: an ECDSA key must be on P-256, P-384 or P-521"))
+        }
+        _ => Some(format!(
+            "{FIELD}: the key must be RSA (at least {MIN_SP_RSA_BITS} bits) or ECDSA on \
+             P-256, P-384 or P-521"
+        )),
+    }
+}
+
+/// The write-time refusals of D-42 that need no database, each naming its rule
+/// — beyond [`saml_sp_violations`], which the caller runs first:
+///
+/// * `encrypt_assertions: true` — assertion encryption is not implemented (D-2);
+///   an SP asking for it would be refused at every sign-on, so it is refused
+///   here, where the administrator can read why;
+/// * an `sp_signing_cert_pem` the SSO endpoint cannot use
+///   ([`sp_signing_certificate_refusal`]).
+///
+/// The other two — an `allowed_groups` entry outside the tenant and a changed
+/// `entity_id` — need the datastore and the stored row, and are the route's.
+#[must_use]
+pub fn saml_sp_write_refusals(input: &SamlServiceProviderInput) -> Vec<String> {
+    let mut refusals = Vec::new();
+    if input.encrypt_assertions {
+        refusals.push(
+            "encrypt_assertions: assertion encryption is not supported yet; leave it false"
+                .to_string(),
+        );
+    }
+    if let Some(pem) = input.sp_signing_cert_pem.as_deref() {
+        refusals.extend(sp_signing_certificate_refusal(pem));
+    }
+    refusals
+}
+
+/// [`validate_saml_service_provider`], then [`saml_sp_write_refusals`]: every
+/// rule a registry write must satisfy that needs neither the datastore nor the
+/// stored row.
+///
+/// # Errors
+///
+/// [`AxiamError::Validation`] carrying the violations of the first of the two
+/// that has any, joined by `; `. The message never echoes a certificate.
+pub fn validate_saml_service_provider_write(input: &SamlServiceProviderInput) -> AxiamResult<()> {
+    validate_saml_service_provider(input)?;
+    let refusals = saml_sp_write_refusals(input);
+    if refusals.is_empty() {
+        Ok(())
+    } else {
+        Err(AxiamError::Validation {
+            message: refusals.join("; "),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,5 +801,158 @@ mod tests {
         assert!(all.contains("encrypt_assertions"));
         let err = validate_saml_service_provider(&input).expect_err("refused");
         assert!(matches!(err, AxiamError::Validation { .. }));
+    }
+}
+
+/// The D-42 certificate rule, on real keys of every kind it names. Needs
+/// OpenSSL's RSA generation (`test_support`), which is behind `saml`.
+#[cfg(all(test, feature = "saml"))]
+mod write_refusal_tests {
+    use super::*;
+    use crate::saml_idp::test_support::rsa_material;
+    use axiam_core::models::saml_sp::{AcsEndpoint, SamlBinding};
+
+    fn ec_pem(algorithm: &'static rcgen::SignatureAlgorithm) -> String {
+        let key = rcgen::KeyPair::generate_for(algorithm).expect("key pair");
+        rcgen::CertificateParams::new(vec!["sp.example.test".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("self-signed")
+            .pem()
+    }
+
+    /// A self-signed certificate over an EC key on `curve`, by OpenSSL (rcgen
+    /// here has no P-521).
+    fn openssl_ec_pem(curve: openssl::nid::Nid) -> String {
+        use openssl::{asn1, ec, hash, nid, pkey, x509};
+        let group = ec::EcGroup::from_curve_name(curve).expect("curve");
+        let pair =
+            pkey::PKey::from_ec_key(ec::EcKey::generate(&group).expect("ec key")).expect("pkey");
+        let mut name = x509::X509NameBuilder::new().expect("name");
+        name.append_entry_by_nid(nid::Nid::COMMONNAME, "sp")
+            .expect("cn");
+        let name = name.build();
+        let mut builder = x509::X509Builder::new().expect("builder");
+        builder.set_version(2).expect("version");
+        builder.set_subject_name(&name).expect("subject");
+        builder.set_issuer_name(&name).expect("issuer");
+        builder.set_pubkey(&pair).expect("pubkey");
+        builder
+            .set_not_before(&asn1::Asn1Time::days_from_now(0).expect("nb"))
+            .expect("nb");
+        builder
+            .set_not_after(&asn1::Asn1Time::days_from_now(30).expect("na"))
+            .expect("na");
+        builder
+            .sign(&pair, hash::MessageDigest::sha256())
+            .expect("sign");
+        String::from_utf8(builder.build().to_pem().expect("pem")).expect("utf8")
+    }
+
+    fn input() -> SamlServiceProviderInput {
+        SamlServiceProviderInput {
+            enabled: true,
+            display_name: "Payroll".into(),
+            entity_id: "https://payroll.example.com/saml/metadata".into(),
+            acs_urls: vec![AcsEndpoint {
+                url: "https://payroll.example.com/acs".into(),
+                binding: SamlBinding::HttpPost,
+                index: 0,
+                is_default: true,
+            }],
+            slo_url: None,
+            slo_binding: None,
+            name_id_format: Default::default(),
+            sign_responses: true,
+            encrypt_assertions: false,
+            sp_signing_cert_pem: None,
+            sp_encryption_cert_pem: None,
+            want_authn_requests_signed: false,
+            allow_idp_initiated: false,
+            attribute_mappings: Vec::new(),
+            allowed_groups: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rsa_from_2048_bits_and_ecdsa_on_the_three_nist_curves_are_usable() {
+        for (label, pem) in [
+            ("rsa-2048", rsa_material(2048, "sp", 30).cert_pem),
+            ("p-256", ec_pem(&rcgen::PKCS_ECDSA_P256_SHA256)),
+            ("p-384", ec_pem(&rcgen::PKCS_ECDSA_P384_SHA384)),
+            ("p-521", openssl_ec_pem(openssl::nid::Nid::SECP521R1)),
+        ] {
+            assert_eq!(sp_signing_certificate_refusal(&pem), None, "{label}");
+        }
+    }
+
+    #[test]
+    fn a_short_rsa_key_a_non_rsa_non_ecdsa_key_and_garbage_are_refused_by_rule() {
+        let short = rsa_material(1024, "sp", 30).cert_pem;
+        let refusal = sp_signing_certificate_refusal(&short).expect("1024-bit RSA");
+        assert!(refusal.starts_with("sp_signing_cert_pem") && refusal.contains("2048"));
+
+        // An EC curve outside the three is refused too.
+        let koblitz = openssl_ec_pem(openssl::nid::Nid::SECP256K1);
+        let refusal = sp_signing_certificate_refusal(&koblitz).expect("secp256k1");
+        assert!(
+            refusal.contains("P-256") && refusal.contains("P-521"),
+            "{refusal}"
+        );
+
+        let ed25519 = ec_pem(&rcgen::PKCS_ED25519);
+        let refusal = sp_signing_certificate_refusal(&ed25519).expect("Ed25519");
+        assert!(refusal.contains("RSA") && refusal.contains("P-256"));
+
+        for garbage in [
+            "",
+            "not a pem",
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----",
+        ] {
+            let refusal = sp_signing_certificate_refusal(garbage).expect("garbage");
+            assert!(refusal.starts_with("sp_signing_cert_pem"), "{refusal}");
+        }
+        // Dates are not judged: an expired certificate is usable as a key.
+        let mut params =
+            rcgen::CertificateParams::new(vec!["old.example.test".to_string()]).unwrap();
+        params.not_before = rcgen::date_time_ymd(2001, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2002, 1, 1);
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        assert_eq!(
+            sp_signing_certificate_refusal(&params.self_signed(&key).unwrap().pem()),
+            None
+        );
+    }
+
+    #[test]
+    fn the_write_rules_run_after_the_validator_and_name_each_refusal() {
+        assert!(validate_saml_service_provider_write(&input()).is_ok());
+
+        let mut encrypting = input();
+        encrypting.encrypt_assertions = true;
+        encrypting.sp_encryption_cert_pem = Some(ec_pem(&rcgen::PKCS_ECDSA_P256_SHA256));
+        let error = validate_saml_service_provider_write(&encrypting).expect_err("encryption");
+        assert!(error.to_string().contains("encrypt_assertions"), "{error}");
+
+        let mut weak = input();
+        weak.sp_signing_cert_pem = Some(rsa_material(1024, "sp", 30).cert_pem);
+        let error = validate_saml_service_provider_write(&weak).expect_err("weak key");
+        let text = error.to_string();
+        assert!(
+            text.contains("sp_signing_cert_pem") && !text.contains("BEGIN"),
+            "{text}"
+        );
+
+        // The validator's own refusals come first and stand alone.
+        let mut invalid = input();
+        invalid.display_name = String::new();
+        invalid.encrypt_assertions = true;
+        let text = validate_saml_service_provider_write(&invalid)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            text.contains("display_name") && !text.contains("not supported yet"),
+            "{text}"
+        );
     }
 }

@@ -22,6 +22,29 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-04 SSF delivery threat entries (Phase 23 T23.5.4, model
+> 2.29.0 — T-402 … T-405 enter).** T23.5.3 built what **D-53** decided and
+> entered none of it; this pass does, against the tests T23.5.3 landed. The
+> **ssf_stream + ssf_event_buffer** store takes the new step-up record and is
+> renamed **ssf_stream + ssf_event_buffer + ssf_step_up**. Four threats enter:
+> **T-402**, held and dead-lettered events keeping a person's subject —
+> mitigated by the seven-day `x-message-ttl` on `axiam.ssf_push.dlq` (the only
+> queue with one) and the buffer's seven-day expiry, with the residual stated: an
+> erased person's subject can outlive the erasure in a buffer or the dead-letter
+> queue for up to seven days; **T-403**, long polls held open against the poll
+> endpoint — mitigated by one waiting long poll per stream per instance and the
+> `ssf_poll` bucket; **T-404**, an `assurance-level-change` forged, replayed or
+> suppressed through the step-up record — mitigated by a server-side record that
+> is single-use, per user, ten minutes and emitted only for a new session at
+> another level, with the residual that the return-leg marker lets a relying
+> party spend the record early and cost one event; and **T-405**, a security
+> event lost with nobody told — **open**, an accepted trade-off, because
+> producing an event is best effort (D-52). **T-391** gains the redirect leg
+> (`guarded_fetch_no_redirect`, D-53 (9)) and the residual that a receiver which
+> logs its own header is outside AXIAM's control; **T-392**'s delivery text,
+> which still described the old second-hop refusal, is corrected. The model is
+> **405 threats, 388 mitigated / 17 open**.
+>
 > **The 2026-10-04 SSF delivery entry (Phase 23 T23.5.3, model 2.28.0 — no
 > threat enters).** The delivery half of the Shared Signals Framework
 > transmitter is built on the decisions T23.5.2 took — the `SsfPush` deliverer on
@@ -39,7 +62,8 @@
 > T-385 … T-401 enter).** AXIAM becomes a Shared Signals Framework transmitter
 > (G-5): a new external entity (the **SSF receiver**, in a boundary of its own),
 > the **SSF transmitter** process and the **ssf_stream + ssf_event_buffer**
-> store, on the *Audit, webhooks, email & notifications* diagram. Seventeen
+> store (*ssf_stream + ssf_event_buffer + ssf_step_up* since 2.29.0), on the
+> *Audit, webhooks, email & notifications* diagram. Seventeen
 > threats enter: receiver impersonation (T-385), cross-tenant stream access
 > (T-386), forged, replayed and confused SETs (T-387 … T-389), a SET misaddressed
 > through an audience shared across tenants (T-390), the push credential (T-391),
@@ -921,7 +945,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 401 threats** and a
+The system is verified against a **STRIDE threat model of 405 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -944,8 +968,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 401 |
-| Mitigated / Open | 385 / 16 |
+| Threats identified | 405 |
+| Mitigated / Open | 388 / 17 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -961,10 +985,10 @@ optimistic closed one.
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 60 | 0 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 32 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
-| Audit, webhooks, email & notifications | 18 | 1 |
+| Audit, webhooks, email & notifications | 39 | 3 |
 | Deployment & platform (Kubernetes) | 28 | 5 |
 | Client SDKs & admin-UI integration surface | 28 | 3 |
 
@@ -1012,7 +1036,11 @@ with their tests, and four open — the push endpoint at delivery time, event
 flooding and the poll buffer until the delivery task lands (T-392, T-394, T-395),
 and SET replay until the SDK receiver helper that de-duplicates `jti` ships
 (T-388). The delivery task has landed (T23.5.3, model 2.28.0): T-392, T-394 and
-T-395 are mitigated, leaving only T-388.
+T-395 are mitigated, leaving only T-388. The four delivery entries of model
+2.29.0 (T-402 … T-405) add one open item, and it is accepted rather than
+deferred: an SSF event that cannot be produced or queued is lost with a log line
+and nothing else, because a logout must not fail when a receiver's queue is
+down (T-405).
 
 ### Coverage by STRIDE category
 
@@ -1025,10 +1053,10 @@ the category recorded against it in the model.
 | Category | Threats | Open |
 |---|---|---|
 | Spoofing | 92 | 4 |
-| Tampering | 79 | 2 |
+| Tampering | 80 | 2 |
 | Repudiation | 11 | 0 |
-| Information disclosure | 92 | 7 |
-| Denial of service | 46 | 4 |
+| Information disclosure | 93 | 6 |
+| Denial of service | 48 | 3 |
 | Elevation of privilege | 81 | 2 |
 
 ### Coverage by severity
@@ -1036,13 +1064,13 @@ the category recorded against it in the model.
 | Severity | Threats | Open |
 |---|---|---|
 | Critical | 41 | 2 |
-| High | 174 | 9 |
-| Medium | 159 | 7 |
-| Low | 27 | 1 |
+| High | 174 | 8 |
+| Medium | 162 | 6 |
+| Low | 28 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 19 still-open items are listed one by one in
+the weight the control carries. The 17 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -2286,8 +2314,8 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 19 of
-401. On the website this table is generated from the Threat Dragon model, so it
+Every threat the model does not record as mitigated, most severe first — 17 of
+405. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -2305,14 +2333,12 @@ each.
 | T-146 — Long-lived client secret committed to a repository | High | SDK configuration (client secrets, CA bundles) · *Client SDKs & admin UI integration surface* |
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
-| T-392 — The push endpoint is used to reach internal services | High | SSF transmitter (SET issuance, stream API, discovery) · *Audit, webhooks, email & notifications* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
 | T-388 — A captured SET is replayed to its receiver | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
-| T-394 — A receiver is flooded with events | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
-| T-395 — The poll buffer grows without bound | Medium | ssf_stream + ssf_event_buffer · *Audit, webhooks, email & notifications* |
+| T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are

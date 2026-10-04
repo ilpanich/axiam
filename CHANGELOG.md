@@ -934,6 +934,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **SSF delivery threats T-402 … T-405 (T23.5.4, threat model 2.29.0).** Held
+  and dead-lettered events keeping a person's subject (T-402: seven-day TTL on
+  `axiam.ssf_push.dlq` and the buffer; an erased subject can outlive the erasure
+  there for up to seven days), long polls held open (T-403: one waiting long
+  poll per stream per instance), an `assurance-level-change` forged or
+  suppressed through the step-up record (T-404) — all three mitigated with
+  their tests — and a lost event nobody is told of (T-405, open: production is
+  best effort). T-391 gains the no-redirect push, T-392's delivery text is
+  corrected, and the SSF store is renamed `ssf_stream + ssf_event_buffer +
+  ssf_step_up`. 405 threats, 388 mitigated / 17 open.
+
 - **SSF push cannot be aimed at an internal address, flood a receiver or grow a
   buffer without bound (T23.5.3, closes T-392, T-394, T-395; threat model
   2.28.0).** Every push goes through the shared SSRF guard with

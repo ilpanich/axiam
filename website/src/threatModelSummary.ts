@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.28.0",
+ "version": "2.29.0",
  "diagramCount": 9,
- "total": 401,
- "open": 16,
- "mitigated": 385,
+ "total": 405,
+ "open": 17,
+ "mitigated": 388,
  "areas": [
   {
    "id": 0,
@@ -98,8 +98,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "total": 35,
-   "open": 2
+   "total": 39,
+   "open": 3
   },
   {
    "id": 7,
@@ -122,7 +122,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Tampering",
-   "total": 79,
+   "total": 80,
    "open": 2
   },
   {
@@ -132,13 +132,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 92,
+   "total": 93,
    "open": 6
   },
   {
    "name": "Denial of service",
-   "total": 46,
-   "open": 2
+   "total": 48,
+   "open": 3
   },
   {
    "name": "Elevation of privilege",
@@ -159,12 +159,12 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Medium",
-   "total": 159,
-   "open": 5
+   "total": 162,
+   "open": 6
   },
   {
    "name": "Low",
-   "total": 27,
+   "total": 28,
    "open": 1
   }
  ],
@@ -318,6 +318,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Audit, webhooks, email & notifications",
    "element": "SET push / poll response",
    "residualRisk": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Open because the control is the receiver's: RFC 8417 §4.1 / contract §32.7 require it to remember the `jti`s it processed and refuse a repeat, and the receiver helper that does so ships in the SDKs only after the post-merge fan-out (D-35); a receiver that does not de-duplicate stays exposed for as long as it treats an old SET as news."
+  },
+  {
+   "number": 405,
+   "title": "A security event is lost and nobody is told",
+   "category": "Denial of service",
+   "severity": "Medium",
+   "diagramId": 6,
+   "area": "Audit, webhooks, email & notifications",
+   "element": "SET push / poll response",
+   "residualRisk": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation."
   },
   {
    "number": 161,

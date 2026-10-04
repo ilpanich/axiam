@@ -990,27 +990,29 @@ mod with_saml {
     }
 
     // -----------------------------------------------------------------------
-    // 9. A residual the real-SP round trip leaves open: samael's metadata types
+    // 9. SP metadata samael cannot type (D-54)
     // -----------------------------------------------------------------------
 
-    /// **A pin of today's behaviour, not a wish.** `samael` types
-    /// `SPSSODescriptor/@cacheDuration` as an integer and requires an
-    /// `AssertionConsumerService/@index`, so SP metadata carrying an ISO-8601
-    /// `cacheDuration` (`PT1H`) on the `SPSSODescriptor`, or an ACS with no
-    /// `index`, is answered `400 not SAML service-provider metadata` (T23.2.5's
-    /// hand-off). **Keycloak 26.7.0's export carries neither**, so the round trip
-    /// in `saml_idp_keycloak_roundtrip_test` registers it unmodified; but some other
-    /// SP's will. Whether to pre-normalise those attributes before `samael` parses
-    /// the document, or default a missing `index`, is a decision for the
-    /// maintainer; this test exists so that whoever takes it sees the behaviour
-    /// change, and the document is refused with the generic message either way.
+    /// **D-54.** `samael` types `SPSSODescriptor/@cacheDuration` as an integer and
+    /// requires an `AssertionConsumerService/@index`; real SP metadata (Shibboleth,
+    /// SimpleSAMLphp) carries an ISO-8601 duration and often no index. AXIAM
+    /// normalises both on the parsed tree before `samael` reads it: the duration is
+    /// dropped and the missing index is defaulted, each with a warning in the draft.
+    /// The draft registers, and the registered SP completes a sign-on that `samael`,
+    /// as that SP, validates. (Keycloak 26.7.0's own export needs neither.)
     #[actix_rt::test]
-    async fn sp_metadata_samael_cannot_type_is_refused_today_with_the_generic_message() {
-        let w = world().await;
-        let app = e2e_app!(w);
-        let document = |sp_attrs: &str, acs_attrs: &str| {
+    async fn sp_metadata_with_a_cache_duration_and_no_acs_index_registers_and_signs_in() {
+        let (w, app, idp_xml) = setup!();
+        let document = |sp_attrs: &str, acs: &str| {
             format!(
-                r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://sp-meta.example.test/metadata"><md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"{sp_attrs}><md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://sp-meta.example.test/saml/acs"{acs_attrs}/></md:SPSSODescriptor></md:EntityDescriptor>"#
+                r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{}"><md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"{sp_attrs}>{acs}</md:SPSSODescriptor></md:EntityDescriptor>"#,
+                entity("c")
+            )
+        };
+        let acs_element = |attrs: &str| {
+            format!(
+                r#"<md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="{}"{attrs}/>"#,
+                acs("c")
             )
         };
         let parse = |doc: String| {
@@ -1028,28 +1030,61 @@ mod with_saml {
             }
         };
 
-        // The control: the same document, with an index and no cacheDuration, parses.
-        let (status, _) = parse(document("", r#" index="1" isDefault="true""#)).await;
+        // The control: a document needing neither normalisation is not warned about.
+        let (status, text) = parse(document("", &acs_element(r#" index="1""#))).await;
         assert_eq!(status, 200, "the control parses");
+        assert!(
+            json_of(&text)["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| !v.as_str().unwrap_or_default().contains("cacheDuration")),
+            "no spurious warning"
+        );
 
-        for (label, doc) in [
-            (
-                "an ISO-8601 cacheDuration on the SPSSODescriptor",
-                document(r#" cacheDuration="PT1H""#, r#" index="1""#),
-            ),
-            (
-                "an ACS without an index",
-                document("", r#" isDefault="true""#),
-            ),
-        ] {
-            let (status, text) = parse(doc).await;
-            assert_eq!(status, 400, "{label}");
-            assert_eq!(
-                json_of(&text)["message"],
-                "Validation error: not SAML service-provider metadata",
-                "{label}: the generic message, never the parser's text"
-            );
-        }
+        // The case: an ISO-8601 cacheDuration and an ACS with no index.
+        let (status, text) = parse(document(
+            r#" cacheDuration="PT1H""#,
+            &acs_element(r#" isDefault="true""#),
+        ))
+        .await;
+        assert_eq!(status, 200, "the document is read, with both normalised");
+        let draft = json_of(&text);
+        let warnings: Vec<String> = draft["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            warnings.iter().any(|w| w.contains("cacheDuration")),
+            "the dropped duration is named"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains(&acs("c")) && w.contains("index 0")),
+            "the defaulted index is named with its location"
+        );
+        assert_eq!(draft["service_provider"]["acs_urls"][0]["index"], 0);
+
+        // The draft registers as it is, and the registered SP signs in.
+        register_sp(&app, &w, draft["service_provider"].clone()).await;
+        let sp = reference_sp(&idp_xml, "c", false);
+        let mut browser = Browser::default();
+        let (id, (action, response_b64, _)) =
+            sp_initiated_login(&app, &w, &mut browser, &sp, None, "alice").await;
+        assert_eq!(action, acs("c"));
+        sp.parse_xml_response(&decode(&response_b64), Some(&[id.as_str()]))
+            .expect("samael accepts the response for the SP registered from that metadata");
+
+        // An index that is present but invalid is still refused, generically.
+        let (status, text) = parse(document("", &acs_element(r#" index="abc""#))).await;
+        assert_eq!(status, 400);
+        assert_eq!(
+            json_of(&text)["message"],
+            "Validation error: not SAML service-provider metadata"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -207,6 +207,8 @@ pub const ENV_END_SESSION_PER_MIN: &str = "AXIAM__RATE_LIMIT__END_SESSION_PER_MI
 pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DCR_PER_MIN` — T21.4, never preset.
 pub const ENV_DCR_PER_MIN: &str = "AXIAM__RATE_LIMIT__DCR_PER_MIN";
+/// `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` — G-3 / T23.3.8, never preset.
+pub const ENV_DIRECTORY_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN` — X2.
 pub const ENV_UMA_PERM_PER_MIN: &str = "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN` — X2.
@@ -472,6 +474,26 @@ pub struct RateLimitConfig {
     /// Per-IP, never client-keyed: a registration request has no client
     /// identity by definition — obtaining one is what the call is for.
     pub dcr_per_min: u32,
+    /// Max writes per minute per IP to the directory management routes —
+    /// `PUT`, `PATCH` and `DELETE` on `/api/v1/tenants/{tenant_id}/directory`
+    /// and `POST …/directory/links` (default: 30 — G-3, T23.3.8, CONTRACT
+    /// §30.3 rule 9). Reads are not in it. Deliberately **not** part of
+    /// [`MachineLimitPreset`]: this is an administrator's console traffic, sized
+    /// from what a write costs, not from capacity.
+    ///
+    /// What a write costs is why it is limited at all: every one resolves the
+    /// directory's host name (the address guard, T-300), so an authenticated
+    /// administrator — or a stolen administrator token — could otherwise use
+    /// the route as a resolver of tenant-chosen names at the server's expense,
+    /// and `link_account` opens directory connections (and, on success, signs a
+    /// person out everywhere). Thirty a minute is far more than a human editing
+    /// one configuration produces and far less than a loop.
+    ///
+    /// **One bucket per route**, as every bucket here is keyed: the three
+    /// methods of the configuration resource share one, and the link route has
+    /// its own, so a burst of edits does not spend the allowance for linking
+    /// and the reverse. Per-IP, never client-keyed: the caller is a person.
+    pub directory_admin_per_min: u32,
     /// Max `/scim/v2/*` requests per minute per IP (default: 600 — R3.1/B4).
     ///
     /// **One bucket for the whole `/scim/v2` surface**, reads and writes
@@ -619,6 +641,9 @@ impl Default for RateLimitConfig {
             // T21.4 — see the field docs. The smallest limit here, because
             // this is the only unauthenticated *write* endpoint.
             dcr_per_min: 5,
+            // G-3 / T23.3.8 — see the field docs. Administrator writes that
+            // each resolve a tenant-chosen host name.
+            directory_admin_per_min: 30,
             // --- R3.1/B4 SCIM: the REST administrative surface -------------
             // 600/min == the gRPC Admin family's absolute ceiling
             // (ADMIN_PER_SEC_DEFAULT 10/s), copied deliberately and for the
@@ -825,6 +850,10 @@ impl RateLimitConfig {
         );
         assert!(self.scim_per_min >= 1, "scim_per_min must be >= 1");
         assert!(self.dcr_per_min >= 1, "dcr_per_min must be >= 1");
+        assert!(
+            self.directory_admin_per_min >= 1,
+            "directory_admin_per_min must be >= 1"
+        );
         assert!(self.webauthn_per_min >= 1, "webauthn_per_min must be >= 1");
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates
@@ -959,6 +988,7 @@ mod tests {
             (ENV_DEVICE_VERIFY_PER_MIN, d.device_verify_per_min),
             (ENV_SCIM_PER_MIN, d.scim_per_min),
             (ENV_WEBAUTHN_PER_MIN, d.webauthn_per_min),
+            (ENV_DIRECTORY_ADMIN_PER_MIN, d.directory_admin_per_min),
         ] {
             assert_eq!(
                 documented_u32(&table, env, 0),
@@ -1022,6 +1052,7 @@ mod tests {
             assert_eq!(cfg.mfa_per_min, shipped.mfa_per_min);
             assert_eq!(cfg.scim_per_min, shipped.scim_per_min);
             assert_eq!(cfg.webauthn_per_min, shipped.webauthn_per_min);
+            assert_eq!(cfg.directory_admin_per_min, shipped.directory_admin_per_min);
             for env in [
                 ENV_LOGIN_PER_MIN,
                 ENV_REGISTER_PER_MIN,
@@ -1029,6 +1060,7 @@ mod tests {
                 ENV_MFA_PER_MIN,
                 ENV_SCIM_PER_MIN,
                 ENV_WEBAUTHN_PER_MIN,
+                ENV_DIRECTORY_ADMIN_PER_MIN,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1239,6 +1271,7 @@ mod tests {
         assert_eq!(d.password_reset_per_min, 3);
         assert_eq!(d.mfa_per_min, 5);
         assert_eq!(d.webauthn_per_min, 10);
+        assert_eq!(d.directory_admin_per_min, 30);
         // The relationship is the point, not the literal. `RateLimitShared`
         // keys per `"{endpoint}:{ip}"`, so each of the six webauthn routes
         // carries this allowance independently and a ceremony spends one from

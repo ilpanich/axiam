@@ -407,6 +407,11 @@ pub struct AppState<C: Connection + Clone> {
     ///
     /// See [`bundles::FederationState`].
     pub federation: bundles::FederationState<C>,
+    /// The LDAP / Active Directory identity source's management surface
+    /// (G-3, T23.3.8).
+    ///
+    /// See [`bundles::DirectoryState`].
+    pub directory: bundles::DirectoryState<C>,
     /// The SAML 2.0 identity provider (G-2, T23.2.3). Behind `saml`: a build
     /// without it mounts no SAML route at all (D-20).
     ///
@@ -851,6 +856,16 @@ impl<C: Connection + Clone> AppState<C> {
                     assertion_replay_repo,
                     reqwest::Client::new(),
                 ),
+            },
+            // No encryption key in a test harness: the feature is then
+            // unavailable, exactly as on a deployment without one, and a test
+            // that writes a directory configuration installs a key (and a
+            // resolver, so the address guard needs no DNS) by replacing this
+            // field.
+            directory: bundles::DirectoryState {
+                config_repo: axiam_db::SurrealDirectoryConfigRepository::new(db.clone(), None),
+                sync_state_repo: axiam_db::SurrealDirectorySyncStateRepository::new(db.clone()),
+                client: Arc::new(axiam_directory::DirectoryClient::default()),
             },
             #[cfg(feature = "saml")]
             saml_idp,

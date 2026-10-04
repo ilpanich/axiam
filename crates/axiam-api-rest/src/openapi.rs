@@ -295,6 +295,13 @@ use crate::handlers;
         handlers::settings::get_tenant_override,
         handlers::settings::set_tenant_override,
         handlers::settings::delete_tenant_override,
+        // Directory — LDAP / Active Directory identity source (G-3, T23.3.8)
+        handlers::directory::get_directory,
+        handlers::directory::set_directory,
+        handlers::directory::update_directory,
+        handlers::directory::delete_directory,
+        handlers::directory::link_account,
+        handlers::directory::get_sync_status,
         // Email Config (FUNC-03 / D-13)
         handlers::email_config::get_org_email_config,
         handlers::email_config::set_org_email_config,
@@ -606,6 +613,17 @@ use crate::handlers;
         axiam_core::models::settings::EmailVerificationPolicy,
         axiam_core::models::settings::CertificatePolicy,
         axiam_core::models::settings::NotificationPolicy,
+        // Directory (G-3, T23.3.8). The component names are the ones CONTRACT
+        // §30.1 pins and the registry's `sensitive_request_fields` names.
+        axiam_core::models::directory::DirectoryConfig,
+        axiam_core::models::directory::DirectoryKind,
+        axiam_core::models::directory::UserAttributeMap,
+        axiam_core::models::directory::GroupMapping,
+        handlers::directory::SetDirectoryConfig,
+        handlers::directory::UpdateDirectoryConfig,
+        handlers::directory::LinkDirectoryAccount,
+        handlers::directory::DirectoryLinkResult,
+        handlers::directory::DirectorySyncStatus,
         // Email Config (FUNC-03 / D-13)
         axiam_core::models::email::EmailConfig,
         axiam_core::models::email::EmailConfigOverride,
@@ -674,6 +692,7 @@ use crate::handlers;
         (name = "oidc", description = "OpenID Connect discovery, JWKS, and UserInfo"),
         (name = "settings", description = "Organization and tenant security settings"),
         (name = "email-config", description = "Organization and tenant email provider configuration"),
+        (name = "directory", description = "Tenant LDAP / Active Directory identity source — configuration, account linking and sync status (CONTRACT §30)"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),
         (name = "federation-sso", description = "First-time SSO — public OIDC/SAML start and callback endpoints"),
         (name = "notification_rules", description = "Notification rule management"),

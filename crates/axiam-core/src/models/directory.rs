@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 /// still an explicit, editable field of the configuration (or, for the
 /// strategy and change attribute, derived from this value at the point of use);
 /// nothing about the kind changes what is *allowed*.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectoryKind {
     /// OpenLDAP and other RFC 4519 directories with `entryUUID`.
@@ -122,8 +122,19 @@ impl DirectoryKind {
     }
 }
 
+/// The refusal text for a write that moves the connection (URL, StartTLS, bind
+/// DN or trust anchors) without entering the bind secret again (F4 P23W2-01).
+///
+/// One constant, because three places must say the same words: the repository
+/// (which enforces the rule in the `WHERE` of the write), the management route
+/// (which checks it first so the refusal can be audited with the rule) and the
+/// tests that pin both. It names the rule and none of the values.
+pub const CONNECTION_MOVED_WITHOUT_SECRET: &str = "changing the directory's url, start_tls, \
+    bind_dn or trust anchors requires entering the bind secret again: a stored bind secret is \
+    never sent to a server it was not entered for";
+
 /// Which directory attribute feeds each AXIAM user field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct UserAttributeMap {
     /// The attribute holding the login name (`uid`, `sAMAccountName`).
     pub username: String,
@@ -152,7 +163,7 @@ pub const GROUP_MAPPINGS_MAX: usize = 500;
 /// normalisation (`axiam_directory::dn`), so `CN=Staff, OU=Groups` and
 /// `cn=staff,ou=groups` are the same row. One DN may map to several AXIAM
 /// groups; the same (DN, group) pair twice is refused as redundant.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GroupMapping {
     /// The directory group's distinguished name.
     pub directory_group_dn: String,
@@ -165,7 +176,7 @@ pub struct GroupMapping {
 /// A tenant's directory configuration, as stored and as read back.
 ///
 /// Carries no secret: see the module documentation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DirectoryConfig {
     /// Row identifier.
     pub id: Uuid,
@@ -198,12 +209,15 @@ pub struct DirectoryConfig {
     /// `memberOf` (user-side, AD) or `member` (group-side, OpenLDAP).
     pub group_member_attribute: String,
     /// How many levels of nested groups are followed, `0..=10`.
+    #[schema(minimum = 0, maximum = 10)]
     pub group_nesting_depth: u8,
     /// The group-mapping table (D-30): which directory groups put a user into
     /// which AXIAM groups. Empty means no directory group maps to anything, and
     /// a sign-in then removes every directory-sourced membership the user held.
+    #[schema(max_items = 500)]
     pub group_mappings: Vec<GroupMapping>,
     /// Seconds between incremental sync runs.
+    #[schema(minimum = 300, maximum = 86400)]
     pub sync_interval_secs: u64,
     /// Provision an AXIAM user on first successful directory sign-in.
     pub jit_provisioning: bool,

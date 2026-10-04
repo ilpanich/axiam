@@ -1289,6 +1289,68 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         handlers::email_config::test_tenant_email_config::<C>,
                     )),
             )
+            // --- Tenant directory (LDAP / Active Directory, G-3, T23.3.8,
+            // CONTRACT §30). Reads are unlimited; the four writes — `PUT`,
+            // `PATCH`, `DELETE` and the link `POST` — are each wrapped, since
+            // each resolves a tenant-chosen host name or opens directory
+            // connections (plan §7 rule 6). The three methods of the
+            // configuration resource count in one shared bucket
+            // (`directory_config`), the link route in its own
+            // (`directory_link`). The resource carries its own JSON config:
+            // a body whose `bind_secret` has the wrong type must not be echoed
+            // back in the `400`.
+            .service(
+                web::resource("/tenants/{tenant_id}/directory")
+                    .app_data(handlers::directory::directory_json_config())
+                    .route(web::get().to(handlers::directory::get_directory::<C>))
+                    .route(
+                        // `.to()` first: `Route::to` after `.wrap()` would
+                        // replace the wrapped service and drop the limiter.
+                        web::put()
+                            .to(handlers::directory::set_directory::<C>)
+                            .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "directory_config",
+                                rate_limit_cfg.directory_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        // `.to()` first: `Route::to` after `.wrap()` would
+                        // replace the wrapped service and drop the limiter.
+                        web::patch()
+                            .to(handlers::directory::update_directory::<C>)
+                            .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "directory_config",
+                                rate_limit_cfg.directory_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        // `.to()` first: `Route::to` after `.wrap()` would
+                        // replace the wrapped service and drop the limiter.
+                        web::delete()
+                            .to(handlers::directory::delete_directory::<C>)
+                            .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "directory_config",
+                                rate_limit_cfg.directory_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/directory/links")
+                    .app_data(handlers::directory::directory_json_config())
+                    .wrap(build_governor(rate_limit_cfg.directory_admin_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "directory_link",
+                        rate_limit_cfg.directory_admin_per_min,
+                    ))
+                    .route(web::post().to(handlers::directory::link_account::<C>)),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/directory/sync-status")
+                    .route(web::get().to(handlers::directory::get_sync_status::<C>)),
+            )
             // --- Tenant security overrides (explicit {tenant_id} path segment,
             // same convention as the email-config trio above) ---
             .service(

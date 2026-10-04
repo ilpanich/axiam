@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:47d55f0b4865ab65dc5deb9dffbc7ff0750774246c0442de5faa6405b10af47b"
+    "x-axiam-spec-digest": "sha256:2bc60df3e0257843c0562fb8333cd95328f44b6aa5be8c6483966dc36c2b7c13"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -5795,6 +5795,9 @@
           },
           "400": {
             "description": "Settings are internally inconsistent, or enable OPAQUE on a server holding no OPAQUE keys"
+          },
+          "409": {
+            "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory)"
           }
         },
         "security": [
@@ -9654,6 +9657,318 @@
           },
           "400": {
             "description": "Override violates org baseline, or enables OPAQUE on a server holding no OPAQUE keys"
+          },
+          "409": {
+            "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory)"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/directory": {
+      "get": {
+        "tags": [
+          "directory"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/directory`",
+        "operationId": "get_directory",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tenant's directory configuration (the bind secret is never returned)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectoryConfig"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The tenant has no directory configuration"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "directory"
+        ],
+        "summary": "`PUT /api/v1/tenants/{tenant_id}/directory` — create or **replace**.",
+        "description": "A replacement resets every omitted optional member to its default. `bind_secret`\nis required on create; on a replacement, absent keeps the stored secret —\nunless the write moves `url`, `start_tls`, `bind_dn` or `trust_anchors_pem`,\nwhich is a `400` without it.",
+        "operationId": "set_directory",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDirectoryConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The configuration was replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectoryConfig"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The configuration was created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectoryConfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation or address-guard refusal, or the connection moved without the bind secret"
+          },
+          "403": {
+            "description": "Another tenant's configuration"
+          },
+          "409": {
+            "description": "An enabled directory under opaque_mode `required`"
+          },
+          "503": {
+            "description": "The deployment has no directory encryption key"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "directory"
+        ],
+        "summary": "`DELETE /api/v1/tenants/{tenant_id}/directory`",
+        "description": "Removes the configuration and its sync state. Directory accounts can no\nlonger sign in with a password (there is no fallback to a local hash) and the\nsync job stops for the tenant; sessions, refresh tokens and passkeys they\nalready hold keep working until they expire or an administrator deactivates\nthe accounts. There is no unlink.",
+        "operationId": "delete_directory",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The configuration and its sync state are gone"
+          },
+          "403": {
+            "description": "Another tenant's configuration"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "directory"
+        ],
+        "summary": "`PATCH /api/v1/tenants/{tenant_id}/directory` — a **sparse** update.",
+        "operationId": "update_directory",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDirectoryConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The configuration after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectoryConfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation or address-guard refusal, or the connection moved without the bind secret"
+          },
+          "403": {
+            "description": "Another tenant's configuration"
+          },
+          "404": {
+            "description": "The tenant has no directory configuration"
+          },
+          "409": {
+            "description": "An enabled directory under opaque_mode `required`"
+          },
+          "503": {
+            "description": "The deployment has no directory encryption key"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/directory/links": {
+      "post": {
+        "tags": [
+          "directory"
+        ],
+        "summary": "`POST /api/v1/tenants/{tenant_id}/directory/links` — link a local account to\nits directory entry (D-28).",
+        "description": "The directory resolves the entry from the account's own username; the caller\nsupplies only the account. Marks the account, deletes its WebAuthn\ncredentials, revokes its `User`-type certificates and then all its sessions\nand OAuth2 refresh tokens (TOTP is kept): **the owner is signed out\neverywhere**. Idempotent: an account already linked to that entry gets `200`\nwith `was_already_linked: true` and the revocations run again.",
+        "operationId": "link_account",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkDirectoryAccount"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The account is linked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectoryLinkResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The account is deleted"
+          },
+          "403": {
+            "description": "Another tenant's account"
+          },
+          "404": {
+            "description": "Unknown account, or the directory has no single entry for it"
+          },
+          "409": {
+            "description": "No enabled directory, the entry is linked to another account, or the account to a different entry"
+          },
+          "503": {
+            "description": "The directory cannot be asked"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tenants/{tenant_id}/directory/sync-status": {
+      "get": {
+        "tags": [
+          "directory"
+        ],
+        "summary": "`GET /api/v1/tenants/{tenant_id}/directory/sync-status`",
+        "operationId": "get_sync_status",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sync job's state; nulls before the first run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectorySyncStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The tenant has no directory configuration"
           }
         },
         "security": [
@@ -9904,6 +10219,9 @@
           },
           "400": {
             "description": "An override is less restrictive than the org baseline, or enables OPAQUE on a server holding no OPAQUE keys"
+          },
+          "409": {
+            "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory)"
           }
         },
         "security": [
@@ -14841,6 +15159,222 @@
           }
         }
       },
+      "DirectoryConfig": {
+        "type": "object",
+        "description": "A tenant's directory configuration, as stored and as read back.\n\nCarries no secret: see the module documentation.",
+        "required": [
+          "id",
+          "tenant_id",
+          "enabled",
+          "kind",
+          "url",
+          "start_tls",
+          "bind_dn",
+          "base_dn",
+          "user_filter",
+          "user_attribute_map",
+          "group_member_attribute",
+          "group_nesting_depth",
+          "group_mappings",
+          "sync_interval_secs",
+          "jit_provisioning",
+          "trust_anchors_pem",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "base_dn": {
+            "type": "string",
+            "description": "Where users are searched for."
+          },
+          "bind_dn": {
+            "type": "string",
+            "description": "The service account AXIAM binds as to search. It should hold read-only\nrights: AXIAM never writes to a directory."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the row was created."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the directory is used for sign-in and sync."
+          },
+          "group_base_dn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where groups are searched for (reverse-`member` lookups, group sync)."
+          },
+          "group_filter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Restricts which entries under [`Self::group_base_dn`] are groups."
+          },
+          "group_mappings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupMapping"
+            },
+            "description": "The group-mapping table (D-30): which directory groups put a user into\nwhich AXIAM groups. Empty means no directory group maps to anything, and\na sign-in then removes every directory-sourced membership the user held.",
+            "maxItems": 500
+          },
+          "group_member_attribute": {
+            "type": "string",
+            "description": "`memberOf` (user-side, AD) or `member` (group-side, OpenLDAP)."
+          },
+          "group_nesting_depth": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many levels of nested groups are followed, `0..=10`.",
+            "maximum": 10,
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Row identifier."
+          },
+          "jit_provisioning": {
+            "type": "boolean",
+            "description": "Provision an AXIAM user on first successful directory sign-in."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DirectoryKind",
+            "description": "The kind of directory, which selects defaults."
+          },
+          "start_tls": {
+            "type": "boolean",
+            "description": "Upgrade an `ldap://` connection with StartTLS before any bind."
+          },
+          "sync_interval_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds between incremental sync runs.",
+            "maximum": 86400,
+            "minimum": 300
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant. At most one configuration exists per tenant."
+          },
+          "trust_anchors_pem": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "PEM CA certificates that anchor trust in the directory's server\ncertificate. Empty means the platform roots used by the rest of the\nworkspace's outbound TLS. An organisation CA's PEM can be pasted here."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the row was last written."
+          },
+          "url": {
+            "type": "string",
+            "description": "`ldaps://host[:port]` or `ldap://host[:port]` together with\n[`Self::start_tls`]. A plaintext URL is refused at configuration time."
+          },
+          "user_attribute_map": {
+            "$ref": "#/components/schemas/UserAttributeMap",
+            "description": "Which attribute feeds which user field."
+          },
+          "user_filter": {
+            "type": "string",
+            "description": "The user-lookup filter template. It contains exactly one `{username}`\nplaceholder, which the bind path replaces with the RFC 4515-escaped\nlogin name; the template itself is never formatted with raw input."
+          }
+        }
+      },
+      "DirectoryKind": {
+        "type": "string",
+        "description": "Which kind of directory server a configuration points at.\n\nIt drives **defaults only**: the external-id attribute, the group-membership\nstrategy and the change attribute the sync job reads. Every one of them is\nstill an explicit, editable field of the configuration (or, for the\nstrategy and change attribute, derived from this value at the point of use);\nnothing about the kind changes what is *allowed*.",
+        "enum": [
+          "open_ldap",
+          "active_directory"
+        ]
+      },
+      "DirectoryLinkResult": {
+        "type": "object",
+        "description": "What linking did.",
+        "required": [
+          "user_id",
+          "directory_external_id",
+          "webauthn_credentials_deleted",
+          "certificates_revoked",
+          "was_already_linked"
+        ],
+        "properties": {
+          "certificates_revoked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`User`-type certificates revoked.",
+            "minimum": 0
+          },
+          "directory_external_id": {
+            "type": "string",
+            "description": "The entry's `entryUUID` or `objectGUID` as text: an identifier, not a\nsecret."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The account that was linked."
+          },
+          "was_already_linked": {
+            "type": "boolean",
+            "description": "`true` when the account was already linked to that very entry and the\ncall only re-ran the revocations (an interrupted link completed)."
+          },
+          "webauthn_credentials_deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Passkeys and security keys deleted.",
+            "minimum": 0
+          }
+        }
+      },
+      "DirectorySyncStatus": {
+        "type": "object",
+        "description": "A read-only view of the sync job's state for one tenant. Counts of what a\nrun did are in its audit rows, and no account id is here.",
+        "required": [
+          "full_required",
+          "has_watermark"
+        ],
+        "properties": {
+          "full_required": {
+            "type": "boolean",
+            "description": "The next run must be a full reconciliation."
+          },
+          "has_watermark": {
+            "type": "boolean",
+            "description": "An incremental run has a starting point."
+          },
+          "last_attempt_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the last attempt started, or null before the first run."
+          },
+          "last_full_run_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the last complete full run finished, or null."
+          },
+          "last_result": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`ok`, `partial`, `failed` or `safety_valve` (an open set: decode another\nvalue without failing), or null before the first run."
+          }
+        }
+      },
       "DynamicRegistrationMode": {
         "type": "string",
         "description": "Whether, and on what terms, a client may register itself through\nRFC 7591 dynamic client registration (T21.4).\n\nThree values rather than a `bool` plus a second `bool`, because the middle\none is the whole point: a deployment that wants MCP Inspector to register\nitself during a demonstration and a deployment that wants Claude Code to\nregister itself in production want different things, and the difference is\nwhether an administrator handed out a credential first.\n\n[`Disabled`](Self::Disabled) is the serde default and the system default\n(I1). `POST /oauth2/register` exists on every deployment and answers `403`\non every one that has not chosen otherwise — the path is there, the feature\nis not, and a scanner learns nothing from the difference because there is\nnone to learn.",
@@ -15466,6 +16000,25 @@
           }
         }
       },
+      "GroupMapping": {
+        "type": "object",
+        "description": "One row of the group-mapping table (G-3, T23.3.4, D-30): a directory group,\nnamed by its distinguished name, and the AXIAM group a member of it is put\ninto.\n\n**The table is the only way a directory group reaches an AXIAM group.**\nThere is no match by name, no prefix or wildcard, and no AXIAM group is ever\ncreated from a directory one: a directory administrator who names a group\n`admins` gains nothing unless a tenant administrator mapped it here.\n\nThe DN is stored as the administrator typed it and compared after RFC 4514\nnormalisation (`axiam_directory::dn`), so `CN=Staff, OU=Groups` and\n`cn=staff,ou=groups` are the same row. One DN may map to several AXIAM\ngroups; the same (DN, group) pair twice is refused as redundant.",
+        "required": [
+          "directory_group_dn",
+          "group_id"
+        ],
+        "properties": {
+          "directory_group_dn": {
+            "type": "string",
+            "description": "The directory group's distinguished name."
+          },
+          "group_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The AXIAM group of the same tenant a member of that directory group is\nput into. Checked to exist in the tenant when the configuration is\nwritten."
+          }
+        }
+      },
       "HealthResponse": {
         "type": "object",
         "required": [
@@ -15752,6 +16305,20 @@
           "Rsa4096",
           "Ed25519"
         ]
+      },
+      "LinkDirectoryAccount": {
+        "type": "object",
+        "description": "`POST /api/v1/tenants/{tenant_id}/directory/links` body.",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The local account to link. The directory entry is found by the\ndirectory, from the account's own username; the caller names no entry."
+          }
+        }
       },
       "LockoutPolicy": {
         "type": "object",
@@ -19593,6 +20160,140 @@
           }
         }
       },
+      "SetDirectoryConfig": {
+        "type": "object",
+        "description": "`PUT /api/v1/tenants/{tenant_id}/directory` — a **replacement**.\n\nEvery `DirectoryConfig` member except `id`, `tenant_id` and the two\ntimestamps, plus the write-only `bind_secret`. An omitted optional member is\n**reset to its default**, not kept.",
+        "required": [
+          "enabled",
+          "kind",
+          "url",
+          "start_tls",
+          "bind_dn",
+          "base_dn",
+          "user_filter"
+        ],
+        "properties": {
+          "base_dn": {
+            "type": "string",
+            "description": "Where users are searched for."
+          },
+          "bind_dn": {
+            "type": "string",
+            "description": "The service account the search runs as."
+          },
+          "bind_secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The service account's password: **write-only**, 1 to 4096 octets.\nRequired when the tenant has no configuration yet; on a replacement,\nabsent means *keep the stored secret* — unless the write moves the\nconnection (`url`, `start_tls`, `bind_dn` or `trust_anchors_pem`), which\nthen requires it (`400`, P23W2-01).",
+            "writeOnly": true,
+            "maxLength": 4096,
+            "minLength": 1
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "A disabled directory serves no sign-in and is not synced."
+          },
+          "group_base_dn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to null."
+          },
+          "group_filter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to null."
+          },
+          "group_mappings": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/GroupMapping"
+            },
+            "description": "At most 500; every `group_id` a group of the tenant. Default empty.",
+            "maxItems": 500
+          },
+          "group_member_attribute": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults by `kind`."
+          },
+          "group_nesting_depth": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`0..=10`, default 5.",
+            "maximum": 10,
+            "minimum": 0
+          },
+          "jit_provisioning": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Default false."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DirectoryKind",
+            "description": "Chooses defaults only."
+          },
+          "start_tls": {
+            "type": "boolean",
+            "description": "Upgrade an `ldap://` connection with StartTLS before any bind."
+          },
+          "sync_interval_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`300..=86400`, default 3600.",
+            "maximum": 86400,
+            "minimum": 300
+          },
+          "trust_anchors_pem": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "At most 16 CA certificates in PEM. Default empty (the public roots).",
+            "maxItems": 16
+          },
+          "url": {
+            "type": "string",
+            "description": "`ldaps://host[:port]`, or `ldap://host[:port]` with `start_tls`."
+          },
+          "user_attribute_map": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserAttributeMap",
+                "description": "Defaults by `kind`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "user_filter": {
+            "type": "string",
+            "description": "One `{username}` placeholder in value position."
+          }
+        }
+      },
       "SetMtlsTrustAnchor": {
         "type": "object",
         "description": "Body for `PUT .../ca-certificates/{id}/mtls-trust-anchor`.",
@@ -21038,6 +21739,156 @@
           "deny"
         ]
       },
+      "UpdateDirectoryConfig": {
+        "type": "object",
+        "description": "`PATCH /api/v1/tenants/{tenant_id}/directory` — a **sparse** update.\n\nEvery member optional: absent leaves the stored value, and for the two\nnullable members an explicit `null` clears it.",
+        "properties": {
+          "base_dn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`SetDirectoryConfig::base_dn`]."
+          },
+          "bind_dn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`SetDirectoryConfig::bind_dn`]."
+          },
+          "bind_secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`SetDirectoryConfig::bind_secret`]; absent keeps the stored secret,\nsubject to the same P23W2-01 rule.",
+            "writeOnly": true,
+            "maxLength": 4096,
+            "minLength": 1
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "See [`SetDirectoryConfig::enabled`]."
+          },
+          "group_base_dn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Explicit `null` clears it."
+          },
+          "group_filter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Explicit `null` clears it."
+          },
+          "group_mappings": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/GroupMapping"
+            },
+            "description": "Replaces the whole table when present.",
+            "maxItems": 500
+          },
+          "group_member_attribute": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`SetDirectoryConfig::group_member_attribute`]."
+          },
+          "group_nesting_depth": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "See [`SetDirectoryConfig::group_nesting_depth`].",
+            "maximum": 10,
+            "minimum": 0
+          },
+          "jit_provisioning": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "See [`SetDirectoryConfig::jit_provisioning`]."
+          },
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DirectoryKind",
+                "description": "See [`SetDirectoryConfig::kind`]."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "start_tls": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "See [`SetDirectoryConfig::start_tls`]."
+          },
+          "sync_interval_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "See [`SetDirectoryConfig::sync_interval_secs`].",
+            "maximum": 86400,
+            "minimum": 300
+          },
+          "trust_anchors_pem": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Replaces the whole list when present.",
+            "maxItems": 16
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`SetDirectoryConfig::url`]."
+          },
+          "user_attribute_map": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserAttributeMap",
+                "description": "Replaces the whole map when present."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "user_filter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "See [`SetDirectoryConfig::user_filter`]."
+          }
+        }
+      },
       "UpdateFederationConfigRequest": {
         "type": "object",
         "properties": {
@@ -22032,6 +22883,34 @@
           }
         }
       },
+      "UserAttributeMap": {
+        "type": "object",
+        "description": "Which directory attribute feeds each AXIAM user field.",
+        "required": [
+          "username",
+          "email",
+          "display_name",
+          "external_id"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "description": "The attribute holding the human-readable name."
+          },
+          "email": {
+            "type": "string",
+            "description": "The attribute holding the e-mail address."
+          },
+          "external_id": {
+            "type": "string",
+            "description": "The attribute holding the immutable entry identifier\n(`entryUUID`, `objectGUID`)."
+          },
+          "username": {
+            "type": "string",
+            "description": "The attribute holding the login name (`uid`, `sAMAccountName`)."
+          }
+        }
+      },
       "UserInfoPostForm": {
         "type": "object",
         "description": "The form body `POST /oauth2/userinfo` accepts (RFC 6750 §2.2).\n\nUnknown fields are ignored, as serde does by default: RFC 6750 §2.2 defines\none parameter and says nothing about others, and a UserInfo request that\nalso carried, say, a `client_id` is not malformed.",
@@ -22593,6 +23472,10 @@
     {
       "name": "email-config",
       "description": "Organization and tenant email provider configuration"
+    },
+    {
+      "name": "directory",
+      "description": "Tenant LDAP / Active Directory identity source — configuration, account linking and sync status (CONTRACT §30)"
     },
     {
       "name": "federation",

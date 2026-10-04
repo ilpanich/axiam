@@ -6,6 +6,7 @@ pub mod ca_certificates;
 pub mod certificates;
 pub mod dcr;
 pub mod device;
+pub mod directory;
 pub mod email_config;
 pub mod email_verification;
 pub mod federation;

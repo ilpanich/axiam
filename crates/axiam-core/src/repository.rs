@@ -495,6 +495,26 @@ pub trait UserRepository: Send + Sync {
             ))
         }
     }
+
+    /// How many of the tenant's directory accounts are **live** — carry a
+    /// directory marker and are `Active`, `PendingVerification` or `Locked`,
+    /// i.e. the ones `deactivate_directory_account` would still deactivate and
+    /// that a deleted or disabled directory leaves with sessions and passkeys
+    /// that keep working (G-3, T23.3.8). One count, no rows hydrated: the audit
+    /// row of a configuration delete or disable records it (CONTRACT §30.3
+    /// rule 5).
+    ///
+    /// The default implementation refuses.
+    fn count_live_directory_accounts(
+        &self,
+        _tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not support directory accounts".into(),
+            ))
+        }
+    }
 }
 
 pub trait RoleRepository: Send + Sync {

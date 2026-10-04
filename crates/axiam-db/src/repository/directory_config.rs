@@ -17,8 +17,8 @@ use axiam_auth::crypto::{decrypt_separate, encrypt_separate};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::directory::{
-    DirectoryConfig, DirectoryKind, GROUP_MAPPINGS_MAX, GroupMapping, NewDirectoryConfig,
-    UserAttributeMap,
+    CONNECTION_MOVED_WITHOUT_SECRET, DirectoryConfig, DirectoryKind, GROUP_MAPPINGS_MAX,
+    GroupMapping, NewDirectoryConfig, UserAttributeMap,
 };
 use axiam_core::repository::DirectoryConfigRepository;
 use axiam_core::secrets::{DIRECTORY_ENCRYPTION_KEY, env_var_name};
@@ -177,6 +177,14 @@ impl<C: Connection> SurrealDirectoryConfigRepository<C> {
     /// which case the directory feature is unavailable (see the module docs).
     pub fn new(db: impl Into<DbHandle<C>>, key: Option<[u8; 32]>) -> Self {
         Self { db: db.into(), key }
+    }
+
+    /// Whether the encryption key is configured: the one fact a management
+    /// route needs to answer "this deployment does not have the feature" before
+    /// it validates anything, without learning or logging the key itself.
+    #[must_use]
+    pub fn has_encryption_key(&self) -> bool {
+        self.key.is_some()
     }
 
     /// The text every missing-key refusal carries: the logical name and the
@@ -362,11 +370,14 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
     }
 
     async fn update(&self, input: NewDirectoryConfig) -> AxiamResult<DirectoryConfig> {
-        let key = self.key_for_write()?;
         // `None` keeps the stored ciphertext and nonce untouched; `Some` writes
-        // both, under a fresh nonce.
+        // both, under a fresh nonce. **The key is needed only to seal**: an
+        // update that carries no secret (enabling or disabling the directory,
+        // editing a filter) neither reads nor writes one, so a deployment that
+        // later lost its key can still switch its directory off (T23.3.8,
+        // CONTRACT §30.3 rule 4: only a write that carries a secret is `503`).
         let sealed = match &input.bind_secret {
-            Some(secret) => Some(seal(key, secret)?),
+            Some(secret) => Some(seal(self.key_for_write()?, secret)?),
             None => None,
         };
         // D-30: before anything is written, so a refused table changes nothing.
@@ -482,10 +493,7 @@ impl<C: Connection> DirectoryConfigRepository for SurrealDirectoryConfigReposito
                 || updated.trust_anchors_pem != anchors)
         {
             return Err(AxiamError::Validation {
-                message: "changing the directory's url, start_tls, bind_dn or trust anchors \
-                          requires entering the bind secret again: a stored bind secret is \
-                          never sent to a server it was not entered for"
-                    .into(),
+                message: CONNECTION_MOVED_WITHOUT_SECRET.into(),
             });
         }
         Ok(updated)

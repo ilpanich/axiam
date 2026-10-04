@@ -394,6 +394,22 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("test_tenant", "POST", "/api/v1/tenants/{tenant_id}/email-config/test"),
         ],
     },
+    "directory": {
+        "doc": "A tenant's LDAP / Active Directory identity source (CONTRACT §30): "
+               "the one configuration, the explicit act that links an existing "
+               "local account to its directory entry, and a read-only view of the "
+               "sync job. Signing in needs nothing new -- a directory account "
+               "calls the same §1 `login`.",
+        "operations": [
+            ("get", "GET", "/api/v1/tenants/{tenant_id}/directory"),
+            ("set", "PUT", "/api/v1/tenants/{tenant_id}/directory"),
+            ("update", "PATCH", "/api/v1/tenants/{tenant_id}/directory"),
+            ("delete", "DELETE", "/api/v1/tenants/{tenant_id}/directory"),
+            ("link_account", "POST", "/api/v1/tenants/{tenant_id}/directory/links"),
+            ("get_sync_status", "GET",
+             "/api/v1/tenants/{tenant_id}/directory/sync-status"),
+        ],
+    },
     "settings": {
         "doc": "Effective settings, and the organization/tenant layers they "
                "resolve from.",
@@ -511,6 +527,12 @@ SENSITIVE_FIELDS: frozenset[tuple[str, str]] = frozenset({
     ("CreateUserRequest", "password"),
     ("CreateWebhookRequest", "secret"),
     ("UpdateWebhookRequest", "secret"),
+    # T23.3.8 / CONTRACT §30.5. The credential of the customer's directory
+    # service account; write-only, on exactly these two request types and on no
+    # response (the server never returns it, D-15). `Sensitive<T>` from the first
+    # version an SDK ships.
+    ("SetDirectoryConfig", "bind_secret"),
+    ("UpdateDirectoryConfig", "bind_secret"),
 })
 
 
@@ -564,7 +586,13 @@ def _update_style(spec: dict[str, Any], method: str, schema: str | None) -> str 
     Generators read this field to pick the right shape: an optional-everything
     patch type for ``sparse``, a required-everything value type for ``replace``.
     """
-    if method != "PUT" or not schema:
+    if not schema:
+        return None
+    if method == "PATCH":
+        # A PATCH is partial by definition: `directory.update` (CONTRACT §30.1)
+        # is the first one on this surface, and its body has no required member.
+        return "sparse"
+    if method != "PUT":
         return None
     component = spec["components"]["schemas"].get(schema, {})
     return "replace" if component.get("required") else "sparse"

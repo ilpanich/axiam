@@ -2743,7 +2743,7 @@ async fn main() -> std::io::Result<()> {
         user_repo.clone(),
         session_repo.clone(),
         directory_sync_refresh_repo,
-        directory_sync_state_repo,
+        directory_sync_state_repo.clone(),
         Arc::clone(&directory_group_mapper) as _,
         Arc::clone(&directory_audit_sink) as _,
     )));
@@ -2913,6 +2913,15 @@ async fn main() -> std::io::Result<()> {
             oidc_federation_service: oidc_federation_service.clone(),
             #[cfg(feature = "saml")]
             saml_federation_service: saml_federation_service.clone(),
+        },
+        // G-3 (T23.3.8): the management routes share the sign-in path's
+        // configuration repository (and so its encryption key) and its
+        // connector — the address policy a write is checked against is the
+        // policy every connection is checked against.
+        directory: bundles::DirectoryState {
+            config_repo: directory_config_repo.clone(),
+            sync_state_repo: directory_sync_state_repo,
+            client: Arc::clone(directory_authenticator.client()),
         },
         #[cfg(feature = "saml")]
         saml_idp: saml_idp_state,

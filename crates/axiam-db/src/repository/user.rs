@@ -1048,6 +1048,25 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         }
     }
 
+    async fn count_live_directory_accounts(&self, tenant_id: Uuid) -> AxiamResult<u64> {
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM user \
+                 WHERE tenant_id = $tenant_id \
+                   AND directory_external_id != NONE \
+                   AND status IN ['Active', 'PendingVerification', 'Locked'] \
+                 GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result.check().map_err(DbError::from)?;
+        let rows: Vec<crate::helpers::CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().map(|r| r.total).unwrap_or(0))
+    }
+
     async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<bool> {
         // Atomic compare-and-set (SEC-008/SECHRD-01): the UPDATE only matches
         // when the stored step is unset (NONE, first-ever verification —

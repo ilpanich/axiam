@@ -171,6 +171,22 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "email_config:write",
         "Create, update, or delete organization or tenant email configuration",
     ),
+    // Directory — LDAP / Active Directory identity source (G-3, T23.3.8,
+    // CONTRACT §30). `directory:link` is kept apart from `directory:write`
+    // because linking acts on an account (it signs its owner out everywhere and
+    // retires its passkeys), not on the configuration (T-337).
+    (
+        "directory:read",
+        "Read the tenant's directory configuration and sync status (the bind secret is never returned)",
+    ),
+    (
+        "directory:write",
+        "Create, replace, edit or delete the tenant's directory configuration",
+    ),
+    (
+        "directory:link",
+        "Link an existing local account to its directory entry (revokes its sessions and passkeys)",
+    ),
     // Tenants
     ("tenants:list", "List tenants within an organization"),
     ("tenants:get", "Retrieve a single tenant"),
@@ -321,6 +337,9 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
     "notification_rules",
     "settings",
     "email_config",
+    // G-3: the bind secret is a human administrator's to enter (§30.3 rule 8),
+    // and linking signs a person out everywhere.
+    "directory",
     "tenants",
     "organizations",
     "admin",
@@ -1091,6 +1110,37 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "POST",
         "/api/v1/tenants/{tenant_id}/email-config/test",
         "email_config:write",
+    ),
+    // Directory — LDAP / Active Directory identity source (G-3, T23.3.8)
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/directory",
+        "directory:read",
+    ),
+    (
+        "PUT",
+        "/api/v1/tenants/{tenant_id}/directory",
+        "directory:write",
+    ),
+    (
+        "PATCH",
+        "/api/v1/tenants/{tenant_id}/directory",
+        "directory:write",
+    ),
+    (
+        "DELETE",
+        "/api/v1/tenants/{tenant_id}/directory",
+        "directory:write",
+    ),
+    (
+        "POST",
+        "/api/v1/tenants/{tenant_id}/directory/links",
+        "directory:link",
+    ),
+    (
+        "GET",
+        "/api/v1/tenants/{tenant_id}/directory/sync-status",
+        "directory:read",
     ),
     // WebAuthn Attestation Policy (X3 wave 3)
     (

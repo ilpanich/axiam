@@ -853,6 +853,7 @@ dependencies = [
  "axiam-authz",
  "axiam-core",
  "axiam-db",
+ "axiam-directory",
  "axiam-email",
  "axiam-federation",
  "axiam-oauth2",
@@ -893,6 +894,7 @@ dependencies = [
  "webauthn-rs-proto",
  "wiremock",
  "x509-parser 0.18.1",
+ "zeroize",
 ]
 
 [[package]]

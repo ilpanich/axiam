@@ -298,6 +298,50 @@ async fn the_listing_holds_marked_accounts_only_and_pages_by_id() {
 }
 
 #[tokio::test]
+async fn the_live_count_holds_marked_active_pending_and_locked_accounts_only() {
+    let db = setup().await;
+    let repo = SurrealUserRepository::new(db);
+    let tenant = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    assert_eq!(repo.count_live_directory_accounts(tenant).await.unwrap(), 0);
+
+    local(&repo, tenant, "local-one").await;
+    directory(&repo, other, "elsewhere").await;
+    directory(&repo, tenant, "live").await;
+    let pending = directory(&repo, tenant, "pending").await;
+    let locked = directory(&repo, tenant, "locked").await;
+    let gone = directory(&repo, tenant, "gone").await;
+    for (id, status) in [
+        (pending, UserStatus::PendingVerification),
+        (locked, UserStatus::Locked),
+    ] {
+        repo.update(
+            tenant,
+            id,
+            UpdateUser {
+                status: Some(status),
+                ..UpdateUser::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(repo.count_live_directory_accounts(tenant).await.unwrap(), 4);
+
+    // An account the sync job deactivated is no longer live.
+    repo.deactivate_directory_account(tenant, gone)
+        .await
+        .unwrap()
+        .expect("deactivated");
+    assert_eq!(repo.count_live_directory_accounts(tenant).await.unwrap(), 3);
+    assert_eq!(
+        repo.count_live_directory_accounts(other).await.unwrap(),
+        1,
+        "another tenant's accounts are counted in its own tenant"
+    );
+}
+
+#[tokio::test]
 async fn deactivating_sets_inactive_and_only_inactive() {
     let db = setup().await;
     let repo = SurrealUserRepository::new(db);

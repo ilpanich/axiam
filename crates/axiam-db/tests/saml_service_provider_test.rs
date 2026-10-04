@@ -615,6 +615,32 @@ async fn groups_outside_tenant_names_exactly_the_ones_that_are_not_the_tenants()
         vec![theirs, missing],
         "another tenant's group is outside, like one that does not exist; order kept, no repeats"
     );
+
+    // W4 F4 (the `x IN $ids` pitfall T23.2.4 met on a compound index): several
+    // of the tenant's own groups at once are all found.
+    let also_mine = groups
+        .create(CreateGroup {
+            tenant_id: tenant,
+            name: "also-mine".into(),
+            description: String::new(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    assert!(
+        repo.groups_outside_tenant(tenant, &[mine, also_mine])
+            .await
+            .unwrap()
+            .is_empty(),
+        "two of the tenant's groups are both the tenant's"
+    );
+    assert_eq!(
+        repo.groups_outside_tenant(tenant, &[also_mine, theirs, mine])
+            .await
+            .unwrap(),
+        vec![theirs]
+    );
 }
 
 #[tokio::test]

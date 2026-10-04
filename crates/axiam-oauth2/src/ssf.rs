@@ -1433,6 +1433,55 @@ mod tests {
         assert!(axiam_auth::token::validate_access_token(&set, &cfg).is_err());
     }
 
+    /// F4 W4 (T-389), pinned: a SET is refused by **every** verifier AXIAM
+    /// runs over a token signed with the same deployment key — the access-token
+    /// middleware and token exchange's `subject_token`/`actor_token`
+    /// (`decode_access_token`), introspection (`decode_access_token_any_audience`,
+    /// which reports `active: false` for it), and the `id_token_hint` of
+    /// `/oauth2/authorize` and end-session (`decode_id_token_hint`, which does
+    /// not check `exp` but needs `sub`). A relying party's back-channel logout
+    /// verifier needs `typ: logout+jwt` and the back-channel-logout event, and a
+    /// SET carries neither. On both issuer forms.
+    #[test]
+    fn a_set_is_refused_by_every_verifier_axiam_runs() {
+        for tenant_paths in [false, true] {
+            let cfg = config(tenant_paths);
+            for format in [SsfSubjectFormat::IssSub, SsfSubjectFormat::Email] {
+                let s = stream(SsfStreamStatus::Enabled, format);
+                let set = issue_set(
+                    &cfg,
+                    &s,
+                    &sample(SsfEventType::SessionRevoked),
+                    &subject(true),
+                    Some("cause-1"),
+                )
+                .unwrap();
+                assert!(axiam_auth::token::validate_access_token(&set, &cfg).is_err());
+                assert!(axiam_auth::token::decode_access_token(&set, &cfg).is_err());
+                assert!(axiam_auth::token::decode_access_token_any_audience(&set, &cfg).is_err());
+                assert!(
+                    crate::logout::decode_id_token_hint(&set, &cfg.jwt_public_key_pem).is_none()
+                );
+                let header = jsonwebtoken::decode_header(&set).unwrap();
+                assert_eq!(header.typ.as_deref(), Some(SET_TYP));
+                assert_ne!(header.typ.as_deref(), Some("logout+jwt"));
+                let claims = unverified_claims(&set);
+                let events = claims["events"].as_object().unwrap();
+                assert!(!events.contains_key("http://schemas.openid.net/event/backchannel-logout"));
+            }
+        }
+    }
+
+    /// The claims of a compact JWS, read without verifying it.
+    fn unverified_claims(jws: &str) -> Value {
+        use base64::Engine as _;
+        let payload = jws.split('.').nth(1).unwrap();
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     #[test]
     fn every_jti_is_unique() {
         let cfg = config(false);

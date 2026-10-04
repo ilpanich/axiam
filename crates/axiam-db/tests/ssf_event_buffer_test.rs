@@ -218,3 +218,24 @@ async fn delete_by_jti_removes_only_the_named_rows_of_this_stream() {
         0
     );
 }
+
+/// W4 F4 (the `x IN $ids` pitfall T23.2.4 met on a compound unique index): an
+/// acknowledgement naming many rows of one stream deletes every one of them,
+/// whatever the planner does with `(tenant_id, stream_id, jti)`.
+#[tokio::test]
+async fn an_acknowledgement_naming_many_rows_deletes_every_one() {
+    let (_db, repo) = repo().await;
+    let tenant = Uuid::new_v4();
+    let stream = Uuid::new_v4();
+    let now = Utc::now();
+    let held: Vec<SsfPendingEvent> = (0..6).map(|i| event(&format!("e{i}"))).collect();
+    for (i, e) in held.iter().enumerate() {
+        repo.push(tenant, stream, e, now + Duration::milliseconds(i as i64))
+            .await
+            .unwrap();
+    }
+    let acked: Vec<String> = held[..5].iter().map(|e| e.jti.clone()).collect();
+    assert_eq!(repo.delete_by_jti(tenant, stream, &acked).await.unwrap(), 5);
+    let left = repo.list_oldest(tenant, stream, 100, now).await.unwrap();
+    assert_eq!(left.iter().map(label).collect::<Vec<_>>(), ["e5"]);
+}

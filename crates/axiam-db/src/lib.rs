@@ -64,8 +64,8 @@ pub use repository::{
     SurrealSamlServiceProviderRepository, SurrealSamlSpSessionRepository,
     SurrealScimTokenRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
     SurrealSessionClientRepository, SurrealSessionRepository, SurrealSettingsRepository,
-    SurrealSsfStreamRepository, SurrealSsoHandoffCodeRepository, SurrealTenantRepository,
-    SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
+    SurrealSsfEventBufferRepository, SurrealSsfStreamRepository, SurrealSsoHandoffCodeRepository,
+    SurrealTenantRepository, SurrealUserRepository, SurrealWebauthnAttestationPolicyRepository,
     SurrealWebauthnCredentialRepository, SurrealWebhookRepository,
 };
 

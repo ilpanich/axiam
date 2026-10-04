@@ -46,6 +46,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use super::user::User;
+
 /// The OAuth2 scope a receiver's client-credentials token must carry on the
 /// stream management API and the poll endpoint.
 pub const SSF_MANAGE_SCOPE: &str = "ssf.manage";
@@ -637,6 +639,112 @@ pub trait SsfOutbox: Send + Sync {
         stream: &'a SsfStream,
         event: &'a SsfPendingEvent,
     ) -> SsfFuture<'a, Result<(), SsfOutboxError>>;
+
+    /// Release the events a **paused** push stream held, oldest first, now
+    /// that it is enabled again (D-48, D-51): each becomes one
+    /// [`crate::outbound::OutboundKind::SsfPush`] message. Returns how many
+    /// were released. A poll stream releases nothing — its receiver reads its
+    /// own buffer. The default releases nothing, for an outbox with no buffer.
+    fn resume<'a>(
+        &'a self,
+        _stream: &'a SsfStream,
+    ) -> SsfFuture<'a, Result<usize, SsfOutboxError>> {
+        Box::pin(async { Ok(0) })
+    }
+}
+
+/// The session-revocation port (D-52): the **only** way a CAEP
+/// `session-revoked` event is produced.
+///
+/// `SessionRepository` calls it from exactly the three paths that publish to
+/// the revocation feed — `invalidate`, `invalidate_user_sessions` and
+/// `invalidate_user_sessions_except` — **after** the revocation has committed,
+/// with the sessions that really were removed. It is never called from
+/// `consume` or `consume_by_token_hash` (a redemption is not a revocation), nor
+/// by expiry, and it does not depend on `revocation_feed_enabled`.
+///
+/// A sink must not fail the revocation it reports: it returns nothing, and
+/// logs what it cannot do.
+pub trait SessionRevocationSink: Send + Sync {
+    /// Whether the sink will do anything with a revocation. A repository
+    /// reads a session's user (to name it) only when this is `true`, so a
+    /// sink that is not wired costs the revocation path nothing.
+    fn is_active(&self) -> bool {
+        true
+    }
+
+    /// `session_ids` of `user_id` in `tenant_id` were revoked just now.
+    fn sessions_revoked<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        session_ids: &'a [Uuid],
+    ) -> SsfFuture<'a, ()>;
+}
+
+/// The port a background job that deactivates accounts on its own account
+/// reports through (D-52: a directory deactivation, `system`). Same contract
+/// as [`SessionRevocationSink`]: after the change committed, never failing it.
+pub trait SsfSystemAccountSink: Send + Sync {
+    /// The account of `user` was set `Inactive` by the platform itself.
+    /// `user` is the account as it was **before** the change.
+    fn account_disabled<'a>(&'a self, tenant_id: Uuid, user: &'a User) -> SsfFuture<'a, ()>;
+}
+
+/// A sink bound **after** the objects that hold it exist.
+///
+/// The session repository is built first and cloned into a dozen services; the
+/// emitter that implements the sink needs the repositories and the outbox,
+/// which come later. The repository is given a `Late` handle at construction
+/// and the composition root binds the real sink once it has one. Until then
+/// the handle is inactive and does nothing.
+pub struct Late<T: ?Sized>(std::sync::OnceLock<std::sync::Arc<T>>);
+
+impl<T: ?Sized> Default for Late<T> {
+    fn default() -> Self {
+        Self(std::sync::OnceLock::new())
+    }
+}
+
+impl<T: ?Sized> Late<T> {
+    /// Bind the real implementation. `false` when one was bound already (the
+    /// first binding stays).
+    pub fn bind(&self, inner: std::sync::Arc<T>) -> bool {
+        self.0.set(inner).is_ok()
+    }
+
+    /// The bound implementation, if any.
+    #[must_use]
+    pub fn get(&self) -> Option<&std::sync::Arc<T>> {
+        self.0.get()
+    }
+}
+
+impl SessionRevocationSink for Late<dyn SessionRevocationSink> {
+    fn is_active(&self) -> bool {
+        self.get().is_some_and(|inner| inner.is_active())
+    }
+
+    fn sessions_revoked<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        session_ids: &'a [Uuid],
+    ) -> SsfFuture<'a, ()> {
+        match self.get() {
+            Some(inner) => inner.sessions_revoked(tenant_id, user_id, session_ids),
+            None => Box::pin(async {}),
+        }
+    }
+}
+
+impl SsfSystemAccountSink for Late<dyn SsfSystemAccountSink> {
+    fn account_disabled<'a>(&'a self, tenant_id: Uuid, user: &'a User) -> SsfFuture<'a, ()> {
+        match self.get() {
+            Some(inner) => inner.account_disabled(tenant_id, user),
+            None => Box::pin(async {}),
+        }
+    }
 }
 
 #[cfg(test)]

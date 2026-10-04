@@ -3408,6 +3408,64 @@ pub trait SsfStreamRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// SSF event buffer (tenant-scoped) (G-5, T23.5.3)
+// ---------------------------------------------------------------------------
+
+/// The per-stream bounded buffer of unsigned events (D-48, schema v77's
+/// `ssf_event_buffer`): the events of an `enabled` poll stream waiting to be
+/// polled, and those of **any** `paused` stream waiting to be released.
+///
+/// Rows hold an [`crate::models::ssf::SsfPendingEvent`] — never a signed SET;
+/// the SET is signed when it is read (`axiam_oauth2::ssf::sign_set`). Every
+/// method is scoped by tenant **and** stream: a row of another stream is not
+/// seen, acknowledged or counted, exactly as one that does not exist.
+pub trait SsfEventBufferRepository: Send + Sync {
+    /// Buffer `event` for the stream at `now`: at most
+    /// [`crate::models::ssf::POLL_BUFFER_MAX_EVENTS`] rows per stream — the
+    /// **oldest** are dropped to admit this one — each living
+    /// [`crate::models::ssf::POLL_BUFFER_RETENTION_DAYS`] days from `now`.
+    /// One row per `jti`: buffering an event already buffered is `Ok` and
+    /// changes nothing.
+    fn push(
+        &self,
+        tenant_id: Uuid,
+        stream_id: Uuid,
+        event: &crate::models::ssf::SsfPendingEvent,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// The stream's unexpired events, **oldest first**, at most `limit`.
+    fn list_oldest(
+        &self,
+        tenant_id: Uuid,
+        stream_id: Uuid,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::ssf::SsfPendingEvent>>> + Send;
+
+    /// Delete exactly the rows of **this stream** named by `jtis`; a `jti` the
+    /// stream does not hold (or that another stream does) is ignored. Returns
+    /// how many rows went.
+    fn delete_by_jti(
+        &self,
+        tenant_id: Uuid,
+        stream_id: Uuid,
+        jtis: &[String],
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// How many rows the stream holds (expired ones included until swept).
+    fn count(
+        &self,
+        tenant_id: Uuid,
+        stream_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Remove every row whose `expires_at` is at or before `now`, in every
+    /// tenant; returns how many. The sweep job registered in `/health/jobs`.
+    fn delete_expired(&self, now: DateTime<Utc>) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // SAML IdP pending AuthnRequests (tenant-scoped) (G-2, T23.2.3)
 // ---------------------------------------------------------------------------
 

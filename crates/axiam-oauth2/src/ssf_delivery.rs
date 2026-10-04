@@ -43,15 +43,15 @@
 //! the request), ten seconds, **no redirect followed**, a response body read
 //! to at most 64 KiB and never logged.
 //!
-//! **The only way out of the process is `guarded_fetch` with
-//! `allow_private = false`**: the name is resolved fresh, every address must be
-//! globally routable, the validated address is pinned into the connection, and
-//! `https` is required. A name an administrator registered that resolves to an
-//! internal address is refused here, at delivery, which is what the write-time
-//! policy cannot catch (T-392). The guard follows redirects itself, re-running
-//! the full guard on each hop; this deliverer refuses the second hop outright
-//! instead, because following one would send the SET (and the credential) to a
-//! host the administrator never named.
+//! **The only way out of the process is `guarded_fetch_no_redirect` with
+//! `allow_private = false`** (`axiam_pki::ssrf`, D-53 (9)): the name is resolved
+//! fresh, every address must be globally routable, the validated address is
+//! pinned into the connection, and `https` is required. A name an administrator
+//! registered that resolves to an internal address is refused here, at delivery,
+//! which is what the write-time policy cannot catch (T-392). The fetch makes
+//! **one hop and returns a `3xx` as a response**: a redirect is never followed,
+//! so neither the SET nor the credential can reach a host the administrator
+//! never named — by construction, not by inspecting a later hop.
 //!
 //! | The receiver answers | Outcome |
 //! |---|---|
@@ -59,15 +59,15 @@
 //! | `400` with an RFC 8935 `err` | dead-letter, the code in the audit row |
 //! | `401`, `403` | dead-letter: the credential is wrong until someone fixes it |
 //! | `404`, `408`, `429`, `5xx`, a timeout, no connection | retry |
-//! | a redirect | retry; it is never followed |
-//! | anything else (a `400` without a code, `410`, `422` …) | retry, bounded by the dispatcher |
+//! | a `3xx` | retry; it is never followed |
+//! | any other `4xx` (a `400` without a known code, `410`, `422` …) | dead-letter, reason `HTTP <status>`: it will not change on retry (D-53 (8)) |
+//! | anything else | retry |
 //!
 //! A reason string reaches the audit log, so it is one of a fixed vocabulary:
 //! never a header, a URL, a response body or a transport error's text (which
 //! would carry the endpoint's URL).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use axiam_auth::config::AuthConfig;
 use axiam_core::error::AxiamError;
@@ -80,7 +80,7 @@ use axiam_core::outbound::{
     OutboundMessage, OutboundPublisher,
 };
 use axiam_core::repository::{SsfEventBufferRepository, SsfStreamRepository};
-use axiam_federation::ssrf::{SsrfError, guarded_fetch, read_capped_body};
+use axiam_federation::ssrf::{SsrfError, guarded_fetch_no_redirect, read_capped_body};
 use chrono::Utc;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 
@@ -279,7 +279,7 @@ pub struct SsfPushDeliverer<S, B> {
     streams: S,
     buffer: B,
     auth_config: AuthConfig,
-    /// `guarded_fetch`'s `allow_private`. **Always `false`** except for the
+    /// The guarded fetch's `allow_private`. **Always `false`** except for the
     /// integration tests' loopback receiver, which turn it on through
     /// [`Self::admitting_private_networks_for_tests`] and nothing else.
     allow_private: bool,
@@ -290,7 +290,7 @@ where
     S: SsfStreamRepository + 'static,
     B: SsfEventBufferRepository + 'static,
 {
-    /// The production deliverer: every push goes through `guarded_fetch` with
+    /// The production deliverer: every push goes through `guarded_fetch_no_redirect` with
     /// `allow_private = false`.
     pub fn new(streams: S, buffer: B, auth_config: AuthConfig) -> Self {
         Self {
@@ -412,53 +412,35 @@ where
         set: &str,
         authorization: Option<HeaderValue>,
     ) -> Result<DeliveryOutcome, OutboundError> {
-        // The guard follows a redirect by calling this closure again with the
-        // `Location`. The second call builds a request that cannot be sent, so
-        // the SET and the credential never reach a host the administrator did
-        // not name.
-        let calls = AtomicU8::new(0);
-        let redirected = AtomicBool::new(false);
-        let result = guarded_fetch(endpoint, self.allow_private, |client, target| {
-            if calls.fetch_add(1, Ordering::SeqCst) > 0 {
-                redirected.store(true, Ordering::SeqCst);
-                return client
+        // One guarded hop that returns a redirect instead of following it
+        // (D-53 (9)): neither the SET nor the credential can reach a host the
+        // administrator did not name, by construction.
+        let response =
+            match guarded_fetch_no_redirect(endpoint, self.allow_private, |client, target| {
+                let mut request = client
                     .post(target)
-                    .header("\n", "a redirect is not followed");
-            }
-            let mut request = client
-                .post(target)
-                .header(CONTENT_TYPE, SET_CONTENT_TYPE)
-                .header(ACCEPT, "application/json")
-                .body(set.to_owned());
-            if let Some(value) = &authorization {
-                request = request.header(AUTHORIZATION, value.clone());
-            }
-            request
-        })
-        .await;
-
-        let response = match result {
-            Ok(response) => response,
-            // The first request was built and sent (so the endpoint passed the
-            // guard) and the guard then failed on something that is not a
-            // transport error of that request: it is judging a redirect's
-            // target. Either way the answer was a redirect, and it is not
-            // followed.
-            Err(error)
-                if redirected.load(Ordering::SeqCst) || answered_a_redirect(&calls, &error) =>
+                    .header(CONTENT_TYPE, SET_CONTENT_TYPE)
+                    .header(ACCEPT, "application/json")
+                    .body(set.to_owned());
+                if let Some(value) = &authorization {
+                    request = request.header(AUTHORIZATION, value.clone());
+                }
+                request
+            })
+            .await
             {
-                return Ok(retry(
-                    "the receiver answered with a redirect, which is not followed",
-                ));
-            }
-            Err(error) => return Ok(classify_transport(&error)),
-        };
+                Ok(response) => response,
+                Err(error) => return Ok(classify_transport(&error)),
+            };
 
         let status = response.status().as_u16();
         Ok(match status {
             200..=299 => DeliveryOutcome::Delivered {
                 response_status: Some(status),
             },
+            // A 3xx is never followed, and is a retry: the administrator may
+            // fix the endpoint.
+            300..=399 => retry("the receiver answered with a redirect, which is not followed"),
             400 => match read_capped_body(response, MAX_RESPONSE_BODY_BYTES)
                 .await
                 .ok()
@@ -466,12 +448,17 @@ where
                 .and_then(rfc_8935_error)
             {
                 Some(code) => dead(&format!("the receiver rejected the SET: {code}")),
-                None => retry("the receiver answered 400 without an RFC 8935 error code"),
+                // A 400 without a known code will not change on retry either.
+                None => dead("HTTP 400"),
             },
+            // The one 4xx that says the credential is wrong until someone fixes it.
             401 | 403 => dead(&format!(
                 "the receiver refused the push credential (HTTP {status})"
             )),
             404 | 408 | 429 | 500..=599 => retry(&format!("the receiver answered HTTP {status}")),
+            // Any other 4xx will not change on retry (D-53 (8)).
+            400..=499 => dead(&format!("HTTP {status}")),
+            // Anything else (1xx, an unassigned code) retries.
             _ => retry(&format!(
                 "the receiver answered an unexpected HTTP {status}"
             )),
@@ -494,22 +481,6 @@ where
     ) -> OutboundFuture<'a, Result<DeliveryOutcome, OutboundError>> {
         Box::pin(self.attempt(msg))
     }
-}
-
-/// Whether `error` came from the guard judging a redirect target rather than
-/// from the one request this deliverer built: that request was built (`calls`
-/// is non-zero) and the failure is of a kind only a later hop can produce — a
-/// request's own failure is [`SsrfError::RequestFailed`].
-fn answered_a_redirect(calls: &AtomicU8, error: &SsrfError) -> bool {
-    calls.load(Ordering::SeqCst) > 0
-        && matches!(
-            error,
-            SsrfError::Blocked
-                | SsrfError::ResolveFailed
-                | SsrfError::InsecureScheme
-                | SsrfError::InvalidUrl
-                | SsrfError::TooManyRedirects
-        )
 }
 
 fn dead(reason: &str) -> DeliveryOutcome {
@@ -601,16 +572,19 @@ mod tests {
     /// admission off. Pinned against the source so that a second HTTP client
     /// cannot be added beside it without this test saying so.
     #[test]
-    fn push_goes_through_guarded_fetch_and_nothing_else() {
+    fn push_goes_through_the_no_redirect_guarded_fetch_and_nothing_else() {
         let source = include_str!("ssf_delivery.rs");
         let production = source
             .split("#[cfg(test)]")
             .next()
             .expect("the production half of the file");
-        assert_eq!(production.matches("guarded_fetch(").count(), 1);
+        // One call, of the variant that returns a redirect; the following
+        // `guarded_fetch` is not used at all.
+        assert_eq!(production.matches("guarded_fetch_no_redirect(").count(), 1);
+        assert_eq!(production.matches("guarded_fetch(").count(), 0);
         assert_eq!(
             production
-                .matches("guarded_fetch(endpoint, self.allow_private")
+                .matches("guarded_fetch_no_redirect(endpoint, self.allow_private")
                 .count(),
             1
         );

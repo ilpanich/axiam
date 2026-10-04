@@ -472,8 +472,10 @@ async fn a_400_with_an_rfc_8935_error_is_dead_lettered_with_the_code() {
     }
 }
 
+/// D-53 (8): a `400` without a known RFC 8935 code will not change on retry:
+/// dead-lettered, the reason the status and nothing the receiver said.
 #[tokio::test]
-async fn a_400_without_a_known_code_is_retried() {
+async fn a_400_without_a_known_code_is_dead_lettered_with_its_status() {
     let w = world().await;
     let receiver = Receiver::start(400).await;
     let stream = w.push_stream(&receiver, None).await;
@@ -494,8 +496,60 @@ async fn a_400_without_a_known_code_is_retried() {
             .deliver_attempt(&w.message(&stream, &pending))
             .await
             .unwrap();
-        assert!(matches!(outcome, DeliveryOutcome::Retry { .. }));
+        assert!(matches!(outcome, DeliveryOutcome::DeadLetter { .. }));
+        assert_eq!(reason_of(&outcome), "HTTP 400");
     }
+}
+
+/// D-53 (8): any other `4xx` — the ones D-49 does not name — dead-letters with
+/// the reason `HTTP <status>`.
+#[tokio::test]
+async fn any_other_4xx_is_dead_lettered_with_its_status() {
+    let w = world().await;
+    let receiver = Receiver::start(410).await;
+    let stream = w.push_stream(&receiver, None).await;
+    for status in [402u16, 405, 409, 410, 413, 415, 422, 451] {
+        receiver.set_reply(Reply::status(status));
+        let pending = w.pending(&stream, &revoked());
+        let outcome = w
+            .deliverer()
+            .deliver_attempt(&w.message(&stream, &pending))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, DeliveryOutcome::DeadLetter { .. }),
+            "{status}"
+        );
+        assert_eq!(reason_of(&outcome), format!("HTTP {status}"));
+    }
+}
+
+/// D-53 (8), (9): a `3xx` retries, and is never followed.
+#[tokio::test]
+async fn a_3xx_is_retried_and_never_followed() {
+    let w = world().await;
+    let target = Receiver::start(202).await;
+    let receiver = Receiver::start(302).await;
+    let stream = w.push_stream(&receiver, Some(credential())).await;
+    for status in [300u16, 301, 302, 303, 307, 308] {
+        receiver.set_reply(Reply {
+            status,
+            body: String::new(),
+            headers: vec![("Location".into(), target.url())],
+        });
+        let pending = w.pending(&stream, &revoked());
+        let outcome = w
+            .deliverer()
+            .deliver_attempt(&w.message(&stream, &pending))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, DeliveryOutcome::Retry { .. }), "{status}");
+        assert!(reason_of(&outcome).contains("redirect"));
+    }
+    assert!(
+        target.requests().is_empty(),
+        "the redirect target saw nothing"
+    );
 }
 
 /// The response body is read to at most 64 KiB: a `400` whose code sits beyond
@@ -517,7 +571,9 @@ async fn the_response_body_is_capped() {
         .deliver_attempt(&w.message(&stream, &pending))
         .await
         .unwrap();
-    assert!(matches!(outcome, DeliveryOutcome::Retry { .. }));
+    // The code sits beyond the cap, so it is not read: an uncoded 400.
+    assert!(matches!(outcome, DeliveryOutcome::DeadLetter { .. }));
+    assert_eq!(reason_of(&outcome), "HTTP 400");
 }
 
 #[tokio::test]
@@ -543,9 +599,8 @@ async fn the_retryable_statuses_are_retried() {
     let w = world().await;
     let receiver = Receiver::start(500).await;
     let stream = w.push_stream(&receiver, None).await;
-    // D-49's list, plus two statuses it does not name: retried, bounded by the
-    // dispatcher's attempt ceiling.
-    for status in [404u16, 408, 429, 500, 502, 503, 504, 410, 422] {
+    // D-49's list; every other 4xx dead-letters (D-53 (8)).
+    for status in [404u16, 408, 429, 500, 502, 503, 504] {
         receiver.set_reply(Reply::status(status));
         let pending = w.pending(&stream, &revoked());
         let outcome = w

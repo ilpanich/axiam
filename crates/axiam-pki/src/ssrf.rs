@@ -349,6 +349,47 @@ pub async fn guarded_fetch_with_cap(
     Err(SsrfError::TooManyRedirects)
 }
 
+/// One guarded hop that **never follows a redirect** (G-5, T23.5.3, D-53 (9)).
+///
+/// The same resolve (A + AAAA, fresh), refusal of any non-global address, HTTPS
+/// requirement (waived only with `allow_private`, the test seam), IP pinning and
+/// `Content-Length` cap as [`guarded_fetch`], on the one URL it is given. A `3xx`
+/// is **returned to the caller as a response** — its `Location` is not resolved,
+/// not validated and not fetched — so a caller that must not send a body or a
+/// credential anywhere but the address it was given (an SSF push, whose
+/// `Authorization` header would otherwise follow a redirect) can refuse a
+/// redirect by construction instead of by inspecting a later hop.
+///
+/// [`guarded_fetch`] and [`guarded_fetch_with_cap`] are unchanged.
+pub async fn guarded_fetch_no_redirect(
+    url: &str,
+    allow_private: bool,
+    build_request: impl Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, SsrfError> {
+    let parsed = url::Url::parse(url).map_err(|_| SsrfError::InvalidUrl)?;
+    let host = parsed.host_str().ok_or(SsrfError::InvalidUrl)?.to_string();
+    let port = parsed.port_or_known_default().unwrap_or(443);
+
+    // SEC-069, as on the first hop of `guarded_fetch`.
+    if parsed.scheme() != "https" && !allow_private {
+        return Err(SsrfError::InsecureScheme);
+    }
+
+    let ip = resolve_and_pick(&host, port, allow_private).await?;
+    let client = pinned_client(&host, ip, port)?;
+    let resp = build_request(&client, url)
+        .send()
+        .await
+        .map_err(|e| SsrfError::RequestFailed(e.to_string()))?;
+
+    if let Some(len) = resp.content_length()
+        && len > MAX_RESPONSE_BYTES as u64
+    {
+        return Err(SsrfError::ResponseTooLarge(MAX_RESPONSE_BYTES));
+    }
+    Ok(resp)
+}
+
 /// Read a response body with a hard streaming cap, aborting as soon as `cap`
 /// is exceeded — WITHOUT buffering the rest of the body first (CQ-B23).
 ///
@@ -728,5 +769,110 @@ mod tests {
             matches!(result, Err(SsrfError::ResponseTooLarge(CAP))),
             "expected ResponseTooLarge({CAP}), got: {result:?}"
         );
+    }
+
+    // -- D-53 (9): one guarded hop that returns a redirect instead of following it --
+
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn no_redirect_returns_a_3xx_and_never_fetches_its_target() {
+        let target = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&target)
+            .await;
+        let origin = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(307).insert_header("Location", target.uri().as_str()),
+            )
+            .expect(1)
+            .mount(&origin)
+            .await;
+
+        // The test seam admits the first (only) hop to loopback.
+        let response = guarded_fetch_no_redirect(&origin.uri(), true, |c, u| c.post(u).body("x"))
+            .await
+            .expect("a 3xx is a response, not an error");
+        assert_eq!(response.status().as_u16(), 307);
+        assert_eq!(
+            response.headers().get("location").map(|v| v.as_bytes()),
+            Some(target.uri().as_bytes())
+        );
+        // `expect(0)` is verified when the server drops: the target saw nothing.
+        target.verify().await;
+        origin.verify().await;
+    }
+
+    /// A redirect to an address the guard refuses is returned, not fetched and
+    /// not judged: its `Location` is never resolved.
+    #[tokio::test]
+    async fn no_redirect_returns_a_redirect_to_an_internal_address_without_fetching_it() {
+        let origin = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", "http://169.254.169.254/latest/meta-data"),
+            )
+            .mount(&origin)
+            .await;
+        let response = guarded_fetch_no_redirect(&origin.uri(), true, |c, u| c.post(u))
+            .await
+            .expect("returned, not an SSRF error");
+        assert_eq!(response.status().as_u16(), 302);
+    }
+
+    /// The one hop gets the whole guard.
+    #[tokio::test]
+    async fn no_redirect_keeps_the_guard_on_the_one_hop() {
+        for url in [
+            "https://127.0.0.1:9/x",
+            "https://localhost:9/x",
+            // Not 10.0.0.1 or the metadata address: the SEC-107 test installs
+            // the process-wide allow-list with exactly those.
+            "https://192.168.7.7/x",
+            "https://172.20.1.1/x",
+        ] {
+            let result = guarded_fetch_no_redirect(url, false, |c, u| c.get(u)).await;
+            assert!(
+                matches!(result, Err(SsrfError::Blocked)),
+                "{url} must be blocked, got {result:?}"
+            );
+        }
+        // Plaintext is refused before anything resolves.
+        let result =
+            guarded_fetch_no_redirect("http://93.184.216.34/x", false, |c, u| c.get(u)).await;
+        assert!(matches!(result, Err(SsrfError::InsecureScheme)));
+        let result = guarded_fetch_no_redirect("not a url", false, |c, u| c.get(u)).await;
+        assert!(matches!(result, Err(SsrfError::InvalidUrl)));
+    }
+
+    #[tokio::test]
+    async fn no_redirect_honours_the_content_length_cap() {
+        let origin = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(vec![b'a'; MAX_RESPONSE_BYTES + 1]),
+            )
+            .mount(&origin)
+            .await;
+        let result = guarded_fetch_no_redirect(&origin.uri(), true, |c, u| c.get(u)).await;
+        assert!(matches!(result, Err(SsrfError::ResponseTooLarge(_))));
+    }
+
+    #[tokio::test]
+    async fn no_redirect_returns_an_ordinary_answer_unchanged() {
+        let origin = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&origin)
+            .await;
+        let response = guarded_fetch_no_redirect(&origin.uri(), true, |c, u| c.post(u))
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 202);
     }
 }

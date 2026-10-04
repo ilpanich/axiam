@@ -41,7 +41,19 @@ pub struct QueueSpec {
     /// `x-dead-letter-routing-key`, sent with `x-dead-letter-exchange = ""`.
     /// `None` for the DLQ, which has no dead-letter arguments at all.
     pub dead_letter_routing_key: Option<String>,
+    /// `x-message-ttl` in milliseconds: how long a message may wait in this
+    /// queue before the broker drops it. `None` — every queue of every kind but
+    /// the SSF push DLQ — declares no TTL, which is what the webhook queues
+    /// already hold and must keep holding (a redeclaration with different
+    /// arguments is refused).
+    pub message_ttl_ms: Option<i64>,
 }
+
+/// How long a dead-lettered SSF push message stays in `axiam.ssf_push.dlq`:
+/// seven days, D-48's bound for held events (D-53 (10)). It holds an unsigned
+/// event and so a subject, possibly an address; the queue is new, so the TTL is
+/// declared with it and no in-flight message is affected.
+pub const SSF_PUSH_DLQ_MESSAGE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 impl QueueSpec {
     /// The `queue.declare` arguments.
@@ -51,6 +63,9 @@ impl QueueSpec {
     /// (`PRECONDITION_FAILED`), which would stop the server booting on upgrade.
     pub fn arguments(&self) -> FieldTable {
         let mut args = FieldTable::default();
+        if let Some(ttl_ms) = self.message_ttl_ms {
+            args.insert("x-message-ttl".into(), AMQPValue::LongLongInt(ttl_ms));
+        }
         if let Some(routing_key) = &self.dead_letter_routing_key {
             args.insert(
                 "x-dead-letter-exchange".into(),
@@ -85,14 +100,22 @@ impl OutboundTopology {
             QueueSpec {
                 name: self.dlq.clone(),
                 dead_letter_routing_key: None,
+                // Only the SSF push kind bounds its DLQ (D-53 (10)); the
+                // webhook DLQ is declared exactly as it always was.
+                message_ttl_ms: match self.kind {
+                    OutboundKind::SsfPush => Some(SSF_PUSH_DLQ_MESSAGE_TTL_MS),
+                    OutboundKind::Webhook => None,
+                },
             },
             QueueSpec {
                 name: self.primary.clone(),
                 dead_letter_routing_key: Some(self.dlq.clone()),
+                message_ttl_ms: None,
             },
             QueueSpec {
                 name: self.retry.clone(),
                 dead_letter_routing_key: Some(self.primary.clone()),
+                message_ttl_ms: None,
             },
         ]
     }
@@ -168,5 +191,62 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), OutboundKind::ALL.len() * 3);
+    }
+
+    /// D-53 (10): the SSF push DLQ — and only it — carries a seven-day
+    /// `x-message-ttl`, with no dead-letter arguments; the primary and the retry
+    /// queue are declared like every other kind's.
+    #[test]
+    fn the_ssf_push_dlq_declaration_is_pinned() {
+        let specs = OutboundTopology::for_kind(OutboundKind::SsfPush).queue_specs();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "axiam.ssf_push.dlq",
+                "axiam.ssf_push",
+                "axiam.ssf_push.retry"
+            ]
+        );
+        let dlq = specs[0].arguments();
+        assert_eq!(dlq.inner().len(), 1, "exactly the TTL");
+        assert_eq!(
+            dlq.inner().get("x-message-ttl"),
+            Some(&AMQPValue::LongLongInt(604_800_000))
+        );
+        assert_eq!(SSF_PUSH_DLQ_MESSAGE_TTL_MS, 7 * 24 * 3600 * 1000);
+        for (spec, routing_key) in [
+            (&specs[1], "axiam.ssf_push.dlq"),
+            (&specs[2], "axiam.ssf_push"),
+        ] {
+            let args = spec.arguments();
+            assert_eq!(
+                args.inner().len(),
+                2,
+                "no TTL on the primary or the retry queue"
+            );
+            assert_eq!(
+                args.inner().get("x-dead-letter-routing-key"),
+                Some(&AMQPValue::LongString(routing_key.into()))
+            );
+        }
+    }
+
+    /// No other kind's DLQ is bounded: the webhook DLQ keeps the arguments the
+    /// broker already holds.
+    #[test]
+    fn only_the_ssf_push_dlq_has_a_message_ttl() {
+        for kind in OutboundKind::ALL {
+            let specs = OutboundTopology::for_kind(*kind).queue_specs();
+            for spec in &specs {
+                let has_ttl = spec.arguments().inner().contains_key("x-message-ttl");
+                assert_eq!(
+                    has_ttl,
+                    *kind == OutboundKind::SsfPush && spec.name.ends_with(".dlq"),
+                    "{}",
+                    spec.name
+                );
+            }
+        }
     }
 }

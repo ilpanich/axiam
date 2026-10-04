@@ -58,6 +58,9 @@ use uuid::Uuid;
 
 use axiam_api_rest::authz::AuthzData;
 use axiam_api_rest::extractors::client_info::{client_ip, user_agent};
+use axiam_api_rest::ssf_emitter::{
+    ChangeType, CredentialDetail, CredentialType, InitiatingEntity, with_cause,
+};
 use axiam_api_rest::state::AppState;
 
 use crate::auth::{ScimPrincipal, require_scim_provision};
@@ -756,9 +759,14 @@ pub async fn replace<C: Connection + Clone>(
 
     // SEC-098: a PUT carrying `active: false` is the RFC 7644 §3.5.1 spelling
     // of a deactivation and must revoke on the same terms as the PATCH one.
-    if status == UserStatus::Inactive {
-        revoke_live_credentials(&state, user.tenant_id(), id, "scim.deactivated").await;
-    }
+    // G-5 (D-52): the deactivation, and the sessions it revokes, are one cause.
+    with_cause(Some(InitiatingEntity::Admin), async {
+        if status == UserStatus::Inactive {
+            revoke_live_credentials(&state, user.tenant_id(), id, "scim.deactivated").await;
+        }
+        emit_account_state(&state, &current.status, &updated).await;
+    })
+    .await;
 
     state
         .emit_webhook(
@@ -831,6 +839,34 @@ async fn revoke_live_credentials<C: Connection + Clone>(
             %tenant_id, %user_id, reason, error = %e,
             "SCIM: could not revoke OAuth2 refresh tokens after a credential-affecting write"
         ),
+    }
+}
+
+/// G-5 (D-52): the RISC event a status written through SCIM amounts to —
+/// `active: false` disables an account that was not `Inactive`, `active: true`
+/// enables one that was. Anything else (a lock-out, a first activation of a
+/// pending account) is neither.
+async fn emit_account_state<C: Connection + Clone>(
+    state: &AppState<C>,
+    before: &UserStatus,
+    after: &User,
+) {
+    match (before, &after.status) {
+        (previous, UserStatus::Inactive) if *previous != UserStatus::Inactive => {
+            state
+                .ssf
+                .emitter
+                .account_disabled(after.tenant_id, after)
+                .await;
+        }
+        (UserStatus::Inactive, UserStatus::Active) => {
+            state
+                .ssf
+                .emitter
+                .account_enabled(after.tenant_id, after)
+                .await;
+        }
+        _ => {}
     }
 }
 
@@ -975,15 +1011,36 @@ pub async fn patch<C: Connection + Clone>(
     let updated = if user_patch_is_noop(&update) {
         current
     } else {
+        let password_written = update.password_hash.is_some();
         let u = state.user_repo.update(user.tenant_id(), id, update).await?;
         authz
             .get_ref()
             .as_ref()
             .invalidate_subject(user.tenant_id(), id)
             .await?;
-        if let Some(reason) = revocation_reason {
-            revoke_live_credentials(&state, user.tenant_id(), id, reason).await;
-        }
+        // G-5 (D-52): the change, the credentials it revokes and the events they
+        // produce are one cause.
+        with_cause(Some(InitiatingEntity::Admin), async {
+            if let Some(reason) = revocation_reason {
+                revoke_live_credentials(&state, user.tenant_id(), id, reason).await;
+            }
+            if password_written {
+                state
+                    .ssf
+                    .emitter
+                    .credential_changed(
+                        u.tenant_id,
+                        u.id,
+                        CredentialType::Password,
+                        ChangeType::Update,
+                        InitiatingEntity::Admin,
+                        CredentialDetail::default(),
+                    )
+                    .await;
+            }
+            emit_account_state(&state, &current.status, &u).await;
+        })
+        .await;
         state
             .emit_webhook(
                 u.tenant_id,

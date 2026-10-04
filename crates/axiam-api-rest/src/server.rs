@@ -699,6 +699,19 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         rate_limit_cfg.ssf_per_min,
                     ))
                     .route(web::post().to(handlers::ssf::request_verification::<C>)),
+            )
+            // T23.5.3 — RFC 8936 poll delivery. One stream per path, so one bucket
+            // for the route (`ssf_poll`) under `ssf_per_min`: a long poll holds a
+            // request for up to 30 s, so an honest receiver makes two a minute.
+            .service(
+                web::resource("/poll/{stream_id}")
+                    .app_data(web::PayloadConfig::new(handlers::ssf::POLL_MAX_BODY_BYTES))
+                    .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ssf_poll",
+                        rate_limit_cfg.ssf_per_min,
+                    ))
+                    .route(web::post().to(handlers::ssf::poll_events::<C>)),
             ),
     );
     cfg.service(oauth2_scope::<C>(rate_limit_cfg, revocation_feed_enabled));

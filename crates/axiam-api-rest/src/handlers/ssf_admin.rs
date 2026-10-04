@@ -736,6 +736,11 @@ pub async fn update_stream<C: Connection + Clone>(
     if updated.status != old.status {
         announce_status(&state, &updated).await;
     }
+    // D-48: a paused push stream enabled again releases what it held, after the
+    // receiver has been told it is enabled.
+    if old.status == SsfStreamStatus::Paused && updated.status == SsfStreamStatus::Enabled {
+        crate::handlers::ssf::release_held(&state, &updated).await;
+    }
     Ok(HttpResponse::Ok().json(SsfStream::from(updated)))
 }
 

@@ -121,9 +121,73 @@ pub async fn delete_mfa_method<C: Connection + Clone>(
             .await?;
     }
 
+    let tenant_id = user_scope_tenant(&caller, user_id);
+    let initiator = if is_own_resource(&caller, user_id) {
+        axiam_oauth2::ssf::InitiatingEntity::User
+    } else {
+        axiam_oauth2::ssf::InitiatingEntity::Admin
+    };
+    // G-5 (D-52): what is about to be removed, read before it goes — a
+    // WebAuthn credential's kind and AAGUID are not recoverable afterwards.
+    let removed = removed_method(&state, tenant_id, user_id, &method_id).await;
     state
         .mfa_method_service
-        .delete_method(user_scope_tenant(&caller, user_id), user_id, &method_id)
+        .delete_method(tenant_id, user_id, &method_id)
         .await?;
+    if let Some((credential_type, detail)) = removed {
+        state
+            .ssf
+            .emitter
+            .credential_changed(
+                tenant_id,
+                user_id,
+                credential_type,
+                axiam_oauth2::ssf::ChangeType::Delete,
+                initiator,
+                detail,
+            )
+            .await;
+    }
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// The CAEP credential type (and AAGUID) of the MFA method `method_id` names:
+/// `"totp"` is an `app`, a credential id is a `fido2-*` of that credential's
+/// kind. `None` when it names nothing the user holds (the delete then answers
+/// `404` and emits nothing).
+async fn removed_method<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    method_id: &str,
+) -> Option<(
+    axiam_oauth2::ssf::CredentialType,
+    crate::ssf_emitter::CredentialDetail,
+)> {
+    use axiam_core::repository::{UserRepository as _, WebauthnCredentialRepository as _};
+
+    if method_id == "totp" {
+        let user = state.user_repo.get_by_id(tenant_id, user_id).await.ok()?;
+        return (user.mfa_enabled && user.mfa_secret.is_some()).then(|| {
+            (
+                axiam_oauth2::ssf::CredentialType::App,
+                crate::ssf_emitter::CredentialDetail::default(),
+            )
+        });
+    }
+    let credential_id: Uuid = method_id.parse().ok()?;
+    let credential = state
+        .webauthn
+        .webauthn_credential_repo
+        .get_by_id(tenant_id, credential_id)
+        .await
+        .ok()?;
+    (credential.user_id == user_id).then(|| {
+        (
+            crate::handlers::webauthn::fido2_credential_type(&credential.credential_type),
+            crate::ssf_emitter::CredentialDetail {
+                fido2_aaguid: credential.aaguid.map(|a| a.to_string()),
+            },
+        )
+    })
 }

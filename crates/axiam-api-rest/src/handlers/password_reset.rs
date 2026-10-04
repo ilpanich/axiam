@@ -14,7 +14,9 @@ use surrealdb::Connection;
 use uuid::Uuid;
 
 use crate::error::AxiamApiError;
+use crate::ssf_emitter::{CredentialDetail, with_cause};
 use crate::state::AppState;
+use axiam_oauth2::ssf::{ChangeType, CredentialType, InitiatingEntity};
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -332,22 +334,47 @@ pub async fn confirm_reset<C: Connection + Clone>(
         req.opaque.as_ref(),
     )?;
 
-    // QUAL-07: PasswordResetService is now a hoisted AppState singleton.
-    let user_id = state
-        .mail
-        .password_reset_service
-        .confirm_reset(
+    // G-5 (D-52): a reset revokes every session of the account; the
+    // `credential-change` and those `session-revoked` events are one cause (the
+    // holder of the reset token is the user).
+    with_cause(Some(InitiatingEntity::User), async {
+        // QUAL-07: PasswordResetService is now a hoisted AppState singleton.
+        let user_id = state
+            .mail
+            .password_reset_service
+            .confirm_reset(
+                req.tenant_id,
+                &req.token,
+                &req.new_password,
+                &settings.password,
+                state.auth_config.pepper.as_ref().map(|p| p.expose_secret()),
+                Some(&state.http_client),
+            )
+            .await?;
+
+        crate::handlers::opaque_enrollment::store_credential(
+            &state,
             req.tenant_id,
-            &req.token,
-            &req.new_password,
-            &settings.password,
-            state.auth_config.pepper.as_ref().map(|p| p.expose_secret()),
-            Some(&state.http_client),
+            user_id,
+            enrolled,
         )
         .await?;
 
-    crate::handlers::opaque_enrollment::store_credential(&state, req.tenant_id, user_id, enrolled)
-        .await?;
+        state
+            .ssf
+            .emitter
+            .credential_changed(
+                req.tenant_id,
+                user_id,
+                CredentialType::Password,
+                ChangeType::Update,
+                InitiatingEntity::User,
+                CredentialDetail::default(),
+            )
+            .await;
+        Ok::<(), AxiamApiError>(())
+    })
+    .await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({ "reset": true })))
 }

@@ -330,8 +330,9 @@ pub struct SamlIdpState<C: Connection + Clone> {
     pub issuer: Arc<axiam_federation::saml_idp::SamlIdpIssuer>,
 }
 
-/// The Shared Signals Framework transmitter (G-5, T23.5.2): the stream registry
-/// and the outbox events go to.
+/// The Shared Signals Framework transmitter (G-5, T23.5.2, T23.5.3): the
+/// stream registry, the poll buffer, the outbox events go to, and the emitter
+/// the change sites call.
 ///
 /// In every build; it reads nothing behind a feature.
 #[derive(Clone)]
@@ -339,9 +340,33 @@ pub struct SsfState<C: Connection + Clone> {
     /// The tenant's registered streams; seals the push `Authorization` header
     /// under `pki_encryption_key`.
     pub stream_repo: axiam_db::SurrealSsfStreamRepository<C>,
+    /// The per-stream bounded buffer: what a poll stream's receiver reads and a
+    /// paused stream holds (D-48).
+    pub buffer_repo: axiam_db::SurrealSsfEventBufferRepository<C>,
     /// Where produced events go (D-48): push enqueue, the poll buffer, or
-    /// nothing for a disabled stream. `None` until delivery is wired (T23.5.3),
-    /// and in a harness that does not test it — the verification endpoint then
-    /// answers `503`.
+    /// nothing for a disabled stream. `None` when delivery is not wired (a
+    /// harness that does not test it) — the verification endpoint then answers
+    /// `503`. Set through [`SsfState::bind_outbox`], which also wires the
+    /// emitter.
     pub outbox: Option<Arc<dyn axiam_core::models::ssf::SsfOutbox>>,
+    /// The one emitter every change site calls (D-52). A no-op until an outbox
+    /// is bound.
+    pub emitter: crate::ssf_emitter::SsfEmitter<C>,
+    /// The session repository's `session-revoked` port, bound to [`Self::emitter`]
+    /// (D-52). A `Late` handle because the repository is built first.
+    pub session_sink:
+        Arc<axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SessionRevocationSink>>,
+    /// The directory sync's `account-disabled` port, bound to [`Self::emitter`].
+    pub account_sink:
+        Arc<axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SsfSystemAccountSink>>,
+}
+
+impl<C: Connection + Clone> SsfState<C> {
+    /// Wire the outbox: producers (verification, a status change) and the
+    /// emitter — and through it both ports — send events to it. The emitter
+    /// keeps the first outbox it is given.
+    pub fn bind_outbox(&mut self, outbox: Arc<dyn axiam_core::models::ssf::SsfOutbox>) {
+        self.emitter.bind_outbox(outbox.clone());
+        self.outbox = Some(outbox);
+    }
 }

@@ -333,6 +333,7 @@ use crate::handlers;
         handlers::ssf::get_stream_status,
         handlers::ssf::update_stream_status,
         handlers::ssf::request_verification,
+        handlers::ssf::poll_events,
         // Email Config (FUNC-03 / D-13)
         handlers::email_config::get_org_email_config,
         handlers::email_config::set_org_email_config,
@@ -690,6 +691,9 @@ use crate::handlers;
         handlers::ssf::SsfStreamStatusView,
         handlers::ssf::SsfStatusUpdate,
         handlers::ssf::SsfVerificationRequest,
+        handlers::ssf::SsfPollRequest,
+        handlers::ssf::SsfSetError,
+        handlers::ssf::SsfPollResponse,
         // Email Config (FUNC-03 / D-13)
         axiam_core::models::email::EmailConfig,
         axiam_core::models::email::EmailConfigOverride,

@@ -39,16 +39,17 @@ use axiam_auth::token::SubjectKind;
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::ssf::{
-    MIN_VERIFICATION_INTERVAL_SECS, SSF_MANAGE_SCOPE, SecretChange, SsfStatusActor, SsfStream,
-    SsfStreamStatus, SsfStreamUpdate,
+    MIN_VERIFICATION_INTERVAL_SECS, POLL_MAX_EVENTS_PER_RESPONSE, SSF_MANAGE_SCOPE, SecretChange,
+    SsfDeliveryMethod, SsfStatusActor, SsfStream, SsfStreamStatus, SsfStreamUpdate,
 };
 use axiam_core::repository::{
-    AuditLogRepository, SettingsRepository, SsfStreamRepository, TenantRepository,
+    AuditLogRepository, SettingsRepository, SsfEventBufferRepository, SsfStreamRepository,
+    TenantRepository,
 };
 use axiam_oauth2::ssf::{
-    ReceiverStreamUpdate, ReceiverUpdateMode, SsfConfiguration, SsfStreamConfiguration,
-    apply_receiver_update, build_ssf_configuration, prepare_verification, stream_configuration,
-    validate_status_reason,
+    ReceiverStreamUpdate, ReceiverUpdateMode, SsfConfiguration, SsfError, SsfStreamConfiguration,
+    apply_receiver_update, build_ssf_configuration, prepare_verification, sign_set,
+    stream_configuration, validate_status_reason,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -66,8 +67,28 @@ pub const AUDIT_RECEIVER_STATUS: &str = "ssf_stream.receiver_status_changed";
 /// Audit action: a receiver asked for a verification event.
 pub const AUDIT_VERIFICATION: &str = "ssf_stream.verification_requested";
 
+/// Audit action: a receiver reported, in a poll request's `setErrs`, that it
+/// could not accept a SET (RFC 8936 §2.4). `metadata.err` is one of RFC 8935
+/// §2.4's codes (or `unrecognized`); a receiver's free-text description is never
+/// stored.
+pub const AUDIT_POLL_SET_ERROR: &str = "ssf_stream.poll_set_error";
+
 /// Longest verification `state`, in bytes.
 const MAX_STATE_BYTES: usize = 1024;
+
+/// The longest a poll request waits for an event when it does not ask to return
+/// immediately (D-48: a long poll is at most 30 s).
+pub const POLL_LONG_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+/// How often a waiting poll looks at the buffer again.
+const POLL_WAIT_STEP: std::time::Duration = std::time::Duration::from_millis(500);
+/// Largest request body a poll takes, in bytes.
+pub const POLL_MAX_BODY_BYTES: usize = 32_768;
+/// Most `ack` entries one poll request may carry.
+const POLL_MAX_ACKS: usize = 1_000;
+/// Most `setErrs` entries one poll request may carry.
+const POLL_MAX_SET_ERRS: usize = 100;
+/// A `jti` longer than this names nothing (they are 32 characters).
+const MAX_JTI_BYTES: usize = 64;
 
 // ---------------------------------------------------------------------------
 // The tenant switch
@@ -289,6 +310,24 @@ async fn audit_receiver<C: Connection + Clone>(
         .await
     {
         tracing::error!(target: "axiam::ssf", action, %error, "an SSF audit row could not be written");
+    }
+}
+
+/// A paused push stream was enabled again: enqueue what it held, oldest first
+/// (D-48). Best effort and bounded — the held events stay buffered if the
+/// broker is down, and the next resume (or a status write) takes them.
+pub(crate) async fn release_held<C: Connection + Clone>(state: &AppState<C>, stream: &SsfStream) {
+    let Some(outbox) = state.ssf.outbox.as_ref() else {
+        return;
+    };
+    match outbox.resume(stream).await {
+        Ok(0) => {}
+        Ok(released) => {
+            tracing::info!(target: "axiam::ssf", stream_id = %stream.id, released, "held SSF events released");
+        }
+        Err(error) => {
+            tracing::warn!(target: "axiam::ssf", stream_id = %stream.id, %error, "held SSF events could not be released");
+        }
     }
 }
 
@@ -637,6 +676,9 @@ pub async fn update_stream_status<C: Connection + Clone>(
         serde_json::json!({ "from": previous.as_str(), "to": updated.status.as_str() }),
     )
     .await;
+    if previous == SsfStreamStatus::Paused && updated.status == SsfStreamStatus::Enabled {
+        release_held(&state, &updated).await;
+    }
     Ok(no_store(HttpResponse::Ok()).json(SsfStreamStatusView::from(&updated)))
 }
 
@@ -733,4 +775,235 @@ pub async fn request_verification<C: Connection + Clone>(
     )
     .await;
     Ok(no_store(HttpResponse::NoContent()).finish())
+}
+
+// ---------------------------------------------------------------------------
+// The poll endpoint (RFC 8936)
+// ---------------------------------------------------------------------------
+
+/// One `setErrs` entry (RFC 8936 §2.4).
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SsfSetError {
+    /// An RFC 8935 §2.4 error code.
+    pub err: String,
+    /// Free text from the receiver. Accepted and **not stored**.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `POST /ssf/v1/poll/{stream_id}` body (RFC 8936 §2.2). Every member is
+/// optional; an empty body is `{}`.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct SsfPollRequest {
+    /// The most SETs to return, clamped to 100. `0` acknowledges only.
+    #[serde(rename = "maxEvents", default)]
+    pub max_events: Option<i64>,
+    /// `true` answers at once, possibly with no SETs; `false` (the default)
+    /// waits up to 30 s for one.
+    #[serde(rename = "returnImmediately", default)]
+    pub return_immediately: Option<bool>,
+    /// The `jti`s of SETs the receiver processed: exactly those rows of this
+    /// stream are deleted.
+    #[serde(default)]
+    pub ack: Vec<String>,
+    /// SETs the receiver could not accept: each is deleted and audited.
+    #[serde(rename = "setErrs", default)]
+    pub set_errs: std::collections::HashMap<String, SsfSetError>,
+}
+
+/// `POST /ssf/v1/poll/{stream_id}` answer (RFC 8936 §2.3).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SsfPollResponse {
+    /// The compact SETs by `jti`, oldest first. Signed now, against the stream
+    /// as it is now.
+    #[schema(value_type = std::collections::HashMap<String, String>)]
+    pub sets: serde_json::Map<String, serde_json::Value>,
+    /// Whether more are held than were returned.
+    #[serde(rename = "moreAvailable")]
+    pub more_available: bool,
+}
+
+/// The audit-safe reading of a receiver's `err`: one of RFC 8935 §2.4's codes,
+/// else a fixed word. Free text from a third party is not written to the audit
+/// log.
+fn audited_err_code(raw: &str) -> &'static str {
+    axiam_oauth2::ssf_delivery::RFC_8935_ERROR_CODES
+        .into_iter()
+        .find(|known| *known == raw)
+        .unwrap_or("unrecognized")
+}
+
+fn empty_poll_response() -> HttpResponse {
+    no_store(HttpResponse::Ok()).json(SsfPollResponse {
+        sets: serde_json::Map::new(),
+        more_available: false,
+    })
+}
+
+/// `POST /ssf/v1/poll/{stream_id}` — RFC 8936 poll delivery (D-48).
+///
+/// The receiver's token, as on the stream API, and the same single `404` for a
+/// stream that is not its own. In this order: the acknowledgements, then the
+/// reported errors, then the next SETs — so an event acknowledged here is not
+/// returned by this same call. An unacknowledged event comes back on the next
+/// poll (at-least-once); a SET is **signed now**, against the stream as it is
+/// now, so a stream paused or disabled meanwhile answers an empty `sets`.
+#[utoipa::path(
+    post,
+    path = "/ssf/v1/poll/{stream_id}",
+    tag = "ssf-receiver",
+    params(("stream_id" = String, Path, description = "The poll stream")),
+    request_body(content = SsfPollRequest, description = "Every member optional; an empty body is {}"),
+    responses(
+        (status = 200, description = "The next SETs, oldest first, and whether more are held", body = SsfPollResponse),
+        (status = 400, description = "A malformed body, a negative maxEvents, too many ack or \
+                                      setErrs entries, or a push stream"),
+        (status = 401, description = "No valid token"),
+        (status = 403, description = "Not an OAuth2 client token with the ssf.manage scope"),
+        (status = 404, description = "No such stream for this receiver"),
+        (status = 413, description = "The body is over 32 KiB"),
+        (status = 429, description = "Rate limit"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn poll_events<C: Connection + Clone>(
+    receiver: SsfReceiverToken,
+    state: web::Data<AppState<C>>,
+    http_req: HttpRequest,
+    path: web::Path<String>,
+    body: web::Bytes,
+) -> Result<HttpResponse, AxiamApiError> {
+    let raw_id = path.into_inner();
+    let mut stream = owned_stream(&state, &receiver, Some(&raw_id)).await?;
+    if stream.delivery_method != SsfDeliveryMethod::Poll {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: "this stream delivers by push; there is nothing to poll".into(),
+        }));
+    }
+    if body.len() > POLL_MAX_BODY_BYTES {
+        return Ok(HttpResponse::PayloadTooLarge().finish());
+    }
+    let request: SsfPollRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        SsfPollRequest::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|_| {
+            AxiamApiError(AxiamError::Validation {
+                message: "the poll request is not a valid RFC 8936 JSON body".into(),
+            })
+        })?
+    };
+    let max_events = match request.max_events {
+        None => POLL_MAX_EVENTS_PER_RESPONSE,
+        Some(n) if n < 0 => {
+            return Err(AxiamApiError(AxiamError::Validation {
+                message: "maxEvents must not be negative".into(),
+            }));
+        }
+        Some(n) => usize::try_from(n)
+            .unwrap_or(POLL_MAX_EVENTS_PER_RESPONSE)
+            .min(POLL_MAX_EVENTS_PER_RESPONSE),
+    };
+    if request.ack.len() > POLL_MAX_ACKS || request.set_errs.len() > POLL_MAX_SET_ERRS {
+        return Err(AxiamApiError(AxiamError::Validation {
+            message: format!(
+                "a poll request carries at most {POLL_MAX_ACKS} ack and {POLL_MAX_SET_ERRS} \
+                 setErrs entries"
+            ),
+        }));
+    }
+
+    // 1. Acknowledgements: exactly the named rows of this stream.
+    let acked: Vec<String> = request
+        .ack
+        .into_iter()
+        .filter(|jti| jti.len() <= MAX_JTI_BYTES)
+        .collect();
+    state
+        .ssf
+        .buffer_repo
+        .delete_by_jti(receiver.tenant_id, stream.id, &acked)
+        .await?;
+
+    // 2. Errors the receiver reports: each row is deleted (the receiver will not
+    //    accept that SET, so offering it again is pointless) and audited.
+    for (jti, reported) in request.set_errs {
+        if jti.len() > MAX_JTI_BYTES {
+            continue;
+        }
+        let removed = state
+            .ssf
+            .buffer_repo
+            .delete_by_jti(receiver.tenant_id, stream.id, std::slice::from_ref(&jti))
+            .await?;
+        audit_receiver(
+            &state,
+            &http_req,
+            &receiver,
+            AUDIT_POLL_SET_ERROR,
+            stream.id,
+            serde_json::json!({
+                "jti": jti,
+                "err": audited_err_code(&reported.err),
+                "held": removed > 0,
+            }),
+        )
+        .await;
+    }
+
+    // 3. The next SETs. Nothing from a stream that is not enabled; max 0 asks
+    //    for acknowledgements only.
+    if stream.status != SsfStreamStatus::Enabled || max_events == 0 {
+        return Ok(empty_poll_response());
+    }
+    let return_immediately = request.return_immediately.unwrap_or(false);
+    let started = std::time::Instant::now();
+    loop {
+        let held = state
+            .ssf
+            .buffer_repo
+            .list_oldest(receiver.tenant_id, stream.id, max_events + 1, Utc::now())
+            .await?;
+        if !held.is_empty() {
+            let more_available = held.len() > max_events;
+            let mut sets = serde_json::Map::new();
+            let mut unsignable: Vec<String> = Vec::new();
+            for pending in held.iter().take(max_events) {
+                match sign_set(&state.auth_config, &stream, pending) {
+                    Ok(set) => {
+                        sets.insert(pending.jti.clone(), serde_json::Value::String(set));
+                    }
+                    // A key that cannot sign is the operator's to fix; the event
+                    // stays for the next poll.
+                    Err(SsfError::Signing(_)) => {
+                        tracing::error!(target: "axiam::ssf", stream_id = %stream.id, "a held SSF event could not be signed");
+                    }
+                    // The stream no longer carries it (narrowed meanwhile) or it
+                    // can never be signed for this stream: drop it.
+                    Err(_) => unsignable.push(pending.jti.clone()),
+                }
+            }
+            if !unsignable.is_empty() {
+                state
+                    .ssf
+                    .buffer_repo
+                    .delete_by_jti(receiver.tenant_id, stream.id, &unsignable)
+                    .await?;
+            }
+            if !sets.is_empty() || return_immediately {
+                return Ok(no_store(HttpResponse::Ok()).json(SsfPollResponse {
+                    sets,
+                    more_available,
+                }));
+            }
+        }
+        if return_immediately || started.elapsed() >= POLL_LONG_POLL_MAX {
+            return Ok(empty_poll_response());
+        }
+        tokio::time::sleep(POLL_WAIT_STEP.min(POLL_LONG_POLL_MAX - started.elapsed())).await;
+        // The stream as it is now: paused, disabled or gone while waiting.
+        stream = owned_stream(&state, &receiver, Some(&raw_id)).await?;
+        if stream.status != SsfStreamStatus::Enabled {
+            return Ok(empty_poll_response());
+        }
+    }
 }

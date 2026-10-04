@@ -526,7 +526,12 @@ impl<C: Connection + Clone> AppState<C> {
         if let Some(publisher) = &self.events.webhook_publisher {
             self.events
                 .webhook_delivery
-                .emit(publisher, tenant_id, event_type.to_string(), payload)
+                .emit(
+                    publisher.as_ref(),
+                    tenant_id,
+                    event_type.to_string(),
+                    payload,
+                )
                 .await;
         }
     }

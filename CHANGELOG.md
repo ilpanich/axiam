@@ -525,6 +525,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path (`/saml/v2/{tenant_id}/sso`), same value and attributes; logout and both
   `end_session`s clear it with the others (T23.2.3, D-11).
 - Front-channel logout declined by design and recorded (T23.12.1, D-6)
+- **The webhook dispatcher is now a shared outbound dispatcher (T23.5.1, D-36);
+  internal refactor, no behaviour change.** G-5 (Shared Signals Framework push)
+  and G-6 (outbound SCIM) need the same durable queue, one-attempt delivery,
+  bounded backoff and dead-letter queue that webhooks already had, and sit in
+  layers that cannot reach `axiam-api-rest`. `axiam-core` gains
+  `outbound::{OutboundMessage, OutboundKind, OutboundPublisher,
+  OutboundDeliverer, DeliveryOutcome}` (two object-safe ports); `axiam-amqp`
+  gains `outbound` (per-kind topology declaration, publisher, the consume loop,
+  the retry policy and the deliverer registry); `WebhookDeliveryService`
+  implements `OutboundDeliverer` and `axiam-server` registers it with the
+  generic loop. Webhooks keep exactly their queue, retry-queue and DLQ names and
+  arguments (`axiam.webhook`, `.retry`, `.dlq`), their on-the-wire message
+  format (so in-flight messages and a rolling upgrade are unaffected), signing
+  (`X-Axiam-Timestamp`, `X-Axiam-Signature`), SSRF-guarded delivery, the
+  `AXIAM__WEBHOOK__MAX_ATTEMPTS`, `AXIAM__WEBHOOK__BACKOFF_BASE_MS` and
+  `AXIAM__WEBHOOK__BACKOFF_CEILING_MS` variables, and the
+  `webhook.delivery_*` audit records. A test pins the names byte for byte.
+  Source-level moves: `WebhookRetryConfig::from_env()` is now
+  `OutboundRetryConfig::from_env_for(OutboundKind::Webhook)`
+  (`WebhookRetryConfig` remains as an alias of `OutboundRetryConfig`);
+  `WebhookDeliveryService::emit` takes `&dyn OutboundPublisher`. The OpenAPI
+  document is unchanged.
 
 ### Fixed
 

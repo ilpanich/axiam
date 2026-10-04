@@ -32,13 +32,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::{App, HttpServer, web};
-use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher, WebhookPublisher};
+use axiam_amqp::{
+    AmqpConfig, AmqpManager, MailOutboundPublisher, OutboundDeliverers, OutboundRetryConfig,
+    WebhookPublisher, run_outbound_consumer,
+};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::middleware::request_span::RedactingRootSpanBuilder;
 use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
 use axiam_api_rest::state::AppState;
 use axiam_api_rest::state::bundles;
-use axiam_api_rest::webhook_consumer::{WebhookRetryConfig, start_webhook_consumer};
 use axiam_api_rest::{
     HealthChecker, RateLimitConfig, RouteOptions, ServerConfig, build_cors, health_routes,
     openapi_routes, register_api_v1_routes_with,
@@ -49,6 +51,7 @@ use axiam_auth::{
     AttestationCaCache, AuthService, EmailVerificationService, MfaMethodService,
     PasswordResetService, WebauthnService,
 };
+use axiam_core::outbound::OutboundKind;
 use axiam_core::repository::{
     OrganizationRepository, Pagination, ServiceAccountRepository, TenantRepository,
 };
@@ -2266,15 +2269,21 @@ async fn main() -> std::io::Result<()> {
     let webhook_publisher = WebhookPublisher::new(webhook_pub_channel);
 
     // Spawn the webhook AMQP consumer on a background task (CORR-03/D-06).
-    // Drives WebhookDeliveryService::deliver_once for each queued delivery,
-    // schedules retries natively via the retry-queue TTL+DLX (D-07/D-08,
-    // bounded exponential backoff read from AXIAM__WEBHOOK__* — D-20), and
-    // writes per-attempt/terminal audit records (D-09).
+    // The webhook kind of the shared outbound dispatcher (D-36): the webhook
+    // deliverer (WebhookDeliveryService::deliver_once behind the core
+    // OutboundDeliverer port) is registered with the generic consumer loop,
+    // which schedules retries natively via the retry-queue TTL+DLX
+    // (D-07/D-08, bounded exponential backoff read from AXIAM__WEBHOOK__* —
+    // D-20) and writes per-attempt/terminal audit records (D-09). Later kinds
+    // (SSF push, outbound SCIM) register their own deliverer here.
     {
-        let webhook_delivery_for_consumer = webhook_delivery.clone();
+        let mut outbound_deliverers = OutboundDeliverers::new();
+        outbound_deliverers
+            .register(Arc::new(webhook_delivery.clone()))
+            .expect("Failed to register the webhook deliverer");
         let webhook_publisher_for_consumer = webhook_publisher.clone();
         let webhook_audit_repo = audit_repo.clone();
-        let webhook_retry_cfg = WebhookRetryConfig::from_env();
+        let webhook_retry_cfg = OutboundRetryConfig::from_env_for(OutboundKind::Webhook);
         let webhook_amqp = Arc::clone(&amqp);
         // CQ-B53: a transient broker disconnect (consumer stream ends, or the
         // channel fails to open) must NOT kill the whole API server. Recreate
@@ -2287,14 +2296,18 @@ async fn main() -> std::io::Result<()> {
                 match webhook_amqp.create_channel().await {
                     Ok(webhook_channel) => {
                         backoff = Duration::from_secs(1);
-                        start_webhook_consumer(
+                        if let Err(e) = run_outbound_consumer(
                             webhook_channel,
-                            webhook_delivery_for_consumer.clone(),
-                            webhook_publisher_for_consumer.clone(),
-                            webhook_audit_repo.clone(),
+                            OutboundKind::Webhook,
+                            &outbound_deliverers,
+                            webhook_publisher_for_consumer.as_outbound(),
+                            &webhook_audit_repo,
                             webhook_retry_cfg,
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::error!(error = %e, "Webhook AMQP consumer failed");
+                        }
                         tracing::warn!("Webhook AMQP consumer exited — reconnecting");
                     }
                     Err(e) => {

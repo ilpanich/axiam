@@ -43,7 +43,7 @@ pub struct QueueSpec {
     pub dead_letter_routing_key: Option<String>,
     /// `x-message-ttl` in milliseconds: how long a message may wait in this
     /// queue before the broker drops it. `None` — every queue of every kind but
-    /// the SSF push and SCIM push DLQs — declares no TTL, which is what the webhook queues
+    /// the SSF push, SCIM push and CIBA ping DLQs — declares no TTL, which is what the webhook queues
     /// already hold and must keep holding (a redeclaration with different
     /// arguments is refused).
     pub message_ttl_ms: Option<i64>,
@@ -60,6 +60,14 @@ pub const SSF_PUSH_DLQ_MESSAGE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// (`{resource_type, axiam_id}`), but the id names a user, so the queue is
 /// bounded. Declared with the (new) queue; no in-flight message is affected.
 pub const SCIM_PUSH_DLQ_MESSAGE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// How long a dead-lettered CIBA ping stays in `axiam.ciba_ping.dlq`: seven
+/// days, as for the other kinds that hold an identifier. The message holds a
+/// request's record id and tenant — never the `auth_req_id` or the notification
+/// token — but a record id names a person's sign-in attempt, so the queue is
+/// bounded (T23.7.2, D-65). Declared with the (new) queue; no in-flight message
+/// is affected.
+pub const CIBA_PING_DLQ_MESSAGE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 impl QueueSpec {
     /// The `queue.declare` arguments.
@@ -106,12 +114,13 @@ impl OutboundTopology {
             QueueSpec {
                 name: self.dlq.clone(),
                 dead_letter_routing_key: None,
-                // The SSF push (D-53 (10)) and SCIM push (D-57) kinds bound
-                // their DLQs; the webhook DLQ is declared exactly as it always
-                // was.
+                // The SSF push (D-53 (10)), SCIM push (D-57) and CIBA ping
+                // (D-65) kinds bound their DLQs; the webhook DLQ is declared
+                // exactly as it always was.
                 message_ttl_ms: match self.kind {
                     OutboundKind::SsfPush => Some(SSF_PUSH_DLQ_MESSAGE_TTL_MS),
                     OutboundKind::ScimPush => Some(SCIM_PUSH_DLQ_MESSAGE_TTL_MS),
+                    OutboundKind::CibaPing => Some(CIBA_PING_DLQ_MESSAGE_TTL_MS),
                     OutboundKind::Webhook => None,
                 },
             },
@@ -288,19 +297,69 @@ mod tests {
         }
     }
 
-    /// Exactly the SSF push and SCIM push DLQs carry an `x-message-ttl`; the
-    /// webhook queues keep the arguments the broker already holds, and no
-    /// primary or retry queue of any kind has one.
+    /// D-65: the CIBA ping topology is declared like the other new kinds' — a
+    /// seven-day `x-message-ttl` on the DLQ and nothing else, the primary and
+    /// the retry queue with the two dead-letter arguments. Byte for byte.
     #[test]
-    fn only_the_ssf_push_and_scim_push_dlqs_have_a_message_ttl() {
+    fn the_ciba_ping_declaration_is_pinned() {
+        let t = OutboundTopology::for_kind(OutboundKind::CibaPing);
+        assert_eq!(t.primary.as_bytes(), b"axiam.ciba_ping");
+        assert_eq!(t.retry.as_bytes(), b"axiam.ciba_ping.retry");
+        assert_eq!(t.dlq.as_bytes(), b"axiam.ciba_ping.dlq");
+
+        let specs = t.queue_specs();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "axiam.ciba_ping.dlq",
+                "axiam.ciba_ping",
+                "axiam.ciba_ping.retry"
+            ]
+        );
+        let dlq = specs[0].arguments();
+        assert_eq!(dlq.inner().len(), 1, "exactly the TTL");
+        assert_eq!(
+            dlq.inner().get("x-message-ttl"),
+            Some(&AMQPValue::LongLongInt(604_800_000))
+        );
+        assert_eq!(CIBA_PING_DLQ_MESSAGE_TTL_MS, 7 * 24 * 3600 * 1000);
+        for (spec, routing_key) in [
+            (&specs[1], "axiam.ciba_ping.dlq"),
+            (&specs[2], "axiam.ciba_ping"),
+        ] {
+            let args = spec.arguments();
+            assert_eq!(
+                args.inner().len(),
+                2,
+                "no TTL on the primary or the retry queue"
+            );
+            assert_eq!(
+                args.inner().get("x-dead-letter-exchange"),
+                Some(&AMQPValue::LongString("".into()))
+            );
+            assert_eq!(
+                args.inner().get("x-dead-letter-routing-key"),
+                Some(&AMQPValue::LongString(routing_key.into()))
+            );
+        }
+    }
+
+    /// Exactly the SSF push, SCIM push and CIBA ping DLQs carry an
+    /// `x-message-ttl`; the webhook queues keep the arguments the broker already
+    /// holds, and no primary or retry queue of any kind has one.
+    #[test]
+    fn only_the_ssf_scim_and_ciba_ping_dlqs_have_a_message_ttl() {
         for kind in OutboundKind::ALL {
             let specs = OutboundTopology::for_kind(*kind).queue_specs();
             for spec in &specs {
                 let has_ttl = spec.arguments().inner().contains_key("x-message-ttl");
                 assert_eq!(
                     has_ttl,
-                    matches!(kind, OutboundKind::SsfPush | OutboundKind::ScimPush)
-                        && spec.name.ends_with(".dlq"),
+                    matches!(
+                        kind,
+                        OutboundKind::SsfPush | OutboundKind::ScimPush | OutboundKind::CibaPing
+                    ) && spec.name.ends_with(".dlq"),
                     "{}",
                     spec.name
                 );

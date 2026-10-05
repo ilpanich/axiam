@@ -124,6 +124,15 @@ outbound_kinds! {
     /// resource and its link at the attempt and computes the desired downstream
     /// state then, so no attribute of a person ever sits in a queue or the DLQ.
     ScimPush => "scim_push",
+    /// The ping-mode notification of a decided CIBA request (G-7, T23.7.2,
+    /// D-65): `POST {"auth_req_id": …}` with `Authorization: Bearer
+    /// <client_notification_token>` to the client's registered
+    /// `backchannel_client_notification_endpoint`. `target_id` is the **record
+    /// id** of the CIBA request and `payload` is empty: the deliverer
+    /// (`axiam-oauth2`) re-reads the request, opens its sealed credentials and
+    /// reads the client's endpoint at the attempt, so neither the `auth_req_id`
+    /// nor the notification token ever sits in a queue or the dead-letter queue.
+    CibaPing => "ciba_ping",
 }
 
 impl OutboundKind {
@@ -300,8 +309,25 @@ mod tests {
             &[
                 OutboundKind::Webhook,
                 OutboundKind::SsfPush,
-                OutboundKind::ScimPush
+                OutboundKind::ScimPush,
+                OutboundKind::CibaPing
             ]
+        );
+    }
+
+    #[test]
+    fn ciba_ping_slug_is_pinned() {
+        // T23.7.2 — the queue names (`axiam.ciba_ping`, `.retry`, `.dlq`), the
+        // retry env-var prefix (`AXIAM__CIBA_PING__*`) and the audit prefix
+        // (`ciba_ping.delivery_*`) all derive from this slug.
+        assert_eq!(OutboundKind::CibaPing.as_str(), "ciba_ping");
+        assert_eq!(
+            serde_json::to_string(&OutboundKind::CibaPing).unwrap(),
+            "\"ciba_ping\""
+        );
+        assert_eq!(
+            OutboundKind::from_slug("ciba_ping"),
+            Some(OutboundKind::CibaPing)
         );
     }
 

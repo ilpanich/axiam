@@ -786,6 +786,27 @@ pub struct CibaApprovalView {
     pub expires_at: DateTime<Utc>,
 }
 
+/// The class a request's `acr_values` still need, given the authentication the
+/// approving session performed — `None` when the request asked for no class
+/// AXIAM implements, or when the session already achieved one of them.
+///
+/// The one place the rule lives: [`CibaService::approve`] refuses with it, and
+/// the approval page asks for it beforehand so that it can offer the step-up
+/// before the user presses Approve. The class a session achieved is derived
+/// from its `amr` ([`acr_for`]); nothing the caller says moves it.
+#[must_use]
+pub fn step_up_required(acr_values: &[String], amr: &[Amr]) -> Option<Acr> {
+    let achieved = acr_for(amr);
+    let requested: Vec<Acr> = acr_values
+        .iter()
+        .filter_map(|v| Acr::from_wire(v))
+        .collect();
+    if requested.is_empty() || requested.iter().any(|wanted| achieved.satisfies(*wanted)) {
+        return None;
+    }
+    Some(requested.iter().copied().min().unwrap_or(Acr::MultiFactor))
+}
+
 /// The result of a decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CibaDecisionOutcome {
@@ -816,6 +837,11 @@ pub struct CibaService<CR, UR> {
     /// unverified, and never lets a client that registered a signing
     /// algorithm fall back to plain requests.
     signed_requests: Option<std::sync::Arc<dyn crate::ciba_signed_request::SignedRequestVerifier>>,
+    /// Where a decided ping-mode request's notification is queued (T23.7.2,
+    /// D-65). `None` queues nothing: a deployment with no dispatcher wired
+    /// (T23.8.1 supplies the in-process one) still records the decision, and
+    /// the client — which may poll in either mode — still collects the result.
+    ping: Option<crate::ciba_ping::PingPublisher>,
 }
 
 impl<CR, UR> CibaService<CR, UR>
@@ -830,7 +856,21 @@ where
             users,
             public_key_pem,
             signed_requests: None,
+            ping: None,
         }
+    }
+
+    /// Wire the ping-mode notification queue (T23.7.2, D-65). Builder-style.
+    ///
+    /// Once set, [`Self::approve`] and [`Self::deny`] enqueue one
+    /// `OutboundKind::CibaPing` message — the request's record id and tenant,
+    /// nothing secret — for a ping-mode request they have just recorded. The
+    /// enqueue is best effort: a broker that is down is logged and never turns
+    /// a recorded decision into an error.
+    #[must_use]
+    pub fn with_ping_publisher(mut self, publisher: crate::ciba_ping::PingPublisher) -> Self {
+        self.ping = Some(publisher);
+        self
     }
 
     /// Wire the signed-request verifier (D-61). Builder-style, like
@@ -1167,13 +1207,7 @@ where
         }
 
         let achieved = acr_for(&approval.amr);
-        let requested: Vec<Acr> = view
-            .acr_values
-            .iter()
-            .filter_map(|v| Acr::from_wire(v))
-            .collect();
-        if !requested.is_empty() && !requested.iter().any(|wanted| achieved.satisfies(*wanted)) {
-            let required = requested.iter().copied().min().unwrap_or(Acr::MultiFactor);
+        if let Some(required) = step_up_required(&view.acr_values, &approval.amr) {
             return Ok(CibaDecisionOutcome::StepUpRequired { required });
         }
 
@@ -1232,9 +1266,33 @@ where
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         {
-            Some(req) => Ok(CibaDecisionOutcome::Recorded(Box::new(req))),
+            Some(req) => {
+                self.enqueue_ping(&req).await;
+                Ok(CibaDecisionOutcome::Recorded(Box::new(req)))
+            }
             // Swept between the write and the read: decided, but gone.
             None => Ok(CibaDecisionOutcome::NotDecidable),
+        }
+    }
+
+    /// Queue the ping of a just-decided ping-mode request (D-65). After an
+    /// approval **and** after a denial: the client learns that the request was
+    /// decided, never how — it asks the token endpoint, where it authenticates.
+    async fn enqueue_ping(&self, request: &CibaRequest) {
+        let Some(publisher) = &self.ping else {
+            return;
+        };
+        if request.delivery_mode != CibaDeliveryMode::Ping {
+            return;
+        }
+        let message = crate::ciba_ping::ping_message(request.tenant_id, request.id);
+        if let Err(e) = publisher.enqueue(&message).await {
+            tracing::error!(
+                error = %e,
+                request_id = %request.id,
+                "a decided CIBA request's ping could not be queued; the client can still \
+                 collect the result from the token endpoint"
+            );
         }
     }
 
@@ -1280,6 +1338,36 @@ mod tests {
 
     fn ciba_grants() -> Vec<String> {
         vec![CIBA_GRANT_TYPE.to_owned(), "refresh_token".to_owned()]
+    }
+
+    /// T23.7.2 — the rule the page asks and `approve` enforces is one function:
+    /// a step-up is needed only when the request asked for a class AXIAM
+    /// implements and the session's evidence achieved none of them.
+    #[test]
+    fn a_step_up_is_required_only_for_a_class_the_session_did_not_achieve() {
+        let mfa = vec![Acr::MultiFactor.as_str().to_owned()];
+        let single = vec![Acr::SingleFactor.as_str().to_owned()];
+        let password = [Amr::Pwd];
+        let second_factor = [Amr::Pwd, Amr::Otp, Amr::Mfa];
+
+        assert_eq!(
+            step_up_required(&mfa, &password),
+            Some(Acr::MultiFactor),
+            "a password session has not achieved multi-factor"
+        );
+        assert_eq!(step_up_required(&mfa, &second_factor), None);
+        assert_eq!(step_up_required(&single, &password), None);
+        assert_eq!(step_up_required(&[], &password), None, "asked for nothing");
+        assert_eq!(
+            step_up_required(&["urn:other:acr".to_owned()], &password),
+            None,
+            "a value AXIAM does not implement can never be satisfied, so is never asked for"
+        );
+        // Any satisfiable value in the list is enough.
+        let either = vec![mfa[0].clone(), single[0].clone()];
+        assert_eq!(step_up_required(&either, &password), None);
+        // And no evidence at all is single-factor, the strict reading.
+        assert_eq!(step_up_required(&mfa, &[]), Some(Acr::MultiFactor));
     }
 
     #[test]

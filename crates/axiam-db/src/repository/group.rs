@@ -5,8 +5,10 @@ use axiam_core::id::new_id;
 use axiam_core::models::group::{CreateGroup, DirectoryMembershipWrite, Group, UpdateGroup};
 use axiam_core::models::service_account::ServiceAccount;
 use axiam_core::models::user::{User, UserStatus};
+use axiam_core::provisioning::ProvisioningSink;
 use axiam_core::repository::{GroupRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
@@ -146,12 +148,83 @@ struct EdgeGroupRow {
 #[derive(Clone)]
 pub struct SurrealGroupRepository<C: Connection> {
     db: DbHandle<C>,
+    /// Told of every committed group and membership change (G-6, D-57).
+    provisioning_sink: Option<Arc<dyn ProvisioningSink>>,
 }
 
 impl<C: Connection> SurrealGroupRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
-        Self { db }
+        Self {
+            db,
+            provisioning_sink: None,
+        }
+    }
+
+    /// Report committed changes to `sink` (G-6, D-57): group `create`,
+    /// `update` and `delete` call [`ProvisioningSink::group_changed`], and
+    /// every membership change of a **user** (`add_member`, `remove_member`,
+    /// the two directory-member methods, and each member a deleted group
+    /// loses) calls [`ProvisioningSink::membership_changed`] — **after** the
+    /// write succeeded. A service account's membership is not provisioned and
+    /// notifies nothing. The sink cannot fail the write.
+    #[must_use]
+    pub fn with_provisioning_sink(mut self, sink: Arc<dyn ProvisioningSink>) -> Self {
+        self.provisioning_sink = Some(sink);
+        self
+    }
+
+    async fn notify_group_changed(&self, tenant_id: Uuid, group_id: Uuid) {
+        if let Some(sink) = &self.provisioning_sink {
+            sink.group_changed(tenant_id, group_id).await;
+        }
+    }
+
+    async fn notify_membership_changed(&self, tenant_id: Uuid, group_id: Uuid, user_id: Uuid) {
+        if let Some(sink) = &self.provisioning_sink {
+            sink.membership_changed(tenant_id, group_id, user_id).await;
+        }
+    }
+
+    /// The user members of a group, read **before** the group is deleted so
+    /// each can be reported as having lost the membership. Empty (and no query
+    /// issued) when no active sink is attached.
+    async fn user_member_ids_for_delete(
+        &self,
+        tenant_id: Uuid,
+        group_id: Uuid,
+    ) -> AxiamResult<Vec<Uuid>> {
+        if !self
+            .provisioning_sink
+            .as_ref()
+            .is_some_and(|sink| sink.is_active())
+        {
+            return Ok(Vec::new());
+        }
+        #[derive(Debug, SurrealValue)]
+        struct MemberId {
+            user_id: String,
+        }
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(in) AS user_id FROM member_of \
+                 WHERE out = type::record('group', $group_id) \
+                 AND out.tenant_id = $tenant_id \
+                 AND record::tb(in) = 'user'",
+            )
+            .bind(("group_id", group_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<MemberId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| {
+                Uuid::parse_str(&row.user_id)
+                    .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")).into())
+            })
+            .collect()
     }
 }
 
@@ -245,6 +318,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         let tenant_id = Uuid::parse_str(&tenant_id_str)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
 
+        self.notify_group_changed(tenant_id, id).await;
         Ok(Group {
             id,
             tenant_id,
@@ -338,6 +412,7 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         let tenant_id_parsed = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
 
+        self.notify_group_changed(tenant_id_parsed, id).await;
         Ok(Group {
             id,
             tenant_id: tenant_id_parsed,
@@ -352,6 +427,14 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let id_str = id.to_string();
         let tenant_id_str = tenant_id.to_string();
+
+        // G-6 (D-57): a user whose scope came from this group leaves it with
+        // the group, so each member is reported once the delete committed. The
+        // members are read first (the edges go in the transaction below) and
+        // only when a sink is attached. A foreign group has no members in this
+        // tenant, and the tenant-scoped delete below aborts with `NotFound`
+        // before anything is announced.
+        let members = self.user_member_ids_for_delete(tenant_id, id).await?;
 
         // Delete associated membership edges first, then the group record —
         // inside one transaction so a concurrent reader never observes a
@@ -384,6 +467,10 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
 
         crate::helpers::map_delete_errors(result.take_errors(), "group", &id_str)?;
 
+        self.notify_group_changed(tenant_id, id).await;
+        for user_id in members {
+            self.notify_membership_changed(tenant_id, id, user_id).await;
+        }
         Ok(())
     }
 
@@ -469,6 +556,8 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .check()
             .map_err(|e| classify_write_error(e.to_string(), "group_membership"))?;
 
+        self.notify_membership_changed(tenant_id, group_id, user_id)
+            .await;
         Ok(())
     }
 
@@ -486,13 +575,15 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
         // both endpoints (in.tenant_id / out.tenant_id). Without this a caller
         // with a foreign user+group id pair could sever another tenant's
         // membership. `.check()` surfaces per-statement failures.
-        self.db
+        let mut result = self
+            .db
             .current()
             .query(
                 "DELETE member_of WHERE \
                  in = type::record('user', $user_id) AND \
                  out = type::record('group', $group_id) AND \
-                 in.tenant_id = $tenant_id AND out.tenant_id = $tenant_id",
+                 in.tenant_id = $tenant_id AND out.tenant_id = $tenant_id \
+                 RETURN BEFORE",
             )
             .bind(("user_id", user_id_str))
             .bind(("group_id", group_id_str))
@@ -502,6 +593,12 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
+        // G-6 (D-57): only a membership that really went is reported.
+        let removed: Vec<EdgeSourceRow> = result.take(0).map_err(DbError::from)?;
+        if !removed.is_empty() {
+            self.notify_membership_changed(tenant_id, group_id, user_id)
+                .await;
+        }
         Ok(())
     }
 
@@ -615,7 +712,11 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .await
             .map_err(DbError::from)?;
         match result.check() {
-            Ok(_) => Ok(DirectoryMembershipWrite::Created),
+            Ok(_) => {
+                self.notify_membership_changed(tenant_id, group_id, user_id)
+                    .await;
+                Ok(DirectoryMembershipWrite::Created)
+            }
             Err(e) => match classify_write_error(e.to_string(), "group_membership") {
                 // The unique `(in, out)` index decided: an edge is already
                 // there. Whose it is decides what this call reports — and it
@@ -672,7 +773,12 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let removed: Vec<EdgeSourceRow> = result.take(0).map_err(DbError::from)?;
-        Ok(!removed.is_empty())
+        if removed.is_empty() {
+            return Ok(false);
+        }
+        self.notify_membership_changed(tenant_id, group_id, user_id)
+            .await;
+        Ok(true)
     }
 
     async fn get_user_directory_group_ids(

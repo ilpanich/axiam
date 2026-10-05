@@ -3,8 +3,10 @@
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::gdpr::{AccountDeletion, AccountDeletionStatus, CreateAccountDeletion};
+use axiam_core::provisioning::ProvisioningSink;
 use axiam_core::repository::AccountDeletionRepository;
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
@@ -72,12 +74,15 @@ impl AccountDeletionRowWithId {
 
 pub struct SurrealAccountDeletionRepository<C: Connection> {
     db: DbHandle<C>,
+    /// Told when a deletion request disables the account (G-6, D-57).
+    provisioning_sink: Option<Arc<dyn ProvisioningSink>>,
 }
 
 impl<C: Connection> Clone for SurrealAccountDeletionRepository<C> {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
+            provisioning_sink: self.provisioning_sink.clone(),
         }
     }
 }
@@ -85,7 +90,21 @@ impl<C: Connection> Clone for SurrealAccountDeletionRepository<C> {
 impl<C: Connection> SurrealAccountDeletionRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
-        Self { db }
+        Self {
+            db,
+            provisioning_sink: None,
+        }
+    }
+
+    /// Report the account a deletion request disables to `sink` (G-6, D-57).
+    ///
+    /// [`Self::create_with_pending_flag`] writes the user row's `status`
+    /// (`Inactive`) in its own transaction, outside `SurrealUserRepository`, so
+    /// the repository that owns the write has to announce it.
+    #[must_use]
+    pub fn with_provisioning_sink(mut self, sink: Arc<dyn ProvisioningSink>) -> Self {
+        self.provisioning_sink = Some(sink);
+        self
     }
 
     /// Find a pending deletion request by user_id within a tenant.
@@ -225,6 +244,10 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
             .check()
             .map_err(|e| classify_write_error(e.to_string(), "account_deletion"))?;
 
+        // The user is `Inactive` now: a provisioned field changed.
+        if let Some(sink) = &self.provisioning_sink {
+            sink.user_changed(tenant_id, user_id).await;
+        }
         Ok(AccountDeletion {
             id,
             tenant_id,

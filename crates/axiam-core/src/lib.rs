@@ -9,6 +9,7 @@ pub mod models;
 pub mod outbound;
 pub mod permission_scope;
 pub mod personal_data;
+pub mod provisioning;
 pub mod repository;
 pub mod revocation_feed;
 pub mod secrets;

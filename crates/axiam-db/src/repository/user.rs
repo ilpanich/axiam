@@ -11,8 +11,10 @@ use axiam_core::models::user::{
     Address, CollisionAttribute, CreateDirectoryAccount, CreateUser, IdentityCollision, UpdateUser,
     User, UserStatus,
 };
+use axiam_core::provisioning::ProvisioningSink;
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
@@ -350,6 +352,10 @@ pub struct SurrealUserRepository<C: Connection> {
     db: DbHandle<C>,
     /// Optional server-side pepper for password hashing.
     pepper: Option<String>,
+    /// Told of every committed change to a provisioned field (G-6, D-57).
+    /// `None` is a repository nobody provisions from; an unbound `Late` handle
+    /// is the same thing until the composition root binds it.
+    provisioning_sink: Option<Arc<dyn ProvisioningSink>>,
 }
 
 impl<C: Connection> Clone for SurrealUserRepository<C> {
@@ -357,6 +363,7 @@ impl<C: Connection> Clone for SurrealUserRepository<C> {
         Self {
             db: self.db.clone(),
             pepper: self.pepper.clone(),
+            provisioning_sink: self.provisioning_sink.clone(),
         }
     }
 }
@@ -364,7 +371,11 @@ impl<C: Connection> Clone for SurrealUserRepository<C> {
 impl<C: Connection> SurrealUserRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
-        Self { db, pepper: None }
+        Self {
+            db,
+            pepper: None,
+            provisioning_sink: None,
+        }
     }
 
     pub fn with_pepper(db: impl Into<DbHandle<C>>, pepper: String) -> Self {
@@ -372,6 +383,30 @@ impl<C: Connection> SurrealUserRepository<C> {
         Self {
             db,
             pepper: Some(pepper),
+            provisioning_sink: None,
+        }
+    }
+
+    /// Report committed changes to `sink` (G-6, D-57): every mutating method
+    /// that can change what a downstream SCIM service provider is told calls
+    /// [`ProvisioningSink::user_changed`] **after** the write succeeded. An
+    /// `update` calls it only when it touches a provisioned field (username,
+    /// email, status, metadata); login bookkeeping (`increment_failed_logins`,
+    /// `update_totp_step`, lock and failed-login stamps) never does. The sink
+    /// cannot fail the write (it returns nothing).
+    ///
+    /// Clones of the repository carry the sink with them, so one binding at
+    /// the composition root reaches every service that clones the repository.
+    #[must_use]
+    pub fn with_provisioning_sink(mut self, sink: Arc<dyn ProvisioningSink>) -> Self {
+        self.provisioning_sink = Some(sink);
+        self
+    }
+
+    /// Tell the sink the user changed. A no-op when no sink is attached.
+    async fn notify_user_changed(&self, tenant_id: Uuid, user_id: Uuid) {
+        if let Some(sink) = &self.provisioning_sink {
+            sink.user_changed(tenant_id, user_id).await;
         }
     }
 }
@@ -496,7 +531,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             id: id_str,
         })?;
 
-        Ok(row.into_user(id)?)
+        let user = row.into_user(id)?;
+        self.notify_user_changed(user.tenant_id, id).await;
+        Ok(user)
     }
 
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<User> {
@@ -592,7 +629,15 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // second attempt needs its own copy. The clone is paid only on the
         // attempt itself, which the uncontended path never reaches past the
         // first.
-        crate::helpers::retry_on_write_conflict(|| async {
+        // G-6 (D-57): only a change to a field a downstream directory is told
+        // about notifies the provisioning sink. A login's bookkeeping (lock
+        // stamps, TOTP step, failed-login counters) and a credential or MFA
+        // change do not.
+        let touches_provisioned_field = input.username.is_some()
+            || input.email.is_some()
+            || input.status.is_some()
+            || input.metadata.is_some();
+        let updated = crate::helpers::retry_on_write_conflict(|| async {
             let input = input.clone();
             let id_str = id.to_string();
             let tenant_id_str = tenant_id.to_string();
@@ -726,9 +771,13 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                 id: id_str,
             })?;
 
-            Ok(row.into_user(id)?)
+            Ok::<_, axiam_core::error::AxiamError>(row.into_user(id)?)
         })
-        .await
+        .await?;
+        if touches_provisioned_field {
+            self.notify_user_changed(tenant_id, id).await;
+        }
+        Ok(updated)
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
@@ -835,6 +884,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             }
             .into());
         }
+        self.notify_user_changed(tenant_id, id).await;
         Ok(())
     }
 
@@ -880,7 +930,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             entity: "user".into(),
             id: id_str,
         })?;
-        Ok(row.into_user(user_id)?)
+        let user = row.into_user(user_id)?;
+        self.notify_user_changed(tenant_id, user_id).await;
+        Ok(user)
     }
 
     async fn create_directory_account(&self, input: CreateDirectoryAccount) -> AxiamResult<User> {
@@ -930,7 +982,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             entity: "user".into(),
             id: id_str,
         })?;
-        Ok(row.into_user(id)?)
+        let user = row.into_user(id)?;
+        self.notify_user_changed(user.tenant_id, id).await;
+        Ok(user)
     }
 
     async fn find_identity_collision(
@@ -1061,7 +1115,11 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         })
         .await?;
         match rows.into_iter().next() {
-            Some(row) => Ok(Some(row.into_user(user_id)?)),
+            Some(row) => {
+                let user = row.into_user(user_id)?;
+                self.notify_user_changed(tenant_id, user_id).await;
+                Ok(Some(user))
+            }
             None => Ok(None),
         }
     }
@@ -1329,6 +1387,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .map_err(DbError::from)?
             .check()
             .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        // G-6 (D-57, D-58): the deliverer sees `Anonymized` and sends the
+        // downstream `DELETE`, whatever the target's deprovision policy says.
+        self.notify_user_changed(tenant_id, user_id).await;
         Ok(())
     }
 }
@@ -1436,7 +1497,9 @@ impl<C: Connection> SurrealUserRepository<C> {
             id: id_str,
         })?;
 
-        Ok(row.into_user(id)?)
+        let user = row.into_user(id)?;
+        self.notify_user_changed(user.tenant_id, id).await;
+        Ok(user)
     }
 
     /// Mark a user as deletion-pending and set the scheduled purge date (D-08).
@@ -1466,6 +1529,8 @@ impl<C: Connection> SurrealUserRepository<C> {
             .map_err(DbError::from)?
             .check()
             .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        // The account is set `Inactive` here: a provisioned field.
+        self.notify_user_changed(tenant_id, user_id).await;
         Ok(())
     }
 
@@ -1491,6 +1556,8 @@ impl<C: Connection> SurrealUserRepository<C> {
             .map_err(DbError::from)?
             .check()
             .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        // The account is set `Active` again here: a provisioned field.
+        self.notify_user_changed(tenant_id, user_id).await;
         Ok(())
     }
 

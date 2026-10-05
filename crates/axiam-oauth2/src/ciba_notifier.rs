@@ -20,7 +20,13 @@
 //! The recipient is re-read here — never taken from the request row — and is
 //! mailed only if the account may take part in the grant right now
 //! ([`user_may_be_subject`]: it may sign in, and is not under lockout), is not
-//! scheduled for deletion, and has an address. Anything else is a quiet no-op:
+//! scheduled for deletion, and has an address **something vouches for** (D-25's
+//! rule, [`email_is_vouched_for`]: `email_verified_at` is set, or the account
+//! is `Active`). The last is the W5 F4 review's (D-74): a self-registered
+//! account inside its grace period can carry anybody's address, and a CIBA
+//! client — which writes the `binding_message` the mail quotes — would
+//! otherwise have AXIAM mail that stranger up to three times a minute from the
+//! tenant's own sender. Anything else is a quiet no-op:
 //! the request still waits on the approval page, and a notification that cannot
 //! be sent must not be told apart from one that was (D-63). The mail consumer
 //! resolves the delivery address from the user record again at send time
@@ -41,6 +47,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::ciba::user_may_be_subject;
+use crate::ssf::email_is_vouched_for;
 
 /// What a mail says when the client sent no `binding_message`.
 const NO_BINDING_MESSAGE: &str = "(none)";
@@ -102,6 +109,7 @@ where
             || !user_may_be_subject(&user)
             || user.deletion_pending
             || user.email.trim().is_empty()
+            || !email_is_vouched_for(&user)
         {
             tracing::debug!(
                 request_id = %notification.request_id,

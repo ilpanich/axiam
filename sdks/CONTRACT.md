@@ -11015,7 +11015,9 @@ was decided and polls once.
 
 Two audiences use this, and they are not the same code. The **user** approves on the console
 page `/ciba/approve`, behind a human session and a CSRF check (`GET`/`POST
-/api/v1/ciba/requests/{id}[/approve|/deny]`); that page is the console's job and **is not SDK
+/api/v1/ciba/requests/{id}[/approve|/deny]`; a token AXIAM minted for an OAuth2 client — from the
+code, refresh or CIBA grant — is `403` there even though it names the user, amended in place by
+the W5 F4 review, T-447); that page is the console's job and **is not SDK
 surface** — it is excluded from the management registry (tag `ciba`) and §33.9 says an SDK never
 approves. The **client** is what this section covers: the **initiation helper** and the helpers
 around it (§33.1). Nothing here is a §27 namespace, so contract 1.58 adds **no operation to the

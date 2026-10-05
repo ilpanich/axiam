@@ -274,6 +274,49 @@ async fn an_account_that_may_not_be_mailed_is_not_mailed() {
     assert!(sent(&w).is_empty());
 }
 
+/// W5 F4 review (D-74, D-25's rule): an address nothing vouches for is not
+/// mailed. A `PendingVerification` account with no `email_verified_at` — a
+/// self-registration that may carry anybody's address — gets no approval mail
+/// (the request still waits on the page); once the address is verified, or the
+/// account is `Active`, it does.
+#[tokio::test]
+async fn an_address_nothing_vouches_for_is_not_mailed() {
+    let w = world().await;
+    let users = SurrealUserRepository::new(w.db.clone());
+    users
+        .update(
+            w.tenant_id,
+            w.user_id,
+            UpdateUser {
+                status: Some(UserStatus::PendingVerification),
+                email_verified_at: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    w.notifier.notify(notification(&w, None)).await.unwrap();
+    assert!(
+        sent(&w).is_empty(),
+        "an unverified address of a pending account is not mailed"
+    );
+
+    // Verified: the address is vouched for, the account still pending.
+    users
+        .update(
+            w.tenant_id,
+            w.user_id,
+            UpdateUser {
+                email_verified_at: Some(Some(Utc::now())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    w.notifier.notify(notification(&w, None)).await.unwrap();
+    assert_eq!(sent(&w).len(), 1, "a verified address is mailed");
+}
+
 #[tokio::test]
 async fn a_queue_failure_is_reported_to_the_caller_to_log() {
     let w = world_with(RecordingMail {

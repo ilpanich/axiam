@@ -562,6 +562,49 @@ async fn the_signed_in_user_approves_and_the_clients_poll_gets_tokens() {
     assert_eq!(get_page(&app, id, &jwt).await.0, 404);
 }
 
+/// W5 F4 review, T-447: a token AXIAM minted for an OAuth2 client names the
+/// user and a live session, and the user extractor admits it — but approving
+/// is the person's act on the console page. The CIBA client that redeemed one
+/// request holds such a token; it cannot open, approve or refuse the next one
+/// in the user's name, even knowing its record id.
+#[actix_web::test]
+async fn a_token_minted_for_a_client_cannot_decide_a_request() {
+    let w = world().await;
+    let app = app!(w, limits());
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+
+    // A first request, approved by Alice, redeemed by the client.
+    let (first_auth_req_id, first) = start(&app, &w, "alice", "").await;
+    let version = get_page(&app, first, &jwt).await.1["version"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(decide(&app, first, "approve", version, &jwt).await.0, 200);
+    let (status, issued) = poll(&app, &w, &first_auth_req_id).await;
+    assert_eq!(status, 200);
+    let client_held = issued["access_token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        decode_unverified(&client_held)["client_id"],
+        w.client.client_id,
+        "the token is the client's"
+    );
+
+    // A second request: the client's token is not a sign-in on the page.
+    let (_, second) = start(&app, &w, "alice", "").await;
+    assert_eq!(get_page(&app, second, &client_held).await.0, 403);
+    let version = row(&w, second).await.version;
+    for verb in ["approve", "deny"] {
+        assert_eq!(
+            decide(&app, second, verb, version, &client_held).await.0,
+            403,
+            "a client's token may not {verb}"
+        );
+    }
+    assert_eq!(row(&w, second).await.status, CibaRequestStatus::Pending);
+
+    // Alice's own sign-in still can.
+    assert_eq!(decide(&app, second, "approve", version, &jwt).await.0, 200);
+}
+
 #[actix_web::test]
 async fn the_signed_in_user_denies_and_the_clients_poll_gets_access_denied() {
     let w = world().await;
@@ -757,6 +800,17 @@ async fn both_decisions_are_audited_without_the_binding_message() {
     assert_eq!(metadata["client_id"], w.client.client_id);
     assert_eq!(metadata["delivery_mode"], "poll");
     assert_eq!(metadata["acr"], MFA);
+    // W5 F4 review, T-435: the session that decided is in the row, for a
+    // refusal as for an approval (the request row is swept, and a refusal
+    // records no session on it).
+    let deciding_session = decode_unverified(&jwt)["jti"].as_str().unwrap().to_owned();
+    for entry in yes.iter().chain(no.iter()) {
+        assert_eq!(
+            entry.metadata["session_id"],
+            deciding_session.as_str(),
+            "the deciding session is recorded"
+        );
+    }
     for entry in yes.iter().chain(no.iter()) {
         let rendered = serde_json::to_string(entry).unwrap();
         assert!(

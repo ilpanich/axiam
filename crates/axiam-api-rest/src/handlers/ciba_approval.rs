@@ -10,7 +10,9 @@
 //! * `AuthzMiddleware` — the caller is an authenticated human with a session.
 //!   Approval records *that session* as the evidence behind the minted tokens
 //!   (`sid`, `auth_time`, `amr`, `acr`; D-67), so a caller without one is
-//!   refused, whatever token it holds.
+//!   refused, whatever token it holds — and so is a token AXIAM minted for an
+//!   OAuth2 client, which names a session too (W5 F4 review, T-447): only a
+//!   console sign-in's token decides.
 //! * `CsrfMiddleware` — another origin cannot silently POST an approval on a
 //!   victim's session; the `binding_message` is what lets the *user* tell a
 //!   request they started from one an attacker did.
@@ -42,8 +44,9 @@
 //!
 //! # What the audit says
 //!
-//! `ciba.approved` and `ciba.denied` record the user, the request id, the client
-//! and the delivery mode — and, for an approval, the `acr` achieved. **Never the
+//! `ciba.approved` and `ciba.denied` record the user, the session that decided,
+//! the request id, the client and the delivery mode — and, for an approval, the
+//! `acr` achieved. **Never the
 //! `binding_message`**: a client chooses it, and a call-centre agent's text
 //! ("confirm the transfer to J. Doe") can be personal data that has no business
 //! in an append-only log. The reader who needs it has the request row for as
@@ -147,11 +150,22 @@ fn server_error() -> HttpResponse {
 
 /// The authentication behind the caller's session, or `None` for a caller with
 /// no session row (a machine token, a session ended since the token was
-/// validated).
+/// validated) **or whose token AXIAM minted for an OAuth2 client**.
+///
+/// The last is the W5 F4 review's (T-447): an access token from the code,
+/// refresh or CIBA grant names the user and a live session, and the user
+/// extractor admits it like a console sign-in's. Approving is the person's act
+/// on this page (contract §33: "that page is the console's job and is not SDK
+/// surface"); a relying party holding one of its user's tokens — a CIBA client
+/// that redeemed an earlier request among them — must not be able to approve
+/// in the user's name. A console sign-in's token carries no `client_id`.
 async fn session_evidence<C: Connection + Clone>(
     state: &AppState<C>,
     user: &AuthenticatedUser,
 ) -> Result<Option<(DateTime<Utc>, Vec<Amr>)>, ()> {
+    if user.claims.0.client_id.is_some() {
+        return Ok(None);
+    }
     match state
         .session_repo
         .get_by_id(user.principal_tenant_id, user.session_id)
@@ -179,6 +193,8 @@ async fn session_evidence<C: Connection + Clone>(
     responses(
         (status = 200, description = "The pending request", body = CibaApprovalPage),
         (status = 401, description = "Not authenticated"),
+        (status = 403, description = "The token is not a console sign-in's: no session row behind it, \
+                                      or AXIAM minted it for an OAuth2 client"),
         (status = 404, description = "Unknown, another user's, expired or already decided — one answer"),
     ),
     security(("session" = [])),
@@ -247,7 +263,9 @@ pub async fn get_request<C: Connection + Clone>(
     responses(
         (status = 200, description = "Approved", body = CibaDecisionResponse),
         (status = 401, description = "Not authenticated"),
-        (status = 403, description = "The request asked for an authentication class this session has not achieved", body = CibaStepUpRequired),
+        (status = 403, description = "The request asked for an authentication class this session has not \
+                                      achieved (`step_up_required`, body below); or the token is not a \
+                                      console sign-in's (`authorization_denied`)", body = CibaStepUpRequired),
         (status = 404, description = "Unknown, another user's, expired, already decided, or changed since read"),
     ),
     security(("session" = [])),
@@ -313,6 +331,8 @@ pub async fn approve<C: Connection + Clone>(
     responses(
         (status = 200, description = "Refused", body = CibaDecisionResponse),
         (status = 401, description = "Not authenticated"),
+        (status = 403, description = "The token is not a console sign-in's: no session row behind it, \
+                                      or AXIAM minted it for an OAuth2 client"),
         (status = 404, description = "Unknown, another user's, expired, already decided, or changed since read"),
     ),
     security(("session" = [])),
@@ -370,9 +390,13 @@ async fn audit_decision<C: Connection + Clone>(
     request: &CibaRequest,
     action: &str,
 ) {
+    // The session that decided (W5 F4 review, T-435): the request row that
+    // also holds it for an approval is swept ten minutes after it expires, and
+    // a refusal records no session on the row at all.
     let mut metadata = serde_json::json!({
         "client_id": request.client_id,
         "delivery_mode": request.delivery_mode.as_str(),
+        "session_id": user.session_id.to_string(),
     });
     if let Some(approval) = &request.approval {
         metadata["acr"] = serde_json::Value::String(approval.acr.clone());

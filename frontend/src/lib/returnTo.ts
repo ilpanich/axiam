@@ -22,9 +22,11 @@ import { clearReauthAttempts } from "@/lib/reauth";
  * 3. begins with a single `/` — not `//`, which reads as a path and resolves
  *    to a different host;
  * 4. the path is exactly `/oauth2/authorize`, exactly
- *    `/t/{uuid}/oauth2/authorize` (T21.6, per-tenant path issuers), or exactly
+ *    `/t/{uuid}/oauth2/authorize` (T21.6, per-tenant path issuers), exactly
  *    `/saml/v2/{uuid}/sso/continue` (T23.2.3, the SAML SSO endpoint's return
- *    leg), and there is a query.
+ *    leg), or exactly `/ciba/approve` with the one query
+ *    `request_id=<uuid>` (T23.7.2, the CIBA approval page's step-up), and there
+ *    is a query.
  *
  * Rule 4 is what makes traversal a non-question: nothing is normalised and
  * then compared, because nothing but one of two exact shapes is accepted in the
@@ -61,12 +63,26 @@ const SAML_SSO_CONTINUE_PATH =
   /^\/saml\/v2\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/sso\/continue$/;
 
 /**
+ * The CIBA approval page (T23.7.2, G-7). A request that asks for a stronger
+ * sign-in than the user's session achieved sends the user through this login
+ * hop and back to **this SPA page**, not to a server endpoint. Nothing travels
+ * with it but the request's record id (not a secret, D-68): the page reads the
+ * request afresh, and the decision is conditional on the version that read
+ * returned, so the way back consumes nothing. The query is held to exactly that
+ * one parameter, so the value cannot carry anything else through.
+ */
+const CIBA_APPROVAL_PATH = "/ciba/approve";
+const CIBA_APPROVAL_QUERY =
+  /^request_id=[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
  * Is `path` a sign-in continuation this deployment could serve — an
- * authorization endpoint, or the SAML SSO return leg?
+ * authorization endpoint, the SAML SSO return leg, or the CIBA approval page?
  */
 function isAuthorizePath(path: string): boolean {
   return (
     path === AUTHORIZE_PATH ||
+    path === CIBA_APPROVAL_PATH ||
     TENANT_AUTHORIZE_PATH.test(path) ||
     SAML_SSO_CONTINUE_PATH.test(path)
   );
@@ -104,6 +120,7 @@ export function sanitizeReturnTo(raw: string | null | undefined): string | null 
   const query = raw.slice(queryStart + 1);
   if (!isAuthorizePath(path)) return null;
   if (query.length === 0) return null;
+  if (path === CIBA_APPROVAL_PATH && !CIBA_APPROVAL_QUERY.test(query)) return null;
 
   return raw;
 }

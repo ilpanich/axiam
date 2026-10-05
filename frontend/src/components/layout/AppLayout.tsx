@@ -1,14 +1,16 @@
 import { useState, useEffect } from "react";
-import { Outlet, Navigate } from "react-router";
+import { Outlet, Navigate, useLocation } from "react-router";
 import { Loader2 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { cn } from "@/lib/utils";
 import { OWN_SCOPE_CACHE_SLOT } from "@/lib/queryClient";
+import { sanitizeReturnTo } from "@/lib/returnTo";
 
 export function AppLayout() {
   const { isAuthenticated, activeTenantId, isSwitchingTenant } = useAuthStore();
+  const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Close sidebar on escape key
@@ -21,7 +23,17 @@ export function AppLayout() {
   }, []);
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
+    // A visitor arriving on a page that is meant to be reached from a link in a
+    // mail (the CIBA approval page, T23.7.2) is brought back to it after
+    // signing in. Only a destination `sanitizeReturnTo` accepts is carried --
+    // for every other page the answer is the plain login it always was.
+    const resume = sanitizeReturnTo(location.pathname + location.search);
+    return (
+      <Navigate
+        to={resume ? `/login?return_to=${encodeURIComponent(resume)}` : "/login"}
+        replace
+      />
+    );
   }
 
   return (

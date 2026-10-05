@@ -1475,6 +1475,34 @@ Sonnet 5.5 for delivery plumbing and docs.
 > notification sink, which only the HTTP middleware fed; hence the wrapper.
 > Carried to F4: one mail per dead letter can flood a rule's recipients while a
 > target is down.
+>
+> **EXECUTED — G-6, W5: T23.6.4, 2026-10-05** (`ba6905f`, `3fc1c01`, `add8876`,
+> `8c3fece`, `e5fd471`, `7bbfdfe` Sonnet 5.5; `8424488` Opus 5.5, threat entries,
+> in a worktree). Management, contract and documentation. Six routes under
+> `/api/v1/scim-targets` (list, create, get with the delivery-state projection,
+> `PUT` conditional on the version read — `409` when overtaken — `DELETE`, and
+> `POST …/reconcile`, `202` or `409` while claimed), the tenant the token's;
+> `base_url` and `token_url` held to `validate_push_endpoint`; the credential
+> write-only and bound to its URL (`400` naming the field); the human-only family
+> `scim_targets:read`/`:write`; buckets `scim_target_create`, `_update`,
+> `_delete`, `_reconcile` under `scim_target_admin_per_min` (30); enabling a target
+> starts a reconciliation through the same claim. `openapi.json` and the registry
+> (namespace `scim_targets`, 190 operations across 28 namespaces, the credential
+> `Sensitive`). **Contract 1.57, §31** (SHOULD in all eleven SDKs). Console page
+> *SCIM targets*; website *Integrate* page **Outbound SCIM provisioning**; the
+> authentik comparison's outbound-SCIM row and gap item flipped, the Keycloak and
+> Zitadel cells extended, each with a 2026-10-05 change-log line. Threat model
+> **2.32.0** (420 threats, 401 mitigated, 19 open): **T-407 … T-420** (a SCIM
+> downstream trust boundary, the target store, the deliverer and its flows), T-402
+> amended; **T-409** and **T-418** Open for the F4 review. Tests: 24 HTTP tests
+> (round trip, no credential member anywhere, URL binding, overtaken `PUT`, foreign
+> tenant, address policy, reconcile `202`/`409`, service account `401`, each write
+> bucket counted), the M2M suite extended, 24 console tests. **G-6 is complete.**
+>
+> What the plan did not anticipate. The threat entries found a gap D-57 left:
+> a client-credentials target's secret is bound to `token_url` only, so moving
+> `base_url` alone sends the next freshly minted access token to the new host
+> (T-409, Open, for the F4 review). The SDK fan-out of §31 is post-merge (D-35).
 
 **Target.** A tenant can register downstream SCIM 2.0 service providers and
 AXIAM pushes user and group lifecycle changes to them, with reconciliation.

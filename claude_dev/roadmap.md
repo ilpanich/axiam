@@ -1100,7 +1100,7 @@ with an F4 security review of the wave's diff against
 | T23.6.1 | `ScimTarget` model and credentials | Sonnet 5.5 | W5 |✓ |
 | T23.6.2 | Lifecycle-event to SCIM translation on the shared dispatcher | Sonnet 5.5 | W5 |✓ |
 | T23.6.3 | Reconciliation, dead-letter, GDPR erasure propagation | Sonnet 5.5 | W5 |✓ |
-| T23.6.4 | CRUD, console, contract §31, OpenAPI, website, threat entries | Sonnet 5.5 | W5 | |
+| T23.6.4 | CRUD, console, contract §31, OpenAPI, website, threat entries | Sonnet 5.5 | W5 |✓ |
 | T23.7.1 | CIBA: `bc-authorize`, `auth_req_id` lifecycle, single-use redemption, polling back-off | Opus 5.5 | W5 | |
 | T23.7.2 | Approval on the identity pages, email notification, ping mode | Sonnet 5.5 | W5 | |
 | T23.7.3 | e2e poll and ping, contract §33 (D-56), SDK helper (seven SDKs, post-merge per D-35), website | Sonnet 5.5 | W5 | |

@@ -117,6 +117,13 @@ outbound_kinds! {
     /// attempt, so a queued message never holds a signed SET and a stream
     /// disabled in the meantime delivers nothing (D-48, D-51).
     SsfPush => "ssf_push",
+    /// One outbound SCIM 2.0 provisioning operation toward a tenant-registered
+    /// downstream service provider (G-6, D-57). `target_id` is the
+    /// `ScimTarget` id and `payload` is a reference only,
+    /// `{resource_type, axiam_id}`: the deliverer re-reads the target, the
+    /// resource and its link at the attempt and computes the desired downstream
+    /// state then, so no attribute of a person ever sits in a queue or the DLQ.
+    ScimPush => "scim_push",
 }
 
 impl OutboundKind {
@@ -290,7 +297,27 @@ mod tests {
         );
         assert_eq!(
             OutboundKind::ALL,
-            &[OutboundKind::Webhook, OutboundKind::SsfPush]
+            &[
+                OutboundKind::Webhook,
+                OutboundKind::SsfPush,
+                OutboundKind::ScimPush
+            ]
+        );
+    }
+
+    #[test]
+    fn scim_push_slug_is_pinned() {
+        // T23.6.1 — the queue names (`axiam.scim_push`, `.retry`, `.dlq`), the
+        // retry env-var prefix (`AXIAM__SCIM_PUSH__*`) and the audit prefix
+        // (`scim_push.delivery_*`) all derive from this slug.
+        assert_eq!(OutboundKind::ScimPush.as_str(), "scim_push");
+        assert_eq!(
+            serde_json::to_string(&OutboundKind::ScimPush).unwrap(),
+            "\"scim_push\""
+        );
+        assert_eq!(
+            OutboundKind::from_slug("scim_push"),
+            Some(OutboundKind::ScimPush)
         );
     }
 

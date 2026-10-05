@@ -203,6 +203,12 @@ pub type DeviceAuthorizationServiceT<C> = DeviceAuthorizationService<
     SurrealUserRepository<C>,
 >;
 
+/// G-7 — the CIBA service: `bc-authorize` and the approval API T23.7.2's
+/// identity pages call. The token endpoint redeems through
+/// `TokenService::exchange_ciba`, handed this service's request store.
+pub type CibaServiceT<C> =
+    axiam_oauth2::ciba::CibaService<axiam_db::SurrealCibaRequestRepository<C>, SurrealUserRepository<C>>;
+
 /// B3 — RFC 8693 token exchange. Needs only the tenant repository: the
 /// exchanging client is authenticated by `TokenService::authenticate_client`
 /// and handed in, so there is exactly one secret-verification path in the
@@ -717,6 +723,14 @@ impl<C: Connection + Clone> AppState<C> {
             oauth2_client_repo.clone(),
             SurrealPushedAuthRequestRepository::new(db.clone()),
         );
+        // G-7: no sealing key in a test harness, so a ping-mode request is
+        // refused as on a deployment without one; a test that needs ping
+        // replaces this field.
+        let ciba_service = axiam_oauth2::ciba::CibaService::new(
+            axiam_db::SurrealCibaRequestRepository::new(db.clone(), None),
+            user_repo.clone(),
+            auth_config.jwt_public_key_pem.clone(),
+        );
         let device_authorization_service = DeviceAuthorizationService::new(
             device_grant_repo.clone(),
             oauth2_client_repo.clone(),
@@ -851,6 +865,8 @@ impl<C: Connection + Clone> AppState<C> {
                 authorize_service,
                 token_service,
                 device_authorization_service,
+                ciba_service,
+                ciba_notifier: Arc::new(axiam_core::models::ciba::NoopCibaUserNotifier),
                 token_exchange_service,
                 par_service,
                 permission_ticket_repo: SurrealPermissionTicketRepository::new(db.clone()),

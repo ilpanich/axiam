@@ -1910,6 +1910,7 @@ async fn rfc7592_clients_without_a_management_token_are_refused() {
         browser_sso: false,
         allowed_resources: vec![MCP.into()],
         managed_by,
+        ciba: Default::default(),
     };
     // A `dcr` row written the way every pre-v69 registration was: no digest.
     let (legacy_dcr, _) = repo.create(row(ManagedBy::Dcr)).await.unwrap();

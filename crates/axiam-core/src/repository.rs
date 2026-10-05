@@ -1822,6 +1822,110 @@ pub trait DeviceGrantRepository: Send + Sync {
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
+/// Storage for CIBA backchannel authentication requests (G-7).
+///
+/// Two parties write to one row — the user deciding on the identity pages and
+/// the client asking the token endpoint — so every transition is a single
+/// statement whose `WHERE` clause carries its precondition (T-406's lesson),
+/// and nothing is written for a request before the request carrying it has
+/// been validated (T-404's lesson): the token endpoint authenticates the
+/// client and matches it to the row before [`Self::record_poll`] is called.
+pub trait CibaRequestRepository: Send + Sync {
+    /// Store a new request. A ping-mode request's credentials are sealed; a
+    /// repository with no sealing key refuses one with
+    /// `AxiamError::ServiceUnavailable`.
+    fn create(
+        &self,
+        input: crate::models::ciba::CreateCibaRequest,
+    ) -> impl Future<Output = AxiamResult<crate::models::ciba::CibaRequest>> + Send;
+
+    /// Look a request up by the hash of its `auth_req_id`, in one tenant.
+    fn get_by_hash(
+        &self,
+        tenant_id: Uuid,
+        auth_req_id_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
+
+    /// Look a request up by record id, in one tenant.
+    fn get_by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
+
+    /// `pending → approved`, conditional on `version = expected_version`, on
+    /// the row's user being `user_id`, and on the request being unexpired.
+    /// `false` when any precondition fails — the caller cannot tell which.
+    fn approve(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+        user_id: Uuid,
+        evidence: crate::models::ciba::CibaApprovalEvidence,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// `pending → denied`, under the same three preconditions as
+    /// [`Self::approve`].
+    fn deny(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// `pending | approved → expired` once `expires_at` has passed,
+    /// conditional on `version = expected_version`.
+    fn mark_expired(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Record a token request against the request: compare-and-set on the
+    /// `last_polled_at` the caller read, writing `polled_at` and
+    /// `interval_secs`. `false` means another token request for the same
+    /// request landed in between — which is itself polling too fast.
+    fn record_poll(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        seen_last_polled_at: Option<chrono::DateTime<chrono::Utc>>,
+        polled_at: chrono::DateTime<chrono::Utc>,
+        interval_secs: u64,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Atomically redeem an **approved**, unexpired request started by
+    /// `client_id`, returning it exactly once — the X6 two-layer arbiter
+    /// (`device_grant.redeem`'s). `None` means it was not approved, belongs to
+    /// another client, expired, or another token request redeemed it.
+    fn redeem(
+        &self,
+        tenant_id: Uuid,
+        auth_req_id_hash: &str,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
+
+    /// Open a ping-mode request's sealed credentials, for the deliverer
+    /// (T23.7.2). `None` for a poll-mode request.
+    fn ping_credentials(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaPingCredentials>>> + Send;
+
+    /// The expiry sweep: every `pending`/`approved` request past `expires_at`
+    /// becomes `expired`, and every request that expired more than
+    /// `retention` before `now` is deleted. Returns the number deleted.
+    fn sweep_expired(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        retention: chrono::Duration,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
 /// Storage for session/client participation (B5, back-channel logout).
 ///
 /// One AXIAM session serves many relying parties — that is what SSO is — so

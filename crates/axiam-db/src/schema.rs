@@ -437,6 +437,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "scim_target",
         sql: SCHEMA_V79,
     },
+    Migration {
+        version: 80,
+        name: "ciba_backchannel_authentication",
+        sql: SCHEMA_V80,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4380,9 +4385,143 @@ DEFINE INDEX IF NOT EXISTS idx_scim_target_state_tenant ON TABLE scim_target_sta
     COLUMNS tenant_id;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v80 — T23.7.1 / G-7: CIBA backchannel authentication
+// -----------------------------------------------------------------------
+//
+// Additive DDL only, nothing backfilled: no client holds the CIBA grant until
+// an administrator (or an initial-access-token registration) gives it one.
+//
+// **`oauth2_client`** gains the two CIBA Core §4 members AXIAM stores:
+// `backchannel_token_delivery_mode` (`poll` or `ping`; absent for a client
+// without the grant) and `backchannel_client_notification_endpoint` (ping
+// only). Both read back as absent on every older row, which is exactly what
+// such a client registered.
+//
+// **`ciba_request`** is the pending-request store, one SCHEMAFULL row per
+// `bc-authorize`. The `auth_req_id` is never stored, only its SHA-256 —
+// UNIQUE, so a collision cannot make two requests answer one identifier. A
+// ping-mode request also holds `ping_ciphertext`/`ping_nonce`: the
+// `auth_req_id` and the client's `client_notification_token`, sealed with
+// AES-256-GCM under `pki_encryption_key` (the key webhook secrets, SSF push
+// headers and SCIM target credentials use) because the notification needs
+// both in clear. `user_id` is absent for a request whose hint named nobody who
+// may sign in (it can only expire); present, it is what erasure deletes by.
+// `version` is bumped by every status transition and is what approval and
+// denial are conditional on; `redemption_id` is the X6 arbiter's per-attempt
+// nonce. `status` is one of five values. Rows are marked `expired` and then
+// deleted by the cleanup scheduler (job `ciba_request`), and go with their
+// tenant and their user.
+const SCHEMA_V80: &str = "\
+DEFINE FIELD IF NOT EXISTS backchannel_token_delivery_mode ON TABLE oauth2_client
+    TYPE option<string> ASSERT $value = NONE OR $value IN ['poll', 'ping'];
+DEFINE FIELD IF NOT EXISTS backchannel_client_notification_endpoint ON TABLE oauth2_client
+    TYPE option<string> ASSERT $value = NONE OR string::len($value) <= 2048;
+DEFINE TABLE IF NOT EXISTS ciba_request SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS auth_req_id_hash ON TABLE ciba_request TYPE string
+    ASSERT string::len($value) = 64;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS scopes ON TABLE ciba_request TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS scopes.* ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS binding_message ON TABLE ciba_request TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) <= 256;
+DEFINE FIELD IF NOT EXISTS acr_values ON TABLE ciba_request TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS acr_values.* ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS resource ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS delivery_mode ON TABLE ciba_request TYPE string
+    ASSERT $value IN ['poll', 'ping'];
+DEFINE FIELD IF NOT EXISTS ping_ciphertext ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS ping_nonce ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE ciba_request TYPE string
+    ASSERT $value IN ['pending', 'approved', 'denied', 'expired', 'redeemed'];
+DEFINE FIELD IF NOT EXISTS version ON TABLE ciba_request TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS interval_secs ON TABLE ciba_request TYPE int DEFAULT 5;
+DEFINE FIELD IF NOT EXISTS last_polled_at ON TABLE ciba_request TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE ciba_request TYPE datetime;
+DEFINE FIELD IF NOT EXISTS approval_session_id ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS auth_time ON TABLE ciba_request TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS acr ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS amr ON TABLE ciba_request TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS amr.* ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS decided_at ON TABLE ciba_request TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE ciba_request TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_ciba_request_hash ON TABLE ciba_request
+    COLUMNS auth_req_id_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_ciba_request_tenant_user ON TABLE ciba_request
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_ciba_request_expires ON TABLE ciba_request
+    COLUMNS expires_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.7.1 / G-7 — v80 adds the CIBA client metadata columns and the
+    /// pending-request store additively, with the unique hash index, the
+    /// erasure index and the expiry index the sweep reads, and stores no
+    /// `auth_req_id` in clear.
+    #[test]
+    fn v80_defines_the_ciba_request_store_additively() {
+        assert!(SCHEMA_V80.contains("DEFINE TABLE IF NOT EXISTS ciba_request SCHEMAFULL"));
+        assert!(SCHEMA_V80.contains(
+            "idx_ciba_request_hash ON TABLE ciba_request\n    COLUMNS auth_req_id_hash UNIQUE"
+        ));
+        assert!(SCHEMA_V80.contains(
+            "idx_ciba_request_tenant_user ON TABLE ciba_request\n    COLUMNS tenant_id, user_id"
+        ));
+        assert!(
+            SCHEMA_V80
+                .contains("idx_ciba_request_expires ON TABLE ciba_request\n    COLUMNS expires_at")
+        );
+        assert!(
+            SCHEMA_V80
+                .contains("$value IN ['pending', 'approved', 'denied', 'expired', 'redeemed']")
+        );
+        assert!(SCHEMA_V80.contains("$value = NONE OR $value IN ['poll', 'ping']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V80.contains(forbidden),
+                "v80 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V80
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v80 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("ciba_request") || statement.contains("backchannel_"),
+                "v80 defined something outside its scope: {statement}"
+            );
+        }
+        // The identifier is stored only as a digest.
+        assert!(!SCHEMA_V80.contains("FIELD IF NOT EXISTS auth_req_id ON"));
+        assert!(!SCHEMA_V80.contains("client_notification_token"));
+    }
+
+    /// v80 takes the next number and keeps v79 as it was.
+    #[test]
+    fn v80_follows_v79_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| (79..=80).contains(&m.version))
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![(79, "scim_target"), (80, "ciba_backchannel_authentication")]
+        );
+    }
 
     /// T23.6.1 / D-57, D-58 — v79 adds the target registry, the link rows and
     /// the delivery state, additively, with the two unique indexes the link is
@@ -5536,8 +5675,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&79),
-            "v79 is the newest migration (T23.6.1 — outbound SCIM targets: `scim_target`, \
+            Some(&80),
+            "v80 is the newest migration (T23.7.1 — CIBA: the `ciba_request` store and the two \
+             backchannel metadata columns on `oauth2_client`; v79 was T23.6.1 — outbound SCIM targets: `scim_target`, \
              `scim_target_link` and `scim_target_state`; v78 was T23.5.3 — the SSF step-up record `ssf_step_up`; \
              v77 was T23.5.2 — the SSF transmitter: `ssf_stream`, \
              `ssf_event_buffer` and `security_settings.oidc_ssf_enabled`; v76 was T23.2.4 — SAML \

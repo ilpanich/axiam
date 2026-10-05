@@ -1609,6 +1609,18 @@ async fn main() -> std::io::Result<()> {
         device_verification_uri,
     );
 
+    // G-7 — CIBA. The pending-request store seals a ping-mode request's
+    // notification credentials under `pki_encryption_key`, the key webhook
+    // secrets use; without it a ping-mode request is refused and poll works.
+    // The sweep below (`ciba_request` on `/health/jobs`) shares this store.
+    let ciba_request_repo =
+        axiam_db::SurrealCibaRequestRepository::new(pool.handle_for_repo(), webhook_enc_key);
+    let ciba_service = axiam_oauth2::ciba::CibaService::new(
+        ciba_request_repo.clone(),
+        user_repo.clone(),
+        config.auth.jwt_public_key_pem.clone(),
+    );
+
     // B3 — token exchange (RFC 8693).
     //
     // The ordinary access-token lifetime is the exchanged-token ceiling: an
@@ -3080,6 +3092,10 @@ async fn main() -> std::io::Result<()> {
             authorize_service: authorize_service.clone(),
             token_service: token_service.clone(),
             device_authorization_service: device_authorization_service.clone(),
+            ciba_service: ciba_service.clone(),
+            // G-7 — nobody is notified until T23.7.2 wires the e-mail
+            // notifier; the request waits on the identity pages.
+            ciba_notifier: Arc::new(axiam_core::models::ciba::NoopCibaUserNotifier),
             token_exchange_service: token_exchange_service.clone(),
             par_service: par_service.clone(),
             // X2 — UMA 2.0. The repository rather than an assembled service,

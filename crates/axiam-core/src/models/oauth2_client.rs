@@ -548,6 +548,11 @@ pub struct OAuth2Client {
     /// is exactly what the TTL is for.
     #[serde(default)]
     pub last_authorized_at: Option<DateTime<Utc>>,
+    /// G-7 — the CIBA client metadata (CIBA Core §4). Empty for every client
+    /// that does not hold the CIBA grant, which is every client registered
+    /// before schema v80.
+    #[serde(default)]
+    pub ciba: crate::models::ciba::CibaClientMetadata,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -814,6 +819,9 @@ pub struct CreateOAuth2Client {
     /// be edited to `admin` would be a field that launders one.
     #[serde(default)]
     pub managed_by: ManagedBy,
+    /// G-7 — see [`OAuth2Client::ciba`].
+    #[serde(default)]
+    pub ciba: crate::models::ciba::CibaClientMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -868,6 +876,10 @@ pub struct UpdateOAuth2Client {
     /// an allow-list whose current contents nobody can state from one request,
     /// and `Some(vec![])` is how an operator withdraws the last target.
     pub allowed_resources: Option<Vec<String>>,
+    /// G-7 — see [`OAuth2Client::ciba`]. A whole replacement of both members;
+    /// `Some(CibaClientMetadata::default())` clears them.
+    #[serde(default)]
+    pub ciba: Option<crate::models::ciba::CibaClientMetadata>,
 }
 
 /// The fields an RFC 7592 `PUT /oauth2/register/{client_id}` may replace on a
@@ -906,6 +918,8 @@ pub struct DcrRegistrationReplacement {
     /// The tenant's `external_client_allowed_resources` **as of the update**
     /// (D3). Never the request's.
     pub allowed_resources: Vec<String>,
+    /// G-7 — the CIBA metadata, as `validate` resolved it. Replaced whole.
+    pub ciba: crate::models::ciba::CibaClientMetadata,
 }
 
 impl DcrRegistrationReplacement {
@@ -925,6 +939,7 @@ impl DcrRegistrationReplacement {
             jwks: create.jwks.clone(),
             jwks_uri: create.jwks_uri.clone(),
             allowed_resources: create.allowed_resources.clone(),
+            ciba: create.ciba.clone(),
         }
     }
 }
@@ -1684,6 +1699,7 @@ mod tests {
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Admin,
             last_authorized_at: None,
+            ciba: Default::default(),
         }
     }
 
@@ -1712,6 +1728,7 @@ mod tests {
             browser_sso: false,
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Admin,
+            ciba: Default::default(),
         }
     }
 

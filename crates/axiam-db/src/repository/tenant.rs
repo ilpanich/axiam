@@ -387,6 +387,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
                  DELETE saml_logout_run WHERE tenant_id = $id; \
                  DELETE ssf_event_buffer WHERE tenant_id = $id; \
                  DELETE ssf_step_up WHERE tenant_id = $id; \
+                 DELETE ciba_request WHERE tenant_id = $id; \
                  DELETE ssf_stream WHERE tenant_id = $id; \
                  DELETE scim_target_link WHERE tenant_id = $id; \
                  DELETE scim_target_state WHERE tenant_id = $id; \

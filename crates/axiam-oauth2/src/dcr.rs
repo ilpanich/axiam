@@ -60,6 +60,7 @@
 //! the provenance or the tenant. On success the token rotates: the old one dies
 //! in the same statement that writes the new one.
 
+use axiam_core::models::ciba::CIBA_GRANT_TYPE;
 use axiam_core::models::oauth2_client::{
     ClientAuthMethod, ClientProfile, CreateOAuth2Client, OAuth2Client,
 };
@@ -149,6 +150,22 @@ pub struct RegistrationRequest {
     /// RFC 7591 §2 `software_statement`. Refused rather than ignored.
     #[serde(default)]
     pub software_statement: Option<String>,
+    /// CIBA Core §4 `backchannel_token_delivery_mode` (G-7). Accepted only
+    /// with the CIBA grant, which only an initial-access-token registration
+    /// may name (D-62).
+    #[serde(default)]
+    pub backchannel_token_delivery_mode: Option<String>,
+    /// CIBA Core §4 `backchannel_client_notification_endpoint` — ping only,
+    /// under the webhook URL policy.
+    #[serde(default)]
+    pub backchannel_client_notification_endpoint: Option<String>,
+    /// CIBA Core §4 — refused: signed authentication requests are not
+    /// implemented.
+    #[serde(default)]
+    pub backchannel_authentication_request_signing_alg: Option<String>,
+    /// CIBA Core §4 — `true` is refused: there is no user code to check.
+    #[serde(default)]
+    pub backchannel_user_code_parameter: Option<bool>,
 }
 
 /// Why a registration was refused, with the RFC 7591 §3.2.2 code it is
@@ -405,7 +422,22 @@ pub fn validate(
                 ));
             }
             for g in requested {
-                if !DCR_GRANT_TYPES.contains(&g.trim()) {
+                let g = g.trim();
+                // G-7 / D-62 — the CIBA grant is the one grant beyond the code
+                // flow a registration may name, and only one an administrator
+                // authorised: it lets the client push a sign-in request at any
+                // user of the tenant, which a stranger must not be able to do.
+                if g == CIBA_GRANT_TYPE {
+                    if policy.dynamic_registration != DynamicRegistrationMode::InitialAccessToken {
+                        return Err(DcrError::InvalidClientMetadata(format!(
+                            "the {CIBA_GRANT_TYPE} grant may be registered only with an \
+                             initial access token: it lets a client send sign-in requests to \
+                             this tenant's users"
+                        )));
+                    }
+                    continue;
+                }
+                if !DCR_GRANT_TYPES.contains(&g) {
                     return Err(DcrError::InvalidClientMetadata(format!(
                         "grant_type {g:?} is not one this endpoint issues (allowed: {})",
                         DCR_GRANT_TYPES.join(", ")
@@ -415,8 +447,12 @@ pub fn validate(
             // `refresh_token` alone is a client that can refresh a token it can
             // never obtain. Refused rather than silently topped up with
             // `authorization_code`, because adding a grant nobody asked for is
-            // how a registration ends up more capable than its request.
-            if !requested.iter().any(|g| g.trim() == "authorization_code") {
+            // how a registration ends up more capable than its request. The
+            // CIBA grant obtains tokens too, so it satisfies the rule.
+            if !requested
+                .iter()
+                .any(|g| g.trim() == "authorization_code" || g.trim() == CIBA_GRANT_TYPE)
+            {
                 return Err(DcrError::InvalidClientMetadata(
                     "grant_types must include authorization_code: refresh_token alone would \
                      register a client that can refresh a token it cannot obtain"
@@ -430,6 +466,22 @@ pub fn validate(
     let token_endpoint_auth_method =
         resolve_auth_method(req.token_endpoint_auth_method.as_deref())?;
 
+    // G-7 — the CIBA metadata, under the same rules the admin API applies.
+    let ciba = crate::ciba::validate_client_registration(crate::ciba::CibaRegistrationView {
+        grant_types: &grant_types,
+        token_endpoint_auth_method,
+        // I5: a registration is always `standard`.
+        profile: ClientProfile::Standard,
+        delivery_mode: req.backchannel_token_delivery_mode.as_deref(),
+        notification_endpoint: req.backchannel_client_notification_endpoint.as_deref(),
+        signing_alg: req
+            .backchannel_authentication_request_signing_alg
+            .as_deref(),
+        user_code_parameter: req.backchannel_user_code_parameter,
+    })
+    .map_err(|e| DcrError::InvalidClientMetadata(e.to_string()))?;
+    let browser_driven = grant_types.iter().any(|g| g == "authorization_code");
+
     // --- redirect URIs ------------------------------------------------------
     //
     // Structure is the caller's to check with the same `validate_redirect_uris`
@@ -437,7 +489,7 @@ pub fn validate(
     // tenant's host allow-list, which the admin API has no equivalent of
     // because an administrator registering a URI has already decided it is
     // acceptable.
-    if req.redirect_uris.is_empty() {
+    if req.redirect_uris.is_empty() && browser_driven {
         return Err(DcrError::InvalidRedirectUri(
             "redirect_uris must name at least one URI: every grant this endpoint issues is \
              completed through a browser redirect"
@@ -529,6 +581,7 @@ pub fn validate(
             // D5 — forced. A request cannot claim to be an administrator's
             // client, because this value is built here rather than echoed.
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Dcr,
+            ciba,
         },
     })
 }
@@ -615,6 +668,12 @@ pub struct RegistrationResponse {
     /// RFC 7591 §2 `jwks_uri`, as stored. Echoed for the reason `jwks` is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwks_uri: Option<String>,
+    /// CIBA Core §4, as stored (G-7). Present only for a CIBA client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backchannel_token_delivery_mode: Option<String>,
+    /// CIBA Core §4, as stored. Present only for a ping-mode client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backchannel_client_notification_endpoint: Option<String>,
     /// RFC 7592 §3 `registration_client_uri`: where this client reads,
     /// replaces and deletes its registration.
     ///
@@ -721,6 +780,14 @@ pub fn client_information(
             .as_deref()
             .and_then(|j| serde_json::from_str(j).ok()),
         jwks_uri: client.jwks_uri.clone(),
+        backchannel_token_delivery_mode: client
+            .ciba
+            .backchannel_token_delivery_mode
+            .map(|m| m.as_str().to_owned()),
+        backchannel_client_notification_endpoint: client
+            .ciba
+            .backchannel_client_notification_endpoint
+            .clone(),
         registration_client_uri,
         registration_access_token,
     }
@@ -1238,6 +1305,7 @@ mod tests {
             last_authorized_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            ciba: Default::default(),
         }
     }
 
@@ -1495,6 +1563,103 @@ mod tests {
         assert!(
             put.get("client_secret").is_none(),
             "a public client has no secret to show"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G-7 — the CIBA grant and its metadata (D-62)
+    // -----------------------------------------------------------------------
+
+    fn ciba_request(mode: Option<&str>, endpoint: Option<&str>) -> RegistrationRequest {
+        RegistrationRequest {
+            redirect_uris: Vec::new(),
+            client_name: Some("Call centre".into()),
+            grant_types: Some(vec![CIBA_GRANT_TYPE.into(), "refresh_token".into()]),
+            token_endpoint_auth_method: Some("client_secret_basic".into()),
+            scope: Some("openid profile".into()),
+            backchannel_token_delivery_mode: mode.map(str::to_owned),
+            backchannel_client_notification_endpoint: endpoint.map(str::to_owned),
+            ..RegistrationRequest::default()
+        }
+    }
+
+    #[test]
+    fn an_anonymous_registration_cannot_name_the_ciba_grant() {
+        let err = validate(
+            Uuid::new_v4(),
+            &ciba_request(Some("poll"), None),
+            &policy(|_| {}),
+        )
+        .unwrap_err();
+        assert_eq!(err.error_code(), "invalid_client_metadata");
+    }
+
+    #[test]
+    fn an_initial_access_token_registration_may_name_it_without_redirect_uris() {
+        let protected = policy(|p| {
+            p.dynamic_registration = DynamicRegistrationMode::InitialAccessToken;
+        });
+        let out = validate(
+            Uuid::new_v4(),
+            &ciba_request(Some("poll"), None),
+            &protected,
+        )
+        .unwrap();
+        assert!(out.create.grant_types.iter().any(|g| g == CIBA_GRANT_TYPE));
+        assert_eq!(
+            out.create.ciba.backchannel_token_delivery_mode,
+            Some(axiam_core::models::ciba::CibaDeliveryMode::Poll)
+        );
+        assert!(out.create.redirect_uris.is_empty());
+        // And the information response echoes what was stored.
+        let mut stored = stored(&inspector_request());
+        stored.ciba = out.create.ciba.clone();
+        let info =
+            serde_json::to_value(client_information(&stored, "u".into(), None, None)).unwrap();
+        assert_eq!(info["backchannel_token_delivery_mode"], "poll");
+    }
+
+    #[test]
+    fn the_ciba_metadata_rules_apply_to_a_registration() {
+        let protected = policy(|p| {
+            p.dynamic_registration = DynamicRegistrationMode::InitialAccessToken;
+        });
+        for bad in [
+            ciba_request(None, None),
+            ciba_request(Some("push"), None),
+            ciba_request(Some("ping"), None),
+            ciba_request(Some("ping"), Some("https://10.1.2.3/notify")),
+            ciba_request(Some("poll"), Some("https://rp.example.com/notify")),
+        ] {
+            let err = validate(Uuid::new_v4(), &bad, &protected).unwrap_err();
+            assert_eq!(err.error_code(), "invalid_client_metadata");
+        }
+        let mut public = ciba_request(Some("poll"), None);
+        public.token_endpoint_auth_method = Some("none".into());
+        assert!(validate(Uuid::new_v4(), &public, &protected).is_err());
+        let mut signed = ciba_request(Some("poll"), None);
+        signed.backchannel_authentication_request_signing_alg = Some("PS256".into());
+        assert!(validate(Uuid::new_v4(), &signed, &protected).is_err());
+        let mut user_code = ciba_request(Some("poll"), None);
+        user_code.backchannel_user_code_parameter = Some(true);
+        assert!(validate(Uuid::new_v4(), &user_code, &protected).is_err());
+        // Metadata without the grant is refused even in the open mode.
+        let mut stray = inspector_request();
+        stray.backchannel_token_delivery_mode = Some("poll".into());
+        assert!(validate(Uuid::new_v4(), &stray, &policy(|_| {})).is_err());
+
+        let ping = validate(
+            Uuid::new_v4(),
+            &ciba_request(Some("ping"), Some("https://rp.example.com/ciba/notify")),
+            &protected,
+        )
+        .unwrap();
+        assert_eq!(
+            ping.create
+                .ciba
+                .backchannel_client_notification_endpoint
+                .as_deref(),
+            Some("https://rp.example.com/ciba/notify")
         );
     }
 }

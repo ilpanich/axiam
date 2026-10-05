@@ -2324,6 +2324,7 @@ async fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
         allowed_resources: Vec::new(),
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         last_authorized_at: None,
+        ciba: Default::default(),
     };
     assert_eq!(validate_registration(&client), Ok(()));
     assert!(
@@ -2396,6 +2397,7 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
         allowed_resources: Vec::new(),
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         last_authorized_at: None,
+        ciba: Default::default(),
     };
 
     let cases: [(&str, RawAuthnParams<'_>); 6] = [

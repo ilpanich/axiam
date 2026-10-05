@@ -138,6 +138,7 @@ fn public_client(tenant_id: Uuid, name: &str, backchannel: Option<String>) -> Cr
         // T21.4 / D5 — an administrator-created client, which is what these
         // fixtures stand in for.
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+        ciba: Default::default(),
     }
 }
 

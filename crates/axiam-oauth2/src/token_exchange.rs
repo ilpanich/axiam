@@ -1186,6 +1186,7 @@ mod tests {
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             last_authorized_at: None,
+            ciba: Default::default(),
         };
         assert!(
             !client_may_impersonate(&client),
@@ -1381,6 +1382,7 @@ mod tests {
                 allowed_resources: Vec::new(),
                 managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
                 last_authorized_at: None,
+                ciba: Default::default(),
             }
         }
 

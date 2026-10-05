@@ -602,6 +602,7 @@ pub async fn create<C: Connection + Clone>(
         // has no such member, so an API caller cannot claim a provenance, and
         // this is the one handler entitled to assert `admin`.
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+        ciba: Default::default(),
     };
 
     // X5.1 — refuse a registration that could not satisfy the profile it

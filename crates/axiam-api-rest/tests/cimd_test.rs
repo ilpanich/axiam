@@ -667,6 +667,7 @@ async fn a_document_cannot_rewrite_an_administrators_client() {
             browser_sso: false,
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Cimd,
+            ciba: Default::default(),
         },
     )
     .await

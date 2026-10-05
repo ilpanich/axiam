@@ -70,6 +70,7 @@ fn extract_pat(req: &actix_web::HttpRequest) -> Result<ProtectionApiToken, Axiam
              a permission ticket is bound to the client that minted it"
                 .into(),
         ));
+        ciba: Default::default(),
     }
 
     // The `uma_protection` scope is the only thing that distinguishes a PAT

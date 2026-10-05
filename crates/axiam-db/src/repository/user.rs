@@ -27,12 +27,15 @@ use crate::helpers::{CountRow, classify_write_error, parse_uuid, search_bind, se
 /// state that names the person (T23.2.4, schema v76, D-37, T-381) — the
 /// participant rows (the `NameID` and `SessionIndex` each SP was given) and the
 /// logout runs (whose sessions ended) — and the SSF step-up record (T23.5.3,
-/// schema v78, D-53 (1)) that names the user and the session they held. Keyed on
-/// `$tenant_id` and `$id`, the user's record id, which every statement binds.
+/// schema v78, D-53 (1)) that names the user and the session they held, and the
+/// CIBA requests (T23.7.1, schema v80) that name the user, their binding
+/// messages and the approval's evidence. Keyed on `$tenant_id` and `$id`, the
+/// user's record id, which every statement binds.
 const SAML_ERASURE_STATEMENTS: &str = "\
     DELETE saml_sp_session WHERE tenant_id = $tenant_id AND user_id = $id; \
     DELETE saml_logout_run WHERE tenant_id = $tenant_id AND user_id = $id; \
-    DELETE ssf_step_up WHERE tenant_id = $tenant_id AND user_id = $id; ";
+    DELETE ssf_step_up WHERE tenant_id = $tenant_id AND user_id = $id; \
+    DELETE ciba_request WHERE tenant_id = $tenant_id AND user_id = $id; ";
 
 /// DB-side row struct for queries where the UUID is already known.
 ///

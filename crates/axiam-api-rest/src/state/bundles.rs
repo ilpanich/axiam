@@ -194,6 +194,13 @@ pub struct OAuth2State<C: Connection + Clone> {
     pub token_service: TokenServiceT<C>,
     /// B2 — device authorization grant (RFC 8628).
     pub device_authorization_service: DeviceAuthorizationServiceT<C>,
+    /// G-7 — CIBA: `bc-authorize`, the pending-request store and the approval
+    /// API.
+    pub ciba_service: CibaServiceT<C>,
+    /// G-7 — where a stored CIBA request reaches its user (T23.7.2 wires
+    /// e-mail; until then, nobody is notified and the request waits on the
+    /// identity pages). Called detached, after the request is stored.
+    pub ciba_notifier: Arc<dyn axiam_core::models::ciba::CibaUserNotifier>,
     /// B3 — token exchange (RFC 8693).
     pub token_exchange_service: TokenExchangeServiceT<C>,
     /// B5 — pushed authorization requests (RFC 9126).

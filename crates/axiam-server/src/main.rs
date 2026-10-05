@@ -902,6 +902,11 @@ async fn main() -> std::io::Result<()> {
     amqp.declare_outbound_topology(OutboundKind::SsfPush)
         .await
         .expect("Failed to declare SSF push AMQP topology");
+    // G-6 / T23.6.2: the outbound SCIM kind (D-57) — `axiam.scim_push`,
+    // `.retry`, `.dlq` (the DLQ with the seven-day TTL: it holds user ids).
+    amqp.declare_outbound_topology(OutboundKind::ScimPush)
+        .await
+        .expect("Failed to declare SCIM push AMQP topology");
     tracing::info!("RabbitMQ connected and queues declared");
 
     // LIVE pooled-connection reference — registered in `AppState` so handlers
@@ -911,6 +916,15 @@ async fn main() -> std::io::Result<()> {
     let db_handle = pool.handle_for_repo();
     let org_repo = SurrealOrganizationRepository::new(pool.handle_for_repo());
     let tenant_repo = SurrealTenantRepository::new(pool.handle_for_repo());
+    // G-6 / T23.6.2 (D-57): the one provisioning event source. Every repository
+    // that can write a provisioned field (users, groups and their memberships,
+    // the GDPR deletion request's status write) reports to this handle after its
+    // write committed. It is bound to the SCIM provisioner below, once the
+    // dispatcher's publisher exists (it needs the broker); until then it is
+    // inactive and the repositories issue the queries they always did.
+    let provisioning_sink: Arc<
+        axiam_core::models::ssf::Late<dyn axiam_core::provisioning::ProvisioningSink>,
+    > = Arc::default();
     let user_repo = SurrealUserRepository::with_pepper(
         pool.handle_for_repo(),
         config
@@ -919,8 +933,10 @@ async fn main() -> std::io::Result<()> {
             .as_ref()
             .map(|p| p.expose_secret().to_string())
             .unwrap_or_default(),
-    );
-    let group_repo = SurrealGroupRepository::new(pool.handle_for_repo());
+    )
+    .with_provisioning_sink(provisioning_sink.clone());
+    let group_repo = SurrealGroupRepository::new(pool.handle_for_repo())
+        .with_provisioning_sink(provisioning_sink.clone());
     let role_repo = SurrealRoleRepository::new(pool.handle_for_repo());
     let permission_repo = SurrealPermissionRepository::new(pool.handle_for_repo());
     let resource_repo = SurrealResourceRepository::new(pool.handle_for_repo());
@@ -1189,7 +1205,10 @@ async fn main() -> std::io::Result<()> {
     let directory_group_mapper = Arc::new(
         axiam_directory::RepositoryGroupMapper::new(
             Arc::clone(&directory_authenticator),
-            axiam_db::SurrealGroupRepository::new(pool.handle_for_repo()),
+            // The mapping adds and removes directory-sourced memberships: it
+            // reports them like every other writer (D-57).
+            axiam_db::SurrealGroupRepository::new(pool.handle_for_repo())
+                .with_provisioning_sink(provisioning_sink.clone()),
         )
         .with_change_slot(directory_membership_slot.clone()),
     );
@@ -1231,7 +1250,10 @@ async fn main() -> std::io::Result<()> {
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());
     let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo());
-    let account_deletion_repo = SurrealAccountDeletionRepository::new(pool.handle_for_repo());
+    // The deletion request sets the account `Inactive` in its own transaction,
+    // so this repository reports it (D-57).
+    let account_deletion_repo = SurrealAccountDeletionRepository::new(pool.handle_for_repo())
+        .with_provisioning_sink(provisioning_sink.clone());
     let export_job_repo = SurrealExportJobRepository::new(pool.handle_for_repo());
     let erasure_proof_repo = SurrealErasureProofRepository::new(pool.handle_for_repo());
 
@@ -2397,6 +2419,50 @@ async fn main() -> std::io::Result<()> {
             OutboundRetryConfig::from_env_for(OutboundKind::SsfPush),
         );
         tracing::info!("SSF push consumer spawned");
+    }
+
+    // G-6 / T23.6.2 (D-57) — outbound SCIM provisioning, the third kind of the
+    // same dispatcher: one publisher channel (enqueue, and the consumer's
+    // TTL-delayed retries), the provisioner every repository reports to, and the
+    // deliverer behind the same `spawn_outbound_consumer` as the other kinds.
+    // Retry env vars are `AXIAM__SCIM_PUSH__*`. Targets' credentials are sealed
+    // under the key webhook secrets use; without it the deliverer cannot open
+    // one and a target cannot be stored (the management API is T23.6.4).
+    {
+        let scim_publisher = {
+            let channel = amqp
+                .create_publisher_channel()
+                .await
+                .expect("Failed to create AMQP SCIM push publisher channel");
+            axiam_amqp::AmqpOutboundPublisher::new(channel)
+        };
+        let scim_target_repo =
+            axiam_db::SurrealScimTargetRepository::new(db_handle.clone(), webhook_enc_key);
+        let bound = provisioning_sink.bind(Arc::new(axiam_scim::outbound::ScimProvisioner::new(
+            scim_target_repo.clone(),
+            Arc::new(scim_publisher.clone()),
+        )));
+        debug_assert!(bound, "the provisioning sink is bound exactly once");
+        let mut scim_deliverers = OutboundDeliverers::new();
+        scim_deliverers
+            .register(Arc::new(axiam_scim::outbound::ScimPushDeliverer::new(
+                scim_target_repo,
+                axiam_db::SurrealScimTargetLinkRepository::new(db_handle.clone()),
+                axiam_db::SurrealScimTargetStateRepository::new(db_handle.clone()),
+                user_repo.clone(),
+                group_repo.clone(),
+                Arc::new(scim_publisher.clone()),
+            )))
+            .expect("Failed to register the SCIM push deliverer");
+        spawn_outbound_consumer(
+            Arc::clone(&amqp),
+            OutboundKind::ScimPush,
+            scim_deliverers,
+            scim_publisher,
+            audit_repo.clone(),
+            OutboundRetryConfig::from_env_for(OutboundKind::ScimPush),
+        );
+        tracing::info!("SCIM push consumer spawned");
     }
 
     // Spawn AMQP mail consumer on a background task (D-14).

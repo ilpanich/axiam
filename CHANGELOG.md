@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Outbound SCIM provisioning: the source, the client and the deliverer
+  (T23.6.2, G-6, D-57).** AXIAM can now push user and group changes to a
+  downstream SCIM 2.0 service provider. Management routes, the console and the
+  contract section follow in T23.6.4, so nothing registers a target yet.
+  `ProvisioningSink` is a new core port the SurrealDB user and group repositories
+  call after every committed write of a provisioned field (user create, update of
+  username, email, status or name metadata, delete, erasure, the directory-account
+  methods and the deletion-request status write; group create, rename, delete and
+  every membership change), so the REST API, SCIM inbound, directory sign-in and
+  sync, federation just-in-time provisioning and GDPR erasure are all covered
+  without touching their call sites; login bookkeeping reports nothing. A
+  `ScimProvisioner` turns each report into one **reference**
+  (`{resource_type, axiam_id}`, no attribute of a person) per enabled target on a
+  new `scim_push` kind of the shared outbound dispatcher (`axiam.scim_push`,
+  `.retry`, `.dlq`; the dead-letter queue discards after seven days). The
+  `ScimPushDeliverer` re-reads the target, the resource and its link at every
+  attempt and sends `POST /Users`, `PATCH` (replace on the mapped attributes
+  only, skipped when the digest of the representation is unchanged) or `DELETE`
+  (always for an erased user; for a deprovisioned one when the target's policy
+  says so, else `active=false`); groups carry `displayName`, `externalId` and the
+  linked members. Every request, the OAuth2 token request included, goes through
+  the no-redirect SSRF guard; a redirect is never followed. New environment
+  variables `AXIAM__SCIM_PUSH__MAX_ATTEMPTS`, `AXIAM__SCIM_PUSH__BACKOFF_BASE_MS`
+  and `AXIAM__SCIM_PUSH__BACKOFF_CEILING_MS` (defaults 5, 5000, 3600000),
+  documented on the Integrate page; `axiam.scim_push` is in `docs/api/asyncapi.yml`.
+
 - **SAML 2.0 IdP end-to-end tests: a `samael` reference SP and a real Keycloak
   (T23.2.7, G-2).** Tests only; no server, contract or OpenAPI change.
   `saml_idp_e2e_test` drives the production route table with a service provider

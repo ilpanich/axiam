@@ -1835,6 +1835,31 @@ w.WriteHeader(http.StatusOK)`,
         ],
       },
       {
+        type: "p",
+        text: "Outbound SCIM provisioning (AXIAM pushing users and groups to a downstream SCIM 2.0 service provider) is the third kind on the dispatcher, with queues of its own (`axiam.scim_push`, `.retry`, `.dlq`) and its own variables. A queued message holds only the id of the user or group to re-sync, never an attribute of a person; the dead-letter queue still discards after seven days, because the ids are user ids.",
+      },
+      {
+        type: "table",
+        headers: ["Config key", "Default", "Meaning"],
+        rows: [
+          [
+            "AXIAM__SCIM_PUSH__MAX_ATTEMPTS",
+            "`5`",
+            "Total attempts per provisioning message before it is dead-lettered; the first attempt counts as one.",
+          ],
+          [
+            "AXIAM__SCIM_PUSH__BACKOFF_BASE_MS",
+            "`5000`",
+            "Delay before the first retry of a provisioning message.",
+          ],
+          [
+            "AXIAM__SCIM_PUSH__BACKOFF_CEILING_MS",
+            "`3600000`",
+            "Upper bound on any single provisioning retry delay — one hour.",
+          ],
+        ],
+      },
+      {
         type: "warn",
         text: "A webhook also carries a per-endpoint `retry_policy` (`max_retries`, `initial_delay_secs`, `backoff_multiplier`), which is validated and stored — `max_retries` at most 10, `initial_delay_secs` between 1 and 3600, `backoff_multiplier` between 0 and 10. The delivery consumer does **not** read it: the schedule that runs is the deployment-wide one above. Treat the field as recorded intent, not as a per-endpoint control.",
       },

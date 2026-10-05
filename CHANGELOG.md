@@ -39,6 +39,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   datastore connection, so a test boots the whole server with no broker over the
   embedded engine and runs a login, a webhook delivery and an SSF push through
   it. See *Minimal profile (no broker)* in `docs/deployment/README.md`.
+- **CIBA — client-initiated backchannel authentication, complete (G-7, T23.7.1 –
+  T23.7.3; contract 1.58).** AXIAM is an OpenID Connect CIBA Core 1.0
+  authorization server in poll and ping modes (no push), with signed
+  authentication requests and the FAPI-CIBA client: `POST /oauth2/bc-authorize`,
+  the CIBA grant at the token endpoint, the user's approval on the console after
+  a full sign-in (with step-up) and an approval e-mail, the ping on the shared
+  outbound dispatcher, rate-limit and lockout coverage of the grant. The three
+  entries below are the server work; this one is the rest. **Contract §33** (CIBA,
+  the client's half: `ciba_initiate`, `ciba_poll`, `ciba_await` and
+  `ciba_handle_ping`, the server rules an SDK can observe, error mapping,
+  `Sensitive<T>` for `auth_req_id`, `client_notification_token` and the signed
+  request's key material, `ciba_initiate` never retried, sixteen required tests
+  per SDK) is **contract 1.58**: additive, SHOULD in the seven full-surface SDKs
+  and MAY in the other four, with no operation added to the management registry
+  (190 across 28). **§21.3.1 vector A is amended in place**: the discovery
+  document's `mtls_endpoint_aliases` has a seventh member,
+  `backchannel_authentication_endpoint`, so an SDK whose test pinned the six keys
+  must re-vendor `CONTRACT.md` and update the pin (the post-merge SDK fan-out, D-35,
+  carries both). **Website:** the *Integrate* page "CIBA (backchannel
+  authentication)" (registering a client, the request, approval and step-up,
+  polling and `slow_down`, ping, tokens, limits and lockout, what is not
+  supported), linked from the OAuth2 and FAPI pages, and the contract anchors
+  at 1.58. **Tests:** `frontend/e2e/ciba.spec.ts` drives poll mode end to end
+  through the real approval page (tokens carrying the approval's evidence,
+  denial, a second redemption refused, expiry, `slow_down` growth, a request for
+  nobody, a multi-factor request a password session cannot approve, refused
+  parameters, and the limiter counting failed client authentications at
+  `bc-authorize` — the Keycloak 26.7.x class); the e2e stack lowers
+  `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` to 20 so the limiter can be
+  exhausted quickly (the shipped default stays 60). Ping mode end to end is the
+  Rust test `ciba_ping_flow_test` (the approval route, the production deliverer
+  through its test seam, a loopback receiver, then the client's redemption):
+  a compose receiver cannot satisfy the outbound guard (`https`, a publicly
+  routable address, a certificate from the Mozilla roots) without weakening it.
+
 - **CIBA — user approval, e-mail notification and ping mode (G-7, T23.7.2).**
   The user's half of a backchannel authentication request, and the client's
   notification that it was decided. **Approval API** (the device grant's user

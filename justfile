@@ -742,11 +742,15 @@ conformance-up:
     fi
     echo "[conformance] waiting for the suite to become ready (up to 3 min)…"
     for _ in $(seq 1 90); do
-      if curl -sSk --max-time 5 "${SUITE_BASE_URL}/api/runner/available" >/dev/null 2>&1; then
+      # `-f` is load-bearing. Without it curl exits 0 on ANY HTTP response, so the
+      # suite's nginx answering `502 Bad Gateway` while the JVM behind it is still
+      # booting after the truststore restart above counted as "ready" — run
+      # 37276852665 then created no plan at all, for all three variants.
+      if curl -sSfk --max-time 5 "${SUITE_BASE_URL}/api/runner/available" >/dev/null 2>&1; then
         echo "[conformance] ready at ${SUITE_BASE_URL}"
         # The front door is the other half of a usable rig, and a run that
         # discovers it is down discovers it 35 stalled modules later.
-        if curl -sSk --max-time 5 "https://localhost:${AXIAM_TLS_PORT}/index.html" >/dev/null 2>&1; then
+        if curl -sSfk --max-time 5 "https://localhost:${AXIAM_TLS_PORT}/index.html" >/dev/null 2>&1; then
           echo "[conformance] front door serving the SPA at https://localhost:${AXIAM_TLS_PORT}"
         else
           echo "[conformance] WARNING: nothing serving the SPA on ${AXIAM_TLS_PORT}; check 'docker compose -f conformance/docker-compose.yml logs axiam-frontend'" >&2

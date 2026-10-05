@@ -81,7 +81,13 @@ jobs:
     runs-on: ubuntu-latest
     # Generous, because the suite is slow and a hung module should surface as a
     # timeout in the report rather than as a killed job with no artifacts.
-    timeout-minutes: 90
+    #
+    # 150, not 90: run 37276852665 spent 18 minutes in the image build and
+    # bring-up alone, and the suite then runs three plans back to back, each
+    # module costing up to `module_timeout` seconds when it cannot complete. At
+    # the dispatch default (180 s) a worst case is hours; at 30 s it is still
+    # an hour-plus on top of the build. A killed job loses the report.
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

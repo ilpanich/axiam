@@ -38,11 +38,21 @@ echo "[run-plan] suite: $BASE"
 echo "[run-plan] plan:  $PLAN_NAME"
 echo "[run-plan] config: $PLAN_CONFIG"
 
-if ! "${CURL[@]}" --max-time 10 "$BASE/api/runner/available" >/dev/null 2>&1; then
-  echo "[run-plan] the suite is not answering at $BASE" >&2
-  echo "[run-plan] run 'just conformance-up' first (it takes ~60s to become ready)" >&2
-  exit 1
-fi
+# Wait for the suite rather than probe it once. `-f` matters: the suite's nginx
+# answers `502 Bad Gateway` while its JVM boots (for ~20s after the truststore
+# restart `conformance-up` performs), and curl without `-f` exits 0 on that, so
+# a plan POST made in that window got an HTML error page back and created
+# nothing — run 37276852665, all three variants, after a probe that "passed".
+suite_wait="${CONFORMANCE_SUITE_WAIT:-180}"
+suite_deadline=$(( $(date +%s) + suite_wait ))
+until "${CURL[@]}" -f --max-time 10 "$BASE/api/runner/available" >/dev/null 2>&1; do
+  if [ "$(date +%s)" -ge "$suite_deadline" ]; then
+    echo "[run-plan] the suite is not answering at $BASE after ${suite_wait}s" >&2
+    echo "[run-plan] run 'just conformance-up' first (it takes ~60s to become ready)" >&2
+    exit 1
+  fi
+  sleep 3
+done
 
 # --- create the plan ------------------------------------------------------
 #

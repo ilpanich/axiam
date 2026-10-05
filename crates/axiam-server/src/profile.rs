@@ -16,7 +16,10 @@
 //!    definition — and a replica count is the orchestrator's knowledge, not the
 //!    process's. A **singleton lease** row in the shared datastore is the only
 //!    thing that can tell ([`acquire_lease`], [`spawn_lease_renewal`]); an
-//!    instance that loses it exits rather than run beside another.
+//!    instance that loses it exits rather than run beside another — through
+//!    the orderly stop, so that the audit rows it still holds are written
+//!    first ([`signal_on_lease_lost`], [`spawn_lease_loss_stop`]; T23.8.2,
+//!    P23W5-A1), with a backstop if that stop does not finish in time.
 //!
 //! Every constant is a field of [`LeaseTiming`] so the logic is tested with
 //! short values; [`LeaseTiming::PRODUCTION`] is what the server uses.
@@ -29,6 +32,7 @@ use axiam_core::repository::ReactorRepository;
 use axiam_db::{LeaseClaim, SurrealMinimalProfileLeaseRepository};
 use chrono::Utc;
 use surrealdb::Connection;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -49,15 +53,23 @@ pub struct LeaseTiming {
     pub boot_wait: Duration,
     /// How often that wait re-tries the claim.
     pub boot_poll: Duration,
+    /// How long an instance that lost the lease may take to stop in order —
+    /// stop accepting, finish what is in flight, write its queued audit rows —
+    /// before the backstop ends the process anyway. It runs beside the new
+    /// holder for that long at most, accepting no new connection.
+    pub lost_stop_deadline: Duration,
 }
 
 impl LeaseTiming {
-    /// TTL 30 s, renewed every 10 s, a boot waits up to 45 s (D-59).
+    /// TTL 30 s, renewed every 10 s, a boot waits up to 45 s (D-59); a lost
+    /// lease stops the instance within 15 s (T23.8.2) — the REST listener's
+    /// idle keep-alive (5 s) and the audit drain's bound (5 s) fit inside it.
     pub const PRODUCTION: Self = Self {
         ttl: Duration::from_secs(30),
         renew_every: Duration::from_secs(10),
         boot_wait: Duration::from_secs(45),
         boot_poll: Duration::from_secs(1),
+        lost_stop_deadline: Duration::from_secs(15),
     };
 
     fn ttl_chrono(&self) -> chrono::Duration {
@@ -185,14 +197,63 @@ pub async fn acquire_lease<C: Connection>(
     }
 }
 
-/// What the lease's holder does when its renewal finds the lease taken by
-/// another instance: the server exits the process non-zero.
+/// A reaction to a lost lease. [`spawn_lease_renewal`] calls one when its
+/// renewal finds the lease taken; the composition root passes
+/// [`signal_on_lease_lost`], and keeps [`exit_on_lease_lost`] as the backstop
+/// of [`spawn_lease_loss_stop`].
 pub type OnLeaseLost = Arc<dyn Fn() + Send + Sync>;
 
-/// The production reaction to a lost lease: exit non-zero (the orchestrator
-/// restarts the instance, which then waits for the other to go).
+/// The backstop: exit the process non-zero at once (the orchestrator restarts
+/// the instance, which then waits for the other to go).
+///
+/// Until T23.8.2 this was the reaction itself, called from the renewal task:
+/// the process ended wherever it was, and with it every audit row the
+/// middleware still had queued, a request between its write and its audit row,
+/// and a GDPR purge between the erasure and `gdpr.user_pseudonymized`
+/// (P23W5-A1). It now runs only if the orderly stop has not finished within
+/// [`LeaseTiming::lost_stop_deadline`].
 pub fn exit_on_lease_lost() -> OnLeaseLost {
     Arc::new(|| std::process::exit(1))
+}
+
+/// The reaction the composition root gives the renewal task: raise `lost`.
+/// Nothing stops here; [`spawn_lease_loss_stop`] waits on the flag.
+pub fn signal_on_lease_lost(lost: watch::Sender<bool>) -> OnLeaseLost {
+    Arc::new(move || {
+        lost.send_replace(true);
+    })
+}
+
+/// Once `lost` is raised: log it, call `stop` (the composition root's orderly
+/// stop: the REST listener stops accepting and finishes what is in flight, the
+/// teardown after it drains the audit queue and the cleanup task, and `serve`
+/// returns an error, so the process exits non-zero), and, if the process is
+/// still here `deadline` later, run `backstop`. The composition root aborts the
+/// returned task when its teardown has finished, which disarms the backstop. A
+/// dropped `lost` sender without the flag raised ends the task quietly.
+pub fn spawn_lease_loss_stop(
+    mut lost: watch::Receiver<bool>,
+    stop: impl FnOnce() + Send + 'static,
+    deadline: Duration,
+    backstop: OnLeaseLost,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if lost.wait_for(|lost| *lost).await.is_err() {
+            return;
+        }
+        error!(
+            deadline_secs = deadline.as_secs_f64(),
+            "the minimal-profile lease is lost — stopping in order (no new connections, \
+             in-flight work finished, queued audit rows written) and then exiting non-zero"
+        );
+        stop();
+        tokio::time::sleep(deadline).await;
+        error!(
+            "the orderly stop after a lost minimal-profile lease did not finish in time — \
+             exiting now"
+        );
+        backstop();
+    })
 }
 
 /// Renew the lease every [`LeaseTiming::renew_every`]. When a renewal reports
@@ -292,6 +353,7 @@ mod tests {
         renew_every: Duration::from_millis(100),
         boot_wait: Duration::from_millis(450),
         boot_poll: Duration::from_millis(20),
+        lost_stop_deadline: Duration::from_millis(150),
     };
 
     async fn db() -> Surreal<Db> {
@@ -313,7 +375,111 @@ mod tests {
         assert_eq!(t.ttl, Duration::from_secs(30));
         assert_eq!(t.renew_every, Duration::from_secs(10));
         assert_eq!(t.boot_wait, Duration::from_secs(45));
+        assert_eq!(t.lost_stop_deadline, Duration::from_secs(15));
         assert_eq!(LeaseTiming::default(), t);
+    }
+
+    // ---- a lost lease stops the instance in order (T23.8.2, P23W5-A1) ----
+
+    fn counter() -> (Arc<std::sync::atomic::AtomicU32>, OnLeaseLost) {
+        let n = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let m = Arc::clone(&n);
+        (
+            n,
+            Arc::new(move || {
+                m.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_renewal_reaction_only_raises_the_flag() {
+        let (tx, rx) = watch::channel(false);
+        let react = signal_on_lease_lost(tx);
+        assert!(!*rx.borrow());
+        react();
+        assert!(*rx.borrow(), "the lost-lease flag is raised");
+    }
+
+    #[tokio::test]
+    async fn a_lost_lease_starts_the_orderly_stop_at_once_and_the_backstop_only_after_the_deadline()
+    {
+        let (tx, rx) = watch::channel(false);
+        let (stops, stop) = counter();
+        let (backstops, backstop) = counter();
+        let task = spawn_lease_loss_stop(rx, move || stop(), FAST.lost_stop_deadline, backstop);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            0,
+            "nothing while the lease is held"
+        );
+
+        tx.send_replace(true);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            1,
+            "the orderly stop starts at once"
+        );
+        assert_eq!(
+            backstops.load(Ordering::SeqCst),
+            0,
+            "the backstop waits for the deadline"
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the task ends after the backstop")
+            .unwrap();
+        assert_eq!(
+            backstops.load(Ordering::SeqCst),
+            1,
+            "an orderly stop that overruns ends in the backstop"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_orderly_stop_that_finishes_in_time_disarms_the_backstop() {
+        let (tx, rx) = watch::channel(false);
+        let (_, stop) = counter();
+        let (backstops, backstop) = counter();
+        let task = spawn_lease_loss_stop(rx, move || stop(), FAST.lost_stop_deadline, backstop);
+        tx.send_replace(true);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // The composition root's teardown finished: it aborts the task.
+        task.abort();
+        tokio::time::sleep(FAST.lost_stop_deadline * 2).await;
+        assert_eq!(backstops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_flag_raised_before_the_watch_starts_still_stops() {
+        let (tx, rx) = watch::channel(false);
+        tx.send_replace(true);
+        drop(tx); // the renewal task ended after raising it
+        let (stops, stop) = counter();
+        let (_, backstop) = counter();
+        let task = spawn_lease_loss_stop(rx, move || stop(), Duration::from_secs(60), backstop);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_lease_never_lost_never_stops() {
+        let (tx, rx) = watch::channel(false);
+        let (stops, stop) = counter();
+        let (backstops, backstop) = counter();
+        let task = spawn_lease_loss_stop(rx, move || stop(), FAST.lost_stop_deadline, backstop);
+        drop(tx); // an orderly stop for another reason: the renewal task went
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the watch ends with its sender")
+            .unwrap();
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
+        assert_eq!(backstops.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -303,9 +303,13 @@ pub struct ServeOptions {
     pub rest_listener: Option<std::net::TcpListener>,
     /// The timing of the minimal profile's singleton lease.
     pub lease_timing: LeaseTiming,
-    /// What the minimal profile does when its lease is taken by another
-    /// instance: the process exits non-zero.
-    pub on_lease_lost: OnLeaseLost,
+    /// The minimal profile's **backstop** for a lost lease. An instance whose
+    /// lease another instance takes over stops in order — the REST listener
+    /// stops accepting, the audit queue is drained, the cleanup task finishes —
+    /// and [`serve`] returns an error, so `main` exits non-zero (T23.8.2,
+    /// P23W5-A1). This runs only if that has not finished within
+    /// [`LeaseTiming::lost_stop_deadline`]; production exits the process.
+    pub lease_lost_backstop: OnLeaseLost,
     /// **Test seam, never set in production.** Lets the webhook and SSF push
     /// deliverers reach a loopback `http://` receiver (their own
     /// `admitting_private_networks_for_tests`), so a test can watch a delivery
@@ -320,7 +324,7 @@ impl Default for ServeOptions {
         Self {
             rest_listener: None,
             lease_timing: LeaseTiming::PRODUCTION,
-            on_lease_lost: profile::exit_on_lease_lost(),
+            lease_lost_backstop: profile::exit_on_lease_lost(),
             admit_private_networks_for_tests: false,
         }
     }
@@ -358,6 +362,10 @@ where
     // The minimal profile's boot guards: broadcast off, no enabled reactor
     // registration, and the singleton lease that proves this is the only
     // instance. Each refusal names the profile and the fix.
+    //
+    // Losing the lease later raises `lease_lost`; the REST listener's run below
+    // waits on it and stops in order (T23.8.2, P23W5-A1).
+    let (lease_lost_tx, lease_lost) = tokio::sync::watch::channel(false);
     let lease_renewal = if deployment_profile.is_minimal() {
         let guards = profile::enforce_minimal_profile(
             config.authz.decision_cache_broadcast_enabled,
@@ -365,7 +373,7 @@ where
             axiam_db::SurrealMinimalProfileLeaseRepository::new(pool.handle_for_repo()),
             &instance_id.to_string(),
             opts.lease_timing,
-            Arc::clone(&opts.on_lease_lost),
+            profile::signal_on_lease_lost(lease_lost_tx),
         )
         .await;
         match guards {
@@ -2963,31 +2971,82 @@ where
     } else {
         http_server.bind(&bind_addr)?
     };
-    http_server.run().await?;
+    let http_server = http_server.run();
+
+    // The minimal profile: a lost lease stops this instance through the same
+    // orderly path as a SIGTERM — no new connections, in-flight requests
+    // finished, then the teardown below — instead of ending the process
+    // wherever it is, which lost every audit row still queued (T23.8.2,
+    // P23W5-A1). The backstop runs only if that overruns its deadline.
+    let lease_loss_stop = lease_renewal.as_ref().map(|_| {
+        let handle = http_server.handle();
+        profile::spawn_lease_loss_stop(
+            lease_lost.clone(),
+            move || {
+                // `stop` sends its command eagerly; the returned future only
+                // reports completion, which the teardown below observes.
+                tokio::spawn(handle.stop(true));
+            },
+            opts.lease_timing.lost_stop_deadline,
+            Arc::clone(&opts.lease_lost_backstop),
+        )
+    });
+
+    http_server.await?;
+    let lease_was_lost = *lease_lost.borrow();
 
     // An orderly stop gives the minimal profile's lease up, so a successor (a
-    // rolling update's next instance) does not wait out the TTL.
+    // rolling update's next instance) does not wait out the TTL. A lost lease
+    // is not ours to release (and the release is conditional on the holder).
     if let Some(renewal) = lease_renewal {
         renewal.abort();
-        if let Err(e) = axiam_db::SurrealMinimalProfileLeaseRepository::new(db_handle.clone())
-            .release(&instance_id.to_string())
-            .await
+        if !lease_was_lost
+            && let Err(e) = axiam_db::SurrealMinimalProfileLeaseRepository::new(db_handle.clone())
+                .release(&instance_id.to_string())
+                .await
         {
             tracing::warn!(error = %e, "could not release the minimal-profile lease");
         }
     }
 
-    // Tell the audit worker its channel is about to close on purpose, before
-    // anything drops the senders. Without this the orderly stop below logs
-    // `Audit worker channel closed` at WARN on every single clean shutdown —
-    // see `AuditMiddleware::begin_shutdown` for why that matters.
-    audit_shutdown.begin_shutdown();
-
-    // Signal the cleanup task to shut down and wait for it to finish.
+    // Signal the cleanup task first, so it winds down while the audit queue
+    // drains; it finishes the tick it is in, so an erasure and its
+    // `gdpr.user_pseudonymized` row are not separated.
     let _ = cleanup_shutdown_tx.send(true);
+
+    // Write what the audit middleware still holds before the runtime goes
+    // (T23.8.2). `drain` also tells the worker the close is the orderly one,
+    // so a clean stop does not log `Audit worker channel closed` at WARN — see
+    // `AuditMiddleware::begin_shutdown` for why that matters. Bounded: a
+    // datastore that never answers cannot hold the stop up.
+    if !audit_shutdown.drain(AUDIT_DRAIN_DEADLINE).await {
+        tracing::error!(
+            deadline_secs = AUDIT_DRAIN_DEADLINE.as_secs_f64(),
+            "audit entries still queued at shutdown could not be written in time — \
+             they are lost (see the `Failed to write audit log entry` warnings above)"
+        );
+    }
+
     if let Err(e) = cleanup_handle.await {
         tracing::warn!(error = ?e, "cleanup task join error");
     }
 
+    // The teardown is done: disarm the lost-lease backstop.
+    if let Some(stop) = lease_loss_stop {
+        stop.abort();
+    }
+    if lease_was_lost {
+        return Err(std::io::Error::other(
+            "the minimal-profile lease was taken by another instance; this instance stopped \
+             in order and exits non-zero (AXIAM__AMQP__ENABLED=false is single-instance by \
+             definition)",
+        ));
+    }
+
     Ok(())
 }
+
+/// How long the teardown waits for the audit middleware's queue to be written
+/// (T23.8.2). The queue holds at most 4 096 entries; written one at a time
+/// against a healthy datastore that is well under this.
+const AUDIT_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);

@@ -150,6 +150,7 @@ fn short_lease() -> LeaseTiming {
         renew_every: Duration::from_millis(100),
         boot_wait: Duration::from_millis(300),
         boot_poll: Duration::from_millis(20),
+        lost_stop_deadline: Duration::from_secs(10),
     }
 }
 
@@ -753,5 +754,122 @@ async fn the_server_boots_without_a_broker_and_serves_login_webhook_and_ssf_push
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         ),
         "the server is still running"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A lost lease (T23.8.2, P23W5-A1)
+// ---------------------------------------------------------------------------
+
+/// Requests audited before the loss, each one row in the system trail.
+const AUDITED_BEFORE_THE_LOSS: usize = 20;
+
+/// An instance whose lease another instance takes over stops through the
+/// orderly path — the REST listener stops, the audit queue is drained, the
+/// cleanup task finishes — and `serve` returns an error naming the lease, which
+/// is `main`'s non-zero exit. Before T23.8.2 the reaction was
+/// `std::process::exit(1)` from the renewal task: every audit row still queued
+/// in the middleware's channel, a request between its write and its audit row,
+/// and a GDPR purge between the erasure and `gdpr.user_pseudonymized` were lost
+/// with the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_rows() {
+    let db = fresh_db().await;
+    let mut config = minimal_config();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    axiam_auth::client_secret::install_from_config(&config.auth)
+        .expect("the client-secret hasher installs");
+    config
+        .auth
+        .resolve_keys()
+        .expect("the Ed25519 keys parse (CQ-B14)");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let rest_port = listener.local_addr().unwrap().port();
+    config.server.port = rest_port;
+
+    // The backstop is what runs if the orderly stop does not finish in time;
+    // here it only records that it ran.
+    let backstop_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&backstop_ran);
+    let (pool, health) = pool_over(&db);
+    let opts = ServeOptions {
+        rest_listener: Some(listener),
+        lease_timing: short_lease(),
+        lease_lost_backstop: Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst)
+        }),
+        ..ServeOptions::default()
+    };
+    let stopped = serve_on_big_stack(config, pool, health, opts);
+
+    // No idle keep-alive connection: the orderly stop waits for open ones.
+    let http = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap();
+    let base = format!("http://127.0.0.1:{rest_port}");
+    eventually("the REST listener", async || {
+        let resp = http.get(format!("{base}/health")).send().await.ok()?;
+        resp.status().is_success().then_some(())
+    })
+    .await;
+    for _ in 0..AUDITED_BEFORE_THE_LOSS {
+        http.get(format!("{base}/api/v1/auth/me"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Another instance takes the lease over.
+    db.query(
+        "UPDATE type::record('minimal_profile_lease', 'instance') \
+         SET holder = 'the-usurper', renewed_at = time::now(), expires_at = time::now() + 1h",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    // The instance stops on its own, in order, and says why.
+    let result = tokio::time::timeout(Duration::from_secs(20), stopped)
+        .await
+        .expect("an instance whose lease was taken stops")
+        .expect("the server thread reported");
+    let message = result
+        .expect_err("a lost lease is a non-zero exit")
+        .to_string();
+    assert!(message.contains("lease"), "{message}");
+    assert!(
+        !backstop_ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the orderly stop finished before the backstop was needed"
+    );
+
+    // Every request audited before the loss is in the trail.
+    let rows = SurrealAuditLogRepository::new(db.clone())
+        .list_system(
+            AuditLogFilter {
+                action: Some("GET /api/v1/auth/me".into()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 1_000,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(rows.len(), AUDITED_BEFORE_THE_LOSS);
+
+    // And the other instance's lease was left alone.
+    assert_eq!(
+        SurrealMinimalProfileLeaseRepository::new(db.clone())
+            .current()
+            .await
+            .unwrap()
+            .unwrap()
+            .holder,
+        "the-usurper"
     );
 }

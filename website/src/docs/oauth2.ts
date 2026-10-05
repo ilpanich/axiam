@@ -51,6 +51,11 @@ export const OAUTH2_PAGES: DocPage[] = [
             "See [Device authorization grant](#/docs/device-flow).",
           ],
           [
+            "CIBA",
+            "A client that already knows the user asks AXIAM to authenticate them on another device: call centres, back-office approvals, kiosks.",
+            "Poll and ping modes, signed requests for FAPI-CIBA. See [CIBA (backchannel authentication)](#/docs/ciba).",
+          ],
+          [
             "Token Exchange",
             "A service calling another service on a user's behalf.",
             "Narrowing only, always. See [Token exchange](#/docs/token-exchange).",
@@ -73,6 +78,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           { method: "POST", path: "/oauth2/userinfo", summary: "The same claims, with the token in an Authorization header or (POST only) an access_token form field.", public: true },
           { method: "GET", path: "/oauth2/revocations", summary: "Hashed ids of recently revoked sessions. Optional, off by default.", public: true },
           { method: "POST", path: "/oauth2/device_authorization", summary: "Begin a device grant (RFC 8628).", public: true },
+          { method: "POST", path: "/oauth2/bc-authorize", summary: "Begin a CIBA backchannel authentication request. The client authenticates as at the token endpoint.", public: true },
           { method: "POST", path: "/oauth2/register", summary: "Dynamic client registration (RFC 7591). Off by default on every tenant: `403` until enabled.", public: true },
           { method: "GET", path: "/oauth2/register/{client_id}", summary: "RFC 7592: a self-registered client reads its registration, with its registration access token.", public: true },
           { method: "PUT", path: "/oauth2/register/{client_id}", summary: "RFC 7592: replace the registration under the tenant's current policy; rotates the token.", public: true },
@@ -629,6 +635,10 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "warn",
         text: "Polling faster than `interval` is what earns `slow_down`, and ignoring `slow_down` is what earns a rate-limit refusal. Treat the interval as a floor set by the server, not as a suggestion.",
       },
+      {
+        type: "note",
+        text: "When the **client** already knows who the user is — a call-centre desk, a back-office approval — the user does not need a code from a screen: see [CIBA (backchannel authentication)](#/docs/ciba), where the client names the person and AXIAM notifies them.",
+      },
     ],
   },
 
@@ -1073,6 +1083,11 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "note",
         text: "Either way, a refresh token presented **after** it was rotated is marked on its session and written to the audit log as `oauth2.refresh_token_replayed`, naming the client, its profile and a disposition of `accepted_under_fapi_grace` or `refused` — and never the token or its digest. `GET /api/v1/users/{user_id}/sessions` reads the counters; the admin UI shows them as badges on the **Sessions** action of any row in *Users*. Alert on `refused`: nothing a conformant client does produces one.",
+      },
+      { type: "h", id: "ciba", text: "FAPI-CIBA" },
+      {
+        type: "p",
+        text: "A `fapi2` client may also hold the **CIBA** grant, on the FAPI-CIBA profile's terms: every backchannel authentication request is a signed `request` JWT (`PS256`, `ES256` or `EdDSA`, registered with the client's keys), the request carries a `binding_message`, a ping-mode client's notification token has at least 22 characters, and the endpoint is the seventh member of `mtls_endpoint_aliases` for a `tls_client_auth` client. Registration and the request are on [CIBA (backchannel authentication)](#/docs/ciba).",
       },
       { type: "h", id: "conformance", text: "Conformance" },
       {

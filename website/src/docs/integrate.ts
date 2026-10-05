@@ -1838,6 +1838,252 @@ export const INTEGRATE_PAGES: DocPage[] = [
   },
 
   {
+    slug: "ciba",
+    section: "APIs & integration",
+    navLabel: "CIBA",
+    title: "CIBA (backchannel authentication)",
+    intro:
+      "Let a client ask AXIAM to authenticate a user on another device. A call-centre system, a teller application or a kiosk names the person; AXIAM tells them, they sign in and approve on their own phone or laptop, and the client collects the tokens by polling or is told when to. OpenID Connect CIBA Core 1.0, poll and ping modes, with the FAPI-CIBA signed-request profile.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
+    blocks: [
+      { type: "h", id: "what", text: "What it is for" },
+      {
+        type: "p",
+        text: "The [device grant](#/docs/device-flow) starts at the device: it shows a code and the user types it elsewhere. CIBA starts at the **client that already knows who the user is**. The client sends the user's name, AXIAM stores a *pending request* and tells that user, and nothing about the exchange runs through a browser the client controls. Typical uses are a call-centre agent confirming a caller's identity, a back-office system asking an approver to confirm a payment, and a shared terminal that must not see a password.",
+      },
+      {
+        type: "code",
+        caption: "who talks to whom",
+        code: "  client (agent desk)              AXIAM                         the user's phone\n    |-- POST /oauth2/bc-authorize --->|                               |\n    |<-- auth_req_id, interval -------|--- e-mail with a link ------->|\n    |                                 |<-- GET /api/v1/ciba/requests/{id}\n    |-- POST /oauth2/token (poll) --->|    (user signs in, steps up)  |\n    |<-- authorization_pending -------|<-- POST .../approve ----------|\n    |-- POST /oauth2/token (poll) --->|                               |\n    |<-- access_token, id_token ------|                               |",
+      },
+      {
+        type: "list",
+        items: [
+          "**Two modes.** In **poll** mode the client asks the token endpoint at the request's `interval` until the request is decided. In **ping** mode AXIAM first calls the client's notification endpoint once the user has decided, and the client then asks the token endpoint once. **Push mode is not offered.**",
+          "**The user approves on the console**, at `/ciba/approve`, after a full sign-in, including any multi-factor step the request asked for. The client never sees the user's credentials, and a client or a service account **cannot approve its own request**.",
+          "**Tokens carry the approval.** The ID token's `auth_time`, `amr` and `acr` come from the session the user approved with, and the access token's `sid` names that session: ending the session ends the tokens.",
+          "**The SDKs' helper follows the merge.** Contract §33 states the client's half (initiate, poll, wait, handle a ping); the language libraries pick it up from the release that carries it.",
+        ],
+      },
+      { type: "h", id: "register", text: "Register a CIBA client" },
+      {
+        type: "p",
+        text: "A CIBA client holds the grant `urn:openid:params:grant-type:ciba` and names how it wants to be told. It must be a **confidential** client — any `token_endpoint_auth_method` but `none` — because it authenticates at `bc-authorize` exactly as it does at the token endpoint. Registration is over the admin API (the console's client form does not carry the CIBA fields yet) or, for a self-registering client, RFC 7591/7592 **with an initial access token**; an anonymous registration can never obtain the grant, because a stranger would otherwise get a way to send notifications to every user of the tenant.",
+      },
+      {
+        type: "code",
+        caption: "a poll-mode client",
+        code: 'POST /api/v1/oauth2-clients\n{\n  "name": "Agent desk",\n  "redirect_uris": [],\n  "grant_types": ["urn:openid:params:grant-type:ciba", "refresh_token"],\n  "scopes": ["openid", "profile"],\n  "token_endpoint_auth_method": "client_secret_basic",\n  "backchannel_token_delivery_mode": "poll"\n}',
+      },
+      {
+        type: "table",
+        headers: ["Field", "Meaning"],
+        rows: [
+          ["`backchannel_token_delivery_mode`", "`poll` or `ping`. Required with the grant; `push` is refused."],
+          ["`backchannel_client_notification_endpoint`", "Ping mode only: where AXIAM calls. An absolute `https` URL under the webhook address policy (no credentials, no fragment, no private, loopback or internal host). Refused in poll mode."],
+          ["`backchannel_authentication_request_signing_alg`", "`PS256`, `ES256` or `EdDSA`. When set, **every** request from the client must be a signed `request` JWT under that algorithm, verified against the client's registered `jwks` or `jwks_uri` (exactly one of the two). Required for a `fapi2` client."],
+          ["`backchannel_user_code_parameter`", "`true` is refused: AXIAM has no per-user secret to check a user code against that is not the password."],
+        ],
+      },
+      {
+        type: "note",
+        text: "Ping mode needs `AXIAM__AUTH__PKI_ENCRYPTION_KEY`: the notification endpoint and the client's notification token are sealed together under it, the key webhook secrets use. Without the key a ping-mode request is refused and poll mode keeps working.",
+      },
+      { type: "h", id: "request", text: "1. The authentication request" },
+      {
+        type: "code",
+        code: "POST /oauth2/bc-authorize?tenant_id=<uuid>\nAuthorization: Basic <client credentials>\nContent-Type: application/x-www-form-urlencoded\n\nscope=openid%20profile&login_hint=alice&binding_message=Confirm%2042%20EUR%20to%20J.%20Doe&requested_expiry=120",
+      },
+      {
+        type: "code",
+        caption: "response",
+        code: '{\n  "auth_req_id": "0v7tZq...",\n  "expires_in": 120,\n  "interval": 5\n}',
+      },
+      {
+        type: "table",
+        headers: ["Parameter", "Rule"],
+        rows: [
+          ["`scope`", "Required, must include `openid`, and every value must be registered for the client (`invalid_scope` otherwise)."],
+          ["`login_hint`", "A username, then an e-mail address, within the tenant. At most 256 bytes."],
+          ["`id_token_hint`", "An ID token **this deployment issued to this client**. Its expiry is not checked: it only names the user. Send one of the two hints, never both."],
+          ["`binding_message`", "Optional (required for a `fapi2` client). At most 64 printable characters; shown to the user as text. It is what lets a person tell the request they started from one an attacker did. `invalid_binding_message` when refused."],
+          ["`requested_expiry`", "Optional, 30 to 600 seconds. `expires_in` is 300 without it."],
+          ["`acr_values`", "Optional, at most 8 values of at most 128 bytes. Asking for `urn:axiam:acr:mfa` makes the user step up to a multi-factor session before they can approve."],
+          ["`resource`", "Optional, RFC 8707, subject to the client's allowed resources."],
+          ["`client_notification_token`", "Required in ping mode: 1 to 1 024 visible ASCII characters (at least 22 for a `fapi2` client). The bearer AXIAM will present at the ping."],
+        ],
+      },
+      {
+        type: "p",
+        text: "`login_hint_token`, `user_code` and `request_uri` are refused with `invalid_request`. The authentication endpoint is advertised in discovery as `backchannel_authentication_endpoint`, under the tenant path (`/t/{tenant_id}/oauth2/bc-authorize`) as well as the root form.",
+      },
+      {
+        type: "warn",
+        text: "A successful answer **proves nothing about the user.** AXIAM never sends `unknown_user_id`: a hint that names nobody, a person who may not sign in, and a person under brute-force lockout all get a normal-looking `auth_req_id`, and the request simply expires. Answering differently would let any CIBA client enumerate the tenant's usernames and e-mail addresses at the endpoint's rate limit. The only thing that tells a client nobody answered is `expired_token`.",
+      },
+      { type: "h", id: "signed", text: "Signed requests and the fapi2 client" },
+      {
+        type: "p",
+        text: "A client that registered a signing algorithm sends the request as a single `request` JWS (CIBA Core §7.1.1) and **nothing else beside it** except its own authentication; a parameter outside the JWT is refused before the client is even authenticated, and a client that registered no algorithm cannot send a `request` at all. The JWT carries `iss` (the client id), `aud` (the issuer, in the root or tenant-path form), `exp`, `nbf`, `iat` and a `jti`. The spread between `nbf` and `exp` is at most 60 minutes, `nbf` is at most 60 minutes old, a minute of clock skew is allowed, and a `jti` is accepted once. Every failure is `invalid_request`.",
+      },
+      {
+        type: "p",
+        text: "A **`fapi2` CIBA client** is the FAPI-CIBA profile: the grant needs the signing algorithm registered (admin API only; dynamic registration is never `fapi2`), authentication by `tls_client_auth`, `self_signed_tls_client_auth` or `private_key_jwt`, and sender-constrained tokens. Its requests must carry a `binding_message`, and in ping mode a `client_notification_token` of at least 22 characters. A row edited to drop the algorithm gets `unauthorized_client`; one edited to a shared secret gets `invalid_client`. The registration is in [FAPI 2.0 & mTLS clients](#/docs/fapi2); a `tls_client_auth` client reaches `bc-authorize` on the mTLS host, which discovery lists as the seventh `mtls_endpoint_aliases` member.",
+      },
+      { type: "h", id: "approval", text: "2. The user approves" },
+      {
+        type: "p",
+        text: "A request for a person who may sign in sends them **one e-mail** (the built-in `ciba_approval` template, customisable per organization or tenant) with the client's name, the binding message and a link to the console page. The link carries the request's record id, **never** the `auth_req_id` or any token. A signed-out user is taken to the sign-in page and brought back to the same page afterwards. Mail is sent only to an account that may sign in, and **at most three times a minute per user, whatever the clients asking**, so a flood of requests cannot become a flood of prompts: a request past that is stored and answered as usual and the user is simply not told again.",
+      },
+      {
+        type: "api",
+        endpoints: [
+          { method: "GET", path: "/api/v1/ciba/requests/{request_id}", summary: "What the approval page shows: client, scopes, binding message, requested authentication classes, expiry, and the `version` to send back. Never the `auth_req_id`." },
+          { method: "POST", path: "/api/v1/ciba/requests/{request_id}/approve", summary: "Approve, conditional on the version read. `403 step_up_required` names the class the session must reach." },
+          { method: "POST", path: "/api/v1/ciba/requests/{request_id}/deny", summary: "Refuse, conditional on the version read. Needs no step-up." },
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**A human session and a CSRF token.** These are the signed-in user's own routes; a service-account token does not work, and neither does the client's credential.",
+          "**One answer for every reason.** An unknown id, **another user's** request, an expired one, one already decided and one changed since the page read it are all the same `404`. The id is a handle, not a secret: what protects a request is that only its own user, signed in, can open it.",
+          "**Step-up.** A request that asks for a class the session has not reached (`acr_values`) is answered `403 step_up_required` naming it. The page sends the user through the existing sign-in hop, which ends the weaker session, asks for the factor and returns to the page. Approval is always conditional on the version the page read, so nothing is carried across the hop.",
+          "**Both decisions are audited**: `ciba.approved` and `ciba.denied` record the user, the request, the client, the mode and (for an approval) the class achieved. The binding message is never written to the audit log.",
+          "**Lockout is checked again.** A user under brute-force lockout cannot approve, and one locked between approval and redemption gets nothing (below).",
+        ],
+      },
+      { type: "h", id: "poll", text: "3. Polling the token endpoint" },
+      {
+        type: "code",
+        code: "POST /oauth2/token?tenant_id=<uuid>\nAuthorization: Basic <client credentials>\nContent-Type: application/x-www-form-urlencoded\n\ngrant_type=urn%3Aopenid%3Aparams%3Agrant-type%3Aciba&auth_req_id=0v7tZq...",
+      },
+      {
+        type: "table",
+        headers: ["`error`", "Meaning", "What the client does"],
+        rows: [
+          ["`authorization_pending`", "The user has not decided yet.", "Wait `interval` seconds and ask again."],
+          ["`slow_down`", "You asked inside the interval.", "Add 5 seconds to your interval for good, then keep polling."],
+          ["`access_denied`", "The user refused.", "Stop. Show that it was declined."],
+          ["`expired_token`", "Nobody answered in time.", "Stop. Start a new request if the person is still there."],
+          ["`invalid_grant`", "Unknown, another client's or tenant's, already redeemed, or the user may no longer sign in.", "Stop. Do not retry."],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**The interval is 5 seconds**, and each early poll adds 5 more, up to 60. `slow_down` carries no value: count it yourself. A request asked about **inside the interval** is `slow_down` *whatever its state*, so an approved request polled too early does not return tokens, it lengthens the wait.",
+          "**Stop at `expires_in`.** The deadline the response gave is authoritative; do not poll past it. After an expiry the row is kept for ten minutes so a late poll still answers `expired_token`, then `invalid_grant`.",
+          "**A request is redeemed once.** The second token request for the same `auth_req_id`, one after the other or at the same instant, is `invalid_grant`; exactly one of two simultaneous requests receives tokens. Store the response before doing anything else with it.",
+          "**Lockout covers this grant.** The user's lockout and eligibility are checked when the request is made (it becomes a request that expires), when they approve, and again at redemption. A person locked out between approval and redemption gets no tokens and the approval is spent.",
+        ],
+      },
+      { type: "h", id: "ping", text: "Ping mode" },
+      {
+        type: "p",
+        text: "After the user approves **or refuses**, AXIAM calls the endpoint the client registered once, with the bearer token the client supplied in the request:",
+      },
+      {
+        type: "code",
+        code: 'POST /ciba/notify HTTP/1.1\nContent-Type: application/json\nAuthorization: Bearer <client_notification_token>\n\n{"auth_req_id":"0v7tZq..."}',
+      },
+      {
+        type: "list",
+        items: [
+          "**The ping says only that the request was decided**, never how, and it is identical after an approval and a refusal. The client then polls the token endpoint **once** and learns the outcome (tokens, `access_denied` or `expired_token`) there, where the single-use redemption is decided.",
+          "**Check the bearer token** before acting, in constant time. It is the secret that tells the client the call is AXIAM's.",
+          "**Answer quickly** with any `2xx`, then do the poll. A redirect, `408`, `429`, `5xx`, a timeout or no answer is retried; any other `4xx` is not (the endpoint or the token is wrong until someone fixes it).",
+          "**The call is guarded.** It goes over `https` to an address that must be publicly routable, re-resolved at every attempt, and a redirect is never followed, so the notification token cannot be sent anywhere the client did not register. A client on a private network therefore cannot be pinged by default; it polls. An operator who hosts such a client can name its exact host in `AXIAM__PKI__SSRF_ALLOWED_HOSTS`, which still requires `https` and a certificate AXIAM trusts.",
+          "**A ping is delivered at least once, never exactly once, and may not arrive.** A ping-mode client should fall back to polling once half of `expires_in` has passed without one.",
+        ],
+      },
+      {
+        type: "table",
+        headers: ["Config key", "Default", "Meaning"],
+        rows: [
+          ["`AXIAM__CIBA_PING__MAX_ATTEMPTS`", "`5`", "Total attempts per ping before it is dead-lettered."],
+          ["`AXIAM__CIBA_PING__BACKOFF_BASE_MS`", "`5000`", "Delay before the first retry."],
+          ["`AXIAM__CIBA_PING__BACKOFF_CEILING_MS`", "`3600000`", "Upper bound on a single retry delay."],
+        ],
+      },
+      { type: "h", id: "tokens", text: "4. The tokens" },
+      {
+        type: "list",
+        items: [
+          "**An ID token, always,** with `auth_time`, `amr` and `acr` from the approving session, and no `urn:openid:params:jwt:claim:auth_req_id` claim (that belongs to push mode).",
+          "**The access token's `sid` is the approving session's.** Signing that session out revokes the tokens with it.",
+          "**A refresh token only for a client that holds `refresh_token`,** carrying the same evidence snapshot.",
+          "**Sender-constraining follows the registration.** A client registered for certificate-bound or DPoP-bound tokens receives them, as for every other grant.",
+        ],
+      },
+      { type: "h", id: "limits", text: "Limits and lockout" },
+      {
+        type: "table",
+        headers: ["Limit", "Value"],
+        rows: [
+          ["`POST /oauth2/bc-authorize`", "Its **own** rate-limit bucket, `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` (60 by default, 600 on the `gateway` preset, 6 000 on `mesh`), keyed like the token endpoint, plus a second per-client bucket after authentication. A refused request is `429`."],
+          ["The CIBA grant at the token endpoint", "Counted by `AXIAM__RATE_LIMIT__TOKEN_PER_MIN` like every grant, and by each request's own interval."],
+          ["Approval routes", "`AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN`, 30, one bucket per route; never moved by a preset."],
+          ["User notifications", "Three per user per minute, fixed, whatever the clients asking."],
+          ["Lifetimes", "`expires_in` 300 s by default; `requested_expiry` 30 to 600 s; `binding_message` 64 characters; `acr_values` 8 values of 128 bytes; an expired request is deleted ten minutes after it expires."],
+        ],
+      },
+      {
+        type: "p",
+        text: "The limiter counts the endpoint **before and after authentication**, so a flood of requests with a wrong client secret spends the same budget as a flood of valid ones: it is the case Keycloak 26.7.x missed, where a brute-force lockout did not apply to CIBA. A failed client authentication at either endpoint is audited as `oauth2.client_auth_failed`, and every stored request as `oauth2.ciba_initiated`. There is no lockout keyed on a caller-supplied `client_id`: a stranger cannot lock a real client out.",
+      },
+      { type: "h", id: "not-supported", text: "What is not supported" },
+      {
+        type: "list",
+        items: [
+          "**Push mode.** FAPI-CIBA forbids it, and AXIAM offers poll and ping only.",
+          "**`login_hint_token`, `user_code` and `request_uri`.** The first has no defined format here, a user code would have to be checked against something that is not the password, and AXIAM never fetches a request.",
+          "**`unknown_user_id`.** Never sent, deliberately (above).",
+          "**A push-notification channel to the user's phone.** The user is told by e-mail today; a push channel is later work.",
+          "**Console fields for the CIBA metadata.** Register over the API for now.",
+          "**An SDK `approve` call.** The approval API needs a human session and belongs to the console.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "CONTRACT §33 — CIBA",
+            href: contractLink("33"),
+            note: "The normative text for the client's half: operations, shapes, every server rule an SDK can observe, error mapping, `Sensitive<T>` and the required tests. §21.3.1 is amended for the seventh mTLS alias.",
+          },
+          {
+            label: "FAPI 2.0 profile — CIBA under the fapi2 profile",
+            href: `${GH_BLOB}/docs/admin/fapi2-profile.md`,
+            note: "Registering a FAPI-CIBA client.",
+          },
+          {
+            label: "OpenID Connect CIBA Core 1.0",
+            href: "https://openid.net/specs/openid-client-initiated-backchannel-authentication-core-1_0.html",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Device authorization grant →",
+            body: "The other grant that completes elsewhere: the device shows a code, the user types it.",
+            to: "docs",
+            doc: "device-flow",
+          },
+          {
+            title: "FAPI 2.0 & mTLS clients →",
+            body: "Sender-constrained tokens, mutual TLS and the signed-request profile a CIBA client can run under.",
+            to: "docs",
+            doc: "fapi2",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
     slug: "webhooks",
     section: "APIs & integration",
     navLabel: "Webhooks",

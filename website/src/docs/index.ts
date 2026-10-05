@@ -68,7 +68,7 @@ export const DOC_SECTIONS: DocSectionGroup[] = [
   },
   {
     label: "APIs & integration",
-    slugs: ["rest", "grpc", "amqp", "scim", "scim-outbound", "directory", "saml-idp", "ssf", "webhooks", "reactors", "errors"],
+    slugs: ["rest", "grpc", "amqp", "scim", "scim-outbound", "directory", "saml-idp", "ssf", "ciba", "webhooks", "reactors", "errors"],
   },
   {
     label: "Operate",

@@ -5056,7 +5056,7 @@ wrongly:
 The discovery cache keying of §12 rule 6 is unaffected: aliases are part of the
 document, cached with it, and keyed by the same origin.
 
-#### §21.3.1 Test vectors (normative, contract 1.43; amended in place, contract 1.58)
+#### §21.3.1 Test vectors (normative, contract 1.43)
 
 Three documents, abridged to the members that matter. An SDK claiming the §21
 client role MUST pin all three. They live here rather than in a separate

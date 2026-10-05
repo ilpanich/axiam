@@ -135,6 +135,9 @@ just bench-report
 # 5. Tear down.
 just target=axiam bench-down
 just target=keycloak bench-down
+
+# Compose logs of a running target (no secrets needed in the environment).
+just target=axiam bench-logs 200 axiam-server
 ```
 
 Or run the entire matrix (all targets × all profiles × all scenarios) unattended.

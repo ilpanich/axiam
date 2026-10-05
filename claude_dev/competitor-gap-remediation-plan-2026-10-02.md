@@ -14,7 +14,8 @@
 > on `claude/phase23-w4` with D-35 taken at its start and D-36 … D-55 during
 > it; merged as PR #543 on 2026-10-04. G-2 and G-5 are complete. W5 (G-6
 > outbound SCIM, G-7 CIBA, G-8 AMQP-less profile) runs on `claude/phase23-w5`,
-> with D-56 taken at its start. Written against AXIAM `1.0.0-beta17` from the three
+> with D-56 taken at its start and D-57 … D-74 during it (D-60 by the
+> maintainer); its PR follows the F4 review. Written against AXIAM `1.0.0-beta17` from the three
 > comparisons in this directory:
 > [`competitor-comparison-keycloak.md`](competitor-comparison-keycloak.md)
 > (Keycloak 26.8.0),
@@ -2064,6 +2065,37 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > the 2026-09-25 runs. It is a smoke run (built from the checkout), not
 > submission evidence. T23.7.1 may start.
 
+> **W5 F4, 2026-10-05:** [`security-review-phase23-w5-2026-10-05.md`](security-review-phase23-w5-2026-10-05.md).
+> Fourteen findings, no merge blocker after fixes. Fixed on the branch, all
+> wave-introduced or bookkeeping the wave left stale: a client-credentials SCIM
+> target's `base_url` could move without the secret, so the next fresh access token
+> went to the new host (**P23W5-01**, Medium, **T-409** closed, contract §31.3 rule 2
+> amended in place); one `scim_delivery_failed` mail per dead letter (**P23W5-02**,
+> Medium, **T-418** closed, **D-73**, schema v84); the CIBA approval routes admitted an
+> access token AXIAM minted for an OAuth2 client, so the CIBA client could approve its
+> next request in its user's name (**P23W5-04**, Medium, new **T-447**, §33 amended);
+> the approval mail to unproven addresses (**P23W5-03**, Low, new **T-446**, **D-74**);
+> decisions audited without the deciding session (P23W5-05, T-435 closed); CodeQL
+> hygiene (P23W5-08); the website's trust-boundary count (P23W5-12); `threatTop`
+> (P23W5-14). T-424, T-431 and T-433 closed against T23.7.2's tests. Before it,
+> T23.8.2 fixed the lost-lease exit (A1, D-72). Filed: the same client-token approval
+> on the device grant (P23W5-06, Medium, pre-existing, ilpanich/axiam#549), a tarpit SCIM
+> downstream stalling every tenant's provisioning on a replica (P23W5-07, Medium,
+> #550), notification flooding where T-117's batching never existed (P23W5-13,
+> Medium, T-117 reopened, #551), T23.8.2's GDPR audit gaps (A7, A8, #552), silent
+> request-audit loss (A10, T-108 reopened, #553), the full profile's abrupt exits
+> (A12, A11, #554), and the lows (P23W5-09, -10, -11, A4, A6, a misleading pepper log
+> line, #555). G-6, G-7, G-8 are #544, #545, #546; SDK fan-out per D-35 in #547
+> (contract 1.57) and #548 (1.58). Threat model **2.35.0 — 447 threats, 426
+> mitigated / 21 open**. **Binding on W6:** the minimal profile is a benchmark
+> configuration only as T23.8.3 documents it (single instance; deliveries lost on
+> restart, T-445); keep SCIM targets disabled or on a loopback that answers
+> (P23W5-07); a RADIUS spike carries the limiter-and-lockout rule from its first
+> commit, no user oracle (D-63), a per-NAS secret sealed, write-only and bound to its
+> NAS address, Message-Authenticator required; any background notification goes
+> through a `NotificationGate`; any approval surface takes a console sign-in only;
+> new ids start at T-448.
+
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This
 plan does not edit `roadmap.md`; the phase is added when the maintainer
@@ -2271,6 +2303,8 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-70 | *Taken in T23.7.1 (Opus 5.5), 2026-10-05, accepted by the orchestrator.* Rate limits | **`bc_authorize_per_min`** in the machine presets (60 / 600 / 6 000), keyed like `/oauth2/token`, plus a per-client bucket after authentication; a fixed 3 user notifications per user per minute that no preset moves; the CIBA grant counts against `token_per_min`. Rejected: a never-preset limit like `device_authorization` (breaks NAT'd call-centre fleets) |
 | D-71 | *Taken by the orchestrator, 2026-10-05, on T23.7.3's report.* §4 G-7 asks for "poll and ping end to end in the e2e harness", but the compose e2e stack cannot reach a ping receiver without weakening production: the deliverer requires `https` and refuses private addresses (`AXIAM__PKI__SSRF_ALLOWED_HOSTS` exempts the address rule, never the scheme), its client trusts the webpki roots only, the write-time policy refuses private literals and local names, and the e2e compose sets no `pki_encryption_key` | **Poll runs end to end in the compose e2e harness** (`frontend/e2e/ciba.spec.ts`, real browser approval); **ping runs end to end at the Rust level** (`ciba_ping_flow_test`: the REST routes, `CibaService` and the production `CibaPingDeliverer` through its loopback test seam, against a loopback receiver), the precedent W4 set for SSF push. Rejected: an operator setting for extra trust anchors on guarded outbound fetches (new production surface and a threat entry, to serve a test); dropping ping from the acceptance |
 | D-72 | *Raised in T23.8.2 (Opus 5.5), 2026-10-05; taken by the orchestrator.* D-59 says an instance that loses its singleton lease "exits non-zero" but not how soon; the first build exited at once, wherever it was, losing queued audit rows (T23.8.2's A1) | **An orderly stop with a 15 s backstop.** A lost lease raises a flag; the instance stops accepting at once, finishes in-flight requests, drains the audit queue (bounded at 5 s), joins the cleanup task and exits non-zero; `std::process::exit(1)` remains only as the backstop after 15 s (`LeaseTiming::lost_stop_deadline`). The audit drain applies to every orderly stop, SIGTERM in the full profile included. Rejected: an immediate exit (the regression); waiting the 30 s lease TTL (two instances serve longer) |
+| D-73 | *Proposed by the W5 F4 review (Opus 5.5), 2026-10-05, P23W5-02; accepted by the orchestrator (implemented; the maintainer may override in the wave PR).* T-418: one `scim_delivery_failed` notification mail per SCIM dead letter floods a rule's recipients while a target is down | **At most one `scim_delivery_failed` notification per target per hour; every dead letter keeps its audit row and its count.** `NotifyingAuditLog` takes a `NotificationGate` (no constructor without one), asked only for a notifiable row after the append; the SCIM gate claims `scim_target_state.failure_notified_at` with a conditional write (schema **v84**), so replicas agree; a target of another tenant or a deleted one claims nothing; a gate that cannot decide stays silent and logs once. The console's `state` shows the outage's size. Rejected: notify only on the transition into failure (a flapping target floods again); an in-memory per-process window (N replicas, N mails); a digest mail; changing the generic dispatcher for every event (T-117's own issue, #551) |
+| D-74 | *Proposed by the W5 F4 review (Opus 5.5), 2026-10-05, P23W5-03; accepted by the orchestrator (implemented; the maintainer may override in the wave PR).* T23.7.2 mailed the CIBA approval prompt to whatever address an account carried, proven or not — a self-registered account with a stranger's address plus a client that can call `bc-authorize` makes AXIAM mail that stranger | **The approval mail goes only to an address D-25's rule vouches for** — `email_verified_at` set, or the account `Active` — the rule the SAML IdP applies to an email `NameID` and SSF to an email subject. An unvouched address is the same quiet no-op as an account that may not sign in; the request is stored, answered as before (T-422) and waits on the approval page. Consequence: a federated account (`PendingVerification` for life, T-160) gets no approval mail unless an address was verified. Rejected: mailing any address (a phishing relay quoting client-chosen text); verified-only (ends mail for administrator-created accounts) |
 
 ---
 

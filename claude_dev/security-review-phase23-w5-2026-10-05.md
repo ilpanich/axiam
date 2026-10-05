@@ -77,14 +77,14 @@ composes the full profile exactly as `main.rs` did (§9).
 | **P23W5-03** | The CIBA approval mail went to whatever address an account carried, proven or not: a self-registered account with a stranger's address plus a client that can call `bc-authorize` makes AXIAM mail that stranger up to three times a minute, quoting client-chosen text. | Low | `CibaMailNotifier` → **T-446** (new) | **Fixed** — `f380891` (proposed D-74) |
 | **P23W5-04** | The approval routes admitted an access token AXIAM minted for an OAuth2 client (it names the user and a live session): the CIBA client holding one from an earlier redemption could open and approve its next request in the user's name. | Medium | `/api/v1/ciba/requests/*` → **T-447** (new), T-431 | **Fixed** — `f380891` (contract §33 amended) |
 | **P23W5-05** | `ciba.approved` / `ciba.denied` recorded the user but not the deciding session, which T-435 required; the request row that holds it is swept, and a refusal stores none. | Low | approval audit → **T-435** | **Fixed** — `f380891` (T-435 Mitigated) |
-| **P23W5-06** | The device grant's `/api/v1/device/decide` admits the same client-minted token: a relying party holding a user's `openid` token approves a device flow it started and gets its device client's scopes and a refresh token. | Medium | device grant (B2) → **T-447** | **Reported** (pre-existing; §14) |
-| **P23W5-07** | One `scim_push` consumer per replica, one attempt at a time for every tenant: a downstream that never answers costs 10–20 s per attempt, and a reconciliation of 10 000 users stalls every tenant's provisioning on that replica for more than a day. The 10 000-member dead-letter bound is untested. | Medium | deliverer, reconciliation; T-414 | **Reported** (wave-introduced, needs a decision; §14) |
+| **P23W5-06** | The device grant's `/api/v1/device/decide` admits the same client-minted token: a relying party holding a user's `openid` token approves a device flow it started and gets its device client's scopes and a refresh token. | Medium | device grant (B2) → **T-447** | **Reported** (ilpanich/axiam#549; pre-existing; §14) |
+| **P23W5-07** | One `scim_push` consumer per replica, one attempt at a time for every tenant: a downstream that never answers costs 10–20 s per attempt, and a reconciliation of 10 000 users stalls every tenant's provisioning on that replica for more than a day. The 10 000-member dead-letter bound is untested. | Medium | deliverer, reconciliation; T-414 | **Reported** (ilpanich/axiam#550; wave-introduced, needs a decision; §14) |
 | **P23W5-08** | CodeQL hygiene: credential literals in two tests, `assert_eq!`/`assert_ne!` on decrypted credentials and `auth_req_id`s (printed on failure), loop bindings named `token`, one formatted into an assertion. | Informational | tests | **Fixed** — `d4ff514`, `6ac3671` |
-| **P23W5-09** | The SCIM admin `PUT` is conditional on the version the server reads, not one the client read: two administrators saving forms are last-writer-wins on everything but the credential binding. | Low | §31 `PUT`; T-416 | **Reported** (§14) |
-| **P23W5-10** | The webhook deliverer still uses `guarded_fetch` and re-sends the signed request to a redirect target. No credential travels (an HMAC over a timestamped body), every hop is SSRF-checked. | Informational | webhooks; T-112 | **Reported** (pre-existing; §14) |
-| **P23W5-11** | `fapi-conformance.yml`: the gate is red on every unattended run (interactive modules), and the report step interpolates `inputs.axiam_image` into a shell script. | Informational | CI harness (D-60) | **Reported** (§14) |
+| **P23W5-09** | The SCIM admin `PUT` is conditional on the version the server reads, not one the client read: two administrators saving forms are last-writer-wins on everything but the credential binding. | Low | §31 `PUT`; T-416 | **Reported** (ilpanich/axiam#555; §14) |
+| **P23W5-10** | The webhook deliverer still uses `guarded_fetch` and re-sends the signed request to a redirect target. No credential travels (an HMAC over a timestamped body), every hop is SSRF-checked. | Informational | webhooks; T-112 | **Reported** (ilpanich/axiam#555; pre-existing; §14) |
+| **P23W5-11** | `fapi-conformance.yml`: the gate is red on every unattended run (interactive modules), and the report step interpolates `inputs.axiam_image` into a shell script. | Informational | CI harness (D-60) | **Reported** (ilpanich/axiam#555; §14) |
 | **P23W5-12** | The website's Security page said "Five trust boundaries"; the model has ten. | Informational | `website/src/security.ts` | **Fixed** — `7439a28` |
-| **P23W5-13** | T-117 claimed notifications are "delivered in configurable batches"; nothing batches them, and a request-path event an attacker can produce in volume mails each recipient once per event. | Medium | notification rules → **T-117** | **Reported** (pre-existing; T-117 reopened; §14) |
+| **P23W5-13** | T-117 claimed notifications are "delivered in configurable batches"; nothing batches them, and a request-path event an attacker can produce in volume mails each recipient once per event. | Medium | notification rules → **T-117** | **Reported** (ilpanich/axiam#551; pre-existing; T-117 reopened; §14) |
 | **P23W5-14** | The model's `threatTop` stayed at 443 when T-444 and T-445 entered. | Informational | `Axiam.json` | **Fixed** — `9e52b1f` (447) |
 
 **Verdict on merge.** Nothing open blocks W5. The eight fixes are in and pinned,
@@ -95,8 +95,8 @@ management registry are regenerated. Two proposed decisions go to the maintainer
 with this review: **D-73** (one SCIM failure notification per target per hour)
 and **D-74** (the CIBA mail to a vouched address only, which leaves federated
 accounts unmailed); both are implemented, and either is a one-line change if the
-maintainer decides otherwise. P23W5-06, -07, -09, -10, -11 and -13 are issue
-bodies for the wave PR (§14), with T23.8.2's A4, A6, A7, A8, A10, A11 and A12.
+maintainer decides otherwise. P23W5-06, -07, -09, -10, -11 and -13 are filed (ilpanich/axiam#549, #550, #555, #551),
+with T23.8.2's A7 and A8 (#552), A10 (#553), A11 and A12 (#554), A4 and A6 (#555).
 
 ---
 

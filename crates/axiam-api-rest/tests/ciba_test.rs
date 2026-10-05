@@ -1343,7 +1343,10 @@ async fn a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize() {
         body,
     )
     .await;
-    assert_eq!((status, json["error"].as_str()), (401, Some("invalid_client")));
+    assert_eq!(
+        (status, json["error"].as_str()),
+        (401, Some("invalid_client"))
+    );
 
     f.db.query("UPDATE oauth2_client SET profile = 'fapi2' WHERE client_id = $c")
         .bind(("c", f.ciba.client_id.clone()))
@@ -1353,11 +1356,10 @@ async fn a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize() {
     assert_eq!(status, 401, "{json}");
     // D-17 answers first for a fapi2 row on a shared secret; either way the
     // request is refused and nothing is stored.
-    let mut count = f
-        .db
-        .query("SELECT count() AS n FROM ciba_request GROUP ALL")
-        .await
-        .unwrap();
+    let mut count =
+        f.db.query("SELECT count() AS n FROM ciba_request GROUP ALL")
+            .await
+            .unwrap();
     let n: Option<i64> = count.take("n").unwrap();
     assert_eq!(n.unwrap_or(0), 0);
 }

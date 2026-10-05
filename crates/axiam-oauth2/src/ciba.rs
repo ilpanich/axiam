@@ -1265,7 +1265,7 @@ mod tests {
             parse_acr_values(Some("urn:axiam:acr:mfa urn:axiam:acr:1fa")).unwrap(),
             ["urn:axiam:acr:mfa", "urn:axiam:acr:1fa"]
         );
-        let many = vec!["a"; MAX_ACR_VALUES + 1].join(" ");
+        let many = ["a"; MAX_ACR_VALUES + 1].join(" ");
         assert!(parse_acr_values(Some(&many)).is_err());
         assert!(parse_acr_values(Some(&"x".repeat(MAX_ACR_VALUE_BYTES + 1))).is_err());
     }

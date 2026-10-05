@@ -47,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `backchannel_client_notification_endpoint` (ping only, under the webhook
   outbound URL policy) on `POST`/`PUT /api/v1/oauth2-clients` and RFC 7591/7592
   registration (the CIBA grant only with an initial access token, never
-  anonymously); `backchannel_authentication_request_signing_alg` and
+  anonymously; a CIBA-only registration needs no redirect URI);
+  `backchannel_authentication_request_signing_alg` and
   `backchannel_user_code_parameter: true` are refused; a CIBA client must be
   confidential and on the `standard` profile (a `fapi2` client cannot hold the
   grant until signed authentication requests exist). Discovery, in both issuer

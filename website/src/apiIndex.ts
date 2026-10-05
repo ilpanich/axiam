@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta17";
-export const API_OPERATION_COUNT = 272;
-export const API_PATH_COUNT = 185;
+export const API_OPERATION_COUNT = 273;
+export const API_PATH_COUNT = 186;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -298,6 +298,12 @@ export const API_INDEX: ApiGroup[] = [
     "method": "GET",
     "path": "/oauth2/authorize/logout",
     "summary": "Reached by `end_session`'s `302` when no `id_token_hint` named a session.",
+    "public": true
+   },
+   {
+    "method": "POST",
+    "path": "/oauth2/bc-authorize",
+    "summary": "",
     "public": true
    },
    {

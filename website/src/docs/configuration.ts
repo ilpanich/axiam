@@ -290,7 +290,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__OAUTH2_MTLS_BASE_URL",
-            "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations. Six aliases are published and the front channel is never among them. A value that cannot be parsed **fails discovery with a** `500` — deliberately unlike the default-tenant row below: an unusable alias would send a client's certificate to a host that authenticates nothing, so the document is refused rather than served without it.",
+            "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations. Seven aliases are published — the six back-channel endpoints and CIBA's `bc-authorize` — and the front channel is never among them. A value that cannot be parsed **fails discovery with a** `500` — deliberately unlike the default-tenant row below: an unusable alias would send a client's certificate to a host that authenticates nothing, so the document is refused rather than served without it.",
             "https://mtls.iam.acme.dev",
           ],
           [

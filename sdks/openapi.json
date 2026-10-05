@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:8819c27753ff576b9571d361771d7143c9ea245021872f71f5e087476f88338c"
+    "x-axiam-spec-digest": "sha256:e79506e7ae79c82d3ac093d6f7defe2e925d0bcc88fc4e0e0254bc003217be1f"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4484,6 +4484,17 @@
                           "authn_request_params": {
                             "$ref": "#/components/schemas/AuthnRequestParamsMode",
                             "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
+                          },
+                          "backchannel_authentication_request_signing_alg": {
+                            "oneOf": [
+                              {
+                                "$ref": "#/components/schemas/CibaRequestSigningAlg",
+                                "description": "G-7 / D-61 — the algorithm this client signs its authentication\nrequests with; absent for a client sending plain requests."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           },
                           "backchannel_client_notification_endpoint": {
                             "type": [
@@ -15523,14 +15534,14 @@
               "string",
               "null"
             ],
-            "description": "A signed authentication request. Not supported; refused."
+            "description": "A signed authentication request (CIBA Core §7.1.1): a JWT whose claims\nare this request's parameters, signed with the client's registered\n`backchannel_authentication_request_signing_alg`. Required from a\nclient that registered one, refused from a client that did not; sent\nalone, with no authentication-request parameter beside it."
           },
           "request_uri": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Not supported; refused."
+            "description": "Not part of CIBA; refused."
           },
           "requested_expiry": {
             "type": [
@@ -16107,6 +16118,15 @@
             "description": "The `auth_req_id` the client was given at `bc-authorize`."
           }
         }
+      },
+      "CibaRequestSigningAlg": {
+        "type": "string",
+        "description": "The JWS algorithm a CIBA client signs its authentication requests with\n(CIBA Core §4 `backchannel_authentication_request_signing_alg`, §7.1.1).\n\nExactly the three algorithms AXIAM verifies on any client-signed JWT\n(`axiam_oauth2::jose::PERMITTED_ALGORITHMS`): FAPI 2.0 §5.3.1.1's list. A\nregistration naming anything else — `RS256`, `HS256`, `none` — is refused\nrather than stored, so no row can hold an algorithm the verifier would not\nhonour (D-61).",
+        "enum": [
+          "PS256",
+          "ES256",
+          "EdDSA"
+        ]
       },
       "CimdPolicy": {
         "type": "object",
@@ -16811,7 +16831,7 @@
               "string",
               "null"
             ],
-            "description": "G-7 — CIBA Core §4. **Refused**: signed authentication requests are not\nsupported by this server."
+            "description": "G-7 — CIBA Core §4: `PS256`, `ES256` or `EdDSA`. When set, every\nbackchannel authentication request must be a signed `request` JWT under\nthis algorithm, verified against `jwks` or `jwks_uri` (exactly one is\nrequired; an inline `jwks` must hold a key of the algorithm). Required\nfor a `fapi2` client holding the CIBA grant."
           },
           "backchannel_client_notification_endpoint": {
             "type": [
@@ -16832,7 +16852,7 @@
               "string",
               "null"
             ],
-            "description": "G-7 — CIBA Core §4 `backchannel_token_delivery_mode`: `poll` or\n`ping`. Required when `grant_types` holds\n`urn:openid:params:grant-type:ciba`, refused otherwise; `push` is not\noffered. A CIBA client must be confidential and on the `standard`\nprofile."
+            "description": "G-7 — CIBA Core §4 `backchannel_token_delivery_mode`: `poll` or\n`ping`. Required when `grant_types` holds\n`urn:openid:params:grant-type:ciba`, refused otherwise; `push` is not\noffered. A CIBA client must be confidential; a `fapi2` one must also\nregister `backchannel_authentication_request_signing_alg`."
           },
           "backchannel_user_code_parameter": {
             "type": [
@@ -19443,9 +19463,14 @@
           "revocation_endpoint",
           "introspection_endpoint",
           "device_authorization_endpoint",
-          "pushed_authorization_request_endpoint"
+          "pushed_authorization_request_endpoint",
+          "backchannel_authentication_endpoint"
         ],
         "properties": {
+          "backchannel_authentication_endpoint": {
+            "type": "string",
+            "description": "CIBA Core §7.1 — authenticates the client."
+          },
           "device_authorization_endpoint": {
             "type": "string",
             "description": "RFC 8628 §3.1 — authenticates the client."
@@ -19780,6 +19805,17 @@
             "$ref": "#/components/schemas/AuthnRequestParamsMode",
             "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
           },
+          "backchannel_authentication_request_signing_alg": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CibaRequestSigningAlg",
+                "description": "G-7 / D-61 — the algorithm this client signs its authentication\nrequests with; absent for a client sending plain requests."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "backchannel_client_notification_endpoint": {
             "type": [
               "string",
@@ -20112,6 +20148,7 @@
           "backchannel_authentication_endpoint",
           "backchannel_token_delivery_modes_supported",
           "backchannel_user_code_parameter_supported",
+          "backchannel_authentication_request_signing_alg_values_supported",
           "end_session_endpoint",
           "backchannel_logout_supported",
           "backchannel_logout_session_supported",
@@ -20150,6 +20187,13 @@
             "type": "string",
             "description": "CIBA Core §4 — G-7. Advertised unconditionally because the endpoint\nis always mounted; whether a client may use it is its registration."
           },
+          "backchannel_authentication_request_signing_alg_values_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CIBA Core §4 — the algorithms a signed authentication request\n(§7.1.1) may use: `PS256`, `ES256`, `EdDSA`. Never `none`."
+          },
           "backchannel_logout_session_supported": {
             "type": "boolean",
             "description": "The claim that AXIAM puts `sid` in its logout tokens — which it does,\nunconditionally. An RP reads this to know it can match a logout token\nto one session rather than having to end every session for the subject."
@@ -20167,7 +20211,7 @@
           },
           "backchannel_user_code_parameter_supported": {
             "type": "boolean",
-            "description": "CIBA Core §4 — `false`: AXIAM accepts no `user_code`.\n`backchannel_authentication_request_signing_alg_values_supported` is\nabsent rather than empty: signed authentication requests are not\nsupported, and absence is how CIBA Core §4 says so."
+            "description": "CIBA Core §4 — `false`: AXIAM accepts no `user_code`."
           },
           "claims_parameter_supported": {
             "type": "boolean",
@@ -21753,7 +21797,7 @@
               "string",
               "null"
             ],
-            "description": "CIBA Core §4 — refused: signed authentication requests are not\nimplemented."
+            "description": "CIBA Core §4 — `PS256`, `ES256` or `EdDSA`, with `jwks` or `jwks_uri`\nholding a key of that algorithm. When registered, every backchannel\nauthentication request must be a signed `request` JWT (D-61)."
           },
           "backchannel_client_notification_endpoint": {
             "type": [
@@ -21858,6 +21902,13 @@
           "registration_client_uri"
         ],
         "properties": {
+          "backchannel_authentication_request_signing_alg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4, as stored. Present only for a client that signs its\nauthentication requests."
+          },
           "backchannel_client_notification_endpoint": {
             "type": [
               "string",
@@ -26250,7 +26301,7 @@
               "string",
               "null"
             ],
-            "description": "G-7 — refused, as on create."
+            "description": "G-7 — see the create DTO. `\"\"` clears."
           },
           "backchannel_client_notification_endpoint": {
             "type": [

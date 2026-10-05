@@ -134,7 +134,7 @@ export const OAUTH2_PAGES: DocPage[] = [
         items: [
           "**An unknown tenant is answered identically to a known one**, apart from the value it echoes — the document is not an enumeration oracle.",
           "`AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` names the tenant an unparameterised request describes. It states a fact in a document and is not a fallback in a handler: no endpoint's behaviour changes, and a caller that names a different tenant gets that one. A value that does not parse as a UUID is ignored and **reported once at boot**, describing the value's shape and never the value — so a deployment that set it can tell that it did not take, without the variable's contents reaching a log.",
-          "`mtls_endpoint_aliases` (RFC 8705 §5) appears when `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` is set, naming a separate mTLS host for the six back-channel endpoints. Absent by default; the front channel is never aliased. An unusable value fails discovery with a `500` rather than being silently dropped.",
+          "`mtls_endpoint_aliases` (RFC 8705 §5) appears when `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` is set, naming a separate mTLS host for the seven back-channel endpoints (CIBA's `bc-authorize` among them). Absent by default; the front channel is never aliased. An unusable value fails discovery with a `500` rather than being silently dropped.",
           "`claims_parameter_supported: true` — the OIDC Core §5.5 `claims` parameter is honoured for its `userinfo` member. On a client in the honour lane it also reads `claims.id_token.acr`.",
         ],
       },

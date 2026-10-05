@@ -22,6 +22,21 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **Signed CIBA authentication requests (Phase 23 T23.7.1 continued, D-61
+> amended, model 2.33.1 — T-440 … T-443 enter; T-421 and T-434 amended).**
+> `bc-authorize` verifies a signed `request` JWT (CIBA Core §7.1.1) against
+> the keys the client registered, under exactly the algorithm it registered,
+> with `aud`, `iss`, `exp`, `nbf`, `iat` and a single-use `jti`, and takes the
+> request from the JWT alone; a `fapi2` client may hold the CIBA grant only
+> with signed requests, strong client authentication and sender-constrained
+> tokens. Four threats enter, all mitigated: a forged or algorithm-confused
+> request (**T-440**), a replayed or cross-server one (**T-441**), parameters
+> smuggled beside it or a signing client served unsigned (**T-442**), and the
+> cost of verifying (**T-443**). **T-434** now records the `fapi2` CIBA client
+> served as FAPI-CIBA requires rather than refused, and **T-421** the mTLS
+> alias for `bc-authorize`. The model is **443 threats, 420 mitigated /
+> 23 open**.
+>
 > **The 2026-10-05 CIBA threat entries (Phase 23 T23.7.1, model 2.33.0 —
 > T-421 … T-439 enter).** AXIAM gains OpenID Connect Client-Initiated
 > Backchannel Authentication (G-7): a client that already knows whom it wants
@@ -1035,7 +1050,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 439 threats** and a
+The system is verified against a **STRIDE threat model of 443 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1058,8 +1073,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 439 |
-| Mitigated / Open | 416 / 23 |
+| Threats identified | 443 |
+| Mitigated / Open | 420 / 23 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -1074,7 +1089,7 @@ optimistic closed one.
 |---|---|---|
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
-| OAuth2 / OIDC authorization server | 79 | 4 |
+| OAuth2 / OIDC authorization server | 83 | 4 |
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
@@ -1154,11 +1169,11 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 97 | 5 |
-| Tampering | 86 | 2 |
+| Spoofing | 98 | 5 |
+| Tampering | 88 | 2 |
 | Repudiation | 13 | 1 |
 | Information disclosure | 104 | 8 |
-| Denial of service | 54 | 5 |
+| Denial of service | 55 | 5 |
 | Elevation of privilege | 85 | 2 |
 
 ### Coverage by severity
@@ -1166,9 +1181,9 @@ the category recorded against it in the model.
 | Severity | Threats | Open |
 |---|---|---|
 | Critical | 41 | 2 |
-| High | 186 | 10 |
-| Medium | 179 | 9 |
-| Low | 33 | 2 |
+| High | 187 | 10 |
+| Medium | 181 | 9 |
+| Low | 34 | 2 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
@@ -1779,10 +1794,14 @@ are published rather than counted as passes.
   it; every transition between the user deciding and the client polling is
   conditional on what each read. The endpoint has its own rate-limit bucket,
   the grant is counted by the token endpoint's, each request carries its own
-  polling interval, and a user is sent at most three prompts a minute. A `fapi2`
-  client cannot hold the grant until signed authentication requests exist, and
-  a self-registered client can obtain it only with an administrator's initial
-  access token.
+  polling interval, and a user is sent at most three prompts a minute. A client
+  that registers a signing algorithm sends every request as a signed JWT,
+  verified against the keys it registered under exactly that algorithm, with
+  its audience, lifetime and single-use `jti` checked and nothing outside the
+  JWT read; a `fapi2` client may hold the grant only that way, with strong
+  client authentication and sender-constrained tokens, as the FAPI-CIBA
+  profile requires. A self-registered client can obtain the grant only with
+  an administrator's initial access token.
 
 ### Federation (SAML & OIDC)
 
@@ -2438,7 +2457,7 @@ checklist — most of the threat model's open items live here.
 **The open risk register**
 
 Every threat the model does not record as mitigated, most severe first — 23 of
-439. On the website this table is generated from the Threat Dragon model, so it
+443. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind

@@ -359,7 +359,8 @@ and `/.well-known/openid-configuration` gains:
   "revocation_endpoint":                   "https://mtls.iam.example.com/oauth2/revoke",
   "introspection_endpoint":                "https://mtls.iam.example.com/oauth2/introspect",
   "device_authorization_endpoint":         "https://mtls.iam.example.com/oauth2/device_authorization",
-  "pushed_authorization_request_endpoint": "https://mtls.iam.example.com/oauth2/par"
+  "pushed_authorization_request_endpoint": "https://mtls.iam.example.com/oauth2/par",
+  "backchannel_authentication_endpoint":   "https://mtls.iam.example.com/oauth2/bc-authorize"
 }
 ```
 
@@ -383,7 +384,10 @@ proxy hostname in front of the same server.
 
 ### Three things not to get wrong
 
-- **Six endpoints are aliased, and only six.** `authorization_endpoint` and
+- **Seven endpoints are aliased, and only seven** — every endpoint where the
+  server authenticates the client or a certificate-bound token is presented,
+  CIBA's `backchannel_authentication_endpoint` included since D-61 (a
+  `tls_client_auth` FAPI-CIBA client authenticates there). `authorization_endpoint` and
   `end_session_endpoint` are front-channel — sending a browser to an mTLS host
   raises a native certificate-chooser dialog most users cannot answer — and
   `jwks_uri` is public key material that gains nothing from a handshake.
@@ -655,6 +659,38 @@ nothing. If you talk to more than one issuer, compare `iss` against the one you
 started the flow with, on both the success and the error callback.
 
 ---
+
+## CIBA under the `fapi2` profile (FAPI-CIBA)
+
+A `fapi2` client may hold the CIBA grant (`urn:openid:params:grant-type:ciba`)
+on the terms the FAPI-CIBA profile sets (D-61). On top of everything this page
+already requires of a `fapi2` client — PAR, `tls_client_auth`,
+`self_signed_tls_client_auth` or `private_key_jwt`, and certificate- or
+DPoP-bound tokens — its registration must name
+`backchannel_authentication_request_signing_alg` (`PS256`, `ES256` or `EdDSA`),
+with `jwks` or `jwks_uri` holding a key of that algorithm:
+
+```json
+{
+  "profile": "fapi2",
+  "require_par": true,
+  "token_endpoint_auth_method": "private_key_jwt",
+  "jwks_uri": "https://bank.example.com/.well-known/jwks.json",
+  "dpop_bound_access_tokens": true,
+  "grant_types": ["urn:openid:params:grant-type:ciba"],
+  "backchannel_token_delivery_mode": "poll",
+  "backchannel_authentication_request_signing_alg": "PS256"
+}
+```
+
+Every request to `POST /oauth2/bc-authorize` from such a client is then a
+signed `request` JWT (CIBA Core §7.1.1) and nothing else besides the client's
+authentication: `iss` is the client id, `aud` the issuer, `exp`/`nbf`/`iat`/`jti`
+present, at most sixty minutes between `nbf` and `exp`, and each `jti` used
+once. A `fapi2` request must carry a `binding_message`, and a ping-mode client's
+`client_notification_token` must be at least 22 characters. Push mode is not
+offered. A `standard` client may register the same algorithm and is then held
+to the same signed-request rules; it need not.
 
 ## Not implemented
 

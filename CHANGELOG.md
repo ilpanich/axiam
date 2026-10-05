@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `acr_values` and RFC 8707 `resource`; a ping-mode client also sends
   `client_notification_token`. The answer is `auth_req_id` (256 bits, stored
   only as its SHA-256), `expires_in` and `interval` (5 s). `login_hint_token`,
-  `user_code` and signed authentication requests (`request`) are refused
-  `invalid_request`; CIBA Core §13's `invalid_binding_message` is new. **A hint
+  `user_code` and `request_uri` are refused `invalid_request`; CIBA Core §13's
+  `invalid_binding_message` is new. **A hint
   naming nobody, a user who may not sign in or a user under brute-force lockout
   is answered exactly like a real one** and the request simply expires —
   `unknown_user_id` is never sent, so the endpoint is not a user oracle. The
@@ -48,13 +48,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outbound URL policy) on `POST`/`PUT /api/v1/oauth2-clients` and RFC 7591/7592
   registration (the CIBA grant only with an initial access token, never
   anonymously; a CIBA-only registration needs no redirect URI);
-  `backchannel_authentication_request_signing_alg` and
-  `backchannel_user_code_parameter: true` are refused; a CIBA client must be
-  confidential and on the `standard` profile (a `fapi2` client cannot hold the
-  grant until signed authentication requests exist). Discovery, in both issuer
-  forms, gains `backchannel_authentication_endpoint`,
+  `backchannel_user_code_parameter: true` is refused; a CIBA client must be
+  confidential. Discovery, in both issuer forms, gains
+  `backchannel_authentication_endpoint`,
   `backchannel_token_delivery_modes_supported` (`poll`, `ping`),
-  `backchannel_user_code_parameter_supported: false` and the grant type. **Rate
+  `backchannel_user_code_parameter_supported: false`,
+  `backchannel_authentication_request_signing_alg_values_supported` (`PS256`,
+  `ES256`, `EdDSA`) and the grant type, and `mtls_endpoint_aliases` gains a
+  seventh member, `backchannel_authentication_endpoint` (a `tls_client_auth`
+  client authenticates there). **Signed authentication requests and the
+  FAPI-CIBA client (D-61).** `backchannel_authentication_request_signing_alg`
+  (`PS256`, `ES256` or `EdDSA`) is accepted at the admin API and RFC 7591/7592
+  registration with exactly one of `jwks`/`jwks_uri` (an inline `jwks` must
+  hold a key of that algorithm), stored (schema **v81**) and echoed. A client
+  that registered it must send **every** request as a signed `request` JWT
+  (CIBA Core §7.1.1) under exactly that algorithm, verified against its
+  registered keys; one that did not cannot send one. The JWT must carry `iss`
+  (the client id), `aud` (the issuer, deployment or tenant-path form, string or
+  array), `exp`, `nbf`, `iat` and `jti`; `exp - nbf` is at most 60 minutes and
+  `nbf` at most 60 minutes old (FAPI-CIBA), and the `jti` is single-use (the
+  proof-replay table, kind `ciba_request_object`). The request's parameters come
+  from the JWT only — any authentication-request parameter beside `request` is
+  refused — and every failure is `invalid_request` describing it. A `fapi2`
+  client may hold the CIBA grant only with signed requests (and, as for every
+  grant, `tls_client_auth`/`self_signed_tls_client_auth`/`private_key_jwt` and
+  sender-constrained tokens), must send a `binding_message`, and in ping mode a
+  `client_notification_token` of at least 22 characters. **Rate
   limits:** the new `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` (default 60;
   `gateway` 600, `mesh` 6000) is the endpoint's own bucket, keyed like
   `/oauth2/token`, plus a per-client bucket after authentication and a fixed

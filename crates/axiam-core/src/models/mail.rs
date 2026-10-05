@@ -23,6 +23,10 @@ pub enum MailType {
     Notification,
     DeletionCancel,
     ExportReady,
+    /// A CIBA backchannel authentication request is waiting for its user
+    /// (G-7, T23.7.2). Carries the client's name, its `binding_message` and a
+    /// link to the approval page — never the `auth_req_id` or any token.
+    CibaApproval,
 }
 
 impl MailType {
@@ -39,6 +43,7 @@ impl MailType {
         Self::Notification,
         Self::DeletionCancel,
         Self::ExportReady,
+        Self::CibaApproval,
     ];
 }
 

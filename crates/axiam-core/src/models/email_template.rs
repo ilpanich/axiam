@@ -27,6 +27,9 @@ pub enum TemplateKind {
     DeletionScheduled,
     /// Sent when a data-export file is ready for download. D-12.
     ExportReady,
+    /// Sent when a CIBA backchannel authentication request is waiting for the
+    /// user to approve it (G-7, T23.7.2).
+    CibaApproval,
 }
 
 impl TemplateKind {
@@ -38,6 +41,7 @@ impl TemplateKind {
         Self::AdminNotification,
         Self::DeletionScheduled,
         Self::ExportReady,
+        Self::CibaApproval,
     ];
 
     /// Return a built-in default template for this kind.
@@ -46,6 +50,8 @@ impl TemplateKind {
     /// template renderer.  Available tokens per kind:
     /// - `DeletionScheduled`: `username`, `tenant_name`, `action_url` (cancel link), `expiry_time`
     /// - `ExportReady`: `username`, `tenant_name`, `action_url` (download link), `expiry_time`
+    /// - `CibaApproval`: `username`, `tenant_name`, `client_name`, `binding_message`,
+    ///   `action_url` (the approval page), `expiry_time`
     pub fn builtin_template(&self) -> (&'static str, &'static str, &'static str) {
         // (subject, html_body, text_body)
         match self {
@@ -82,6 +88,7 @@ impl std::fmt::Display for TemplateKind {
             Self::AdminNotification => write!(f, "admin_notification"),
             Self::DeletionScheduled => write!(f, "deletion_scheduled"),
             Self::ExportReady => write!(f, "export_ready"),
+            Self::CibaApproval => write!(f, "ciba_approval"),
         }
     }
 }
@@ -97,6 +104,7 @@ impl std::str::FromStr for TemplateKind {
             "admin_notification" => Ok(Self::AdminNotification),
             "deletion_scheduled" => Ok(Self::DeletionScheduled),
             "export_ready" => Ok(Self::ExportReady),
+            "ciba_approval" => Ok(Self::CibaApproval),
             other => Err(format!("invalid template kind: {other}")),
         }
     }
@@ -247,13 +255,17 @@ mod tests {
     // --- TemplateKind::ALL ---
 
     #[test]
-    fn all_contains_six_kinds() {
-        assert_eq!(TemplateKind::ALL.len(), 6);
+    fn all_contains_seven_kinds() {
+        assert_eq!(TemplateKind::ALL.len(), 7);
     }
 
     #[test]
     fn new_kinds_round_trip() {
-        for kind in [TemplateKind::DeletionScheduled, TemplateKind::ExportReady] {
+        for kind in [
+            TemplateKind::DeletionScheduled,
+            TemplateKind::ExportReady,
+            TemplateKind::CibaApproval,
+        ] {
             let s = kind.to_string();
             let parsed: TemplateKind = s.parse().unwrap();
             assert_eq!(kind, parsed);

@@ -400,6 +400,7 @@ mod tests {
             MailType::Notification,
             MailType::DeletionCancel,
             MailType::ExportReady,
+            MailType::CibaApproval,
         ];
 
         for variant in variants {
@@ -435,6 +436,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&MailType::ExportReady).unwrap(),
             r#""export_ready""#
+        );
+        assert_eq!(
+            serde_json::to_string(&MailType::CibaApproval).unwrap(),
+            r#""ciba_approval""#
         );
     }
 

@@ -4,6 +4,7 @@ pub mod acr;
 pub mod authn_params;
 pub mod authorize;
 pub mod ciba;
+pub mod ciba_notifier;
 pub mod ciba_ping;
 pub mod ciba_signed_request;
 pub mod cimd;

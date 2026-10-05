@@ -447,6 +447,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "ciba_signed_authentication_requests",
         sql: SCHEMA_V81,
     },
+    Migration {
+        version: 82,
+        name: "ciba_approval_email_template",
+        sql: SCHEMA_V82,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4484,9 +4489,43 @@ DEFINE FIELD OVERWRITE kind ON TABLE oauth2_proof_replay TYPE string
     ASSERT $value IN ['client_assertion', 'dpop_proof', 'ciba_request_object'];
 ";
 
+// -----------------------------------------------------------------------
+// Schema v82 — T23.7.2 / G-7: the CIBA approval e-mail's template kind
+// -----------------------------------------------------------------------
+//
+// `email_template.kind` is re-defined to admit `ciba_approval`, the built-in
+// template of the mail that tells a user a CIBA request is waiting. The
+// re-definition only widens the ASSERT (the v14 list plus one value): every
+// stored row satisfies the new one, and a tenant or organization that stores a
+// customised version of the mail can now do so.
+const SCHEMA_V82: &str = "\
+DEFINE FIELD OVERWRITE kind ON TABLE email_template TYPE string
+    ASSERT $value IN ['activation', 'password_reset', 'mfa_setup_reminder',
+                      'admin_notification', 'deletion_scheduled', 'export_ready',
+                      'ciba_approval'];
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.7.2 / G-7 — v82 widens the template-kind ASSERT by exactly the CIBA
+    /// approval mail, keeping every earlier kind.
+    #[test]
+    fn v82_admits_the_ciba_approval_template_kind_and_keeps_the_others() {
+        for kind in [
+            "activation",
+            "password_reset",
+            "mfa_setup_reminder",
+            "admin_notification",
+            "deletion_scheduled",
+            "export_ready",
+            "ciba_approval",
+        ] {
+            assert!(SCHEMA_V82.contains(&format!("'{kind}'")), "{kind}");
+        }
+        assert!(SCHEMA_V82.contains("DEFINE FIELD OVERWRITE kind ON TABLE email_template"));
+    }
 
     /// T23.7.1 / G-7 — v80 adds the CIBA client metadata columns and the
     /// pending-request store additively, with the unique hash index, the
@@ -5703,8 +5742,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&81),
-            "v81 is the newest migration (T23.7.1 continued, D-61 — signed CIBA authentication \
+            Some(&82),
+            "v82 is the newest migration (T23.7.2 — the CIBA approval e-mail's template kind \
+             `ciba_approval` in the `email_template.kind` ASSERT; v81 was T23.7.1 continued, \
+             D-61 — signed CIBA authentication \
              requests: `oauth2_client.backchannel_authentication_request_signing_alg` and the \
              `ciba_request_object` replay kind; v80 was T23.7.1 — CIBA: the `ciba_request` store \
              and the two backchannel metadata columns on `oauth2_client`; v79 was T23.6.1 — outbound SCIM targets: `scim_target`, \

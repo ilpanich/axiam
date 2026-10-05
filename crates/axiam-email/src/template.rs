@@ -281,6 +281,33 @@ deleted after the grace period.</p>
              This is a single-use link.\n\n\
              If you did not request this export, contact your administrator.",
         ),
+        // G-7 / T23.7.2: a CIBA backchannel authentication request is waiting.
+        // `client_name` and `binding_message` are the CLIENT's words (HTML-escaped
+        // in the HTML body, like every value); `action_url` is the approval page
+        // and the only way in. Nothing here is a credential: the page needs the
+        // user signed in, so a forwarded mail approves nothing for anyone else.
+        TemplateKind::CibaApproval => (
+            "Approve a sign-in to {{tenant_name}}?",
+            r#"<!DOCTYPE html>
+<html><body>
+<h1>Approve a sign-in?</h1>
+<p>Hi {{username}},</p>
+<p><strong>{{client_name}}</strong> asked to sign you in to <strong>{{tenant_name}}</strong>
+from another device.</p>
+<p>Message from the application: <strong>{{binding_message}}</strong></p>
+<p><a href="{{action_url}}">Review and approve or refuse</a></p>
+<p>This request expires at {{expiry_time}}.</p>
+<p>If you did not expect this, do not approve it — open the link and refuse it, or
+ignore this email and the request will expire.</p>
+</body></html>"#,
+            "Hi {{username}},\n\n\
+             {{client_name}} asked to sign you in to {{tenant_name}} from another device.\n\n\
+             Message from the application: {{binding_message}}\n\n\
+             Review and approve or refuse: {{action_url}}\n\n\
+             This request expires at {{expiry_time}}.\n\n\
+             If you did not expect this, do not approve it — open the link and refuse it, \
+             or ignore this email and the request will expire.",
+        ),
     };
 
     EmailTemplate {
@@ -453,6 +480,36 @@ mod tests {
         let text = render(&t.text_body, &ctx);
         assert!(text.contains("Acme Org"));
         assert!(text.contains("alice@example.com"));
+    }
+
+    #[test]
+    fn builtin_ciba_approval_names_the_client_message_and_link_and_escapes_them() {
+        let t = builtin_template(TemplateKind::CibaApproval);
+        let mut ctx = full_context();
+        ctx.insert("client_name".into(), "Call <b>Centre</b>".into());
+        ctx.insert("binding_message".into(), "Pay J.Doe & co".into());
+        ctx.insert(
+            PH_ACTION_URL.into(),
+            "https://id.example/ciba/approve?request_id=abc".into(),
+        );
+
+        let text = render(&t.text_body, &ctx);
+        assert!(text.contains("Call <b>Centre</b>"));
+        assert!(text.contains("Pay J.Doe & co"));
+        assert!(text.contains("https://id.example/ciba/approve?request_id=abc"));
+        assert!(!text.contains("{{"));
+
+        // The client chose both words: in the HTML body they are text, not markup.
+        let html = render_html(&t.html_body, &ctx);
+        assert!(html.contains("Call &lt;b&gt;Centre&lt;/b&gt;"));
+        assert!(html.contains("Pay J.Doe &amp; co"));
+        assert!(!html.contains("<b>Centre"));
+        assert!(!html.contains("{{"));
+
+        // The subject carries neither the client's name nor its message.
+        let subject = render(&t.subject, &ctx);
+        assert!(!subject.contains("Centre") && !subject.contains("J.Doe"));
+        assert!(!subject.contains("{{"));
     }
 
     // --- render_html / escape_html ---

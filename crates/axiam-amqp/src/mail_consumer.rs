@@ -86,6 +86,7 @@ pub fn template_kind_for(mail_type: &MailType) -> TemplateKind {
         MailType::Notification => TemplateKind::AdminNotification,
         MailType::DeletionCancel => TemplateKind::DeletionScheduled,
         MailType::ExportReady => TemplateKind::ExportReady,
+        MailType::CibaApproval => TemplateKind::CibaApproval,
     }
 }
 
@@ -678,6 +679,14 @@ mod mail_retry_backoff_tests {
             template_kind_for(&MailType::ExportReady),
             TemplateKind::ExportReady
         );
+        assert_eq!(
+            template_kind_for(&MailType::CibaApproval),
+            TemplateKind::CibaApproval
+        );
+        // And nothing in `MailType::ALL` is left unmapped.
+        for mail_type in MailType::ALL {
+            let _ = template_kind_for(mail_type);
+        }
     }
 
     #[test]

@@ -22,6 +22,22 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **Audit durability in the minimal profile (Phase 23 T23.8.2, model 2.34.0 —
+> T-444 and T-445 enter; T-405 amended; T-108 reopened).** An Opus review of
+> every audit-write path with `AXIAM__AMQP__ENABLED=false` (D-59) against
+> T19.27 ([`audit-durability-review-minimal-profile-2026-10-05.md`](audit-durability-review-minimal-profile-2026-10-05.md)).
+> AXIAM's own audit rows never rode the broker, and T19.27's erasure
+> dead-letter path is unchanged. One regression, fixed: an instance that lost
+> the profile's singleton lease ended the process at once, losing the audit
+> rows still queued; it now stops in order and drains them, as every orderly
+> stop now does (**T-444**, mitigated). The profile's recorded trade — queued
+> deliveries and mail, with the audit rows they would have written, lost on
+> restart; no external audit ingestion — enters as **T-445** (accepted).
+> **T-405**'s "once queued, at-least-once" is the full profile's, and
+> **T-108** is reopened: its mitigation described a transactional audit write
+> and a compliance notification on failure that were never built. The model is
+> **445 threats, 420 mitigated / 25 open**.
+>
 > **Signed CIBA authentication requests (Phase 23 T23.7.1 continued, D-61
 > amended, model 2.33.1 — T-440 … T-443 enter; T-421 and T-434 amended).**
 > `bc-authorize` verifies a signed `request` JWT (CIBA Core §7.1.1) against
@@ -1050,7 +1066,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 443 threats** and a
+The system is verified against a **STRIDE threat model of 445 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1073,8 +1089,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 443 |
-| Mitigated / Open | 420 / 23 |
+| Threats identified | 445 |
+| Mitigated / Open | 420 / 25 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -1093,8 +1109,8 @@ optimistic closed one.
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
-| Audit, webhooks, email & notifications | 54 | 5 |
-| Deployment & platform (Kubernetes) | 28 | 5 |
+| Audit, webhooks, email & notifications | 55 | 6 |
+| Deployment & platform (Kubernetes) | 29 | 6 |
 | Client SDKs & admin-UI integration surface | 28 | 3 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
@@ -1157,7 +1173,12 @@ of model 2.33.0 (T-421 … T-439) add four open items of the specified-ahead
 kind: the approval page (T-431), the flood of sign-in prompts it must defuse
 (T-424), ping delivery's address guard (T-433) and the audit row of each
 decision (T-435) close when T23.7.2 builds what they describe — no route
-approves a request or delivers a ping before then.
+approves a request or delivers a ping before then. The T23.8.2 review of the
+minimal profile's audit path (model 2.34.0) adds two open items: the profile's
+accepted trade — queued deliveries and mail, and the audit rows they would have
+written, lost on restart, with no external audit ingestion (T-445) — and T-108,
+reopened because the control it described, a compliance notification when an
+audit write fails, was never built.
 
 ### Coverage by STRIDE category
 
@@ -1171,7 +1192,7 @@ the category recorded against it in the model.
 |---|---|---|
 | Spoofing | 98 | 5 |
 | Tampering | 88 | 2 |
-| Repudiation | 13 | 1 |
+| Repudiation | 15 | 3 |
 | Information disclosure | 104 | 8 |
 | Denial of service | 55 | 5 |
 | Elevation of privilege | 85 | 2 |
@@ -1181,8 +1202,8 @@ the category recorded against it in the model.
 | Severity | Threats | Open |
 |---|---|---|
 | Critical | 41 | 2 |
-| High | 187 | 10 |
-| Medium | 181 | 9 |
+| High | 187 | 11 |
+| Medium | 183 | 10 |
 | Low | 34 | 2 |
 
 Severity records the impact if the threat were realised, so it does not change
@@ -2456,8 +2477,8 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 23 of
-443. On the website this table is generated from the Threat Dragon model, so it
+Every threat the model does not record as mitigated, most severe first — 25 of
+445. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -2469,6 +2490,7 @@ each.
 | T-306 — A leaked signing key keeps forging assertions after the credential is retired | Critical | SAML service provider (registered per tenant) · *Federation — SAML SP & OIDC relying party* |
 | T-18 — Backup or snapshot exfiltration | High | SurrealDB cluster (all tenant data) · *System diagram* |
 | T-94 — Key extracted from device firmware or flash | High | IoT device · *PKI, certificates & IoT device identity* |
+| T-108 — Action succeeds while its audit write fails | High | Audit middleware & service · *Audit, webhooks, email & notifications* |
 | T-124 — Operator credentials grant unaudited data access | High | Cluster operator / SRE · *Deployment & platform (Kubernetes)* |
 | T-133 — Backup media accessible outside the cluster | High | Backups / volume snapshots · *Deployment & platform (Kubernetes)* |
 | T-135 — Dependency-confusion or typosquatted SDK package | High | Integrator / developer · *Client SDKs & admin UI integration surface* |
@@ -2486,11 +2508,13 @@ each.
 | T-409 — An access token minted with the stored client secret follows a base URL moved without it | Medium | Outbound SCIM provisioning (target API, deliverer, reconciliation) · *Audit, webhooks, email & notifications* |
 | T-418 — One notification mail per dead letter floods a rule's recipients while a target is down | Medium | dead-letter audit row · *Audit, webhooks, email & notifications* |
 | T-424 — A flood of sign-in prompts wears a user down until one is approved by mistake | Medium | sign-in request notification · *OAuth2 / OIDC authorization server* |
+| T-445 — The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 | T-435 — CIBA requests and decisions are not attributable | Low | CIBA: /oauth2/bc-authorize + approval service · *OAuth2 / OIDC authorization server* |
 
-None of these is an unhandled defect in AXIAM's own request path: they are
-accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
+With one exception — T-108, request audit that drops a row with only a log line
+to say so, carried to the next security review — none of these is an unhandled
+defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
 gaps on the SDK and distribution side, or — for two in outbound SCIM's
 background delivery, T-409 and T-418 — decisions carried to the next security
 review. The rest of this section is the same

@@ -53,10 +53,10 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.33.1",
+ "version": "2.34.0",
  "diagramCount": 9,
- "total": 443,
- "open": 23,
+ "total": 445,
+ "open": 25,
  "mitigated": 420,
  "areas": [
   {
@@ -98,14 +98,14 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "total": 54,
-   "open": 5
+   "total": 55,
+   "open": 6
   },
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 28,
-   "open": 5
+   "total": 29,
+   "open": 6
   },
   {
    "id": 8,
@@ -127,8 +127,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Repudiation",
-   "total": 13,
-   "open": 1
+   "total": 15,
+   "open": 3
   },
   {
    "name": "Information disclosure",
@@ -155,12 +155,12 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "High",
    "total": 187,
-   "open": 10
+   "open": 11
   },
   {
    "name": "Medium",
-   "total": 181,
-   "open": 9
+   "total": 183,
+   "open": 10
   },
   {
    "name": "Low",
@@ -208,6 +208,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "PKI, certificates & IoT device identity",
    "element": "IoT device",
    "residualRisk": "Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM limits the blast radius with per-device certificates, a maximum validity policy and immediate revocation."
+  },
+  {
+   "number": 108,
+   "title": "Action succeeds while its audit write fails",
+   "category": "Repudiation",
+   "severity": "High",
+   "diagramId": 6,
+   "area": "Audit, webhooks, email & notifications",
+   "element": "Audit middleware & service",
+   "residualRisk": "Carried to the W5 F4 review (T23.8.2, review P23W5-A10). Until model 2.34.0 this entry read “audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed”; no code does either. What is built: AXIAM's own request rows are written by the audit middleware off the request path — a bounded queue of 4 096 entries and one worker — so a full queue drops the entry with an `ERROR` line and a failed append is a `WARN` line while the action stands; the GDPR erasure and tenant-deletion records dead-letter a failed write to an append-only file and a structured `axiam.audit.dlq` event (T19.27, `write_erasure_audit_with_dlq`); every orderly stop drains the queue (T-444). What is not: a fallback for any other row, the GDPR request records included (P23W5-A8), and any counter or notification when a row is dropped or fails (P23W5-A10). An attacker who can exhaust the datastore can act while the rows recording it are dropped, and only the server log says so."
   },
   {
    "number": 124,
@@ -347,7 +357,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 6,
    "area": "Audit, webhooks, email & notifications",
    "element": "SET push / poll response",
-   "residualRisk": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation."
+   "residualRisk": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost, in the full profile: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation. In the minimal profile (`AXIAM__AMQP__ENABLED=false`, D-59) a queued push waits in an in-process queue and is lost on restart, and a dead letter is its audit row alone (T-445)."
   },
   {
    "number": 409,
@@ -378,6 +388,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "OAuth2 / OIDC authorization server",
    "element": "sign-in request notification",
    "residualRisk": "Partly built (T23.7.1); **open until T23.7.2** builds the notification and the approval page. Built: one user is sent at most **three** notifications a minute whatever the clients asking (a fixed shared bucket no preset moves); a request past it is still stored and answered as usual, so the throttle reveals nothing (T-422); every client has its own `bc-authorize` bucket after authentication besides the route's; the `binding_message` is bounded and printable (T-437); a request expires in at most ten minutes. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_validates_stores_and_notifies` (one notification per stored request, carrying the binding message and no secret), `the_limiter_counts_bc_authorize`. Closes with T23.7.2: the approval page shows the client and the binding message and requires a full sign-in, MFA included, before one deliberate approval — never an approval from the notification itself."
+  },
+  {
+   "number": 445,
+   "title": "The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart",
+   "category": "Repudiation",
+   "severity": "Medium",
+   "diagramId": 7,
+   "area": "Deployment & platform (Kubernetes)",
+   "element": "AXIAM deployment (N replicas, HPA)",
+   "residualRisk": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
   },
   {
    "number": 161,

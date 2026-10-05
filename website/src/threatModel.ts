@@ -15,10 +15,10 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.33.1",
+ "version": "2.34.0",
  "diagramCount": 9,
- "total": 443,
- "open": 23,
+ "total": 445,
+ "open": 25,
  "mitigated": 420,
  "diagrams": [
   {
@@ -7953,7 +7953,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules. Since Phase 23 (G-5, T23.5.2, model 2.27.0) it also covers the Shared Signals Framework transmitter: the SSF stream registry and its per-stream event buffer (`ssf_stream`, `ssf_event_buffer`), SET issuance with the deployment key, the stream management API and transmitter metadata a receiver calls with its own client credentials, and the push and poll flows to the receiver, across a boundary of their own (D-44 … D-52). Since model 2.29.0 (T23.5.4) the store also holds the step-up record (`ssf_step_up`, D-53 (1)) the authorization endpoint keeps for `assurance-level-change`. Since model 2.31.0 (D-55) the transmitter is inactive for every tenant while the deployment holds more than one tenant and serves no per-tenant issuers, so tenants never share an issuer. Since model 2.32.0 (G-6, T23.6.4) it also covers outbound SCIM provisioning: the target registry and its management routes (`scim_target`, contract §31), the link rows and delivery state (`scim_target_link`, `scim_target_state`), the provisioning source every user and group repository reports to, the `ScimPush` deliverer on the shared dispatcher, reconciliation, and the dead-letter row that reaches the notification rules, with the downstream SCIM service provider across a boundary of its own (D-57, D-58).",
+   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules. Since Phase 23 (G-5, T23.5.2, model 2.27.0) it also covers the Shared Signals Framework transmitter: the SSF stream registry and its per-stream event buffer (`ssf_stream`, `ssf_event_buffer`), SET issuance with the deployment key, the stream management API and transmitter metadata a receiver calls with its own client credentials, and the push and poll flows to the receiver, across a boundary of their own (D-44 … D-52). Since model 2.29.0 (T23.5.4) the store also holds the step-up record (`ssf_step_up`, D-53 (1)) the authorization endpoint keeps for `assurance-level-change`. Since model 2.31.0 (D-55) the transmitter is inactive for every tenant while the deployment holds more than one tenant and serves no per-tenant issuers, so tenants never share an issuer. Since model 2.32.0 (G-6, T23.6.4) it also covers outbound SCIM provisioning: the target registry and its management routes (`scim_target`, contract §31), the link rows and delivery state (`scim_target_link`, `scim_target_state`), the provisioning source every user and group repository reports to, the `ScimPush` deliverer on the shared dispatcher, reconciliation, and the dead-letter row that reaches the notification rules, with the downstream SCIM service provider across a boundary of its own (D-57, D-58). At model 2.34.0 (T23.8.2, the review of the audit-write path in the minimal profile against T19.27) an instance's stop with audit rows still queued or in flight enters as T-444, Mitigated; T-405 is amended (a queued push is at-least-once in the full profile only) and T-108 reopened (its text now describes the controls the code has).",
    "width": 1438,
    "height": 1348,
    "boundaries": [
@@ -8108,9 +8108,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Action succeeds while its audit write fails",
        "type": "Repudiation",
        "severity": "High",
-       "status": "Mitigated",
+       "status": "Open",
        "description": "If audit writes are best-effort, an attacker who can make the audit path fail — by exhausting the datastore or triggering a specific error — performs actions that leave no trace.",
-       "mitigation": "Audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed."
+       "mitigation": "Carried to the W5 F4 review (T23.8.2, review P23W5-A10). Until model 2.34.0 this entry read “audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed”; no code does either. What is built: AXIAM's own request rows are written by the audit middleware off the request path — a bounded queue of 4 096 entries and one worker — so a full queue drops the entry with an `ERROR` line and a failed append is a `WARN` line while the action stands; the GDPR erasure and tenant-deletion records dead-letter a failed write to an append-only file and a structured `axiam.audit.dlq` event (T19.27, `write_erasure_audit_with_dlq`); every orderly stop drains the queue (T-444). What is not: a fallback for any other row, the GDPR request records included (P23W5-A8), and any counter or notification when a row is dropped or fails (P23W5-A10). An attacker who can exhaust the datastore can act while the rows recording it are dropped, and only the server log says so."
       },
       {
        "number": 109,
@@ -8129,9 +8129,18 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The audit log is append-only by design, so any personal data written into it cannot later be erased — which is in direct tension with the GDPR Art. 17 erasure path AXIAM also offers.",
        "mitigation": "Both halves are now bounded. **Retention** (T-119): a default 730-day sweep through the table's only deletion path — deployment-wide, reachable from no HTTP handler, `0` to disable, both states logged at startup. **Collection** (R-7, 2026-09-12): `AXIAM__AUDIT__MINIMISE`, default `false`, applied in `SurrealAuditLogRepository::append` — the only code every audit row passes through, since the request middleware is one producer among eighteen and the rest call `append` directly. With it on, `ip_address` is truncated to its `/24` or `/48` prefix and a `user_agent` in `metadata` is reduced to a coarse family, immediately before the write because the table is append-only and there is no second chance by construction; an address that does not parse is **dropped** rather than written through, since a value that cannot be parsed cannot be shown to have been minimised. Three limits, each deliberate: the structured metadata producers write is never touched — the client and disposition on a refresh-token replay (T-254), the names of released claims (T-241), a federated subject (T-161) are accountability evidence other mitigations depend on, and dropping them would weaken three controls to narrow one; the switch is **deployment-wide and not per tenant**, because audit is a control the deployment relies on *including against a tenant administrator* and a tenant-level switch would let a tenant weaken the evidence used to investigate that tenant; and it is off by default, because reducing forensic precision is a lawful-basis judgement to make deliberately. Both states are logged at startup exactly as retention is. Erasure and export are unaffected and are asserted so rather than assumed: `pseudonymize_actor` clears `ip_address` outright so a truncated value is erased by the same statement as a whole one, and the Art. 15 export's `audit_entries` section reads `action`, `outcome`, `timestamp` and `resource_id` and never the address (`minimisation_leaves_every_field_the_art_15_export_reads`). The request-audit middleware's own metadata key set is pinned exactly — `http_status` and `authenticated`, nothing else — so \"no request metadata\" cannot regress into an append-only table with a 730-day window. Residual, accepted: the deployment still chooses, and one that leaves the switch off collects what it collects today. `docs/compliance/gdpr-compliance.md` §2a; `docs/deployment/README.md`."
+      },
+      {
+       "number": 444,
+       "title": "An instance stops while audit rows are queued or in flight, and they are lost",
+       "type": "Repudiation",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The request audit middleware writes off the request path: an entry waits in a bounded queue (4 096) for the one worker that appends it, so a response can go out before its row is written. A process that ends abruptly loses that queue, a request between its write and its audit row, and a GDPR purge between the erasure and `gdpr.user_pseudonymized`. Two stops did exactly that until T23.8.2: the minimal profile's reaction to a lost singleton lease was `std::process::exit(1)` from the renewal task — and a lease is lost after its holder could not reach the datastore, which is when the queue fills — and an orderly SIGTERM dropped the queue with the runtime too, because the teardown only set a flag (review P23W5-A1, A2).",
+       "mitigation": "Built (T23.8.2). A lost lease only raises a flag; the composition root then stops through the SIGTERM path — no new connections, in-flight requests finished, the cleanup task's current tick finished, so an erasure and its row stay together — and every orderly stop drains the audit queue with `AuditMiddleware::drain`, a FIFO barrier bounded at 5 s, before `serve` returns; after a lost lease it returns an error, the non-zero exit D-59 requires. The process exit survives only as a backstop after `LeaseTiming::lost_stop_deadline` (15 s). Tests: `crates/axiam-server/tests/minimal_profile_boot.rs` `an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_rows`; `crates/axiam-server/src/profile.rs` `a_lost_lease_starts_the_orderly_stop_at_once_and_the_backstop_only_after_the_deadline`, `an_orderly_stop_that_finishes_in_time_disarms_the_backstop`; `crates/axiam-audit/tests/service_and_middleware.rs` `drain_returns_once_every_queued_entry_is_written`, `drain_is_bounded_when_the_datastore_does_not_answer`. Residuals: a SIGKILL, an OOM kill and the backstop still lose the queue; the gRPC listener is not part of the orderly stop, and the full profile still exits mid-flight when an AMQP consumer dies (review P23W5-A11, A12)."
       }
      ],
-     "open": 0
+     "open": 1
     },
     {
      "id": "564e10a1-ee60-5981-91af-b9a8d05a75fa",
@@ -9008,7 +9017,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Open",
        "description": "SSF signals exist so that a receiver can act on a change: end a session AXIAM revoked, stop trusting a disabled account. Production is best effort (D-52): an event that cannot be produced or queued is dropped with a log line, and the operation that caused it succeeds. A receiver that never hears of a revocation keeps the session it would have ended, and nothing tells it, the tenant or the user that an event was due.",
-       "mitigation": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation."
+       "mitigation": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost, in the full profile: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation. In the minimal profile (`AXIAM__AMQP__ENABLED=false`, D-59) a queued push waits in an in-process queue and is lost on restart, and a dead letter is its audit row alone (T-445)."
       }
      ],
      "open": 2
@@ -9146,10 +9155,10 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 1
     }
    ],
-   "total": 54,
-   "open": 5,
+   "total": 55,
+   "open": 6,
    "bySeverity": {
-    "Medium": 33,
+    "Medium": 34,
     "High": 12,
     "Low": 9
    }
@@ -9157,7 +9166,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "description": "Runtime and platform view: the edge (ingress or reverse proxy), replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Since 1.0.0-beta08 the edge routes by path to a server that terminates its own TLS, and since 1.0.0-beta11 the gRPC listener may be published through the same edge. Threats here are largely deployment responsibilities rather than application code.",
+   "description": "Runtime and platform view: the edge (ingress or reverse proxy), replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Since 1.0.0-beta08 the edge routes by path to a server that terminates its own TLS, and since 1.0.0-beta11 the gRPC listener may be published through the same edge. Threats here are largely deployment responsibilities rather than application code. At model 2.34.0 (T23.8.2) the minimal profile (AXIAM__AMQP__ENABLED=false, D-59: SurrealDB only, single-instance by a singleton lease) enters with its accepted durability trade, T-445: queued deliveries and mail, and the audit rows they would have written, are lost on restart, and external audit ingestion is unavailable.",
    "width": 1448,
    "height": 848,
    "boundaries": [
@@ -9401,9 +9410,18 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Only the SHA-256 hash of the one-time bootstrap setup token is stored, and the first-boot mint is a no-op once a token row exists, so an operator who lost the token had exactly one documented recovery: wipe the volume (DF-019). A subcommand that re-mints it removes that cliff and introduces a second credential path to POST /api/v1/admin/bootstrap, the endpoint that creates the first super-admin. Ungated, it would work on a deployment that already has administrators, and would therefore be an account takeover available to anyone who can run a command in the pod — with no authentication in front of it and nothing in the audit trail naming a principal.",
        "mitigation": "axiam-server setup-token --remint refuses, with exit code 2 and no write at all, unless the deployment has no user row AND no redeemed setup token — that is, unless nobody has bootstrapped it. Before bootstrap there is no administrator to take over and no credential to reset, which is exactly the state an operator who lost the first-boot token is in; after it, the deployment has an authenticated way to create accounts and a password-reset flow, so re-minting is never the answer. Both gates are evaluated before the existing hash is deleted, so a refused call leaves the current token working. The token is printed to stdout only, never through tracing, so it does not reach the container log a second time; there is deliberately no --print, because the plaintext is not stored and storing it so that it could be printed would be the wrong fix. The subcommand parse is its own unit-tested function so that setup-token with the flag missing or mistyped exits 2 rather than silently starting a second server. Pinned by remint_replaces_the_previous_hash, remint_refuses_once_a_user_exists and remint_refuses_once_a_token_was_consumed, the last two asserting that the stored hash is unchanged after a refusal."
+      },
+      {
+       "number": 445,
+       "title": "The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart",
+       "type": "Repudiation",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "With `AXIAM__AMQP__ENABLED=false` webhooks, SSF push, outbound SCIM, CIBA ping and transactional mail ride bounded in-process queues. A message queued, or sleeping before a retry, when the process stops is gone, and so is the terminal audit row its delivery would have written: the trail ends at a `<kind>.delivery_attempt`, or holds nothing for a message never attempted, and an enqueue refused because a queue is full leaves only a log line. A lost `ExportReady` mail strands a ready GDPR export whose download token travelled only in it. External services' audit events have no ingestion path at all, and a producer that publishes to a broker left running is confirmed by the broker while nothing consumes.",
+       "mitigation": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
       }
      ],
-     "open": 0
+     "open": 1
     },
     {
      "id": "d6917d9a-710b-50eb-82ff-1cb71c7fb7b4",
@@ -9833,12 +9851,12 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 28,
-   "open": 5,
+   "total": 29,
+   "open": 6,
    "bySeverity": {
     "High": 17,
     "Critical": 2,
-    "Medium": 9
+    "Medium": 10
    }
   },
   {

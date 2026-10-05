@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:e17232bab9251d143920029b2efe662fecd12a407743781f7a81e5e22c65080b"
+    "x-axiam-spec-digest": "sha256:fdc06131c210e1fa4afc1b54130308683d758786bb8b54b9f1a1c899fe77e420"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -7616,6 +7616,12 @@
           },
           "400": {
             "description": "Unknown event, non-interceptable event, or out-of-range timeout"
+          },
+          "409": {
+            "description": "The registration would be enabled in the minimal profile (AXIAM__AMQP__ENABLED=false), which has no reactor transport; register it with enabled: false"
+          },
+          "503": {
+            "description": "This build composes no reactor transport, so an enabled registration is refused"
           }
         },
         "security": [
@@ -7733,6 +7739,12 @@
           },
           "400": {
             "description": "The merged registration is invalid"
+          },
+          "409": {
+            "description": "The merged registration would be enabled in the minimal profile (AXIAM__AMQP__ENABLED=false), which has no reactor transport"
+          },
+          "503": {
+            "description": "This build composes no reactor transport, so an enabled registration is refused"
           }
         },
         "security": [
@@ -13241,6 +13253,7 @@
           "health"
         ],
         "summary": "`GET /health` — liveness probe. Always returns 200.",
+        "description": "Also states the deployment profile (`full` | `minimal`) and, in `minimal`,\nwhat that profile does not provide. The state is optional so the route\nstays a liveness probe that answers even when mounted without it (`full`).",
         "operationId": "health",
         "responses": {
           "200": {
@@ -18855,12 +18868,29 @@
       },
       "HealthResponse": {
         "type": "object",
+        "description": "Response body for `GET /health`.\n\n`profile` and `unavailable` are additive (G-8, D-59): a client that reads\nonly `status` is unaffected.",
         "required": [
-          "status"
+          "status",
+          "profile"
         ],
         "properties": {
+          "profile": {
+            "type": "string",
+            "description": "The messaging profile this process runs: `full` (RabbitMQ is used) or\n`minimal` (`AXIAM__AMQP__ENABLED=false`, no broker).",
+            "example": "full"
+          },
           "status": {
             "type": "string"
+          },
+          "unavailable": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Present only in the `minimal` profile: the capabilities it does not\nprovide — `reactors`, `amqp_authz`, `amqp_audit_ingestion` and\n`decision_cache_broadcast`. Absent in `full`."
           }
         }
       },

@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:4e5d9485699a012ad52631997da3b47932b1e081aa90d3e7581b4c477ea2bf16"
+    "x-axiam-spec-digest": "sha256:04cab143d7e9a5efcd52924b932471fddb778962a3e75235a6ef5afab041d632"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -9095,6 +9095,409 @@
         ]
       }
     },
+    "/api/v1/scim-targets": {
+      "get": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`GET /api/v1/scim-targets`",
+        "operationId": "list_targets",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the tenant's outbound SCIM targets, oldest first, each with its delivery state; `search` matches name, base URL and id, before paging",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A paginated result set.",
+                  "required": [
+                    "items",
+                    "total",
+                    "offset",
+                    "limit"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "A registered SCIM target, as the management API returns it. **The\ncredential is never returned**, and there is no member that says anything\nabout it.",
+                        "required": [
+                          "id",
+                          "tenant_id",
+                          "name",
+                          "base_url",
+                          "enabled",
+                          "auth",
+                          "scope",
+                          "push_groups",
+                          "user_name_from",
+                          "deprovision",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "properties": {
+                          "auth": {
+                            "$ref": "#/components/schemas/ScimTargetAuth",
+                            "description": "How AXIAM authenticates to it (no credential)."
+                          },
+                          "base_url": {
+                            "type": "string",
+                            "description": "The downstream's SCIM service root."
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When the target was registered."
+                          },
+                          "deprovision": {
+                            "$ref": "#/components/schemas/DeprovisionPolicy",
+                            "description": "What happens downstream to a user who leaves scope or is no longer\nactive (erasure always deletes)."
+                          },
+                          "enabled": {
+                            "type": "boolean",
+                            "description": "Whether AXIAM pushes to it."
+                          },
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The target id."
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "The name."
+                          },
+                          "push_groups": {
+                            "type": "boolean",
+                            "description": "Whether groups are pushed too."
+                          },
+                          "scope": {
+                            "$ref": "#/components/schemas/ScimTargetScope",
+                            "description": "Which users it provisions."
+                          },
+                          "state": {
+                            "oneOf": [
+                              {
+                                "$ref": "#/components/schemas/ScimTargetDeliveryState",
+                                "description": "Delivery state: last success and failure, consecutive failures,\ndead-lettered total, last reconciliation."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "tenant_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The owning tenant."
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When it was last written: the version an update is conditional on."
+                          },
+                          "user_name_from": {
+                            "$ref": "#/components/schemas/UserNameSource",
+                            "description": "Which attribute becomes `userName`."
+                          }
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`POST /api/v1/scim-targets`",
+        "operationId": "create_target",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScimTargetInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The target was registered. When it is enabled, a reconciliation is started: the initial synchronisation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimTargetResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value rule — the message names the rule or the field"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "The credential cannot be sealed: pki_encryption_key is not configured"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scim-targets/{id}": {
+      "get": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`GET /api/v1/scim-targets/{id}`",
+        "operationId": "get_target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Target ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The target and its delivery state (last success and failure, a fixed-vocabulary failure reason, consecutive failures, dead-lettered total, last reconciliation). The credential is never returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimTargetResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such target in this tenant"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`PUT /api/v1/scim-targets/{id}`",
+        "description": "A **replacement**: an omitted optional member takes its default, except the\ncredential, which absent keeps.",
+        "operationId": "update_target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Target ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScimTargetInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The target's new configuration. Enabling a disabled target starts a reconciliation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimTargetResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value rule, or a move of the credential to another URL (`base_url` of a bearer target, `auth.token_url` of a client-credentials one) or a switch of `auth.type` without the credential — the message names the field"
+          },
+          "404": {
+            "description": "No such target in this tenant"
+          },
+          "409": {
+            "description": "The target changed since it was read (reload it and retry)"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "A credential was given and the deployment cannot seal it"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`DELETE /api/v1/scim-targets/{id}`",
+        "description": "The target, its link rows and its delivery state. **Nothing is\ndeprovisioned downstream**: the users and groups AXIAM created there stay.",
+        "operationId": "delete_target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Target ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The target, its link rows and its delivery state were deleted. Nothing is deprovisioned downstream: the users and groups AXIAM created in the service provider remain there, and AXIAM no longer knows them"
+          },
+          "404": {
+            "description": "No such target in this tenant"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scim-targets/{id}/reconcile": {
+      "post": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`POST /api/v1/scim-targets/{id}/reconcile`",
+        "description": "Start a reconciliation now.",
+        "operationId": "reconcile_target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Target ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The reconciliation was claimed and runs in the background: it queues a reference for every user and group in scope and for every linked resource, reads the downstream and repairs drift. Its outcome is on the target's delivery state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimReconcileAccepted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such target in this tenant"
+          },
+          "409": {
+            "description": "A reconciliation holds the claim (or ran within the last five minutes), or the target is disabled"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "Delivery is not wired in this deployment"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/scim-tokens": {
       "get": {
         "tags": [
@@ -16906,6 +17309,14 @@
           }
         }
       },
+      "DeprovisionPolicy": {
+        "type": "string",
+        "description": "What happens downstream to a user who falls out of scope or is no longer\nactive. Erasure always deletes, whatever this says.",
+        "enum": [
+          "deactivate",
+          "delete"
+        ]
+      },
       "DeviceAuthResponse": {
         "type": "object",
         "description": "Response returned when a device authenticates via certificate.",
@@ -22214,6 +22625,308 @@
           }
         }
       },
+      "ScimReconcileAccepted": {
+        "type": "object",
+        "description": "The body of a started reconciliation's `202`.",
+        "required": [
+          "target_id",
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Always `started`."
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The target being reconciled."
+          }
+        }
+      },
+      "ScimTargetAuth": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A static bearer token, sent as `Authorization: Bearer <token>` to\n`base_url`.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "bearer"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "OAuth2 client credentials: AXIAM obtains an access token from\n`token_url` with its client id and a stored client secret.",
+            "required": [
+              "token_url",
+              "client_id",
+              "type"
+            ],
+            "properties": {
+              "client_id": {
+                "type": "string",
+                "description": "The OAuth2 client id."
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The scope requested, if any."
+              },
+              "token_url": {
+                "type": "string",
+                "description": "The token endpoint the client secret is sent to."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "oauth2_client_credentials"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How AXIAM authenticates to the downstream service provider, without the\ncredential itself."
+      },
+      "ScimTargetDeliveryState": {
+        "type": "object",
+        "description": "A target's delivery state, as `GET` projects it. Fixed vocabulary only: the\nfailure reason is one of the deliverer's phrases, never a URL, a response\nbody or a value.",
+        "required": [
+          "consecutive_failures",
+          "dead_lettered_total"
+        ],
+        "properties": {
+          "consecutive_failures": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Failed attempts since the last success.",
+            "minimum": 0
+          },
+          "dead_lettered_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Deliveries dead-lettered over the target's lifetime.",
+            "minimum": 0
+          },
+          "last_failure_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When a delivery attempt last failed or was dead-lettered."
+          },
+          "last_failure_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, in the deliverer's fixed vocabulary."
+          },
+          "last_reconciled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When reconciliation last ran."
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When a delivery last succeeded."
+          }
+        }
+      },
+      "ScimTargetInput": {
+        "type": "object",
+        "description": "`create` and `update` (a **replacement**) body.",
+        "required": [
+          "name",
+          "base_url",
+          "auth",
+          "scope"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/ScimTargetAuth",
+            "description": "`bearer`, or `oauth2_client_credentials` with `token_url` (the same URL\npolicy), `client_id` (1–256 bytes) and an optional `scope`."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "The downstream's SCIM service root: an `https` URL under the outbound\naddress policy (no credentials or fragment, at most 2 048 bytes, no\nnon-public address, no local name)."
+          },
+          "credential": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "**Write-only.** The bearer token or the OAuth2 client secret, 1–4 096\nbytes. Required on create. On update, absent keeps the stored one —\nexcept that moving it to another URL (`base_url` of a bearer target,\n`token_url` of a client-credentials one) or switching `auth.type`\nrequires it again."
+          },
+          "deprovision": {
+            "$ref": "#/components/schemas/DeprovisionPolicy",
+            "description": "`deactivate` (default: `PATCH active=false`) or `delete`."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "`true` by default. A disabled target receives nothing."
+          },
+          "name": {
+            "type": "string",
+            "description": "1–128 bytes."
+          },
+          "push_groups": {
+            "type": "boolean",
+            "description": "Push groups too (every group for `all_users`, the listed ones for\n`groups`). `false` by default."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScimTargetScope",
+            "description": "`all_users`, or `groups` with 1–100 `group_ids` of this tenant: users\nwho are direct members of any listed group."
+          },
+          "user_name_from": {
+            "$ref": "#/components/schemas/UserNameSource",
+            "description": "`username` (default) or `email`."
+          }
+        }
+      },
+      "ScimTargetResponse": {
+        "type": "object",
+        "description": "A registered SCIM target, as the management API returns it. **The\ncredential is never returned**, and there is no member that says anything\nabout it.",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "base_url",
+          "enabled",
+          "auth",
+          "scope",
+          "push_groups",
+          "user_name_from",
+          "deprovision",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/ScimTargetAuth",
+            "description": "How AXIAM authenticates to it (no credential)."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "The downstream's SCIM service root."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the target was registered."
+          },
+          "deprovision": {
+            "$ref": "#/components/schemas/DeprovisionPolicy",
+            "description": "What happens downstream to a user who leaves scope or is no longer\nactive (erasure always deletes)."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether AXIAM pushes to it."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The target id."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "push_groups": {
+            "type": "boolean",
+            "description": "Whether groups are pushed too."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScimTargetScope",
+            "description": "Which users it provisions."
+          },
+          "state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ScimTargetDeliveryState",
+                "description": "Delivery state: last success and failure, consecutive failures,\ndead-lettered total, last reconciliation."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was last written: the version an update is conditional on."
+          },
+          "user_name_from": {
+            "$ref": "#/components/schemas/UserNameSource",
+            "description": "Which attribute becomes `userName`."
+          }
+        }
+      },
+      "ScimTargetScope": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Every user of the tenant.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "all_users"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Users who are direct members of any listed group.",
+            "required": [
+              "group_ids",
+              "type"
+            ],
+            "properties": {
+              "group_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "description": "Users who are direct members of any listed group."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "groups"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Which users a target provisions."
+      },
       "ScimTokenResponse": {
         "type": "object",
         "description": "Metadata only. The handle is never in a list response — it exists in\nplaintext exactly once, in [`CreateScimTokenResponse`].",
@@ -26124,6 +26837,14 @@
           }
         }
       },
+      "UserNameSource": {
+        "type": "string",
+        "description": "Which AXIAM attribute becomes the downstream `userName`. The mapping is a\nfixed attribute set, not a mapping language (D-57).",
+        "enum": [
+          "username",
+          "email"
+        ]
+      },
       "UserResponse": {
         "type": "object",
         "description": "Public-safe user representation (no password_hash, no mfa_secret).",
@@ -26524,6 +27245,10 @@
     {
       "name": "ssf",
       "description": "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"
+    },
+    {
+      "name": "scim-targets",
+      "description": "Outbound SCIM provisioning — the registry of downstream SCIM 2.0 service providers a tenant administrator manages, with each target's delivery state (CONTRACT §31)"
     },
     {
       "name": "ssf-receiver",

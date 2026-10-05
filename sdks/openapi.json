@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:fdc06131c210e1fa4afc1b54130308683d758786bb8b54b9f1a1c899fe77e420"
+    "x-axiam-spec-digest": "sha256:0647f9c8897988e2ffcc850bde1fba0e2e50ccbc222f5b5a388e6beb2df8b36c"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2606,6 +2606,9 @@
           "401": {
             "description": "Not authenticated"
           },
+          "403": {
+            "description": "The token is not a console sign-in's: no session row behind it, or AXIAM minted it for an OAuth2 client"
+          },
           "404": {
             "description": "Unknown, another user's, expired or already decided — one answer"
           }
@@ -2661,7 +2664,7 @@
             "description": "Not authenticated"
           },
           "403": {
-            "description": "The request asked for an authentication class this session has not achieved",
+            "description": "The request asked for an authentication class this session has not achieved (`step_up_required`, body below); or the token is not a console sign-in's (`authorization_denied`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2723,6 +2726,9 @@
           },
           "401": {
             "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The token is not a console sign-in's: no session row behind it, or AXIAM minted it for an OAuth2 client"
           },
           "404": {
             "description": "Unknown, another user's, expired, already decided, or changed since read"
@@ -9592,7 +9598,7 @@
             }
           },
           "400": {
-            "description": "A value rule, or a move of the credential to another URL (`base_url` of a bearer target, `auth.token_url` of a client-credentials one) or a switch of `auth.type` without the credential — the message names the field"
+            "description": "A value rule, or a move of the credential to another URL (`base_url` of a bearer target, `auth.token_url` or `base_url` of a client-credentials one) or a switch of `auth.type` without the credential — the message names the field"
           },
           "404": {
             "description": "No such target in this tenant"
@@ -23500,7 +23506,7 @@
               "string",
               "null"
             ],
-            "description": "**Write-only.** The bearer token or the OAuth2 client secret, 1–4 096\nbytes. Required on create. On update, absent keeps the stored one —\nexcept that moving it to another URL (`base_url` of a bearer target,\n`token_url` of a client-credentials one) or switching `auth.type`\nrequires it again."
+            "description": "**Write-only.** The bearer token or the OAuth2 client secret, 1–4 096\nbytes. Required on create. On update, absent keeps the stored one —\nexcept that moving it to another URL (`base_url` of a bearer target,\n`token_url` or `base_url` of a client-credentials one) or switching\n`auth.type` requires it again."
           },
           "deprovision": {
             "$ref": "#/components/schemas/DeprovisionPolicy",

@@ -1526,7 +1526,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "GET",
     "path": "/health",
-    "summary": "",
+    "summary": "Also states the deployment profile (`full` | `minimal`) and, in `minimal`, what that profile does not provide.",
     "public": true
    },
    {

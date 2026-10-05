@@ -1649,6 +1649,36 @@ initiation helper); OpenAPI; threat model; website.
 
 ### G-8 — AMQP-less deployment profile and whole-stack footprint — **P2**
 
+> **EXECUTED (partly) — G-8, W5: T23.8.1, 2026-10-05** (`b870dbb`, `216e05c`,
+> `7d18c5b`, `9baeacc`, `d79f81e`, `dd4b1a1`, `4370cb7`, `a52be02`; Sonnet 5.5).
+> The minimal profile per **D-59**. `AXIAM__AMQP__ENABLED` (default `true`); with
+> `false` there is no connection, no topology and no signing key, and the authz,
+> external-audit and cache-invalidation machinery is not started; the reactor gate
+> composes `UnavailableReactorTransport`. **One in-process outbound dispatcher**
+> (`axiam_amqp::outbound::inprocess`: a bounded channel of 1 024 per kind, retries
+> as bounded sleeping tasks, a dead letter is the audit row) over **one outcome
+> table** (`outbound::outcome`) that the AMQP loop now uses too, so webhook, SSF
+> push, SCIM push and CIBA ping keep their deliverers, retry policy and audit
+> vocabulary; mail on an in-process channel around the broker-free send path.
+> **Boot refusals**: the decision-cache broadcast, any enabled reactor
+> registration, and a second live instance through a **singleton lease** (schema
+> **v83**, TTL 30 s, renewed every 10 s, a boot waits 45 s for a stale lease; an
+> instance that loses it exits). At runtime reactor writes that would enable a
+> registration answer `409` (`503` stays for a build without a transport), gRPC
+> `FAILED_PRECONDITION`; `/health` reports `profile` and, minimal, `unavailable`.
+> The composition root moved from `main.rs` into `axiam_server::boot::serve`, so a
+> test boots it: `minimal_profile_boot` (5) runs a real login, a webhook to a
+> loopback receiver and an SSF SET verified against the deployment key with no
+> broker, and each refusal. Deployment docs gained *Minimal profile (no broker)*;
+> OpenAPI regenerated. Tests: 171 `axiam-amqp` lib tests (the outcome table through
+> both dispatchers), the mail channel, 10 lease and 13 reactor repository tests,
+> server profile tests, reactor `409`, gRPC, `/health`.
+>
+> What the plan did not anticipate. Booting the composition root in a test needed
+> it out of `main.rs`; two source-guard tests followed the move. Webhook delivery to
+> a loopback receiver needed the test seam the SSF deliverer has. The live-broker
+> tests remain CI's.
+
 **Target.** A documented *minimal* profile in which AXIAM runs with SurrealDB
 only, and a re-measured whole-stack resting footprint.
 

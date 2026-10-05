@@ -1321,3 +1321,43 @@ async fn an_anonymous_registration_cannot_obtain_the_ciba_grant() {
     assert_eq!(status, 400, "{json}");
     assert_eq!(json["error"], "invalid_client_metadata");
 }
+
+/// The registration gates are not the only line (D-17's shape): a CIBA row
+/// edited in the datastore to a public client, or to the `fapi2` profile, is
+/// refused at `bc-authorize` too.
+#[actix_web::test]
+async fn a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    f.db.query("UPDATE oauth2_client SET token_endpoint_auth_method = 'none' WHERE client_id = $c")
+        .bind(("c", f.other.client_id.clone()))
+        .await
+        .unwrap();
+    let body = format!(
+        "client_id={}&scope=openid&login_hint=alice",
+        f.other.client_id
+    );
+    let (status, json) = post_form(
+        &app,
+        &format!("/oauth2/bc-authorize?tenant_id={}", f.tenant_id),
+        body,
+    )
+    .await;
+    assert_eq!((status, json["error"].as_str()), (401, Some("invalid_client")));
+
+    f.db.query("UPDATE oauth2_client SET profile = 'fapi2' WHERE client_id = $c")
+        .bind(("c", f.ciba.client_id.clone()))
+        .await
+        .unwrap();
+    let (status, json) = bc_authorize!(app, f, &f.ciba, "&login_hint=alice");
+    assert_eq!(status, 401, "{json}");
+    // D-17 answers first for a fapi2 row on a shared secret; either way the
+    // request is refused and nothing is stored.
+    let mut count = f
+        .db
+        .query("SELECT count() AS n FROM ciba_request GROUP ALL")
+        .await
+        .unwrap();
+    let n: Option<i64> = count.take("n").unwrap();
+    assert_eq!(n.unwrap_or(0), 0);
+}

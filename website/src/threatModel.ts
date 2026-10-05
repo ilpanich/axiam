@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.32.0",
+ "version": "2.33.0",
  "diagramCount": 9,
- "total": 420,
- "open": 19,
- "mitigated": 401,
+ "total": 439,
+ "open": 23,
+ "mitigated": 416,
  "diagrams": [
   {
    "id": 0,
@@ -1897,7 +1897,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "description": "Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores. Since 1.0.0-beta13 this also covers the OpenID Connect Basic OP surface the W1–W9 waves added — the per-client browser login hop and its OP session cookie, the honour lane for the authentication-request parameters, the consent-gated address and phone scopes, client_secret_basic, POST /oauth2/userinfo and tenant-scoped discovery — and the resource-endpoint token validation the OpenID Foundation conformance runs found wanting (T-237…T-259).",
+   "description": "Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores. Since 1.0.0-beta13 this also covers the OpenID Connect Basic OP surface the W1–W9 waves added — the per-client browser login hop and its OP session cookie, the honour lane for the authentication-request parameters, the consent-gated address and phone scopes, client_secret_basic, POST /oauth2/userinfo and tenant-scoped discovery — and the resource-endpoint token validation the OpenID Foundation conformance runs found wanting (T-237…T-259). Since Phase 23 (G-7, T23.7.1, model 2.33.0) it also covers CIBA — Client-Initiated Backchannel Authentication: the backchannel authentication endpoint and the approval service the identity pages call, the pending-request store, and the CIBA client in a boundary of its own, the consumption device (T-421…T-439).",
    "width": 1438,
    "height": 1028,
    "boundaries": [
@@ -1924,6 +1924,14 @@ export const THREAT_MODEL: ThreatModel = {
      "w": 380,
      "h": 940,
      "label": "Data tier"
+    },
+    {
+     "id": "349c0354-dfae-5c05-ab28-e1c8cfb006cd",
+     "x": 24,
+     "y": 784,
+     "w": 260,
+     "h": 200,
+     "label": "CIBA consumption device"
     }
    ],
    "nodes": [
@@ -2807,6 +2815,180 @@ export const THREAT_MODEL: ThreatModel = {
       }
      ],
      "open": 0
+    },
+    {
+     "id": "85b33ce6-dea8-545c-8ee5-840c358057ab",
+     "kind": "actor",
+     "x": 49,
+     "y": 854,
+     "w": 150,
+     "h": 80,
+     "name": "CIBA client (consumption device)",
+     "lines": [
+      "CIBA client",
+      "(consumption device)"
+     ],
+     "description": "A confidential client registered for urn:openid:params:grant-type:ciba (poll or ping): a call centre, a point of sale, a back office acting for a customer. It knows whom it wants authenticated and holds none of their credentials (G-7).",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 434,
+       "title": "A `fapi2` client is served CIBA without the profile's signed authentication requests",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The FAPI-CIBA profile requires signed authentication requests and sender-constrained tokens. AXIAM does not verify signed authentication requests; serving a `fapi2` client the CIBA grant anyway would give a client registered under a profile that promises FAPI a flow that does not meet it, while its operator believes it does.",
+       "mitigation": "Built (T23.7.1, D-61). A `fapi2` client cannot hold the CIBA grant: refused at registration (admin API; a self-registered client is never `fapi2`) and again at `bc-authorize` for a row edited in the datastore. `backchannel_authentication_request_signing_alg` is refused at registration, a `request` or `request_uri` at `bc-authorize` is `invalid_request`, and discovery publishes no signing-algorithm list, so no client is told signed requests work. Sender-constraining follows the client's registration as for every grant. Tests: `crates/axiam-oauth2/src/ciba.rs` `stray_metadata_public_and_fapi_clients_and_unimplemented_members_are_refused`, `unsupported_parameters_are_refused_before_anything_else`; `crates/axiam-api-rest/tests/ciba_test.rs` `a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize` (a CIBA row edited to `fapi2` is refused and nothing is stored); `crates/axiam-oauth2/src/oidc.rs` `discovery_lists_exactly_the_ciba_that_is_implemented`; `crates/axiam-api-rest/tests/ciba_test.rs` `discovery_lists_exactly_what_is_implemented_in_both_issuer_forms`. Residual: FAPI-CIBA conformance is unavailable until signed requests are built — a gap in the feature, not an exposure."
+      },
+      {
+       "number": 438,
+       "title": "A self-registered client obtains the CIBA grant and targets the tenant's users",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Dynamic registration lets a stranger create a client (T-273). The CIBA grant lets a client send sign-in requests to any user of the tenant by naming them. A stranger who could register a CIBA client would gain exactly that — a notification channel to every user, and the T-424 attack, from a client nobody vetted.",
+       "mitigation": "Built (T23.7.1, D-62). RFC 7591 accepts the CIBA grant **only in `initial_access_token` mode** — the registration an administrator authorised by minting a single-use token — and refuses it in `anonymous` mode with `invalid_client_metadata`; the CIBA metadata is validated by the same rules as the admin API's, and a CIBA-only registration needs no redirect URI. Tests: `crates/axiam-oauth2/src/dcr.rs` `an_anonymous_registration_cannot_name_the_ciba_grant`, `an_initial_access_token_registration_may_name_it_without_redirect_uris`, `the_ciba_metadata_rules_apply_to_a_registration`; `crates/axiam-api-rest/tests/ciba_test.rs` `an_anonymous_registration_cannot_obtain_the_ciba_grant`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "3c33fdd2-685b-5587-8571-836183810548",
+     "kind": "process",
+     "x": 624,
+     "y": 644,
+     "w": 140,
+     "h": 140,
+     "name": "CIBA: /oauth2/bc-authorize + approval service",
+     "lines": [
+      "CIBA:",
+      "/oauth2/bc-authorize",
+      "+ approval",
+      "service"
+     ],
+     "description": "POST /oauth2/bc-authorize (and under /t/{tenant_id}) and axiam_oauth2::ciba::CibaService (T23.7.1; D-61, D-62, D-63): client authentication as at the token endpoint, hint resolution, validation and storage of the request, the user-notification port, and the approval service API (lookup_for_approval, approve, deny) the identity pages call (T23.7.2). The CIBA grant itself is redeemed at /oauth2/token.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 421,
+       "title": "A caller starts a backchannel authentication without authenticating as the client its registration names",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`POST /oauth2/bc-authorize` asks AXIAM to push a sign-in request at a user on another device. If a caller could reach it unauthenticated, as a public client, with a credential the registration does not name (SEC-093's shape), or — for a `fapi2` row edited in the datastore — with a shared secret, anybody who learned a client id could send the tenant's users sign-in prompts in that client's name, and the request would be attributed to a client that never made it.",
+       "mitigation": "Built (T23.7.1). The endpoint authenticates exactly as the token endpoint does: the same request context (the `Authorization: Basic` header, the client certificate rustls verified, a client assertion) and the same `TokenService::authenticate_client`, so the **registration** decides the method; the D-17 request-time rule (`fapi::enforce_client_authentication`) runs next. A CIBA client must be confidential — the grant is refused at registration (admin API and RFC 7591) and at request time to a `none` client — and must hold the grant (`unauthorized_client` otherwise). A failure is the uniform `401 invalid_client` and is recorded as the token endpoint's `oauth2.client_auth_failed` audit row, detached from the response and attributed by the SEC-087 rules. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_refuses_each_malformed_request_with_its_section_13_code` (a wrong secret is `401`, a client without the grant `unauthorized_client`, nothing stored), `ciba_client_authentication_failures_meet_the_same_lockout` (the audit rows name the CIBA grant and the client), `admin_registration_accepts_and_validates_the_ciba_metadata` (a public client is refused the grant), `a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize` (a row edited in the datastore to `none` is `invalid_client`); `crates/axiam-oauth2/src/ciba.rs` `stray_metadata_public_and_fapi_clients_and_unimplemented_members_are_refused`."
+      },
+      {
+       "number": 422,
+       "title": "`bc-authorize` becomes a user-enumeration oracle",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A CIBA request names its user by a hint — a username, an e-mail address or an ID token. CIBA Core §13 defines `unknown_user_id` for a hint that names nobody; answering it, or answering a locked or inactive account differently, or taking measurably longer for a real user (to send them a notification), would let every registered CIBA client test the tenant's usernames and addresses at the endpoint's rate limit.",
+       "mitigation": "Built (T23.7.1, D-63). A hint naming nobody, a user who may not sign in, or a user under brute-force lockout is **answered exactly like a real one**: the request is stored with no subject and the response carries the same members and values (`auth_req_id`, `expires_in`, `interval`); nothing can approve it, the client polls `authorization_pending` and then `expired_token`. `unknown_user_id` is never sent. The hint is resolved only after every other parameter has been validated, so a malformed request is refused identically whoever it names, and the user notification is handed to the port **detached** from the response, so its cost is not on the response path. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_is_not_a_user_oracle` (a real and an unknown hint get the same shape, the unknown one has no subject and answers `authorization_pending`, a locked user is nobody, only the real unlocked user is notified)."
+      },
+      {
+       "number": 423,
+       "title": "An `id_token_hint` names a user of another tenant or another client's relying party",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The key that signs ID tokens is the deployment's, shared by every tenant and every issuer form (T-279). An `id_token_hint` that were only signature-checked could carry a subject from another tenant, or an ID token issued to a different relying party, and make AXIAM push a sign-in request to a user the requesting client never authenticated — the CIBA form of token confusion.",
+       "mitigation": "Built (T23.7.1). The hint must verify under the deployment's EdDSA key **and** carry `aud` equal to the authenticated client **and** an `iss` this request may name (the deployment's root issuer or this tenant's path issuer); anything else is `invalid_request`, with one message whatever failed. The subject is then looked up in the request's tenant only (and the row's tenant re-checked), so a subject from another tenant resolves to nobody (T-422). Expiry is not required: the hint authenticates nothing, it only names the user to ask. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `an_id_token_hint_must_be_one_this_server_issued_to_this_client` (issued to this client: resolved; to another client: refused; signed by another key: refused); `bc_authorize_refuses_each_malformed_request_with_its_section_13_code` (an ID token this server never issued)."
+      },
+      {
+       "number": 429,
+       "title": "Brute-force lockout does not apply to CIBA (the Keycloak 26.7.x class)",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A user's brute-force lockout (`locked_until`) is read on the password path, and `account_may_act` — what the other grants check — reads the account's status but not that lockout. A backchannel grant that skipped it would mint tokens for an account the lockout was protecting; and client-authentication failures at a new endpoint that skipped the token endpoint's machinery would be a second, unaudited guessing surface.",
+       "mitigation": "Built (T23.7.1). A user may be the subject of a CIBA grant only while the account may act **and** is not under lockout (`ciba::user_may_be_subject`), checked three times: at `bc-authorize` (a locked user resolves to nobody and is not notified, T-422), at approval, and at redemption — after the approval is spent, so a lockout between approval and redemption burns it (`invalid_grant`). Client-authentication failures at `bc-authorize` and for the CIBA grant meet the token endpoint's machinery: the uniform `invalid_client`, the `oauth2.client_auth_failed` audit row, and buckets that end in `429` whatever the credential. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_is_not_a_user_oracle` (the locked user), `a_lockout_after_approval_refuses_the_redemption`, `ciba_client_authentication_failures_meet_the_same_lockout`."
+      },
+      {
+       "number": 430,
+       "title": "A request is approved by someone other than its user, with weaker authentication than it asked for, or after it was decided or expired — and the tokens claim the approval",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The approval is the only act of the person in the whole flow. An approval API that accepted any signed-in user, a version or status it did not check, an expired request, or an `acr` stated by its caller would let one user approve another's request, an MFA request be satisfied by a password, or tokens carry `auth_time`, `acr` and `amr` that no authentication produced.",
+       "mitigation": "Built (T23.7.1) in the service API the identity pages call (`CibaService::lookup_for_approval`, `approve`, `deny`). A request is shown and decidable only for **its own user**, while pending and unexpired, and the decision is conditional on the version the page read (T-427); the account must still be allowed to act and not be locked out. The `acr` recorded is **derived from the approving session's `amr`** (`acr_for`), never taken from the caller; a request whose `acr_values` named a class the session did not achieve is not approved — the page is told which class to step up to. The minted ID token carries the approval's `auth_time`, the reported `acr` and the `amr`, the access token names the approving session in `sid` (ending it ends them), and the refresh token keeps the same snapshot (D-9). Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `pending_then_slow_down_then_tokens_with_the_approvals_evidence` (a password-only session cannot approve an MFA request; the tokens carry the approval's evidence and session), `denied_is_access_denied_and_expired_is_expired_token` (another user cannot deny; an expired request cannot be approved); `crates/axiam-db/tests/ciba_request_repository_test.rs` `approval_is_conditional_on_version_user_status_and_expiry`."
+      },
+      {
+       "number": 435,
+       "title": "CIBA requests and decisions are not attributable",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Open",
+       "description": "A sign-in request pushed at a user, and that user's approval or refusal, are security decisions. Without a record, a stream of prompts a user reports, or an approval they dispute, could not be traced to the client that asked or to the session that decided.",
+       "mitigation": "Partly built (T23.7.1): every stored request is audited as `oauth2.ciba_initiated` (the client, the request, the delivery mode and the expiry — never the hint or the binding message), and every client-authentication failure as `oauth2.client_auth_failed`. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_validates_stores_and_notifies` (one row per stored request), `ciba_client_authentication_failures_meet_the_same_lockout`. **Open until T23.7.2** audits each approval and denial with the approving user and session from the page that makes them."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "fdbd0326-30ee-5184-abdd-7ecdd22a271a",
+     "kind": "store",
+     "x": 1254,
+     "y": 754,
+     "w": 150,
+     "h": 80,
+     "name": "ciba_request (pending CIBA requests)",
+     "lines": [
+      "ciba_request",
+      "(pending CIBA",
+      "requests)"
+     ],
+     "description": "ciba_request (schema v80): one row per bc-authorize — tenant, client, SHA-256 of the auth_req_id (unique), the resolved user or none, scopes, binding message, acr_values, resource, delivery mode, status, version, interval, last poll, expiry and the approval's evidence; a ping-mode request's auth_req_id and client_notification_token sealed under pki_encryption_key. Swept by the ciba_request job; removed with its user and its tenant.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 425,
+       "title": "An `auth_req_id` is guessed, stolen from storage or redeemed by a client that did not start it",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Once a user approves, the `auth_req_id` is what turns the approval into tokens. A short or predictable identifier could be guessed; one stored in clear could be read from the datastore or a backup; and one honoured for any authenticated client would let a client that learned another's identifier — from a log, a shared proxy, its own tenant's data — collect tokens for a user who approved somebody else.",
+       "mitigation": "Built (T23.7.1). 256 bits of CSPRNG, base64url (CIBA Core asks for 128); only its SHA-256 is stored, under a unique index; the raw value is returned once and never logged. Redemption is conditional on the **client that started the request** in the datastore's own `WHERE` (and on the tenant), and the token endpoint matches the row to the authenticated client before it writes anything: another client's or tenant's identifier is `invalid_grant`, exactly like an unknown one, and leaves the row untouched. A ping-mode request's recoverable copy is sealed (T-432). Tests: `crates/axiam-oauth2/src/ciba.rs` `auth_req_ids_are_high_entropy_and_hashed`; `crates/axiam-db/tests/ciba_request_repository_test.rs` `redemption_needs_approval_the_starting_client_and_happens_once`, `the_hash_is_unique`, `a_request_round_trips_every_column`; `crates/axiam-api-rest/tests/ciba_test.rs` `another_clients_or_tenants_auth_req_id_is_invalid_grant` (no write for the foreign client; the owner still redeems), `bc_authorize_validates_stores_and_notifies` (only the digest is stored)."
+      },
+      {
+       "number": 426,
+       "title": "Two concurrent token requests redeem one approval twice",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A CIBA client polls on an interval and retries; the moment a user approves there is likely a request in flight. A read-then-write redemption would let two requests both see `approved` and both mint a token set from one approval — T-163's class, on a new credential.",
+       "mitigation": "Built (T23.7.1). Redemption is the **X6 two-layer arbiter** the device grant uses: a guarded `UPDATE … WHERE status = 'approved' AND client_id = … AND expires_at > now RETURN BEFORE` inside an explicit transaction (the engine aborts a conflicting loser), then a per-attempt nonce read back after the commit in a query of its own, so only the caller whose nonce survived mints tokens; a lost race is `invalid_grant`, never a `5xx`. Single use is conditional on an attested persistent engine, as for every X6 path. Tests: `crates/axiam-db/tests/ciba_request_repository_test.rs` `concurrent_redemptions_yield_exactly_one_winner` (50 rounds of 8 racers on `surrealkv`); `crates/axiam-api-rest/tests/ciba_test.rs` `concurrent_redemptions_yield_exactly_one_token_set` (two concurrent token requests over HTTP on `surrealkv`, six rounds: one `200`, the other refused), `pending_then_slow_down_then_tokens_with_the_approvals_evidence` (a second redemption is `invalid_grant`)."
+      },
+      {
+       "number": 427,
+       "title": "The user deciding and the client polling overwrite each other, or a request moves on a marker before it is validated",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Two parties write the same row without coordinating: the user approving or denying, and the client whose every token request records a poll. Read-modify-write between them (T-406's class) could put back a status the other changed, let a stale approval page approve a request that was denied in another tab, or let a poll stamp a request it does not own; and a transition driven by a marker rather than by a validated request (T-404's lesson) could move a request no authenticated party asked to move.",
+       "mitigation": "Built (T23.7.1). Every transition is one statement carrying its precondition: approval and denial on `status = 'pending'`, the `version` the page read, the request's own user and an unexpired request; expiry on `status IN [pending, approved]`, the version and a past expiry; redemption as T-426. A poll is a compare-and-set on the `last_polled_at` the token endpoint read, and does **not** move `version`, so a client polling every five seconds cannot make an approval page's read stale; a lost compare-and-set is answered `slow_down`. Nothing is written for a request before the client is authenticated and matched to it. Tests: `crates/axiam-db/tests/ciba_request_repository_test.rs` `approval_is_conditional_on_version_user_status_and_expiry`, `denial_is_conditional_and_final`, `polls_compare_and_set_without_moving_the_version`; `crates/axiam-api-rest/tests/ciba_test.rs` `another_clients_or_tenants_auth_req_id_is_invalid_grant` (a foreign client writes nothing), `denied_is_access_denied_and_expired_is_expired_token` (another user cannot deny)."
+      },
+      {
+       "number": 432,
+       "title": "A ping-mode request's notification credential and identifier are readable at rest",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Ping mode needs two values in clear at delivery: the `auth_req_id` (the notification's body) and the `client_notification_token` the client supplied (the bearer AXIAM presents to the client's endpoint). Stored in clear, a datastore or backup reader could forge notifications to the client and learn a live identifier.",
+       "mitigation": "Built (T23.7.1). Both are sealed together with AES-256-GCM under `pki_encryption_key` (the key webhook secrets, SSF push headers and SCIM target credentials use), nonce in its own column; no read of the table projects either column except `CibaRequestRepository::ping_credentials`, for the deliverer; the type's `Debug` redacts both. With no key configured a ping-mode request is refused, never stored in clear; a poll-mode request holds neither. Tests: `crates/axiam-db/tests/ciba_request_repository_test.rs` `ping_credentials_are_sealed_and_need_the_key` (refused without the key; neither value appears in the stored row; opens to what was stored); `crates/axiam-core/src/models/ciba.rs` `ping_credentials_never_print`."
+      },
+      {
+       "number": 436,
+       "title": "Pending requests keep a person's identity, binding message and approval after they are needed, or after erasure",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A request row names a user, carries the client's binding message (often a transaction description) and, once approved, the session and authentication methods of the approval. Kept indefinitely, or surviving the user's erasure or the tenant's deletion, it is personal data held without purpose.",
+       "mitigation": "Built (T23.7.1). A request lives at most ten minutes (`requested_expiry` 30–600 s); the cleanup loop's `ciba_request` job — listed in `/health/jobs` from boot — marks every pending or approved request past its expiry `expired`, and deletes any request ten minutes after it expired (long enough to answer a late poll `expired_token`). The row carries `user_id`, so both erasure paths delete the user's requests, and the tenant-delete transaction deletes the tenant's. Tests: `crates/axiam-db/tests/ciba_request_repository_test.rs` `expiry_is_marked_conditionally_and_the_sweep_marks_then_deletes`, `erasure_and_tenant_deletion_remove_the_requests`; `crates/axiam-server/src/job_health.rs` `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (the `ciba_request` sweep is recorded by the loop and registered); `crates/axiam-db/src/schema.rs` `v80_defines_the_ciba_request_store_additively`."
+      }
+     ],
+     "open": 0
     }
    ],
    "edges": [
@@ -3299,14 +3481,204 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "HTTPS",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "b9a496a9-5911-5bd3-864d-6ab46243807c",
+     "path": "M199,870.3 L627.2,735.1",
+     "name": "backchannel authentication request",
+     "description": "",
+     "label": "backchannel authentication request (HTTPS, client auth)",
+     "labelLines": [
+      "backchannel authentication request",
+      "(HTTPS, client auth)"
+     ],
+     "lx": 413.1,
+     "ly": 802.7,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 437,
+       "title": "A `binding_message` misleads the user: overlong, multi-line or direction-reversed text",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The binding message is the only text the client's device and the user's approval page both show, and the user compares them to know they are approving the request in front of them. Text with control characters, line breaks or bidirectional overrides could make the two screens disagree or hide what is being approved; an unbounded one could carry a payload into a notification.",
+       "mitigation": "Built (T23.7.1). At most 64 characters, not blank, no control character and no bidirectional embedding or override (`invalid_binding_message`, CIBA Core §13); stored trimmed and passed to the notification port as validated. Tests: `crates/axiam-oauth2/src/ciba.rs` `binding_messages_are_bounded_and_printable`; `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_refuses_each_malformed_request_with_its_section_13_code` (too long, a line break)."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "1e71bc5c-8cee-5772-985c-022d90f5f6ad",
+     "path": "M763.5,722.7 L1254,784.6",
+     "name": "store pending request",
+     "description": "",
+     "label": "store pending request (hashed auth_req_id)",
+     "labelLines": [
+      "store pending request (hashed",
+      "auth_req_id)"
+     ],
+     "lx": 1008.7,
+     "ly": 753.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "b852cced-d3c4-589b-b3bc-e8d06d418183",
+     "path": "M629.5,686.8 L199,505.6",
+     "name": "sign-in request notification",
+     "description": "",
+     "label": "sign-in request notification (port, T23.7.2)",
+     "labelLines": [
+      "sign-in request notification (port,",
+      "T23.7.2)"
+     ],
+     "lx": 414.2,
+     "ly": 596.2,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "e-mail / push",
+     "threats": [
+      {
+       "number": 424,
+       "title": "A flood of sign-in prompts wears a user down until one is approved by mistake",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "Every CIBA request may notify its user. A client — or several — sending request after request for one person turns the notification channel into the *MFA fatigue* attack: prompts arrive until the user approves one to make them stop, or approves the wrong one. The prompt is also the only place the user can tell a legitimate request from a hostile one.",
+       "mitigation": "Partly built (T23.7.1); **open until T23.7.2** builds the notification and the approval page. Built: one user is sent at most **three** notifications a minute whatever the clients asking (a fixed shared bucket no preset moves); a request past it is still stored and answered as usual, so the throttle reveals nothing (T-422); every client has its own `bc-authorize` bucket after authentication besides the route's; the `binding_message` is bounded and printable (T-437); a request expires in at most ten minutes. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_validates_stores_and_notifies` (one notification per stored request, carrying the binding message and no secret), `the_limiter_counts_bc_authorize`. Closes with T23.7.2: the approval page shows the client and the binding message and requires a full sign-in, MFA included, before one deliberate approval — never an approval from the notification itself."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "5638e544-e852-5b31-92d2-a9330fce072b",
+     "path": "M199,505.6 L629.5,686.8",
+     "name": "approve / deny (identity pages)",
+     "description": "",
+     "label": "approve / deny (identity pages) (T23.7.2)",
+     "labelLines": [
+      "approve / deny (identity pages)",
+      "(T23.7.2)"
+     ],
+     "lx": 414.2,
+     "ly": 596.2,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 431,
+       "title": "The approval page approves without a full sign-in, or is driven cross-site",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Open",
+       "description": "The approval is a state-changing act a user performs in a browser, on a request a third party started. A page that approved on a weak or stale session, that a hostile page could submit cross-site or frame, or that hid which client asked and what binding message it showed, would turn CIBA into a way to obtain a user's approval without their informed consent.",
+       "mitigation": "**Open until T23.7.2 builds the page.** T23.7.1 provides only the service API it calls (T-430): no route approves or denies a request today, so nothing is exposed yet. T23.7.2 must mount the page on the identity pages (T15.7) behind full authentication with MFA where the request or the tenant requires it, under `/api/v1`'s CSRF double-submit and the frame-ancestor policy, show the client and the binding message from `lookup_for_approval`, pass the version back, and audit the decision (T-435)."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "befc0d61-587e-5c27-b0bd-76337daf35e1",
+     "path": "M146.9,854 L409.3,394.8",
+     "name": "token request with auth_req_id",
+     "description": "",
+     "label": "token request with auth_req_id (HTTPS, client auth)",
+     "labelLines": [
+      "token request with auth_req_id",
+      "(HTTPS, client auth)"
+     ],
+     "lx": 278.1,
+     "ly": 624.4,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 428,
+       "title": "A limiter forgets the CIBA endpoint or grant, so initiation and polling are unmetered",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The Keycloak 26.7 lesson: a rate limit that covers every grant but one is a rate limit an attacker routes around through that one. `bc-authorize` allocates a row per request and may notify a person; the CIBA grant is polled in a loop by design. Either left out of the limiter, or polled without a per-request interval, becomes a storage, notification and CPU sink.",
+       "mitigation": "Built (T23.7.1). `bc-authorize` has **its own bucket and preset** (`AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN`, default 60; gateway 600, mesh 6000; a docs-parity row in `docs/deployment/rate-limit-sizing.md`), counted on the route by the per-key governor and the shared counter (keyed like `/oauth2/token`) and again per authenticated client in the handler. The CIBA grant is dispatched **inside** the token endpoint after its route limiters, its public-client bucket and its DPoP check, so `TOKEN_PER_MIN` counts it like every grant; and each request carries its own interval: a token request inside it is `slow_down` and raises the interval by 5 s, to 60 s. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `the_limiter_counts_bc_authorize` (429 after the budget), `the_limiter_counts_the_ciba_grant` (429 after the budget), `pending_then_slow_down_then_tokens_with_the_approvals_evidence` (the interval grows 5 → 10 → 15); `crates/axiam-oauth2/src/ciba.rs` `polling_inside_the_interval_slows_down_and_the_interval_grows_to_a_cap`; `crates/axiam-api-rest/src/config/rate_limit.rs` `documented_defaults_match_shipped_config`, `documented_presets_match_applied_profiles`."
+      },
+      {
+       "number": 439,
+       "title": "Tokens from a CIBA grant reach beyond what the request asked for and the user approved",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The user approves a request the client made: a set of scopes, for a resource, under the client's registration. A redemption that could add scopes, name a different `resource`, or mint for a client other than the one that asked would hand out a token wider than the approval.",
+       "mitigation": "Built (T23.7.1). `scope` must include `openid` and name only scopes the client is registered for (`invalid_scope` otherwise); the RFC 8707 `resource` is validated against the client's `allowed_resources` at `bc-authorize` and **bound**: a token request may repeat it, never change it (`invalid_target`); tokens are minted for the redeeming client, which must be the starting client (T-425), with the request's scopes and the approval's evidence (T-430). Tests: `crates/axiam-oauth2/src/ciba.rs` `scope_must_carry_openid_and_stay_registered`; `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_refuses_each_malformed_request_with_its_section_13_code` (`invalid_scope`, `invalid_target`), `pending_then_slow_down_then_tokens_with_the_approvals_evidence` (the scope and client of the minted tokens)."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "568bd2f3-589f-5dfa-aac6-cd31ef264941",
+     "path": "M506.1,366.3 L1254,755",
+     "name": "redeem CIBA request",
+     "description": "",
+     "label": "redeem CIBA request (X6 arbiter)",
+     "labelLines": [
+      "redeem CIBA request (X6 arbiter)"
+     ],
+     "lx": 880.1,
+     "ly": 560.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "a052c53c-af43-5c92-bb5b-74ff87dff55c",
+     "path": "M627.2,735.1 L199,870.3",
+     "name": "ping notification",
+     "description": "",
+     "label": "ping notification (T23.7.2)",
+     "labelLines": [
+      "ping notification (T23.7.2)"
+     ],
+     "lx": 413.1,
+     "ly": 802.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 433,
+       "title": "The ping notification endpoint is used to reach internal services",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Open",
+       "description": "A ping-mode client registers `backchannel_client_notification_endpoint`, and AXIAM will POST to it from inside the deployment with a bearer token attached. Pointed at a metadata service, a loopback admin port or a private address — or at a public name that resolves to one, or that redirects — the deliverer becomes a request forger (T-112 and T-392's class).",
+       "mitigation": "Write time is built (T23.7.1): the endpoint is required in ping mode, refused in poll mode, and held to the webhook outbound address policy (`validate_push_endpoint`: absolute `https`, a host, no credentials or fragment, no IP literal that is not globally routable, no `localhost`, `*.local` or `*.internal`) at the admin API and RFC 7591. Tests: `crates/axiam-oauth2/src/ciba.rs` `a_ping_registration_needs_a_public_https_endpoint`; `crates/axiam-api-rest/tests/ciba_test.rs` `admin_registration_accepts_and_validates_the_ciba_metadata` (the metadata address is refused). **Open until T23.7.2** builds delivery: it must go through `guarded_fetch_no_redirect` with `allow_private = false`, re-read the endpoint before it sends (W4 F4 §15), and keep failure text a fixed vocabulary."
+      }
+     ],
+     "open": 1
     }
    ],
-   "total": 60,
-   "open": 0,
+   "total": 79,
+   "open": 4,
    "bySeverity": {
-    "High": 26,
-    "Medium": 25,
-    "Low": 4,
+    "High": 34,
+    "Medium": 35,
+    "Low": 5,
     "Critical": 5
    }
   },

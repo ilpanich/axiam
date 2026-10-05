@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:04cab143d7e9a5efcd52924b932471fddb778962a3e75235a6ef5afab041d632"
+    "x-axiam-spec-digest": "sha256:8819c27753ff576b9571d361771d7143c9ea245021872f71f5e087476f88338c"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -4484,6 +4484,24 @@
                           "authn_request_params": {
                             "$ref": "#/components/schemas/AuthnRequestParamsMode",
                             "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
+                          },
+                          "backchannel_client_notification_endpoint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "G-7 — the ping-mode notification endpoint."
+                          },
+                          "backchannel_token_delivery_mode": {
+                            "oneOf": [
+                              {
+                                "$ref": "#/components/schemas/CibaDeliveryMode",
+                                "description": "G-7 — the CIBA delivery mode; absent for a client without the grant."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           },
                           "browser_sso": {
                             "type": "boolean",
@@ -13477,6 +13495,78 @@
         }
       }
     },
+    "/oauth2/bc-authorize": {
+      "post": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`POST /oauth2/bc-authorize` — CIBA Core §7.",
+        "operationId": "bc_authorize",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/BackchannelAuthenticationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Request stored; poll or await the ping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackchannelAuthenticationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "CIBA Core section 13 error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Client authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/oauth2/device_authorization": {
       "post": {
         "tags": [
@@ -15354,6 +15444,151 @@
           "honour"
         ]
       },
+      "BackchannelAuthenticationRequest": {
+        "type": "object",
+        "description": "`POST /oauth2/bc-authorize` (CIBA Core §7.1), form-encoded.",
+        "properties": {
+          "acr_values": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Requested authentication context classes, space-delimited."
+          },
+          "binding_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Shown to the user on both devices."
+          },
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`private_key_jwt` credential."
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Must be `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`."
+          },
+          "client_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client, unless it authenticates with HTTP Basic or an assertion\nthat names it."
+          },
+          "client_notification_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Bearer token for the ping notification. Required in ping mode."
+          },
+          "client_secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`client_secret_post` credential."
+          },
+          "id_token_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An ID token AXIAM issued to this client."
+          },
+          "login_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A username or e-mail address in the tenant."
+          },
+          "login_hint_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Not supported; refused."
+          },
+          "request": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A signed authentication request. Not supported; refused."
+          },
+          "request_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Not supported; refused."
+          },
+          "requested_expiry": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Requested lifetime in seconds."
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 8707 target service."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Space-delimited; must include `openid`."
+          },
+          "user_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Not supported; refused."
+          }
+        }
+      },
+      "BackchannelAuthenticationResponse": {
+        "type": "object",
+        "description": "`POST /oauth2/bc-authorize` success body (CIBA Core §7.3).",
+        "required": [
+          "auth_req_id",
+          "expires_in",
+          "interval"
+        ],
+        "properties": {
+          "auth_req_id": {
+            "type": "string",
+            "description": "The identifier the client redeems at the token endpoint. Returned once."
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the request expires.",
+            "minimum": 0
+          },
+          "interval": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minimum seconds between token requests.",
+            "minimum": 0
+          }
+        }
+      },
       "BatchCheckAccessBody": {
         "type": "object",
         "description": "Body for a batch authorization check.",
@@ -15849,6 +16084,27 @@
           "reason_code": {
             "type": "string",
             "description": "B1: machine-readable decision reason — `allowed`, `no_grant`, or\n`denied_by_rule` (SDK contract §11).\n\nBoth refusals still return `allowed: false` and still map to 403, so a\nclient that reads only `allowed` is unaffected. The distinction matters\nto the person on the other end: `no_grant` means \"ask an admin for\naccess\", `denied_by_rule` means \"an admin has already decided\" — and a\nUI that cannot tell them apart sends users to raise tickets that will\nbe refused.\n\nT-15-02 still holds: this is a fixed, closed vocabulary of three\nvalues. It says which *kind* of decision was made, never which rule\nmade it or where in the resource tree it sits."
+          }
+        }
+      },
+      "CibaDeliveryMode": {
+        "type": "string",
+        "description": "How a CIBA client learns that a request has been decided (CIBA Core §5).\n\n`push` is deliberately absent: AXIAM does not offer it, and the FAPI-CIBA\nprofile forbids it — push delivers the tokens themselves to a client\nendpoint, which makes the notification endpoint a token sink.",
+        "enum": [
+          "poll",
+          "ping"
+        ]
+      },
+      "CibaPingNotification": {
+        "type": "object",
+        "description": "The ping-mode notification body (CIBA Core §10.2) — the contract T23.7.2's\ndeliverer sends, as `POST` to the client's\n`backchannel_client_notification_endpoint` with\n`Authorization: Bearer <client_notification_token>` and\n`Content-Type: application/json`.\n\nNothing else is in it: the notification says *that* a request was decided,\nnever how; the client learns the outcome from the token endpoint, where it\nauthenticates.",
+        "required": [
+          "auth_req_id"
+        ],
+        "properties": {
+          "auth_req_id": {
+            "type": "string",
+            "description": "The `auth_req_id` the client was given at `bc-authorize`."
           }
         }
       },
@@ -16550,12 +16806,40 @@
             "$ref": "#/components/schemas/AuthnRequestParamsMode",
             "description": "X7.1 — whether this client's authorization requests may carry the\nOpenID Connect authentication-request parameters (`prompt`, `max_age`,\n`acr_values`, `claims`, `id_token_hint`, `login_hint`, `display`,\n`ui_locales`, `claims_locales`).\n\n`\"ignore\"` (the default) is what every AXIAM client has always done:\nthey are dropped and reach no decision. `\"honour\"` opts in, and is\n**refused on a `fapi2` client** at both this gate and the authorization\nendpoint — the two are different answers to the same question about\nwhat a request from this client means."
           },
+          "backchannel_authentication_request_signing_alg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — CIBA Core §4. **Refused**: signed authentication requests are not\nsupported by this server."
+          },
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — CIBA Core §4: where a ping-mode client is notified. Required in\nping mode and refused in poll mode; an absolute `https` URL held to the\nwebhook address policy (no credentials, no fragment, no private,\nloopback or internal host)."
+          },
           "backchannel_logout_uri": {
             "type": [
               "string",
               "null"
             ],
             "description": "B5 — where OIDC back-channel logout tokens are delivered. Omit for a\nclient that does not participate."
+          },
+          "backchannel_token_delivery_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — CIBA Core §4 `backchannel_token_delivery_mode`: `poll` or\n`ping`. Required when `grant_types` holds\n`urn:openid:params:grant-type:ciba`, refused otherwise; `push` is not\noffered. A CIBA client must be confidential and on the `standard`\nprofile."
+          },
+          "backchannel_user_code_parameter": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "G-7 — CIBA Core §4. `true` is **refused**: this server holds no user\ncode to verify."
           },
           "browser_sso": {
             "type": "boolean",
@@ -19496,6 +19780,24 @@
             "$ref": "#/components/schemas/AuthnRequestParamsMode",
             "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
           },
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — the ping-mode notification endpoint."
+          },
+          "backchannel_token_delivery_mode": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CibaDeliveryMode",
+                "description": "G-7 — the CIBA delivery mode; absent for a client without the grant."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "browser_sso": {
             "type": "boolean",
             "description": "X7.3 — echoed for the same reason."
@@ -19807,6 +20109,9 @@
           "device_authorization_endpoint",
           "pushed_authorization_request_endpoint",
           "require_pushed_authorization_requests",
+          "backchannel_authentication_endpoint",
+          "backchannel_token_delivery_modes_supported",
+          "backchannel_user_code_parameter_supported",
           "end_session_endpoint",
           "backchannel_logout_supported",
           "backchannel_logout_session_supported",
@@ -19841,6 +20146,10 @@
             "type": "boolean",
             "description": "RFC 9207 §3 — X5.1. AXIAM emits `iss` on **every** authorization\nresponse, success and error alike, for every client, so this is\nunconditionally true. See `handlers::oauth2::append_issuer` for why it\nis not made conditional."
           },
+          "backchannel_authentication_endpoint": {
+            "type": "string",
+            "description": "CIBA Core §4 — G-7. Advertised unconditionally because the endpoint\nis always mounted; whether a client may use it is its registration."
+          },
           "backchannel_logout_session_supported": {
             "type": "boolean",
             "description": "The claim that AXIAM puts `sid` in its logout tokens — which it does,\nunconditionally. An RP reads this to know it can match a logout token\nto one session rather than having to end every session for the subject."
@@ -19848,6 +20157,17 @@
           "backchannel_logout_supported": {
             "type": "boolean",
             "description": "Back-Channel Logout 1.0 §3."
+          },
+          "backchannel_token_delivery_modes_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CIBA Core §4 — `poll` and `ping`. `push` is not offered."
+          },
+          "backchannel_user_code_parameter_supported": {
+            "type": "boolean",
+            "description": "CIBA Core §4 — `false`: AXIAM accepts no `user_code`.\n`backchannel_authentication_request_signing_alg_values_supported` is\nabsent rather than empty: signed authentication requests are not\nsupported, and absence is how CIBA Core §4 says so."
           },
           "claims_parameter_supported": {
             "type": "boolean",
@@ -21428,6 +21748,34 @@
         "type": "object",
         "description": "An RFC 7591 §2 client metadata document, as a registration request.\n\nOnly the members AXIAM can act on are fields. RFC 7591 §2 says a server\n\"MUST ignore any metadata parameters it does not understand\", which is what\n`serde` does with the rest — `client_uri`, `logo_uri`, `contacts`,\n`tos_uri`, `policy_uri` and the localised `client_name#xx` forms all arrive\nfrom MCP Inspector and are dropped. `software_statement` is the one\nunimplemented member that is **not** ignored: see\n[`DcrError::UnsupportedSoftwareStatement`].",
         "properties": {
+          "backchannel_authentication_request_signing_alg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4 — refused: signed authentication requests are not\nimplemented."
+          },
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4 `backchannel_client_notification_endpoint` — ping only,\nunder the webhook URL policy."
+          },
+          "backchannel_token_delivery_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4 `backchannel_token_delivery_mode` (G-7). Accepted only\nwith the CIBA grant, which only an initial-access-token registration\nmay name (D-62)."
+          },
+          "backchannel_user_code_parameter": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "CIBA Core §4 — `true` is refused: there is no user code to check."
+          },
           "client_name": {
             "type": [
               "string",
@@ -21510,6 +21858,20 @@
           "registration_client_uri"
         ],
         "properties": {
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4, as stored. Present only for a ping-mode client."
+          },
+          "backchannel_token_delivery_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4, as stored (G-7). Present only for a CIBA client."
+          },
           "client_id": {
             "type": "string",
             "description": "The issued `client_id`."
@@ -25283,6 +25645,13 @@
               "null"
             ]
           },
+          "auth_req_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `auth_req_id` a CIBA client received from `/oauth2/bc-authorize`,\nfor `grant_type=urn:openid:params:grant-type:ciba`. The REST layer\nroutes that grant to `TokenService::exchange_ciba`."
+          },
           "claim_token": {
             "type": [
               "string",
@@ -25876,12 +26245,40 @@
               }
             ]
           },
+          "backchannel_authentication_request_signing_alg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — refused, as on create."
+          },
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — see the create DTO. `\"\"` clears."
+          },
           "backchannel_logout_uri": {
             "type": [
               "string",
               "null"
             ],
             "description": "Pass an empty string to clear a previously registered URI — the one\nedit an operator makes when an RP is decommissioned."
+          },
+          "backchannel_token_delivery_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — see the create DTO. `\"\"` clears."
+          },
+          "backchannel_user_code_parameter": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "G-7 — `true` refused, as on create."
           },
           "browser_sso": {
             "type": [

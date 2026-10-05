@@ -167,6 +167,14 @@ async fn bc_authorize_inner<C: Connection + Clone>(
             "client not authorized for the CIBA grant".into(),
         ));
     }
+    if client.token_endpoint_auth_method.is_public() {
+        // CIBA Core §7.1: the client authenticates here. The registration gates
+        // refuse a public CIBA client; a row edited to `none` meets the same
+        // answer, uniform with any other failed client authentication.
+        return build_oauth2_error_response(&OAuth2Error::InvalidClient(
+            axiam_oauth2::token::CLIENT_AUTH_FAILED.into(),
+        ));
+    }
     if client.profile.is_fapi2() {
         // D-61: the registration gate refuses this combination; a row edited
         // in the datastore meets the same answer here.

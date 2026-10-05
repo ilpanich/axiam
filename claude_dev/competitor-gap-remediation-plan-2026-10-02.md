@@ -1446,6 +1446,35 @@ Sonnet 5.5 for delivery plumbing and docs.
 > linked is never created inactive. A no-op attempt records no success: it proves
 > nothing about the endpoint. Groups of more than 10 000 members dead-letter, since
 > the member list travels in one `PATCH`.
+>
+> **EXECUTED (partly) — G-6, W5: T23.6.3, 2026-10-05** (`c10cfb9`, `1155134`,
+> `1eae45c`; Sonnet 5.5, resumed once after a container restart from the
+> working tree). Reconciliation, notification and erasure per **D-58**.
+> `axiam_scim::outbound::reconcile`: a run claims the target (24 h scheduled,
+> five minutes on demand), enqueues a reference per in-scope and per linked
+> resource, pages the downstream `/Users` and `/Groups` (100 per page, 100 pages,
+> five minutes) through the deliverer's own client, clears the digest of drifted
+> resources, drops links whose resource is gone, deprovisions a downstream
+> resource whose `externalId` is an out-of-scope, disabled or erased resource of
+> this tenant, retries `erase_pending` links, and never touches a resource whose
+> `externalId` is not one of this tenant's. A cleanup job `scim_reconcile`,
+> registered in `SWEEP_JOBS`. A dead-lettered erasure `DELETE` leaves the link
+> `Deprovisioned` with `erase_pending`; the link survives the erasure cascade until
+> the downstream `DELETE` succeeds (`gdpr-compliance.md` names it).
+> `NotificationEventType::ScimDeliveryFailed` (`scim_delivery_failed`), and a
+> `NotifyingAuditLog` wrapper so the consumer's dead-letter row, written outside
+> any HTTP request, reaches the tenant's notification rules; the console's rule
+> editor lists the event; `openapi.json` gains the enum value. Tests: 23
+> reconciliation tests against the loopback server (drift, gone, foreign and other
+> tenant's `externalId`, out-of-scope and erased deprovision, claims, page budget,
+> pending erasure), 4 erasure-propagation tests through the real pipeline and the
+> admin `DELETE` route, a dead-letter notification test over real repositories,
+> 2 sweep tests, the job-health pin extended.
+>
+> What the plan did not anticipate. The dead-letter audit row never reached the
+> notification sink, which only the HTTP middleware fed; hence the wrapper.
+> Carried to F4: one mail per dead letter can flood a rule's recipients while a
+> target is down.
 
 **Target.** A tenant can register downstream SCIM 2.0 service providers and
 AXIAM pushes user and group lifecycle changes to them, with reconciliation.

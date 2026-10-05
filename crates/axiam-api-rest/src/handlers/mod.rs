@@ -28,13 +28,22 @@ pub mod pgp_keys;
 pub mod reactors;
 pub mod resources;
 pub mod roles;
+/// SAML IdP registry and credential management (contract §29): compiled into
+/// every build, so it is **not** behind `saml`.
+pub mod saml_admin;
 #[cfg(feature = "saml")]
 pub mod saml_idp;
+/// The SAML IdP's single-logout endpoint and the IdP-initiated logout trigger
+/// (T23.2.4). Behind `saml`, like the SSO endpoint it sits beside.
+#[cfg(feature = "saml")]
+pub mod saml_idp_slo;
 pub mod scim_tokens;
 pub mod scopes;
 pub mod service_accounts;
 pub mod sessions;
 pub mod settings;
+pub mod ssf;
+pub mod ssf_admin;
 pub mod tenants;
 pub mod uma;
 pub mod users;

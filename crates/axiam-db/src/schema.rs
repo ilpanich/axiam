@@ -417,6 +417,21 @@ static MIGRATIONS: &[Migration] = &[
         name: "directory_sync_state",
         sql: SCHEMA_V75,
     },
+    Migration {
+        version: 76,
+        name: "saml_single_logout",
+        sql: SCHEMA_V76,
+    },
+    Migration {
+        version: 77,
+        name: "ssf_transmitter",
+        sql: SCHEMA_V77,
+    },
+    Migration {
+        version: 78,
+        name: "ssf_step_up",
+        sql: SCHEMA_V78,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4051,9 +4066,447 @@ DEFINE INDEX IF NOT EXISTS idx_directory_sync_state_tenant ON TABLE directory_sy
     COLUMNS tenant_id UNIQUE;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v76 — T23.2.4 / G-2 / D-37, D-39: SAML single logout
+// -----------------------------------------------------------------------
+//
+// Additive DDL only: two new tables, nothing backfilled (no assertion was
+// issued with a per-SP index before this migration, and no logout chain
+// existed).
+//
+// **`saml_sp_session`** is the participant record (D-37): one row per (tenant,
+// AXIAM session, service provider), written by the SSO endpoint's second leg
+// before the assertion is signed. It holds the `NameID` and the `SessionIndex`
+// the SP was given, so a logout can be mapped back (a pairwise `NameID` is an
+// HMAC and cannot be reversed). `idx_saml_sp_session_participant` is UNIQUE on
+// `(tenant_id, session_id, sp_id)` — a second sign-on to one SP in one session
+// reuses the row — and `idx_saml_sp_session_index` is UNIQUE on
+// `(tenant_id, sp_id, session_index)` — the key SLO resolves a request by, which
+// no two rows of one SP can share. The index is 32 CSPRNG bytes, base64url
+// without padding, written by the application; the datastore only refuses an
+// empty one. `ended_at` is set when a logout revokes the session, so the
+// sweeper leaves the row alone for one run lifetime while the chain still needs
+// it. The row's `expires_at` is the session's, so it never outlives it.
+//
+// **`saml_logout_run`** is the replay guard of a `LogoutRequest` and the state of
+// the front-channel chain (D-38, D-39). `idx_saml_logout_run_replay` is UNIQUE
+// on `(tenant_id, replay_key)`, where `replay_key` is `{sp_id}:{request id}` (or
+// `idp:{row id}` for an IdP-initiated run), so a replayed request is refused by
+// the datastore for the row's whole ten-minute life — longer than the window an
+// `IssueInstant` is accepted in. `current_request_hash` is the SHA-256 of the
+// one outbound request `ID` the browser carries: **never the raw `ID`** (T-383).
+// `queue` and `session_ids` hold record ids, never a `NameID`; `queue` is
+// capped at 32, the same bound the application enforces.
+const SCHEMA_V76: &str = "\
+DEFINE TABLE IF NOT EXISTS saml_sp_session SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS session_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS sp_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS sp_entity_id ON TABLE saml_sp_session TYPE string;
+DEFINE FIELD IF NOT EXISTS name_id ON TABLE saml_sp_session TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS name_id_format ON TABLE saml_sp_session TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS session_index ON TABLE saml_sp_session TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_sp_session TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE saml_sp_session TYPE datetime;
+DEFINE FIELD IF NOT EXISTS ended_at ON TABLE saml_sp_session TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_session_participant ON TABLE saml_sp_session
+    COLUMNS tenant_id, session_id, sp_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_session_index ON TABLE saml_sp_session
+    COLUMNS tenant_id, sp_id, session_index UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_session_user ON TABLE saml_sp_session
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_saml_sp_session_expires ON TABLE saml_sp_session
+    COLUMNS expires_at;
+DEFINE TABLE IF NOT EXISTS saml_logout_run SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE saml_logout_run TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS initiator_sp_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS initiator_request_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS initiator_relay_state ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS replay_key ON TABLE saml_logout_run TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS queue ON TABLE saml_logout_run TYPE array<string>
+    ASSERT array::len($value) <= 32;
+DEFINE FIELD IF NOT EXISTS queue.* ON TABLE saml_logout_run TYPE string;
+DEFINE FIELD IF NOT EXISTS session_ids ON TABLE saml_logout_run TYPE array<string>
+    ASSERT array::len($value) <= 100;
+DEFINE FIELD IF NOT EXISTS session_ids.* ON TABLE saml_logout_run TYPE string;
+DEFINE FIELD IF NOT EXISTS current_sp_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS current_request_hash ON TABLE saml_logout_run TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) = 64;
+DEFINE FIELD IF NOT EXISTS consumption_id ON TABLE saml_logout_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE saml_logout_run TYPE string
+    ASSERT $value IN ['active', 'finished'];
+DEFINE FIELD IF NOT EXISTS partial ON TABLE saml_logout_run TYPE bool;
+DEFINE FIELD IF NOT EXISTS sessions_ended ON TABLE saml_logout_run TYPE int;
+DEFINE FIELD IF NOT EXISTS sps_told ON TABLE saml_logout_run TYPE int;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE saml_logout_run TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE saml_logout_run TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_saml_logout_run_replay ON TABLE saml_logout_run
+    COLUMNS tenant_id, replay_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_saml_logout_run_request ON TABLE saml_logout_run
+    COLUMNS tenant_id, current_request_hash;
+DEFINE INDEX IF NOT EXISTS idx_saml_logout_run_user ON TABLE saml_logout_run
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_saml_logout_run_expires ON TABLE saml_logout_run
+    COLUMNS expires_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v77 — T23.5.2 / G-5 / D-45 … D-52: the SSF transmitter
+// -----------------------------------------------------------------------
+//
+// Additive DDL only, nothing backfilled: no tenant transmits until an
+// organization turns the switch on and an administrator registers a stream.
+//
+// **`security_settings.oidc_ssf_enabled`** (D-45) is the layered `ssf_enabled`
+// switch, with the shape of `oidc_saml_idp_enabled` (v72): `option<bool>
+// DEFAULT false`, so a row written before this migration reads as *off*.
+//
+// **`ssf_stream`** is the registry of SSF streams, one SCHEMAFULL row each,
+// tenant-scoped — except for one index: `idx_ssf_stream_audience` is UNIQUE on
+// `audience` **alone**, across every tenant (D-47). Without per-tenant issuer
+// paths every tenant's SETs carry the deployment's `iss`, so the audience is
+// what keeps one tenant's SETs from verifying at another tenant's receiver;
+// the datastore, not the application, decides it. The push `Authorization`
+// header is AES-256-GCM ciphertext under `pki_encryption_key` (the key webhook
+// secrets use) with its nonce in its own column, and no read of the table
+// projects either (the repository's `PUBLIC_COLUMNS`). The enumerations are
+// asserted against the spellings the model writes; `events_allowed` and
+// `events_requested` hold event-type URIs, at most the six AXIAM transmits.
+//
+// **`ssf_event_buffer`** is the per-stream bounded buffer (D-48): events held
+// for a `paused` stream and events waiting to be polled by a `poll` stream,
+// unsigned (`pending_json` is an `SsfPendingEvent`; the SET is signed when it
+// is read). UNIQUE on `(tenant_id, stream_id, jti)`, so an event is buffered
+// once and an acknowledgement names exactly one row; `jti` is 32 lower-case
+// hex characters. The bound (1 000 per stream, oldest dropped) and the
+// retention (`expires_at`, seven days) are the application's, written by
+// T23.5.3. Rows go with their stream and with their tenant.
+const SCHEMA_V77: &str = "\
+DEFINE FIELD IF NOT EXISTS oidc_ssf_enabled ON TABLE security_settings
+    TYPE option<bool> DEFAULT false;
+DEFINE TABLE IF NOT EXISTS ssf_stream SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE ssf_stream TYPE string;
+DEFINE FIELD IF NOT EXISTS receiver_client_id ON TABLE ssf_stream TYPE string
+    ASSERT string::len($value) > 0;
+DEFINE FIELD IF NOT EXISTS audience ON TABLE ssf_stream TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 512;
+DEFINE FIELD IF NOT EXISTS description ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS delivery_method ON TABLE ssf_stream TYPE string
+    ASSERT $value IN ['push', 'poll'];
+DEFINE FIELD IF NOT EXISTS endpoint_url ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS auth_header_ciphertext ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS auth_header_nonce ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS secret_key_version ON TABLE ssf_stream TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS events_allowed ON TABLE ssf_stream TYPE array<string>
+    ASSERT array::len($value) <= 6;
+DEFINE FIELD IF NOT EXISTS events_allowed.* ON TABLE ssf_stream TYPE string;
+DEFINE FIELD IF NOT EXISTS events_requested ON TABLE ssf_stream TYPE array<string>
+    ASSERT array::len($value) <= 6;
+DEFINE FIELD IF NOT EXISTS events_requested.* ON TABLE ssf_stream TYPE string;
+DEFINE FIELD IF NOT EXISTS subject_format ON TABLE ssf_stream TYPE string
+    ASSERT $value IN ['iss_sub', 'email'];
+DEFINE FIELD IF NOT EXISTS status ON TABLE ssf_stream TYPE string
+    ASSERT $value IN ['enabled', 'paused', 'disabled'];
+DEFINE FIELD IF NOT EXISTS status_reason ON TABLE ssf_stream TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status_actor ON TABLE ssf_stream TYPE string
+    ASSERT $value IN ['admin', 'receiver'];
+DEFINE FIELD IF NOT EXISTS last_verification_at ON TABLE ssf_stream TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE ssf_stream TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE ssf_stream TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_ssf_stream_audience ON TABLE ssf_stream
+    COLUMNS audience UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_ssf_stream_tenant ON TABLE ssf_stream
+    COLUMNS tenant_id;
+DEFINE INDEX IF NOT EXISTS idx_ssf_stream_receiver ON TABLE ssf_stream
+    COLUMNS tenant_id, receiver_client_id;
+DEFINE TABLE IF NOT EXISTS ssf_event_buffer SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE ssf_event_buffer TYPE string;
+DEFINE FIELD IF NOT EXISTS stream_id ON TABLE ssf_event_buffer TYPE string;
+DEFINE FIELD IF NOT EXISTS jti ON TABLE ssf_event_buffer TYPE string
+    ASSERT string::len($value) = 32;
+DEFINE FIELD IF NOT EXISTS event_uri ON TABLE ssf_event_buffer TYPE string;
+DEFINE FIELD IF NOT EXISTS pending_json ON TABLE ssf_event_buffer TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE ssf_event_buffer TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE ssf_event_buffer TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_ssf_event_buffer_jti ON TABLE ssf_event_buffer
+    COLUMNS tenant_id, stream_id, jti UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_ssf_event_buffer_stream ON TABLE ssf_event_buffer
+    COLUMNS tenant_id, stream_id, created_at;
+DEFINE INDEX IF NOT EXISTS idx_ssf_event_buffer_expires ON TABLE ssf_event_buffer
+    COLUMNS expires_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v78 — T23.5.3 / G-5 / D-53 (1): the step-up record
+// -----------------------------------------------------------------------
+//
+// Additive DDL only. **`ssf_step_up`** is what the honour lane remembers about
+// a step-up it sent a user to perform: the OP session the user held and the
+// `acr` that session achieved, so the return leg that arrives with a new
+// session of the same user can emit CAEP `assurance-level-change` with a true
+// `previous_level` and consume the row (single use). UNIQUE on
+// `(tenant_id, user_id)`: one row per user, the latest step-up replacing the
+// earlier. Ten-minute `expires_at`, swept by the cleanup scheduler (job
+// `ssf_step_up`, registered in `/health/jobs`); the row goes with its tenant
+// (the tenant-delete transaction) and with its user (both erasure paths, by
+// `user_id`). It holds no credential and no address.
+const SCHEMA_V78: &str = "\
+DEFINE TABLE IF NOT EXISTS ssf_step_up SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE ssf_step_up TYPE string;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE ssf_step_up TYPE string;
+DEFINE FIELD IF NOT EXISTS previous_session_id ON TABLE ssf_step_up TYPE string;
+DEFINE FIELD IF NOT EXISTS previous_acr ON TABLE ssf_step_up TYPE string
+    ASSERT $value IN ['urn:axiam:acr:1fa', 'urn:axiam:acr:mfa'];
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE ssf_step_up TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE ssf_step_up TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_ssf_step_up_user ON TABLE ssf_step_up
+    COLUMNS tenant_id, user_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_ssf_step_up_expires ON TABLE ssf_step_up
+    COLUMNS expires_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.5.3 / D-53 (1) — v78 adds the step-up record additively, one row per
+    /// `(tenant, user)`, with the expiry index the sweep reads.
+    #[test]
+    fn v78_defines_the_step_up_record_additively() {
+        assert!(SCHEMA_V78.contains("DEFINE TABLE IF NOT EXISTS ssf_step_up SCHEMAFULL"));
+        assert!(SCHEMA_V78.contains(
+            "idx_ssf_step_up_user ON TABLE ssf_step_up\n    COLUMNS tenant_id, user_id UNIQUE"
+        ));
+        assert!(
+            SCHEMA_V78
+                .contains("idx_ssf_step_up_expires ON TABLE ssf_step_up\n    COLUMNS expires_at")
+        );
+        assert!(SCHEMA_V78.contains("$value IN ['urn:axiam:acr:1fa', 'urn:axiam:acr:mfa']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V78.contains(forbidden),
+                "v78 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V78
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v78 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("ssf_step_up"),
+                "v78 defined something outside its table: {statement}"
+            );
+        }
+        // No credential, no address.
+        for forbidden in ["email", "token", "password", "secret"] {
+            assert!(!SCHEMA_V78.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    /// v78 takes the next number and keeps v77 as it was.
+    #[test]
+    fn v78_follows_v77_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| (77..=78).contains(&m.version))
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(names, vec![(77, "ssf_transmitter"), (78, "ssf_step_up")]);
+    }
+
+    /// T23.5.2 / D-45, D-47, D-48 — v77 adds the stream registry, the event
+    /// buffer and the settings switch, additively, with the deployment-wide
+    /// audience index and the buffer's one-row-per-`jti` index.
+    #[test]
+    fn v77_defines_the_ssf_tables_and_the_switch_additively() {
+        assert!(SCHEMA_V77.contains(
+            "oidc_ssf_enabled ON TABLE security_settings\n    TYPE option<bool> DEFAULT false"
+        ));
+        for table in ["ssf_stream", "ssf_event_buffer"] {
+            assert!(
+                SCHEMA_V77.contains(&format!("DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL")),
+                "{table}"
+            );
+        }
+        // D-47: the audience is unique across tenants, not per tenant.
+        assert!(
+            SCHEMA_V77.contains(
+                "idx_ssf_stream_audience ON TABLE ssf_stream\n    COLUMNS audience UNIQUE"
+            )
+        );
+        // D-48: one row per (tenant, stream, jti).
+        assert!(SCHEMA_V77.contains(
+            "idx_ssf_event_buffer_jti ON TABLE ssf_event_buffer\n    COLUMNS tenant_id, stream_id, jti UNIQUE"
+        ));
+        assert!(SCHEMA_V77.contains("$value IN ['enabled', 'paused', 'disabled']"));
+        assert!(SCHEMA_V77.contains("$value IN ['push', 'poll']"));
+        assert!(SCHEMA_V77.contains("$value IN ['iss_sub', 'email']"));
+        assert!(SCHEMA_V77.contains("$value IN ['admin', 'receiver']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V77.contains(forbidden),
+                "v77 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V77
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v77 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("ssf_stream")
+                    || statement.contains("ssf_event_buffer")
+                    || statement.contains("oidc_ssf_enabled ON TABLE security_settings"),
+                "v77 defined something outside its tables: {statement}"
+            );
+        }
+    }
+
+    /// T-391 — the push header is stored only as ciphertext and nonce; there is
+    /// no plaintext column, and the buffer holds unsigned events, not SETs.
+    #[test]
+    fn v77_stores_the_push_header_sealed_and_no_signed_token() {
+        assert!(SCHEMA_V77.contains("auth_header_ciphertext ON TABLE ssf_stream"));
+        assert!(SCHEMA_V77.contains("auth_header_nonce ON TABLE ssf_stream"));
+        for forbidden in [
+            "authorization_header ON TABLE",
+            "auth_header ON TABLE",
+            "set_jws",
+            "signed_set",
+            "password",
+        ] {
+            assert!(!SCHEMA_V77.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    /// v77 takes the next number and keeps v76 as it was.
+    #[test]
+    fn v77_follows_v76_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| (76..=77).contains(&m.version))
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![(76, "saml_single_logout"), (77, "ssf_transmitter")]
+        );
+    }
+
+    /// T23.2.4 / D-37, D-39 — v76 adds the participant record and the logout run,
+    /// additively, with the two unique indexes the participant record is defined
+    /// by and the replay guard the run is.
+    #[test]
+    fn v76_defines_the_participant_record_and_the_logout_run_additively() {
+        for table in ["saml_sp_session", "saml_logout_run"] {
+            assert!(
+                SCHEMA_V76.contains(&format!("DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL")),
+                "{table}"
+            );
+        }
+        // D-37: one row per (tenant, session, SP), and an index no two rows of one
+        // SP share.
+        assert!(SCHEMA_V76.contains(
+            "idx_saml_sp_session_participant ON TABLE saml_sp_session
+    COLUMNS tenant_id, session_id, sp_id UNIQUE"
+        ));
+        assert!(SCHEMA_V76.contains(
+            "idx_saml_sp_session_index ON TABLE saml_sp_session
+    COLUMNS tenant_id, sp_id, session_index UNIQUE"
+        ));
+        // D-38: the replay guard of a LogoutRequest ID, per tenant.
+        assert!(SCHEMA_V76.contains(
+            "idx_saml_logout_run_replay ON TABLE saml_logout_run
+    COLUMNS tenant_id, replay_key UNIQUE"
+        ));
+        assert!(SCHEMA_V76.contains("array::len($value) <= 32"));
+        assert!(SCHEMA_V76.contains("$value IN ['active', 'finished']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V76.contains(forbidden),
+                "v76 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V76
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v76 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("saml_sp_session") || statement.contains("saml_logout_run"),
+                "v76 defined something outside its two tables: {statement}"
+            );
+        }
+    }
+
+    /// T-383 — the run stores a digest of the outbound request `ID`, never the
+    /// `ID`, and holds no `NameID`; the participant record holds no credential.
+    #[test]
+    fn v76_stores_digests_and_record_ids_only_where_it_must() {
+        assert!(SCHEMA_V76.contains(
+            "current_request_hash ON TABLE saml_logout_run TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) = 64"
+        ));
+        for forbidden in [
+            "current_request_id",
+            "outbound_id",
+            "request_id ON TABLE saml_logout_run TYPE string",
+        ] {
+            assert!(!SCHEMA_V76.contains(forbidden), "{forbidden}");
+        }
+        let run_part = &SCHEMA_V76[SCHEMA_V76
+            .find("DEFINE TABLE IF NOT EXISTS saml_logout_run")
+            .unwrap()..];
+        assert!(
+            !run_part.contains("name_id"),
+            "the run's queue is record ids: no NameID is copied into it"
+        );
+        for credential in ["password", "secret", "key_material", "private"] {
+            assert!(
+                !SCHEMA_V76.contains(credential),
+                "v76 must hold no {credential}"
+            );
+        }
+    }
+
+    /// v76 takes the next number and keeps v75 as it was.
+    #[test]
+    fn v76_follows_v75_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| (75..=76).contains(&m.version))
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![(75, "directory_sync_state"), (76, "saml_single_logout")]
+        );
+    }
 
     /// T23.3.5 / D-31 — v75 adds one table, additively, one row per tenant, with
     /// no personal data column and the last result held to the four spellings.
@@ -4103,7 +4556,7 @@ mod tests {
     fn v75_follows_v74_in_the_registry() {
         let names: Vec<(u32, &str)> = MIGRATIONS
             .iter()
-            .filter(|m| m.version >= 74)
+            .filter(|m| (74..=75).contains(&m.version))
             .map(|m| (m.version, m.name))
             .collect();
         assert_eq!(
@@ -4172,7 +4625,7 @@ mod tests {
         }
         let names: Vec<(u32, &str)> = MIGRATIONS
             .iter()
-            .filter(|m| m.version >= 72)
+            .filter(|m| (72..=75).contains(&m.version))
             .map(|m| (m.version, m.name))
             .collect();
         assert_eq!(
@@ -4891,8 +5344,13 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&75),
-            "v75 is the newest migration (T23.3.5 — the directory sync job's per-tenant state, \
+            Some(&78),
+            "v78 is the newest migration (T23.5.3 — the SSF step-up record `ssf_step_up`; \
+             v77 was T23.5.2 — the SSF transmitter: `ssf_stream`, \
+             `ssf_event_buffer` and `security_settings.oidc_ssf_enabled`; v76 was T23.2.4 — SAML \
+             single logout: the participant record \
+             `saml_sp_session` and the logout chain `saml_logout_run`; v75 was T23.3.5 — the \
+             directory sync job's per-tenant state, \
              `directory_sync_state`; v74 was T23.3.4 — directory group mapping: \
              `directory_config.group_mappings` and `member_of.source`; v73 was T23.2.3's \
              pending SAML AuthnRequests, v72 was T23.2.1 — the SAML identity provider's storage; \

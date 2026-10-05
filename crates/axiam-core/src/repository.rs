@@ -49,7 +49,10 @@ use crate::models::{
     reactor::{CreateReactor, Reactor, UpdateReactor},
     resource::{CreateResource, Resource, UpdateResource},
     role::{AssignmentScope, CreateRole, Role, RoleAssignment, RoleSubjectAssignment, UpdateRole},
-    saml_idp_credential::{SamlIdpCredential, SealedSamlIdpCredential, StoreSamlIdpCredential},
+    saml_idp_credential::{
+        SamlIdpCredential, SamlIdpCredentialPromotion, SealedSamlIdpCredential,
+        StoreSamlIdpCredential,
+    },
     saml_sp::{SamlServiceProvider, SamlServiceProviderInput},
     scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
@@ -3281,6 +3284,25 @@ pub trait SamlServiceProviderRepository: Send + Sync {
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<SamlServiceProvider>>> + Send;
 
+    /// One page of the tenant's service providers, oldest first, narrowed by
+    /// [`Pagination::search`] over `display_name`, `entity_id` and the record id
+    /// **before** `offset`/`limit` (`total` counts matches, not rows).
+    fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<SamlServiceProvider>>> + Send;
+
+    /// Which of `groups` are **not** groups of this tenant, in the order given
+    /// and without duplicates. Empty means every one is. The registry's
+    /// `allowed_groups` write-time rule (D-42) asks this; the repository does
+    /// not enforce it on `create`/`update`.
+    fn groups_outside_tenant(
+        &self,
+        tenant_id: Uuid,
+        groups: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<Vec<Uuid>>> + Send;
+
     /// Replace a service provider's configuration (a full replacement, not a
     /// patch). `NotFound` when it does not exist in this tenant;
     /// `AlreadyExists` when the new `entity_id` is another SP's.
@@ -3291,9 +3313,201 @@ pub trait SamlServiceProviderRepository: Send + Sync {
         input: SamlServiceProviderInput,
     ) -> impl Future<Output = AxiamResult<SamlServiceProvider>> + Send;
 
-    /// Remove a service provider. `NotFound` when it does not exist in this
-    /// tenant.
+    /// Remove a service provider **and everything the datastore holds for it**,
+    /// in one transaction (T-366): its pending `AuthnRequest`s and the
+    /// `saml_sp_session` rows D-37 keeps per SP (T23.2.4). `NotFound` when it
+    /// does not exist in this tenant.
     fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SSF streams (tenant-scoped) (G-5, T23.5.2)
+// ---------------------------------------------------------------------------
+
+/// Storage for the Shared Signals Framework stream registry; see
+/// [`crate::models::ssf`].
+///
+/// Every method but [`Self::create`]'s audience check is tenant-scoped: a
+/// stream of another tenant is not found, exactly as one that does not exist.
+/// The repository does not validate values (that is `axiam_oauth2::ssf`'s);
+/// it enforces only what needs the datastore — the deployment-wide audience
+/// uniqueness — and it seals the push `Authorization` header.
+pub trait SsfStreamRepository: Send + Sync {
+    /// Register a stream. `AlreadyExists` when **any** tenant's stream already
+    /// uses this audience (D-47).
+    fn create(
+        &self,
+        input: crate::models::ssf::NewSsfStream,
+    ) -> impl Future<Output = AxiamResult<crate::models::ssf::SsfStream>> + Send;
+
+    /// One stream. `NotFound` when it does not exist in this tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::ssf::SsfStream>> + Send;
+
+    /// One page of the tenant's streams, oldest first, narrowed by
+    /// [`Pagination::search`] over `audience`, `receiver_client_id`,
+    /// `description` and the id before `offset`/`limit`.
+    fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<crate::models::ssf::SsfStream>>> + Send;
+
+    /// The tenant's streams bound to one receiver client, oldest first.
+    fn list_for_receiver(
+        &self,
+        tenant_id: Uuid,
+        receiver_client_id: &str,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::ssf::SsfStream>>> + Send;
+
+    /// The tenant's streams that would carry `event` now: not `disabled`, and
+    /// the event both allowed and requested. What an event source iterates
+    /// (T23.5.3); a `paused` stream is included because its events are held.
+    fn list_for_event(
+        &self,
+        tenant_id: Uuid,
+        event: crate::models::ssf::SsfEventType,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::ssf::SsfStream>>> + Send;
+
+    /// Replace a stream's configuration. `NotFound` when it does not exist in
+    /// this tenant; `AlreadyExists` when the new audience is another stream's.
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        update: crate::models::ssf::SsfStreamUpdate,
+    ) -> impl Future<Output = AxiamResult<crate::models::ssf::SsfStream>> + Send;
+
+    /// Record a verification request at `now` **if** the last one was at least
+    /// `min_interval_secs` ago, atomically. `false` means too soon (`429`).
+    /// `NotFound` when the stream does not exist in this tenant.
+    fn claim_verification(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        now: DateTime<Utc>,
+        min_interval_secs: i64,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// The stored push `Authorization` header in plaintext, or `None` when the
+    /// stream has none. **The single path to the plaintext**; only the push
+    /// deliverer calls it. `NotFound` when the stream does not exist in this
+    /// tenant.
+    fn decrypt_authorization_header(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<Zeroizing<String>>>> + Send;
+
+    /// Remove a stream **and its poll buffer**, in one transaction. `NotFound`
+    /// when it does not exist in this tenant.
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SSF event buffer (tenant-scoped) (G-5, T23.5.3)
+// ---------------------------------------------------------------------------
+
+/// The per-stream bounded buffer of unsigned events (D-48, schema v77's
+/// `ssf_event_buffer`): the events of an `enabled` poll stream waiting to be
+/// polled, and those of **any** `paused` stream waiting to be released.
+///
+/// Rows hold an [`crate::models::ssf::SsfPendingEvent`] — never a signed SET;
+/// the SET is signed when it is read (`axiam_oauth2::ssf::sign_set`). Every
+/// method is scoped by tenant **and** stream: a row of another stream is not
+/// seen, acknowledged or counted, exactly as one that does not exist.
+pub trait SsfEventBufferRepository: Send + Sync {
+    /// Buffer `event` for the stream at `now`: at most
+    /// [`crate::models::ssf::POLL_BUFFER_MAX_EVENTS`] rows per stream — the
+    /// **oldest** are dropped to admit this one — each living
+    /// [`crate::models::ssf::POLL_BUFFER_RETENTION_DAYS`] days from `now`.
+    /// One row per `jti`: buffering an event already buffered is `Ok` and
+    /// changes nothing.
+    fn push(
+        &self,
+        tenant_id: Uuid,
+        stream_id: Uuid,
+        event: &crate::models::ssf::SsfPendingEvent,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// The stream's unexpired events, **oldest first**, at most `limit`.
+    fn list_oldest(
+        &self,
+        tenant_id: Uuid,
+        stream_id: Uuid,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::ssf::SsfPendingEvent>>> + Send;
+
+    /// Delete exactly the rows of **this stream** named by `jtis`; a `jti` the
+    /// stream does not hold (or that another stream does) is ignored. Returns
+    /// how many rows went.
+    fn delete_by_jti(
+        &self,
+        tenant_id: Uuid,
+        stream_id: Uuid,
+        jtis: &[String],
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// How many rows the stream holds (expired ones included until swept).
+    fn count(
+        &self,
+        tenant_id: Uuid,
+        stream_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Remove every row whose `expires_at` is at or before `now`, in every
+    /// tenant; returns how many. The sweep job registered in `/health/jobs`.
+    fn delete_expired(&self, now: DateTime<Utc>) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SSF step-up records (tenant-scoped) (G-5, T23.5.3, D-53 (1))
+// ---------------------------------------------------------------------------
+
+/// Where the honour lane remembers a step-up it sent a user to perform, so the
+/// return leg can tell SSF receivers the `acr` changed (schema v78's
+/// `ssf_step_up`; see [`crate::models::ssf::SsfStepUp`]).
+///
+/// At most one row per `(tenant, user)`, decided by a unique index. Every method
+/// is scoped by tenant: another tenant's row is not seen, taken or counted.
+pub trait SsfStepUpRepository: Send + Sync {
+    /// Record `record`, replacing any earlier one for the same `(tenant, user)`;
+    /// it expires [`crate::models::ssf::STEP_UP_RECORD_TTL_MINUTES`] minutes
+    /// after `now`.
+    fn put(
+        &self,
+        record: &crate::models::ssf::SsfStepUp,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Consume the user's record for a return leg made in `current_session_id`:
+    /// it is deleted whether or not it is still valid, and returned only when
+    /// unexpired at `now`. Atomic — two concurrent takes cannot both receive it.
+    ///
+    /// A record whose `previous_session_id` **is** `current_session_id` is left
+    /// in place and `None` returned (F4 W4 P23W4-02, T-404): that session is the
+    /// one the step-up was asked of, so a return leg made in it stepped nothing
+    /// up, and spending the record there would cost the real return leg its
+    /// event.
+    fn take(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ssf::SsfStepUp>>> + Send;
+
+    /// How many records the tenant holds (expired ones included until swept).
+    fn count_for_tenant(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Remove every record whose `expires_at` is at or before `now`, in every
+    /// tenant; returns how many. The sweep job registered in `/health/jobs`.
+    fn delete_expired(&self, now: DateTime<Utc>) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -3340,6 +3554,164 @@ pub trait PendingSamlRequestRepository: Send + Sync {
     > + Send;
 
     /// Remove every expired row, in every tenant; returns how many.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// SAML IdP participants and logout runs (tenant-scoped) (G-2, T23.2.4)
+// ---------------------------------------------------------------------------
+
+/// The record of which service providers hold which AXIAM session, with the
+/// `NameID` and per-SP `SessionIndex` each was given (D-37); see
+/// [`crate::models::saml_slo`].
+///
+/// Every method takes the `tenant_id`; a row of another tenant is not found,
+/// exactly as one that does not exist.
+pub trait SamlSpSessionRepository: Send + Sync {
+    /// Record that `input.sp_id` is given `input.session_index` for
+    /// `input.session_id`, or read back the row the session already has for that
+    /// SP — the row whose `SessionIndex` the assertion must carry. On a read-back
+    /// the `NameID` and its format are refreshed to the values now being asserted
+    /// and the **original index is kept**. Never creates a second row for one
+    /// (tenant, session, SP): decided by a unique index, so two concurrent
+    /// sign-ons to one SP in one session agree on one index.
+    fn record(
+        &self,
+        input: crate::models::saml_slo::NewSamlSpSession,
+    ) -> impl Future<Output = AxiamResult<crate::models::saml_slo::SamlSpSession>> + Send;
+
+    /// The row an SP holds under `session_index`, or `None`. The key SLO resolves
+    /// a `LogoutRequest` by: tenant, the verified issuer's SP, the index.
+    fn get_by_index(
+        &self,
+        tenant_id: Uuid,
+        sp_id: Uuid,
+        session_index: &str,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::saml_slo::SamlSpSession>>> + Send;
+
+    /// Every row an SP holds for one `NameID` value (the request that names no
+    /// `SessionIndex`), at most 100, oldest first.
+    fn list_for_sp_name_id(
+        &self,
+        tenant_id: Uuid,
+        sp_id: Uuid,
+        name_id: &str,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::saml_slo::SamlSpSession>>> + Send;
+
+    /// Every row of one AXIAM session, oldest first.
+    fn list_for_session(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::saml_slo::SamlSpSession>>> + Send;
+
+    /// One row by record id, or `None`.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::saml_slo::SamlSpSession>>> + Send;
+
+    /// Mark the rows of these sessions as belonging to a logout that is under
+    /// way: the sweeper leaves them alone for one run lifetime, so a chain that
+    /// has revoked its sessions still finds them. Returns how many rows.
+    fn mark_ended(
+        &self,
+        tenant_id: Uuid,
+        session_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete the rows of these sessions (the end of a logout run). Returns how
+    /// many.
+    fn delete_for_sessions(
+        &self,
+        tenant_id: Uuid,
+        session_ids: &[Uuid],
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every row of one user (erasure). Returns how many.
+    fn delete_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Remove, in every tenant, the rows whose session has expired, and those
+    /// whose session row is gone (unless a logout run ended it within one run
+    /// lifetime); returns how many.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+/// Logout runs: the replay guard of a `LogoutRequest` and the state of the
+/// front-channel chain (D-38, D-39); see [`crate::models::saml_slo`].
+///
+/// Every method takes the `tenant_id`.
+pub trait SamlLogoutRunRepository: Send + Sync {
+    /// Claim a run. [`AxiamError::ReplayDetected`] when the initiating SP already
+    /// used this request `ID` in this tenant, decided by a unique index so two
+    /// concurrent copies of one request cannot both proceed. An IdP-initiated run
+    /// has nothing to replay and never collides.
+    fn claim(
+        &self,
+        input: crate::models::saml_slo::NewSamlLogoutRun,
+    ) -> impl Future<Output = AxiamResult<crate::models::saml_slo::SamlLogoutRun>> + Send;
+
+    /// Record what the run ended and whom it must tell, after the sessions are
+    /// revoked. Returns the run as stored.
+    fn plan(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        plan: crate::models::saml_slo::SamlLogoutPlan,
+    ) -> impl Future<Output = AxiamResult<crate::models::saml_slo::SamlLogoutRun>> + Send;
+
+    /// Move the chain on: the queue that remains, the SP the browser now goes to
+    /// and the SHA-256 of that request's `ID`, the partial flag and the count of
+    /// SPs told.
+    fn progress(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        progress: crate::models::saml_slo::SamlLogoutProgress,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Consume the outstanding request whose `ID` hashes to `request_hash`:
+    /// `Some` for exactly one caller, `None` for every other (consumed, expired,
+    /// unknown, addressed to another SP, or lost the race). The X6 two-layer
+    /// arbiter. `sp_id` is the SP that answered: a response from any other SP
+    /// consumes nothing.
+    fn consume_response(
+        &self,
+        tenant_id: Uuid,
+        request_hash: &str,
+        sp_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::saml_slo::SamlLogoutRun>>> + Send;
+
+    /// One run, or `None`.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::saml_slo::SamlLogoutRun>>> + Send;
+
+    /// Mark the chain ended. The row stays, with its replay key, until it
+    /// expires.
+    fn finish(
+        &self,
+        tenant_id: Uuid,
+        run_id: Uuid,
+        partial: bool,
+        sps_told: u32,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete every run of one user (erasure). Returns how many.
+    fn delete_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Remove every expired run, in every tenant; returns how many.
     fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
@@ -3403,6 +3775,23 @@ pub trait SamlIdpCredentialRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<SamlIdpCredential>> + Send;
+
+    /// Promote the tenant's `next` credential `id` to `active`, and retire the
+    /// credential that was `active` (its key destroyed, as in [`Self::retire`]),
+    /// **in one transaction** (D-42): no state with two signers or none is ever
+    /// visible, and a promotion that cannot happen changes nothing.
+    ///
+    /// `Conflict` unless `id` is the tenant's current `next` credential and
+    /// `now` lies inside its validity window (`not_before <= now < not_after`),
+    /// so a stale page cannot promote something else. `NotFound` when `id` is not
+    /// this tenant's. Of two concurrent promotions of one `next`, one wins and
+    /// the other is `Conflict`.
+    fn promote(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<SamlIdpCredentialPromotion>> + Send;
 }
 
 // ---------------------------------------------------------------------------

@@ -32,13 +32,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::{App, HttpServer, web};
-use axiam_amqp::{AmqpConfig, AmqpManager, MailOutboundPublisher, WebhookPublisher};
+use axiam_amqp::{
+    AmqpConfig, AmqpManager, MailOutboundPublisher, OutboundDeliverers, OutboundRetryConfig,
+    WebhookPublisher, run_outbound_consumer,
+};
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::middleware::request_span::RedactingRootSpanBuilder;
 use axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware;
 use axiam_api_rest::state::AppState;
 use axiam_api_rest::state::bundles;
-use axiam_api_rest::webhook_consumer::{WebhookRetryConfig, start_webhook_consumer};
 use axiam_api_rest::{
     HealthChecker, RateLimitConfig, RouteOptions, ServerConfig, build_cors, health_routes,
     openapi_routes, register_api_v1_routes_with,
@@ -49,6 +51,7 @@ use axiam_auth::{
     AttestationCaCache, AuthService, EmailVerificationService, MfaMethodService,
     PasswordResetService, WebauthnService,
 };
+use axiam_core::outbound::OutboundKind;
 use axiam_core::repository::{
     OrganizationRepository, Pagination, ServiceAccountRepository, TenantRepository,
 };
@@ -893,6 +896,12 @@ async fn main() -> std::io::Result<()> {
     amqp.declare_webhook_topology()
         .await
         .expect("Failed to declare webhook AMQP topology");
+    // G-5 / T23.5.3: the SSF push kind of the shared dispatcher (D-36) gets its
+    // own sibling queues (`axiam.ssf_push`, `.retry`, `.dlq`); declaring them
+    // changes nothing for the webhook queues above.
+    amqp.declare_outbound_topology(OutboundKind::SsfPush)
+        .await
+        .expect("Failed to declare SSF push AMQP topology");
     tracing::info!("RabbitMQ connected and queues declared");
 
     // LIVE pooled-connection reference — registered in `AppState` so handlers
@@ -983,7 +992,19 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
-    let session_repo = SurrealSessionRepository::new(pool.handle_for_repo());
+    // G-5 / T23.5.3 (D-52): the session repository reports every revocation to a
+    // sink that is bound to the SSF emitter once the emitter exists (it needs the
+    // outbox, which needs the broker); until then it is inactive and the
+    // repository issues the queries it always did. The directory sync's
+    // deactivation reports through the second.
+    let ssf_session_sink: Arc<
+        axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SessionRevocationSink>,
+    > = Arc::default();
+    let ssf_account_sink: Arc<
+        axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SsfSystemAccountSink>,
+    > = Arc::default();
+    let session_repo = SurrealSessionRepository::new(pool.handle_for_repo())
+        .with_revocation_sink(ssf_session_sink.clone());
     let session_repo = match revocation_feed_ttl {
         Some(ttl) => session_repo.with_revocation_feed(ttl),
         None => session_repo,
@@ -1451,6 +1472,12 @@ async fn main() -> std::io::Result<()> {
     // keeps it bounded either way.
     let saml_pending_repo =
         axiam_db::SurrealPendingSamlRequestRepository::new(pool.handle_for_repo());
+    // T23.2.4 — the single-logout stores (schema v76): which SPs hold which
+    // session, and the logout chain. Built in every build for the same reason.
+    let saml_participant_repo =
+        axiam_db::SurrealSamlSpSessionRepository::new(pool.handle_for_repo());
+    let saml_logout_run_repo =
+        axiam_db::SurrealSamlLogoutRunRepository::new(pool.handle_for_repo());
     // Process-wide JWKS cache shared by all OIDC federation handlers (D-01/D-02/D-03).
     let jwks_cache = Arc::new(JwksCache::new());
     // B3: process-wide in-process cache for AXIAM's OWN `GET /oauth2/jwks`
@@ -1645,15 +1672,17 @@ async fn main() -> std::io::Result<()> {
     // the tenant signing-credential service (D-21: its keys are sealed through
     // the database custodian of the same custodian set the CAs use) and the
     // issuer, built on the deployment's root issuer and the pairwise key.
-    #[cfg(feature = "saml")]
     let saml_idp_state = bundles::SamlIdpState {
         sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(pool.handle_for_repo()),
         pending_repo: saml_pending_repo.clone(),
+        participant_repo: saml_participant_repo.clone(),
+        logout_run_repo: saml_logout_run_repo.clone(),
         credential_service: axiam_pki::saml_signing::SamlIdpCredentialService::new(
             cert_service.clone(),
             Arc::clone(&ca_custodians),
             axiam_db::SurrealSamlIdpCredentialRepository::new(pool.handle_for_repo()),
         ),
+        #[cfg(feature = "saml")]
         issuer: Arc::new(axiam_federation::saml_idp::SamlIdpIssuer::new(
             config.auth.root_issuer(),
             config
@@ -1661,6 +1690,46 @@ async fn main() -> std::io::Result<()> {
                 .map(axiam_federation::saml_idp::PairwiseKey::new),
         )),
     };
+
+    // G-5 / T23.5.2 — the SSF stream registry. Push credentials are sealed
+    // under the key webhook secrets use (D-49); without it a stream with a push
+    // header cannot be stored and everything else works.
+    let ssf_stream_repo =
+        axiam_db::SurrealSsfStreamRepository::new(pool.handle_for_repo(), webhook_enc_key);
+    // T23.5.3 — the poll/hold buffer and the one emitter every change site calls
+    // (D-52). The emitter does nothing until the outbox is bound (below, once the
+    // broker's publisher exists); the two ports are bound to it now.
+    let ssf_event_buffer_repo =
+        axiam_db::SurrealSsfEventBufferRepository::new(pool.handle_for_repo());
+    // D-53 (1): the step-up record the honour lane writes and the return leg
+    // consumes; its ten-minute expiry is swept by the cleanup scheduler.
+    let ssf_step_up_repo = axiam_db::SurrealSsfStepUpRepository::new(pool.handle_for_repo());
+    // D-55: SSF requires per-tenant issuers in a deployment of more than one
+    // tenant. One gate for the process: the emitter, the poll endpoint,
+    // discovery and the push deliverer ask it; a change is audited per tenant
+    // with SSF on.
+    let ssf_gate = Arc::new(axiam_oauth2::ssf::SsfIssuerGate::new(
+        config.auth.tenant_issuer_paths,
+        Arc::new(tenant_repo.clone()),
+    ));
+    ssf_gate.bind_observer(Arc::new(
+        axiam_api_rest::ssf_emitter::SharedIssuerAudit::new(
+            org_repo.clone(),
+            tenant_repo.clone(),
+            settings_repo.clone(),
+            audit_repo.clone(),
+        ),
+    ));
+    let ssf_emitter = axiam_api_rest::ssf_emitter::SsfEmitter::new(
+        ssf_stream_repo.clone(),
+        tenant_repo.clone(),
+        settings_repo.clone(),
+        user_repo.clone(),
+        config.auth.clone(),
+        ssf_gate.clone(),
+    );
+    ssf_session_sink.bind(Arc::new(ssf_emitter.clone()));
+    ssf_account_sink.bind(Arc::new(ssf_emitter.clone()));
 
     // G7: resolve the deployment rate-limit posture BEFORE validation and
     // before `config.rate_limit` / `config.grpc` are cloned into the App
@@ -2266,15 +2335,21 @@ async fn main() -> std::io::Result<()> {
     let webhook_publisher = WebhookPublisher::new(webhook_pub_channel);
 
     // Spawn the webhook AMQP consumer on a background task (CORR-03/D-06).
-    // Drives WebhookDeliveryService::deliver_once for each queued delivery,
-    // schedules retries natively via the retry-queue TTL+DLX (D-07/D-08,
-    // bounded exponential backoff read from AXIAM__WEBHOOK__* — D-20), and
-    // writes per-attempt/terminal audit records (D-09).
+    // The webhook kind of the shared outbound dispatcher (D-36): the webhook
+    // deliverer (WebhookDeliveryService::deliver_once behind the core
+    // OutboundDeliverer port) is registered with the generic consumer loop,
+    // which schedules retries natively via the retry-queue TTL+DLX
+    // (D-07/D-08, bounded exponential backoff read from AXIAM__WEBHOOK__* —
+    // D-20) and writes per-attempt/terminal audit records (D-09). Later kinds
+    // (SSF push, outbound SCIM) register their own deliverer here.
     {
-        let webhook_delivery_for_consumer = webhook_delivery.clone();
+        let mut outbound_deliverers = OutboundDeliverers::new();
+        outbound_deliverers
+            .register(Arc::new(webhook_delivery.clone()))
+            .expect("Failed to register the webhook deliverer");
         let webhook_publisher_for_consumer = webhook_publisher.clone();
         let webhook_audit_repo = audit_repo.clone();
-        let webhook_retry_cfg = WebhookRetryConfig::from_env();
+        let webhook_retry_cfg = OutboundRetryConfig::from_env_for(OutboundKind::Webhook);
         let webhook_amqp = Arc::clone(&amqp);
         // CQ-B53: a transient broker disconnect (consumer stream ends, or the
         // channel fails to open) must NOT kill the whole API server. Recreate
@@ -2287,14 +2362,18 @@ async fn main() -> std::io::Result<()> {
                 match webhook_amqp.create_channel().await {
                     Ok(webhook_channel) => {
                         backoff = Duration::from_secs(1);
-                        start_webhook_consumer(
+                        if let Err(e) = run_outbound_consumer(
                             webhook_channel,
-                            webhook_delivery_for_consumer.clone(),
-                            webhook_publisher_for_consumer.clone(),
-                            webhook_audit_repo.clone(),
+                            OutboundKind::Webhook,
+                            &outbound_deliverers,
+                            webhook_publisher_for_consumer.as_outbound(),
+                            &webhook_audit_repo,
                             webhook_retry_cfg,
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::error!(error = %e, "Webhook AMQP consumer failed");
+                        }
                         tracing::warn!("Webhook AMQP consumer exited — reconnecting");
                     }
                     Err(e) => {
@@ -2309,6 +2388,73 @@ async fn main() -> std::io::Result<()> {
             }
         });
         tracing::info!("Webhook consumer spawned");
+    }
+
+    // G-5 / T23.5.3 — the SSF push kind of the same dispatcher (D-36): one
+    // publisher channel for enqueueing events and for the consumer's TTL-delayed
+    // retries, the outbox every producer submits to (D-48), and a consumer
+    // supervisor that is the webhook one's copy (the duplication is known and
+    // carried to F4). Retry env vars are `AXIAM__SSF_PUSH__*`.
+    let ssf_publisher = {
+        let channel = amqp
+            .create_publisher_channel()
+            .await
+            .expect("Failed to create AMQP SSF push publisher channel");
+        axiam_amqp::AmqpOutboundPublisher::new(channel)
+    };
+    let ssf_outbox: Arc<dyn axiam_core::models::ssf::SsfOutbox> =
+        Arc::new(axiam_oauth2::ssf_delivery::SsfOutboxService::new(
+            ssf_event_buffer_repo.clone(),
+            Arc::new(ssf_publisher.clone()),
+        ));
+    ssf_emitter.bind_outbox(Arc::clone(&ssf_outbox));
+    {
+        let mut ssf_deliverers = OutboundDeliverers::new();
+        ssf_deliverers
+            .register(Arc::new(axiam_oauth2::ssf_delivery::SsfPushDeliverer::new(
+                ssf_stream_repo.clone(),
+                ssf_event_buffer_repo.clone(),
+                config.auth.clone(),
+                ssf_gate.clone(),
+            )))
+            .expect("Failed to register the SSF push deliverer");
+        let ssf_publisher_for_consumer = ssf_publisher.clone();
+        let ssf_audit_repo = audit_repo.clone();
+        let ssf_retry_cfg = OutboundRetryConfig::from_env_for(OutboundKind::SsfPush);
+        let ssf_amqp = Arc::clone(&amqp);
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(1);
+            let max_backoff = Duration::from_secs(30);
+            loop {
+                match ssf_amqp.create_channel().await {
+                    Ok(ssf_channel) => {
+                        backoff = Duration::from_secs(1);
+                        if let Err(e) = run_outbound_consumer(
+                            ssf_channel,
+                            OutboundKind::SsfPush,
+                            &ssf_deliverers,
+                            &ssf_publisher_for_consumer,
+                            &ssf_audit_repo,
+                            ssf_retry_cfg,
+                        )
+                        .await
+                        {
+                            tracing::error!(error = %e, "SSF push AMQP consumer failed");
+                        }
+                        tracing::warn!("SSF push AMQP consumer exited — reconnecting");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to (re)create SSF push consumer channel — retrying"
+                        );
+                    }
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+            }
+        });
+        tracing::info!("SSF push consumer spawned");
     }
 
     // Spawn AMQP mail consumer on a background task (D-14).
@@ -2673,18 +2819,9 @@ async fn main() -> std::io::Result<()> {
     // silence this is meant to break.
     let job_health =
         axiam_server::job_health::JobHealth::new(Duration::from_secs(config.cleanup_interval_secs));
-    for job in [
-        "saml_assertion_replay",
-        "federation_login_state",
-        "saml_authn_request",
-        // G-3 (T23.3.5): the directory sync job. Registered like the others, so a
-        // deployment where it has never run once still lists it.
-        "directory_sync",
-        "amqp_nonce_replay",
-        "gdpr_purge",
-        "gdpr_export",
-        "audit_retention",
-    ] {
+    // The list is `job_health::SWEEP_JOBS`, which a test checks against what the
+    // cleanup loop records.
+    for job in axiam_server::job_health::SWEEP_JOBS {
         job_health.register(job);
     }
 
@@ -2706,6 +2843,8 @@ async fn main() -> std::io::Result<()> {
         Arc::new(federation_login_state_repo.clone()),
         Arc::new(sso_handoff_code_repo.clone()),
         Arc::new(saml_pending_repo.clone()),
+        Arc::new(saml_participant_repo.clone()),
+        Arc::new(saml_logout_run_repo.clone()),
         Arc::new(amqp_nonce_repo.clone()),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),
@@ -2747,7 +2886,16 @@ async fn main() -> std::io::Result<()> {
         directory_sync_state_repo.clone(),
         Arc::clone(&directory_group_mapper) as _,
         Arc::clone(&directory_audit_sink) as _,
-    )));
+    )
+    // G-5 (D-52): a directory deactivation is an SSF `account-disabled`.
+    .with_ssf_sink(ssf_account_sink.clone())))
+    // G-5 (T23.5.3): the buffer's seven-day sweep, and the `account-purged` of an
+    // erasure.
+    .with_ssf(
+        Arc::new(ssf_event_buffer_repo.clone()),
+        Arc::new(ssf_step_up_repo.clone()),
+        ssf_account_sink.clone(),
+    );
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared
@@ -2924,8 +3072,21 @@ async fn main() -> std::io::Result<()> {
             sync_state_repo: directory_sync_state_repo,
             client: Arc::clone(directory_authenticator.client()),
         },
-        #[cfg(feature = "saml")]
         saml_idp: saml_idp_state,
+        // G-5 / T23.5.2, T23.5.3 — the stream registry seals push credentials under
+        // the key webhook secrets use (D-49); the outbox routes every produced
+        // event to the dispatcher or the poll buffer (D-48).
+        ssf: bundles::SsfState {
+            stream_repo: ssf_stream_repo,
+            buffer_repo: ssf_event_buffer_repo,
+            step_up_repo: ssf_step_up_repo,
+            outbox: Some(ssf_outbox),
+            emitter: ssf_emitter,
+            session_sink: ssf_session_sink,
+            account_sink: ssf_account_sink,
+            poll_waiters: Arc::default(),
+            gate: ssf_gate,
+        },
     };
 
     // X4 — accept subject tokens from trusted external IdPs.

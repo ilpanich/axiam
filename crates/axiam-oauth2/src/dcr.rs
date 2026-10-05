@@ -832,6 +832,8 @@ mod tests {
             dcr_max_clients: d.dcr_max_clients,
             dcr_unused_client_ttl_days: d.dcr_unused_client_ttl_days,
             saml_idp_enabled: d.saml_idp_enabled,
+            ssf_enabled: d.ssf_enabled,
+            ssf_inactive_reason: None,
         };
         mutate(&mut p);
         p

@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.24.0",
+ "version": "2.31.0",
  "diagramCount": 9,
- "total": 356,
- "open": 16,
- "mitigated": 340,
+ "total": 406,
+ "open": 17,
+ "mitigated": 389,
  "diagrams": [
   {
    "id": 0,
@@ -3313,9 +3313,9 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config. Since Phase 23 (G-2) it also covers AXIAM as a SAML identity provider: the assertion issuer (`axiam_federation::saml_idp`, T23.2.2), the tenant's sealed signing credential (`saml_idp_credential`, D-21) and the trust boundary to the service providers it issues to. T23.2.3 adds the SSO endpoint (`/saml/v2/{tenant}/sso`, both bindings, IdP-initiated, the continue leg) and the `saml_authn_request` store that holds a request across the login hop.",
+   "description": "Inbound federation from external identity providers: OIDC discovery and code exchange, SAML assertion consumption, the shared SSRF guard on every outbound IdP fetch, and attribute-to-role mapping with JIT provisioning. Since 1.0.0-beta08 this also covers the public login surface — the unauthenticated providers listing a login page renders its buttons from, the single-use handoff codes that let a cross-site SAML or Apple return issue a SameSite=Strict session, the plain-OAuth2 variant that authenticates by a userinfo call rather than a signed ID token, and organization→tenant inheritance of a federation config. Since Phase 23 (G-2) it also covers AXIAM as a SAML identity provider: the assertion issuer (`axiam_federation::saml_idp`, T23.2.2), the tenant's sealed signing credential (`saml_idp_credential`, D-21) and the trust boundary to the service providers it issues to. T23.2.3 adds the SSO endpoint (`/saml/v2/{tenant}/sso`, both bindings, IdP-initiated, the continue leg) and the `saml_authn_request` store that holds a request across the login hop. T23.2.8 (model 2.25.0) specifies the rest of the IdP ahead of its code: the SP registry store (`saml_service_provider`) and its management routes (contract §29, with SP metadata import as an SSRF and XXE surface), the IdP metadata endpoint, and the SLO endpoint with the per-SP `saml_sp_session` and `saml_logout_run` stores it needs (D-37 … D-42); its threats are Open until T23.2.5 and T23.2.4 build the controls they name.",
    "width": 1478,
-   "height": 1068,
+   "height": 1298,
    "boundaries": [
     {
      "id": "a89fe874-1c88-526f-9ef4-378f7d6958a8",
@@ -3330,7 +3330,7 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 324,
      "y": 24,
      "w": 660,
-     "h": 980,
+     "h": 1240,
      "label": "AXIAM federation services"
     },
     {
@@ -3338,7 +3338,7 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 1034,
      "y": 84,
      "w": 420,
-     "h": 920,
+     "h": 1180,
      "label": "Data tier"
     },
     {
@@ -3356,6 +3356,14 @@ export const THREAT_MODEL: ThreatModel = {
      "w": 260,
      "h": 190,
      "label": "SAML service providers"
+    },
+    {
+     "id": "cbed75da-f7cb-52ab-bf3c-dd9a6e542bde",
+     "x": 24,
+     "y": 1084,
+     "w": 260,
+     "h": 190,
+     "label": "Tenant administrators"
     }
    ],
    "nodes": [
@@ -4224,9 +4232,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Service providers link a user across SPs, or back to the AXIAM account",
        "type": "Information disclosure",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "A `NameID` that is the same at every SP, or derivable from the user id, lets SPs that compare notes — or an attacker who breaches two of them — follow a person across services the person kept apart, and hands every SP an AXIAM internal identifier.",
-       "mitigation": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. Open because `SessionIndex` is the AXIAM session id (plan §4 G-2, so that SLO and the revocation feed revoke the same thing): it is identical at every SP of one sign-on, as is `AuthnInstant`, so SPs that collude can correlate concurrent sessions despite pairwise identifiers. T23.2.4 decides whether SLO can map a per-SP index back to the session."
+       "mitigation": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. **Built (T23.2.4, 2026-10-04).** D-37: a per-SP random `SessionIndex` (32 CSPRNG bytes, base64url) recorded in `saml_sp_session` before signing and mapped back by the SLO endpoint by (tenant, SP, index) and then `NameID`, so SLO and the revocation feed still revoke the same session; the session id no longer reaches the XML. Tests (T23.2.4): `saml_idp_sso_test.rs::the_assertion_carries_a_per_sp_index_that_is_not_the_session_id` (one session, two SPs: two indexes, neither the session id, the session id nowhere in either assertion; a second sign-on to one SP reuses its index), `saml_idp::tests::the_authn_statement_carries_the_per_sp_index_instant_and_class` and, in `axiam-db`, `saml_slo_test.rs::an_index_resolves_for_its_own_sp_and_tenant_only`. Residual: `AuthnInstant` is the session's authentication time at every SP, which colluding SPs can compare (T-314 forbids misstating it)."
       },
       {
        "number": 313,
@@ -4262,10 +4270,10 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Mitigated",
        "description": "Some SP verifiers check only the first signature in a document, or treat a signature as covering an assertion because a reference names it. Against them, any document the tenant's key signed that carries no assertion — an error response echoing a request id an attacker chose, for instance — can be placed ahead of a forged assertion and vouch for it. Anyone who can send an `AuthnRequest` could collect one.",
-       "mitigation": "The tenant's key signs one shape of document only: a response carrying exactly one assertion (T-311). Failure responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`, `RequestDenied`, `InvalidNameIDPolicy`) carry no assertion and are never signed, which SAML Profiles §4.1.3.5 permits, and they have no status message or detail. Tests: `failure_responses_are_status_only_unsigned_and_echo_what_can_be_echoed`, `axiam_own_sp_refuses_a_failure_response`. Constraint for T23.2.4: a signed `LogoutRequest` or `LogoutResponse` is exactly such a document, so SLO signing needs its own decision rather than reusing this key by default."
+       "mitigation": "The tenant's key signs one shape of document only: a response carrying exactly one assertion (T-311). Failure responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`, `RequestDenied`, `InvalidNameIDPolicy`) carry no assertion and are never signed, which SAML Profiles §4.1.3.5 permits, and they have no status message or detail. Tests: `failure_responses_are_status_only_unsigned_and_echo_what_can_be_echoed`, `axiam_own_sp_refuses_a_failure_response`. Constraint for T23.2.4: a signed `LogoutRequest` or `LogoutResponse` is exactly such a document, so SLO signing needs its own decision rather than reusing this key by default. Decided for SLO (T23.2.8, 2026-10-04, D-38): AXIAM signs a logout message only for a session holder or in reply to a verified SP request, detached over the query on HTTP-Redirect so no XML signature exists to harvest; recorded as T-373."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "2a2a1983-07c2-5847-a3d0-7de61be737f2",
@@ -4296,12 +4304,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Sign-on stops when the active credential expires or is retired before a successor is in place",
        "type": "Denial of service",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Because the signer refuses an expired credential (T-308), a tenant whose credential reaches `not_after` stops issuing assertions to every SP, and so does one whose administrator retires the active credential. SPs pin the certificate, so a successor must be published in metadata before it signs, or every SP rejects its first assertion.",
-       "mitigation": "Open until rotation exists. The `next` slot is in the schema (at most one per tenant, enforced by the database), so a successor can be issued ahead of time, but there is no promote verb and the metadata endpoint does not yet publish `next` (T23.2.5). Until then an administrator issues the successor early and coordinates the switch with each SP. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion."
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29 and D-42: an `issue_idp_credential` into the `next` slot and a `promote_idp_credential` that, in one transaction, retires the old `active` and activates `next`, refused unless the id is the current `next` and inside its validity window; D-40 makes the metadata endpoint publish `active` and then `next`, so an SP has the successor before it signs, with `Cache-Control: max-age=3600`; §29 `get_idp` and `list_idp_credentials` show `not_after` so an administrator sees expiry coming. Tests (T23.2.5): `saml_admin_test.rs::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key`, `::a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing`, `::a_promotion_repeated_with_a_stale_page_is_a_409`, `::metadata::the_document_parses_back_with_samael_active_before_next_and_never_a_retired_key` and `::metadata::a_promotion_changes_what_is_published`; in `axiam-db`, `saml_idp_credential_test.rs::of_concurrent_promotions_exactly_one_wins`. Residual: a tenant that never rotates stops at `not_after`, and retiring the active credential without a successor stops sign-on at once — deliberate, as the incident response to T-306. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion."
       }
      ],
-     "open": 1
+     "open": 0
     },
     {
      "id": "7443c8b5-68b4-5ac9-bd3d-f39cdb1d21be",
@@ -4630,6 +4638,395 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Every edge the mapping writes carries `member_of.source = directory` (schema v74; the datastore admits no other owner value, and an edge without the field reads as manual). The mapping removes only directory-sourced edges the directory no longer backs, never touches or duplicates a manual edge, and leaves a manual edge of the same pair as it is; removals run before additions, so a stop part-way leaves less access. Tests: `a_manual_membership_is_untouched_by_every_application`, `a_manual_membership_of_the_same_pair_is_left_alone_and_never_removed`, `removing_a_directory_membership_removes_only_that_edge`, `the_datastore_admits_no_owner_but_directory`, `apply_backed_groups_reports_what_it_did_and_leaves_manual_edges`. Residual: an administrator's `add_member` on a pair the directory already owns is a conflict, not a promotion to manual, so that membership leaves with the directory — the safe direction (`add_member_on_a_directory_edge_is_still_a_conflict`)."
       }
      ],
+     "open": 0
+    },
+    {
+     "id": "2c859601-e642-5294-8142-a9ed10a36135",
+     "kind": "actor",
+     "x": 49,
+     "y": 1144,
+     "w": 150,
+     "h": 80,
+     "name": "Tenant administrator (console / SDK, §29)",
+     "lines": [
+      "Tenant administrator",
+      "(console / SDK, §29)"
+     ],
+     "description": "A human administrator of one tenant holding `saml_sp:read`, `saml_sp:write` or `saml_idp:credential`. Service-account tokens are refused on the `saml` namespace in this revision (D-42).",
+     "outOfScope": false,
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "de15bf38-6ec2-5998-a6c9-a20a44ae1780",
+     "kind": "process",
+     "x": 374,
+     "y": 1044,
+     "w": 140,
+     "h": 140,
+     "name": "SAML registry management (/api/v1/tenants/{t}/saml)",
+     "lines": [
+      "SAML",
+      "registry",
+      "management",
+      "(/api/v1/tenants/{t}/saml)"
+     ],
+     "description": "Contract §29 (T23.2.8, built by T23.2.5): the eleven `saml` management routes — the SP registry (CRUD, `update` a replacement), `parse_sp_metadata` (upload or URL through `guarded_fetch`, a draft only) and the IdP credential lifecycle (`issue`, `promote` in one transaction, `retire`) plus `get_idp`. Compiled in every build and independent of `saml_idp_enabled` (D-42); every SP write through `validate_saml_service_provider` and §29.3's refusals.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 357,
+       "title": "A principal registers, edits or deletes service providers it should not, or another tenant's",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The SP registry decides where a tenant's signed assertions may be delivered and which users each SP receives. A caller who could write it for a tenant it does not administer, or with a weaker permission than registration deserves, could register an SP of its own and receive assertions for the tenant's users, or delete a production SP.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29.3 rule 9 and D-42: the routes live under `/api/v1/tenants/{tenant_id}/saml` and the path tenant must be the caller's (another tenant's id is `403`); reads need `saml_sp:read`, SP writes and `parse_sp_metadata` `saml_sp:write`, the credential writes `saml_idp:credential`; service-account tokens are refused on the whole namespace in this revision, so registering where assertions go stays a human administrator's act; every repository call is tenant-keyed. Tests (T23.2.5): `saml_admin_test.rs::another_tenants_id_is_403_on_all_eleven`, `::each_operation_needs_its_own_permission_and_no_other`, `::a_service_account_token_is_refused_on_all_eleven` (the extractor's `401`, as on every human-only route)."
+      },
+      {
+       "number": 358,
+       "title": "A registration admits a delivery target, certificate or option the IdP cannot hold to its rules",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Every later SSO and SLO decision trusts the registry. A write path that skipped the validator, accepted an ACS or SLO URL that is a glob, plaintext or fragment-bearing, stored a certificate the SSO endpoint cannot use, or accepted `encrypt_assertions` while encryption is unimplemented would turn into ACS redirection (T-318), a signing SP whose requests can never verify, or an SP refused at every sign-on.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29.3 rules 1–3 and D-42: every create and update runs `validate_saml_service_provider` (the redirect-URI rule shared with OAuth2 clients, no `*`, unique URLs and indexes, one default, exactly one `CERTIFICATE` block that parses, a private key refused by name) and then four refusals of its own — `encrypt_assertions: true` (D-2), an `sp_signing_cert_pem` the SSO endpoint's decoder (`pem_cert_to_der`) refuses or whose key is not RSA ≥ 2048 or ECDSA P-256/384/521, an `allowed_groups` entry outside the tenant, and a changed `entity_id` (the pairwise `NameID` is keyed on it, D-22). The SSO endpoint still re-checks the ACS on every use (`check_acs_url`). Tests (T23.2.5): `saml_admin_test.rs::every_validator_refusal_is_a_400_validation_error_naming_the_rule` (each validator rule, on create and on update), `::each_d42_refusal_is_a_400_on_create_and_on_update`, `::the_certificates_the_endpoint_can_use_are_accepted_expired_ones_included`; in `axiam-federation`, `saml_sp::write_refusal_tests` (RSA, ECDSA on P-256, P-384 and P-521, Ed25519, secp256k1 and garbage)."
+      },
+      {
+       "number": 359,
+       "title": "SP metadata import makes the server fetch an internal or metadata-service address",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`parse_sp_metadata` accepts a URL chosen by an administrator, or by whoever holds an administrator's token. Fetched naively, it would reach cloud-metadata credentials, internal admin interfaces or AXIAM itself from the server's network position, and an error that echoed the response would read them back.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-41: `https` only, fetched only through `axiam_pki::ssrf::guarded_fetch` with `allow_private = false` — the name resolved once and the connection pinned to the vetted address, loopback, private, link-local and metadata addresses refused, every redirect hop re-validated, the transport cap and timeout — then the 512 KiB document cap; one fetch per call, no credentials sent, and no periodic refresh. A failure answers one of three generic messages and never the body, status line or resolved address (T-356's lesson), so the route cannot read an internal response; refusals are audited by category. Permission `saml_sp:write` and the `SAML_ADMIN_PER_MIN` bucket bound who and how often. Tests (T23.2.5): `saml_admin_test.rs::parse::a_url_is_refused_by_the_guard_with_a_message_that_names_no_address` (`http`, loopback, private, link-local, IPv6 and credentialed URLs); in `axiam-federation`, `saml_idp::sp_metadata::fetch_tests::without_the_seam_every_loopback_private_and_plain_http_url_is_refused`, `::a_success_is_the_body_and_a_failure_is_a_category_never_the_body` (an error body is never echoed) and `::the_response_is_capped_and_a_redirect_is_re_validated_strictly` (a redirect hop is held to the production rule); in `axiam-pki`, `ssrf::tests::ssrf_rejects_redirect_to_internal`."
+      },
+      {
+       "number": 360,
+       "title": "XML external entities, entity expansion or a parser differential in imported SP metadata",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "An SP metadata document is attacker-influenced XML (an upload, or whatever a URL serves). A DTD with external entities reads local files or makes requests; nested internal entities exhaust memory; a non-UTF-8 encoding can hide a declaration from a byte-level check.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-41: the receiver's rule, unchanged — `refuse_markup_declarations` (any `<!` other than a comment or CDATA) and `refuse_other_encodings` (a NUL, or a declared encoding other than UTF-8) on the bytes before any parser sees them, so there is no entity to expand; a 512 KiB cap; then `samael`'s metadata types, which open no network. Exactly one `EntityDescriptor` with one SAML 2.0 `SPSSODescriptor` is accepted; an aggregate is refused. Tests (T23.2.5): `saml_admin_test.rs::parse::dtd_xxe_encoding_aggregate_and_oversize_documents_are_refused_with_one_generic_message` (`<!DOCTYPE>`, `<!ENTITY>`, an entity bomb, a declared UTF-16 encoding, an `EntitiesDescriptor`, an oversized document); in `axiam-federation`, `saml_idp::sp_metadata::tests::a_dtd_an_entity_and_a_declared_foreign_encoding_are_refused_on_the_bytes` (UTF-16 on the wire included), `::an_aggregate_a_wrong_root_two_sp_descriptors_and_a_non_saml2_one_are_refused` and `::an_oversize_document_and_a_deeply_nested_one_are_refused`."
+      },
+      {
+       "number": 361,
+       "title": "Unsigned SP metadata decides what the IdP trusts",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "SP metadata is usually unsigned and fetched over a path the administrator does not control. If its ACS endpoints and certificates were stored as fetched — or refreshed from the URL later — whoever could alter the document in transit or on the SP's host would redirect assertions or substitute the key AXIAM verifies the SP's requests with.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-41: import is a parse to a draft, never a write; nothing is stored until an administrator submits the draft through `create_service_provider` or `update_service_provider`, where the validator and §29's refusals apply as to a manual entry. The document's own signature is not evaluated (there is no anchor, and its own certificate would be circular) and the draft warns so; the certificates' SHA-256 fingerprints are returned for out-of-band comparison; `validUntil` and `cacheDuration` are ignored; `encrypt_assertions` is never set; and AXIAM never re-reads an SP's metadata on its own. Tests (T23.2.5): `saml_admin_test.rs::parse::good_metadata_becomes_a_draft_that_create_accepts_unchanged_and_nothing_is_stored` (a parse stores nothing, `encrypt_assertions` is never set, the fingerprints come back) and `::parse::a_document_signature_is_reported_as_not_verified`."
+      },
+      {
+       "number": 362,
+       "title": "Registry and credential changes cannot be traced to an administrator",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "A changed ACS list, a new SP certificate or a promoted, retired or newly issued signing credential changes who receives assertions and which key SPs must trust. Without a record, a malicious or mistaken change cannot be attributed or reconstructed.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29.3 rule 11 and D-42: `saml_sp.created`, `saml_sp.updated` (the names of the changed fields, `acs_changed`, `certificate_changed`), `saml_sp.deleted`, `saml_sp.metadata_parsed` (source, URL host, outcome), `saml_idp.credential_issued`, `saml_idp.credential_promoted` and `saml_idp.credential_retired` (ids, slot, fingerprint), each with the actor, on the append-only audit trail; never a certificate's or a document's content. Tests (T23.2.5): `saml_admin_test.rs::every_sp_write_leaves_an_audit_row_with_names_and_no_certificate` (`saml_sp.created`, `.updated`, `.deleted`), `::parse::good_metadata_becomes_a_draft_that_create_accepts_unchanged_and_nothing_is_stored` and `::parse::a_url_is_refused_by_the_guard_with_a_message_that_names_no_address` (`saml_sp.metadata_parsed`, success and refusal), `::issuing_fills_an_empty_slot_with_a_keyless_answer_and_a_sealed_key` (`saml_idp.credential_issued`), `::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key` (`saml_idp.credential_promoted`) and `::retire_works_on_next_and_active_and_is_idempotent` (`saml_idp.credential_retired`)."
+      },
+      {
+       "number": 363,
+       "title": "The management routes are used to burn CPU or to amplify outbound requests",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "`issue_idp_credential` generates an RSA-4096 key (seconds of CPU) and `parse_sp_metadata` makes an outbound request per call. A loop with a stolen administrator token could exhaust the shared process or use AXIAM to hammer an external host.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-42: every write has a per-IP bucket of its own (`AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN`, default 30 per route); issuance checks the slot before generating a key, so an occupied slot costs no key generation (T23.2.1), and a free slot can only be refilled by retiring — which is audited and destroys a key; a metadata fetch is one request with `guarded_fetch`'s timeout and caps and no retry. Tests (T23.2.5): `saml_admin_test.rs::the_seven_writes_have_a_bucket_each_pinned_at_30_and_reads_have_none` and `::an_occupied_slot_is_409_before_any_key_is_generated`."
+      },
+      {
+       "number": 364,
+       "title": "A credential write races, half-applies or is made by a principal who may only edit SPs",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Rotation is two moves — the old active out, the next in. Done as two calls it leaves a moment with no signer (every sign-on fails) or, done in the other order, a database that briefly holds two active keys; a stale console could promote a credential other than the one its operator saw; and a permission shared with ordinary SP edits would let whoever may rename an SP stop sign-on at every SP of the tenant.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-42: `promote_idp_credential/{credential_id}` requires that the id is the tenant's current `next` and inside its validity window (`409` otherwise) and retires the old `active` (destroying its key) and activates `next` in one transaction, a repository method of its own; the slots stay enforced by the UNIQUE index (D-21); issue writes only into an empty slot; the three credential writes need `saml_idp:credential`, separate from `saml_sp:write`. Retiring the active credential without a successor is allowed on purpose (the incident response to T-306) and the console must warn. Tests (T23.2.5): `saml_admin_test.rs::a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing` (a non-`next` id, an expired and a not-yet-valid `next`), `::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key`, `::a_promotion_repeated_with_a_stale_page_is_a_409`, `::of_two_concurrent_promotions_exactly_one_wins` (on `surrealkv`) and `::each_operation_needs_its_own_permission_and_no_other` (the permission split); in `axiam-db`, `saml_idp_credential_test.rs::of_concurrent_promotions_exactly_one_wins` and `::a_promotion_that_cannot_happen_changes_nothing`."
+      },
+      {
+       "number": 365,
+       "title": "A management response or error carries the IdP signing key or its sealed form",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The credential routes are the first API to expose the `saml_idp_credential` table. A response type derived from the stored row, or an error that formatted it, could hand the tenant's signing key — or its ciphertext and custody — to anyone with read access, and with it the ability to sign as the tenant at every SP.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29.2 and D-42: `SamlIdpCredential` on the wire is a response type of its own with the public facts only (certificate, serial, fingerprint, dates, status, issuer CA) — no key, no ciphertext, no custody — built from `SamlIdpCredential`, which carries no key field, and never from `SealedSamlIdpCredential`; only the signer calls `get_active_sealed`. The core type derives no `Serialize`, so a route cannot expose the row by accident. SDKs must drop an undeclared key member (§29.5). Tests (T23.2.5): `saml_admin_test.rs::the_credential_list_is_a_bare_array_newest_first_and_carries_no_key`, `::issuing_fills_an_empty_slot_with_a_keyless_answer_and_a_sealed_key`, `::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key`, `::retire_works_on_next_and_active_and_is_idempotent`, `::a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing` (the error bodies) and `::the_spec_has_the_eleven_operations_and_a_credential_with_no_key_member` — each asserts that no answer contains `PRIVATE KEY`, a key column name or the sealed bytes."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "2d150b0e-0535-5769-8bdc-0c75f7669c8e",
+     "kind": "store",
+     "x": 1269,
+     "y": 834,
+     "w": 170,
+     "h": 80,
+     "name": "saml_service_provider (SP registry)",
+     "lines": [
+      "saml_service_provider",
+      "(SP registry)"
+     ],
+     "description": "Schema v72 (T23.2.1): one row per registered SP — entity id (unique per tenant), ACS allow-list, SLO endpoint, NameID policy, response signing, certificates (public), attribute mappings, allowed groups. No secret. Written only by the §29 routes after validation; read by the SSO and SLO endpoints, which re-check what they use.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 366,
+       "title": "A registry row is read or written across tenants, or outlives the SP it described",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The `saml_service_provider` table holds every tenant's SP registrations side by side. A query that lost its tenant key would let one tenant's SSO request match another tenant's SP; a delete that left the SP's session records behind would let a stale participation drive a logout.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** Every repository method is tenant-keyed and `entity_id` is unique per tenant (T23.2.1, Mitigated at the repository); rows go with their tenant in the tenant-delete transaction. D-37 and §29.3 rule 5: deleting an SP deletes its pending `AuthnRequest`s and its `saml_sp_session` rows in the same transaction (`SP_DELETE_CASCADE`), so a stale participation can never drive a logout or keep a `NameID` for an SP that no longer exists; the registry holds no secret (certificates are public). Tests (T23.2.4): in `axiam-db`, `saml_service_provider_test.rs::deleting_an_sp_removes_what_the_datastore_holds_for_it` (the pending requests and the participant rows of the deleted SP are gone, another SP's stay, a refused delete cascades nothing), `saml_slo_test.rs::deleting_an_sp_removes_its_participant_rows_and_only_its_own` and `::deleting_a_tenant_removes_both_tables_rows_and_only_its_own`; over HTTP, `saml_admin_test.rs::deleting_an_sp_over_http_removes_its_pending_requests_and_only_its_own`; the repository tenant-isolation tests of T23.2.1 in `saml_service_provider_test.rs`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "e7c6d16d-b27f-5884-b98a-d3b974004b47",
+     "kind": "process",
+     "x": 624,
+     "y": 1044,
+     "w": 140,
+     "h": 140,
+     "name": "SAML IdP metadata (/saml/v2/{tenant}/metadata)",
+     "lines": [
+      "SAML IdP",
+      "metadata",
+      "(/saml/v2/{tenant}/metadata)"
+     ],
+     "description": "D-40 (built by T23.2.5, behind `saml`): GET/HEAD, unauthenticated; one EntityDescriptor from fixed templates — signing keys of the `active` and `next` credentials, SSO (and, from T23.2.4, SLO) locations from the one URL function per tenant; unsigned; the D-20 404 when SAML is unavailable, off or without a publishable credential; cached for an hour with an ETag.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 367,
+       "title": "An SP pins a key or endpoints that are not the tenant's",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "SPs trust whatever certificate the IdP metadata carries. A document built from request input, served for the wrong tenant, or with stale or extra keys would make an SP trust an attacker's key or send users somewhere else.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-40: one fixed template, every value escaped; `entityID` and every location from `idp_entity_id`/`idp_sso_url`/`idp_slo_url` of the path tenant only (T-307); one `KeyDescriptor use=\"signing\"` per publishable credential — `active`, then `next` — read through the keyless `list`; no encryption key; `SingleLogoutService` only once the route exists. Unsigned by decision: signing with the published key anchors nothing and would mint another signed document (T-316); trust comes from TLS to the deployment's origin and the fingerprint §29 shows. Residual: an SP that fetches metadata over a path an attacker controls is outside AXIAM's reach. Tests (T23.2.5): `saml_admin_test.rs::metadata::the_document_parses_back_with_samael_active_before_next_and_never_a_retired_key` (both keys, `active` first, no retired one, no encryption key, no `SingleLogoutService`), `::metadata::each_tenant_publishes_its_own_urls_and_keys` and `::metadata::a_promotion_changes_what_is_published`; in `axiam-federation`, `saml_idp::idp_metadata::tests` (the template carries what D-40 names and nothing else, every value escaped)."
+      },
+      {
+       "number": 368,
+       "title": "The metadata endpoint reveals whether a tenant exists, serves SAML or has a credential",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "The metadata route is unauthenticated. Different answers for an unknown tenant, a tenant with SAML off, a build without SAML and a tenant without a credential would let anyone enumerate tenants and their SAML posture.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-40 with D-20/D-27: the same empty `404` for every one of those cases and for a non-canonical tenant id, decided before anything is read, on every method and sub-path (`default_service`); no `503` for a missing credential. Readiness is visible only to the tenant's administrator through §29 `get_idp`. Residual as T-326: a flood tells a build with SAML from one without (429 against 404). Tests (T23.2.5): `saml_admin_test.rs::metadata::the_three_d20_404s_are_indistinguishable_from_each_other_and_from_an_unmounted_path` (an unknown tenant, a non-canonical id, the setting off, only a retired credential, no credential, sub-paths and every other method)."
+      },
+      {
+       "number": 369,
+       "title": "A metadata request flood loads the database and the process",
+       "type": "Denial of service",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Every metadata request reads the tenant's settings and credentials and renders XML, unauthenticated.",
+       "mitigation": "**Built (T23.2.5, 2026-10-04).** D-40: a per-route governor with the `end_session_per_min` preset and the shared bucket `saml_idp_metadata`; at most two certificates per document; `Cache-Control: public, max-age=3600` and a strong `ETag` so SPs and caches revalidate cheaply (`304`). Tests (T23.2.5): `saml_admin_test.rs::metadata::the_metadata_route_is_rate_limited_with_a_bucket_of_its_own` and `::metadata::the_etag_revalidates_with_304_and_head_answers_like_get`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "98615ed3-7338-5a0e-a46a-c202a2371450",
+     "kind": "process",
+     "x": 824,
+     "y": 794,
+     "w": 140,
+     "h": 140,
+     "name": "SAML SLO endpoint (/saml/v2/{tenant}/slo)",
+     "lines": [
+      "SAML SLO",
+      "endpoint",
+      "(/saml/v2/{tenant}/slo)"
+     ],
+     "description": "D-38/D-39 (built by T23.2.4, behind `saml`): GET/POST `/slo` for SP LogoutRequests and LogoutResponses on both bindings, and the IdP-initiated trigger `/sso/logout`. Receives with T23.2.3's receiver, requires every SP message signed (per node, SHA-2, never verify_signed_xml), resolves sessions through `saml_sp_session`, revokes them (back-channel to OIDC clients, invalidate → revocation feed) before propagating a signed LogoutRequest to each other SP through the browser, clears the OP cookies, and answers the initiating SP.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 370,
+       "title": "A forged LogoutRequest ends another user's sessions",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Whoever can make a browser deliver a `LogoutRequest` naming a user's `NameID` and `SessionIndex` could sign that user out everywhere; done across a tenant, it is a mass sign-out.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38: every `LogoutRequest` must be signed by the issuing SP's registered certificate — HTTP-Redirect over the exact octets received, RSA-SHA-2 only (`SigAlg` must name RSA-SHA-256, -384 or -512, else the request is refused as an algorithm not accepted; `SigAlg` is itself among the signed octets, and a `SigAlg` that names another algorithm than the one the signature was made with fails as an invalid signature — there is no separate comparison; wording made exact in the W4 F4 review); HTTP-POST as the one enveloped signature of the root, verified on that node by xmlsec with SHA-1 refused; `verify_signed_xml` is never used — and an SP without a certificate cannot start a logout; `Destination` must be present and byte-equal to the tenant's SLO URL, `IssueInstant` fresh, `NotOnOrAfter` unexpired. A disabled SP's key ends nothing. D-37: the request resolves only sessions recorded for that SP whose `NameID` matches. Anything refused gets an error page that posts nowhere, sets no cookie and signs nothing. Tests (T23.2.4), over HTTP in `saml_idp_slo_test.rs`: `unsigned_wrong_key_tampered_and_sha1_requests_are_refused_on_both_bindings`, `a_misplaced_or_wrong_binding_signature_is_refused` (inside `Extensions`, inside the `NameID`, beside a second signature, a half signature, an enveloped signature on the Redirect binding), `field_level_refusals_hold_on_both_bindings` (wrong and missing `Destination`, stale and future `IssueInstant`, expired `NotOnOrAfter`, `EncryptedID`, `BaseID`, 33 `SessionIndex` values, an empty `NameID`) and `an_sp_without_a_certificate_a_disabled_sp_and_an_unknown_issuer_cannot_initiate`; in `axiam-federation`, `saml_idp::logout::tests::a_signature_anywhere_but_the_roots_own_child_is_refused` and `::a_redirect_query_carries_one_message_and_is_signed_over_that_parameter`. Every refusal test asserts the session, the participant row and the run table are untouched."
+      },
+      {
+       "number": 371,
+       "title": "A captured logout message is replayed",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Logout messages travel through the browser and can be captured. A replayed `LogoutRequest` could end a session created after it; a replayed `LogoutResponse` could advance or confuse a logout chain.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38: a `LogoutRequest` `ID` is single-use per SP — `replay_key` `{sp_id}:{ID}`, UNIQUE per tenant in `saml_logout_run`, claimed before anything is resolved or revoked and kept after the run finishes, for the row's ten minutes, longer than the five-minute `IssueInstant` window; D-39: each outbound request `ID` is 256 random bits, stored as a digest and consumed once on the X6 two-layer arbiter when its response arrives, from the SP it was sent to. Tests (T23.2.4): `saml_idp_slo_test.rs::a_replayed_request_id_is_refused_and_ends_no_later_session` (both bindings; the replay of a request naming no index does not end a session created after it) and `::a_replayed_or_foreign_in_response_to_is_refused` (a response from the wrong SP, an unknown id, a replay after the chain moved on and after it ended); in `axiam-db`, `saml_slo_test.rs::a_request_id_is_single_use_per_sp_even_after_the_run_finished`, `::an_outbound_request_is_consumed_once_by_the_sp_it_went_to` and `::concurrent_responses_yield_exactly_one_winner` (100 rounds of 8 racers on surrealkv)."
+      },
+      {
+       "number": 372,
+       "title": "XML external entities, entity expansion or a decompression bomb in a logout message",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The SLO endpoint parses SP-supplied XML, DEFLATE-compressed on the Redirect binding, before it knows who sent it.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38: T23.2.3's receiver, unchanged — 96 KiB encoded and 64 KiB decoded caps, inflating stopped one byte past the cap, any markup declaration and any non-UTF-8 encoding refused on the bytes, libxml without recovery or network — before any lookup; the tenant check and the D-20 `404` run before the body is read. Tests (T23.2.4): `saml_idp_slo_test.rs::xxe_and_a_decompression_bomb_are_refused_before_any_lookup` (an external entity on both bindings and a 16 MiB bomb on the Redirect binding, each refused with no run claimed and nothing touched); in `axiam-federation`, `saml_idp::logout::tests::a_dtd_or_entity_is_refused_before_parsing`, plus the receiver's own refusal tests (`saml_idp::request::tests`)."
+      },
+      {
+       "number": 373,
+       "title": "A logout message signed by the tenant's key is harvested as a signature-wrapping gadget",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "T-316's constraint: an SP verifier that checks only the first signature, or binds a reference by name, can be fed any document the tenant's key signed, placed ahead of a forged assertion. Signed logout messages are such documents, and SLO exists to produce them.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38: AXIAM signs a `LogoutRequest` only for a session its holder ended or a verified SP request ended, and a `LogoutResponse` only in reply to a verified request — never for an unauthenticated party, so obtaining one needs a session (whose holder can already obtain signed responses for their own account) or an SP's key. On HTTP-Redirect the signature is the detached query signature, so no XML signature exists to harvest; on HTTP-POST it is enveloped like the assertion's (root child, one reference to the root `ID`) and re-verified before sending. AXIAM's own SP verifier refuses misplaced signatures (D-23). Tests (T23.2.4): `saml_idp_slo_test.rs::the_other_sps_receive_signed_logout_requests_in_sequence_and_a_partial_run_ends_in_partial_logout` (every Redirect-bound message is verified against the tenant credential's certificate and carries no `Signature` in its document; every POST-bound one carries exactly one enveloped signature that verifies) and `::a_full_run_ends_in_success_to_the_initiator`; the refusal tests of T-370 and `::an_sp_without_a_certificate_a_disabled_sp_and_an_unknown_issuer_cannot_initiate`, whose `assert_refused` checks that an unverified message gets no redirect, no form, no cookie and so nothing signed; in `axiam-federation`, `saml_idp::logout::tests::a_redirect_logout_request_has_a_detached_signature_and_no_xml_signature`, `::a_post_logout_request_is_enveloped_and_verifies_under_the_roots_own_signature`, `::a_logout_response_is_signed_on_both_bindings_and_reports_success_or_partial` and `::nothing_is_signed_for_an_input_that_is_not_in_order`."
+      },
+      {
+       "number": 374,
+       "title": "A flood or an endless chain exhausts the SLO endpoint",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "`/slo` and the logout trigger are unauthenticated, parse XML and verify signatures; a logout chain could be driven through many SPs.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38/D-39: the tenant check and D-20 `404` before the body is read; per-route governors with the `end_session_per_min` preset and the buckets `saml_idp_slo` and `saml_idp_sso_logout`; the receiver's size caps; at most 32 `SessionIndex` elements per request and 32 SPs per chain, then `PartialLogout`; runs expire after ten minutes and are swept. Tests (T23.2.4): `saml_idp_slo_test.rs::the_slo_route_is_rate_limited` and `::the_logout_trigger_is_rate_limited_in_a_bucket_of_its_own` (each bucket at a limit of 1, and `/slo` keeps its own allowance), `::a_run_is_capped_at_32_service_providers_and_is_partial_past_it` (33 participants: 32 taken, the run partial from the start), `::field_level_refusals_hold_on_both_bindings` (33 `SessionIndex` values refused, 32 served) and `::slo_and_the_logout_trigger_answer_an_indistinguishable_404_when_saml_is_off`; in `axiam-federation`, `saml_idp::logout::tests::at_most_32_session_indexes_are_read`; in `axiam-db`, `saml_slo_test.rs::expired_runs_are_swept_and_a_runs_user_rows_are_erased`."
+      },
+      {
+       "number": 375,
+       "title": "The SLO endpoint delivers messages or the browser to a location an SP never registered",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A logout endpoint that took its destination from a message — a response location, a `RelayState`, a post-logout parameter — would be an open redirector and could post signed logout messages to an attacker.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-38/D-39: outbound messages go only to the SP's registered `slo_url` on its registered `slo_binding`, the final response only to the initiating SP's registered `slo_url`; an SP's `RelayState` (≤ 80 bytes) is echoed to that SP only; the IdP-initiated trigger ends on AXIAM's own page with no redirect parameter; the POST binding renders through the D-27 auto-post page (`form-action` = the `slo_url` origin), so no second setter of a content-security policy appears. Tests (T23.2.4): `saml_idp_slo_test.rs::a_message_naming_another_location_is_answered_at_the_registered_one` (hostile extensions and a URL as `RelayState`, both bindings, the form's policy naming only the registered origin) and `::the_trigger_reads_no_destination_from_its_query`, and the destination assertions of the propagation tests; in `axiam-api-rest`, `middleware::security_headers::tests::exactly_one_handler_sets_its_own_policy` (still exactly one) and `handlers::saml_idp::tests::the_auto_post_policy_is_narrower_than_the_global_one`."
+      },
+      {
+       "number": 376,
+       "title": "A logout cannot be traced to the SP, the sessions and the outcome",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "A user disputing that they were signed out, or an administrator investigating a mass sign-out, needs to know which SP asked, which sessions ended and which SPs were told.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-39: an audit row `saml_idp.logout` per logout phase — `sessions_ended` when the sessions are revoked (initiator, SP, sessions ended, SPs queued) and `completed` when the chain ends (SPs told, partial, outcome) — never a `NameID`, a `SessionIndex` or a session id; session revocation itself is recorded as every logout is. Tests (T23.2.4): `saml_idp_slo_test.rs::the_other_sps_receive_signed_logout_requests_in_sequence_and_a_partial_run_ends_in_partial_logout` (both rows, their phases and counts, and none of the principals' `NameID`s or indexes in either), `::a_full_run_ends_in_success_to_the_initiator` (outcome `success`) and `::the_idp_initiated_trigger_revokes_clears_the_cookies_and_propagates` (initiator `idp`)."
+      },
+      {
+       "number": 378,
+       "title": "A third-party page signs the visitor out of AXIAM and every SP",
+       "type": "Spoofing",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "The IdP-initiated trigger acts on the browser's own OP cookie; a cross-site page that could navigate a visitor to it would end the visitor's session and their SP sessions — a nuisance, at scale a denial of service.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-39: `GET /saml/v2/{t}/sso/logout` is refused with `403` for `Sec-Fetch-Site: cross-site` (D-26's rule) and acts only on the session the browser's own OP cookie names, resolved through the tenant-keyed lookup; `/slo` itself acts only on signed SP requests and never reads the cookie. Residual as D-26: a browser that sends no fetch metadata is admitted. Tests (T23.2.4): `saml_idp_slo_test.rs::the_trigger_refuses_cross_site_and_resolves_the_cookie_in_its_own_tenant_only` (the cross-site trigger is refused with nothing ended and nothing cleared; with no cookie only the page is shown; another tenant's cookie names nothing here), `::the_idp_initiated_trigger_revokes_clears_the_cookies_and_propagates` and `::slo_never_reads_the_op_cookie`."
+      },
+      {
+       "number": 379,
+       "title": "An SP's logout reaches sessions it never took part in, or another tenant's",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "SLO ends whole sessions. If an SP could name any session — by a guessed index, by another SP's index, by a `NameID` alone or across tenants — one compromised SP could sign anyone out of everything.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-37/D-39: sessions are resolved by (path tenant, the verified issuer's SP, `SessionIndex`) in `saml_sp_session`, and the row's `NameID` value and format must equal the request's; with no index, only the sessions recorded for that SP and that `NameID`. Indexes are 256-bit random per SP. Tests (T23.2.4): `saml_idp_slo_test.rs::only_the_sessions_the_sp_participates_in_end_and_only_for_the_right_name_id` (another SP's index, a mismatched `NameID` value, a mismatched and an absent format, an unknown principal — each answered `Success`, each ending nothing; then the right request ends only its own session), `::a_request_without_an_index_ends_every_session_the_sp_holds_for_that_name_id` and `::another_tenants_path_ends_nothing` (an SP unknown to the other tenant is refused; one registered there with the same entity id and certificate finds no row under that tenant); in `axiam-db`, `saml_slo_test.rs::an_index_resolves_for_its_own_sp_and_tenant_only` and `::list_for_sp_name_id_is_scoped_to_the_sp_and_the_name_id`."
+      },
+      {
+       "number": 380,
+       "title": "SP sessions outlive the AXIAM session they came from",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "An SP keeps its own session after the assertion. When the AXIAM session ends by anything but a SAML logout chain — an administrator's revocation, a password reset, an account disable, `/oauth2/end_session`, expiry — or a chain stops at an SP that never answers, the remaining SPs are not told and the user stays signed in there.",
+       "mitigation": "Accepted design trade-off (D-38, D-39). SAML has no back channel through the browser; the SOAP binding that would provide one is not implemented. What bounds it: SLO revokes the AXIAM session first, so a broken chain never keeps an AXIAM session alive; assertions are valid for five minutes and single-use; a revoked session or a suspended account obtains no new assertion (T-328), so the SP session cannot be renewed through AXIAM; and the SP's own session lifetime is the SP administrator's to set. A later decision may add SOAP back-channel logout or drive a chain from `end_session`."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "a2a0c721-f0d1-5524-a648-bf8002e851f5",
+     "kind": "store",
+     "x": 1079,
+     "y": 964,
+     "w": 170,
+     "h": 80,
+     "name": "saml_sp_session (per-SP SessionIndex)",
+     "lines": [
+      "saml_sp_session",
+      "(per-SP SessionIndex)"
+     ],
+     "description": "D-37 (T23.2.4, next schema version): one row per (tenant, session, SP) — user, SP entity id, the asserted NameID and format, the per-SP random SessionIndex, expiry. Written by the SSO continue leg before signing; read by SLO to map an index back to a session and to find the SPs to tell.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 381,
+       "title": "The participant table links a person's sessions to the SPs they use",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "`saml_sp_session` records, per live session, which SPs the user signed in to and the `NameID` each received — an email address at an `emailAddress` SP. A dump, or rows kept after the session or the person is gone, would disclose that history.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-37: rows are tenant-scoped, deleted when the logout chain that revoked their session ends, swept once the session has expired or is gone (a logout that just ended it keeps them for one run lifetime), deleted with their SP and their tenant, and removed by both erasure paths by `user_id`; they hold no credential (a `SessionIndex` alone ends nothing, since a logout request must be signed). Tests (T23.2.4), in `axiam-db`: `saml_slo_test.rs::the_sweeper_removes_expired_rows_and_rows_of_sessions_that_are_gone`, `::deleting_a_tenant_removes_both_tables_rows_and_only_its_own`, `::deleting_an_sp_removes_its_participant_rows_and_only_its_own`, `::both_erasure_paths_remove_the_persons_rows` (the administrator's `delete` and the Art. 17 `anonymize_user`), `::rows_are_deleted_by_session_and_by_user_and_only_in_their_tenant` and the schema test `v76_stores_digests_and_record_ids_only_where_it_must` (no credential column); over HTTP, `saml_idp_slo_test.rs::an_sp_initiated_logout_on_the_redirect_binding_revokes_the_session_and_the_feed_shows_it` (no row left when the chain ends)."
+      },
+      {
+       "number": 382,
+       "title": "An assertion is issued whose session SLO cannot find",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "If the SSO leg signed before recording which SP got which `SessionIndex`, a failed or lost write would leave an SP holding a session no logout can reach.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-37: the continue leg writes (or reads back) the participant row after consuming the handle and before signing; the issuer takes its `SessionIndex` from the row and the endpoint compares what was issued with what was recorded; a failed write answers `Responder` and issues nothing. Tests (T23.2.4): `saml_idp_sso_test.rs::a_failed_participant_write_yields_no_assertion` (the datastore refuses every participant write: a failure response with no assertion and no row) and `::the_assertion_carries_a_per_sp_index_that_is_not_the_session_id`; in `axiam-federation`, `saml_idp::tests::the_authn_statement_carries_the_per_sp_index_instant_and_class`."
+      },
+      {
+       "number": 384,
+       "title": "Participant and logout-chain rows accumulate without bound",
+       "type": "Denial of service",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Every sign-on to an SP writes a row and every logout a run; without expiry the tables grow with traffic.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-37/D-39: one participant row per (session, SP), refreshed rather than duplicated; runs expire after ten minutes; both tables are swept by the cleanup scheduler and reported on `/health/jobs` as `saml_sp_session` and `saml_logout_run`. Tests (T23.2.4): in `axiam-db`, `saml_slo_test.rs::the_sweeper_removes_expired_rows_and_rows_of_sessions_that_are_gone`, `::expired_runs_are_swept_and_a_runs_user_rows_are_erased`, `::a_second_sign_on_to_one_sp_in_one_session_keeps_the_first_index` and `::concurrent_records_for_one_session_and_sp_agree_on_one_index`; over HTTP, `saml_idp_sso_test.rs::the_assertion_carries_a_per_sp_index_that_is_not_the_session_id` (a second sign-on adds no row); in `axiam-server`, `job_health::tests::the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "ba9784ec-399d-526d-8530-f9541a09249a",
+     "kind": "store",
+     "x": 1269,
+     "y": 964,
+     "w": 170,
+     "h": 80,
+     "name": "saml_logout_run (logout chains)",
+     "lines": [
+      "saml_logout_run",
+      "(logout chains)"
+     ],
+     "description": "D-38/D-39 (T23.2.4): a logout in progress — initiator, the queue of participant rows still to tell, the digest of the current outbound request ID, the partial flag and the inbound LogoutRequest replay key; ten-minute rows, consumed on the X6 arbiter.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 383,
+       "title": "A database read yields a usable logout-chain identifier",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "A logout run names the next SP's outbound request. If the store kept the raw request `ID`, someone who could read it could forge the matching `LogoutResponse` and steer the chain.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** D-39: the outbound request `ID` is stored as its SHA-256 digest, consumed once, and accepted only from the SP it was sent to (with its signature when it registered a certificate); runs are tenant-scoped, expire after ten minutes and go with their tenant. A forged response could at most continue a logout already under way. Tests (T23.2.4): in `axiam-db`, `saml_slo_test.rs::the_run_holds_a_digest_of_the_outbound_id_and_no_name_id` and the schema test `v76_stores_digests_and_record_ids_only_where_it_must`; over HTTP in `saml_idp_slo_test.rs`, `the_other_sps_receive_signed_logout_requests_in_sequence_and_a_partial_run_ends_in_partial_logout` (the stored run holds the digest and the serialised table never contains the `ID`), `::a_replayed_or_foreign_in_response_to_is_refused` (only the SP the request went to can consume it) and `::non_success_answers_make_the_run_partial_and_unverified_ones_are_refused_unconsumed` (an unsigned or wrong-key answer from an SP with a certificate is refused and consumes nothing)."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "84aeaa23-2930-5ea3-8269-d1e7fd183781",
+     "kind": "store",
+     "x": 1079,
+     "y": 1094,
+     "w": 170,
+     "h": 80,
+     "name": "session / revoked_session (feed)",
+     "lines": [
+      "session /",
+      "revoked_session (feed)"
+     ],
+     "description": "The AXIAM session rows and, when the feed is on, the revocation feed's `revoked_session` entries (shown in full on the authentication diagram). SLO revokes through `SessionRepository::invalidate`, which publishes the revoked session's hash.",
+     "outOfScope": false,
+     "threats": [],
      "open": 0
     }
    ],
@@ -5299,15 +5696,339 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "SurrealDB (private network)",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "838d668f-79a3-5423-9b67-3a6cab44d25b",
+     "path": "M199,1167.6 L375.6,1129",
+     "name": "§29 management calls (bearer)",
+     "description": "Authenticated administrator calls to the `saml` namespace: SP CRUD, metadata parse, credential lifecycle.",
+     "label": "§29 management calls (bearer)",
+     "labelLines": [
+      "§29 management calls (bearer)"
+     ],
+     "lx": 287.3,
+     "ly": 1148.3,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS (REST)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "7a016eb8-b689-5611-8e99-4c70624d8222",
+     "path": "M511.7,1096.1 L1269,896.4",
+     "name": "validated SP write / read",
+     "description": "Create, replace, delete and read SP rows after `validate_saml_service_provider` and §29.3's refusals; delete cascades to the SP's participant rows.",
+     "label": "validated SP write / read",
+     "labelLines": [
+      "validated SP write / read"
+     ],
+     "lx": 890.3,
+     "ly": 996.3,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "da053c41-980b-5812-930d-c75174de5ed2",
+     "path": "M506.8,1083 L1082.9,799",
+     "name": "issue / promote / retire (one transaction)",
+     "description": "Key generation and sealing on issue; promote retires the old active and activates next in one transaction; retire destroys the key. No key ever returned.",
+     "label": "issue / promote / retire (one transaction)",
+     "labelLines": [
+      "issue / promote / retire (one",
+      "transaction)"
+     ],
+     "lx": 794.8,
+     "ly": 941,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "aecc212e-9e49-5c1a-87f9-aedc40961889",
+     "path": "M444,1044 L444,654",
+     "name": "SP metadata_url fetch request",
+     "description": "parse_sp_metadata with a URL: handed to guarded_fetch only (https, resolve once and pin, private/loopback/link-local refused, redirects re-validated, capped).",
+     "label": "SP metadata_url fetch request",
+     "labelLines": [
+      "SP metadata_url fetch request"
+     ],
+     "lx": 444,
+     "ly": 849,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "b2044a54-8193-5743-bbd3-5e8ea2c42a5e",
+     "path": "M398.2,636.9 L158.6,914",
+     "name": "SP metadata fetch (guarded)",
+     "description": "The single outbound GET for an SP's metadata, to the address the guard vetted.",
+     "label": "SP metadata fetch (guarded)",
+     "labelLines": [
+      "SP metadata fetch (guarded)"
+     ],
+     "lx": 278.4,
+     "ly": 775.5,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "fe16fedf-59bb-5766-bb45-b05c50734f1b",
+     "path": "M199,975.1 L626.6,1095.1",
+     "name": "IdP metadata fetch (unauthenticated)",
+     "description": "An SP (or its administrator) reads the tenant's IdP metadata to pin the signing certificates and locations.",
+     "label": "IdP metadata fetch (unauthenticated)",
+     "labelLines": [
+      "IdP metadata fetch (unauthenticated)"
+     ],
+     "lx": 412.8,
+     "ly": 1035.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "3e31b42d-3cf5-5187-af38-eb02cf56ae4c",
+     "path": "M749.9,1071.8 L1111,799",
+     "name": "read active + next certificates (no key)",
+     "description": "SamlIdpCredentialRepository::list — public facts only; never get_active_sealed.",
+     "label": "read active + next certificates (no key)",
+     "labelLines": [
+      "read active + next certificates (no",
+      "key)"
+     ],
+     "lx": 930.4,
+     "ly": 935.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "4673f45b-efb4-5d72-893b-47935b6e0e14",
+     "path": "M199,945.2 L824.5,872.1",
+     "name": "LogoutRequest / LogoutResponse (Redirect / POST, via the browser)",
+     "description": "An SP's signed logout request, or its answer to AXIAM's, delivered by the user's browser on either binding.",
+     "label": "LogoutRequest / LogoutResponse (Redirect / POST, via the browser)",
+     "labelLines": [
+      "LogoutRequest / LogoutResponse",
+      "(Redirect / POST, via the browser)"
+     ],
+     "lx": 511.7,
+     "ly": 908.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS (front channel)",
+     "threats": [
+      {
+       "number": 377,
+       "title": "Logout messages, NameIDs and RelayState are recorded in request logs",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "On the HTTP-Redirect binding a `LogoutRequest` — with its `NameID`, possibly an email address — and `RelayState` travel in the query string, which request tracing records.",
+       "mitigation": "**Built (T23.2.4, 2026-10-04).** The W3 F4 request tracer (`RedactingRootSpanBuilder`) redacts every query value not on `KEPT_QUERY_PARAMETERS`; D-38 adds no SLO parameter to that list (`SigAlg`, an algorithm URI, was already a kept structural parameter: its value is recorded as received, which reveals nothing, and what it must be is T-370's rule, not this one's), and the handlers log no message, `NameID`, `RelayState` or cookie. Tests (T23.2.4): `saml_idp_slo_test.rs::the_request_log_records_no_message_parameter_of_slo` (the real `/slo` route through the tracer: `SAMLRequest`, `SAMLResponse`, `RelayState` and `Signature` are recorded as `[redacted]` and no value reaches the log) and, in `axiam-api-rest`, `middleware::request_span::tests::the_single_logout_parameters_are_redacted_and_none_was_added_to_the_kept_list`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "4eb779bc-f741-50dc-898c-4cd860b2cab4",
+     "path": "M824.5,872.1 L199,945.2",
+     "name": "signed LogoutRequest / LogoutResponse (SP's slo_binding)",
+     "description": "AXIAM's logout messages to each SP of the session, and the final response to the initiating SP — only to registered slo_url values; detached signature on Redirect, enveloped on POST.",
+     "label": "signed LogoutRequest / LogoutResponse (SP's slo_binding)",
+     "labelLines": [
+      "signed LogoutRequest /",
+      "LogoutResponse (SP's slo_binding)"
+     ],
+     "lx": 511.7,
+     "ly": 908.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS (front channel)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "8d529853-83b0-5696-9f8a-d0872c14e3a8",
+     "path": "M183.2,384 L836,824.8",
+     "name": "IdP-initiated logout (/sso/logout, OP cookie)",
+     "description": "The browser's own sign-out at AXIAM: same-site only, acting on the session its OP cookie names.",
+     "label": "IdP-initiated logout (/sso/logout, OP cookie)",
+     "labelLines": [
+      "IdP-initiated logout (/sso/logout,",
+      "OP cookie)"
+     ],
+     "lx": 509.6,
+     "ly": 604.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "10587f12-ae62-5b32-aa7c-bb4acb8c4d4a",
+     "path": "M956.1,896.2 L1086.9,964",
+     "name": "resolve sessions by (SP, SessionIndex, NameID)",
+     "description": "Map a verified request back to sessions; list the other SPs of those sessions; delete the rows when the run ends.",
+     "label": "resolve sessions by (SP, SessionIndex, NameID)",
+     "labelLines": [
+      "resolve sessions by (SP,",
+      "SessionIndex, NameID)"
+     ],
+     "lx": 1021.5,
+     "ly": 930.1,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "3dc774a1-2785-5cb6-afe9-73808f2fd5a0",
+     "path": "M961,884.4 L1269,978.1",
+     "name": "hold / consume logout chain (X6)",
+     "description": "Create the run with the request's replay key; consume each outbound request ID once when its response arrives.",
+     "label": "hold / consume logout chain (X6)",
+     "labelLines": [
+      "hold / consume logout chain (X6)"
+     ],
+     "lx": 1115,
+     "ly": 931.3,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "b77f0d5a-cdda-595a-9403-4517d88a7573",
+     "path": "M943.5,913.5 L1124,1094",
+     "name": "invalidate session + publish to revocation feed",
+     "description": "AuthService::logout → SessionRepository::invalidate, after OIDC back-channel logout; the feed entry is written when the feed is enabled.",
+     "label": "invalidate session + publish to revocation feed",
+     "labelLines": [
+      "invalidate session + publish to",
+      "revocation feed"
+     ],
+     "lx": 1033.7,
+     "ly": 1003.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "7919cd3f-7265-50a2-a0e3-85f4f52f24f1",
+     "path": "M959.2,838.6 L1079,792.1",
+     "name": "unseal active key (logout signing)",
+     "description": "get_active_sealed for the two signing cases D-38 allows; the key decrypted into a zeroizing buffer only.",
+     "label": "unseal active key (logout signing)",
+     "labelLines": [
+      "unseal active key (logout signing)"
+     ],
+     "lx": 1019.1,
+     "ly": 815.3,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "b8fa4fa2-ba50-57fa-a281-9aeaca24d89c",
+     "path": "M964,865.5 L1269,872.2",
+     "name": "read SP (certificate, slo_url)",
+     "description": "The verified issuer's registration: the certificate to verify with and the registered slo_url/slo_binding to send to.",
+     "label": "read SP (certificate, slo_url)",
+     "labelLines": [
+      "read SP (certificate, slo_url)"
+     ],
+     "lx": 1116.5,
+     "ly": 868.8,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "edf438c0-318e-5508-8865-782c1cecda5e",
+     "path": "M761.1,884 L1079,978.7",
+     "name": "record participant + per-SP SessionIndex",
+     "description": "Written after the handle is consumed and before the assertion is signed (D-37); a failure issues nothing.",
+     "label": "record participant + per-SP SessionIndex",
+     "labelLines": [
+      "record participant + per-SP",
+      "SessionIndex"
+     ],
+     "lx": 920,
+     "ly": 931.3,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "5dad8923-1903-5abd-afa5-748f475447bc",
+     "path": "M764,865.1 L1269,872.7",
+     "name": "read SP registration",
+     "description": "Find the SP by Issuer within the path tenant; ACS allow-list, certificate and policy.",
+     "label": "read SP registration",
+     "labelLines": [
+      "read SP registration"
+     ],
+     "lx": 1016.5,
+     "ly": 868.9,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB (private network)",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 97,
-   "open": 4,
+   "total": 125,
+   "open": 3,
    "bySeverity": {
-    "High": 37,
-    "Medium": 38,
+    "High": 44,
+    "Medium": 51,
     "Critical": 13,
-    "Low": 9
+    "Low": 17
    }
   },
   {
@@ -6824,16 +7545,16 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules.",
+   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules. Since Phase 23 (G-5, T23.5.2, model 2.27.0) it also covers the Shared Signals Framework transmitter: the SSF stream registry and its per-stream event buffer (`ssf_stream`, `ssf_event_buffer`), SET issuance with the deployment key, the stream management API and transmitter metadata a receiver calls with its own client credentials, and the push and poll flows to the receiver, across a boundary of their own (D-44 … D-52). Since model 2.29.0 (T23.5.4) the store also holds the step-up record (`ssf_step_up`, D-53 (1)) the authorization endpoint keeps for `assurance-level-change`. Since model 2.31.0 (D-55) the transmitter is inactive for every tenant while the deployment holds more than one tenant and serves no per-tenant issuers, so tenants never share an issuer.",
    "width": 1438,
-   "height": 848,
+   "height": 1088,
    "boundaries": [
     {
      "id": "c0d71a54-aac0-5a7f-84bf-d3ac20259104",
      "x": 324,
      "y": 24,
      "w": 660,
-     "h": 800,
+     "h": 1040,
      "label": "AXIAM eventing & audit services"
     },
     {
@@ -6849,8 +7570,16 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 1034,
      "y": 84,
      "w": 380,
-     "h": 660,
+     "h": 900,
      "label": "Data tier"
+    },
+    {
+     "id": "22ad7639-84f9-58e1-9d96-5ddd89f8a00c",
+     "x": 24,
+     "y": 784,
+     "w": 260,
+     "h": 220,
+     "label": "SSF receivers"
     }
    ],
    "nodes": [
@@ -7221,6 +7950,200 @@ export const THREAT_MODEL: ThreatModel = {
       }
      ],
      "open": 0
+    },
+    {
+     "id": "ca5dcc2e-8c77-530c-b35e-5fa3aac86bc9",
+     "kind": "actor",
+     "x": 49,
+     "y": 864,
+     "w": 150,
+     "h": 80,
+     "name": "SSF receiver (relying party)",
+     "lines": [
+      "SSF receiver",
+      "(relying party)"
+     ],
+     "description": "A relying party that consumes CAEP and RISC events from AXIAM: receives SETs on its push endpoint (RFC 8935) or polls for them (RFC 8936), and manages its stream through the SSF 1.0 stream management API.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 385,
+       "title": "Receiver impersonation on the stream management API",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The SSF stream management API lets a receiver read its stream, repoint its push endpoint, change the push credential, change the stream's status and ask for verification events. A party that can pass for a receiver — a user session, a service account, a client token minted for another purpose, or another receiver's client — could redirect a tenant's security events, silence them, or learn which events and subjects a relying party watches.",
+       "mitigation": "`SsfReceiverToken` (`handlers::ssf`, D-50): only an access token issued to an OAuth2 client by the client-credentials grant (`sub_kind` `OAuth2Client`) **and** carrying the dedicated scope `ssf.manage` is accepted; a user token (even an administrator's), a service-account token or a client token without the scope is `403`, no token `401`. A stream is the receiver's only when its administrator-set `receiver_client_id` is the token's `client_id`; every other stream answers the same `404` as one that does not exist. The scope reaches a client only through its registration (`OAuth2Client::scopes`, refused by the token endpoint otherwise) and the binding only through an administrator (§32). Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `the_receiver_api_needs_a_client_token_with_the_scope`, `another_receivers_or_another_tenants_stream_is_not_found`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "2cb70f89-99d6-5c6b-8862-a03dea020ff9",
+     "kind": "process",
+     "x": 374,
+     "y": 784,
+     "w": 140,
+     "h": 160,
+     "name": "SSF transmitter (SET issuance, stream API, discovery)",
+     "lines": [
+      "SSF",
+      "transmitter",
+      "(SET",
+      "issuance,",
+      "stream API,",
+      "discovery)"
+     ],
+     "description": "`axiam_oauth2::ssf` and `handlers::ssf` / `handlers::ssf_admin` (T23.5.2): the stream registry's management routes (contract §32), the receiver's stream management API under `/ssf/v1`, `/.well-known/ssf-configuration`, and `sign_set`, the only SET signer, run at delivery by the push deliverer and the poll endpoint T23.5.3 builds.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 386,
+       "title": "Cross-tenant or cross-receiver stream access",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Streams of every tenant live in one table. A tenant administrator, or a receiver of one tenant, who can name another tenant's stream id — in a path, a `stream_id` query or a body — could read where that tenant's events go or change it.",
+       "mitigation": "The tenant is never taken from the request: the management routes refuse a `{tenant_id}` that is not the caller's (`403`) and require `ssf_streams:read` / `ssf_streams:write` (a human-only family: a service-account token is `401`); the receiver API takes the tenant from the token. Every repository verb is tenant-scoped in its `WHERE` (`SurrealSsfStreamRepository`), so another tenant's id reads, updates, verifies, decrypts and deletes as `NotFound`. Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `tenants_cannot_read_update_verify_open_or_delete_each_others_streams`; `crates/axiam-api-rest/tests/ssf_test.rs` `another_receivers_or_another_tenants_stream_is_not_found`, `each_operation_needs_its_permission_its_tenant_and_a_human`."
+      },
+      {
+       "number": 389,
+       "title": "A SET is mistaken for another kind of JWT",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "SETs, ID tokens, logout tokens and access tokens are all signed with the same deployment key (D-13). A SET presented where an access token or an ID token is expected could be accepted as one if the verifier checks only the signature.",
+       "mitigation": "Explicit typing and shape (SSF §4.1.1–§4.1.3, RFC 8417 §4.5–§4.7): `typ: secevent+jwt`, no `sub` and no `exp` (`SetClaims` has no field for either), an `events` claim, and an `aud` that is a receiver audience, never an AXIAM audience. AXIAM's own access-token validation therefore refuses a SET (no `exp`, wrong audience). Tests: `crates/axiam-oauth2/src/ssf.rs` `a_set_is_never_accepted_as_an_axiam_access_token`, `a_set_verifies_against_the_published_jwks_with_the_pinned_header_and_claims`."
+      },
+      {
+       "number": 392,
+       "title": "The push endpoint is used to reach internal services",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The push endpoint is chosen by a tenant administrator and, since SSF lets a receiver update its delivery, by the receiver. AXIAM POSTs to it from inside the deployment. Pointed at a metadata service, a loopback admin port or a private address, it turns the transmitter into a request forger with a credential attached.",
+       "mitigation": "Write time is built: every endpoint an administrator or a receiver supplies is held to the webhook outbound address policy (D-49, `validate_push_endpoint`): `https` only, no credentials or fragment, no IP literal that is not globally routable (loopback, private, link-local, the metadata address, IPv4-mapped forms), no `localhost`, `*.local` or `*.internal`. Tests: `crates/axiam-oauth2/src/ssf.rs` `the_push_endpoint_policy_is_the_webhook_one`; `crates/axiam-api-rest/tests/ssf_test.rs` `every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule`, `a_receiver_cannot_repoint_its_endpoint_to_a_refused_address`. **Built (T23.5.3, 2026-10-04).** At delivery every push goes through the shared `axiam_pki::ssrf` guard, reached as `axiam_federation::ssrf`, with `allow_private = false` and through nothing else: the name is resolved fresh, every address it resolves to must be globally routable, the validated address is pinned into the connection, and `https` is required. Since D-53 (9) (model 2.29.0 records it) the call is `guarded_fetch_no_redirect`, one guarded hop that returns a `3xx` as a response: a redirect, to an internal address or any other, is never resolved, let alone connected to, and the deliverer retries it, so neither the SET nor the `Authorization` header reaches a host the administrator never named (T-391). The response body is read to at most 64 KiB, and every reason string that reaches the audit log is a fixed phrase — never a URL, a header or a response. A name an administrator registered that resolves to an internal address is caught here, which the write-time policy cannot do. Tests (T23.5.3): `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `the_address_guard_refuses_an_internal_endpoint_at_delivery` (127.0.0.1, `localhost`, `::1`, the metadata address and 10.0.0.5 are refused by the production deliverer with the listener untouched; a plaintext endpoint is dead-lettered before anything resolves), `a_redirect_is_not_followed` (a public target is not sent to), `a_redirect_to_a_reachable_receiver_is_not_followed_either` (a loopback target the test seam would admit receives nothing: the `Location` is never fetched; renamed in the W4 F4 review), `a_3xx_is_retried_and_never_followed`, `the_response_body_is_capped`; `crates/axiam-oauth2/src/ssf_delivery.rs` `push_goes_through_the_no_redirect_guarded_fetch_and_nothing_else` (the production source holds one `guarded_fetch_no_redirect` call, no call of the redirect-following `guarded_fetch`, no other HTTP client, and `allow_private` is set only by the hidden test seam), `a_transport_reason_never_carries_the_error_text`; `crates/axiam-pki/src/ssrf.rs` `no_redirect_keeps_the_guard_on_the_one_hop` (loopback, `localhost` and private literals blocked, plaintext refused before anything resolves), `no_redirect_returns_a_redirect_to_an_internal_address_without_fetching_it`; `crates/axiam-api-rest/tests/ssf_test.rs` `the_address_guard_refuses_a_private_endpoint_at_delivery_end_to_end` (the production deliverer behind the real outbox, a name that resolves to the receiver's own loopback address). Residual: the guard honours the operator's `AXIAM__PKI__SSRF_ALLOWED_HOSTS` exception (SEC-107) here exactly as it does for webhooks, for the named host only and never for a metadata endpoint."
+      },
+      {
+       "number": 393,
+       "title": "Flooding the stream management API or discovery",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The stream management API, the verification endpoint and the unauthenticated transmitter metadata are new inbound surfaces. A loop against them costs a datastore read per request, and verification additionally makes AXIAM sign and send an event, so it amplifies towards the receiver.",
+       "mitigation": "Every route has its own bucket (plan §7 rule 6): `AXIAM__RATE_LIMIT__SSF_PER_MIN` (60 per minute per IP) on each receiver route and each discovery form, `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` (30) on each management write, never moved by a profile preset. Each stream also enforces `min_verification_interval` (60 s) atomically in the datastore, `429` inside it. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `every_ssf_route_has_its_own_bucket`, `the_verification_event_is_submitted_signed_on_delivery_and_rate_limited_per_stream`; `crates/axiam-db/tests/ssf_stream_repository_test.rs` `a_verification_is_claimed_once_per_interval`."
+      },
+      {
+       "number": 397,
+       "title": "A receiver widens its events or overrides the administrator",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "SSF lets a receiver update its stream configuration and status. A receiver that could add event types beyond what the administrator allowed, change the delivery method, the audience or the subject format, or restart a stream the administrator stopped would receive personal data the tenant never agreed to send it.",
+       "mitigation": "`apply_receiver_update` (D-50): `events_requested` may only narrow within the administrator's `events_allowed` (an allowed-but-unknown URI is ignored, a known one outside the allowance is `400`); transmitter-supplied members must match; the method is the administrator's; the audience, the subject format and the allowance are never receiver-writable. A status the administrator set to anything but `enabled` cannot be changed by the receiver (`403`, D-51); POST and DELETE on the configuration endpoint are `403`. Tests: `crates/axiam-oauth2/src/ssf.rs` `a_receiver_may_narrow_but_not_widen_its_events`, `transmitter_supplied_members_must_match`, `replace_deletes_what_it_omits_and_needs_a_delivery`; `crates/axiam-api-rest/tests/ssf_test.rs` `a_receiver_narrows_its_events_and_cannot_widen_them`, `the_receiver_sets_its_status_unless_an_administrator_stopped_the_stream`."
+      },
+      {
+       "number": 399,
+       "title": "Stream changes are not attributable",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Where a tenant's security events go is a security decision. Without a record, a stream repointed to a collection endpoint, or a verification storm, cannot be traced to the administrator or the receiver that caused it.",
+       "mitigation": "One audit row per write: `ssf_stream.created`, `ssf_stream.updated` (the **names** of the changed members), `ssf_stream.deleted` with the administrator as actor; `ssf_stream.receiver_updated`, `ssf_stream.receiver_status_changed` and `ssf_stream.verification_requested` with the receiver's `client_id`. Never the header, never a subject. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `an_administrator_registers_reads_lists_replaces_and_deletes_a_stream`, `a_receiver_narrows_its_events_and_cannot_widen_them`, `the_verification_event_is_submitted_signed_on_delivery_and_rate_limited_per_stream`."
+      },
+      {
+       "number": 400,
+       "title": "A stream is bound to a client that is not the tenant's receiver",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The receiver binding decides who may manage the stream and poll its events. Bound to a client of another tenant, to a client that cannot obtain a client-credentials token, or to a name no client has yet (to be registered later by someone else), it hands the stream to the wrong party.",
+       "mitigation": "The administrator's write refuses (`400`, naming the rule) a `receiver_client_id` that is not an OAuth2 client of the tenant, not registered for the `client_credentials` grant, or not registered with the `ssf.manage` scope; a client of another tenant is not found in this tenant's lookup. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `every_value_rule_and_the_receiver_binding_are_400s_that_name_the_rule`."
+      },
+      {
+       "number": 401,
+       "title": "Transmitter metadata as a tenant oracle",
+       "type": "Information disclosure",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "`/.well-known/ssf-configuration` is unauthenticated by specification. Answers that differ between an unknown tenant, a tenant with the transmitter off and a malformed id tell anyone which tenants exist and which send security events.",
+       "mitigation": "One empty `404` for every way of having nothing to say — no or a malformed tenant id, an unknown tenant, a tenant whose effective `ssf_enabled` is off (the D-20 shape, D-45) — on both the root and the tenant-path form; the receiver API likewise answers a stream of a tenant whose transmitter is off as not found. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `discovery_answers_one_empty_404_for_every_way_of_having_nothing_to_say`, `with_the_transmitter_off_the_receiver_sees_no_stream`, `discovery_on_the_root_issuer_lists_the_endpoints_and_events`, `discovery_on_a_tenant_path_issuer_names_the_tenant_issuer`."
+      },
+      {
+       "number": 403,
+       "title": "Long polls hold the poll endpoint open",
+       "type": "Denial of service",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "RFC 8936 lets a receiver poll without `returnImmediately`, and AXIAM then holds the request for up to 30 seconds, re-reading the stream and its buffer every half second until an event arrives. A receiver, or whoever holds a receiver's token, that opens many long polls at once ties up connections and spends datastore reads on each of them, and a per-minute rate limit does not bound how many wait at the same time.",
+       "mitigation": "Built (T23.5.3, 2026-10-04; D-48, D-53 (11)). Nothing waits before the caller is shown to be the stream's receiver: the token (client credentials, `ssf.manage`) and the stream binding are checked first, and a stream that is not its own is `404` (T-385, T-386). At most **one long poll waits per stream per server instance** (`PollWaiters`: a slot taken the first time a request would wait and released when it answers or is dropped, including when the receiver hangs up). A second concurrent request on the same stream answers at once with what is held, as if `returnImmediately` were true. A wait ends after 30 seconds, or as soon as the stream is paused, disabled or deleted. The route has a bucket of its own, `ssf_poll`, under `AXIAM__RATE_LIMIT__SSF_PER_MIN` (60 a minute per client address, as in T-393), of which an honest long-polling receiver uses about two a minute. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `a_second_long_poll_on_a_stream_answers_at_once_while_one_is_waiting` (the second answers an empty `sets` in less than one wait step, the first still receives the event that arrives meanwhile, and the slot is free once it has answered), `an_empty_poll_returns_at_once_or_waits_for_an_event` (the 30-second cap), `the_poll_route_has_its_own_rate_limit_bucket`; `crates/axiam-api-rest/src/state/bundles.rs` `one_slot_per_stream_released_on_drop`. An abandoned long poll gives its slot back, and a held event the deployment key cannot sign is logged once per request rather than on every look (W4 F4, P23W4-03: before, about sixty `ERROR` lines per waiting receiver per half minute, a log flood a receiver could sustain by polling); the wait step cannot underflow past the 30-second cap. Tests (W4 F4): `an_unsignable_held_event_is_logged_once_per_poll_and_an_abandoned_poll_frees_its_slot`. Residuals: the slot is per instance, so *n* replicas can hold *n* long polls per stream, each re-reading about sixty times over a full wait. A receiver that runs several pollers on one stream turns all but one into immediate answers and busy-loops; what that spends is its own `ssf_poll` budget. It is self-inflicted, and costs others nothing beyond the per-address bound."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "380feb66-2da4-5fd3-aa96-231aa7263516",
+     "kind": "store",
+     "x": 1079,
+     "y": 784,
+     "w": 170,
+     "h": 80,
+     "name": "ssf_stream + ssf_event_buffer + ssf_step_up",
+     "lines": [
+      "ssf_stream +",
+      "ssf_event_buffer +",
+      "ssf_step_up"
+     ],
+     "description": "Schema v77: the stream registry (receiver binding, audience unique across the deployment, sealed push header) and the per-stream bounded buffer of unsigned pending events. Schema v78 (T23.5.3, D-53 (1)): the step-up record `ssf_step_up`, which the authorization endpoint's honour lane writes and its return leg consumes, one per (tenant, user), ten minutes. The push kind's broker queues (`axiam.ssf_push`, `.retry`, `.dlq`) hold the same unsigned pending events as the buffer and are drawn with it rather than as an element of their own.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 391,
+       "title": "The push credential is disclosed or carried to another host",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A receiver may require an `Authorization` header on its push endpoint. AXIAM stores it and presents it on every push, so it is a credential to a third party: readable from a response, a log or the database it is a key to the receiver's endpoint, and if the endpoint could be moved without it, AXIAM itself would hand it to whatever host the endpoint was moved to.",
+       "mitigation": "Sealed with AES-256-GCM under `pki_encryption_key` (the key webhook secrets use), nonce and ciphertext in their own columns; no read projects them and the single path to the plaintext is `decrypt_authorization_header`, for the push deliverer (D-49). No response carries it (`authorization_header_set` says whether one is stored), `Debug` redacts it, audit rows name the field and never the value, and without the key a write that sets one is `503`. A stored header never follows the endpoint to another origin: moving it — by the administrator or the receiver — requires the header again or its removal (`400`). Contract §32.5 makes it `Sensitive<T>`. Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `create_round_trips_every_field_and_never_reads_the_header_back`, `without_the_key_a_header_cannot_be_stored_and_everything_else_works`, `an_update_keeps_replaces_or_clears_the_header`; `crates/axiam-api-rest/tests/ssf_test.rs` `an_administrator_registers_reads_lists_replaces_and_deletes_a_stream`, `moving_the_endpoint_to_another_origin_needs_the_header_again`, `a_receiver_cannot_repoint_its_endpoint_to_a_refused_address`; `crates/axiam-oauth2/src/ssf.rs` `repointing_the_endpoint_is_held_to_the_address_policy_and_the_credential_rule`, `debug_never_prints_a_subjects_address_or_a_receivers_header`; schema `v77_stores_the_push_header_sealed_and_no_signed_token`. **The redirect leg (T23.5.3, 2026-10-04; D-53 (9)).** A stored header could also leave with the push itself, if a push followed a redirect to another host. Every push goes through `guarded_fetch_no_redirect`, which makes one guarded hop and returns a `3xx` as a response, its `Location` never resolved, validated or fetched; the deliverer treats a `3xx` as a retry. The header and the SET therefore reach only the endpoint the administrator or the receiver set. Tests: `crates/axiam-pki/src/ssrf.rs` `no_redirect_returns_a_3xx_and_never_fetches_its_target`, `no_redirect_returns_a_redirect_to_an_internal_address_without_fetching_it`, `no_redirect_keeps_the_guard_on_the_one_hop`; `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `a_3xx_is_retried_and_never_followed` (300, 301, 302, 303, 307 and 308 with a credential stored: each a retry, and the redirect target receives nothing), `a_redirect_is_not_followed`; `crates/axiam-oauth2/src/ssf_delivery.rs` `push_goes_through_the_no_redirect_guarded_fetch_and_nothing_else` (one call of that function, no call of the redirect-following `guarded_fetch`, no other HTTP client). Residual: once delivered, the header is the receiver's. A receiver that logs it, reflects it in a response or forwards it is outside AXIAM's control; AXIAM reads a response body only to find an RFC 8935 error code, at most 64 KiB, and never logs or stores it."
+      },
+      {
+       "number": 395,
+       "title": "The poll buffer grows without bound",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Events for a poll stream, and for any paused stream, wait in `ssf_event_buffer` until they are acknowledged or the stream resumes. A receiver that never polls, or a stream paused and forgotten, would accumulate rows for ever and grow the datastore.",
+       "mitigation": "Built (T23.5.3, 2026-10-04; D-48). `SurrealSsfEventBufferRepository` holds at most 1 000 events per stream and drops the **oldest** to admit the newest (SSF §8.1.2 permits dropping held events), keeps each at most seven days (`expires_at`), has one row per `(tenant, stream, jti)` in the datastore, and loses its rows with their stream and their tenant. The poll endpoint never serves an expired row and an acknowledgement deletes exactly the named rows of that stream; the `ssf_event_buffer` sweep removes what has expired and is registered in `/health/jobs` from boot, in the cleanup loop. Tests: `crates/axiam-db/tests/ssf_event_buffer_test.rs` `the_buffer_is_bounded_and_drops_the_oldest` (1 001 pushes leave 1 000, the first gone, another stream's buffer untouched), `expired_events_are_not_served_and_the_sweep_removes_them`, `a_jti_is_buffered_once`, `delete_by_jti_removes_only_the_named_rows_of_this_stream`; `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_buffer_holds_one_row_per_jti`, `deleting_a_stream_removes_its_buffer_and_nothing_else`, `a_tenant_delete_removes_its_streams_and_buffers`; `crates/axiam-api-rest/tests/ssf_test.rs` `a_narrowed_stream_and_an_expired_event_are_not_served`, `an_acknowledgement_drains_exactly_the_named_rows_of_that_stream`, `a_set_error_deletes_the_row_and_writes_an_audit_row_with_the_code`; `crates/axiam-server/src/job_health.rs` `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (extended: the sweep is in the cleanup loop and in `SWEEP_JOBS`). Residual: an erased user's subject member can outlive the erasure in a buffer for up to seven days (recorded at T23.5.2; T-402 carries it, with the dead-letter queue)."
+      },
+      {
+       "number": 402,
+       "title": "Held and dead-lettered events keep a person's subject after it is needed",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "What waits to be delivered is the unsigned pending event (D-48), and it names a person: an `iss_sub` subject, or on an `email` stream an address. It waits in three places: the poll and pause buffer in the datastore, and the push kind's queues on the broker, the last of which, `axiam.ssf_push.dlq`, receives every event that exhausted its attempts or can never be accepted, and nothing drains it. Without a lifetime, a dead-lettered event would keep its subject indefinitely, outside every sweep and every erasure path, readable by anyone with access to the broker.",
+       "mitigation": "Built (T23.5.3, 2026-10-04; D-48, D-53 (10)). Every place a pending event waits has a lifetime of at most seven days, D-48's bound for held events. **The dead-letter queue**: `axiam.ssf_push.dlq` is declared with an `x-message-ttl` of 604 800 000 ms and no other argument, so the broker drops a dead-lettered event seven days after it arrives. It is the only queue that carries a TTL: the primary and the retry queue keep the declaration every kind uses, and the webhook DLQ keeps the arguments a running broker already holds (RabbitMQ refuses a redeclaration with other arguments). **The buffer**: seven days at most, swept on `/health/jobs`, 1 000 events per stream (T-395). No queue or table holds a signed SET or the push credential (T-391, T-398), and the broker's transport and credentials are T-121's. Tests: `crates/axiam-amqp/src/outbound/topology.rs` `the_ssf_push_dlq_declaration_is_pinned` (the DLQ's arguments are exactly the 604 800 000 ms TTL; the primary and the retry queue carry only their dead-letter routing), `only_the_ssf_push_dlq_has_a_message_ttl` (no other queue of any kind carries one); `crates/axiam-db/tests/ssf_event_buffer_test.rs` `expired_events_are_not_served_and_the_sweep_removes_them`. Residuals, stated rather than hidden. **Erasure**: the Art. 17 erasure and the administrator's delete remove the person's step-up record (T-404) but not events already held in a buffer or a queue, so an erased person's subject can outlive the erasure there for up to seven days (carried from T23.5.2). The `account-purged` event does so on purpose: telling recipients of an erasure is its job. **The primary and retry queues** declare no TTL: a message there lives through its retry schedule (`AXIAM__SSF_PUSH__MAX_ATTEMPTS` attempts, each delay at most `AXIAM__SSF_PUSH__BACKOFF_CEILING_MS`), and waits in the primary queue for as long as no consumer runs."
+      },
+      {
+       "number": 404,
+       "title": "An assurance-level-change is forged, replayed or suppressed through the step-up record",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "CAEP `assurance-level-change` tells receivers that a user's authentication level moved, and a receiver may relax a restriction on an increase. AXIAM learns of a step-up across a browser round trip: the honour lane sends the user to sign in again, and a later authorization request comes back with the new session. If what links the two legs travelled with the browser (a marker in `return_to`, a parameter a relying party sets), a relying party or whoever controls the browser could forge a level change for a user who never stepped up, replay one, attach it to another user, or suppress a real one.",
+       "mitigation": "Built (T23.5.3, 2026-10-04; D-53 (1)). The link is **server-side**. When the honour lane interacts for a step-up (`AcrUnsatisfied`) and the request carries a valid OP session, the authorization endpoint writes an `ssf_step_up` row `{tenant, user, previous_session_id, previous_acr}`: one per `(tenant, user)`, the latest replacing the earlier, ten minutes, `previous_acr` held by the datastore to the two published values. Nothing travels in `return_to`. The return leg consumes the row of **the user the request authenticates as**, in one `DELETE … RETURN BEFORE`, so a row is used once however many legs race for it, and emits only for a **new** session of that user whose `acr` differs from the recorded one, with `previous_level` the recorded value and `initiating_entity: user`. Nothing is written for a request with no readable session, an interaction that is not a step-up (`prompt=login`), or a tenant with SSF off or no stream carrying the event; nothing is emitted for another user's sign-in, the same session returning, an equal `acr`, or a row that expired or was already consumed. The row holds ids and an `acr` URN, no credential and no address; it is swept on `/health/jobs` (`ssf_step_up`) and removed with its tenant and by both erasure paths. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `a_step_up_upgrade_emits_assurance_level_change_with_previous_level_and_direction`, `a_return_with_the_same_acr_emits_nothing`, `the_same_session_returning_emits_nothing`, `a_different_users_return_leg_emits_nothing_and_leaves_the_record`, `an_expired_record_emits_nothing`, `a_step_up_record_is_consumed_once`, `the_latest_step_up_replaces_the_earlier_one`, `without_a_valid_op_session_no_step_up_record_is_written`, `an_interaction_that_is_not_a_step_up_writes_no_record`, `with_ssf_off_for_the_tenant_no_step_up_record_is_written`; `crates/axiam-db/tests/ssf_step_up_test.rs` `a_record_is_taken_once_and_then_it_is_gone`, `the_latest_record_replaces_the_earlier_one_for_a_user`, `a_record_is_one_users_in_one_tenant_only`, `an_expired_record_is_consumed_and_returns_nothing`, `the_sweep_removes_only_expired_records_in_every_tenant`, `the_datastore_refuses_an_acr_outside_the_vocabulary`, `deleting_a_tenant_removes_its_records_and_only_its_own`, `both_erasure_paths_remove_the_persons_record`; `crates/axiam-server/tests/cleanup_task.rs` `an_erasure_removes_the_persons_ssf_step_up_record`; `crates/axiam-server/src/job_health.rs` `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (extended to `ssf_step_up`). **Closed in the W4 F4 review (P23W4-02, 2026-10-04):** the return-leg marker is a query parameter any page can put on a link, and the handler used to consume the row before it validated the rest of the request, so a relying party, or any page that sent the user's browser to the authorization endpoint with the marker while it held the session, could spend the row early with the session that started the step-up and cost the one event the real return leg would have sent. The row is now consumed only once the authorization service has accepted the request (client, `redirect_uri` and the rest), and `take` leaves a row whose `previous_session_id` is the requesting session (`DELETE … WHERE previous_session_id != $current_session_id`), so a return leg in the session that was asked to step up spends nothing. Tests: `a_return_leg_the_authorization_endpoint_refuses_spends_nothing` (three forged return legs — no client, an unknown client, a `redirect_uri` the client never registered — leave the row and tell nobody, and the real return leg then emits), `the_same_session_returning_emits_nothing` (now also: the row is left); `crates/axiam-db/tests/ssf_step_up_test.rs` `a_take_in_the_asking_session_leaves_the_record`. Residual: a page that sends the browser through a complete, valid authorization request of a registered client after the user holds the new session makes the return leg the real one would have made — the event it emits is the true one. Nothing can create an event: an emission needs a step-up the user's own session started and a new session of the same user at another level, and the only party that can present such a session is the user."
+      },
+      {
+       "number": 406,
+       "title": "A stream write that overlaps another puts back what the other changed",
+       "type": "Tampering",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Every write of an SSF stream is read-modify-write: the receiver's `PATCH`, `PUT` and status write and the administrator's replacement each read the stream, decide, and write back the whole configuration they read. Two writes that overlap lose one: a receiver's write prepared before an administrator disabled, narrowed, re-bound or switched the subject format of its stream, landing after, puts the old status, allowance, binding and subject format back — undoing a `disabled` that D-51 says only an administrator may lift, without the administrator's page or audit row showing it, and a receiver can widen the window by writing at its rate limit. The push deliverer has the same shape across two reads: it reads the stream's endpoint, then opens its `Authorization` header, so a header supplied with a new endpoint in between is sent to the old one, against D-49's rule that a credential never follows an endpoint to another origin.",
+       "mitigation": "Decided in the W4 F4 review (P23W4-01, 2026-10-04). Every stream write is conditional on the version it was prepared from: `SsfStreamUpdate::from_stream` carries the stream's `updated_at` and `SsfStreamRepository::update` writes `WHERE updated_at = $expected`, answering `Conflict` (not `NotFound`) when the stream exists but changed. The receiver's `PATCH`, `PUT` and status `POST` decide again from a fresh read when overtaken — so the D-51 check always judges the status the write would replace, and an administrator's `disabled` makes the retry a `403` — and answer `409` only if the stream kept changing over three attempts; the administrator's `PUT` answers `409` and the console reloads. The deliverer reads the stream again after opening the header and pushes only if it is still the version it signed against and whose endpoint it holds; otherwise the attempt is a retry. Contract §32.3 rule 4 and §32.6 say so (1.56, amended in place). Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `a_write_prepared_from_an_overtaken_read_does_not_land`; `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `a_credential_supplied_for_a_new_endpoint_never_reaches_the_old_one`. Residual: the deliverer's second read and the send are not one step, so an endpoint moved after that read is used for one attempt with the header that was stored for it — the header and the endpoint still belong together."
+      }
+     ],
+     "open": 0
     }
    ],
    "edges": [
@@ -7441,14 +8364,135 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "email",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "c5f29b0a-ce93-5eed-b6fa-46dc9d9ba5b2",
+     "path": "M374.5,872.7 L199,894.6",
+     "name": "SET push / poll response",
+     "description": "",
+     "label": "SET push / poll response (HTTPS, RFC 8935 / 8936)",
+     "labelLines": [
+      "SET push / poll response (HTTPS, RFC",
+      "8935 / 8936)"
+     ],
+     "lx": 286.8,
+     "ly": 883.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS, RFC 8935 / 8936",
+     "threats": [
+      {
+       "number": 387,
+       "title": "A forged SET is accepted by a receiver",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A receiver acts on a session-revoked, account-disabled or credential-change event by logging users out or locking accounts. Anyone who can make a receiver accept a SET AXIAM did not sign — an unsigned token, `alg: none`, a key the attacker chose, or a token for a different issuer — can log out or lock out any user of the relying party.",
+       "mitigation": "Every SET is a JWS signed with the deployment's Ed25519 key (D-13), `alg: EdDSA`, `typ: secevent+jwt` and the `kid` the tenant's `jwks_uri` publishes; `sign_set` is the only signer and nothing unsigned is ever sent. `iss` is the tenant's issuer, identical to the transmitter metadata's `issuer` (SSF §4.1.6), which a receiver pins. Verification is the receiver's: contract §32.7 makes the optional receiver helper verify the signature against the JWKS, `typ`, `iss` and `aud` before anything else. Tests: `crates/axiam-oauth2/src/ssf.rs` `a_set_verifies_against_the_published_jwks_with_the_pinned_header_and_claims`, `a_set_does_not_verify_for_another_audience_or_issuer`, `the_issuer_follows_the_tenant_issuer_mode`. Forging still needs the deployment key, a principal asset."
+      },
+      {
+       "number": 388,
+       "title": "A captured SET is replayed to its receiver",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "A SET carries no `exp` (SSF §4.1.7 forbids it), so a SET captured in transit, from a receiver's logs or from a misrouted push stays valid forever. Replayed later, a session-revoked or account-disabled SET logs out or locks out its subject again.",
+       "mitigation": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Open because the control is the receiver's: RFC 8417 §4.1 / contract §32.7 require it to remember the `jti`s it processed and refuse a repeat, and the receiver helper that does so ships in the SDKs only after the post-merge fan-out (D-35); a receiver that does not de-duplicate stays exposed for as long as it treats an old SET as news."
+      },
+      {
+       "number": 390,
+       "title": "A SET is addressed to the wrong receiver",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "On a deployment without per-tenant issuer paths every tenant's SETs carry the same `iss` and are signed with the same key. If two streams — in two tenants — could share an audience, a tenant administrator could register a stream with another tenant's receiver audience, collect SETs about users they created (an email subject a victim also uses, say) and replay them to that receiver, which would accept them: right key, right issuer, right audience.",
+       "mitigation": "The audience is unique **across the deployment**, enforced by the datastore (`idx_ssf_stream_audience` UNIQUE on `audience` alone, D-47): a second registration in any tenant is `409` without saying where. `aud` is the stream's audience, one string, never a list. **Tenants never share an issuer while SSF runs** (D-55, F4 W4 P23W4-11, the maintainer's decision on ilpanich/axiam#539): with tenant issuer paths `iss` is the tenant's own issuer; without them SSF runs only while the deployment holds a single tenant. The shared-issuer gate (`axiam_oauth2::ssf::SsfIssuerGate`) holds when paths are off **and** the deployment holds more than one tenant, counted across every organization; while it holds SSF behaves for every tenant as with `ssf_enabled` off, checked where an event is produced (the emitter), where a SET is signed (`sign_set` refuses, so a queued push is dead-lettered unsigned and a poll answers nothing) and at discovery (one empty `404`), never only at write time; turning `ssf_enabled` on while it holds is `400` naming the cause, and a stream and the settings API say SSF is inactive and why. A change is logged once at `WARN` and audited as `ssf.inactive_shared_issuer` per tenant with SSF on. So a squatted audience no longer buys SETs a receiver accepts on the issuer: either no tenant's SETs exist, or the squatter's carry its own tenant's `iss`, which a receiver checks (contract §32.7 step 6). Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `the_audience_is_unique_across_every_tenant`, `the_shared_issuer_count_spans_organizations_and_moves_the_generation`; `crates/axiam-api-rest/tests/ssf_test.rs` `an_audience_is_unique_across_tenants_and_a_header_needs_the_sealing_key`; `crates/axiam-api-rest/tests/ssf_shared_issuer_test.rs` `with_paths_off_and_two_tenants_ssf_behaves_as_switched_off` (discovery, stream, poll and verification `404`, no emission), `with_paths_off_and_two_tenants_turning_ssf_on_is_refused`, `with_paths_off_and_two_tenants_a_tenant_cannot_turn_ssf_back_on`, `with_paths_off_and_two_tenants_a_stream_and_the_settings_say_why`, `a_second_tenant_created_in_process_stops_ssf_without_waiting_for_the_cache`, `with_paths_off_and_one_tenant_turning_ssf_on_is_accepted`, `with_paths_on_two_tenants_keep_ssf_and_their_own_issuers` and `production_code_takes_the_issuer_check_only_from_the_gate`; `crates/axiam-api-rest/tests/ssf_shared_issuer_log_test.rs` `the_gate_is_logged_once_and_audited_per_tenant`; `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `while_tenants_share_one_issuer_a_queued_push_is_dead_lettered_unsigned`, `with_tenant_issuers_two_tenants_still_deliver`; `crates/axiam-oauth2/src/ssf.rs` `a_set_does_not_verify_for_another_audience_or_issuer`, `sign_set_refuses_while_the_shared_issuer_gate_holds`, `with_tenant_issuers_a_set_of_one_tenant_does_not_verify_as_anothers`, `the_gate_caches_the_count_follows_the_generation_and_reports_each_change_once`. Residual: the tenant count is read from the datastore and reused for at most 60 s, so a second tenant created on **another** replica stops SSF there within a minute (at once on the replica that created it) and a SET signed in that minute still carries the root issuer; a single-tenant deployment keeps the root issuer and needs no gate, since no other tenant shares it, and an organization's own scope tenant is not counted beside its standard tenants because its principals already administer every tenant of their organization. An audience can still be squatted before its owner registers it; the legitimate registration then fails with `409`, which is how the squat is noticed, and the website's SSF page tells receivers to take `aud` from their stream, require the push header and check `iss`."
+      },
+      {
+       "number": 394,
+       "title": "A receiver is flooded with events",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "One administrative act can produce many SETs — revoking every session of a user, disabling accounts in bulk, a directory sync that deactivates hundreds. Pushed without a bound, or retried without a ceiling against a receiver that is slow or down, they overload the receiver and the dispatcher's queue.",
+       "mitigation": "Built (T23.5.3, 2026-10-04; D-48, D-52). One SET per event per stream, and only for a stream that carries the event (the emitter lists `list_for_event`, then `prepare_event` checks again); push goes through the shared outbound dispatcher (D-36) as `OutboundKind::SsfPush` with queues of its own and the per-kind ceiling (`AXIAM__SSF_PUSH__MAX_ATTEMPTS`, exponential backoff with a ceiling, then the dead-letter queue), one attempt per message, so a receiver that is down receives a bounded number of attempts per event and never a retry storm. An answer that cannot change on retry — a `400` with an RFC 8935 error code, `401`, `403` — is dead-lettered at once instead of spending the budget. A paused stream receives nothing: its events are held in the bounded buffer; a disabled stream receives nothing and its queued events are dead-lettered. A retried push carries the byte-identical SET, one `jti`. Tests: `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `the_retryable_statuses_are_retried`, `a_400_with_an_rfc_8935_error_is_dead_lettered_with_the_code`, `a_refused_credential_is_dead_lettered`, `a_disabled_stream_delivers_nothing_and_a_queued_event_is_dead_lettered`, `a_paused_stream_moves_the_event_to_the_buffer_and_acknowledges`, `a_retried_push_carries_the_identical_set`, `resuming_a_paused_push_stream_enqueues_the_held_events_oldest_first`; `crates/axiam-api-rest/tests/ssf_test.rs` `a_logout_reports_session_revoked_to_the_streams_that_carry_it` (a disabled stream, another tenant's and one that did not ask for the event are not sent to), `a_disabled_stream_delivers_and_holds_nothing`, `a_paused_stream_holds_and_delivers_on_resume`, `nothing_is_emitted_with_the_transmitter_off_or_no_stream_registered`; the dispatcher's retry schedule, attempt ceiling and dead-letter queue are pinned by `axiam-amqp`'s outbound tests (T23.5.1). The residual is by design: a mass revocation is as many SETs as sessions (SSF has no batching), and a receiver that answers `2xx` slowly is sent every event."
+      },
+      {
+       "number": 396,
+       "title": "Subject identifiers disclose or link personal data",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A SET names a person. An identifier that is an email address, or one that is the same at every receiver, lets receivers that compare notes follow a user across relying parties, and an address AXIAM never checked lets an attacker who registered it pass as its owner at an email-keyed receiver.",
+       "mitigation": "D-46: `iss_sub` by default — the tenant issuer and the user id, which is the `sub` AXIAM's ID tokens already give every relying party (`subject_types_supported: public`), so SSF discloses no linkage a receiver did not hold. `email` only when an administrator chose it for the stream (a receiver cannot), and only for an address something vouched for — D-25's rule, `email_verified_at` set or the account `Active`; for any other account the event is not sent on that stream, never with another identifier. No event carries free text (`reason_admin`, `reason_user`, `friendly_name` are never sent), and the queue and the buffer hold only the subject member that will be sent. Tests: `crates/axiam-oauth2/src/ssf.rs` `both_subject_formats_are_rfc_9493_and_the_session_is_named`, `an_unvouched_address_is_never_sent_and_nothing_else_replaces_it`, `the_vouching_rule_is_d25s`, `each_of_the_six_events_has_its_pinned_shape`. Residual: a buffered event for an erased user keeps its subject member until it is acknowledged or expires (seven days); T-402 carries it, with the dead-letter queue."
+      },
+      {
+       "number": 398,
+       "title": "An event is delivered on a stream that was disabled or narrowed",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Delivery is asynchronous: an event can wait in the queue or the buffer while an administrator disables the stream, the receiver narrows its events, or the stream is deleted. Delivering it anyway sends personal data to a receiver that is no longer meant to have it.",
+       "mitigation": "What travels is the **unsigned** pending event (D-48); the SET is signed by `sign_set` at the moment of delivery against the stream as it is then, and it refuses a stream that is not enabled or no longer carries the event — a disabled stream delivers nothing, a paused one holds, a narrowed one drops (D-51). The only event a non-enabled stream can sign is the stream-updated announcement of the status it is in (SSF §8.1.5). Tests: `crates/axiam-oauth2/src/ssf.rs` `no_set_for_a_disabled_or_paused_stream_or_an_event_it_does_not_carry`, `a_stream_updated_event_may_only_announce_the_current_status`; `crates/axiam-api-rest/tests/ssf_test.rs` `verification_needs_a_live_stream_and_a_wired_outbox`, `an_admin_status_change_announces_the_new_status`. T23.5.3's e2e test (a disabled stream delivers nothing) re-proves it end to end."
+      },
+      {
+       "number": 405,
+       "title": "A security event is lost and nobody is told",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "SSF signals exist so that a receiver can act on a change: end a session AXIAM revoked, stop trusting a disabled account. Production is best effort (D-52): an event that cannot be produced or queued is dropped with a log line, and the operation that caused it succeeds. A receiver that never hears of a revocation keeps the session it would have ended, and nothing tells it, the tenant or the user that an event was due.",
+       "mitigation": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation."
+      }
+     ],
+     "open": 2
+    },
+    {
+     "id": "c18a02c4-5509-5935-9f28-9e14d95c1a2d",
+     "path": "M199,894.6 L374.5,872.7",
+     "name": "stream management + poll",
+     "description": "",
+     "label": "stream management + poll (HTTPS, client credentials)",
+     "labelLines": [
+      "stream management + poll (HTTPS,",
+      "client credentials)"
+     ],
+     "lx": 286.8,
+     "ly": 883.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS, client credentials",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "fa7ee1e5-990d-5faa-9f82-f7c132011459",
+     "path": "M513.9,860.1 L1079,828.7",
+     "name": "read / write streams, buffer",
+     "description": "",
+     "label": "read / write streams, buffer (SurrealQL)",
+     "labelLines": [
+      "read / write streams, buffer",
+      "(SurrealQL)"
+     ],
+     "lx": 796.4,
+     "ly": 844.4,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealQL",
+     "threats": [],
+     "open": 0
     }
    ],
-   "total": 18,
-   "open": 1,
+   "total": 40,
+   "open": 3,
    "bySeverity": {
-    "Medium": 14,
-    "High": 2,
-    "Low": 2
+    "Medium": 26,
+    "High": 8,
+    "Low": 6
    }
   },
   {

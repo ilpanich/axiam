@@ -298,24 +298,151 @@ pub struct DirectoryState<C: Connection + Clone> {
     pub client: Arc<axiam_directory::DirectoryClient>,
 }
 
-/// The SAML 2.0 identity provider (G-2, T23.2.3): the service-provider
+/// The SAML 2.0 identity provider (G-2, T23.2.3, T23.2.5): the service-provider
 /// registry, the pending `AuthnRequest`s held across the login hop, the
 /// tenant's signing credential, and the issuer.
 ///
-/// Behind `saml`, like the routes that read it: the issuer is
-/// `axiam_federation::saml_idp`, which exists only in a build with
-/// `axiam-federation/saml` (see [`FederationState::saml_federation_service`]
-/// for why that gate is load-bearing).
-#[cfg(feature = "saml")]
+/// **Not behind `saml`** — contract §29's registry and credential routes are
+/// compiled into every build (D-42), and they need only the plain-data pieces
+/// below. The one member that exists only in a SAML build is the **issuer**, which
+/// is `axiam_federation::saml_idp` (see [`FederationState::saml_federation_service`]
+/// for why that gate is load-bearing): a build without `saml` mounts none of the
+/// browser routes that read it.
 #[derive(Clone)]
 pub struct SamlIdpState<C: Connection + Clone> {
     /// The tenant's registered service providers (T23.2.1).
     pub sp_repo: axiam_db::SurrealSamlServiceProviderRepository<C>,
     /// `AuthnRequest`s between the SSO endpoint's two legs (schema v73).
     pub pending_repo: axiam_db::SurrealPendingSamlRequestRepository<C>,
+    /// Which service providers hold which session, with the `NameID` and the
+    /// per-SP `SessionIndex` each was given (schema v76, D-37). Written by the
+    /// SSO endpoint's second leg before it signs; read by single logout.
+    pub participant_repo: axiam_db::SurrealSamlSpSessionRepository<C>,
+    /// Logout runs: the replay guard of a `LogoutRequest` and the state of the
+    /// front-channel chain (schema v76, D-38, D-39).
+    pub logout_run_repo: axiam_db::SurrealSamlLogoutRunRepository<C>,
     /// The tenant's signing credential, unsealed per issuance (D-21).
     pub credential_service: SamlIdpCredentialServiceT<C>,
     /// The deployment's issuer: the root issuer every IdP entity id is built
-    /// on, and the pairwise-identifier key (D-22). One per process.
+    /// on, and the pairwise-identifier key (D-22). One per process. Behind
+    /// `saml`, like the routes that issue with it.
+    #[cfg(feature = "saml")]
     pub issuer: Arc<axiam_federation::saml_idp::SamlIdpIssuer>,
+}
+
+/// The Shared Signals Framework transmitter (G-5, T23.5.2, T23.5.3): the
+/// stream registry, the poll buffer, the outbox events go to, and the emitter
+/// the change sites call.
+///
+/// In every build; it reads nothing behind a feature.
+#[derive(Clone)]
+pub struct SsfState<C: Connection + Clone> {
+    /// The tenant's registered streams; seals the push `Authorization` header
+    /// under `pki_encryption_key`.
+    pub stream_repo: axiam_db::SurrealSsfStreamRepository<C>,
+    /// The per-stream bounded buffer: what a poll stream's receiver reads and a
+    /// paused stream holds (D-48).
+    pub buffer_repo: axiam_db::SurrealSsfEventBufferRepository<C>,
+    /// What the honour lane remembers about a step-up it sent a user to perform
+    /// (D-53 (1)): written at the Interact leg, consumed once by the return leg.
+    pub step_up_repo: axiam_db::SurrealSsfStepUpRepository<C>,
+    /// Where produced events go (D-48): push enqueue, the poll buffer, or
+    /// nothing for a disabled stream. `None` when delivery is not wired (a
+    /// harness that does not test it) — the verification endpoint then answers
+    /// `503`. Set through [`SsfState::bind_outbox`], which also wires the
+    /// emitter.
+    pub outbox: Option<Arc<dyn axiam_core::models::ssf::SsfOutbox>>,
+    /// The one emitter every change site calls (D-52). A no-op until an outbox
+    /// is bound.
+    pub emitter: crate::ssf_emitter::SsfEmitter<C>,
+    /// The session repository's `session-revoked` port, bound to [`Self::emitter`]
+    /// (D-52). A `Late` handle because the repository is built first.
+    pub session_sink:
+        Arc<axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SessionRevocationSink>>,
+    /// The directory sync's `account-disabled` port, bound to [`Self::emitter`].
+    pub account_sink:
+        Arc<axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SsfSystemAccountSink>>,
+    /// The long polls currently waiting, one per stream (D-53 (11)).
+    pub poll_waiters: Arc<PollWaiters>,
+    /// D-55: SSF requires per-tenant issuers in a deployment of more than one
+    /// tenant. Asked where events are produced, where a SET is signed and at
+    /// discovery; shared with the emitter and the push deliverer.
+    pub gate: Arc<axiam_oauth2::ssf::SsfIssuerGate>,
+}
+
+/// The streams that have a long poll waiting **on this instance**.
+///
+/// A long poll holds a request open for up to thirty seconds; a receiver that
+/// opens many on one stream (a retry loop with no backoff, a bug) would hold as
+/// many connections for no benefit, since RFC 8936 has one receiver draining one
+/// stream in order. At most one waits per stream; a second answers at once.
+/// Per instance on purpose: an exact cross-instance count would need shared
+/// state for a bound that only has to be small.
+#[derive(Debug, Default)]
+pub struct PollWaiters {
+    waiting: std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>,
+}
+
+/// Holds a stream's wait slot; releases it when dropped — including when the
+/// request is cancelled because the receiver hung up.
+#[derive(Debug)]
+pub struct PollWaitGuard {
+    owner: Arc<PollWaiters>,
+    stream_id: uuid::Uuid,
+}
+
+impl PollWaiters {
+    /// Take `stream_id`'s wait slot, or `None` when a long poll already holds it.
+    #[must_use]
+    pub fn try_enter(self: &Arc<Self>, stream_id: uuid::Uuid) -> Option<PollWaitGuard> {
+        let mut waiting = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
+        waiting.insert(stream_id).then(|| PollWaitGuard {
+            owner: Arc::clone(self),
+            stream_id,
+        })
+    }
+
+    /// How many streams have a long poll waiting.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        self.waiting.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+impl Drop for PollWaitGuard {
+    fn drop(&mut self) {
+        self.owner
+            .waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.stream_id);
+    }
+}
+
+impl<C: Connection + Clone> SsfState<C> {
+    /// Wire the outbox: producers (verification, a status change) and the
+    /// emitter — and through it both ports — send events to it. The emitter
+    /// keeps the first outbox it is given.
+    pub fn bind_outbox(&mut self, outbox: Arc<dyn axiam_core::models::ssf::SsfOutbox>) {
+        self.emitter.bind_outbox(outbox.clone());
+        self.outbox = Some(outbox);
+    }
+}
+
+#[cfg(test)]
+mod poll_waiter_tests {
+    use super::*;
+
+    #[test]
+    fn one_slot_per_stream_released_on_drop() {
+        let waiters = Arc::new(PollWaiters::default());
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let first = waiters.try_enter(a).expect("the first takes the slot");
+        assert!(waiters.try_enter(a).is_none(), "the second finds it taken");
+        assert!(waiters.try_enter(b).is_some(), "another stream is free");
+        assert_eq!(waiters.waiting(), 1, "b's guard was a temporary");
+        drop(first);
+        assert!(waiters.try_enter(a).is_some(), "released on drop");
+        assert_eq!(waiters.waiting(), 0);
+    }
 }

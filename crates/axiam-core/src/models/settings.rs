@@ -331,6 +331,7 @@ pub const DCR_UNAUTHORIZED_CLIENT_TTL_SECS: u32 = 3_600;
 /// * [`Self::saml_idp_enabled`], validated **disable-only** exactly like
 ///   [`Self::sensitive_scopes_enabled`] (D-20): a tenant may turn its
 ///   organization's `true` off and never its `false` on.
+/// * [`Self::ssf_enabled`], validated **disable-only** the same way (D-45).
 /// * [`Self::dynamic_registration`], on the ladder
 ///   `disabled` → `initial_access_token` → `anonymous`: a tenant may move down
 ///   it and never up.
@@ -492,6 +493,30 @@ pub struct OidcPolicy {
     #[serde(default)]
     #[schema(example = false)]
     pub saml_idp_enabled: bool,
+    /// G-5 / D-45 — whether the tenant is a Shared Signals Framework
+    /// transmitter: its `/.well-known/ssf-configuration` is served, its
+    /// receivers can use the stream management API, and events are signed and
+    /// transmitted on its streams. Default **`false`**.
+    ///
+    /// **Disable-only**, with the shape of [`Self::saml_idp_enabled`]: sending
+    /// security events about the organization's users to third parties is the
+    /// organization's decision. Streams can be registered while it is off; they
+    /// carry nothing until it is on.
+    #[serde(default)]
+    #[schema(example = false)]
+    pub ssf_enabled: bool,
+    /// **Read-only**, D-55: set on a settings response when `ssf_enabled` is on
+    /// but the transmitter is inactive anyway, saying why — the deployment holds
+    /// more than one tenant and serves no per-tenant issuers. Never stored.
+    //
+    // Never stored: the datastore decoder and every constructor leave it
+    // `None`, the settings handlers set it on the response only, and no
+    // request body is this type (the writes take `SetOrgSettings` and
+    // `TenantSettingsOverride`). Not `skip_deserializing`: utoipa would then
+    // drop the field from the published schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(read_only)]
+    pub ssf_inactive_reason: Option<String>,
 }
 
 /// See [`DEFAULT_DCR_MAX_CLIENTS`]. A function because `serde(default = ..)`
@@ -1143,6 +1168,10 @@ pub struct TenantSettingsOverride {
     /// [`OidcPolicy::saml_idp_enabled`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saml_idp_enabled: Option<bool>,
+    /// G-5 / D-45 — disable-only, like `saml_idp_enabled`; see
+    /// [`OidcPolicy::ssf_enabled`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssf_enabled: Option<bool>,
 }
 
 impl TenantSettingsOverride {
@@ -1249,6 +1278,12 @@ pub struct SetOrgSettings {
     #[serde(default)]
     #[schema(example = false)]
     pub saml_idp_enabled: bool,
+    /// G-5 / D-45 — defaulted, so an API client written before the SSF
+    /// transmitter existed lands on `false`, which is what every deployment did
+    /// before (I1).
+    #[serde(default)]
+    #[schema(example = false)]
+    pub ssf_enabled: bool,
 }
 
 /// The erasure grace window a deployment gets when nothing says otherwise.
@@ -1348,6 +1383,9 @@ pub fn system_defaults() -> SetOrgSettings {
         // G-2 / D-20 — no tenant is a SAML identity provider until an
         // organization says so (I1).
         saml_idp_enabled: false,
+        // G-5 / D-45 — no tenant transmits security events until an
+        // organization says so (I1).
+        ssf_enabled: false,
     }
 }
 
@@ -1425,6 +1463,8 @@ pub fn validate_org_settings(input: &SetOrgSettings) -> AxiamResult<()> {
         dcr_unused_client_ttl_days: input.dcr_unused_client_ttl_days,
         cimd: input.cimd.clone(),
         saml_idp_enabled: input.saml_idp_enabled,
+        ssf_enabled: input.ssf_enabled,
+        ssf_inactive_reason: None,
     };
     violations.extend(validate_dcr_policy(&oidc));
     // T21.5 — the same argument, for the mechanism that reaches further: a
@@ -1571,6 +1611,8 @@ pub fn effective_settings(
             saml_idp_enabled: tenant_override
                 .saml_idp_enabled
                 .unwrap_or(org.oidc.saml_idp_enabled),
+            ssf_enabled: tenant_override.ssf_enabled.unwrap_or(org.oidc.ssf_enabled),
+            ssf_inactive_reason: None,
             default_locale: tenant_override
                 .default_locale
                 .clone()
@@ -1827,6 +1869,13 @@ pub fn clamp_overrides_to_org(
     if !org.oidc.saml_idp_enabled && overrides.saml_idp_enabled == Some(true) {
         overrides.saml_idp_enabled = None;
         cleared.push("saml_idp_enabled");
+    }
+
+    // G-5 / D-45 — the same direction again: a tenant may not decide on its
+    // own to transmit security events its organization never authorised.
+    if !org.oidc.ssf_enabled && overrides.ssf_enabled == Some(true) {
+        overrides.ssf_enabled = None;
+        cleared.push("ssf_enabled");
     }
 
     // T21.4 — the three ordered dynamic-registration controls, on the same
@@ -2128,6 +2177,15 @@ pub fn validate_tenant_override(
         violations.push(
             "saml_idp_enabled: cannot enable at tenant level when disabled at org level \
              (issuing SAML assertions is the organization's decision, not the tenant's)"
+                .into(),
+        );
+    }
+
+    // --- G-5 / D-45 SSF transmitter: disable-only, for the same reason ---
+    if overrides.ssf_enabled == Some(true) && !org.oidc.ssf_enabled {
+        violations.push(
+            "ssf_enabled: cannot enable at tenant level when disabled at org level \
+             (transmitting security events is the organization's decision, not the tenant's)"
                 .into(),
         );
     }
@@ -2491,6 +2549,7 @@ pub fn diff_against_org(
             org.oidc.saml_idp_enabled,
             tenant.oidc.saml_idp_enabled
         ),
+        ssf_enabled: diff!(ssf_enabled, org.oidc.ssf_enabled, tenant.oidc.ssf_enabled),
         default_locale: if tenant.oidc.default_locale != org.oidc.default_locale {
             tenant.oidc.default_locale.clone()
         } else {
@@ -2563,6 +2622,8 @@ pub fn settings_from_org_input(id: Uuid, org_id: Uuid, input: &SetOrgSettings) -
             dcr_unused_client_ttl_days: input.dcr_unused_client_ttl_days,
             cimd: input.cimd.clone(),
             saml_idp_enabled: input.saml_idp_enabled,
+            ssf_enabled: input.ssf_enabled,
+            ssf_inactive_reason: None,
         },
         created_at: now,
         updated_at: now,

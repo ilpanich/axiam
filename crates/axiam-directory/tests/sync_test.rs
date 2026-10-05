@@ -131,8 +131,39 @@ struct Harness {
     sync: Sync,
     /// `(tenant, user)` for every decision-cache flush the mapper made.
     flushes: Arc<Mutex<Vec<(Uuid, Uuid)>>>,
+    /// What the job reported to the SSF port (G-5, T23.5.3).
+    ssf: Arc<RecordingAccountSink>,
     staff: Uuid,
     ops: Uuid,
+}
+
+/// The SSF port, recording: `(tenant, user, the status the user had when told)`.
+#[derive(Default)]
+struct RecordingAccountSink {
+    disabled: Mutex<Vec<(Uuid, Uuid, UserStatus)>>,
+}
+
+impl axiam_core::models::ssf::SsfSystemAccountSink for RecordingAccountSink {
+    fn account_disabled<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        user: &'a axiam_core::models::user::User,
+    ) -> axiam_core::models::ssf::SsfFuture<'a, ()> {
+        Box::pin(async move {
+            self.disabled
+                .lock()
+                .unwrap()
+                .push((tenant_id, user.id, user.status.clone()));
+        })
+    }
+
+    fn account_purged<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        _user: &'a axiam_core::models::user::User,
+    ) -> axiam_core::models::ssf::SsfFuture<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 struct Setup {
@@ -252,6 +283,7 @@ async fn build(setup: Setup) -> Harness {
     }
     let mapper = RepositoryGroupMapper::new(Arc::clone(&authenticator), groups.clone())
         .with_change_slot(slot);
+    let ssf = Arc::new(RecordingAccountSink::default());
     let sync = DirectorySync::new(
         config_repo.clone(),
         authenticator,
@@ -262,7 +294,8 @@ async fn build(setup: Setup) -> Harness {
         Arc::new(mapper),
         Arc::new(RepositoryDirectoryAuditSink(audit.clone())),
     )
-    .with_limits(setup.limits);
+    .with_limits(setup.limits)
+    .with_ssf_sink(ssf.clone());
 
     Harness {
         tenant_id,
@@ -276,6 +309,7 @@ async fn build(setup: Setup) -> Harness {
         config_repo,
         sync,
         flushes,
+        ssf,
         staff,
         ops,
     }
@@ -597,6 +631,31 @@ async fn a_second_run_changes_and_audits_nothing_more() {
     let report = h.run_one().await;
     assert_eq!(report.changed(), 0);
     assert_eq!(h.rows(AUDIT_ACCOUNT_DEACTIVATED).await.len(), 1);
+}
+
+/// G-5 (D-52): a deactivation is reported to the SSF port, once per account, after
+/// the change — and an account the run left alone is not.
+#[tokio::test]
+async fn a_deactivation_is_reported_to_the_ssf_port_once() {
+    let h = build(Setup::open_ldap(vec![bob()])).await;
+    let alice_id = h.account("alice", ALICE_UUID).await;
+    let bob_id = h.account("bob", BOB_UUID).await;
+    h.run_one().await;
+    assert_eq!(h.status(alice_id).await, UserStatus::Inactive);
+
+    let told = h.ssf.disabled.lock().unwrap().clone();
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].0, h.tenant_id);
+    assert_eq!(told[0].1, alice_id);
+    // Told about the account as it was before the change, so a subject that
+    // depends on its state (an address vouched for by `Active`) is still right.
+    assert_eq!(told[0].2, UserStatus::Active);
+    assert!(told.iter().all(|(_, user, _)| *user != bob_id));
+
+    // A second run changes nothing, so it says nothing.
+    h.age().await;
+    h.run_one().await;
+    assert_eq!(h.ssf.disabled.lock().unwrap().len(), 1);
 }
 
 /// A pending-verification and a locked directory account are deactivated too:

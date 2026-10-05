@@ -74,6 +74,9 @@ export const NAV_DESTINATIONS: NavDestination[] = [
   { path: "/federation", label: "Federation", navPermission: "federation:list", routePermission: "federation:list" },
   // G-3 (Phase 23): the tenant's LDAP / Active Directory identity source.
   { path: "/directory", label: "Directory", navPermission: "directory:read", routePermission: "directory:read" },
+  // G-2 (Phase 23): the tenant's SAML 2.0 identity provider. Nav and route both
+  // gate on `saml_sp:read`; the writes are gated inside the page.
+  { path: "/saml", label: "SAML Service Providers", navPermission: "saml_sp:read", routePermission: "saml_sp:read" },
   { path: "/organizations", label: "Organizations", navPermission: "organizations:list", routePermission: "organizations:list", organizationOnly: true },
   { path: "/tenants", label: "Tenants", navPermission: "tenants:list", routePermission: "tenants:list" },
   { path: "/certificates", label: "Certificates", navPermission: "certificates:list", routePermission: "certificates:list" },

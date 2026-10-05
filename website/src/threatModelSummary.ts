@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.24.0",
+ "version": "2.31.0",
  "diagramCount": 9,
- "total": 356,
- "open": 16,
- "mitigated": 340,
+ "total": 406,
+ "open": 17,
+ "mitigated": 389,
  "areas": [
   {
    "id": 0,
@@ -80,8 +80,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 97,
-   "open": 4
+   "total": 125,
+   "open": 3
   },
   {
    "id": 4,
@@ -98,8 +98,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "total": 18,
-   "open": 1
+   "total": 40,
+   "open": 3
   },
   {
    "id": 7,
@@ -117,33 +117,33 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 84,
+   "total": 92,
    "open": 4
   },
   {
    "name": "Tampering",
-   "total": 70,
-   "open": 1
+   "total": 81,
+   "open": 2
   },
   {
    "name": "Repudiation",
-   "total": 8,
+   "total": 11,
    "open": 0
   },
   {
    "name": "Information disclosure",
-   "total": 81,
-   "open": 7
+   "total": 93,
+   "open": 6
   },
   {
    "name": "Denial of service",
-   "total": 39,
+   "total": 48,
    "open": 3
   },
   {
    "name": "Elevation of privilege",
-   "total": 74,
-   "open": 1
+   "total": 81,
+   "open": 2
   }
  ],
  "severities": [
@@ -154,17 +154,17 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 161,
+   "total": 174,
    "open": 8
   },
   {
    "name": "Medium",
-   "total": 137,
-   "open": 5
+   "total": 162,
+   "open": 6
   },
   {
    "name": "Low",
-   "total": 17,
+   "total": 29,
    "open": 1
   }
  ],
@@ -300,24 +300,34 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Deployment responsibility: use an encrypted transport and server-side encryption on the backup target."
   },
   {
-   "number": 309,
-   "title": "Sign-on stops when the active credential expires or is retired before a successor is in place",
-   "category": "Denial of service",
+   "number": 380,
+   "title": "SP sessions outlive the AXIAM session they came from",
+   "category": "Elevation of privilege",
    "severity": "Medium",
    "diagramId": 3,
    "area": "Federation — SAML SP & OIDC relying party",
-   "element": "saml_idp_credential (sealed signing key)",
-   "residualRisk": "Open until rotation exists. The `next` slot is in the schema (at most one per tenant, enforced by the database), so a successor can be issued ahead of time, but there is no promote verb and the metadata endpoint does not yet publish `next` (T23.2.5). Until then an administrator issues the successor early and coordinates the switch with each SP. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion."
+   "element": "SAML SLO endpoint (/saml/v2/{tenant}/slo)",
+   "residualRisk": "Accepted design trade-off (D-38, D-39). SAML has no back channel through the browser; the SOAP binding that would provide one is not implemented. What bounds it: SLO revokes the AXIAM session first, so a broken chain never keeps an AXIAM session alive; assertions are valid for five minutes and single-use; a revoked session or a suspended account obtains no new assertion (T-328), so the SP session cannot be renewed through AXIAM; and the SP's own session lifetime is the SP administrator's to set. A later decision may add SOAP back-channel logout or drive a chain from `end_session`."
   },
   {
-   "number": 312,
-   "title": "Service providers link a user across SPs, or back to the AXIAM account",
-   "category": "Information disclosure",
+   "number": 388,
+   "title": "A captured SET is replayed to its receiver",
+   "category": "Tampering",
    "severity": "Medium",
-   "diagramId": 3,
-   "area": "Federation — SAML SP & OIDC relying party",
-   "element": "SAML assertion issuer (saml_idp)",
-   "residualRisk": "Decision D-22: the default persistent `NameID` is HMAC-SHA256 under the dedicated deployment key `saml_pairwise_key` over a versioned label, the tenant id, the user id and the length-prefixed SP entity id, hex-encoded: different per SP and per tenant, not reversible without the key, and independent of the signing credential so a rotation changes nothing. Tests: `the_pairwise_name_id_differs_across_sps_tenants_users_and_keys`, `the_pairwise_name_id_is_stable_across_calls_and_across_a_credential_rotation`, `the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id`. An `emailAddress` `NameID`, and email, username, group and role attributes, are linkable by design and are released only to an SP an administrator configured them for. Open because `SessionIndex` is the AXIAM session id (plan §4 G-2, so that SLO and the revocation feed revoke the same thing): it is identical at every SP of one sign-on, as is `AuthnInstant`, so SPs that collude can correlate concurrent sessions despite pairwise identifiers. T23.2.4 decides whether SLO can map a per-SP index back to the session."
+   "diagramId": 6,
+   "area": "Audit, webhooks, email & notifications",
+   "element": "SET push / poll response",
+   "residualRisk": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Open because the control is the receiver's: RFC 8417 §4.1 / contract §32.7 require it to remember the `jti`s it processed and refuse a repeat, and the receiver helper that does so ships in the SDKs only after the post-merge fan-out (D-35); a receiver that does not de-duplicate stays exposed for as long as it treats an old SET as news."
+  },
+  {
+   "number": 405,
+   "title": "A security event is lost and nobody is told",
+   "category": "Denial of service",
+   "severity": "Medium",
+   "diagramId": 6,
+   "area": "Audit, webhooks, email & notifications",
+   "element": "SET push / poll response",
+   "residualRisk": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation."
   },
   {
    "number": 161,

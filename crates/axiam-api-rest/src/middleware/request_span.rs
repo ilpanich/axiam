@@ -220,6 +220,8 @@ mod tests {
         for sensitive in [
             "RelayState",
             "SAMLRequest",
+            // T23.2.4: the single-logout endpoint's second message parameter.
+            "SAMLResponse",
             "Signature",
             "state",
             "login_hint",
@@ -248,6 +250,30 @@ mod tests {
         );
         assert_eq!(redacted_target("/x", "", None), "/x");
         assert_eq!(redacted_target("/x", "flag", None), "/x?flag");
+    }
+
+    /// T23.2.4, T-377: no single-logout message parameter is a kept one. The
+    /// message, its relay state and its signature are redacted by default;
+    /// `SigAlg` — an algorithm URI, no value of anyone's — is the one structural
+    /// parameter of the Redirect binding the list already kept before `/slo`
+    /// existed, and nothing was added for it.
+    #[test]
+    fn the_single_logout_parameters_are_redacted_and_none_was_added_to_the_kept_list() {
+        for name in ["SAMLRequest", "SAMLResponse", "RelayState", "Signature"] {
+            assert!(
+                !KEPT_QUERY_PARAMETERS.contains(&name),
+                "{name} must not be a kept parameter"
+            );
+        }
+        let target = redacted_target(
+            "/saml/v2/0b5f1d6e-6f0a-4c39-9d1e-2b8f2a1c7e10/slo",
+            "SAMLResponse=probe-value&RelayState=probe-relay&SigAlg=probe-alg&Signature=probe-sig",
+            None,
+        );
+        assert_eq!(
+            target,
+            "/saml/v2/0b5f1d6e-6f0a-4c39-9d1e-2b8f2a1c7e10/slo?SAMLResponse=[redacted]&RelayState=[redacted]&SigAlg=probe-alg&Signature=[redacted]"
+        );
     }
 
     #[test]

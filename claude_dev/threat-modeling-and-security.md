@@ -22,6 +22,143 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-04 D-55 entry (Phase 23 W4, P23W4-11, model 2.31.0 — no
+> count changes).** The maintainer decided P23W4-11 (option (b) of
+> ilpanich/axiam#539): **SSF requires per-tenant issuers in a deployment of more
+> than one tenant.** With `AXIAM__AUTH__TENANT_ISSUER_PATHS` off and more than
+> one tenant, counted across every organization, SSF behaves for every tenant
+> exactly as with `ssf_enabled` off — discovery answers its empty `404`, the
+> receiver API sees no stream, nothing is produced, held or verified, and
+> `sign_set` refuses, so a queued push is dead-lettered and a poll answers
+> nothing — and turning `ssf_enabled` on is `400` naming the cause. **T-390**
+> (Mitigated) cites the new tests; its residual is the cross-replica delay of up
+> to 60 s (the cached tenant count; a tenant created on the same instance takes
+> effect at once), and a single-tenant deployment keeps the root issuer, which
+> needs no gate. The model stays at **406 threats, 389 mitigated / 17 open**.
+>
+> **The 2026-10-04 W4 F4 security review entry (Phase 23, model 2.30.0).** One
+> threat enters, Mitigated on arrival. **T-406**: every SSF stream write was
+> read-modify-write, so a receiver's write that overlapped an administrator's put
+> back the status, allowance, receiver binding or subject format the administrator
+> had just changed — undoing a `disabled` only an administrator may lift — and the
+> push deliverer could send a header supplied for a new endpoint to the old one.
+> Writes are now conditional on the version they were prepared from (a receiver's
+> write decides again from a fresh read, an administrator's answers `409`), and the
+> deliverer reads the stream again before it sends. **T-404**'s residual closes:
+> the step-up record is consumed only after the authorization request is
+> validated, and never in the session that was asked to step up, so no page can
+> spend it. **T-403** and **T-405** are amended: an unsignable held event is
+> logged once per poll, not on every look of a long poll. **T-390**'s residual is
+> corrected: where the deployment serves no per-tenant issuers, an audience a
+> tenant squats before its owner registers it can reach a receiver that adopted a
+> conventional audience and accepts unauthenticated pushes. The model is **406
+> threats, 389 mitigated / 17 open**.
+>
+> **The 2026-10-04 SSF delivery threat entries (Phase 23 T23.5.4, model
+> 2.29.0 — T-402 … T-405 enter).** T23.5.3 built what **D-53** decided and
+> entered none of it; this pass does, against the tests T23.5.3 landed. The
+> **ssf_stream + ssf_event_buffer** store takes the new step-up record and is
+> renamed **ssf_stream + ssf_event_buffer + ssf_step_up**. Four threats enter:
+> **T-402**, held and dead-lettered events keeping a person's subject —
+> mitigated by the seven-day `x-message-ttl` on `axiam.ssf_push.dlq` (the only
+> queue with one) and the buffer's seven-day expiry, with the residual stated: an
+> erased person's subject can outlive the erasure in a buffer or the dead-letter
+> queue for up to seven days; **T-403**, long polls held open against the poll
+> endpoint — mitigated by one waiting long poll per stream per instance and the
+> `ssf_poll` bucket; **T-404**, an `assurance-level-change` forged, replayed or
+> suppressed through the step-up record — mitigated by a server-side record that
+> is single-use, per user, ten minutes and emitted only for a new session at
+> another level, with the residual that the return-leg marker lets a relying
+> party spend the record early and cost one event; and **T-405**, a security
+> event lost with nobody told — **open**, an accepted trade-off, because
+> producing an event is best effort (D-52). **T-391** gains the redirect leg
+> (`guarded_fetch_no_redirect`, D-53 (9)) and the residual that a receiver which
+> logs its own header is outside AXIAM's control; **T-392**'s delivery text,
+> which still described the old second-hop refusal, is corrected. The model is
+> **405 threats, 388 mitigated / 17 open**.
+>
+> **The 2026-10-04 SSF delivery entry (Phase 23 T23.5.3, model 2.28.0 — no
+> threat enters).** The delivery half of the Shared Signals Framework
+> transmitter is built on the decisions T23.5.2 took — the `SsfPush` deliverer on
+> the shared dispatcher (every push through `guarded_fetch` with
+> `allow_private = false`, no redirect followed, the D-49 response mapping), the
+> poll endpoint and its bounded, expiring buffer with the sweep on
+> `/health/jobs`, the outbox, and the D-52 event sources — and the three entries
+> that waited for it close, each with the test files and names its mitigation now
+> carries: **T-392** (the push endpoint as an SSRF surface), **T-394** (a
+> receiver flooded with events) and **T-395** (the poll buffer). **T-388** stays
+> open until the SDK receiver helper that de-duplicates `jti` ships (D-35). The
+> model is **401 threats, 385 mitigated / 16 open**.
+>
+> **The 2026-10-04 SSF transmitter entry (Phase 23 T23.5.2, model 2.27.0 —
+> T-385 … T-401 enter).** AXIAM becomes a Shared Signals Framework transmitter
+> (G-5): a new external entity (the **SSF receiver**, in a boundary of its own),
+> the **SSF transmitter** process and the **ssf_stream + ssf_event_buffer**
+> store (*ssf_stream + ssf_event_buffer + ssf_step_up* since 2.29.0), on the
+> *Audit, webhooks, email & notifications* diagram. Seventeen
+> threats enter: receiver impersonation (T-385), cross-tenant stream access
+> (T-386), forged, replayed and confused SETs (T-387 … T-389), a SET misaddressed
+> through an audience shared across tenants (T-390), the push credential (T-391),
+> push-endpoint SSRF (T-392), API and event flooding (T-393, T-394), poll-buffer
+> exhaustion (T-395), subject-identifier linkability (T-396), a receiver widening
+> its events (T-397), delivery after a stream was disabled (T-398), attribution
+> (T-399), the receiver binding (T-400) and discovery as an oracle (T-401).
+> Thirteen are mitigated by the code and tests of T23.5.2; **T-392, T-394 and
+> T-395** stay open until T23.5.3 builds push, poll and the event sources on the
+> controls D-48, D-49 and D-52 specify, and **T-388** until the SDK receiver
+> helper that de-duplicates `jti` ships (D-35). The model is **401 threats, 382
+> mitigated / 19 open**.
+>
+> **The 2026-10-04 SAML IdP single-logout entry (Phase 23 T23.2.4, model
+> 2.26.0 — no threat enters).** Sixteen threats close, each with the test files
+> and names its mitigation now carries: **T-366** (the SP delete cascade now also
+> removes the `saml_sp_session` rows), **T-370 … T-379** and **T-381 … T-384** —
+> single logout on both bindings, the IdP-initiated trigger, the participant
+> record and the logout chain that T23.2.8 specified are built — and **T-312**,
+> the cross-SP correlation through a shared `SessionIndex`, which a per-SP random
+> index recorded before signing closes (the residual, `AuthnInstant`, is recorded
+> in its mitigation). **T-380** stays open: it is an accepted trade-off. The model
+> is **384 threats, 369 mitigated / 15 open**.
+>
+> **The 2026-10-04 SAML IdP registry routes entry (Phase 23 T23.2.5, model
+> 2.25.0 — no threat enters).** Thirteen threats close, each with the test files
+> and names its mitigation now carries: **T-357 … T-365 and T-367 … T-369** — the
+> registry routes, SP metadata import and the IdP metadata endpoint that T23.2.8
+> specified are built — and **T-309**, the rotation window, which the promote
+> verb closes. **T-366** stays open: the SP delete cascade exists, but the
+> `saml_sp_session` rows it must also remove arrive with T23.2.4. The model is
+> **384 threats, 353 mitigated / 31 open**.
+>
+> **The 2026-10-04 SAML IdP registry, metadata and single-logout entry (Phase 23
+> T23.2.8, model 2.25.0).** Twenty-eight threats enter, all open, and the reason
+> is new: W4 writes the SAML identity provider's normative text before its code
+> (contract §29 and decisions D-37 … D-42), so the entries describe controls the
+> next tasks build and each names the task that closes it — T23.2.5 for the
+> registry routes, SP metadata import and the IdP metadata endpoint (**T-357 …
+> T-369**), T23.2.4 for single logout (**T-370 … T-379, T-381 … T-384**). No route
+> they describe exists yet. The management routes: cross-tenant or under-privileged
+> registration (T-357), a registration the IdP cannot hold to its rules (T-358),
+> metadata import as an SSRF surface (T-359, `guarded_fetch` only) and an XXE
+> surface (T-360, any DTD refused on the bytes), trust in unsigned metadata (T-361,
+> a draft an administrator submits, never a write), audit (T-362), amplification
+> (T-363), a racing or half-applied credential write (T-364, promote in one
+> transaction under its own permission) and the signing key on a response (T-365).
+> The registry store across tenants (T-366). The metadata endpoint: a key or
+> location that is not the tenant's (T-367, unsigned by decision), a tenant oracle
+> (T-368, the D-20 `404` even without a credential) and a flood (T-369). Single
+> logout: forged (T-370, every SP message signed and verified per node) and
+> replayed (T-371) logout messages, XML attacks (T-372), the tenant key's logout
+> signatures as a wrapping gadget (T-373 — signed only for a session holder or a
+> verified SP, and detached on the Redirect binding), floods (T-374), redirection
+> (T-375), audit (T-376), the query string in logs (T-377), logout CSRF (T-378), an
+> SP reaching sessions it never joined (T-379), and the participant and chain
+> stores (T-381 … T-384). **T-380** is the one that will stay open: a service
+> provider's own session outlives an AXIAM session that ends any way but a logout
+> chain, because SAML has no browser back channel and the SOAP binding is not
+> implemented. **T-309** (rotation) and **T-312** (`SessionIndex` per SP) are
+> amended to the decisions that close them. The model is **384 threats,
+> 340 mitigated / 44 open**.
+>
 > **The 2026-10-04 W3 F4 security review entry (Phase 23, model 2.24.0;
 > [`security-review-phase23-w3-2026-10-04.md`](security-review-phase23-w3-2026-10-04.md)).** One threat
 > enters, Mitigated on arrival, and two close. **T-332 closes**: a sign-in for a name
@@ -840,7 +977,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 356 threats** and a
+The system is verified against a **STRIDE threat model of 406 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -863,8 +1000,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 356 |
-| Mitigated / Open | 340 / 16 |
+| Threats identified | 406 |
+| Mitigated / Open | 389 / 17 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -880,10 +1017,10 @@ optimistic closed one.
 | System context | 33 | 2 |
 | Authentication & session management | 35 | 0 |
 | OAuth2 / OIDC authorization server | 60 | 0 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 97 | 4 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
-| Audit, webhooks, email & notifications | 18 | 1 |
+| Audit, webhooks, email & notifications | 39 | 3 |
 | Deployment & platform (Kubernetes) | 28 | 5 |
 | Client SDKs & admin-UI integration surface | 28 | 3 |
 
@@ -916,7 +1053,26 @@ answered (T-254). And the two Medium items that had sat on the token service and
 on the SDK route guard since the first version of the model — the fifteen-minute
 revocation window, seen from each side — closed together at 1.0.0-beta14, when
 the optional revocation feed the server publishes gained a poller in all eleven
-SDKs (T-39, T-143).
+SDKs (T-39, T-143). The twenty-eight SAML identity provider entries of model
+2.25.0 (T-357 … T-384) were open for a reason none of these had: they were
+written before the code they describe, so they close as the registry routes,
+the metadata endpoint and single logout land — all but T-380, a service
+provider's own session outliving the AXIAM session, which is accepted. The
+registry routes, SP metadata import and the metadata endpoint have landed
+(T23.2.5): T-357 … T-365 and T-367 … T-369 are mitigated, and so is the rotation
+window, T-309. Single logout has landed too (T23.2.4): T-366, T-370 … T-379,
+T-381 … T-384 and the per-SP `SessionIndex`, T-312, are mitigated, leaving only the
+accepted T-380. The seventeen Shared Signals Framework entries of model 2.27.0
+(T-385 … T-401) entered with the transmitter's security core: thirteen mitigated
+with their tests, and four open — the push endpoint at delivery time, event
+flooding and the poll buffer until the delivery task lands (T-392, T-394, T-395),
+and SET replay until the SDK receiver helper that de-duplicates `jti` ships
+(T-388). The delivery task has landed (T23.5.3, model 2.28.0): T-392, T-394 and
+T-395 are mitigated, leaving only T-388. The four delivery entries of model
+2.29.0 (T-402 … T-405) add one open item, and it is accepted rather than
+deferred: an SSF event that cannot be produced or queued is lost with a log line
+and nothing else, because a logout must not fail when a receiver's queue is
+down (T-405).
 
 ### Coverage by STRIDE category
 
@@ -928,25 +1084,25 @@ the category recorded against it in the model.
 
 | Category | Threats | Open |
 |---|---|---|
-| Spoofing | 84 | 4 |
-| Tampering | 70 | 1 |
-| Repudiation | 8 | 0 |
-| Information disclosure | 81 | 7 |
-| Denial of service | 39 | 3 |
-| Elevation of privilege | 74 | 1 |
+| Spoofing | 92 | 4 |
+| Tampering | 80 | 2 |
+| Repudiation | 11 | 0 |
+| Information disclosure | 93 | 6 |
+| Denial of service | 48 | 3 |
+| Elevation of privilege | 81 | 2 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
 | Critical | 41 | 2 |
-| High | 161 | 8 |
-| Medium | 137 | 5 |
-| Low | 17 | 1 |
+| High | 174 | 8 |
+| Medium | 162 | 6 |
+| Low | 28 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 16 still-open items are listed one by one in
+the weight the control carries. The 17 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -954,7 +1110,7 @@ with the element it sits on and where responsibility for it lands.
 
 ## Trust boundaries
 
-Seven trust boundaries recur across the system. A data flow that crosses one is a
+Eight trust boundaries recur across the system. A data flow that crosses one is a
 place where authentication, authorization, validation and transport protection all
 have to be re-established — nothing is assumed across a boundary.
 
@@ -965,7 +1121,8 @@ have to be re-established — nothing is assumed across a boundary.
 | **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal; cross-tenant reach only as an explicit organization-scope claim — narrowable to named tenants per role assignment — verified to stay inside the caller's organization and reach |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries |
 | **AXIAM ↔ tenant directory** | AXIAM ↔ a tenant's own LDAP or Active Directory server | TLS before any bind or search — `ldaps://`, or StartTLS that fails closed — verified against the tenant's own anchors and the URL's host; referrals never followed; login names enter filters only through RFC 4515 escaping; a bounded per-tenant pool; a read-only bind account; the host resolved once and held to the deployment's address rule, the connection pinned to the vetted address; every message from the directory measured and checked before it is parsed |
-| **AXIAM ↔ SAML service provider** | AXIAM's SAML identity provider ↔ the applications a tenant registered to receive assertions | Assertions always signed with the tenant's own credential, inside its validity window, under the `Issuer` of the tenant in the request path; delivered only to a registered ACS URL; five-minute validity; a pairwise `NameID` by default; failure responses never signed |
+| **AXIAM ↔ SAML service provider** | AXIAM's SAML identity provider ↔ the applications a tenant registered to receive assertions | Assertions always signed with the tenant's own credential, inside its validity window, under the `Issuer` of the tenant in the request path; delivered only to a registered ACS URL; five-minute validity; a pairwise `NameID` by default; failure responses never signed; once single logout lands (D-38), an SP's logout messages accepted only signed by its registered certificate and verified per node, and AXIAM's own signed only for a session holder or a verified SP |
+| **AXIAM ↔ SSF receiver** | AXIAM's Shared Signals Framework transmitter ↔ the relying parties a tenant registered a stream for | Every SET signed with the deployment key, explicitly typed, under the tenant issuer and an audience unique across the deployment; signed only when delivered, for an enabled stream that carries the event; pushed only to an endpoint held to the outbound address policy, with a sealed credential that never follows the endpoint to another origin; stream management and polling only with the receiver's own client-credentials token carrying `ssf.manage`, for its own streams |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
 
 ### The assets worth protecting
@@ -1586,6 +1743,18 @@ against the classic federation attacks:
   authentication context comes from the session's own evidence, never from the
   request; failure responses carry a status code and nothing else, and are never
   signed, so the key cannot be harvested as a wrapping gadget.
+- **Specified next for the identity provider: registry management, metadata and
+  single logout.** The rules are written (contract §29, D-37 … D-42) and the
+  threat model holds them open until the code lands. Service providers are
+  registered by a human administrator through validated writes; an SP's metadata
+  is imported as a draft the administrator reviews — fetched only through the
+  SSRF guard, refused if it declares a DTD, and never trusted because it was
+  signed or because it came from a URL; the IdP's metadata is unsigned and
+  publishes the next signing certificate before it is promoted; single logout
+  accepts only signed logout messages from a registered SP, revokes the AXIAM
+  session before telling the other service providers, and signs its own logout
+  messages only for the session's holder or a verified SP — detached from the XML
+  on the Redirect binding, so they cannot serve as a wrapping gadget.
 - **Attribute-to-role mapping is an explicit, tenant-scoped allow-list** set by an
   AXIAM administrator; unmapped IdP attributes are discarded, so an IdP cannot
   self-assign privileged roles.
@@ -2177,8 +2346,8 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 16 of
-356. On the website this table is generated from the Threat Dragon model, so it
+Every threat the model does not record as mitigated, most severe first — 17 of
+406. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -2199,8 +2368,9 @@ each.
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
-| T-309 — Sign-on stops when the active credential expires or is retired before a successor is in place | Medium | saml_idp_credential (sealed signing key) · *Federation — SAML SP & OIDC relying party* |
-| T-312 — Service providers link a user across SPs, or back to the AXIAM account | Medium | SAML assertion issuer (saml_idp) · *Federation — SAML SP & OIDC relying party* |
+| T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
+| T-388 — A captured SET is replayed to its receiver | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
+| T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are

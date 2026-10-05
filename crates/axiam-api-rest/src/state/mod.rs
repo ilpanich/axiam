@@ -412,12 +412,16 @@ pub struct AppState<C: Connection + Clone> {
     ///
     /// See [`bundles::DirectoryState`].
     pub directory: bundles::DirectoryState<C>,
-    /// The SAML 2.0 identity provider (G-2, T23.2.3). Behind `saml`: a build
-    /// without it mounts no SAML route at all (D-20).
+    /// The SAML 2.0 identity provider (G-2, T23.2.3, T23.2.5): the registry and
+    /// credential routes of contract §29 exist in every build; the issuer, and
+    /// every browser route that uses it, only with `saml` (D-20, D-42).
     ///
     /// See [`bundles::SamlIdpState`].
-    #[cfg(feature = "saml")]
     pub saml_idp: bundles::SamlIdpState<C>,
+    /// The Shared Signals Framework transmitter (G-5, T23.5.2).
+    ///
+    /// See [`bundles::SsfState`].
+    pub ssf: bundles::SsfState<C>,
 }
 
 /// Assemble the OPAQUE server keys, requiring **both** or neither.
@@ -526,7 +530,12 @@ impl<C: Connection + Clone> AppState<C> {
         if let Some(publisher) = &self.events.webhook_publisher {
             self.events
                 .webhook_delivery
-                .emit(publisher, tenant_id, event_type.to_string(), payload)
+                .emit(
+                    publisher.as_ref(),
+                    tenant_id,
+                    event_type.to_string(),
+                    payload,
+                )
                 .await;
         }
     }
@@ -550,6 +559,7 @@ impl<C: Connection + Clone> AppState<C> {
         // `Option<[u8; 32]>` is `Copy`, so read it out before `auth_config` is
         // moved into the struct literal below.
         let opaque_keys = opaque_keys_from(&auth_config);
+        let auth_config_for_ssf = auth_config.clone();
         // B1: resolve the hash-gate permit count from config (0 = auto → min(cores, 4)).
         let crypto_semaphore =
             Arc::new(Semaphore::new(auth_config.resolved_max_concurrent_hashes()));
@@ -559,7 +569,17 @@ impl<C: Connection + Clone> AppState<C> {
         };
 
         let user_repo = SurrealUserRepository::new(db.clone());
-        let session_repo = SurrealSessionRepository::new(db.clone());
+        // G-5 (D-52): the repository reports a revocation to a sink that is bound
+        // once the emitter exists (below) and that does nothing until an outbox is
+        // wired, so the repository issues the queries it always did.
+        let ssf_session_sink: Arc<
+            axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SessionRevocationSink>,
+        > = Arc::default();
+        let ssf_account_sink: Arc<
+            axiam_core::models::ssf::Late<dyn axiam_core::models::ssf::SsfSystemAccountSink>,
+        > = Arc::default();
+        let session_repo = SurrealSessionRepository::new(db.clone())
+            .with_revocation_sink(ssf_session_sink.clone());
         let federation_link_repo = SurrealFederationLinkRepository::new(db.clone());
         let refresh_token_repo = SurrealRefreshTokenRepository::new(db.clone());
         let webauthn_cred_repo = axiam_db::SurrealWebauthnCredentialRepository::new(db.clone());
@@ -619,10 +639,11 @@ impl<C: Connection + Clone> AppState<C> {
             Arc::clone(&crypto_semaphore),
             Arc::clone(&ca_custodians),
         );
-        #[cfg(feature = "saml")]
         let saml_idp = bundles::SamlIdpState {
             sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(db.clone()),
             pending_repo: axiam_db::SurrealPendingSamlRequestRepository::new(db.clone()),
+            participant_repo: axiam_db::SurrealSamlSpSessionRepository::new(db.clone()),
+            logout_run_repo: axiam_db::SurrealSamlLogoutRunRepository::new(db.clone()),
             credential_service: axiam_pki::saml_signing::SamlIdpCredentialService::new(
                 CertService::new(
                     ca_cert_repo.clone(),
@@ -637,6 +658,7 @@ impl<C: Connection + Clone> AppState<C> {
             // No pairwise key in a test harness: a persistent `NameID` is then
             // refused (`Responder`), exactly as on a deployment without one. A
             // test that issues one replaces this field.
+            #[cfg(feature = "saml")]
             issuer: Arc::new(axiam_federation::saml_idp::SamlIdpIssuer::new(
                 auth_config.root_issuer(),
                 None,
@@ -867,8 +889,46 @@ impl<C: Connection + Clone> AppState<C> {
                 sync_state_repo: axiam_db::SurrealDirectorySyncStateRepository::new(db.clone()),
                 client: Arc::new(axiam_directory::DirectoryClient::default()),
             },
-            #[cfg(feature = "saml")]
             saml_idp,
+            // No sealing key and no outbox: a stream with a push header cannot
+            // be stored and verification answers 503, as on a deployment
+            // without either; a test that needs them replaces this field.
+            ssf: {
+                let stream_repo = axiam_db::SurrealSsfStreamRepository::new(db.clone(), None);
+                // D-55: the gate reads this harness's datastore like a
+                // deployment's, and audits a change like one.
+                let gate = Arc::new(axiam_oauth2::ssf::SsfIssuerGate::new(
+                    auth_config_for_ssf.tenant_issuer_paths,
+                    Arc::new(SurrealTenantRepository::new(db.clone())),
+                ));
+                gate.bind_observer(Arc::new(crate::ssf_emitter::SharedIssuerAudit::new(
+                    SurrealOrganizationRepository::new(db.clone()),
+                    SurrealTenantRepository::new(db.clone()),
+                    SurrealSettingsRepository::new(db.clone()),
+                    SurrealAuditLogRepository::new(db.clone()),
+                )));
+                let emitter = crate::ssf_emitter::SsfEmitter::new(
+                    stream_repo.clone(),
+                    SurrealTenantRepository::new(db.clone()),
+                    SurrealSettingsRepository::new(db.clone()),
+                    SurrealUserRepository::new(db.clone()),
+                    auth_config_for_ssf,
+                    gate.clone(),
+                );
+                ssf_session_sink.bind(Arc::new(emitter.clone()));
+                ssf_account_sink.bind(Arc::new(emitter.clone()));
+                bundles::SsfState {
+                    stream_repo,
+                    buffer_repo: axiam_db::SurrealSsfEventBufferRepository::new(db.clone()),
+                    step_up_repo: axiam_db::SurrealSsfStepUpRepository::new(db.clone()),
+                    outbox: None,
+                    emitter,
+                    session_sink: ssf_session_sink,
+                    account_sink: ssf_account_sink,
+                    poll_waiters: Arc::default(),
+                    gate,
+                }
+            },
         }
     }
 }

@@ -19,8 +19,8 @@
 //!   it changes only by an administrator's act, and [`SamlIdpCredentialService::issue`]
 //!   is that act.
 //! * **No automatic rotation.** The `next` slot exists so rotation needs no
-//!   schema change; nothing promotes it.
-//! * **No REST route.** T23.2.5 adds the admin route.
+//!   schema change; only an administrator's
+//!   [`promote`](SamlIdpCredentialService::promote) (T23.2.5, D-42) moves it.
 //!
 //! # The key
 //!
@@ -35,7 +35,8 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::certificate::{CertificateType, CreateCertificate, KeyAlgorithm};
 use axiam_core::models::saml_idp_credential::{
-    SamlIdpCredential, SamlIdpCredentialStatus, SealedSamlIdpKey, StoreSamlIdpCredential,
+    SamlIdpCredential, SamlIdpCredentialPromotion, SamlIdpCredentialStatus, SealedSamlIdpKey,
+    StoreSamlIdpCredential,
 };
 use axiam_core::repository::{
     CaCertificateRepository, CertificateRepository, SamlIdpCredentialRepository,
@@ -46,7 +47,7 @@ use x509_parser::prelude::FromDer;
 use zeroize::Zeroizing;
 
 use crate::ca_key_store::CaKeyCustodians;
-use crate::cert::{CertService, IssuingScope};
+use crate::cert::{CA_NOT_ACTIVE, CA_NOT_VALID, CertService, IssuingScope};
 use crate::subject::subject_common_name;
 
 /// The longest a SAML IdP signing certificate may be valid: two years, in days.
@@ -181,7 +182,8 @@ where
                 Some(MAX_SAML_IDP_CREDENTIAL_VALIDITY_DAYS),
                 &[],
             )
-            .await?;
+            .await
+            .map_err(ca_that_cannot_sign)?;
         // Into a zeroizing buffer at once. The move leaves no second copy.
         let private_key_pem = Zeroizing::new(std::mem::take(&mut leaf.private_key_pem));
         let serial = leaf_serial_hex(&leaf.public_cert_pem)?;
@@ -263,6 +265,21 @@ where
         self.repo.list(tenant_id).await
     }
 
+    /// Promote the tenant's `next` credential to `active`, retiring the one that
+    /// was (its key destroyed), in one transaction (D-42).
+    ///
+    /// `id` must be the tenant's current `next` credential and `now` inside its
+    /// validity window, or the answer is `Conflict` and nothing changes;
+    /// `NotFound` for an id that is not this tenant's. See
+    /// [`SamlIdpCredentialRepository::promote`].
+    pub async fn promote(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> AxiamResult<SamlIdpCredentialPromotion> {
+        self.repo.promote(tenant_id, id, chrono::Utc::now()).await
+    }
+
     /// Retire a credential: out of its slot, out of metadata, key destroyed.
     ///
     /// The sealed key is cleared in the same write that takes the row out of its
@@ -277,6 +294,22 @@ where
     /// that is not this tenant's.
     pub async fn retire(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<SamlIdpCredential> {
         self.repo.retire(tenant_id, id).await
+    }
+}
+
+/// A CA that is revoked, expired or not yet valid is a statement about the
+/// request — the caller named a CA that cannot sign — so it is a `Validation`
+/// the caller reads, not the `Certificate` error the generic issuing paths give
+/// it (which reaches a client as a bare 500). Everything else passes through.
+fn ca_that_cannot_sign(error: AxiamError) -> AxiamError {
+    match error {
+        AxiamError::Certificate(message) if message == CA_NOT_ACTIVE => AxiamError::Validation {
+            message: "the issuing CA is not active (revoked or retired) and cannot sign".into(),
+        },
+        AxiamError::Certificate(message) if message == CA_NOT_VALID => AxiamError::Validation {
+            message: "the issuing CA is expired or not yet valid and cannot sign".into(),
+        },
+        other => other,
     }
 }
 

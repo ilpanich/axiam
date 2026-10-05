@@ -21,6 +21,17 @@ use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{CountRow, classify_write_error, parse_uuid, search_bind, search_filter};
 
+/// What both erasure paths remove besides the user row: the SAML single-logout
+/// state that names the person (T23.2.4, schema v76, D-37, T-381) — the
+/// participant rows (the `NameID` and `SessionIndex` each SP was given) and the
+/// logout runs (whose sessions ended) — and the SSF step-up record (T23.5.3,
+/// schema v78, D-53 (1)) that names the user and the session they held. Keyed on
+/// `$tenant_id` and `$id`, the user's record id, which every statement binds.
+const SAML_ERASURE_STATEMENTS: &str = "\
+    DELETE saml_sp_session WHERE tenant_id = $tenant_id AND user_id = $id; \
+    DELETE saml_logout_run WHERE tenant_id = $tenant_id AND user_id = $id; \
+    DELETE ssf_step_up WHERE tenant_id = $tenant_id AND user_id = $id; ";
+
 /// DB-side row struct for queries where the UUID is already known.
 ///
 /// NOTE: `Debug` is manually implemented below to redact `mfa_secret` and
@@ -784,14 +795,20 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // tombstone from the certified erasure, and the three resets after it
         // are ones the Art. 17 pipeline does not perform. Those asymmetries
         // are recorded on the columns they belong to, not flattened here.
+        //
+        // The SAML single-logout rows naming the person go in the same
+        // transaction (T23.2.4, schema v76, T-381), as on the Art. 17 path.
         let statement = format!(
-            "UPDATE type::record('user', $id) SET {}, \
+            "BEGIN TRANSACTION; \
+             UPDATE type::record('user', $id) SET {}, \
              status = 'Deleted', \
              totp_last_used_step = NONE, \
              failed_login_attempts = 0, \
              email_verified_at = NONE, \
              updated_at = time::now() \
-             WHERE tenant_id = $tenant_id RETURN BEFORE",
+             WHERE tenant_id = $tenant_id RETURN BEFORE; \
+             {SAML_ERASURE_STATEMENTS} \
+             COMMIT TRANSACTION",
             axiam_core::personal_data::shared_erasure_fragment()
         );
 
@@ -809,7 +826,8 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
+        // BEGIN=0, UPDATE=1, then the SAML and SSF deletes and COMMIT.
+        let rows: Vec<UserRow> = result.take(1).map_err(DbError::from)?;
         if rows.is_empty() {
             return Err(DbError::NotFound {
                 entity: "user".into(),
@@ -1281,13 +1299,22 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // `deletion_pending` is the step that marks the erasure done — it is
         // the only one that does — which is why it is here and not in the
         // shared set.
+        //
+        // What SAML single logout remembers about the person goes in the same
+        // transaction (T23.2.4, schema v76, D-37, T-381): the participant rows
+        // hold the `NameID` each SP was given — an email address at an
+        // `emailAddress` SP — and the logout runs name the user whose sessions
+        // ended. Erasure that left them would be retention.
         let statement = format!(
-            "UPDATE type::record('user', $id) SET {}, \
+            "BEGIN TRANSACTION; \
+             UPDATE type::record('user', $id) SET {}, \
              deletion_pending = false, \
              scheduled_purge_at = NONE, \
              status = 'Anonymized', \
              updated_at = time::now() \
-             WHERE tenant_id = $tenant_id",
+             WHERE tenant_id = $tenant_id; \
+             {SAML_ERASURE_STATEMENTS} \
+             COMMIT TRANSACTION",
             axiam_core::personal_data::shared_erasure_fragment()
         );
 

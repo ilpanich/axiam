@@ -63,6 +63,11 @@ services:
   # limit — a *production* AXIAM instance still cannot federate with an
   # internal-network IdP over plain HTTP, or at all without an explicit
   # allowlist that does not exist today).
+  # T23.2.7 (G-2) uses the same service as the SAML service provider for
+  # `saml_idp_keycloak_roundtrip_test.rs`: a realm per AuthnRequest binding with a
+  # SAML identity provider imported from AXIAM's IdP metadata. The test process
+  # carries every SAML message, so Keycloak never has to reach AXIAM; nothing in
+  # this service changes for it.
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.0
     container_name: axiam-e2e-keycloak

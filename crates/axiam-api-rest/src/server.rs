@@ -648,6 +648,72 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     .route(web::delete().to(handlers::uma::delete_resource_set::<C>)),
             ),
     );
+    // G-5 / T23.5.2 — SSF 1.0 §7 transmitter metadata, at the host root like
+    // every `.well-known` document, and the stream management API (§8) under
+    // `/ssf/v1`. Every route has a bucket of its own (plan §7 rule 6), under
+    // `ssf_per_min`; the stream API is behind `AuthzMiddleware` (a token is
+    // required) and its handlers take the receiver token, as the UMA
+    // protection API does. `.to()` before `.wrap()` on a route, so the limiter
+    // is not dropped.
+    cfg.service(
+        web::resource("/.well-known/ssf-configuration")
+            .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+            .wrap(RateLimitShared::<C>::new(
+                "ssf_configuration",
+                rate_limit_cfg.ssf_per_min,
+            ))
+            .route(web::get().to(handlers::ssf::ssf_configuration::<C>)),
+    );
+    cfg.service(
+        web::scope("/ssf/v1")
+            .wrap(AuthzMiddleware)
+            .app_data(web::JsonConfig::default().limit(32_768))
+            .service(
+                web::resource("/stream")
+                    .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ssf_stream",
+                        rate_limit_cfg.ssf_per_min,
+                    ))
+                    .route(web::get().to(handlers::ssf::get_stream_configuration::<C>))
+                    .route(web::post().to(handlers::ssf::create_stream_refused))
+                    .route(web::patch().to(handlers::ssf::patch_stream_configuration::<C>))
+                    .route(web::put().to(handlers::ssf::replace_stream_configuration::<C>))
+                    .route(web::delete().to(handlers::ssf::delete_stream_refused::<C>)),
+            )
+            .service(
+                web::resource("/status")
+                    .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ssf_status",
+                        rate_limit_cfg.ssf_per_min,
+                    ))
+                    .route(web::get().to(handlers::ssf::get_stream_status::<C>))
+                    .route(web::post().to(handlers::ssf::update_stream_status::<C>)),
+            )
+            .service(
+                web::resource("/verify")
+                    .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ssf_verify",
+                        rate_limit_cfg.ssf_per_min,
+                    ))
+                    .route(web::post().to(handlers::ssf::request_verification::<C>)),
+            )
+            // T23.5.3 — RFC 8936 poll delivery. One stream per path, so one bucket
+            // for the route (`ssf_poll`) under `ssf_per_min`: a long poll holds a
+            // request for up to 30 s, so an honest receiver makes two a minute.
+            .service(
+                web::resource("/poll/{stream_id}")
+                    .app_data(web::PayloadConfig::new(handlers::ssf::POLL_MAX_BODY_BYTES))
+                    .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ssf_poll",
+                        rate_limit_cfg.ssf_per_min,
+                    ))
+                    .route(web::post().to(handlers::ssf::poll_events::<C>)),
+            ),
+    );
     cfg.service(oauth2_scope::<C>(rate_limit_cfg, revocation_feed_enabled));
     // T21.6 — the per-tenant path issuer form, mounted only where
     // `AXIAM__AUTH__TENANT_ISSUER_PATHS` is set. Everything under `/t/` is the
@@ -679,6 +745,17 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
         cfg.route(
             "/.well-known/openid-configuration/t/{tenant_id}",
             web::get().to(handlers::oauth2::discovery_oidc_tenant_path::<C>),
+        );
+        // G-5 / T23.5.2 — SSF 1.0 §7.2: the well-known segment inserted
+        // between the host and the tenant issuer's path.
+        cfg.service(
+            web::resource("/.well-known/ssf-configuration/t/{tenant_id}")
+                .wrap(build_governor(rate_limit_cfg.ssf_per_min))
+                .wrap(RateLimitShared::<C>::new(
+                    "ssf_configuration_tenant",
+                    rate_limit_cfg.ssf_per_min,
+                ))
+                .route(web::get().to(handlers::ssf::ssf_configuration_tenant_path::<C>)),
         );
     }
     let api_scope = web::scope("/api/v1")
@@ -1351,6 +1428,138 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                 web::resource("/tenants/{tenant_id}/directory/sync-status")
                     .route(web::get().to(handlers::directory::get_sync_status::<C>)),
             )
+            // --- SAML 2.0 identity provider: service-provider registry and
+            // signing credential (G-2, T23.2.5, CONTRACT §29). Compiled into
+            // **every** build (D-42): only `parse-sp-metadata` needs `samael` and
+            // answers 503 without it. Reads are unlimited; each of the seven
+            // writes has a bucket of its own (plan §7 rule 6), under
+            // `saml_admin_per_min` — issuing generates an RSA-4096 key and parsing
+            // metadata makes an outbound request. `.to()` first: `Route::to` after
+            // `.wrap()` would replace the wrapped service and drop the limiter.
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/idp")
+                    .route(web::get().to(handlers::saml_admin::get_idp::<C>)),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/service-providers")
+                    .app_data(handlers::saml_admin::registry_json_config())
+                    .route(web::get().to(handlers::saml_admin::list_service_providers::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::saml_admin::create_service_provider::<C>)
+                            .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "saml_sp_create",
+                                rate_limit_cfg.saml_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/service-providers/{sp_id}")
+                    .app_data(handlers::saml_admin::registry_json_config())
+                    .route(web::get().to(handlers::saml_admin::get_service_provider::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::saml_admin::update_service_provider::<C>)
+                            .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "saml_sp_update",
+                                rate_limit_cfg.saml_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::saml_admin::delete_service_provider::<C>)
+                            .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "saml_sp_delete",
+                                rate_limit_cfg.saml_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/parse-sp-metadata")
+                    .app_data(handlers::saml_admin::parse_json_config())
+                    .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "saml_sp_parse",
+                        rate_limit_cfg.saml_admin_per_min,
+                    ))
+                    .route(web::post().to(handlers::saml_admin::parse_sp_metadata::<C>)),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/idp-credentials")
+                    .app_data(handlers::saml_admin::registry_json_config())
+                    .route(web::get().to(handlers::saml_admin::list_idp_credentials::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::saml_admin::issue_idp_credential::<C>)
+                            .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "saml_idp_credential_issue",
+                                rate_limit_cfg.saml_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote")
+                    .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "saml_idp_credential_promote",
+                        rate_limit_cfg.saml_admin_per_min,
+                    ))
+                    .route(web::post().to(handlers::saml_admin::promote_idp_credential::<C>)),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire")
+                    .wrap(build_governor(rate_limit_cfg.saml_admin_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "saml_idp_credential_retire",
+                        rate_limit_cfg.saml_admin_per_min,
+                    ))
+                    .route(web::post().to(handlers::saml_admin::retire_idp_credential::<C>)),
+            )
+            // --- SSF stream registry (G-5, T23.5.2, CONTRACT §32). Works
+            // whatever the tenant's `ssf_enabled` says (D-45). Reads are
+            // unlimited; each of the three writes has a bucket of its own under
+            // `ssf_admin_per_min`. `.to()` first, then `.wrap()`.
+            .service(
+                web::resource("/tenants/{tenant_id}/ssf/streams")
+                    .app_data(handlers::ssf_admin::json_config())
+                    .route(web::get().to(handlers::ssf_admin::list_streams::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::ssf_admin::create_stream::<C>)
+                            .wrap(build_governor(rate_limit_cfg.ssf_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "ssf_stream_create",
+                                rate_limit_cfg.ssf_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/tenants/{tenant_id}/ssf/streams/{stream_id}")
+                    .app_data(handlers::ssf_admin::json_config())
+                    .route(web::get().to(handlers::ssf_admin::get_stream::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::ssf_admin::update_stream::<C>)
+                            .wrap(build_governor(rate_limit_cfg.ssf_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "ssf_stream_update",
+                                rate_limit_cfg.ssf_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::ssf_admin::delete_stream::<C>)
+                            .wrap(build_governor(rate_limit_cfg.ssf_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "ssf_stream_delete",
+                                rate_limit_cfg.ssf_admin_per_min,
+                            )),
+                    ),
+            )
             // --- Tenant security overrides (explicit {tenant_id} path segment,
             // same convention as the email-config trio above) ---
             .service(
@@ -1520,16 +1729,18 @@ pub fn build_cors(allowed_origins: &[String]) -> Cors {
     cors
 }
 
-/// The SAML 2.0 IdP's routes (T23.2.3, G-2): `/saml/v2/{tenant_id}/sso` (both
-/// bindings), `/sso/continue` and `/sso/idp-initiated`.
+/// The SAML 2.0 IdP's routes (T23.2.3, T23.2.4, T23.2.5, G-2):
+/// `/saml/v2/{tenant_id}/sso` (both bindings), `/sso/continue`,
+/// `/sso/idp-initiated`, `/sso/logout`, `/slo` (both bindings) and `/metadata`.
 ///
 /// **Rate limited (§7 rule 6)** with the browser-endpoint preset
 /// `end_session_per_min` — human-driven, unauthenticated, 30 per minute per
 /// address by default — under buckets of their own (`saml_idp_sso`,
-/// `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`), so a flood here
-/// cannot spend `/oauth2/end_session`'s allowance or the reverse. Every route
-/// allocates state (a pending row) or does XML and signature work, which is
-/// what is being bounded.
+/// `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`, `saml_idp_metadata`,
+/// `saml_idp_slo`, `saml_idp_sso_logout`), so a flood here cannot spend
+/// `/oauth2/end_session`'s allowance or the reverse. Every route allocates state
+/// (a pending row, a logout run) or does XML and signature work, which is what is
+/// being bounded.
 ///
 /// **D-20.** Any other method on these paths, and any other path under the
 /// scope, answers [`handlers::saml_idp::not_found`] — the same empty `404` a
@@ -1539,9 +1750,19 @@ pub fn build_cors(allowed_origins: &[String]) -> Cors {
 fn saml_idp_scope<C: surrealdb::Connection + Clone>(
     rate_limit_cfg: &RateLimitConfig,
 ) -> impl actix_web::dev::HttpServiceFactory + 'static {
-    use handlers::saml_idp;
+    use handlers::{saml_idp, saml_idp_slo};
     let per_min = rate_limit_cfg.end_session_per_min;
     web::scope("/saml/v2/{tenant_id}")
+        // T23.2.5, D-40: the IdP metadata. The same browser-endpoint preset, a
+        // bucket of its own, and the D-20 `404` for every other method.
+        .service(
+            web::resource("/metadata")
+                .wrap(build_governor(per_min))
+                .wrap(RateLimitShared::<C>::new("saml_idp_metadata", per_min))
+                .route(web::get().to(saml_idp::metadata::<C>))
+                .route(web::head().to(saml_idp::metadata::<C>))
+                .default_service(web::to(saml_idp::not_found)),
+        )
         .service(
             web::resource("/sso")
                 .wrap(build_governor(per_min))
@@ -1565,6 +1786,25 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
                     per_min,
                 ))
                 .route(web::get().to(saml_idp::sso_idp_initiated::<C>))
+                .default_service(web::to(saml_idp::not_found)),
+        )
+        // T23.2.4, D-39: the IdP-initiated logout trigger. Under the SSO path, so
+        // the OP cookie reaches it; the browser-endpoint preset in a bucket of its
+        // own; the D-20 `404` for every other method.
+        .service(
+            web::resource("/sso/logout")
+                .wrap(build_governor(per_min))
+                .wrap(RateLimitShared::<C>::new("saml_idp_sso_logout", per_min))
+                .route(web::get().to(saml_idp_slo::sso_logout::<C>))
+                .default_service(web::to(saml_idp::not_found)),
+        )
+        // T23.2.4, D-38: single logout, both bindings, the one shared bucket.
+        .service(
+            web::resource("/slo")
+                .wrap(build_governor(per_min))
+                .wrap(RateLimitShared::<C>::new("saml_idp_slo", per_min))
+                .route(web::get().to(saml_idp_slo::slo_redirect::<C>))
+                .route(web::post().to(saml_idp_slo::slo_post::<C>))
                 .default_service(web::to(saml_idp::not_found)),
         )
         .default_service(web::to(saml_idp::not_found))

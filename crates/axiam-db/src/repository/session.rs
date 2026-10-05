@@ -3,6 +3,7 @@
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::session::{Amr, CreateSession, Session};
+use axiam_core::models::ssf::SessionRevocationSink;
 use axiam_core::repository::SessionRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -158,6 +159,12 @@ impl SessionRowWithId {
     }
 }
 
+/// The owner of a session a revocation just removed (G-5).
+#[derive(Debug, SurrealValue)]
+struct RemovedSessionUser {
+    user_id: String,
+}
+
 /// SurrealDB implementation of the Session repository.
 pub struct SurrealSessionRepository<C: Connection> {
     db: DbHandle<C>,
@@ -172,6 +179,11 @@ pub struct SurrealSessionRepository<C: Connection> {
     /// feed existed, which is the property that makes an off-by-default
     /// feature honest rather than merely unused.
     revocation_feed_ttl: Option<chrono::Duration>,
+    /// G-5 (D-52): where a revocation is reported as a CAEP `session-revoked`
+    /// event, or `None` — the default — for a repository nothing listens to.
+    /// Called by the same three revocation paths as the feed, never by
+    /// `consume*` and never by expiry, and independent of the feed's switch.
+    revocation_sink: Option<Arc<dyn SessionRevocationSink>>,
 }
 
 // Manual Clone impl (not derive): `#[derive(Clone)]` would add a `C: Clone`
@@ -186,6 +198,7 @@ impl<C: Connection> Clone for SurrealSessionRepository<C> {
             // revoked.
             validation_cache: self.validation_cache.clone(),
             revocation_feed_ttl: self.revocation_feed_ttl,
+            revocation_sink: self.revocation_sink.clone(),
         }
     }
 }
@@ -197,6 +210,7 @@ impl<C: Connection> SurrealSessionRepository<C> {
             db,
             validation_cache: None,
             revocation_feed_ttl: None,
+            revocation_sink: None,
         }
     }
 
@@ -227,6 +241,42 @@ impl<C: Connection> SurrealSessionRepository<C> {
     pub fn with_revocation_feed(mut self, ttl: chrono::Duration) -> Self {
         self.revocation_feed_ttl = Some(ttl);
         self
+    }
+
+    /// Report revoked sessions to `sink` (G-5, D-52).
+    ///
+    /// The sink hears of a revocation **after** it committed, from `invalidate`,
+    /// `invalidate_user_sessions` and `invalidate_user_sessions_except` only —
+    /// never from `consume` or `consume_by_token_hash` (a redemption is not a
+    /// revocation) and never from expiry. It does not depend on
+    /// [`Self::with_revocation_feed`]. Only when the sink [`is_active`]
+    /// does a revocation read the session's user to name it, so a repository
+    /// whose sink is not bound issues the queries it always did.
+    ///
+    /// [`is_active`]: SessionRevocationSink::is_active
+    #[must_use]
+    pub fn with_revocation_sink(mut self, sink: Arc<dyn SessionRevocationSink>) -> Self {
+        self.revocation_sink = Some(sink);
+        self
+    }
+
+    fn sink_is_active(&self) -> bool {
+        self.revocation_sink
+            .as_ref()
+            .is_some_and(|sink| sink.is_active())
+    }
+
+    /// Tell the sink these sessions of `user_id` were revoked. A no-op when no
+    /// sink is attached or there is nothing to report; never fails the
+    /// revocation (the sink returns nothing).
+    async fn notify_sink(&self, tenant_id: Uuid, user_id: Uuid, session_ids: &[Uuid]) {
+        let Some(sink) = &self.revocation_sink else {
+            return;
+        };
+        if session_ids.is_empty() {
+            return;
+        }
+        sink.sessions_revoked(tenant_id, user_id, session_ids).await;
     }
 
     /// Record that these sessions were revoked, if the feed is enabled.
@@ -276,7 +326,7 @@ impl<C: Connection> SurrealSessionRepository<C> {
         user_id: Uuid,
         except: Option<Uuid>,
     ) -> AxiamResult<Vec<Uuid>> {
-        if self.revocation_feed_ttl.is_none() {
+        if self.revocation_feed_ttl.is_none() && !self.sink_is_active() {
             return Ok(Vec::new());
         }
         let mut result = self
@@ -550,13 +600,23 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
     }
 
     async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
+        // G-5 (D-52): with an active sink the DELETE also says whose session it
+        // was, in the same statement (no extra read, and no window in which the
+        // row is gone before it is read). Without one this is the query it
+        // always was.
+        let want_user = self.sink_is_active();
+        let query = if want_user {
+            "LET $removed = (DELETE type::record('session', $id) \
+                 WHERE tenant_id = $tenant_id RETURN BEFORE); \
+             SELECT user_id FROM $removed"
+        } else {
+            "DELETE type::record('session', $id) \
+             WHERE tenant_id = $tenant_id"
+        };
         let result = self
             .db
             .current()
-            .query(
-                "DELETE type::record('session', $id) \
-                 WHERE tenant_id = $tenant_id",
-            )
+            .query(query)
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
             .await
@@ -582,13 +642,25 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
         // revocation / MFA reset were told "revoked" when nothing was deleted.
         // No `take()` here, so no deserialization is involved: this can only
         // fail when the statement itself did.
-        result
+        let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         // T-39/T-143, after the check: a revocation that did not happen must
         // not be published as one.
         self.publish_revocations(&[id]).await;
+
+        // G-5 (D-52), likewise after the check, and only for a session that
+        // was really there: a logout of one already gone revoked nothing.
+        if want_user {
+            let removed: Vec<RemovedSessionUser> = result.take(1).unwrap_or_default();
+            if let Some(user_id) = removed
+                .first()
+                .and_then(|row| Uuid::parse_str(&row.user_id).ok())
+            {
+                self.notify_sink(tenant_id, user_id, &[id]).await;
+            }
+        }
 
         Ok(())
     }
@@ -729,6 +801,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
         self.publish_revocations(&to_publish).await;
+        self.notify_sink(tenant_id, user_id, &to_publish).await;
 
         Ok(())
     }
@@ -783,6 +856,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 
         let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
         self.publish_revocations(&to_publish).await;
+        self.notify_sink(tenant_id, user_id, &to_publish).await;
         Ok(deleted.len() as u64)
     }
 

@@ -27,6 +27,28 @@ use chrono::{DateTime, Utc};
 /// missed intervals is not noise.
 const STALL_INTERVALS: u32 = 3;
 
+/// The jobs registered at start-up, so a job that has never run once still
+/// appears in `GET /health/jobs` (T-129). One list, read by `main`; a test pins
+/// that the single-logout sweeps are in it and in the cleanup loop.
+pub const SWEEP_JOBS: &[&str] = &[
+    "saml_assertion_replay",
+    "federation_login_state",
+    "saml_authn_request",
+    // G-2 (T23.2.4): the single-logout participant rows and logout runs.
+    "saml_sp_session",
+    "saml_logout_run",
+    // G-3 (T23.3.5): the directory sync job.
+    "directory_sync",
+    // G-5 (T23.5.3): the SSF poll/hold buffer's seven-day expiry.
+    "ssf_event_buffer",
+    // G-5 (T23.5.3, D-53 (1)): the step-up record's ten-minute expiry.
+    "ssf_step_up",
+    "amqp_nonce_replay",
+    "gdpr_purge",
+    "gdpr_export",
+    "audit_retention",
+];
+
 #[derive(Default, Clone)]
 struct Entry {
     last_success_at: Option<DateTime<Utc>>,
@@ -129,6 +151,39 @@ mod tests {
 
     fn tracker() -> JobHealth {
         JobHealth::new(Duration::from_secs(60))
+    }
+
+    /// T-384: the single-logout stores are swept by the cleanup scheduler and
+    /// reported on `/health/jobs` — both sweeps are recorded by the loop in
+    /// `cleanup.rs`, both are registered (so listed before their first run), and
+    /// both appear in a tracker built the way `main` builds it.
+    #[test]
+    fn the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered() {
+        let source = include_str!("cleanup.rs");
+        // T23.5.3 (T-395): the SSF buffer's expiry sweep is in the same loop and
+        // the same list, so `/health/jobs` shows it from boot.
+        for job in [
+            "saml_sp_session",
+            "saml_logout_run",
+            "ssf_event_buffer",
+            "ssf_step_up",
+        ] {
+            let recorded = source.match_indices("&self.job_health,").any(|(at, _)| {
+                let rest = &source[at + "&self.job_health,".len()..];
+                rest.trim_start().starts_with(&format!("\"{job}\""))
+            });
+            assert!(recorded, "{job} is swept by the loop");
+            assert!(SWEEP_JOBS.contains(&job), "{job} is registered");
+        }
+        let tracker = tracker();
+        for job in SWEEP_JOBS {
+            tracker.register(job);
+        }
+        let names: Vec<_> = tracker.snapshot().into_iter().map(|s| s.name).collect();
+        assert!(names.iter().any(|n| n == "saml_sp_session"));
+        assert!(names.iter().any(|n| n == "saml_logout_run"));
+        assert!(names.iter().any(|n| n == "ssf_event_buffer"));
+        assert!(names.iter().any(|n| n == "ssf_step_up"));
     }
 
     #[test]

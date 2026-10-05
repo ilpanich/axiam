@@ -483,6 +483,9 @@ pub async fn finish_registration<C: Connection + Clone>(
         );
     }
 
+    // G-5 (D-52): a WebAuthn credential was registered.
+    emit_registered(&state, scope, user.user_id, &cred).await;
+
     Ok(HttpResponse::Created().json(CredentialResponse {
         id: cred.id,
         credential_id: cred.credential_id,
@@ -491,6 +494,29 @@ pub async fn finish_registration<C: Connection + Clone>(
         created_at: cred.created_at.to_rfc3339(),
         last_used_at: cred.last_used_at.map(|t| t.to_rfc3339()),
     }))
+}
+
+/// Tell the SSF emitter a WebAuthn credential was registered (best effort).
+async fn emit_registered<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    credential: &axiam_core::models::webauthn_credential::WebauthnCredential,
+) {
+    state
+        .ssf
+        .emitter
+        .credential_changed(
+            tenant_id,
+            user_id,
+            fido2_credential_type(&credential.credential_type),
+            axiam_oauth2::ssf::ChangeType::Create,
+            axiam_oauth2::ssf::InitiatingEntity::User,
+            crate::ssf_emitter::CredentialDetail {
+                fido2_aaguid: credential.aaguid.map(|a| a.to_string()),
+            },
+        )
+        .await;
 }
 
 // -------------------------------------------------------------------
@@ -685,6 +711,9 @@ pub async fn setup_finish_registration<C: Connection + Clone>(
         .enable_after_enrollment(tenant_id, user_id)
         .await?;
 
+    // G-5 (D-52): the first factor of a forced enrolment.
+    emit_registered(&state, tenant_id, user_id, &cred).await;
+
     // The tenant's user-verification policy decides whether `user` is
     // truthful, and it is read again rather than carried from `start`: the
     // claim is about what this ceremony proved, and the policy in force when it
@@ -717,6 +746,22 @@ pub async fn setup_finish_registration<C: Connection + Clone>(
         &state.org_repo,
     )
     .await
+}
+
+/// The CAEP `credential_type` of a registered WebAuthn credential (G-5, D-52).
+///
+/// D-52 words the rule as "`fido2-platform` when its transports include
+/// `internal`, else `fido2-roaming`", but the transports are not stored with the
+/// credential (they are inside the sealed passkey). What AXIAM records is the
+/// kind the registration ceremony was run for — a discoverable / platform
+/// authenticator (`Passkey`) or a roaming one (`SecurityKey`) — which is the same
+/// distinction, so that is what decides.
+#[must_use]
+pub fn fido2_credential_type(kind: &WebauthnCredentialType) -> axiam_oauth2::ssf::CredentialType {
+    match kind {
+        WebauthnCredentialType::Passkey => axiam_oauth2::ssf::CredentialType::Fido2Platform,
+        WebauthnCredentialType::SecurityKey => axiam_oauth2::ssf::CredentialType::Fido2Roaming,
+    }
 }
 
 /// What a forced-enrolment WebAuthn sign-in actually proved (RFC 8176).

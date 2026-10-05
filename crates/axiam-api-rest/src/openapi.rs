@@ -302,6 +302,38 @@ use crate::handlers;
         handlers::directory::delete_directory,
         handlers::directory::link_account,
         handlers::directory::get_sync_status,
+        // SAML identity provider — service-provider registry and signing
+        // credential (G-2, T23.2.5, CONTRACT §29). In every build (D-42).
+        handlers::saml_admin::get_idp,
+        handlers::saml_admin::list_service_providers,
+        handlers::saml_admin::create_service_provider,
+        handlers::saml_admin::get_service_provider,
+        handlers::saml_admin::update_service_provider,
+        handlers::saml_admin::delete_service_provider,
+        handlers::saml_admin::parse_sp_metadata,
+        handlers::saml_admin::list_idp_credentials,
+        handlers::saml_admin::issue_idp_credential,
+        handlers::saml_admin::promote_idp_credential,
+        handlers::saml_admin::retire_idp_credential,
+        // SSF stream registry (G-5, T23.5.2, CONTRACT §32).
+        handlers::ssf_admin::list_streams,
+        handlers::ssf_admin::create_stream,
+        handlers::ssf_admin::get_stream,
+        handlers::ssf_admin::update_stream,
+        handlers::ssf_admin::delete_stream,
+        // SSF 1.0 transmitter metadata and stream management API — the
+        // receiver's protocol surface (G-5, T23.5.2, CONTRACT §32.6).
+        handlers::ssf::ssf_configuration,
+        handlers::ssf::ssf_configuration_tenant_path,
+        handlers::ssf::get_stream_configuration,
+        handlers::ssf::create_stream_refused,
+        handlers::ssf::patch_stream_configuration,
+        handlers::ssf::replace_stream_configuration,
+        handlers::ssf::delete_stream_refused,
+        handlers::ssf::get_stream_status,
+        handlers::ssf::update_stream_status,
+        handlers::ssf::request_verification,
+        handlers::ssf::poll_events,
         // Email Config (FUNC-03 / D-13)
         handlers::email_config::get_org_email_config,
         handlers::email_config::set_org_email_config,
@@ -624,6 +656,44 @@ use crate::handlers;
         handlers::directory::LinkDirectoryAccount,
         handlers::directory::DirectoryLinkResult,
         handlers::directory::DirectorySyncStatus,
+        // SAML registry (G-2, T23.2.5). The component names are the ones CONTRACT
+        // §29.1 pins.
+        axiam_core::models::saml_sp::SamlServiceProvider,
+        axiam_core::models::saml_sp::SamlServiceProviderInput,
+        axiam_core::models::saml_sp::AcsEndpoint,
+        axiam_core::models::saml_sp::AttributeMapping,
+        axiam_core::models::saml_sp::AttributeSource,
+        axiam_core::models::saml_sp::NameIdFormat,
+        axiam_core::models::saml_sp::SamlBinding,
+        handlers::saml_admin::SamlIdpInfo,
+        handlers::saml_admin::SamlIdpCredential,
+        handlers::saml_admin::SamlIdpCredentialStatus,
+        handlers::saml_admin::SamlIdpCredentialPromotion,
+        handlers::saml_admin::SamlIdpSlot,
+        handlers::saml_admin::IssueSamlIdpCredential,
+        handlers::saml_admin::ParseSamlSpMetadata,
+        handlers::saml_admin::SamlSpMetadataDraft,
+        // SSF (G-5, T23.5.2). The component names are the ones CONTRACT §32
+        // pins.
+        handlers::ssf_admin::SsfStream,
+        handlers::ssf_admin::SsfStreamInput,
+        axiam_core::models::ssf::SsfEventType,
+        axiam_core::models::ssf::SsfDeliveryMethod,
+        axiam_core::models::ssf::SsfStreamStatus,
+        axiam_core::models::ssf::SsfStatusActor,
+        axiam_core::models::ssf::SsfSubjectFormat,
+        axiam_oauth2::ssf::SsfConfiguration,
+        axiam_oauth2::ssf::SsfAuthorizationScheme,
+        axiam_oauth2::ssf::SsfStreamConfiguration,
+        axiam_oauth2::ssf::SsfDeliveryView,
+        axiam_oauth2::ssf::ReceiverStreamUpdate,
+        axiam_oauth2::ssf::ReceiverDelivery,
+        handlers::ssf::SsfStreamStatusView,
+        handlers::ssf::SsfStatusUpdate,
+        handlers::ssf::SsfVerificationRequest,
+        handlers::ssf::SsfPollRequest,
+        handlers::ssf::SsfSetError,
+        handlers::ssf::SsfPollResponse,
         // Email Config (FUNC-03 / D-13)
         axiam_core::models::email::EmailConfig,
         axiam_core::models::email::EmailConfigOverride,
@@ -692,6 +762,9 @@ use crate::handlers;
         (name = "oidc", description = "OpenID Connect discovery, JWKS, and UserInfo"),
         (name = "settings", description = "Organization and tenant security settings"),
         (name = "email-config", description = "Organization and tenant email provider configuration"),
+        (name = "saml", description = "SAML 2.0 identity provider — service-provider registry, SP metadata import and the IdP signing credential (CONTRACT §29)"),
+        (name = "ssf", description = "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"),
+        (name = "ssf-receiver", description = "Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §32.6)"),
         (name = "directory", description = "Tenant LDAP / Active Directory identity source — configuration, account linking and sync status (CONTRACT §30)"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),
         (name = "federation-sso", description = "First-time SSO — public OIDC/SAML start and callback endpoints"),
@@ -1077,5 +1150,22 @@ mod discovery_alias_tests {
             serde_json::to_value(oidc).unwrap(),
             serde_json::to_value(alias).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod saml_schema_tests {
+    use super::api_doc;
+
+    /// F4 W4 P23W4-05: `AcsEndpoint.index` is a `u16` in the model and in
+    /// contract §29.2, so the published schema bounds it to `0..=65535`. Without
+    /// the maximum a generated SDK types it as an unbounded 32-bit integer and
+    /// learns of the bound from a `400`.
+    #[test]
+    fn the_acs_endpoint_index_is_bounded_to_sixteen_bits() {
+        let doc = serde_json::to_value(api_doc()).unwrap();
+        let index = &doc["components"]["schemas"]["AcsEndpoint"]["properties"]["index"];
+        assert_eq!(index["minimum"], 0, "{index}");
+        assert_eq!(index["maximum"], 65_535, "{index}");
     }
 }

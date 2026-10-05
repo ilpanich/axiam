@@ -6,8 +6,10 @@
 //! (T23.2.3) resolves the tenant from the request path, parses and checks the
 //! `AuthnRequest`, runs the login hop, loads the user's groups and roles and the
 //! tenant's active signing credential, and then calls
-//! [`SamlIdpIssuer::issue`]; SLO (T23.2.4) relies on the `SessionIndex` written
-//! here being the AXIAM session id.
+//! [`SamlIdpIssuer::issue`]. The `SessionIndex` it writes is the **per-SP random
+//! index** the endpoint recorded in `saml_sp_session` just before (D-37, T23.2.4),
+//! never the AXIAM session id: single logout ([`logout`]) maps it back through
+//! that record.
 //!
 //! # What is issued
 //!
@@ -22,7 +24,7 @@
 //! | `Conditions/@NotBefore` | now − [`crate::oidc::CLOCK_SKEW_LEEWAY_SECS`] (the existing skew allowance, 60 s) |
 //! | `AudienceRestriction/Audience` | the SP's entity id |
 //! | `AuthnStatement/@AuthnInstant` | the session's `authenticated_at` |
-//! | `AuthnStatement/@SessionIndex` | the AXIAM session id |
+//! | `AuthnStatement/@SessionIndex` | the per-SP random index recorded in `saml_sp_session` (D-37); **not** the AXIAM session id, so SPs that compare notes cannot correlate a person's sessions (T-312) |
 //! | `AuthnContextClassRef` | [`authn_context_class_ref`] of the session's `amr` |
 //! | `AttributeStatement` | the SP's attribute mapping over user fields, group names and role names |
 //!
@@ -63,9 +65,12 @@
 //! An SP registered with `encrypt_assertions` is **refused** with `Responder`
 //! ([`SamlIdpError::EncryptionUnsupported`]) — never silently sent plaintext.
 
+pub mod idp_metadata;
+pub mod logout;
 mod pairwise;
 pub mod request;
 mod sign;
+pub mod sp_metadata;
 pub mod xml;
 
 #[cfg(test)]
@@ -121,43 +126,11 @@ pub const AUTHN_CONTEXT_UNSPECIFIED: &str = "urn:oasis:names:tc:SAML:2.0:ac:clas
 // The IdP's identifiers
 // ---------------------------------------------------------------------------
 
-/// The tenant's IdP entity id: `{public_base_url}/saml/v2/{tenant_id}/metadata`.
-///
-/// **The one definition.** The `Issuer` of every response and assertion, the
-/// metadata document's `entityID` (T23.2.5) and anything else that names the
-/// IdP must come from here, so they cannot disagree. `public_base_url` is the
-/// deployment's public root, `AuthConfig::root_issuer()` — the value the OIDC
-/// issuer and the T21.6 per-tenant issuers are built on — with or without a
-/// trailing slash. `tenant_id` is the tenant **of the request path**, never one
-/// read from a stored row.
-///
-/// The entity id is the metadata URL itself, the common convention that lets an
-/// SP administrator paste one URL and fetch the metadata from it.
-#[must_use]
-pub fn idp_entity_id(public_base_url: &str, tenant_id: Uuid) -> String {
-    idp_endpoint(public_base_url, tenant_id, "metadata")
-}
-
-/// The tenant's SSO endpoint, `{public_base_url}/saml/v2/{tenant_id}/sso`, for
-/// the metadata `SingleSignOnService` locations (T23.2.5).
-#[must_use]
-pub fn idp_sso_url(public_base_url: &str, tenant_id: Uuid) -> String {
-    idp_endpoint(public_base_url, tenant_id, "sso")
-}
-
-/// The tenant's SLO endpoint, `{public_base_url}/saml/v2/{tenant_id}/slo`, for
-/// the metadata `SingleLogoutService` locations (T23.2.5).
-#[must_use]
-pub fn idp_slo_url(public_base_url: &str, tenant_id: Uuid) -> String {
-    idp_endpoint(public_base_url, tenant_id, "slo")
-}
-
-fn idp_endpoint(public_base_url: &str, tenant_id: Uuid, leaf: &str) -> String {
-    format!(
-        "{}/saml/v2/{tenant_id}/{leaf}",
-        public_base_url.trim_end_matches('/')
-    )
-}
+// Defined in `crate::saml_idp_urls`, which is **not** behind the `saml` feature,
+// so contract §29's `get_idp` computes the same strings in a build without
+// SAML. Re-exported here, where the issuer, the SSO endpoint and the metadata
+// document have always imported them from.
+pub use crate::saml_idp_urls::{idp_entity_id, idp_slo_url, idp_sso_url};
 
 // ---------------------------------------------------------------------------
 // Status codes and errors
@@ -269,6 +242,13 @@ pub enum SamlIdpError {
     /// The SP asks for encrypted assertions, which this build cannot produce.
     #[error("assertion encryption is not supported")]
     EncryptionUnsupported,
+    /// The `SessionIndex` is empty, too long or not the opaque token the
+    /// participant record mints (D-37).
+    #[error("the SessionIndex is not a valid opaque token")]
+    SessionIndexInvalid,
+    /// The SP registered no single-logout endpoint to deliver a logout message to.
+    #[error("the service provider registered no single-logout endpoint")]
+    SloNotRegistered,
     /// The tenant has no active signing credential.
     #[error("the tenant has no active SAML signing credential")]
     NoActiveCredential,
@@ -300,6 +280,8 @@ impl SamlIdpError {
             Self::TenantMismatch
             | Self::PairwiseKeyMissing
             | Self::EncryptionUnsupported
+            | Self::SessionIndexInvalid
+            | Self::SloNotRegistered
             | Self::NoActiveCredential
             | Self::CredentialNotActive
             | Self::CredentialNotValid
@@ -381,6 +363,32 @@ pub fn check_relay_state(relay_state: Option<&str>) -> Result<(), SamlIdpError> 
     }
 }
 
+/// The longest `SessionIndex` this IdP asserts or accepts back, in bytes. The
+/// ones it mints are 43 (32 bytes, base64url without padding); the bound is
+/// there so a caller cannot put an arbitrary string under the tenant's
+/// signature.
+pub const MAX_SESSION_INDEX_BYTES: usize = 256;
+
+/// Check a `SessionIndex` before it is signed: non-empty, at most
+/// [`MAX_SESSION_INDEX_BYTES`], and only the characters of the opaque token
+/// (ASCII letters and digits, `-` and `_`).
+///
+/// # Errors
+///
+/// [`SamlIdpError::SessionIndexInvalid`] (`Responder`).
+pub fn check_session_index(index: &str) -> Result<(), SamlIdpError> {
+    if !index.is_empty()
+        && index.len() <= MAX_SESSION_INDEX_BYTES
+        && index
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        Ok(())
+    } else {
+        Err(SamlIdpError::SessionIndexInvalid)
+    }
+}
+
 /// The `AuthnContextClassRef` an authentication achieved, from its evidence
 /// and nothing else.
 ///
@@ -438,6 +446,11 @@ pub struct SsoIssuance<'a> {
     pub relay_state: Option<&'a str>,
     /// The AXIAM session that authenticated the user.
     pub session: &'a Session,
+    /// The `SessionIndex` to assert: the per-SP random token the endpoint
+    /// recorded in `saml_sp_session` for this (session, SP) **before** calling
+    /// [`SamlIdpIssuer::issue`] (D-37). The session id itself never reaches the
+    /// XML. A caller that has not recorded one has no assertion to sign.
+    pub session_index: &'a str,
     /// The user.
     pub user: &'a User,
     /// The user's groups (for `allowed_groups` and the `groups` attribute).
@@ -475,8 +488,8 @@ pub struct IssuedResponse {
     pub assertion_id: String,
     /// The `NameID` issued (pairwise identifier or email address).
     pub name_id: String,
-    /// The `SessionIndex`: the AXIAM session id.
-    pub session_index: Uuid,
+    /// The `SessionIndex` asserted: [`SsoIssuance::session_index`].
+    pub session_index: String,
     /// When the assertion stops being usable.
     pub not_on_or_after: DateTime<Utc>,
 }
@@ -607,7 +620,7 @@ impl SamlIdpIssuer {
             response_id,
             assertion_id,
             name_id,
-            session_index: req.session.id,
+            session_index: req.session_index.to_owned(),
             not_on_or_after,
         })
     }
@@ -687,6 +700,7 @@ impl SamlIdpIssuer {
             None => {}
         }
         check_relay_state(req.relay_state)?;
+        check_session_index(req.session_index)?;
         check_allowed_groups(req.sp, req.groups)?;
         if req.sp.encrypt_assertions {
             return Err(SamlIdpError::EncryptionUnsupported);
@@ -694,29 +708,51 @@ impl SamlIdpIssuer {
         Ok(())
     }
 
-    /// The `NameID` value under the SP's policy.
-    fn name_id(&self, req: &SsoIssuance<'_>) -> Result<String, SamlIdpError> {
-        match req.sp.name_id_format {
+    /// The `NameID` the SP is given for this user, and its format, under the SP's
+    /// policy — the value [`Self::issue`] will assert.
+    ///
+    /// The SSO endpoint asks it **before** signing, because the participant
+    /// record (D-37) must hold the `NameID` the SP is about to be given, and
+    /// compares it with [`IssuedResponse::name_id`] afterwards. Same function,
+    /// same inputs: they agree unless the user's address changed between the two
+    /// calls, which the comparison catches.
+    ///
+    /// # Errors
+    ///
+    /// [`SamlIdpError::TenantMismatch`], [`SamlIdpError::PairwiseKeyMissing`],
+    /// [`SamlIdpError::NameIdUnavailable`], [`SamlIdpError::NameIdUnverified`].
+    pub fn name_id_for(
+        &self,
+        tenant_id: Uuid,
+        sp: &SamlServiceProvider,
+        user: &User,
+    ) -> Result<(String, NameIdFormat), SamlIdpError> {
+        if sp.tenant_id != tenant_id || user.tenant_id != tenant_id {
+            return Err(SamlIdpError::TenantMismatch);
+        }
+        let value = match sp.name_id_format {
             NameIdFormat::Persistent => {
                 let pairwise_key = self
                     .pairwise_key
                     .as_ref()
                     .ok_or(SamlIdpError::PairwiseKeyMissing)?;
-                Ok(pairwise_name_id(
-                    pairwise_key,
-                    req.tenant_id,
-                    &req.sp.entity_id,
-                    req.user.id,
-                ))
+                pairwise_name_id(pairwise_key, tenant_id, &sp.entity_id, user.id)
             }
             NameIdFormat::EmailAddress => {
-                let email = user_email(req.user).ok_or(SamlIdpError::NameIdUnavailable)?;
-                if !email_is_vouched_for(req.user) {
+                let email = user_email(user).ok_or(SamlIdpError::NameIdUnavailable)?;
+                if !email_is_vouched_for(user) {
                     return Err(SamlIdpError::NameIdUnverified);
                 }
-                Ok(email.to_owned())
+                email.to_owned()
             }
-        }
+        };
+        Ok((value, sp.name_id_format))
+    }
+
+    /// The `NameID` value under the SP's policy.
+    fn name_id(&self, req: &SsoIssuance<'_>) -> Result<String, SamlIdpError> {
+        self.name_id_for(req.tenant_id, req.sp, req.user)
+            .map(|(value, _)| value)
     }
 }
 
@@ -850,7 +886,7 @@ fn assertion_template(p: &AssertionParts<'_>) -> String {
     out.push_str(&format!(
         r#"<saml:AuthnStatement AuthnInstant="{}" SessionIndex="{}"><saml:AuthnContext><saml:AuthnContextClassRef>{}</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>"#,
         instant(req.session.authenticated_at),
-        req.session.id,
+        escape(req.session_index),
         authn_context_class_ref(&req.session.amr)
     ));
 
@@ -946,10 +982,11 @@ fn response_envelope(p: &EnvelopeParts<'_>) -> String {
     out
 }
 
-/// Fixtures for tests outside this crate (the SSO endpoint's HTTP tests and the
-/// e2e harness): what a service provider's SAML library does — generate a key,
-/// sign an `AuthnRequest` enveloped or over a Redirect query, deflate one.
-/// AXIAM never signs a request; nothing in a server path calls these.
+/// Fixtures for tests outside this crate (the SSO and SLO endpoints' HTTP tests
+/// and the e2e harness): what a service provider's SAML library does — generate a
+/// key, sign an `AuthnRequest`, `LogoutRequest` or `LogoutResponse` enveloped or
+/// over a Redirect query, deflate one. AXIAM never signs a message of an SP's;
+/// nothing in a server path calls these.
 #[doc(hidden)]
 pub mod test_support {
     use std::io::Write;
@@ -957,6 +994,14 @@ pub mod test_support {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use samael::crypto::{CryptoProvider, XmlSec};
+
+    /// The two libraries a reference service provider is built from, so the
+    /// e2e harness (T23.2.7) drives `samael`'s SP-side API itself — it
+    /// builds and signs the `AuthnRequest`, parses and validates the
+    /// `Response` — without `axiam-api-rest` taking a dev-dependency on a
+    /// crate that needs system libxml2 in a build that has none.
+    pub use openssl;
+    pub use samael;
 
     /// A key pair and a self-signed certificate over it.
     pub struct Material {
@@ -1015,6 +1060,81 @@ pub mod test_support {
         }
     }
 
+    /// What an SP's library reads out of an IdP metadata document.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct IdpMetadataSummary {
+        /// `EntityDescriptor/@entityID`.
+        pub entity_id: String,
+        /// Each `KeyDescriptor` as `(use, certificate)`, in document order, the
+        /// certificate as the base64 text of `X509Certificate`.
+        pub keys: Vec<(Option<String>, String)>,
+        /// Each `SingleSignOnService` as `(binding, location)`.
+        pub single_sign_on: Vec<(String, String)>,
+        /// The `NameIDFormat`s.
+        pub name_id_formats: Vec<String>,
+        /// Each `SingleLogoutService` as `(binding, location)`.
+        pub single_logout: Vec<(String, String)>,
+        /// Whether the descriptor carries a `validUntil`, a `cacheDuration` or a
+        /// `ds:Signature`.
+        pub has_validity_or_signature: bool,
+    }
+
+    /// Parse an IdP metadata document with `samael`'s metadata types — the
+    /// library this crate's own SP side uses to consume one (`fetch_idp_metadata`)
+    /// — and read out what an SP would.
+    ///
+    /// # Errors
+    ///
+    /// The parser's text, for a document it cannot read as one
+    /// `EntityDescriptor` with an `IDPSSODescriptor`.
+    pub fn parse_idp_metadata(xml: &str) -> Result<IdpMetadataSummary, String> {
+        let parsed: samael::metadata::EntityDescriptorType =
+            xml.parse().map_err(|e| format!("{e}"))?;
+        let entity = parsed
+            .iter()
+            .next()
+            .ok_or_else(|| "no EntityDescriptor".to_string())?;
+        let idp = entity
+            .idp_sso_descriptors
+            .as_ref()
+            .and_then(|d| d.first())
+            .ok_or_else(|| "no IDPSSODescriptor".to_string())?;
+        Ok(IdpMetadataSummary {
+            entity_id: entity.entity_id.clone().ok_or("no entityID")?,
+            keys: idp
+                .key_descriptors
+                .iter()
+                .map(|k| {
+                    (
+                        k.key_use.clone(),
+                        k.key_info
+                            .x509_data
+                            .as_ref()
+                            .and_then(|d| d.certificates.first().cloned())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+            single_sign_on: idp
+                .single_sign_on_services
+                .iter()
+                .map(|e| (e.binding.clone(), e.location.clone()))
+                .collect(),
+            name_id_formats: idp.name_id_formats.clone(),
+            single_logout: idp
+                .single_logout_services
+                .iter()
+                .map(|e| (e.binding.clone(), e.location.clone()))
+                .collect(),
+            has_validity_or_signature: entity.valid_until.is_some()
+                || entity.cache_duration.is_some()
+                || entity.signature.is_some()
+                || idp.valid_until.is_some()
+                || idp.cache_duration.is_some()
+                || idp.signature.is_some(),
+        })
+    }
+
     /// The enveloped `ds:Signature` template for the element whose `ID` is `id`.
     #[must_use]
     pub fn signature_template(id: &str, cert_der: &[u8]) -> String {
@@ -1042,6 +1162,21 @@ pub mod test_support {
     pub fn sign_octets(octets: &str, pkcs8_der: &[u8]) -> String {
         let pair = openssl::pkey::PKey::private_key_from_pkcs8(pkcs8_der).expect("key");
         let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &pair)
+            .expect("signer");
+        signer.update(octets.as_bytes()).expect("update");
+        STANDARD.encode(signer.sign_to_vec().expect("sign"))
+    }
+
+    /// RSA-SHA1 over `octets`, base64: a Redirect `Signature` a conforming IdP
+    /// must refuse (SHA-1 is never accepted).
+    ///
+    /// # Panics
+    ///
+    /// When OpenSSL fails.
+    #[must_use]
+    pub fn sign_octets_sha1(octets: &str, pkcs8_der: &[u8]) -> String {
+        let pair = openssl::pkey::PKey::private_key_from_pkcs8(pkcs8_der).expect("key");
+        let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha1(), &pair)
             .expect("signer");
         signer.update(octets.as_bytes()).expect("update");
         STANDARD.encode(signer.sign_to_vec().expect("sign"))

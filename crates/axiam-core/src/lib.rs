@@ -6,6 +6,7 @@ pub mod error;
 pub mod id;
 pub mod ip_class;
 pub mod models;
+pub mod outbound;
 pub mod permission_scope;
 pub mod personal_data;
 pub mod repository;

@@ -23,8 +23,8 @@
 use axiam_core::ca_keys::CaKeyCustody;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::saml_idp_credential::{
-    SamlIdpCredential, SamlIdpCredentialStatus, SealedSamlIdpCredential, SealedSamlIdpKey,
-    StoreSamlIdpCredential,
+    SamlIdpCredential, SamlIdpCredentialPromotion, SamlIdpCredentialStatus,
+    SealedSamlIdpCredential, SealedSamlIdpKey, StoreSamlIdpCredential,
 };
 use axiam_core::repository::SamlIdpCredentialRepository;
 use chrono::{DateTime, Utc};
@@ -34,9 +34,17 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{classify_write_error, parse_uuid, take_first_or_not_found};
+use crate::helpers::{
+    DELETE_TARGET_MISSING, classify_write_error, is_write_conflict, parse_uuid,
+    retry_on_write_conflict, take_first_or_not_found,
+};
 
 const ENTITY: &str = "saml_idp_credential";
+
+/// `THROW` text: the credential is not the tenant's current `next`.
+const PROMOTE_NOT_NEXT: &str = "axiam:saml_idp_promote_not_next";
+/// `THROW` text: the credential's validity window does not contain now.
+const PROMOTE_OUTSIDE_WINDOW: &str = "axiam:saml_idp_promote_outside_window";
 
 /// Every column **except** the key columns.
 const COLUMNS: &str = "meta::id(id) AS record_id, tenant_id, issuer_ca_id, certificate_pem, \
@@ -142,6 +150,27 @@ impl SealedRow {
         }
         .into_domain()?;
         Ok(SealedSamlIdpCredential { credential, key })
+    }
+}
+
+/// Why one attempt of [`SamlIdpCredentialRepository::promote`]'s transaction
+/// failed. Its `Display` is the engine's own text for a datastore failure, which
+/// is what the write-conflict retry reads.
+enum PromoteFailure {
+    NotFound,
+    NotNext,
+    OutsideWindow,
+    Db(DbError),
+}
+
+impl std::fmt::Display for PromoteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("the credential does not exist"),
+            Self::NotNext => f.write_str("the credential is not the current next credential"),
+            Self::OutsideWindow => f.write_str("the credential is outside its validity window"),
+            Self::Db(error) => write!(f, "{error}"),
+        }
     }
 }
 
@@ -317,5 +346,114 @@ impl<C: Connection> SamlIdpCredentialRepository for SurrealSamlIdpCredentialRepo
             .map_err(|e| classify_write_error(e, ENTITY))?;
 
         self.get(tenant_id, id).await
+    }
+
+    async fn promote(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        now: DateTime<Utc>,
+    ) -> AxiamResult<SamlIdpCredentialPromotion> {
+        #[derive(Debug, SurrealValue)]
+        struct RetiredId {
+            record_id: String,
+        }
+
+        // The whole rotation is one transaction. The checks come first and
+        // `THROW`, so a promotion that cannot happen has written nothing; then
+        // the old `active` leaves its slot (and its key is destroyed in the same
+        // write, as `retire` does) *before* the `next` row takes the slot, which
+        // is what keeps the UNIQUE `slot` index satisfied at every statement and
+        // leaves no state with two signers or none. Statement numbers, counting
+        // BEGIN: 0 BEGIN, 1 LET $row, 2-4 the three checks, 5 LET $retired,
+        // 6 UPDATE, 7 SELECT, 8 COMMIT.
+        //
+        // A contended attempt aborts and commits nothing, so it is replayed
+        // (`retry_on_write_conflict`); the replay sees the winner's state and
+        // answers `Conflict`, which is how the loser of two concurrent
+        // promotions is told.
+        let attempt = || async {
+            let mut result = self
+                .db
+                .current()
+                .query(format!(
+                    "BEGIN TRANSACTION; \
+                     LET $row = (SELECT status, not_before, not_after FROM saml_idp_credential \
+                         WHERE meta::id(id) = $id AND tenant_id = $tenant_id); \
+                     IF array::len($row) == 0 {{ THROW '{DELETE_TARGET_MISSING}'; }}; \
+                     IF $row[0].status != 'next' {{ THROW '{PROMOTE_NOT_NEXT}'; }}; \
+                     IF $row[0].not_before > $now OR $row[0].not_after <= $now \
+                         {{ THROW '{PROMOTE_OUTSIDE_WINDOW}'; }}; \
+                     LET $retired = (UPDATE saml_idp_credential SET \
+                         status = 'retired', encrypted_private_key = NONE, key_locator = NONE, \
+                         retired_at = time::now(), updated_at = time::now() \
+                         WHERE tenant_id = $tenant_id AND status = 'active'); \
+                     UPDATE type::record('saml_idp_credential', $id) SET \
+                         status = 'active', updated_at = time::now(); \
+                     SELECT meta::id(id) AS record_id FROM $retired; \
+                     COMMIT TRANSACTION"
+                ))
+                .bind(("id", id.to_string()))
+                .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("now", now))
+                .await
+                .map_err(|e| PromoteFailure::Db(DbError::from(e)))?;
+
+            let errors = result.take_errors();
+            if !errors.is_empty() {
+                // Every statement's error, not `check()`'s pick: a `THROW`
+                // fires on its own slot while the rest report the generic
+                // "not executed due to a failed transaction".
+                let combined = errors
+                    .into_values()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(if combined.contains(DELETE_TARGET_MISSING) {
+                    PromoteFailure::NotFound
+                } else if combined.contains(PROMOTE_NOT_NEXT) {
+                    PromoteFailure::NotNext
+                } else if combined.contains(PROMOTE_OUTSIDE_WINDOW) {
+                    PromoteFailure::OutsideWindow
+                } else if is_write_conflict(&combined) {
+                    PromoteFailure::Db(DbError::Conflict(combined))
+                } else {
+                    PromoteFailure::Db(classify_write_error(combined, ENTITY))
+                });
+            }
+            result
+                .take::<Vec<RetiredId>>(7)
+                .map_err(|e| PromoteFailure::Db(DbError::from(e)))
+        };
+        // Replayed while the engine reports a write conflict. The retry reads the
+        // *engine's* text, so the attempt keeps its failure as a `PromoteFailure`
+        // (whose `Display` carries it) and only the settled outcome becomes an
+        // `AxiamError` — converted earlier, a conflict would already be the
+        // payload-free `WriteContention` and never be retried.
+        let retired = retry_on_write_conflict(attempt)
+            .await
+            .map_err(|failure| match failure {
+                PromoteFailure::NotFound => AxiamError::from(DbError::NotFound {
+                    entity: ENTITY.into(),
+                    id: id.to_string(),
+                }),
+                PromoteFailure::NotNext => AxiamError::Conflict {
+                    reason: "the credential is not the tenant's current `next` credential".into(),
+                },
+                PromoteFailure::OutsideWindow => AxiamError::Conflict {
+                    reason: "the `next` credential is outside its validity window".into(),
+                },
+                PromoteFailure::Db(error) => AxiamError::from(error),
+            })?;
+
+        let active = self.get(tenant_id, id).await?;
+        let retired = match retired.into_iter().next() {
+            Some(row) => {
+                let old = parse_uuid(&row.record_id, ENTITY).map_err(AxiamError::from)?;
+                Some(self.get(tenant_id, old).await?)
+            }
+            None => None,
+        };
+        Ok(SamlIdpCredentialPromotion { active, retired })
     }
 }

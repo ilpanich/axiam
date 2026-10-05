@@ -857,6 +857,20 @@ jobs:
         env:
           KEYCLOAK_URL: "http://localhost:8180"
 
+      # T23.2.7 (G-2): AXIAM as a SAML 2.0 identity provider, round-tripped with
+      # the same real Keycloak acting as the SP (a realm with a SAML identity
+      # provider imported from AXIAM's IdP metadata; Keycloak's exported SP
+      # metadata registered in AXIAM; both AuthnRequest bindings, signed). The
+      # test process carries every message in the browser's place, so Keycloak
+      # never has to reach AXIAM and AXIAM never reaches Keycloak; see the test
+      # file's module docs. `--ignored` for the same reason as the X4 step.
+      - name: T23.2.7 SAML IdP round trip against real Keycloak
+        run: |
+          cargo test -p axiam-api-rest --test saml_idp_keycloak_roundtrip_test \
+            -- --ignored --test-threads=1
+        env:
+          KEYCLOAK_URL: "http://localhost:8180"
+
       # Seeds two administrators: the organization-level super-admin bootstrap
       # creates, and a tenant-level admin inside `default`. The Playwright
       # suite signs in as the latter — see frontend/e2e/helpers/auth.ts.

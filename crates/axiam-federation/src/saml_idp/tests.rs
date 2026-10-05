@@ -273,6 +273,15 @@ fn role(name: &str) -> Role {
     }
 }
 
+/// What the participant record mints: 32 CSPRNG bytes, base64url, no padding.
+fn mint_session_index() -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
 /// One change to a [`Case`].
 type Edit = Box<dyn Fn(&mut Case)>;
 
@@ -286,6 +295,9 @@ struct Case {
     acs: String,
     request_id: Option<String>,
     relay_state: Option<String>,
+    /// The per-SP index the endpoint recorded (D-37): random, and never the
+    /// session id.
+    session_index: String,
 }
 
 impl Case {
@@ -301,6 +313,7 @@ impl Case {
             acs: ACS.into(),
             request_id: Some(REQUEST_ID.into()),
             relay_state: Some("relay-1".into()),
+            session_index: mint_session_index(),
         }
     }
 
@@ -312,6 +325,7 @@ impl Case {
             in_response_to: self.request_id.as_deref(),
             relay_state: self.relay_state.as_deref(),
             session: &self.session,
+            session_index: &self.session_index,
             user: &self.user,
             groups: &self.groups,
             roles: &self.roles,
@@ -567,7 +581,7 @@ fn a_single_changed_byte_in_any_signed_element_fails_verification() {
     assert!(verify_first_signature(&xml, material()));
 
     // The assertion is the signed element: every part of it is covered.
-    let session_index = case.session.id.to_string();
+    let session_index = case.session_index.clone();
     let issuer_text = format!(">{}", idp_entity_id(BASE_URL, tenant()));
     let not_on_or_after = format!("NotOnOrAfter=\"{}", xml::instant(issued.not_on_or_after));
     for needle in [
@@ -1426,12 +1440,22 @@ fn the_authn_context_mapping_table_is_pinned() {
 }
 
 #[test]
-fn the_authn_statement_carries_the_session_id_instant_and_class() {
+fn the_authn_statement_carries_the_per_sp_index_instant_and_class() {
     let mut case = Case::new();
     case.session.amr = vec![Amr::Pwd, Amr::Otp, Amr::Mfa];
     let issued = case.issue_ok();
-    assert_eq!(issued.session_index, case.session.id);
-    let response = parse(&decode(&issued));
+    assert_eq!(issued.session_index, case.session_index);
+    assert_ne!(
+        issued.session_index,
+        case.session.id.to_string(),
+        "D-37: the index is not the session id"
+    );
+    let xml_text = decode(&issued);
+    assert!(
+        !xml_text.contains(&case.session.id.to_string()),
+        "the session id does not reach the XML at all"
+    );
+    let response = parse(&xml_text);
     let statement = &response
         .assertion
         .as_ref()
@@ -1439,7 +1463,7 @@ fn the_authn_statement_carries_the_session_id_instant_and_class() {
         .expect("statements")[0];
     assert_eq!(
         statement.session_index.as_deref(),
-        Some(case.session.id.to_string().as_str())
+        Some(case.session_index.as_str())
     );
     assert_eq!(
         statement.authn_instant,

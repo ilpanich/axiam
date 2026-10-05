@@ -25,7 +25,9 @@ use crate::middleware::csrf::{
     HEADER_CSRF, access_cookie, clear_access_cookie, clear_csrf_cookie, clear_op_session_cookies,
     clear_refresh_cookie, csrf_cookie, generate_csrf_token, refresh_cookie,
 };
+use crate::ssf_emitter::{CredentialDetail, with_cause};
 use crate::state::AppState;
+use axiam_oauth2::ssf::{ChangeType, CredentialType, InitiatingEntity};
 
 /// Read a blank slug as "not named".
 ///
@@ -669,10 +671,13 @@ pub async fn logout<C: Connection + Clone>(
     // the logout answered 204, and the session — with every OP cookie copy
     // naming it — stayed live.
     let session_tenant = user.principal_tenant_id;
-    state
-        .auth_service
-        .logout(session_tenant, user.session_id)
-        .await?;
+    // G-5 (D-52): the `session-revoked` the session repository reports is the
+    // user's own doing.
+    with_cause(
+        Some(InitiatingEntity::User),
+        state.auth_service.logout(session_tenant, user.session_id),
+    )
+    .await?;
     let cookie_secure = state.auth_config.cookie_secure;
     let mut response = HttpResponse::NoContent();
     response
@@ -839,6 +844,19 @@ pub async fn confirm_mfa<C: Connection + Clone>(
         .auth_service
         .confirm_mfa(user.principal_tenant_id, user.user_id, &body.totp_code)
         .await?;
+    // G-5 (D-52): a TOTP authenticator was enrolled and confirmed.
+    state
+        .ssf
+        .emitter
+        .credential_changed(
+            user.principal_tenant_id,
+            user.user_id,
+            CredentialType::App,
+            ChangeType::Create,
+            InitiatingEntity::User,
+            CredentialDetail::default(),
+        )
+        .await;
     Ok(HttpResponse::Ok().json(MfaConfirmResponse { mfa_enabled: true }))
 }
 
@@ -1004,6 +1022,24 @@ pub async fn setup_confirm_mfa<C: Connection + Clone>(
             user_agent(&req),
         )
         .await?;
+    // G-5 (D-52): the first factor of a forced enrolment, a TOTP authenticator.
+    // The token was just accepted above, so decoding it again names the same
+    // account; a failure here is not the request's failure.
+    if let Ok((user_id, tenant_id, _org_id)) = state.auth_service.decode_setup_token(&b.setup_token)
+    {
+        state
+            .ssf
+            .emitter
+            .credential_changed(
+                tenant_id,
+                user_id,
+                CredentialType::App,
+                ChangeType::Create,
+                InitiatingEntity::User,
+                CredentialDetail::default(),
+            )
+            .await;
+    }
 
     cookie_response_from_output(
         &out,
@@ -1287,10 +1323,66 @@ pub async fn reset_mfa<C: Connection + Clone>(
             .check(&caller, authz.get_ref().as_ref())
             .await?;
     }
-    state
-        .mfa_method_service
-        .reset_mfa(user_scope_tenant(&caller, target_user_id), target_user_id)
-        .await?;
+    let tenant_id = user_scope_tenant(&caller, target_user_id);
+    let initiator = if is_own_resource(&caller, target_user_id) {
+        InitiatingEntity::User
+    } else {
+        InitiatingEntity::Admin
+    };
+    // G-5 (D-52): the TOTP secret is removed, the passkeys are removed, and
+    // every session of the account goes with them — one cause, one `txn`.
+    with_cause(Some(initiator), async {
+        use axiam_core::repository::WebauthnCredentialRepository as _;
+        // Read before the reset: whether a TOTP authenticator is about to go.
+        let had_totp = state
+            .user_repo
+            .get_by_id(tenant_id, target_user_id)
+            .await
+            .map(|u| u.mfa_enabled && u.mfa_secret.is_some())
+            .unwrap_or(false);
+        let removed_passkeys = state
+            .webauthn
+            .webauthn_credential_repo
+            .list_by_user(tenant_id, target_user_id)
+            .await
+            .unwrap_or_default();
+        state
+            .mfa_method_service
+            .reset_mfa(tenant_id, target_user_id)
+            .await?;
+        if had_totp {
+            state
+                .ssf
+                .emitter
+                .credential_changed(
+                    tenant_id,
+                    target_user_id,
+                    CredentialType::App,
+                    ChangeType::Delete,
+                    initiator,
+                    CredentialDetail::default(),
+                )
+                .await;
+        }
+        for credential in &removed_passkeys {
+            state
+                .ssf
+                .emitter
+                .credential_changed(
+                    tenant_id,
+                    target_user_id,
+                    crate::handlers::webauthn::fido2_credential_type(&credential.credential_type),
+                    ChangeType::Delete,
+                    initiator,
+                    CredentialDetail {
+                        fido2_aaguid: credential.aaguid.map(|a| a.to_string()),
+                    },
+                )
+                .await;
+        }
+        Ok::<(), AxiamApiError>(())
+    })
+    .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -1362,22 +1454,46 @@ pub async fn change_password<C: Connection + Clone>(
         body.opaque.as_ref(),
     )?;
 
-    state
-        .auth_service
-        .change_password(
+    // G-5 (D-52): the password change revokes the account's other sessions; the
+    // `credential-change` and those `session-revoked` events are one cause.
+    with_cause(Some(InitiatingEntity::User), async {
+        state
+            .auth_service
+            .change_password(
+                tenant_id,
+                user.user_id,
+                user.session_id,
+                &body.current_password,
+                &body.new_password,
+                &settings.password,
+                &state.password_history_repo,
+                Some(&state.http_client),
+            )
+            .await?;
+
+        crate::handlers::opaque_enrollment::store_credential(
+            &state,
             tenant_id,
             user.user_id,
-            user.session_id,
-            &body.current_password,
-            &body.new_password,
-            &settings.password,
-            &state.password_history_repo,
-            Some(&state.http_client),
+            enrolled,
         )
         .await?;
 
-    crate::handlers::opaque_enrollment::store_credential(&state, tenant_id, user.user_id, enrolled)
-        .await?;
+        state
+            .ssf
+            .emitter
+            .credential_changed(
+                tenant_id,
+                user.user_id,
+                CredentialType::Password,
+                ChangeType::Update,
+                InitiatingEntity::User,
+                CredentialDetail::default(),
+            )
+            .await;
+        Ok::<(), AxiamApiError>(())
+    })
+    .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

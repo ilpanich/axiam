@@ -832,6 +832,9 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | Max `/api/v1/device/verify` + `/device/decide` requests per minute per IP (default `10`). Bounded by the user-code brute-force assertion in `RateLimitConfig::validate`. |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | Max `POST /oauth2/register` (RFC 7591 dynamic client registration) requests per minute per IP (default `5` — the smallest limit in AXIAM). It is the only endpoint that **writes** for a caller holding no credential, and every accepted request allocates a client row that counts against the tenant's `dcr_max_clients`, so the thing being limited is an anonymous party's ability to fill a tenant's client table — not throughput. The honest traffic is one person registering one MCP client once. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [`docs/admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md). |
 | `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` | Max writes per minute per IP to the tenant directory management API — `PUT`, `PATCH`, `DELETE` on `/api/v1/tenants/{tenant_id}/directory` and `POST …/directory/links` (default `30`). Each write resolves a tenant-chosen host name (the address guard), and linking opens directory connections, so the limit bounds how fast an administrator, or a stolen administrator token, can use the routes as a resolver. One bucket per route: the configuration resource's three methods share one, the link route has its own. Reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Managing a tenant's directory](#managing-a-tenants-directory). |
+| `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` | Max writes per minute per IP to the SAML service-provider registry API — create, update and delete a service provider, `POST …/saml/parse-sp-metadata`, and issue, promote and retire the IdP signing credential under `/api/v1/tenants/{tenant_id}/saml` (default `30`). Issuing generates an RSA-4096 key and parsing metadata makes an outbound request, so the limit bounds how fast an administrator, or a stolen administrator token, can burn CPU, use the server to reach an external host, or rewrite where assertions go. One bucket per route; reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
+| `AXIAM__RATE_LIMIT__SSF_PER_MIN` | Max requests per minute per IP to each route of the Shared Signals Framework receiver surface — `/ssf/v1/stream`, `/ssf/v1/status`, `/ssf/v1/verify`, `/ssf/v1/poll/{stream_id}` (RFC 8936, whose long poll holds a request for up to 30 s) and both `/.well-known/ssf-configuration` forms (default `60`). One bucket per route, checked before the receiver's token. Each stream also enforces a 60-second `min_verification_interval` of its own (`429`). Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
+| `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` | Max writes per minute per IP to the SSF stream registry's management API — create, update and delete under `/api/v1/tenants/{tenant_id}/ssf/streams` (default `30`). Each write can repoint where a tenant's security events and the push credential go. One bucket per route; reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
@@ -1674,6 +1677,17 @@ https://id.example.com/t/6f9619ff-8b86-d011-b42d-00c04fc964ff
 The path is **derived, never configured**. There is no per-tenant issuer
 setting: a deployment sets the root issuer and the tenant path follows from it,
 which is why the boot check above still insists the root be a bare URL.
+
+**The Shared Signals transmitter needs it on a deployment of more than one
+tenant** (D-55). A Security Event Token carries the tenant's issuer as `iss`,
+so without per-tenant issuers every tenant's SETs would carry the root issuer
+and the same key, and a receiver could not tell one tenant's from another's.
+While the flag is off and the deployment holds more than one tenant (counted
+across every organization), SSF is inactive for every tenant, exactly as if
+`ssf_enabled` were off, and turning `ssf_enabled` on is refused with `400`. The
+tenant count is re-read at least once a minute, and at once on the instance that
+creates a tenant. A single-tenant deployment keeps the root issuer. See
+[contract §32.3 rule 13](../../sdks/CONTRACT.md#§323-server-rules-every-sdk-can-observe-normative).
 
 ### The three discovery forms
 

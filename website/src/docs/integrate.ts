@@ -1036,6 +1036,584 @@ export const INTEGRATE_PAGES: DocPage[] = [
   },
 
   {
+    slug: "saml-idp",
+    section: "APIs & integration",
+    navLabel: "SAML identity provider",
+    title: "AXIAM as a SAML identity provider",
+    intro:
+      "Let the applications your tenant already runs sign people in with AXIAM over SAML 2.0. Each tenant is its own identity provider with its own signing certificate, issued by the tenant's own CA, and every assertion it issues is signed.",
+    blocks: [
+      { type: "h", id: "what", text: "What it does" },
+      {
+        type: "p",
+        text: "The other direction of [Federation](#/docs/federation): there AXIAM is the *service provider* and trusts an external identity provider; here AXIAM is the **identity provider** and a service provider you register trusts AXIAM. A service provider (SP) is any application with a SAML library — a wiki, a ticketing system, a vendor's hosted product. The person signs in to AXIAM exactly as anywhere else, so multi-factor, passkeys, OPAQUE and the session policy all apply unchanged, and AXIAM tells the SP who they are in a signed assertion.",
+      },
+      {
+        type: "list",
+        items: [
+          "**One identity provider per tenant.** Its entity id, metadata and endpoints are all under the tenant's own path, so a tenant's service providers never see another tenant's identity or key.",
+          "**Web Browser SSO, both ways in.** SP-initiated sign-on takes the SP's `AuthnRequest` on the HTTP-Redirect or the HTTP-POST binding. IdP-initiated sign-on is a per-SP opt-in that is off by default.",
+          "**Assertions are always signed.** There is no setting that turns that off, and no way to register an SP that would receive an unsigned one. Signing the surrounding `Response` too is a per-SP choice, on by default. The assertion is delivered to the SP's registered HTTP-POST consumer endpoint.",
+          "**A pairwise, persistent `NameID` by default.** The identifier an SP sees is derived from the user *and that SP*, so two SPs cannot tell they are talking about the same person. An e-mail `NameID` is available per SP, and is released only for an address AXIAM has verified (or an active account).",
+          "**A signing credential AXIAM issues for you.** The certificate is issued by the tenant's signing CA and its private key is generated and sealed on the server, never shown and destroyed when the credential is retired. You do not export a key from somewhere else and import it.",
+          "**Rotation without a flag day.** Issue the next credential, let SPs pick up the metadata that now publishes both, then promote it.",
+          "**Single logout.** Each SP gets its own random `SessionIndex`; a signed logout request from an SP ends the AXIAM session, and the other SPs that registered a logout endpoint are told one at a time through the browser.",
+        ],
+      },
+      { type: "h", id: "enable", text: "Switch it on" },
+      {
+        type: "p",
+        text: "Two things have to be true before a tenant answers a single SAML request, and until they are every SAML route replies with the same empty `404` — so nobody can tell from outside whether a tenant exists, or serves SAML at all.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Requirement", "Detail"],
+        rows: [
+          [
+            "A server built with the `saml` feature",
+            "It is on by default and links `libxml`; a build made with `--no-default-features` (CI's *Build (SAML off)* job) serves no SAML. The registry and credential API below are compiled into every build, so an administrator can prepare everything on such a server and read the answer to *is SAML available here* from `GET …/saml/idp`.",
+          ],
+          [
+            "`saml_idp_enabled` is on for the tenant",
+            "A layered setting, **off by default**, with the shape of `sensitive_scopes_enabled`: the organization turns it on and a tenant may only turn it *off* again. Set it through the settings API (see [Settings](#/docs/settings)); the console explains the setting but has no control for it yet.",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "Registering service providers and issuing the credential do **not** depend on the setting, so you can finish the whole configuration first and switch the identity provider on last. The metadata endpoint additionally answers `404` until the tenant has an active or a next credential, because metadata without a key is of no use to an SP.",
+      },
+      { type: "h", id: "endpoints", text: "The SAML endpoints" },
+      {
+        type: "p",
+        text: "These are browser and SP-to-IdP routes, not API calls: an SP's own SAML library speaks to them, none takes a bearer token, and they are not in the OpenAPI document. `{tenant}` is the tenant's id in its canonical form, and the base is the deployment's public URL.",
+      },
+      {
+        type: "table",
+        headers: ["Path under `/saml/v2/{tenant}`", "What it is"],
+        rows: [
+          ["`/metadata`", "The identity provider's metadata (`GET` and `HEAD`), and its entity id — the entity id **is** the metadata URL. Paste this one URL into the SP."],
+          ["`/sso`", "Single sign-on: the SP's `AuthnRequest` by `GET` (HTTP-Redirect) or `POST` (HTTP-POST)."],
+          ["`/sso/idp-initiated?sp=<entity id>`", "IdP-initiated sign-on, for an SP registered with `allow_idp_initiated`. It is meant for AXIAM's own pages and bookmarks, and refuses a cross-site request."],
+          ["`/sso/continue`", "The second leg of every sign-on, where the browser's session is resolved. Never called by an SP."],
+          ["`/slo`", "Single logout on both bindings: a signed `LogoutRequest` or `LogoutResponse` from an SP."],
+          ["`/sso/logout`", "IdP-initiated logout: ends the signed-in browser's session and walks it through the SPs that hold one."],
+        ],
+      },
+      {
+        type: "p",
+        text: "The metadata is unsigned: it is served from your deployment's origin, so TLS to that origin is the trust anchor, and an SP administrator who wants more can compare the credential's SHA-256 fingerprint, which the console and the API both show. It advertises the signing certificate or certificates, both `NameID` formats, and the sign-on and logout locations — never a route that does not exist — and is cacheable for an hour with an `ETag`.",
+      },
+      { type: "h", id: "register", text: "Register a service provider" },
+      {
+        type: "p",
+        text: "In the admin console, **SAML Service Providers** (`/saml`, in the *Identity* group of the sidebar, visible with `saml_sp:read`) lists, creates, edits and deletes registrations and shows the identity provider's entity id, metadata URL and endpoints with whether it is currently serving. The same operations are a REST API under `/api/v1/tenants/{tenant_id}/saml`, which is also what the SDKs' `saml` namespace calls.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Import the SP's metadata, or enter it by hand",
+            body: "`parse-sp-metadata` takes either an uploaded document or an `https` URL and returns a **draft** registration with the certificate fingerprints and a list of warnings. It stores nothing. AXIAM fetches a URL only through its outbound address guard, refuses any document that declares a DTD or entity, and takes nothing as trusted from an unsigned document — a signature in it is reported, not evaluated. Two things that real SP metadata carries and a strict XML reader rejects are normalised on the parsed document, each with a warning in the draft: a `cacheDuration` on the `SPSSODescriptor` is dropped, and an `AssertionConsumerService` with no `index` is given the lowest unused one. You review the draft, then save it.",
+            code: 'POST /api/v1/tenants/{tenant_id}/saml/parse-sp-metadata\n{ "metadata_url": "https://wiki.example.com/saml/metadata" }',
+          },
+          {
+            title: "Save the registration",
+            body: "Every write is validated before anything is stored. The `entity_id` is unique within the tenant and **cannot be changed later** — the pairwise `NameID` is keyed on it, so a different id would give every user a new account at that SP; register a new SP instead. The consumer-endpoint list is an allow-list held to the rules of an OAuth2 redirect URI (absolute, `https` — `http` only for loopback — no `*`, no fragment), checked byte for byte against the request.",
+            code: 'POST /api/v1/tenants/{tenant_id}/saml/service-providers\n{\n  "display_name": "Team wiki",\n  "entity_id": "https://wiki.example.com/saml/metadata",\n  "acs_urls": [\n    { "url": "https://wiki.example.com/saml/acs", "binding": "http_post", "index": 0, "is_default": true }\n  ],\n  "name_id_format": "persistent",\n  "sp_signing_cert_pem": "<PEM certificate>",\n  "attribute_mappings": [\n    { "saml_name": "mail", "source": "email" }\n  ],\n  "allowed_groups": []\n}',
+          },
+          {
+            title: "Decide who may sign in",
+            body: "`allowed_groups` limits the SP to members of those groups. **An empty list means every active user of the tenant.** A disabled SP is refused at every sign-on; logout keeps working for it.",
+          },
+          {
+            title: "Give the SP the metadata URL",
+            body: "Hand the SP `GET …/saml/v2/{tenant}/metadata`, or the entity id, sign-on and logout locations shown on the console page, and have it trust the credential below.",
+          },
+        ],
+      },
+      {
+        type: "p",
+        text: "`PUT` is a **replacement**: any member you leave out takes its default, it is not kept. Read the registration, change what you need, and send the whole thing back. The attribute table maps AXIAM's `username`, `email`, `display_name`, `given_name`, `family_name`, `groups` and `roles` onto the attribute names the SP expects. If an SP signs its requests, register its certificate; with `want_authn_requests_signed` an unsigned request is refused, and a logout request from an SP is accepted only when it is signed by that certificate. **The SP must sign with a SHA-256 or stronger digest**: AXIAM refuses SHA-1 on signed requests, and `samael`'s default `Signature::template` uses a SHA-1 digest, so an SP built on it has to set the digest to SHA-256.",
+      },
+      { type: "h", id: "credential", text: "The signing credential" },
+      {
+        type: "p",
+        text: "A tenant holds at most one `active` and one `next` credential; a `retired` one has had its key destroyed. All three states are listed by `GET …/saml/idp-credentials`, which returns public facts only — the certificate, serial, fingerprint, validity and status, and no key of any kind. It needs one of the tenant's active signing CAs to issue from, and key generation takes a few seconds.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Issue the first credential",
+            body: "Into the empty `active` slot. `validity_days` is 1 to 730 (default 365) and never beyond the CA's own expiry.",
+            code: 'POST /api/v1/tenants/{tenant_id}/saml/idp-credentials\n{ "issuer_ca_id": "<signing CA id>", "slot": "active" }',
+          },
+          {
+            title: "To rotate, issue the next one",
+            body: "Into the `next` slot. Metadata now publishes **both** certificates, active first. Wait at least the metadata's one-hour cache and your SPs' own refresh interval.",
+            code: '{ "issuer_ca_id": "<signing CA id>", "slot": "next" }',
+          },
+          {
+            title: "Promote it",
+            body: "`POST …/idp-credentials/{credential_id}/promote` names the current `next` credential; in one transaction the old `active` is retired and its key destroyed and `next` becomes `active`. Naming anything else, or a credential outside its validity window, is a `409`.",
+          },
+        ],
+      },
+      {
+        type: "warn",
+        text: "**Retiring the active credential with no successor stops SAML sign-on for the whole tenant at once.** That is deliberate — it is the response to a leaked key — and the console says so before it asks. Retiring is also the only way to stop a key you no longer trust from signing.",
+      },
+      {
+        type: "p",
+        text: "Issuing, promoting and retiring need `saml_idp:credential`, kept apart from `saml_sp:write` because one call can change sign-on for every SP of the tenant. These credentials are not certificates in the PKI sense: they never appear in the certificate list, and certificate issuance, CSR signing, the bind endpoint, device login and mTLS all refuse them.",
+      },
+      { type: "h", id: "keys", text: "The pairwise key — never change it" },
+      {
+        type: "p",
+        text: "The persistent `NameID` is an HMAC under a deployment secret, `AXIAM__AUTH__SAML_PAIRWISE_KEY`, deliberately independent of the signing credential so that rotating the credential never changes anyone's identifier. It is optional, and **without it a sign-on to an SP that uses the persistent format fails** with a SAML `Responder` status.",
+      },
+      {
+        type: "warn",
+        text: "Set it once and keep it for the life of the deployment. Changing it, losing it or restoring a backup without it gives every user a new, unknown account at every SP that uses persistent identifiers. It is read from the environment or from your secret provider, like the other deployment keys; see [Configuration](#/docs/configuration).",
+      },
+      { type: "h", id: "limits", text: "Rate limits" },
+      {
+        type: "p",
+        text: "Every route is rate limited per client address. The six browser routes each have a bucket of their own — `saml_idp_sso`, `saml_idp_sso_continue`, `saml_idp_sso_idp_initiated`, `saml_idp_metadata`, `saml_idp_slo` and `saml_idp_sso_logout` — all sized by `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` (default 30 a minute), so a flood on one cannot spend another's allowance, or `/oauth2/end_session`'s. The seven administrative writes have one bucket per route under `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` (default 30); reads are not limited. See the [configuration reference](#/docs/configuration).",
+      },
+      { type: "h", id: "logout", text: "Single logout" },
+      {
+        type: "p",
+        text: "AXIAM records, for each sign-on, which SP was given which `NameID` and `SessionIndex`. A `LogoutRequest` is honoured only if it is signed by the certificate registered for that SP and names a session that SP really holds. AXIAM then **revokes the whole AXIAM session first** — back-channel logout to its OIDC clients, then the ordinary revocation, which also reaches the revocation feed — and only then walks the browser through the other SPs, each with a signed request, one at a time. A chain that stalls midway never leaves an AXIAM session alive; the initiating SP is told `Success`, or `PartialLogout` if some SP could not be reached.",
+      },
+      {
+        type: "warn",
+        text: "SAML logout runs only when the logout starts at a SAML endpoint. `/oauth2/end_session`, an administrator revoking a session, a password reset and an account being disabled all end the AXIAM session but do not walk the SPs — those SPs learn nothing until their own session expires or their next sign-on request is refused. An API call cannot lead a browser through other sites. This is a recorded, accepted limit in the threat model.",
+      },
+      { type: "h", id: "unsupported", text: "What it does not do" },
+      {
+        type: "list",
+        items: [
+          "**Assertion encryption.** Not implemented. An SP registered with `encrypt_assertions` is refused when you save it, and AXIAM never falls back to sending a plaintext assertion to an SP that asked for encryption. The metadata advertises no encryption key.",
+          "**Unsigned assertions.** There is no such mode.",
+          "**Signed metadata.** AXIAM's own metadata is unsigned (see above), and a signature on an SP's imported metadata is not evaluated, because there is nothing independent to evaluate it against.",
+          "**Artifact and SOAP bindings.** Sign-on and logout use HTTP-Redirect and HTTP-POST only, and an SP's consumer endpoint must be HTTP-POST.",
+          "**Refreshing an SP's metadata on its own.** Metadata import is a person's act; AXIAM never re-reads a URL later, so a compromised SP host cannot quietly swap its certificate and endpoints.",
+          "**A SAML logout chain from other logouts**, as above.",
+          "**Anything in the SDKs' browser path.** The SDKs administer the registry and the credential; no SDK builds an `AuthnRequest` or consumes an assertion. That is the SP's SAML library's job.",
+        ],
+      },
+      { type: "h", id: "api", text: "Management endpoints" },
+      {
+        type: "api",
+        endpoints: [
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/saml/idp", summary: "The identity provider as the tenant sees it: entity id, metadata, sign-on and logout URLs, whether SAML is available and enabled, and the active and next credential ids." },
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/saml/service-providers", summary: "List registered service providers (paged, searchable)." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/service-providers", summary: "Register one (`201`)." },
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}", summary: "Read one." },
+          { method: "PUT", path: "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}", summary: "Replace it. `entity_id` cannot change." },
+          { method: "DELETE", path: "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}", summary: "Remove it and its session records. Ends no session at the SP." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/parse-sp-metadata", summary: "Turn SP metadata (upload or `https` URL) into a draft. Stores nothing; `503` on a server built without SAML." },
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/saml/idp-credentials", summary: "List the signing credentials, public facts only." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/idp-credentials", summary: "Issue a credential into an empty `active` or `next` slot (`201`)." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote", summary: "Make the `next` credential `active`; retire and destroy the old one." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire", summary: "Retire a `next` or `active` credential and destroy its key." },
+        ],
+      },
+      {
+        type: "p",
+        text: "Three permissions, seeded per tenant: `saml_sp:read`, `saml_sp:write` and `saml_idp:credential`. Only a human administrator may call these — a service-account token is refused with `401` — and only for the caller's own tenant. Changes write `saml_sp.created`, `saml_sp.updated`, `saml_sp.deleted`, `saml_sp.metadata_parsed`, `saml_idp.credential_issued`, `saml_idp.credential_promoted` and `saml_idp.credential_retired` audit rows that name ids, changed fields and fingerprints and never a certificate or a document. Sign-ons and logouts are audited too, without the `NameID`.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "CONTRACT §29 — SAML service provider registration",
+            href: contractLink("29"),
+            note: "The normative text for the eleven operations: shapes, every server rule an SDK can observe, error mapping, and the tests an SDK port owes.",
+          },
+          {
+            label: "Design document §8e — SAML 2.0 Identity Provider",
+            href: `${GH_BLOB}/claude_dev/design-document.md`,
+            note: "Assertion contents, the two-leg sign-on, signing rules and the threat reasoning behind each refusal.",
+          },
+          {
+            label: "Deployment guide — environment variables",
+            href: `${GH_BLOB}/docs/deployment/README.md`,
+            note: "The operator's side: the pairwise key and the rate-limit variables.",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Federation (SAML & OIDC) →",
+            body: "The other direction: trusting an external identity provider instead of being one.",
+            to: "docs",
+            doc: "federation",
+          },
+          {
+            title: "Settings →",
+            body: "Where `saml_idp_enabled` is set, and how organization and tenant values combine.",
+            to: "docs",
+            doc: "settings",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    slug: "ssf",
+    section: "APIs & integration",
+    navLabel: "Shared Signals (SSF)",
+    title: "Shared Signals (SSF) transmitter",
+    intro:
+      "Tell the applications that trust AXIAM the moment something about a person changes: a session was revoked, a credential was replaced, an account was disabled or erased. AXIAM sends signed security events to the receivers you register, by push or by poll, using the OpenID Shared Signals Framework.",
+    blocks: [
+      { type: "h", id: "what", text: "What it does" },
+      {
+        type: "p",
+        text: "An access token lives fifteen minutes and a session at a relying party lives as long as that party lets it, so a logout, a disabled account or a replaced passkey at AXIAM does not by itself reach the applications downstream. [Back-channel logout](#/docs/logout) tells an OIDC relying party that one session ended; the [revocation feed](#/docs/oauth2#revocations) lets a resource server notice a revoked session. The Shared Signals Framework (SSF) is the standard channel for the wider set: **AXIAM is the transmitter, and a receiver you register is told what happened**, so it can end its own session, force a new sign-in or lock its own record.",
+      },
+      {
+        type: "list",
+        items: [
+          "**The specifications.** OpenID Shared Signals Framework 1.0 (final), with the CAEP 1.0 and RISC 1.0 event types, Security Event Tokens (RFC 8417), push delivery (RFC 8935), poll delivery (RFC 8936) and RFC 9493 subject identifiers. Discovery publishes `spec_version` `1_0`.",
+          "**Six events.** CAEP `session-revoked`, `credential-change` and `assurance-level-change`, and RISC `account-disabled`, `account-enabled` and `account-purged`. Every SET carries exactly one. Two protocol events ride along: a *verification* event a receiver can ask for, and a *stream-updated* event AXIAM sends when an administrator changes a stream's status.",
+          "**Signed with the key you already publish.** Each SET is a JWT signed EdDSA with the deployment's key, found at the tenant's JWKS (`jwks_uri` in the discovery document), the same key that signs ID tokens. There is **one** key per deployment; AXIAM has no per-tenant signing keys. The JOSE `typ` is `secevent+jwt`, which is what stops a SET passing as an access token.",
+          "**No `exp`.** SSF forbids it, so a SET never expires. A receiver decides how long a SET is news by its `iat`, and **must de-duplicate on `jti`**: the same event can arrive twice (see [delivery guarantees](#/docs/ssf#guarantees)).",
+          "**One tenant, one issuer.** `iss` is the tenant's issuer — `{root}/t/{tenant}` where the deployment serves per-tenant issuers (see [Per-tenant issuers](#/docs/oauth2#tenant-issuers)), the root issuer otherwise — and is identical to the `issuer` in the discovery document.",
+          "**Several tenants need per-tenant issuers.** Without per-tenant issuers every tenant's SETs would carry the same `iss` and the same key, and an administrator of one tenant who registered another tenant's receiver audience first could push SETs that receiver accepts. So **a deployment that holds more than one tenant must serve per-tenant issuers (`AXIAM__AUTH__TENANT_ISSUER_PATHS`) for SSF to run**: without them SSF is inactive for every tenant, exactly as if `ssf_enabled` were off (see [Switch it on](#/docs/ssf#enable)). A single-tenant deployment keeps the root issuer; nobody else shares it.",
+          "**What a receiver should check.** Verify `iss` against the issuer of the tenant you registered with — it is what tells tenants apart — take your `aud` from your own stream (`GET /ssf/v1/stream`) rather than from a convention such as your own URL, and require the push `Authorization` header you supplied. An audience is unique across the deployment, but another tenant can register yours before you do; your own registration then fails with `409`, and the checks above keep its SETs from being accepted as yours.",
+        ],
+      },
+      { type: "h", id: "enable", text: "Switch it on" },
+      {
+        type: "p",
+        text: "The transmitter is off until you turn it on. `ssf_enabled` is a layered setting with the shape of `saml_idp_enabled` (see [Settings](#/docs/settings)): **off by default**, turned on by the organization, and a tenant may only turn it *off* again. Set it through the settings API; the console explains the setting but has no control for it yet.",
+      },
+      {
+        type: "p",
+        text: "With the setting off, discovery answers an empty `404`, the receiver's stream API sees no stream at all, and nothing is produced. Registering streams does **not** depend on it, so you can register every receiver first and switch the transmitter on last.",
+      },
+      {
+        type: "warn",
+        text: "**More than one tenant: per-tenant issuers first.** While the deployment holds more than one tenant (counted across every organization) and does not serve per-tenant issuers, SSF is **inactive for every tenant**, whatever `ssf_enabled` says: discovery is `404`, receivers see no stream, nothing is produced or signed, a push already queued is dead-lettered and a poll returns nothing. Turning `ssf_enabled` on is refused with `400` naming the cause; the stream registry keeps working, and a stream and the settings API say why SSF is inactive. Set `AXIAM__AUTH__TENANT_ISSUER_PATHS=true` to run SSF. The tenant count is re-read at least once a minute: the instance that creates a second tenant stops SSF at once, other instances within a minute. The change is logged once at `WARN` and audited as `ssf.inactive_shared_issuer` in every tenant with SSF on.",
+      },
+      {
+        type: "table",
+        headers: ["Discovery URL", "Where"],
+        rows: [
+          ["`GET {root}/.well-known/ssf-configuration?tenant_id={tenant}`", "Every deployment."],
+          ["`GET {root}/.well-known/ssf-configuration/t/{tenant}`", "Deployments that serve per-tenant issuers (`AXIAM__AUTH__TENANT_ISSUER_PATHS`): SSF's insertion form, for the issuer `{root}/t/{tenant}`."],
+        ],
+      },
+      {
+        type: "p",
+        text: "Discovery is unauthenticated, as SSF requires. An unknown tenant, a malformed id, a tenant whose switch is off and every tenant while SSF is inactive for want of per-tenant issuers all answer the **same empty `404`**, so the route does not tell anyone which tenants exist or transmit. The document lists the supported events, the two delivery methods, the stream, status and verification endpoints, and `default_subjects` of `ALL`.",
+      },
+      { type: "h", id: "register", text: "Register a receiver (administrator)" },
+      {
+        type: "p",
+        text: "A stream is created by a **tenant administrator**, never by the receiver: deciding which third party receives security events about the tenant's users is a human administrator's act. The registry is a REST API under `/api/v1/tenants/{tenant_id}/ssf/streams` (the `ssf` namespace of the SDKs' management surface). Reading needs `ssf_streams:read` and the three writes need `ssf_streams:write`, both seeded per tenant. A service-account token is refused with `401` and another tenant's id with `403`. The admin console has no page for it yet.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Create the receiver's OAuth2 client",
+            body: "An OAuth2 client of the tenant, registered for the `client_credentials` grant with the scope `ssf.manage`. Its `client_id` is the stream's `receiver_client_id`, and the client is how the receiver proves who it is on the stream API below. Any other client is refused with `400` naming what is missing.",
+          },
+          {
+            title: "Register the stream",
+            body: "Everything a receiver may not change is decided here: the audience, the delivery method, the subject format and the ceiling of events. A push stream also gets its endpoint and, if the endpoint needs one, an `Authorization` header.",
+            code: 'POST /api/v1/tenants/{tenant_id}/ssf/streams\n{\n  "receiver_client_id": "<receiver client id>",\n  "audience": "https://app.example.com/ssf",\n  "delivery_method": "push",\n  "endpoint_url": "https://app.example.com/ssf/events",\n  "authorization_header": "Bearer <receiver token>",\n  "events_allowed": [\n    "https://schemas.openid.net/secevent/caep/event-type/session-revoked",\n    "https://schemas.openid.net/secevent/risc/event-type/account-disabled"\n  ],\n  "subject_format": "iss_sub"\n}',
+          },
+          {
+            title: "Switch the transmitter on",
+            body: "Turn `ssf_enabled` on for the tenant. Until then discovery is `404` and the receiver cannot see the stream. On a deployment of several tenants this needs per-tenant issuers first, or it is refused with `400`. Give the receiver its `client_id` and secret, and the discovery URL.",
+          },
+        ],
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Member", "What it decides"],
+        rows: [
+          [
+            "`audience`",
+            "The SET's `aud`, one string. **Unique across the whole deployment**: reusing one, in any tenant, is `409` without saying where. That is what stops one tenant's administrator from registering another tenant's receiver audience to collect events about their own users and replay them where that receiver listens.",
+          ],
+          [
+            "`subject_format`",
+            "How a person is named in the stream's SETs. `iss_sub` (the default) is `{iss, sub}` with the `sub` of AXIAM's ID tokens, so a receiver that is also an OIDC relying party can match it. `email` names the person by address, and **only the administrator can choose it**, because it decides what personal data leaves. An address is sent only if AXIAM vouches for it (verified, or the account is active); for any other account the event is **not sent on that stream** — never with `iss_sub` instead.",
+          ],
+          [
+            "`events_allowed`",
+            "The ceiling: one to six of the event-type URIs. The receiver may ask for fewer (`events_requested`), never more; `events_delivered` is the intersection.",
+          ],
+          [
+            "`delivery_method`",
+            "`push` or `poll`, set here only. A push stream needs `endpoint_url`; a poll stream has none, because AXIAM serves the poll endpoint.",
+          ],
+          [
+            "`endpoint_url`",
+            "Held to the webhook outbound address policy: absolute `https`, no credentials or fragment, no non-global IP literal, no `localhost`, `*.local` or `*.internal` name. It is checked again, through the same guard, on every delivery.",
+          ],
+          [
+            "`authorization_header`",
+            "The `Authorization` value AXIAM sends with every push. **Write-only**: sealed under `pki_encryption_key` (the key webhook secrets use), never returned (`authorization_header_set` says whether one is stored) and never audited. A deployment without that key refuses a write that stores one with `503`. It **never follows the endpoint to another origin**: moving `endpoint_url` to another scheme, host or port needs the header again, or `clear_authorization_header: true`, else `400`.",
+          ],
+          [
+            "`receiver_client_id`",
+            "The OAuth2 client above. It binds the stream to one receiver: only a token for that client sees or changes it.",
+          ],
+        ],
+      },
+      {
+        type: "p",
+        text: "`PUT` is a **replacement**: an omitted optional member takes its default, with one exception — an omitted `authorization_header` keeps the stored one. Read the stream, change what you need and send it back. Every write is audited as `ssf_stream.created`, `ssf_stream.updated` (naming the changed members) or `ssf_stream.deleted`, and never records the header. Deleting a stream removes every event buffered for it.",
+      },
+      { type: "h", id: "receiver", text: "The receiver's side" },
+      {
+        type: "p",
+        text: "The receiver authenticates with an ordinary OAuth2 **client-credentials** token carrying `ssf.manage`, and calls the stream API under `{root}/ssf/v1/`. A user, service-account or unscoped client token is `403`. A stream bound to another client, another tenant's stream, a stream in a tenant whose switch is off and a stream that does not exist all answer the **same `404`**, so a receiver learns nothing about streams that are not its own.",
+      },
+      {
+        type: "api",
+        endpoints: [
+          { method: "GET", path: "/ssf/v1/stream", summary: "Read one stream (`?stream_id=`) or every stream bound to the receiver's client." },
+          { method: "PATCH", path: "/ssf/v1/stream", summary: "Change the receiver-supplied members that are present." },
+          { method: "PUT", path: "/ssf/v1/stream", summary: "Replace them; an omitted receiver member is removed, and `delivery` is required." },
+          { method: "GET", path: "/ssf/v1/status", summary: "The stream's status (`?stream_id=`)." },
+          { method: "POST", path: "/ssf/v1/status", summary: "Set the stream's status, subject to the rule below." },
+          { method: "POST", path: "/ssf/v1/verify", summary: "Ask for a verification event; `204`." },
+          { method: "POST", path: "/ssf/v1/poll/{stream_id}", summary: "Poll a poll stream (RFC 8936)." },
+        ],
+      },
+      {
+        type: "p",
+        text: "`POST` and `DELETE` on `/ssf/v1/stream` are `403`: streams belong to the administrator. These routes are in the OpenAPI document under the `ssf-receiver` tag and are not part of any SDK's management surface.",
+      },
+      { type: "h", id: "receiver-change", text: "What a receiver may change" },
+      {
+        type: "table",
+        headers: ["The receiver may", "The receiver may not"],
+        rows: [
+          ["Narrow `events_requested` within `events_allowed` (an unknown URI is ignored; a known one outside the ceiling is `400`)", "Change the delivery method, the audience, the subject format or `events_allowed`"],
+          ["Change `description`", "Create or delete a stream"],
+          ["On a push stream, change `endpoint_url` (same address policy, same origin rule) and supply `authorization_header`", "Read a stored `authorization_header`"],
+          ["Set the stream's status, unless an administrator has stopped it (below)", "Restart a stream an administrator paused or disabled (`403`)"],
+        ],
+      },
+      { type: "h", id: "status", text: "Statuses" },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Status", "What happens to an event"],
+        rows: [
+          ["`enabled`", "Signed and transmitted."],
+          ["`paused`", "Nothing is signed or transmitted. The event is **held** in the stream's buffer and sent, oldest first, when the stream is enabled again."],
+          ["`disabled`", "Nothing is signed, transmitted or held. An event for it is dropped where it is produced, one already queued is dead-lettered, and verification is `400`."],
+        ],
+      },
+      {
+        type: "p",
+        text: "An administrator may set any status. The receiver may set any status **unless an administrator set the current one to something other than `enabled`**: a receiver cannot restart what an administrator stopped. An administrator's status change is announced to the receiver with a stream-updated event (`{status, reason?}`) once the change is written; a receiver's own change is not announced, as SSF says. A SET is signed only against the stream as it is at that moment, so a stream disabled, paused or narrowed after an event was queued delivers nothing.",
+      },
+      { type: "h", id: "verify", text: "Verification" },
+      {
+        type: "p",
+        text: "`POST /ssf/v1/verify` with `{ \"stream_id\": …, \"state\": … }` (`state` is optional, at most 1 KiB) asks AXIAM to send the stream a verification event carrying that `state`, so a receiver can prove its endpoint and key handling end to end. It answers `204` and the event follows through the stream's own delivery. **At most one request every 60 seconds per stream** (`min_verification_interval`; `429` inside it, enforced in the datastore so it holds across replicas), and `400` for a disabled stream. A paused stream holds the verification event like any other.",
+      },
+      { type: "h", id: "poll", text: "Poll delivery" },
+      {
+        type: "p",
+        text: "For a poll stream the receiver asks for events at `POST {root}/ssf/v1/poll/{stream_id}` with its token. The body is RFC 8936's, every member optional; a `400` answers a push stream.",
+      },
+      {
+        type: "code",
+        caption: "POST /ssf/v1/poll/{stream_id}",
+        code: '{\n  "maxEvents": 25,\n  "returnImmediately": false,\n  "ack": ["<jti of an event the receiver processed>"],\n  "setErrs": { "<jti>": { "err": "invalid_request", "description": "…" } }\n}\n\n// 200\n{ "sets": { "<jti>": "<compact SET>" }, "moreAvailable": false }',
+      },
+      {
+        type: "list",
+        items: [
+          "**`maxEvents`** is clamped to 100 (a missing value means 100; a negative one is `400`; `0` means acknowledgements only). Events come **oldest first**.",
+          "**Long poll.** Unless the request sets `returnImmediately: true` it waits up to **30 seconds** for an event. AXIAM allows **one waiting long poll per stream** (per server instance): a second concurrent request on the same stream is answered at once, as if it had set `returnImmediately`. A receiver that runs several pollers on one stream gets a busy loop from the extras, not more throughput.",
+          "**`ack`** deletes exactly the events it names, in this stream and no other. Anything not acknowledged is returned again by the next poll, which is what makes delivery at-least-once. At most 1 000 `ack` and 100 `setErrs` entries per request, and the body is at most 32 KiB (`413`).",
+          "**`setErrs`** reports a SET the receiver could not accept (an RFC 8935 `err` code). AXIAM deletes that event, so it is not offered again, and writes an audit row with the code. The receiver's `description` text is never stored.",
+          "**A paused or disabled stream** answers an empty `sets`. The poll response is `Cache-Control: no-store`.",
+        ],
+      },
+      { type: "h", id: "push", text: "Push delivery" },
+      {
+        type: "p",
+        text: "For a push stream AXIAM `POST`s each SET to the endpoint (RFC 8935) with `Content-Type: application/secevent+jwt`, `Accept: application/json`, the stored `Authorization` header if there is one, and a 10-second timeout. **Redirects are never followed**: a `3xx` is a failed attempt, so the endpoint, and the credential sent to it, cannot be rerouted by the receiver's own server. At most 64 KiB of the response is read, and it is never logged.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["The receiver answers", "AXIAM"],
+        rows: [
+          ["`202`, or any `2xx`", "Delivered."],
+          ["`400` with an RFC 8935 `err` code", "Dead-lettered: the SET will not be accepted on retry. The code goes into the audit row."],
+          ["`401`, `403`", "Dead-lettered: the credential is wrong until someone fixes it."],
+          ["Any other `4xx` (a `400` with no known code, `410`, `422`, …)", "Dead-lettered, with the reason `HTTP <status>`."],
+          ["`404`, `408`, `429`, `5xx`, a timeout, no connection, a `3xx`", "Retried on the schedule below."],
+        ],
+      },
+      {
+        type: "p",
+        text: "A stream that is gone or disabled when the attempt runs is dead-lettered; one that is paused moves the event to the buffer and the message is acknowledged. **Resuming** a paused push stream sends its held events, oldest first. The audit reasons come from a fixed vocabulary and never contain a header, a URL, a response body or a transport error's text.",
+      },
+      { type: "h", id: "triggers", text: "What triggers each event" },
+      {
+        type: "p",
+        text: "Events are produced at the place where the change happens, for every stream that carries that event type, and only while `ssf_enabled` is on and SSF is active (see [Switch it on](#/docs/ssf#enable)). A cause that produces several events (a password reset's `credential-change` and `session-revoked`) shares one `txn` value.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Event", "Sent when", "Not sent when"],
+        rows: [
+          [
+            "`session-revoked`",
+            "A session is ended by logout, by an administrator, or by policy. One SET per session id, naming the session as well as the person.",
+            "A session simply **expires**; a refresh token is revoked (RFC 7009), which is not a session revocation; a token is redeemed. It does not depend on `revocation_feed_enabled`.",
+          ],
+          [
+            "`credential-change`",
+            "A password is changed or reset, a SCIM password write, an OPAQUE registration, an authenticator app (TOTP) confirmed, MFA reset or a method deleted, a passkey (`fido2-platform`) or security key (`fido2-roaming`) registered or deleted.",
+            "Never for `x509`: the event shape exists, but certificates bind only to service accounts and an SSF subject is a user, so nothing emits it.",
+          ],
+          [
+            "`assurance-level-change`",
+            "A **step-up** re-authentication completes and the new session's `acr` differs from the one it replaces (`urn:axiam:acr:1fa` and `urn:axiam:acr:mfa`); it carries both levels and the direction.",
+            "A sign-in that is not a step-up, a step-up that lands on the same `acr`, or one that returns for another user or after the ten-minute window.",
+          ],
+          [
+            "`account-disabled`",
+            "A user becomes inactive through the admin API or SCIM (`active: false`), or a directory sync deactivates the account.",
+            "A **lockout** is not a disable.",
+          ],
+          [
+            "`account-enabled`",
+            "The reverse, through the admin API or SCIM (`active: true`).",
+            "A directory sync never re-enables an account, so it never produces this event.",
+          ],
+          [
+            "`account-purged`",
+            "A user is deleted through the admin API or SCIM `DELETE`, or erased under GDPR. The subject is captured before the write, because the person no longer exists at delivery.",
+            "—",
+          ],
+        ],
+      },
+      {
+        type: "note",
+        text: "Production is best effort, as for webhooks: failing to queue an event does not fail the operation that caused it. A receiver that needs certainty about one account can read the account's current state from AXIAM after a signal; the signal says *something changed*, never the only record of it.",
+      },
+      { type: "h", id: "guarantees", text: "Delivery guarantees and limits" },
+      {
+        type: "list",
+        items: [
+          "**At-least-once.** A push that was not acknowledged is retried; a polled event stays until acknowledged. A retried push or repeated poll carries the **byte-identical SET with the same `jti`** (Ed25519 is deterministic), so de-duplicating on `jti` is exact. Keep the `jti`s you processed for at least seven days, and record a `jti` only after the SET verified.",
+          "**The buffer.** Held events — a poll stream's, and any paused stream's — are kept at most **1 000 per stream**; when it is full the **oldest is dropped** to admit the newest, because the newest state is the one a receiver can act on. An event is also kept for **seven days at most**, then swept.",
+          "**The dead-letter queue.** An event that exhausted its attempts or can never be accepted lands in `axiam.ssf_push.dlq`, whose messages expire after **seven days**. They hold unsigned subjects, possibly an address, so they are not kept longer. The webhook queue is a separate one with its own lifetime.",
+          "**Retries.** Push uses the same retry machinery as webhooks, tuned by `AXIAM__SSF_PUSH__MAX_ATTEMPTS` (default 5, counting the first attempt), `AXIAM__SSF_PUSH__BACKOFF_BASE_MS` (default 5 000) and `AXIAM__SSF_PUSH__BACKOFF_CEILING_MS` (default 3 600 000). See [Configuration](#/docs/configuration).",
+          "**Rate limits.** Each receiver route and each discovery form has its own per-IP bucket, `AXIAM__RATE_LIMIT__SSF_PER_MIN` (default 60 a minute); an honest long-polling receiver makes about two requests a minute. The registry's three writes have one bucket per route under `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` (default 30); reads are not limited. Neither moves with `AXIAM__RATE_LIMIT__PROFILE`.",
+        ],
+      },
+      { type: "h", id: "privacy", text: "Privacy" },
+      {
+        type: "list",
+        items: [
+          "**No free text a person typed is ever sent.** CAEP's `reason_admin`, `reason_user` and `friendly_name` members are never populated, and no event member carries a name, a description or a message. A receiver gets URIs, enumerations and timestamps.",
+          "**The subject is resolved when the event is produced, per stream**, not at delivery: an erased account no longer exists by then. The consequence is that an event for an `account-purged` user can sit in a buffer, naming that user, for up to the seven-day bound above.",
+          "**What leaves is the administrator's decision.** The subject format, the event ceiling and the endpoint are all set at registration, and a receiver can only narrow what it gets.",
+        ],
+      },
+      { type: "h", id: "unsupported", text: "What it does not do" },
+      {
+        type: "list",
+        items: [
+          "**Add and remove subject.** AXIAM advertises `default_subjects: ALL` and publishes no add-subject or remove-subject endpoint. A stream carries every user of the tenant; a receiver cannot ask for one person's events only.",
+          "**Receiver-created streams.** A third party choosing which personal data it receives is the administrator's decision, so `POST` and `DELETE` on the stream endpoint are `403`.",
+          "**Per-tenant signing keys.** One deployment key signs every SET and is published at each tenant's JWKS. Rotating it is the deployment's key rotation, and every receiver reads it from the JWKS.",
+          "**A SET that expires.** There is no `exp` and no `sub` claim, by specification and on purpose.",
+          "**Certificate events.** `x509` credential changes are never sent today (see the table above).",
+          "**An `ssf` control in the console.** Registration is through the REST API and the SDKs' `ssf` management namespace.",
+        ],
+      },
+      { type: "h", id: "sdks", text: "From the SDKs" },
+      {
+        type: "p",
+        text: "The registry is the SDKs' `ssf` management namespace (five operations; the `authorization_header` is a `Sensitive` value in every SDK). Verifying a SET and polling are the **optional receiver helper** of the Rust, TypeScript, Python, Java, C#, PHP and Go SDKs: it verifies the signature against the JWKS, checks `typ`, `alg`, `aud` and `iss`, and de-duplicates the `jti`. An SDK never transmits. The SDK ports follow the server's release; until they ship, verify a SET with any JWT library, applying the same checks, and de-duplicate on `jti` yourself.",
+      },
+      { type: "h", id: "api", text: "Management endpoints" },
+      {
+        type: "api",
+        endpoints: [
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/ssf/streams", summary: "List registered streams (paged, searchable by audience, receiver client, description or id)." },
+          { method: "POST", path: "/api/v1/tenants/{tenant_id}/ssf/streams", summary: "Register one (`201`)." },
+          { method: "GET", path: "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}", summary: "Read one. The `Authorization` header is never returned." },
+          { method: "PUT", path: "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}", summary: "Replace it. An omitted `authorization_header` keeps the stored one." },
+          { method: "DELETE", path: "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}", summary: "Delete it and every event buffered for it (`204`)." },
+          { method: "GET", path: "/.well-known/ssf-configuration", summary: "Transmitter metadata (`?tenant_id=`). Empty `404` when off.", public: true },
+          { method: "GET", path: "/.well-known/ssf-configuration/t/{tenant_id}", summary: "The same, in the per-tenant issuer form.", public: true },
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "CONTRACT §32 — SSF stream registration and the receiver helper",
+            href: contractLink("32"),
+            note: "The normative text: the registry operations and shapes, every server rule an SDK can observe, the receiver protocol, the SET, the receiver helper and the tests an SDK port owes.",
+          },
+          {
+            label: "Design document — competitor gap remediation, item G-5 and decisions D-44 … D-53",
+            href: `${GH_BLOB}/claude_dev/competitor-gap-remediation-plan-2026-10-02.md`,
+            note: "Why each choice was made: the SET shape, the audience rule, the subject policy, the status model and the event sources.",
+          },
+          {
+            label: "Deployment guide — environment variables",
+            href: `${GH_BLOB}/docs/deployment/README.md`,
+            note: "The operator's side: the rate-limit and retry variables.",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "Logout & sessions →",
+            body: "Back-channel logout: telling an OIDC relying party that one session ended.",
+            to: "docs",
+            doc: "logout",
+          },
+          {
+            title: "Settings →",
+            body: "Where `ssf_enabled` is set, and how organization and tenant values combine.",
+            to: "docs",
+            doc: "settings",
+          },
+          {
+            title: "Webhooks →",
+            body: "The other outbound channel: HMAC-signed JSON events, on the same delivery machinery.",
+            to: "docs",
+            doc: "webhooks",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
     slug: "webhooks",
     section: "APIs & integration",
     navLabel: "Webhooks",
@@ -1230,6 +1808,31 @@ w.WriteHeader(http.StatusOK)`,
       {
         type: "p",
         text: "The delay is `base × 2^(attempt − 1)`, clamped to the ceiling — 5 s, 10 s, 20 s, 40 s on the defaults. The multiplier is fixed at 2 and is not configurable.",
+      },
+      {
+        type: "p",
+        text: "Shared Signals Framework push delivery runs on the same dispatcher with queues of its own (`axiam.ssf_push`, `.retry`, `.dlq`) and the same schedule, read from the kind's own variables so tuning one never moves the other. Its dead-letter queue discards a message after seven days, because a dead-lettered event still names a person.",
+      },
+      {
+        type: "table",
+        headers: ["Config key", "Default", "Meaning"],
+        rows: [
+          [
+            "AXIAM__SSF_PUSH__MAX_ATTEMPTS",
+            "`5`",
+            "Total push attempts per event before it is dead-lettered; the first attempt counts as one.",
+          ],
+          [
+            "AXIAM__SSF_PUSH__BACKOFF_BASE_MS",
+            "`5000`",
+            "Delay before the first retry of a push.",
+          ],
+          [
+            "AXIAM__SSF_PUSH__BACKOFF_CEILING_MS",
+            "`3600000`",
+            "Upper bound on any single push retry delay — one hour.",
+          ],
+        ],
       },
       {
         type: "warn",

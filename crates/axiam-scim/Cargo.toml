@@ -33,3 +33,7 @@ axiam-authz = { workspace = true }
 axiam-test-support = { workspace = true }
 actix-rt = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
+# T23.5.3 — the SSF event tests build the deployment key at run time (no key
+# literal) and name the request type the routes take.
+rcgen = { workspace = true }
+actix-http = { workspace = true }

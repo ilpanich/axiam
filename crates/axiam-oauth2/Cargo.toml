@@ -39,6 +39,9 @@ x509-parser = { workspace = true }
 # and it is in the OIDC (non-SAML) half.
 axiam-federation = { workspace = true, default-features = false }
 reqwest = { workspace = true }
+# T23.5.2 — the SSF push `Authorization` header a receiver supplies is held in
+# `Zeroizing` on its way to the sealed column. Already in the workspace graph.
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # T21.5 — the CIMD tests serve client metadata documents from a loopback mock
@@ -52,3 +55,6 @@ rcgen = { workspace = true }
 # (resource, scope) pair the live engine would deny at mint time
 # (tests/uma_rpt_deny_property_test.rs).
 proptest = { workspace = true }
+# T23.5.3 — the SSF delivery tests run the real stream and buffer repositories on
+# an in-memory database and the real deliverer against a loopback receiver.
+surrealdb = { workspace = true, features = ["kv-mem"] }

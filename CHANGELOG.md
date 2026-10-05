@@ -9,6 +9,263 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SAML 2.0 IdP end-to-end tests: a `samael` reference SP and a real Keycloak
+  (T23.2.7, G-2).** Tests only; no server, contract or OpenAPI change.
+  `saml_idp_e2e_test` drives the production route table with a service provider
+  built from `samael`'s SP-side API (it builds and signs the `AuthnRequest`,
+  parses and validates the `Response`): SP-initiated login on the HTTP-POST binding
+  (signed request, IdP credential issued through the administrator route) and on
+  HTTP-Redirect (`signed_redirect`), IdP-initiated login, the attribute mapping,
+  the pairwise `NameID` (stable for one SP, different for two SPs and two users),
+  single logout from a `samael`-built `LogoutRequest` on both bindings (session
+  revoked, `GET /oauth2/revocations` shows it, the `LogoutResponse`'s detached
+  signature verifies under `samael`'s URL verifier), a replayed `AuthnRequest` ID,
+  an ACS URL outside the registry and its near-miss spellings, the D-20 `404` on
+  metadata, SSO and SLO for a tenant without the feature (and the routes absent
+  in a build without `saml`), and `samael` refusing the same response under each
+  wrong expectation. `saml_idp_keycloak_roundtrip_test` (`#[ignore]`, run by CI's
+  compose job beside the X4 step) imports AXIAM's IdP metadata into a real
+  Keycloak realm, registers Keycloak's exported SP metadata through
+  `parse_sp_metadata` and `create_service_provider`, and carries a broker login
+  both ways through a cookie-jar client, on both AuthnRequest bindings, signed:
+  Keycloak accepts the response, issues tokens whose claims are the SAML
+  attributes, and links the pairwise `NameID`; a tampered response, a response for
+  another browser's request and a replay are refused. `saml_idp::test_support`
+  re-exports `samael` and `openssl` so the harness needs no new dev-dependency.
+  **SP metadata normalisation (D-54):** `parse_sp_metadata` now reads SP metadata
+  that `samael` could not type. On the libxml tree, after every byte-level refusal,
+  an ISO-8601 `cacheDuration` on the `SPSSODescriptor` is dropped and an
+  `AssertionConsumerService` with no `index` is given the lowest unused
+  non-negative index in document order, each with a draft warning that names it;
+  an `index` that is present but invalid is still refused, and a document needing
+  neither yields the same draft as before. The website's SAML IdP page now says an
+  SP must sign with a SHA-256 or stronger digest (`samael`'s default signature
+  template uses SHA-1, which AXIAM refuses).
+
+- **Shared Signals Framework transmitter: push and poll delivery and the event
+  sources (T23.5.3, G-5, D-48, D-49, D-51, D-52, D-53, contract §32.6).** AXIAM now
+  transmits. **Push (RFC 8935)**: the `SsfPush` deliverer
+  (`axiam_oauth2::ssf_delivery`) runs on the shared outbound dispatcher with
+  queues of its own (`axiam.ssf_push`, `.retry`, `.dlq`; retry variables
+  `AXIAM__SSF_PUSH__MAX_ATTEMPTS`, `…__BACKOFF_BASE_MS`,
+  `…__BACKOFF_CEILING_MS`, documented beside the webhook ones). Each attempt
+  re-reads the stream and signs against it as it is then — gone or disabled
+  dead-letters, paused or now poll goes to the buffer — and POSTs
+  `application/secevent+jwt` with the stored `Authorization` header **only through
+  `axiam_pki::ssrf::guarded_fetch_no_redirect` with `allow_private = false`**: one
+  resolved, address-pinned hop, a `3xx` returned as the answer and **never
+  followed** (so neither the SET nor the credential can reach a host nobody named),
+  a 64 KiB response cap. **Response mapping (D-49, D-53)**: `2xx` is delivered; a
+  `400` with an RFC 8935 `err` dead-letters with the code in the
+  `ssf_push.delivery_failed` audit row, `401` and `403` dead-letter, **any other
+  `4xx` except `404`, `408` and `429` dead-letters with the reason
+  `HTTP <status>`** (it will not change on retry); `404`, `408`, `429`, `5xx`,
+  timeouts, connection failures, a `3xx` and anything else retry. The push
+  dead-letter queue carries a **seven-day `x-message-ttl`** (a dead-lettered
+  message holds an unsigned subject); the webhook queues' arguments are unchanged.
+  **Poll (RFC 8936)**: `POST /ssf/v1/poll/{stream_id}` with the receiver's
+  `ssf.manage` token (the same one `404` for a stream that is not its own):
+  `maxEvents` clamped to 100, `returnImmediately` honoured (a long poll waits at
+  most 30 s, and **at most one long poll waits per stream per instance** — a
+  second concurrent one answers at once), `400` on a push stream, a negative
+  `maxEvents` or more than 1 000 `ack` / 100 `setErrs` entries, `413` over 32 KiB,
+  `ack` deletes exactly that stream's rows, each `setErrs` entry deletes its row
+  and writes an `ssf_stream.poll_set_error` audit row with the RFC 8935 code, SETs
+  are signed at poll time, a paused or disabled stream answers an empty `sets`;
+  bucket `ssf_poll` under `AXIAM__RATE_LIMIT__SSF_PER_MIN`. The **buffer** keeps at
+  most 1 000 events per stream (the oldest dropped), seven days at most, one row
+  per `jti`; its expiry sweep `ssf_event_buffer` is on `/health/jobs`. Resuming a
+  paused push stream releases its held events oldest first. **Event sources** are
+  emitted where the change happens, through one emitter (a no-op with
+  `ssf_enabled` off, one `txn` per operation): `session-revoked` from the session
+  repository's `invalidate`, `invalidate_user_sessions` and
+  `invalidate_user_sessions_except` (never from a redemption or expiry, whether or
+  not the revocation feed is on); `credential-change` from a password change and
+  reset, a SCIM password write, an OPAQUE registration, TOTP confirmation, an MFA
+  reset or method deletion and a WebAuthn registration (`Passkey` →
+  `fido2-platform`, `SecurityKey` → `fido2-roaming`) — **never `x509`**, because
+  certificates bind only to service accounts and an SSF subject is a user;
+  `account-disabled` and `account-enabled` from an administrator's status write,
+  SCIM `active` and (disable only) a directory deactivation — the directory sync
+  never re-enables an account; `account-purged` from `DELETE /api/v1/users/{id}`,
+  **SCIM `DELETE /Users/{id}`** and the GDPR erasure, with the subject captured
+  before the write; and **`assurance-level-change`** from the honour lane's
+  step-up: schema **v78** adds `ssf_step_up`, a ten-minute record (one per tenant
+  and user, the latest replacing) of the session the user held and its `acr`,
+  written when an authorization request interacts for a step-up with a valid OP
+  session and consumed once by the return leg that arrives with a new session of
+  the same user, which emits only when the `acr` differs (`previous_level`,
+  `change_direction`, `initiating_entity: user`); nothing travels in `return_to`.
+  The record's expiry sweep `ssf_step_up` is on `/health/jobs`; the row goes with
+  its tenant and with both user-erasure paths. The stream-updated announcement of
+  a status change obeys the tenant's `ssf_enabled` like every other producer.
+  `openapi.json` regenerated (the poll route, tag `ssf-receiver`); the management
+  registry is unchanged apart from its spec digest. **Contract §32 amended in
+  place before 1.56 ships (no version bump)** to say all of the above; the
+  `axiam.ssf_push` queues are in `docs/api/asyncapi.yml`.
+- **The Shared Signals Framework transmitter in the documentation (T23.5.4,
+  G-5, contract 1.56 §32).** The website's *Integrate* section gains **Shared
+  Signals (SSF) transmitter**, after the SAML identity provider page: the six
+  CAEP and RISC events as EdDSA-signed SETs with no `exp` that a receiver must
+  de-duplicate on `jti`; the disable-only `ssf_enabled` switch and discovery in
+  both issuer forms (an empty `404` when off); registering a receiver
+  (`ssf_streams:read` / `ssf_streams:write`, the deployment-unique audience,
+  `subject_format`, the write-only sealed `Authorization` header that never follows
+  the endpoint to another origin, `receiver_client_id` with `ssf.manage`); the
+  receiver's `/ssf/v1/*` API, what it may change, the statuses and who may set
+  them, verification every 60 s, poll and push including which responses retry and
+  which dead-letter; what triggers each event; the buffer and dead-letter bounds,
+  the retry and rate-limit variables; privacy; and what is not supported. The
+  settings page lists `ssf_enabled`, and the revocation-feed, back-channel logout
+  and *Federation* pages link to it. The SDK receiver helper and the `ssf`
+  management namespace remain the post-merge fan-out of D-35.
+
+- **The SAML identity provider in the documentation: website page, contract
+  amendment (T23.2.9, G-2, contract 1.55).** The website's *Integrate* section
+  gains **AXIAM as a SAML identity provider**: what a per-tenant IdP offers
+  (SP-initiated and IdP-initiated sign-on, HTTP-Redirect and HTTP-POST, always-signed
+  assertions, a pairwise persistent `NameID`, a signing credential issued by the
+  tenant's CA with issue / promote / retire rotation, single logout), how to
+  register a service provider (the console's *SAML Service Providers* page or the
+  §29 API; metadata import is a parse to a draft), the metadata and endpoint paths
+  under `/saml/v2/{tenant}`, the `saml` build feature and the layered
+  `saml_idp_enabled` switch (an empty `404` when off), `AXIAM__AUTH__SAML_PAIRWISE_KEY`
+  (never change it), the rate-limit buckets, and what is not supported (assertion
+  encryption, signed metadata, the artifact and SOAP bindings, a SAML logout chain
+  from non-SAML logouts). The *Federation — SAML & OIDC* page no longer reads as
+  though AXIAM were only a service provider and links to it, the settings page lists
+  `saml_idp_enabled`, and the generated API index now carries the `saml` operations
+  (and places the `ssf` tags the generator refused). **Contract 1.55, amended before
+  it ships, no version bump:** §29's status text and §29.10 say the routes have
+  landed and that all eleven SDKs (Kotlin, Swift, C and C++ over REST included) are
+  in scope, §29.8 gains an eighth required test (`get_idp` readiness decoding, no
+  caching, the implicit tenant), and the breaking-changes log records the amendment
+  with D-43's `401`. The SDK ports remain the post-merge fan-out of D-35; one
+  tracking issue covers contract 1.53, 1.54 and 1.55 together.
+
+- **Shared Signals Framework transmitter: the stream registry, SET issuance,
+  the stream management API and discovery (T23.5.2, G-5, D-44 … D-52, contract
+  1.56 §32).** AXIAM can now act as an SSF 1.0 transmitter of CAEP
+  `session-revoked`, `credential-change` and `assurance-level-change` and RISC
+  `account-disabled`, `account-enabled` and `account-purged` events; push and
+  poll delivery and the event sources follow in T23.5.3, so nothing is
+  transmitted yet. **Management** (namespace `ssf`, tag `ssf`):
+  `GET`/`POST /api/v1/tenants/{tenant_id}/ssf/streams` and
+  `GET`/`PUT`/`DELETE …/ssf/streams/{stream_id}`, permissions
+  `ssf_streams:read` / `ssf_streams:write` (human-only), each write validated —
+  the push endpoint held to the webhook outbound address policy, the receiver
+  bound to an OAuth2 client of the tenant with the `client_credentials` grant
+  and the new scope **`ssf.manage`**, the audience **unique across the
+  deployment** (`409`), the push `Authorization` header write-only and sealed
+  under `pki_encryption_key` (`503` without it), and never following the endpoint
+  to another origin. **Receiver protocol** (tag `ssf-receiver`):
+  `/.well-known/ssf-configuration?tenant_id=` and, with tenant issuer paths,
+  `/.well-known/ssf-configuration/t/{tenant_id}` (one empty `404` for every way of
+  having nothing to say); the SSF stream management API `/ssf/v1/stream`
+  (`GET`, `PATCH`, `PUT`; `POST`/`DELETE` `403`), `/ssf/v1/status` and
+  `/ssf/v1/verify`, authenticated by the receiver's client-credentials token with
+  `ssf.manage`, every other stream the same `404`. **SETs**
+  (`axiam_oauth2::ssf`): `typ: secevent+jwt`, EdDSA with the deployment key's
+  `kid`, the tenant's issuer, the stream's audience, a 128-bit CSPRNG `jti`, no
+  `sub`, no `exp`, one event; `iss_sub` subjects by default, `email` only on the
+  administrator's choice and only for an address AXIAM vouches for; signed only
+  at delivery for an enabled stream that carries the event. A disable-only
+  layered setting **`ssf_enabled`** (default `false`) switches a tenant's
+  transmitter on. `OutboundKind::SsfPush` (`ssf_push`) is declared for the push
+  deliverer. Schema **v77**: `ssf_stream`, `ssf_event_buffer` and
+  `security_settings.oidc_ssf_enabled`, deleted with their tenant (the buffer
+  with its stream too). New rate-limit knobs `AXIAM__RATE_LIMIT__SSF_PER_MIN`
+  (60, one bucket per receiver route and discovery form) and
+  `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` (30, one per write). `openapi.json` and
+  `management-registry.json` regenerated (184 operations across 27 namespaces);
+  contract 1.56 adds §32 with the optional receiver helper (`verify_set`,
+  `poll`) for the seven full-surface SDKs.
+
+- **SAML 2.0 identity provider: single logout (T23.2.4, G-2, D-37 … D-39).**
+  `GET`/`POST /saml/v2/{tenant_id}/slo` (HTTP-Redirect and HTTP-POST, a
+  `LogoutRequest` or a `LogoutResponse`) and the IdP-initiated trigger
+  `GET /saml/v2/{tenant_id}/sso/logout`, behind `saml`, on the D-20 `404`, with
+  the `end_session_per_min` preset in the buckets `saml_idp_slo` and
+  `saml_idp_sso_logout`. **Every message from an SP is signed by its registered
+  certificate**: the Redirect binding over the exact query octets (RSA-SHA-2
+  only), the POST binding as the root's one enveloped signature verified on that
+  node (SHA-1 refused); `verify_signed_xml` is never called; an SP with no
+  certificate cannot initiate, and its `LogoutResponse` only advances the chain.
+  A verified request ends **whole AXIAM sessions** — the ones the SP participates
+  in, by (tenant, SP, `SessionIndex`) and then the `NameID` value and format, or
+  by `NameID` when it names no index — through OIDC back-channel logout and then
+  `AuthService::logout`, so `GET /oauth2/revocations` shows them; no match is
+  `Success`. The other SPs of those sessions are then told, one at a time
+  through the browser, a signed `LogoutRequest` on their registered binding (a
+  **detached** query signature on Redirect, so no XML signature exists to harvest;
+  an enveloped one on POST, re-verified, through the one auto-post page); each
+  answer is consumed once on the X6 arbiter and only from the SP the request went
+  to; at most 32 SPs; the run ends with a signed `LogoutResponse` (`Success`, or
+  `PartialLogout` when an SP has no endpoint, answered unsigned or not `Success`,
+  or the cap was hit) to the initiator. AXIAM signs nothing for an unverified
+  request. Every answer to a verified message clears every OP-cookie copy and the
+  API cookies; `/slo` never reads the OP cookie. The trigger answers `403` to
+  `Sec-Fetch-Site: cross-site`. Audit `saml_idp.logout` (never a `NameID`). The
+  IdP metadata now advertises `SingleLogoutService` for both bindings. Schema
+  **v76**: `saml_sp_session` (the participant record) and `saml_logout_run` (the
+  replay guard and the chain); both are deleted with their tenant, their SP and
+  by both erasure paths, swept by the cleanup scheduler and listed on
+  `/health/jobs`. Threat model **2.26.0**: **T-366, T-370 … T-379, T-381 … T-384
+  and T-312 Mitigated**, each citing its tests (369 mitigated, 15 open); T-380
+  stays open, accepted. No contract or OpenAPI change: these are browser routes.
+
+- **SAML IdP registry and credential routes, IdP metadata and SP metadata import
+  (T23.2.5, G-2, contract §29).** Eleven routes under
+  `/api/v1/tenants/{tenant_id}/saml`, OpenAPI tag `saml`, **compiled into every
+  build** and independent of the tenant's `saml_idp_enabled` (only
+  `parse-sp-metadata` needs `samael` and answers `503` without it):
+  `get_idp` (the IdP's URLs, whether SAML is available and enabled, the credential
+  slots), the service-provider registry (list with `search`, create, get, replace,
+  delete) and the signing credential (list newest first, issue, promote, retire).
+  Every SP write runs the validator and then the four D-42 refusals —
+  `encrypt_assertions: true`, an `sp_signing_cert_pem` the SSO endpoint cannot use
+  (undecodable, RSA under 2048 bits, anything but RSA or ECDSA on P-256, P-384 or
+  P-521), a changed `entity_id` on update, an `allowed_groups` entry outside the
+  tenant — each a `400 validation_error` naming the rule; a repeated `entity_id`
+  and an occupied slot are `409 conflict`, and an occupied slot is refused
+  **before any key is generated**. **Promote** retires the `active` credential
+  (its key destroyed) and makes `next` active in **one transaction**, refused
+  unless the id is the current `next` and inside its validity window (`409`);
+  of two concurrent promotions one wins. **Retire** works on `next` and `active`
+  and is idempotent. `SamlIdpCredential` is a response type of its own — no key,
+  no ciphertext, no custody. **`parse-sp-metadata` parses to a draft and never
+  writes** (D-41): exactly one of `metadata_xml` and `metadata_url`; a URL is
+  fetched once, only through the SSRF guard (`https`, no loopback, private,
+  link-local or cloud-metadata address, every redirect hop checked); a document
+  with any DTD or entity declaration, a non-UTF-8 encoding, over 512 KiB, an
+  aggregate or anything but one `EntityDescriptor` with one SAML 2.0
+  `SPSSODescriptor` is refused with one of three generic messages that never
+  carry the document, a status line or an address; the document's own signature
+  is reported, not evaluated; `encrypt_assertions` is never set. **`GET`/`HEAD
+  /saml/v2/{tenant_id}/metadata`** serves the tenant's IdP metadata (D-40):
+  unauthenticated, unsigned, a fixed escaped template with the `active` and then
+  the `next` signing certificate and no encryption key, `Cache-Control: public,
+  max-age=3600`, a strong `ETag` and `304`; a tenant with SAML off, an unknown or
+  non-canonical id, no publishable credential and a build without SAML all answer
+  the same empty `404`. The permissions are `saml_sp:read`, `saml_sp:write` and
+  `saml_idp:credential` (human principals only: a service-account token is
+  refused with the `401` every human-only route answers; another tenant's id is
+  `403`); the seven writes each have a per-IP bucket under
+  `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` (default 30, never preset), the
+  metadata route the `end_session_per_min` preset in the bucket
+  `saml_idp_metadata`; seven audit actions (`saml_sp.created`, `.updated`,
+  `.deleted`, `.metadata_parsed`; `saml_idp.credential_issued`, `.promoted`,
+  `.retired`) carry the actor, ids, the names of what changed and fingerprints,
+  never a certificate or a document. Deleting a service provider now removes what
+  the datastore holds for it (its pending sign-on requests) in the same
+  transaction. `idp_entity_id`, `idp_sso_url` and `idp_slo_url` moved out of the
+  `saml`-gated module. `openapi.json` and `management-registry.json` are
+  regenerated (179 operations, 26 namespaces). Threat model: T-357 … T-365,
+  T-367 … T-369 and T-309 are Mitigated (353 mitigated / 31 open); T-366 stays
+  open until T23.2.4 adds the rows its cascade must also remove. A revoked or
+  expired issuing CA is now a `400` on `issue_idp_credential` (the generic
+  certificate routes keep their existing answer).
+
 - **Directory e2e against a real OpenLDAP and a real Samba AD DC (T23.3.6,
   G-3).** The oracle for the whole G-3 stack: `docker/docker-compose.directory.yml`
   brings up OpenLDAP (slapd with ppolicy, TLS 1.2 floor, a read-only bind
@@ -77,6 +334,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sdks/management-registry.json` are regenerated (168 operations, 25
   namespaces; `PATCH` bodies are classified `sparse`); the ports follow from
   the merge commit (§30.10).
+
+- **SDK contract 1.55: §29 SAML service provider registration (T23.2.8,
+  G-2).** The normative management surface for AXIAM as a SAML 2.0 identity
+  provider, ahead of the routes (T23.2.5 implements them and regenerates
+  `openapi.json` and `management-registry.json`): a §27 namespace `saml` under
+  `/api/v1/tenants/{tenant_id}/saml` with eleven operations — `get_idp`;
+  `list_service_providers` (paginated), `create_service_provider`,
+  `get_service_provider`, `update_service_provider` (a **replacement**) and
+  `delete_service_provider`; `parse_sp_metadata`, which turns an uploaded or
+  server-fetched SP metadata document into a draft and stores nothing (fetched
+  only through the SSRF guard, any DTD refused, nothing trusted from an unsigned
+  document); and `list_idp_credentials`, `issue_idp_credential`,
+  `promote_idp_credential` (one transaction: `next` → `active`, the old
+  `active` → `retired`) and `retire_idp_credential`. Nothing is `Sensitive`, and
+  `SamlIdpCredential` has no key member. Every write runs
+  `validate_saml_service_provider`; `encrypt_assertions` and an SP signing
+  certificate the SSO endpoint could not use are refused; `entity_id` is unique
+  per tenant and immutable; the routes exist in every build and do not depend on
+  `saml_idp_enabled` (`parse_sp_metadata` alone answers `503` without SAML);
+  permissions `saml_sp:read`, `saml_sp:write` and `saml_idp:credential`; human
+  principals only; a rate-limit bucket `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN`;
+  audit rows; no retry of writes; seven portable tests per SDK. Decisions D-37 …
+  D-42 pin the rest of W4's SAML work: a per-SP random `SessionIndex` recorded
+  before signing (closing T-312 when single logout lands), single logout's
+  bindings, verification, narrow signing and revoke-then-propagate chain, the
+  IdP metadata document (unsigned, `active` then `next`, the D-20 `404` without
+  a credential), SP metadata import, and the credential verbs. The design
+  document gains a §8e *SAML 2.0 Identity Provider* chapter. Non-breaking /
+  additive; **re-sync `CONTRACT.md` for 1.55 in all eleven SDK repositories**
+  from the merged commit.
+
+- **Threat model 2.25.0 (T23.2.8, G-2).** The SAML identity provider's
+  remaining elements — the SP registry store and its management routes (SP
+  metadata import as an SSRF and XXE surface), the IdP metadata endpoint, and the
+  single-logout endpoint with the `saml_sp_session` and `saml_logout_run` stores
+  — and **T-357 … T-384**, all entered **Open**: twenty-seven because the
+  controls they name are specified and not yet built (T23.2.5 and T23.2.4 close
+  them, each with the tests its mitigation lists), and T-380 — a service
+  provider's own session outliving an AXIAM session that ends by anything but a
+  logout chain — because it is an accepted trade-off (no SAML browser back
+  channel). T-309 and T-312 are amended to the decisions that close them. 384
+  threats, 340 mitigated / 44 open; `threatTop` corrected to 384.
 
 - **SDK contract 1.54: §30 directory configuration (T23.3.7, G-3).** The
   normative management surface for a tenant's LDAP / Active Directory identity
@@ -508,7 +807,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hint. A hinted `end_session` is unchanged. Threat T-290; T-237 and T-238
   amended; model 2.19.0.
 
+- **Admin console: the *SAML Service Providers* page (T23.2.6, G-2, contract
+  §29).** One page per tenant at `/saml` (sidebar *Identity*), its nav entry and
+  its route both gated on `saml_sp:read`, over the eleven §29 routes; no server,
+  contract or threat-model change. **Identity provider panel**: the entity id, the
+  metadata URL (copyable), the sign-on and logout URLs, and whether SAML is
+  available in the build, enabled for the tenant and serving metadata, with what
+  to do when it is not. **Service providers** (`saml_sp:write` for every write): a
+  searchable, paginated list; manual entry and edit of every
+  `SamlServiceProviderInput` member, with the ACS allow-list (binding, index,
+  default), the SLO pair, NameID format, `sign_responses`, the two SP
+  certificates as PEM, signed-request and IdP-initiated switches, the attribute
+  mappings and an `allowed_groups` picker over the tenant's groups. The **entity
+  id is read-only on edit** (D-42) and is taken from the stored registration, not
+  the form; **`encrypt_assertions` is shown disabled ("not yet supported") and the
+  form has no member that could send it as `true`**; an edit re-reads the
+  registration and sends a full `PUT`; delete asks first and says it ends no
+  session. **Import from metadata**: paste, upload or an `https` URL into
+  `parse_sp_metadata`, shown as a **draft** with its fingerprints and warnings and
+  the *signature not verified* warning in front, edited in the ordinary form and
+  saved only by the explicit save through `create_service_provider`; both or
+  neither of XML and URL is refused before any request. **Signing credentials**
+  (`saml_idp:credential` for all three actions): status, fingerprint, validity and
+  serial; issue from the organization's active CAs into `active` or `next` for 1
+  to 730 days (default 365); promote behind a confirmation that service providers
+  must have fetched the new metadata; retire behind a confirmation that retiring
+  the **active** credential stops SAML sign-on for the whole tenant at once. The
+  `400`, `404`, `409` and `503` messages are shown verbatim, past the generic
+  redactor. The `saml_admin` row of the frontend coverage matrix is now *covered*,
+  and the Playwright permission matrix has the `/saml` route. The
+  `saml_idp_enabled` setting has no console control yet; the page says so and
+  points to the settings API. Tests: 121 across the service, the form logic and the
+  page (fixtures built at run time).
+
 ### Changed
+
+- **The SAML assertion's `SessionIndex` is a per-SP random token, not the AXIAM
+  session id (T23.2.4, D-37, closes T-312).** SPs that compared notes could
+  correlate one person's sessions through a `SessionIndex` that was the same at
+  every SP of a sign-on. The SSO endpoint's second leg now records — or reads
+  back — a `saml_sp_session` row (the `NameID` the SP is given and 32 CSPRNG
+  bytes, base64url) after the handle is consumed and **before anything is
+  signed**, and the assertion carries that index; a second sign-on to the same SP
+  in one session reuses it. A failed write is a `Responder` failure with no
+  assertion. `SsoIssuance` gains `session_index` and `IssuedResponse.session_index`
+  is a string. An SP that stored the session id as a `SessionIndex` sees a new
+  value on its next sign-on.
 
 - **An email `NameID` is issued only for an address something vouches for
   (T23.2.3, D-25, T-313).** The SAML IdP asserts a user's email — as the
@@ -525,8 +869,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path (`/saml/v2/{tenant_id}/sso`), same value and attributes; logout and both
   `end_session`s clear it with the others (T23.2.3, D-11).
 - Front-channel logout declined by design and recorded (T23.12.1, D-6)
+- **The webhook dispatcher is now a shared outbound dispatcher (T23.5.1, D-36);
+  internal refactor, no behaviour change.** G-5 (Shared Signals Framework push)
+  and G-6 (outbound SCIM) need the same durable queue, one-attempt delivery,
+  bounded backoff and dead-letter queue that webhooks already had, and sit in
+  layers that cannot reach `axiam-api-rest`. `axiam-core` gains
+  `outbound::{OutboundMessage, OutboundKind, OutboundPublisher,
+  OutboundDeliverer, DeliveryOutcome}` (two object-safe ports); `axiam-amqp`
+  gains `outbound` (per-kind topology declaration, publisher, the consume loop,
+  the retry policy and the deliverer registry); `WebhookDeliveryService`
+  implements `OutboundDeliverer` and `axiam-server` registers it with the
+  generic loop. Webhooks keep exactly their queue, retry-queue and DLQ names and
+  arguments (`axiam.webhook`, `.retry`, `.dlq`), their on-the-wire message
+  format (so in-flight messages and a rolling upgrade are unaffected), signing
+  (`X-Axiam-Timestamp`, `X-Axiam-Signature`), SSRF-guarded delivery, the
+  `AXIAM__WEBHOOK__MAX_ATTEMPTS`, `AXIAM__WEBHOOK__BACKOFF_BASE_MS` and
+  `AXIAM__WEBHOOK__BACKOFF_CEILING_MS` variables, and the
+  `webhook.delivery_*` audit records. A test pins the names byte for byte.
+  Source-level moves: `WebhookRetryConfig::from_env()` is now
+  `OutboundRetryConfig::from_env_for(OutboundKind::Webhook)`
+  (`WebhookRetryConfig` remains as an alias of `OutboundRetryConfig`);
+  `WebhookDeliveryService::emit` takes `&dyn OutboundPublisher`. The OpenAPI
+  document is unchanged.
 
 ### Fixed
+
+- **OpenAPI: `AcsEndpoint.index` is published with `maximum: 65535` (F4 W4
+  P23W4-05).** The model and contract §29.2 say an unsigned 16-bit integer; the
+  schema said an unbounded `int32`, so a generated SDK accepted values the server
+  refuses with `400`.
 
 - **Directory just-in-time provisioning: a lost race checks the winner's status
   before mapping groups (F4 P23W3-05).** When two first sign-ins for one
@@ -600,6 +971,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the 16 KiB body limit on `PUT /oauth2/register/{client_id}`.
 
 ### Security
+
+- **Phase 23 W4 security review (F4).**
+  `claude_dev/security-review-phase23-w4-2026-10-04.md`: single logout (D-38),
+  the SAML SP registry and credential routes, SP metadata import with D-54's
+  tree rewrite, SET issuance, the SSF receiver API, push and poll delivery and
+  the event sources reviewed adversarially. Five fixes (P23W4-01 … -05, above),
+  pins for SET token confusion at every verifier and for the wave's multi-value
+  `IN` queries. T-370 and T-377 now state the Redirect `SigAlg` rule exactly;
+  T-390's residual is corrected (audience squatting where every tenant's SETs
+  share one issuer, P23W4-11, a decision for the maintainer) and the website's
+  SSF page tells receivers to take `aud` from their stream and require the push
+  `Authorization` header. Threat model 2.30.0: 406 threats, 389 mitigated / 17
+  open.
+
+- **SSF requires per-tenant issuers in a multi-tenant deployment (F4 W4 P23W4-11, D-55, #539; threat model 2.31.0, T-390).** With `AXIAM__AUTH__TENANT_ISSUER_PATHS` off and more than one tenant, SSF is inactive for every tenant — discovery `404`, no stream on the receiver API, nothing produced or signed, a queued push dead-lettered, a poll answering nothing — and turning `ssf_enabled` on is `400` naming the cause; streams and settings say why (`transmitter_active`, `oidc.ssf_inactive_reason`), a change is logged once at `WARN` and audited as `ssf.inactive_shared_issuer`. Contract §32 amended in place (1.56).
+
+- **A long poll logs an unsignable held event once (F4 W4 P23W4-03).** When the
+  deployment key could not sign a held SSF event, `POST /ssf/v1/poll/{id}`
+  logged it at `ERROR` on every half-second look of a long poll — about sixty
+  lines per waiting receiver per half minute. Once per request now; the
+  long-poll wait can no longer underflow its 30-second cap and panic.
+
+- **A page can no longer spend a user's step-up record (F4 W4 P23W4-02, closes
+  T-404's residual).** `/oauth2/authorize` consumed the `ssf_step_up` row on the
+  return-leg marker alone, before validating the client and `redirect_uri`, and
+  in the session that was asked to step up, so any page could suppress the
+  user's `assurance-level-change`. The row is now consumed only for a request
+  the authorization service accepted, and only by a return leg in another
+  session than the one the step-up was asked of.
+
+- **SSF stream writes no longer undo each other (F4 W4 P23W4-01, adds T-406;
+  threat model 2.30.0).** Every stream write was read-modify-write, so a
+  receiver's `PATCH`, `PUT` or status write that overlapped an administrator's
+  change put back the status, allowance, receiver binding or subject format the
+  administrator had just set — a `disabled` included — and the push deliverer
+  could send a header supplied for a new endpoint to the old one. Writes are now
+  conditional on the version they were prepared from: a receiver's write decides
+  again from a fresh read (and answers `409` only if the stream keeps changing),
+  an administrator's `PUT /api/v1/tenants/{t}/ssf/streams/{s}` answers `409`
+  when the stream changed since it was read, and the deliverer reads the stream
+  again before it sends. Contract §32.3 rule 4 and §32.6 amended in place (1.56
+  is unreleased). 406 threats, 389 mitigated / 17 open.
+
+- **SSF delivery threats T-402 … T-405 (T23.5.4, threat model 2.29.0).** Held
+  and dead-lettered events keeping a person's subject (T-402: seven-day TTL on
+  `axiam.ssf_push.dlq` and the buffer; an erased subject can outlive the erasure
+  there for up to seven days), long polls held open (T-403: one waiting long
+  poll per stream per instance), an `assurance-level-change` forged or
+  suppressed through the step-up record (T-404) — all three mitigated with
+  their tests — and a lost event nobody is told of (T-405, open: production is
+  best effort). T-391 gains the no-redirect push, T-392's delivery text is
+  corrected, and the SSF store is renamed `ssf_stream + ssf_event_buffer +
+  ssf_step_up`. 405 threats, 388 mitigated / 17 open.
+
+- **SSF push cannot be aimed at an internal address, flood a receiver or grow a
+  buffer without bound (T23.5.3, closes T-392, T-394, T-395; threat model
+  2.28.0).** Every push goes through the shared SSRF guard with
+  `allow_private = false` and follows no redirect; retries are bounded by the
+  dispatcher and an answer that cannot change on retry dead-letters at once; the
+  poll buffer holds 1 000 events per stream for seven days and its sweep is on
+  `/health/jobs`. T-388 (replay) stays open until the SDK receiver helper
+  de-duplicates `jti`. 401 threats, 385 mitigated / 16 open.
+
+- **SSF transmitter threats T-385 … T-401 (T23.5.2, threat model 2.27.0).**
+  Receiver impersonation, cross-tenant stream access, forged, replayed and
+  confused SETs, a SET misaddressed through an audience shared across tenants,
+  the push credential, push-endpoint SSRF, API and event flooding, the poll
+  buffer, subject-identifier linkability, a receiver widening its events,
+  delivery after a stream was disabled, attribution, the receiver binding and
+  discovery as an oracle. Thirteen are mitigated with their tests; T-392, T-394
+  and T-395 stay open until T23.5.3 builds delivery on the decided controls, and
+  T-388 (replay) until the SDK receiver helper de-duplicates `jti`. 401 threats,
+  382 mitigated / 19 open.
+
+- **Single logout cannot be forged, replayed or aimed at another session
+  (T23.2.4, closes T-366, T-370 … T-379, T-381 … T-384; T-312).** The tenant's
+  signing key signs a logout message only for a session whose holder ended it or
+  for a verified SP request — never for anyone else — and on the Redirect
+  binding with a detached query signature, so no `ds:Signature` over a logout
+  message exists to be lifted into an assertion (T-316's constraint, T-373).
+  Every SP message is verified per node with the D-23 placement rule or over the
+  exact query octets; a replayed request `ID`, a foreign or replayed
+  `InResponseTo`, a wrong `Destination`, a stale `IssueInstant`, an `EncryptedID`
+  and more than 32 `SessionIndex` values are refused; an SP reaches only the
+  sessions it took part in, under the `NameID` it was given, in its own tenant.
+  Threat model 2.26.0 (369 mitigated, 15 open); the tests each mitigation cites
+  are in `saml_idp_slo_test.rs`, `saml_slo_test.rs` and `saml_idp_sso_test.rs`.
 
 - **Directory management: the address guard's answer to a host name no longer
   maps internal DNS (F4 P23W3-04, adds T-356).** A `PUT` or `PATCH` on

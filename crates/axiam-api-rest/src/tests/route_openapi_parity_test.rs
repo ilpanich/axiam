@@ -109,6 +109,18 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     // `uma_protection` scope is the gate.
     "/uma2/rreg/resource_set",
     "/uma2/rreg/resource_set/{id}",
+    // SSF 1.0 stream management API (G-5, T23.5.2). Authenticated by the
+    // `SsfReceiverToken` extractor — an OAuth2 client's client-credentials
+    // token carrying `ssf.manage` — and not permission-gated, for the UMA
+    // reason: the scope is the gate, and the stream binding to the client is
+    // the authorization.
+    "/ssf/v1/stream",
+    "/ssf/v1/status",
+    "/ssf/v1/verify",
+    // SSF 1.0 / RFC 8936 poll delivery (G-5, T23.5.3): the same extractor and
+    // the same reasoning; the stream is looked up for the token's client, so
+    // another client's stream id is a `404`.
+    "/ssf/v1/poll/{stream_id}",
 ];
 
 /// Returns true if `openapi_path` is covered by any `PUBLIC_PATHS` entry.

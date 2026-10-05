@@ -4,11 +4,12 @@
 //! The old `deliver()` was a detached `tokio::spawn` running an in-process
 //! `tokio::time::sleep` exponential-backoff retry loop with ZERO call
 //! sites — it died on process restart and never actually ran (CORR-03).
-//! `emit()` now only publishes one `axiam_amqp::WebhookMessage` per matching
-//! webhook onto the durable `axiam.webhook` AMQP topology (declared via
-//! `axiam_amqp::connection::declare_webhook_topology`); `deliver_once()` is
-//! the single-attempt HTTP delivery the AMQP consumer (wired in 26-07)
-//! drives per (re)delivery. Retry scheduling is now owned by RabbitMQ's
+//! `emit()` now only enqueues one webhook-kind `axiam_core::outbound::OutboundMessage`
+//! per matching webhook onto the durable `axiam.webhook` AMQP topology (declared
+//! via `axiam_amqp::connection::AmqpManager::declare_webhook_topology`);
+//! `deliver_once()` is the single-attempt HTTP delivery the generic outbound
+//! consumer (`axiam_amqp::outbound`, D-36) drives per (re)delivery through this
+//! type's `OutboundDeliverer` implementation. Retry scheduling is now owned by RabbitMQ's
 //! native per-message TTL + dead-letter-exchange pair on the retry queue,
 //! not by an in-process sleep (D-07).
 //!
@@ -35,6 +36,10 @@
 
 use axiam_auth::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
 use axiam_core::id::new_id;
+use axiam_core::outbound::{
+    DeliveryOutcome, OutboundDeliverer, OutboundError, OutboundFuture, OutboundKind,
+    OutboundMessage, OutboundPublisher,
+};
 use axiam_core::repository::WebhookRepository;
 use axiam_federation::ssrf::{self, SsrfError};
 use chrono::Utc;
@@ -157,14 +162,15 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
     }
 
     /// Publish-only replacement for the old `deliver()` (D-06): fetches the
-    /// webhooks matching `event_type` for `tenant_id` and publishes ONE
-    /// `axiam_amqp::WebhookMessage` per webhook via the injected
-    /// `WebhookPublisher`. Performs no HTTP call and does not spawn a
-    /// detached task — the AMQP consumer (wired in 26-07) drives
-    /// `deliver_once` per (re)delivery.
+    /// webhooks matching `event_type` for `tenant_id` and enqueues ONE
+    /// webhook-kind `OutboundMessage` per webhook via the injected
+    /// `OutboundPublisher` (on the wire: the same `WebhookMessage` JSON on
+    /// `axiam.webhook` as before). Performs no HTTP call and does not spawn a
+    /// detached task; the AMQP consumer drives `deliver_once` per
+    /// (re)delivery.
     pub async fn emit(
         &self,
-        publisher: &axiam_amqp::WebhookPublisher,
+        publisher: &dyn OutboundPublisher,
         tenant_id: Uuid,
         event_type: String,
         payload: serde_json::Value,
@@ -181,16 +187,17 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
         };
 
         for webhook in webhooks {
-            let msg = axiam_amqp::WebhookMessage {
-                webhook_id: webhook.id,
-                delivery_id: new_id(),
+            let msg = OutboundMessage {
+                kind: OutboundKind::Webhook,
                 tenant_id,
+                target_id: webhook.id,
+                delivery_id: new_id(),
                 event_type: event_type.clone(),
                 payload: payload.clone(),
                 attempt: 0,
             };
 
-            if let Err(e) = publisher.publish(&msg).await {
+            if let Err(e) = publisher.enqueue(&msg).await {
                 tracing::error!(
                     webhook_id = %webhook.id,
                     %tenant_id, %event_type,
@@ -296,6 +303,53 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
                 Err(webhook_err)
             }
         }
+    }
+}
+
+/// The webhook kind's deliverer (D-36): one `deliver_once` attempt, classified
+/// for the generic consume loop.
+///
+/// * 2xx: `Delivered`, carrying the status for the success audit record.
+/// * any other status: `Retry` with reason `non-2xx status: <code>`.
+/// * `WebhookError` (SSRF-blocked, secret-decrypt failure, lookup failure, ...):
+///   `Retry` with the error's text. Today's behaviour retries every failure up to
+///   `AXIAM__WEBHOOK__MAX_ATTEMPTS`; this classification keeps that.
+impl<W: WebhookRepository + Clone + 'static> OutboundDeliverer for WebhookDeliveryService<W> {
+    fn kind(&self) -> OutboundKind {
+        OutboundKind::Webhook
+    }
+
+    fn deliver_attempt<'a>(
+        &'a self,
+        msg: &'a OutboundMessage,
+    ) -> OutboundFuture<'a, Result<DeliveryOutcome, OutboundError>> {
+        Box::pin(async move {
+            if msg.kind != OutboundKind::Webhook {
+                return Ok(DeliveryOutcome::DeadLetter {
+                    reason: format!("not a webhook message: {}", msg.kind),
+                });
+            }
+            let result = self
+                .deliver_once(
+                    msg.tenant_id,
+                    msg.target_id,
+                    msg.delivery_id,
+                    &msg.event_type,
+                    &msg.payload,
+                )
+                .await;
+            Ok(match result {
+                Ok(status) if status.is_success() => DeliveryOutcome::Delivered {
+                    response_status: Some(status.as_u16()),
+                },
+                Ok(status) => DeliveryOutcome::Retry {
+                    reason: format!("non-2xx status: {}", status.as_u16()),
+                },
+                Err(e) => DeliveryOutcome::Retry {
+                    reason: e.to_string(),
+                },
+            })
+        })
     }
 }
 

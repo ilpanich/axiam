@@ -15,7 +15,9 @@ use crate::authz::{AuthzData, RequirePermission, is_own_resource, user_scope_ten
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
 use crate::extractors::client_info::{client_ip, user_agent};
+use crate::ssf_emitter::{CredentialDetail, with_cause};
 use crate::state::AppState;
+use axiam_oauth2::ssf::{ChangeType, CredentialType, InitiatingEntity, SsfSubject};
 
 // -----------------------------------------------------------------------
 // Input validation helpers (CQ-B26)
@@ -225,6 +227,7 @@ pub async fn create<C: Connection + Clone>(
     // getting that wrong produced a verifier no login could ever satisfy. An
     // OPAQUE record binds to a server-chosen credential identifier instead, so
     // a `user.pre_create` reactor renaming the user cannot break it.
+    let opaque_registered = enrolled.is_some();
     crate::handlers::opaque_enrollment::store_credential(
         &state,
         created.tenant_id,
@@ -232,6 +235,22 @@ pub async fn create<C: Connection + Clone>(
         enrolled,
     )
     .await?;
+    // G-5 (D-52): an OPAQUE registration is a password credential, created by
+    // the administrator who made the account.
+    if opaque_registered {
+        state
+            .ssf
+            .emitter
+            .credential_changed(
+                created.tenant_id,
+                created.id,
+                CredentialType::Password,
+                ChangeType::Create,
+                InitiatingEntity::Admin,
+                CredentialDetail::default(),
+            )
+            .await;
+    }
 
     // The account is written as `PendingVerification`, so without this the user
     // has no way to activate it: nothing told them it exists, and the only path
@@ -406,7 +425,39 @@ pub async fn update<C: Connection + Clone>(
     crate::reactor_hooks::user_pre_update(&state.events.reactor_gate, scope, target_id, &mut input)
         .await?;
 
+    // G-5 (D-52): a status written by an administrator can disable or enable
+    // the account, which is a RISC event. What it was is read before the write.
+    let status_before = match input.status {
+        Some(_) => state
+            .user_repo
+            .get_by_id(scope, target_id)
+            .await
+            .ok()
+            .map(|u| u.status),
+        None => None,
+    };
+
     let updated = state.user_repo.update(scope, target_id, input).await?;
+
+    if let Some(before) = status_before {
+        match (before, updated.status.clone()) {
+            (previous, UserStatus::Inactive) if previous != UserStatus::Inactive => {
+                state
+                    .ssf
+                    .emitter
+                    .account_disabled(updated.tenant_id, &updated)
+                    .await;
+            }
+            (UserStatus::Inactive, UserStatus::Active) => {
+                state
+                    .ssf
+                    .emitter
+                    .account_enabled(updated.tenant_id, &updated)
+                    .await;
+            }
+            _ => {}
+        }
+    }
 
     // A rename used to need work here: SRP derived `x` over
     // `username ":" password`, so this handler had to read the pre-update
@@ -477,12 +528,33 @@ pub async fn delete<C: Connection + Clone>(
     // Before the tombstone, because a failure here must abort the delete rather
     // than leave a removed account with live sessions. `revoke_all_sessions`
     // covers session-flow refresh tokens and OAuth2 refresh tokens alike.
-    state
-        .auth_service
-        .revoke_all_sessions(user.tenant_id, target_id)
-        .await?;
+    // G-5 (D-52): the subject of an `account-purged` is captured **before** the
+    // write — afterwards the row is a tombstone with no address — and the
+    // revocations and the purge are one cause.
+    let purged_subject = state
+        .user_repo
+        .get_by_id(user.tenant_id, target_id)
+        .await
+        .ok()
+        .map(|u| SsfSubject::from_user(&u));
+    with_cause(Some(InitiatingEntity::Admin), async {
+        state
+            .auth_service
+            .revoke_all_sessions(user.tenant_id, target_id)
+            .await?;
 
-    state.user_repo.delete(user.tenant_id, target_id).await?;
+        state.user_repo.delete(user.tenant_id, target_id).await?;
+
+        if let Some(subject) = purged_subject {
+            state
+                .ssf
+                .emitter
+                .account_purged(user.tenant_id, subject)
+                .await;
+        }
+        Ok::<(), AxiamApiError>(())
+    })
+    .await?;
 
     // Erase the personal data held OUTSIDE the user row.
     //

@@ -1,19 +1,24 @@
 //! Publisher for webhook delivery messages (CORR-03/D-07).
 //!
-//! `WebhookPublisher` puts one `WebhookMessage` per matching webhook onto
-//! the `axiam.webhook` primary queue (`publish`) or, on retry, the
-//! `axiam.webhook.retry` delay queue (`publish_retry`, per-message TTL) so
-//! RabbitMQ's native TTL + dead-letter-exchange pair schedules the delay —
-//! no external scheduler, no in-process `tokio::time::sleep` tying up a
-//! consumer slot (D-07/Pitfall 5). Mirrors `MailOutboundPublisher`'s shape.
+//! Since D-36 the queueing is done by the kind-generic
+//! [`AmqpOutboundPublisher`]; `WebhookPublisher` is the webhook-typed face of
+//! it. It keeps the pre-extraction API (`new`, `publish`, `publish_retry` over
+//! [`WebhookMessage`]) so existing callers and tests are unchanged, and also
+//! implements the core [`OutboundPublisher`] port so that a webhook producer
+//! can hold it as `&dyn OutboundPublisher`.
+//!
+//! `publish` puts one `WebhookMessage` per matching webhook onto the
+//! `axiam.webhook` primary queue; `publish_retry` puts it on the
+//! `axiam.webhook.retry` delay queue (per-message TTL) so RabbitMQ's native
+//! TTL + dead-letter-exchange pair schedules the delay (D-07/Pitfall 5).
 
-use lapin::options::BasicPublishOptions;
-use lapin::{BasicProperties, Channel, Confirmation};
-use tracing::error;
+use lapin::Channel;
 
-use crate::connection::queues;
+use axiam_core::outbound::{OutboundError, OutboundFuture, OutboundMessage, OutboundPublisher};
+
 use crate::error::AmqpError;
 use crate::messages::WebhookMessage;
+use crate::outbound::AmqpOutboundPublisher;
 
 /// Publishes webhook delivery messages to the primary/retry queues
 /// (CORR-03/D-07).
@@ -22,84 +27,53 @@ use crate::messages::WebhookMessage;
 /// publisher confirms enabled before wrapping it here.
 #[derive(Clone)]
 pub struct WebhookPublisher {
-    channel: Channel,
+    inner: AmqpOutboundPublisher,
 }
 
 impl WebhookPublisher {
+    /// Wrap a confirm-enabled publisher channel.
     pub fn new(channel: Channel) -> Self {
-        Self { channel }
+        Self {
+            inner: AmqpOutboundPublisher::new(channel),
+        }
     }
 
-    async fn publish_to(
-        &self,
-        queue: &str,
-        msg: &WebhookMessage,
-        properties: BasicProperties,
-    ) -> Result<(), AmqpError> {
-        let payload = serde_json::to_vec(msg).map_err(|e| {
-            error!(error = %e, "Failed to serialize WebhookMessage");
-            AmqpError::Publish(e.to_string())
-        })?;
-
-        let confirm = self
-            .channel
-            .basic_publish(
-                "".into(),
-                queue.into(),
-                BasicPublishOptions::default(),
-                &payload,
-                properties,
-            )
-            .await
-            .map_err(|e| AmqpError::Publish(e.to_string()))?;
-
-        match confirm.await {
-            Ok(Confirmation::Nack(_)) => {
-                Err(AmqpError::Publish("broker nacked webhook publish".into()))
-            }
-            Err(e) => {
-                error!(error = %e, "Webhook publish not confirmed by broker");
-                Err(AmqpError::Publish(e.to_string()))
-            }
-            Ok(_) => Ok(()),
-        }
+    /// The kind-generic publisher underneath, which the generic consume loop
+    /// uses for its TTL-delayed retry republish.
+    pub fn as_outbound(&self) -> &AmqpOutboundPublisher {
+        &self.inner
     }
 
     /// Publish a webhook delivery message to the primary `axiam.webhook`
     /// queue (first attempt, or a message that already dead-lettered back
     /// from the retry queue after its TTL expired).
     pub async fn publish(&self, msg: &WebhookMessage) -> Result<(), AmqpError> {
-        self.publish_to(
-            queues::WEBHOOK,
-            msg,
-            BasicProperties::default()
-                .with_content_type("application/json".into())
-                .with_delivery_mode(2), // persistent
-        )
-        .await
+        self.inner.publish(&msg.clone().into()).await
     }
 
     /// Publish a webhook delivery message to the `axiam.webhook.retry` queue
     /// with a per-message TTL of `ttl_ms`. RabbitMQ dead-letters the message
     /// back to the primary `axiam.webhook` queue via the default exchange
-    /// once the TTL expires — no consumer is ever attached to the retry
+    /// once the TTL expires: no consumer is ever attached to the retry
     /// queue, so no slot is held for the delay duration (D-07/Pitfall 5).
     pub async fn publish_retry(&self, msg: &WebhookMessage, ttl_ms: u64) -> Result<(), AmqpError> {
-        self.publish_to(
-            queues::WEBHOOK_RETRY,
-            msg,
-            BasicProperties::default()
-                .with_content_type("application/json".into())
-                .with_delivery_mode(2)
-                .with_expiration(ttl_ms.to_string().into()),
-        )
-        .await
+        self.inner.publish_retry(&msg.clone().into(), ttl_ms).await
+    }
+}
+
+impl OutboundPublisher for WebhookPublisher {
+    fn enqueue<'a>(
+        &'a self,
+        msg: &'a OutboundMessage,
+    ) -> OutboundFuture<'a, Result<(), OutboundError>> {
+        self.inner.enqueue(msg)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lapin::BasicProperties;
     use serde_json::json;
     use uuid::Uuid;
 

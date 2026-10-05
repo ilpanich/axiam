@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta17";
-export const API_OPERATION_COUNT = 239;
-export const API_PATH_COUNT = 167;
+export const API_OPERATION_COUNT = 266;
+export const API_PATH_COUNT = 182;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -390,7 +390,7 @@ export const API_INDEX: ApiGroup[] = [
  {
   "id": "api-federation",
   "label": "Federation",
-  "blurb": "SAML service provider and OIDC relying-party configuration, the SSO entry points, and a tenant's LDAP / Active Directory identity source.",
+  "blurb": "SAML service provider and OIDC relying-party configuration, the SSO entry points, a tenant's LDAP / Active Directory identity source, and the registry of service providers for AXIAM's own SAML identity provider.",
   "operations": [
    {
     "method": "POST",
@@ -508,6 +508,61 @@ export const API_INDEX: ApiGroup[] = [
     "method": "GET",
     "path": "/api/v1/tenants/{tenant_id}/directory/sync-status",
     "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/tenants/{tenant_id}/saml/idp",
+    "summary": "The tenant's IdP as an SP will meet it, and whether it answers yet: readiness is visible only here, never on the unauthenticated metadata route (T-368)."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/tenants/{tenant_id}/saml/idp-credentials",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/tenants/{tenant_id}/saml/idp-credentials",
+    "summary": "Generates an RSA-4096 key and a leaf under `issuer_ca_id` into an **empty** slot."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote",
+    "summary": "In **one transaction**, retires the `active` credential (its key destroyed) and makes the `next` one `active`."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire",
+    "summary": "Retires a `next` or an `active` credential and destroys its key."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/tenants/{tenant_id}/saml/parse-sp-metadata",
+    "summary": "Takes exactly one of `metadata_xml` and `metadata_url` and returns what a registration of that SP could look like, the fingerprints of the certificates it carries and warnings."
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/tenants/{tenant_id}/saml/service-providers",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/tenants/{tenant_id}/saml/service-providers",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}",
+    "summary": ""
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}",
+    "summary": "Removes the registration and what the datastore holds for it, in one transaction."
    }
   ]
  },
@@ -1310,6 +1365,95 @@ export const API_INDEX: ApiGroup[] = [
     "method": "DELETE",
     "path": "/api/v1/scim-tokens/{id}",
     "summary": "Revokes rather than deletes: the row is what lets an operator later answer \"was this credential still live on the day of the incident?\", and a deleted row answers nothing."
+   }
+  ]
+ },
+ {
+  "id": "api-shared-signals",
+  "label": "Shared signals",
+  "blurb": "Shared Signals Framework streams: the management API that registers a receiver, and the receiver protocol the receiver itself calls.",
+  "operations": [
+   {
+    "method": "GET",
+    "path": "/.well-known/ssf-configuration",
+    "summary": "",
+    "public": true
+   },
+   {
+    "method": "GET",
+    "path": "/.well-known/ssf-configuration/t/{tenant_id}",
+    "summary": "",
+    "public": true
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/tenants/{tenant_id}/ssf/streams",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/tenants/{tenant_id}/ssf/streams",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}",
+    "summary": ""
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/ssf/v1/poll/{stream_id}",
+    "summary": "The receiver's token, as on the stream API, and the same single `404` for a stream that is not its own."
+   },
+   {
+    "method": "GET",
+    "path": "/ssf/v1/status",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/ssf/v1/status",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/ssf/v1/stream",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/ssf/v1/stream",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/ssf/v1/stream",
+    "summary": ""
+   },
+   {
+    "method": "PATCH",
+    "path": "/ssf/v1/stream",
+    "summary": ""
+   },
+   {
+    "method": "DELETE",
+    "path": "/ssf/v1/stream",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/ssf/v1/verify",
+    "summary": ""
    }
   ]
  },

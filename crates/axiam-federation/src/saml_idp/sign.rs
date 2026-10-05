@@ -239,6 +239,69 @@ pub(super) fn verify_output(
         .map_err(|_| fail("a signature does not verify"))
 }
 
+/// RSA PKCS#1 v1.5 with SHA-256 over `octets`: the HTTP-Redirect binding's
+/// **detached** query signature (SAML Bindings §3.4.4.1). Nothing XML is signed,
+/// so the signature is not a `ds:Signature` anyone could lift into another
+/// document (T-373).
+pub(super) fn sign_octets(octets: &str, key_der: &[u8]) -> Result<Vec<u8>, SamlIdpError> {
+    let fail = |reason: &'static str| {
+        tracing::error!(reason, "SAML IdP: signing a query failed");
+        SamlIdpError::SigningFailed
+    };
+    let key = openssl::pkey::PKey::private_key_from_der(key_der).map_err(|_| fail("key"))?;
+    let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &key)
+        .map_err(|_| fail("signer"))?;
+    signer
+        .update(octets.as_bytes())
+        .map_err(|_| fail("update"))?;
+    signer.sign_to_vec().map_err(|_| fail("sign"))
+}
+
+/// Check a logout message signed with an enveloped signature before it leaves:
+/// the root is the expected `samlp` element with `ID = root_id`; the document
+/// holds **exactly one** `ds:Signature`, the root's own child, whose one
+/// reference is `#root_id`; and xmlsec verifies it against the credential's
+/// certificate with the SHA-2 family only. A builder bug that would emit a
+/// wrapped or mis-referenced message fails closed here, not at an SP.
+pub(super) fn verify_root_signed(
+    document: &str,
+    cert_der: &[u8],
+    root_name: &str,
+    root_id: &str,
+) -> Result<(), SamlIdpError> {
+    let fail = |reason: &'static str| {
+        tracing::error!(reason, "SAML IdP: a logout message failed its own check");
+        SamlIdpError::SigningFailed
+    };
+    let doc = libxml::parser::Parser::default()
+        .parse_string(document.as_bytes())
+        .map_err(|_| fail("unparseable output"))?;
+    let root = doc.get_root_element().ok_or_else(|| fail("no root"))?;
+    if !is_element(&root, super::NS_PROTOCOL, root_name)
+        || root.get_attribute("ID").as_deref() != Some(root_id)
+    {
+        return Err(fail("root is not the message"));
+    }
+    let mut context = libxml::xpath::Context::new(&doc).map_err(|()| fail("no XPath context"))?;
+    let signatures = context
+        .findnodes(
+            &format!("//*[local-name()='Signature' and namespace-uri()='{NS_DSIG}']"),
+            None,
+        )
+        .map_err(|()| fail("XPath failed"))?;
+    if signatures.len() != 1 || !signature_child_references(&root, root_id) {
+        return Err(fail("the signature is not the root's own"));
+    }
+    let ids = context
+        .findnodes("//@ID", None)
+        .map_err(|()| fail("XPath failed"))?;
+    if ids.len() != 1 {
+        return Err(fail("unexpected IDs"));
+    }
+    super::request::verify_post_signature(document, cert_der)
+        .map_err(|_| fail("the signature does not verify"))
+}
+
 fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str) -> bool {
     node.get_name() == name
         && node

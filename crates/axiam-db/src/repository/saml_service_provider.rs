@@ -14,6 +14,15 @@
 //! SP relies on.
 //!
 //! The repository does not validate; see the trait docs.
+//!
+//! # Delete is a cascade, in one transaction
+//!
+//! Removing a service provider removes what the datastore keeps *for* it
+//! ([`SP_DELETE_CASCADE`]): its pending `AuthnRequest` rows today, and — added
+//! by **T23.2.4**, in the same constant, so the same transaction — the
+//! `saml_sp_session` rows D-37 keeps per SP. A registration that outlived its
+//! delete in a side table would let a stale participation drive a logout
+//! (T-366).
 
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
@@ -21,7 +30,7 @@ use axiam_core::models::saml_sp::{
     AcsEndpoint, AttributeMapping, NameIdFormat, SamlBinding, SamlServiceProvider,
     SamlServiceProviderInput,
 };
-use axiam_core::repository::SamlServiceProviderRepository;
+use axiam_core::repository::{PaginatedResult, Pagination, SamlServiceProviderRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
@@ -29,7 +38,10 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{classify_write_error, parse_uuid, take_first_or_not_found};
+use crate::helpers::{
+    CountRow, classify_write_error, map_delete_errors, paginate, parse_uuid, search_bind,
+    search_filter, take_first_or_not_found,
+};
 
 const ENTITY: &str = "saml_service_provider";
 
@@ -147,6 +159,20 @@ const SET_CLAUSE: &str = "enabled = $enabled, display_name = $display_name, \
     allow_idp_initiated = $allow_idp_initiated, \
     attribute_mappings_json = $attribute_mappings_json, \
     allowed_groups = $allowed_groups";
+
+/// What a service provider's delete removes besides the row itself, as
+/// SurrealQL run inside the delete's transaction. Every statement is keyed on
+/// `$tenant_id` and `$id` (the SP's record id, as the string those tables store
+/// in `sp_id`).
+///
+/// The pending `AuthnRequest`s, and (T23.2.4, schema v76, D-37) the participant
+/// rows `saml_sp_session` — a stale participation must not be able to drive a
+/// logout, or hold a `NameID`, for an SP that no longer exists (T-366). Nothing
+/// else may be written for an SP outside this constant without extending it.
+const SP_DELETE_CASCADE: &str = "\
+    DELETE saml_authn_request WHERE tenant_id = $tenant_id AND sp_id = $id; \
+    DELETE saml_sp_session WHERE tenant_id = $tenant_id AND sp_id = $id; \
+    ";
 
 /// SurrealDB implementation of [`SamlServiceProviderRepository`].
 #[derive(Clone)]
@@ -284,6 +310,92 @@ impl<C: Connection> SamlServiceProviderRepository for SurrealSamlServiceProvider
             .collect()
     }
 
+    async fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<SamlServiceProvider>> {
+        // Applied to BOTH queries, so `total` counts matches rather than rows.
+        let search = search_filter(&pagination, &["display_name", "entity_id"]);
+        let search_term = search_bind(&pagination);
+
+        let mut count_result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT count() AS total FROM saml_service_provider \
+                 WHERE tenant_id = $tenant_id{search} GROUP ALL"
+            ))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("search", search_term.clone()))
+            .await
+            .map_err(DbError::from)?;
+        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
+
+        let mut result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT {COLUMNS} FROM saml_service_provider \
+                 WHERE tenant_id = $tenant_id{search} \
+                 ORDER BY created_at ASC \
+                 LIMIT $limit START $offset"
+            ))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("search", search_term))
+            .bind(("limit", pagination.limit))
+            .bind(("offset", pagination.offset))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<SpRow> = result.take(0).map_err(DbError::from)?;
+        let items = rows
+            .into_iter()
+            .map(|row| row.into_domain().map_err(AxiamError::from))
+            .collect::<AxiamResult<Vec<_>>>()?;
+        Ok(paginate(items, count_rows, &pagination))
+    }
+
+    async fn groups_outside_tenant(
+        &self,
+        tenant_id: Uuid,
+        groups: &[Uuid],
+    ) -> AxiamResult<Vec<Uuid>> {
+        #[derive(Debug, SurrealValue)]
+        struct GroupIdRow {
+            record_id: String,
+        }
+        let mut wanted: Vec<Uuid> = Vec::new();
+        for group in groups {
+            if !wanted.contains(group) {
+                wanted.push(*group);
+            }
+        }
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM group \
+                 WHERE tenant_id = $tenant_id AND meta::id(id) IN $ids",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind((
+                "ids",
+                wanted.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+            ))
+            .await
+            .map_err(DbError::from)?;
+        let found: Vec<GroupIdRow> = result.take(0).map_err(DbError::from)?;
+        let found: std::collections::HashSet<String> =
+            found.into_iter().map(|row| row.record_id).collect();
+        Ok(wanted
+            .into_iter()
+            .filter(|group| !found.contains(&group.to_string()))
+            .collect())
+    }
+
     async fn update(
         &self,
         tenant_id: Uuid,
@@ -334,31 +446,27 @@ impl<C: Connection> SamlServiceProviderRepository for SurrealSamlServiceProvider
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
-        #[derive(Debug, SurrealValue)]
-        struct Deleted {
-            tenant_id: String,
-        }
+        // One transaction: the existence guard first (a foreign or unknown id
+        // aborts with `NotFound` before anything is removed), then what the
+        // datastore holds for the SP, then the SP. A reader never sees the
+        // registration gone with its records left, or the reverse.
+        let guard = crate::helpers::delete_existence_guard("saml_service_provider");
+        let query = format!(
+            "BEGIN TRANSACTION; \
+             {guard} \
+             {SP_DELETE_CASCADE} \
+             DELETE type::record('saml_service_provider', $id) WHERE tenant_id = $tenant_id; \
+             COMMIT TRANSACTION"
+        );
         let mut result = self
             .db
             .current()
-            .query(
-                "DELETE type::record('saml_service_provider', $id) \
-                 WHERE tenant_id = $tenant_id RETURN BEFORE",
-            )
+            .query(query)
             .bind(("id", id.to_string()))
             .bind(("tenant_id", tenant_id.to_string()))
             .await
-            .map_err(DbError::from)?
-            .check()
             .map_err(DbError::from)?;
-        let rows: Vec<Deleted> = result.take(0).map_err(DbError::from)?;
-        if rows.is_empty() {
-            return Err(DbError::NotFound {
-                entity: ENTITY.into(),
-                id: id.to_string(),
-            }
-            .into());
-        }
+        map_delete_errors(result.take_errors(), ENTITY, &id.to_string())?;
         Ok(())
     }
 }

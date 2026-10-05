@@ -3790,7 +3790,24 @@ asserts:
 
 > "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17, §19, §27, §28, §28.12 and §30."
 
-§29 is reserved (§30's preamble says for what) and is stated by no SDK until it exists.
+§29 (SAML service-provider registration, contract 1.55) is a §27 namespace too, stated by
+name for the same reason — what the claim adds beyond the generated surface is §29.2's
+absence rule (no key member on `SamlIdpCredential`), §29.3's call-site documentation and
+§29.8's tests:
+
+> "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17, §19, §27, §28, §28.12, §29 and §30."
+
+An SDK states it only after porting it from the merge commit that carries the routes
+([§29.10](#§2910-per-sdk-posture)); none does yet.
+
+§32 (SSF stream registration, contract 1.56) is a §27 namespace too, stated by name for §32.5's
+wrapping and §32.3's call-site documentation:
+
+> "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17, §19, §27, §28, §28.12, §29, §30 and §32."
+
+Its receiver helper (§32.7) is independent of the management surface — a relying party that
+only receives events needs it and nothing else — so an SDK that ships it names it on its own,
+"§32.7", whether or not it states §32.
 
 Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conformance
 verified." (and §1–§11 where the §11 helpers are shipped, §1–§12 where the §12 helpers are
@@ -3829,6 +3846,122 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
+
+- **2026-10-04 (T23.5.2, G-5, contract 1.56)** — **non-breaking / additive.** A new
+  section, [§32](#§32-ssf-stream-registration-and-the-receiver-helper-contract-156): AXIAM as a
+  Shared Signals Framework transmitter (SSF 1.0, CAEP 1.0, RISC 1.0). The management namespace
+  `ssf` — `list_streams` (paginated), `create_stream`, `get_stream`, `update_stream`
+  (**replace**, with the push header kept when absent) and `delete_stream` — with
+  `SsfStreamInput.authorization_header` **Sensitive** from the first version (§27.5 gains two
+  rows); the server rules an SDK can observe (every write validated, the push endpoint held to
+  the webhook outbound address policy, the receiver binding to an OAuth2 client with the
+  `ssf.manage` scope, the audience unique across the deployment as `409`, the header never
+  following the endpoint to another origin, `503` without the sealing key, the status a
+  receiver cannot override, independence from the tenant's `ssf_enabled`, the permissions
+  `ssf_streams:read` and `ssf_streams:write`, human principals only, the bucket
+  `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN`, audit rows); the receiver protocol for reference
+  (discovery on both issuer forms, the stream management API, the SET's header, claims, subject
+  identifiers and the eight event shapes, push and poll); and the **receiver helper**
+  (`verify_set`, `poll`), SHOULD in the seven full-surface SDKs, with its verification order,
+  reason codes and replay window. Six management tests and eight helper tests per SDK. The section is
+  §32, not §31: the plan already names §31 for G-6's outbound SCIM management (D-44). The Conformance Statement
+  gains §32's sentence and §32.7's.
+
+  - **The routes lead the ports.** `openapi.json` and `management-registry.json` are
+    regenerated in the same task (184 operations across 27 namespaces); delivery (push, poll,
+    the event sources) follows in T23.5.3 and changes no shape here.
+  - **Re-sync required for 1.56** in all eleven SDK repositories: `CONTRACT.md`,
+    `openapi.json` and `management-registry.json`, from the **merged** commit (the 1.49 rule).
+    `proto/` is unchanged. Implementing §32 is the post-merge fan-out (D-35); T23.5.4 opens the
+    tracking issue. Per-SDK tests: §32.8.
+
+  - **Amended before 1.56 shipped (T23.5.3, G-5; D-53).** No version bump: no SDK has ported §32
+    and 1.56 is unreleased, so the text is corrected in place (the T23.2.9 precedent for §29
+    under 1.55). (a) The status paragraph no longer says delivery "follows in T23.5.3": it has
+    landed, with `openapi.json` regenerated for the poll route. (b) §32.6 states the poll
+    endpoint's details the first text left to the code: `400` on a push stream, a negative
+    `maxEvents`, a malformed body or more than 1 000 `ack` / 100 `setErrs` entries; `413` over
+    32 KiB; an empty `sets` for a paused or disabled stream; the `ssf_stream.poll_set_error` audit
+    row; the 30-second long poll and the rule that **one long poll waits per stream per
+    instance**, a second answering at once. (c) §32.6 states the **push response mapping** (D-49,
+    completed by D-53): every `4xx` other than `404`, `408` and `429` is dead-lettered (a `400`
+    with a known RFC 8935 code keeping its code, the rest `HTTP <status>`), `3xx` and anything
+    else retry, and **redirects are not followed**, by construction. (d) §32.6 states the
+    **event sources**: `x509` is not emitted (no user-certificate binding), the directory sync
+    never re-enables an account, an administrator's password write is SCIM's, SCIM `DELETE` is an
+    `account-purged`, WebAuthn kinds map to `fido2-platform` / `fido2-roaming`, and
+    `assurance-level-change` follows a step-up through a server-side record. (e) §32.6 names the
+    retry variables `AXIAM__SSF_PUSH__MAX_ATTEMPTS`, `…__BACKOFF_BASE_MS` and
+    `…__BACKOFF_CEILING_MS` and the seven-day lifetime of the push dead-letter queue. None of it
+    changes a management shape, an operation or a required test.
+
+  - **Amended before 1.56 shipped (F4 W4 P23W4-11; D-55, maintainer decision on
+    ilpanich/axiam#539).** No version bump: no SDK has ported §32 and 1.56 is unreleased, so the
+    text is corrected in place. (a) **§32.3 rule 13**, new: SSF requires per-tenant issuers in a
+    deployment of more than one tenant. With `AXIAM__AUTH__TENANT_ISSUER_PATHS` off and more
+    than one tenant (counted across organizations), SSF behaves for every tenant as with
+    `ssf_enabled` off — discovery `404`, no stream on the receiver API, nothing produced, held,
+    verified or signed, a queued push dead-lettered, a poll answering nothing — and turning
+    `ssf_enabled` on is `400` naming the cause; the count is cached for at most 60 s, a change
+    is logged once at `WARN` and audited as `ssf.inactive_shared_issuer`. Rule 9 points at it;
+    §32.6's discovery, receiver API, push and emitter paragraphs say it. (b) **§32.2**:
+    `SsfStream` gains the read-only `transmitter_active` and `transmitter_inactive_reason`, and
+    §32.8 test 3 decodes them; the §27 settings response gains the read-only
+    `oidc.ssf_inactive_reason`. Both are additive response members, so the operation set and
+    the number of required tests are unchanged. `openapi.json` and
+    `management-registry.json` are regenerated in the same fix.
+
+- **2026-10-04 (T23.2.8, G-2, contract 1.55)** — **non-breaking / additive.** A new
+  section, [§29](#§29-saml-service-provider-registration-management-api-contract-155): the
+  management surface for AXIAM as a SAML 2.0 identity provider, as a §27 namespace `saml`
+  with eleven operations — `get_idp`; `list_service_providers` (paginated),
+  `create_service_provider`, `get_service_provider`, `update_service_provider`
+  (**replace**) and `delete_service_provider`; `parse_sp_metadata`, which turns an SP's
+  metadata (uploaded, or fetched by the server through its SSRF guard) into a draft and
+  stores nothing; and `list_idp_credentials`, `issue_idp_credential`,
+  `promote_idp_credential` (one transaction: `next` → `active`, the old `active` →
+  `retired`) and `retire_idp_credential` for the tenant's signing credential. Nothing is
+  `Sensitive`: the registry holds no secret, and `SamlIdpCredential` has **no key member**
+  (an SDK MUST NOT declare one). The server rules an SDK can observe: every write through
+  `validate_saml_service_provider`; `encrypt_assertions` refused while encryption is
+  unimplemented; an SP signing certificate the SSO endpoint could not use refused;
+  `entity_id` unique per tenant and immutable; the routes present in every build and
+  independent of `saml_idp_enabled`, with `parse_sp_metadata` alone `503` in a build
+  without SAML; the permissions `saml_sp:read`, `saml_sp:write` and `saml_idp:credential`;
+  human principals only; the bucket `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN`; audit rows;
+  no retry of writes; seven required tests per SDK (eight after the amendment below). The browser routes (SSO, SLO, IdP
+  metadata) stay out of SDK scope and out of `openapi.json`. §29 replaces the number §30
+  reserved; §27.1 and §27.5 gain a note; the Conformance Statement gains §29's sentence.
+
+  - **The text leads the routes.** `openapi.json` and `management-registry.json` are
+    unchanged at 1.55; the server task that adds the routes (T23.2.5) regenerates both, and
+    the eleven operations reach the SDKs' generated §27 surface from that merge.
+  - **Re-sync required for 1.55** in all eleven SDK repositories: `CONTRACT.md`, from the
+    **merged** commit (the 1.49 rule). `openapi.json`, `management-registry.json` and
+    `proto/` are unchanged here; they are re-synced again when the server task lands.
+    Implementing §29 is a follow-up per SDK after that, in the post-merge fan-out (D-35).
+    Per-SDK tests to add (§29.8, all eleven SDKs): (1) replacement body and required
+    members; (2) no `sign_assertions`, open decoding of members and enums; (3) the
+    `parse_sp_metadata` exclusivity and the draft passed unchanged to
+    `create_service_provider`; (4) no key member on `SamlIdpCredential`, and a nullable
+    `retired` on the promotion; (5) `Page<T>` with `search` carried by the auto-pager, and a
+    plain list for credentials; (6) no retry of the seven writes on `503`; (7) the
+    `400`/`409`/`404`/`503` mapping.
+
+  - **Amended before 1.55 shipped (T23.2.9, G-2; D-43).** No version bump: no SDK has ported
+    §29 and 1.55 is unreleased, so the text is corrected in place (D-43 amended rule 9 the same way). (a)
+    §29.3 rule 9: a service-account token on the `saml` namespace is `401`, not `403` — the
+    shared human-only extractor answers `401` for every human-only family, as §30 says
+    (D-43). (b) §29's status paragraph, the Conformance Statement note and §29.10 no longer
+    say the routes are absent: T23.2.5 regenerated `openapi.json` and
+    `management-registry.json` (179 operations across 26 namespaces at that task, 184 across
+    27 with §32), and the eleven `saml` operations carry the ids of §29.1. (c) §29.8 gains an
+    **eighth required test** (`get_idp` readiness decoding, nullable credential ids, no
+    caching, the implicit tenant), so the count above, "seven required tests per SDK",
+    reads eight. (d) §29.10 states that all eleven SDKs are in scope — Kotlin, Swift, C and
+    C++ included, since §29 is management REST and they carry REST — and that the manifest
+    has no `saml` kind. The tracking issue for the post-merge ports covers 1.53 (§28.12),
+    1.54 (§30) and 1.55 (§29) together (D-35); §32 (1.56) is tracked separately.
 
 - **2026-10-04 (T23.3.7, G-3, contract 1.54)** — **non-breaking / additive.** A new
   section, [§30](#§30-directory-configuration-management-api-contract-154): the management
@@ -7453,7 +7586,11 @@ AXIAM never holds, and the response has no key field to return.
 | `platform` | 4 | `health`, `ready`, `mds_status`, `mds_refresh` |
 
 Contract 1.54 adds the `directory` namespace ([§30](#§30-directory-configuration-management-api-contract-154)),
-which brings the registry to 168 operations across 25 namespaces. The figures quoted elsewhere
+which brings the registry to 168 operations across 25 namespaces. Contract 1.55 adds the `saml`
+namespace ([§29](#§29-saml-service-provider-registration-management-api-contract-155)),
+eleven operations, which brings it to 179 across 26 once the server task regenerates it. Contract 1.56 adds the
+`ssf` namespace ([§32](#§32-ssf-stream-registration-and-the-receiver-helper-contract-156)), five
+operations, which brings the registry to 184 across 27. The figures quoted elsewhere
 in §27 were last re-rendered at 1.51 and are not re-rendered here; the registry is the
 authority ([§27.0](#§270-the-boundary)).
 
@@ -7665,7 +7802,7 @@ synchronous and asynchronous twins ships them for all 162 operations or for none
 
 ### §27.5 `Sensitive<T>` applicability
 
-Seventeen operations carry secret material. The registry names them and the exact fields,
+Nineteen operations carry secret material. The registry names them and the exact fields,
 under `sensitive_request_fields` / `sensitive_response_fields`, so this is a generated
 property of the surface rather than a list somebody remembers to update.
 
@@ -7688,6 +7825,8 @@ property of the surface rather than a list somebody remembers to update.
 | `oauth2_clients.create_registration_token` | response | `initial_access_token` | The RFC 7591 §1.2 initial access token a registering client presents as `Authorization: Bearer`. Shown once, never retrievable; `list_registration_tokens` returns metadata only. (contract 1.50) |
 | `directory.set` | request | `bind_secret` | The credential of the customer's directory service account. Write-only: never returned, on no response. (contract 1.54, [§30.5](#§305-sensitivet-applicability)) |
 | `directory.update` | request | `bind_secret` | As above; absent keeps the stored secret, and moving the connection without it is a `400` ([§30.3](#§303-server-rules-every-sdk-can-observe-normative) rule 2). (contract 1.54) |
+| `ssf.create_stream` | request | `authorization_header` | The `Authorization` header AXIAM presents to an SSF receiver's push endpoint — a credential to a third party. Write-only: never returned, on no response. (contract 1.56, [§32.5](#§325-sensitivet-applicability)) |
+| `ssf.update_stream` | request | `authorization_header` | As above; absent keeps the stored header, and moving the push endpoint to another origin without it is a `400` ([§32.3](#§323-server-rules-every-sdk-can-observe-normative) rule 5). (contract 1.56) |
 
 **RFC 7592's `registration_access_token` (contract 1.53) is Sensitive too, and is not in
 this table only because no §27 operation carries it**: it is returned by the protocol
@@ -7701,6 +7840,10 @@ first build.
 `directory.set` and `directory.update` requests, the only two places it appears, from the first
 version any SDK ships ([§30.5](#§305-sensitivet-applicability)). The table above carries the two
 rows; the registry names the fields under `sensitive_request_fields`.
+
+**The `saml` namespace (contract 1.55) adds no row.** It carries no secret: certificates,
+fingerprints, URLs and entity ids are public, and the IdP's private key is on no request
+and no response at all ([§29.5](#§295-sensitivet-applicability)).
 
 **`certificates.sign_csr` (contract 1.45) is deliberately absent from this table.** Its
 response is a plain `Certificate`, with no `private_key_pem` field and no other sensitive
@@ -9376,11 +9519,372 @@ in by the review that reads them (§28.10's rule: maintained here, never by a
 vendored copy). An SDK that ships §28.12 states it by name — "§28 and §28.12" —
 rather than by letting its existing §28 claim widen (Closing Notes).
 
+## §29 SAML service provider registration (management API, contract 1.55)
+
+**Requirement level: SHOULD, as part of §27. Additive; nothing in §1–§28 or §30 changes.**
+Server design: [`design-document.md`](../claude_dev/design-document.md) §8e, *SAML 2.0
+Identity Provider*; decisions D-20 … D-27 and D-37 … D-42 in the plan's decision table
+([`competitor-gap-remediation-plan-2026-10-02.md`](../claude_dev/competitor-gap-remediation-plan-2026-10-02.md)
+§8). Threat model: T-304 … T-330 and T-357 … T-384.
+
+AXIAM can act as a SAML 2.0 identity provider for a tenant (competitor-gap item G-2): it
+signs assertions for the service providers (SPs) a tenant administrator registered, on the
+Web Browser SSO profile, and logs a user out of them again. **The protocol itself is not
+SDK surface.** Single sign-on, single logout and the IdP metadata document are browser and
+SP-to-IdP routes under `/saml/v2/{tenant_id}/…`; an SP's own SAML library speaks to them,
+not an AXIAM SDK, and they are compiled out of `openapi.json` (OpenAPI Export Feature
+Flag, below). What this section adds is the administration: the per-tenant registry of
+service providers, the import of an SP's metadata into a draft registration, and the
+lifecycle of the tenant's IdP signing credential, as one §27 namespace.
+
+**Status: the routes have landed.** The server task that implements them (T23.2.5)
+regenerated `openapi.json` and `management-registry.json` (the `saml` namespace, eleven
+operations, every one with the operation id of §29.1's first column); this section is
+normative over what it builds, and an SDK implements §29 from the merge commit of the
+branch that carries both, not from a draft (§7 rule 1 of the plan; the 1.49 rule; D-35).
+
+### §29.1 Canonical operation set
+
+A new §27 namespace, **`saml`**, generated from the registry like every other (§27.0: the
+registry is normative, this table is rendered for a reader). The OpenAPI tag is `saml`.
+All eleven paths carry `{tenant_id}`, defaulted from the client's configured tenant per
+§27.4 rule 3. Every route is compiled into **every** server build, with or without the
+`saml` Cargo feature, so every one of them is in the exported `openapi.json` (D-42).
+
+| Operation | HTTP | Request body | Response | `update_style` |
+|---|---|---|---|---|
+| `saml.get_idp` | `GET /api/v1/tenants/{tenant_id}/saml/idp` | — | `200` `SamlIdpInfo` | — |
+| `saml.list_service_providers` | `GET /api/v1/tenants/{tenant_id}/saml/service-providers` | — (`offset`, `limit`, `search`) | `200` page of `SamlServiceProvider` | — |
+| `saml.create_service_provider` | `POST /api/v1/tenants/{tenant_id}/saml/service-providers` | `SamlServiceProviderInput` | `201` `SamlServiceProvider` | — |
+| `saml.get_service_provider` | `GET /api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}` | — | `200` `SamlServiceProvider` | — |
+| `saml.update_service_provider` | `PUT /api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}` | `SamlServiceProviderInput` | `200` `SamlServiceProvider` | **`replace`** |
+| `saml.delete_service_provider` | `DELETE /api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}` | — | `204` | — |
+| `saml.parse_sp_metadata` | `POST /api/v1/tenants/{tenant_id}/saml/parse-sp-metadata` | `ParseSamlSpMetadata` | `200` `SamlSpMetadataDraft` | — |
+| `saml.list_idp_credentials` | `GET /api/v1/tenants/{tenant_id}/saml/idp-credentials` | — | `200` array of `SamlIdpCredential` | — |
+| `saml.issue_idp_credential` | `POST /api/v1/tenants/{tenant_id}/saml/idp-credentials` | `IssueSamlIdpCredential` | `201` `SamlIdpCredential` | — |
+| `saml.promote_idp_credential` | `POST /api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/promote` | — | `200` `SamlIdpCredentialPromotion` | — |
+| `saml.retire_idp_credential` | `POST /api/v1/tenants/{tenant_id}/saml/idp-credentials/{credential_id}/retire` | — | `200` `SamlIdpCredential` | — |
+
+Names follow §27.1. The namespace holds two resources, so the CRUD verbs carry their noun,
+as `federation`'s `list_configs` … `delete_config` do; `parse_sp_metadata` says that it
+parses and does not store; `issue` rather than `create` marks the operation where the server
+mints key material the caller never sees (§27.1's `generate` reasoning; the key is not
+returned at all), and `promote` / `retire` are the two lifecycle moves. The component names
+in the table are the ones the server's export uses. `list_service_providers` is one of
+§27.4 rule 4's paginated operations (the `{ items, total, offset, limit }` envelope, with
+`search` matched against `display_name`, `entity_id` and the id); `list_idp_credentials`
+returns a bare array, newest first, and MUST NOT be modelled as a page.
+
+### §29.2 Shapes (normative)
+
+Field names are the server model's (`axiam_core::models::saml_sp`), unchanged.
+
+**`SamlServiceProvider`** — what every SP read and write returns:
+
+| Field | Type | Notes |
+|---|---|---|
+| `id`, `tenant_id` | UUID | |
+| `enabled` | bool | A disabled SP stays registered and every sign-on for it is refused. Logout still works. |
+| `display_name` | string | 1–256 bytes, no control characters, no surrounding whitespace. |
+| `entity_id` | string | The SP's `entityID`, 1–1 024 bytes, unique per tenant, **immutable** after create (§29.3 rule 3). |
+| `acs_urls` | array of `AcsEndpoint` | 1–32. The allow-list an assertion may be posted to. |
+| `slo_url` | string \| null | The SP's single-logout endpoint. |
+| `slo_binding` | `"http_post"` \| `"http_redirect"` \| null | Set together with `slo_url`. |
+| `name_id_format` | `"persistent"` \| `"email_address"` | `persistent` (the default) is a pairwise identifier per SP (D-22). |
+| `sign_responses` | bool | Sign the `Response` envelope too. The assertion is signed **always**; there is no field to turn that off, and an SDK MUST NOT invent one. |
+| `encrypt_assertions` | bool | Always `false` in this revision (§29.3 rule 2). |
+| `sp_signing_cert_pem` | string \| null | The certificate the SP signs its requests with. Public material. |
+| `sp_encryption_cert_pem` | string \| null | Stored for when encryption is implemented. Public material. |
+| `want_authn_requests_signed` | bool | Refuse an unsigned `AuthnRequest` from this SP. Requires `sp_signing_cert_pem`. |
+| `allow_idp_initiated` | bool | IdP-initiated sign-on is a per-SP opt-in, default `false` (D-3). |
+| `attribute_mappings` | array of `AttributeMapping` | 0–64. |
+| `allowed_groups` | array of UUID | 0–256 groups of the tenant. **Empty means every active user of the tenant may sign in to this SP.** |
+| `created_at`, `updated_at` | RFC 3339 | |
+
+**`AcsEndpoint`** is `{ url, binding, index, is_default }`: `url` a string, `binding` as
+`slo_binding`, `index` an unsigned 16-bit integer unique within the SP, `is_default` a
+bool (at most one `true`; with none, the first listed is the default). **`AttributeMapping`**
+is `{ saml_name, name_format, source }`: `saml_name` the emitted attribute's `Name` (1–256
+bytes, unique within the SP, case-sensitive), `name_format` one of the three SAML
+`attrname-format` URNs (`unspecified`, `uri`, `basic`) or absent, `source` one of
+`"username"`, `"email"`, `"display_name"`, `"given_name"`, `"family_name"`, `"groups"`,
+`"roles"`.
+
+The four string enums (`binding`, `slo_binding`, `name_id_format`, `source`) are **open**:
+an SDK MUST decode a value it does not know without failing, as §27.13 asks of
+`CertificateType`, and MUST NOT send one it does not know.
+
+**`SamlServiceProviderInput`** (`create_service_provider`, and `update_service_provider` as
+a **replacement**) carries every `SamlServiceProvider` field except `id`, `tenant_id`,
+`created_at` and `updated_at`. Required: `display_name`, `entity_id`, `acs_urls`. The rest
+are optional **and an omitted one takes its default on every write, including an update**
+— §27.4 rule 5's warning, which an SDK MUST repeat at the `update_service_provider` call
+site: `enabled` and `sign_responses` default to `true`; `name_id_format` to `persistent`;
+`encrypt_assertions`, `want_authn_requests_signed` and `allow_idp_initiated` to `false`;
+the two certificates, `slo_url` and `slo_binding` to null; `attribute_mappings` and
+`allowed_groups` to empty. An SDK SHOULD offer the read-modify-write form
+(`update_service_provider` from a `get_service_provider` result) §27.4 rule 5 recommends.
+
+**`ParseSamlSpMetadata`** is `{ metadata_xml }` or `{ metadata_url }` — **exactly one**, the
+first a metadata document of at most 512 KiB, the second an `https` URL. An SDK MUST make
+sending both, or neither, impossible or a local `ValidationError` (two methods, a sum type,
+or a builder that refuses) — not a request the server refuses.
+
+**`SamlSpMetadataDraft`** is `{ service_provider, signing_certificate_fingerprint,
+encryption_certificate_fingerprint, warnings }`: `service_provider` a
+`SamlServiceProviderInput` an SDK MUST be able to pass to `create_service_provider` (or
+`update_service_provider`) unchanged; the two fingerprints the lower-case hex SHA-256 of
+the certificate DER the draft carries, or null; `warnings` an array of human-readable
+strings (an SDK MUST NOT parse them). **A draft is not a registration**: nothing is stored
+until the caller submits it, and nothing in it is trusted because it came from a document
+(§29.3 rule 6).
+
+**`SamlIdpCredential`** — the tenant's IdP signing credential, public facts only:
+
+| Field | Type | Notes |
+|---|---|---|
+| `id`, `tenant_id`, `issuer_ca_id` | UUID | `issuer_ca_id` is the signing CA that issued the leaf. |
+| `certificate_pem` | string | The leaf certificate. Public: it is what the metadata publishes. |
+| `serial` | string | Lower-case hex. |
+| `fingerprint` | string | Lower-case hex SHA-256 of the certificate DER — what an SP administrator compares out of band. |
+| `not_before`, `not_after` | RFC 3339 | At most 730 days apart. |
+| `status` | `"active"` \| `"next"` \| `"retired"` | Open enum. At most one `active` and one `next` per tenant. |
+| `created_at` | RFC 3339 | |
+| `retired_at` | RFC 3339 \| null | |
+
+**There is no key on it, and an SDK MUST NOT give it one.** The private key is generated
+by the server, sealed at rest, never returned by any route, and destroyed on retirement
+(D-21); `SamlIdpCredential` has no `private_key_pem`, no ciphertext, no custody field, and
+an SDK's type MUST NOT declare one (§27.5's `certificates.sign_csr` discipline: a type with
+a key field that is always absent lies about every value it holds).
+
+**`IssueSamlIdpCredential`** is `{ issuer_ca_id, slot, validity_days }`: `issuer_ca_id` an
+active signing CA the caller may issue from; `slot` `"active"` or `"next"` (required);
+`validity_days` an integer 1–730, optional, default 365, and never beyond the CA's own
+expiry. **`SamlIdpCredentialPromotion`** is `{ active, retired }`: the credential now
+`active`, and the one it replaced, now `retired`, or null when there was none.
+
+**`SamlIdpInfo`** is `{ tenant_id, saml_available, saml_idp_enabled, metadata_served,
+entity_id, metadata_url, sso_url, slo_url, active_credential_id, next_credential_id }`:
+`saml_available` whether this server build serves SAML at all; `saml_idp_enabled` the
+tenant's **effective** `saml_idp_enabled` setting (D-20; written through the existing
+`settings` operations, not here); `metadata_served` whether `metadata_url` answers now —
+available, enabled, and an `active` or `next` credential exists (D-40); the four URLs
+what the IdP's metadata and endpoints are, for the tenant, computed the same way in every
+build; the two ids null when the slot is empty.
+
+### §29.3 Server rules every SDK can observe (normative)
+
+1. **Every SP write is validated before anything is stored**, by
+   `axiam_federation::saml_sp::validate_saml_service_provider` — the function the SSO
+   endpoint's own checks rest on — and each refusal is `400 validation_error` whose
+   `message` names the field and the rule: an empty, over-long, padded or
+   control-character `display_name` or `entity_id`; no ACS endpoint, more than 32, an ACS
+   URL that is not a registrable redirect URI (absolute, `https` — `http` only for
+   `localhost`, `127.0.0.1` and `[::1]` — and no fragment), any `*` in it, a duplicate URL
+   or `index`, more than one default; an `slo_url` held to the same URL rule, or set
+   without `slo_binding` (or the reverse); a certificate that is not exactly one
+   `CERTIFICATE` PEM block of at most 16 KiB that parses as X.509 — a private key is
+   refused by name; `want_authn_requests_signed` without `sp_signing_cert_pem`; more than
+   64 attribute mappings, a duplicate or invalid `saml_name`, an unknown `name_format`;
+   more than 256 `allowed_groups`. The `message` never echoes a certificate.
+2. **Four write-time refusals beyond the validator (D-42)**, each `400 validation_error`
+   naming the rule: `encrypt_assertions: true` — assertion encryption is not implemented
+   yet (D-2), and an SP asking for it would be refused at every sign-on, never sent a
+   plaintext assertion; an `sp_signing_cert_pem` the SSO endpoint could not use — its
+   decoder refuses it, or its key is RSA under 2 048 bits or anything but RSA or ECDSA on
+   P-256, P-384 or P-521 (an ECDSA certificate verifies HTTP-POST requests only; the
+   HTTP-Redirect binding is RSA-only, and an SDK MUST say so where it documents the
+   field); an `allowed_groups` entry that is not a group of the tenant; and rule 3's
+   `entity_id` change. An expired SP certificate is **not** refused (SAML trusts a
+   registered key as a key, not by its validity dates).
+3. **`entity_id` is unique per tenant and immutable.** A create that repeats one is
+   `409 conflict`. An `update_service_provider` that changes it is `400 validation_error`
+   ("register a new service provider"): the pairwise `NameID` of every user is keyed on it
+   (D-22), so a change would give every user a new, unknown account at that SP. Deleting
+   an SP and registering the same `entity_id` again gives its users their identifiers back.
+4. **Update is a replacement** (`update_style: replace`). An SDK MUST model the body as the
+   whole registration and repeat §27.4 rule 5's warning at the call site.
+5. **Delete** answers `204`, removes the registration and the SP's records of which live
+   sessions signed in to it (D-37), and ends no session: users already signed in to the SP
+   stay signed in there until their SP session ends. A second delete is `404` (§27.4
+   rule 6).
+6. **`parse_sp_metadata` parses and never stores (D-41).** A `metadata_url` is fetched by
+   the server only through its SSRF guard: `https` only, every address the name resolves
+   to and every redirect hop checked, private, loopback, link-local and cloud-metadata
+   addresses refused, the response capped. The document is refused if it contains any DTD
+   or entity declaration, is not UTF-8, is over 512 KiB, or is not exactly one
+   `EntityDescriptor` with one SAML 2.0 `SPSSODescriptor`. Every one of these is `400
+   validation_error` with a **generic** `message` (`metadata_url refused`, `metadata fetch
+   failed`, `not SAML service-provider metadata`) that never carries the fetched body, a
+   status line or an address. The metadata's own signature, if it has one, is **not
+   evaluated** and the draft warns so; `encrypt_assertions` is never set in a draft. In a
+   server built without SAML the operation is `503 service_unavailable` (every other §29
+   operation works in every build). The server never re-reads an SP's metadata on its
+   own: there is no refresh, and a changed SP is re-imported by a person.
+7. **Credentials (D-21, D-42).** `issue_idp_credential` generates an RSA-4096 key and a
+   leaf from `issuer_ca_id` into an **empty** slot: an occupied `active` or `next` slot is
+   `409 conflict`; a CA the caller may not use (another organization's, another tenant's)
+   is `404 not_found`; a CA that cannot sign (revoked, expired, imported or externally
+   held) and a `validity_days` out of range are `400 validation_error`. It takes seconds —
+   an SDK MUST NOT apply a timeout shorter than its ordinary write timeout to it.
+   `promote_idp_credential` requires that `{credential_id}` is the tenant's **current
+   `next`** credential and inside its validity window (`409 conflict` otherwise) and, in
+   one transaction, retires the old `active` — destroying its key — and makes `next`
+   `active`. `retire_idp_credential` retires a `next` or an `active` credential and
+   destroys its key; retiring the **`active`** one with no successor stops SAML sign-on
+   for the whole tenant at once (it is the incident response to a leaked key), and an SDK
+   MUST say so at the call site. Retiring an already retired credential returns it
+   unchanged. The safe rotation is: issue into `next`, wait until every SP has refreshed
+   the metadata (which publishes both), then promote.
+8. **Routes are independent of the tenant's `saml_idp_enabled` setting.** An administrator
+   registers SPs and issues the credential before switching the IdP on. The setting itself
+   is written through §27's `settings` operations and governs only the browser routes,
+   which answer `404` while it is off (D-20).
+9. **Authorization.** Three new permissions, seeded per tenant like every other:
+   `saml_sp:read` (`get_idp`, `list_service_providers`, `get_service_provider`,
+   `list_idp_credentials`), `saml_sp:write` (`create_service_provider`,
+   `update_service_provider`, `delete_service_provider`, `parse_sp_metadata`) and
+   **`saml_idp:credential`** (`issue_idp_credential`, `promote_idp_credential`,
+   `retire_idp_credential`) — kept apart because one call can change or stop sign-on at
+   every SP of the tenant. The `{tenant_id}` in the path must be the caller's tenant;
+   another tenant is `403 authorization_denied`. A service-account token is not accepted
+   on this namespace in this revision (`401`, as for every human-only family, S-9 and §30;
+   amended by D-43 before 1.55 shipped): registering where a tenant's signed
+   assertions go is a human administrator's act.
+10. **Rate limiting.** The seven writes each have a per-IP bucket of their own,
+    `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` (default 30 per minute per route): `429` per §2.
+    Reads are not limited.
+11. **Audit.** `saml_sp.created`, `saml_sp.updated` (the **names** of the changed fields,
+    with `acs_changed` and `certificate_changed`), `saml_sp.deleted`,
+    `saml_sp.metadata_parsed` (upload or URL, the URL's host only, the outcome),
+    `saml_idp.credential_issued`, `saml_idp.credential_promoted` and
+    `saml_idp.credential_retired` (ids, slot and fingerprint). Never a certificate's or a
+    document's content.
+
+### §29.4 Error mapping
+
+§2 and §27.4 rule 7, unchanged: `400` is `ValidationError` (carrying the server's `message`,
+which names the rule), `404` is `NotFoundError`, `409` is `ConflictError`, `403` is
+`AuthzError`, `401` is `AuthError`, `429` and `503` are `NetworkError`. No new error type
+and no new response member. An SDK MUST NOT parse a `message` to recover the rule — it is
+for a human and its wording may change.
+
+### §29.5 `Sensitive<T>` applicability
+
+**Nothing in §29 is wrapped.** The registry holds no secret: SP certificates, the IdP's
+certificate, fingerprints, URLs and entity ids are public material or identifiers (§27.5
+rule 2: wrapping what is not secret teaches callers to ignore the wrapper). §27.5's table
+gains no row and the registry's `sensitive_*_fields` stay empty for the namespace. What an
+SDK owes instead is §29.2's absence rule: `SamlIdpCredential` has **no** key member, and a
+decoder that meets a member named `private_key_pem` (or any other member the type does not
+declare) in a response MUST drop it rather than surface it.
+
+### §29.6 Per-language naming map
+
+§27.3 applies unchanged; for the record:
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `saml.get_idp` | `saml().get_idp` | `saml.getIdp` | `saml.get_idp` | `saml().getIdp` | `saml.getIdp` | `Saml.GetIdpAsync` | `saml()->getIdp` | `Saml().GetIdp` | `saml.getIdp` | `axiam_saml_get_idp` | `saml().get_idp` |
+| `saml.list_service_providers` | `saml().list_service_providers` | `saml.listServiceProviders` | `saml.list_service_providers` | `saml().listServiceProviders` | `saml.listServiceProviders` | `Saml.ListServiceProvidersAsync` | `saml()->listServiceProviders` | `Saml().ListServiceProviders` | `saml.listServiceProviders` | `axiam_saml_list_service_providers` | `saml().list_service_providers` |
+| `saml.create_service_provider` | `saml().create_service_provider` | `saml.createServiceProvider` | `saml.create_service_provider` | `saml().createServiceProvider` | `saml.createServiceProvider` | `Saml.CreateServiceProviderAsync` | `saml()->createServiceProvider` | `Saml().CreateServiceProvider` | `saml.createServiceProvider` | `axiam_saml_create_service_provider` | `saml().create_service_provider` |
+| `saml.get_service_provider` | `saml().get_service_provider` | `saml.getServiceProvider` | `saml.get_service_provider` | `saml().getServiceProvider` | `saml.getServiceProvider` | `Saml.GetServiceProviderAsync` | `saml()->getServiceProvider` | `Saml().GetServiceProvider` | `saml.getServiceProvider` | `axiam_saml_get_service_provider` | `saml().get_service_provider` |
+| `saml.update_service_provider` | `saml().update_service_provider` | `saml.updateServiceProvider` | `saml.update_service_provider` | `saml().updateServiceProvider` | `saml.updateServiceProvider` | `Saml.UpdateServiceProviderAsync` | `saml()->updateServiceProvider` | `Saml().UpdateServiceProvider` | `saml.updateServiceProvider` | `axiam_saml_update_service_provider` | `saml().update_service_provider` |
+| `saml.delete_service_provider` | `saml().delete_service_provider` | `saml.deleteServiceProvider` | `saml.delete_service_provider` | `saml().deleteServiceProvider` | `saml.deleteServiceProvider` | `Saml.DeleteServiceProviderAsync` | `saml()->deleteServiceProvider` | `Saml().DeleteServiceProvider` | `saml.deleteServiceProvider` | `axiam_saml_delete_service_provider` | `saml().delete_service_provider` |
+| `saml.parse_sp_metadata` | `saml().parse_sp_metadata` | `saml.parseSpMetadata` | `saml.parse_sp_metadata` | `saml().parseSpMetadata` | `saml.parseSpMetadata` | `Saml.ParseSpMetadataAsync` | `saml()->parseSpMetadata` | `Saml().ParseSpMetadata` | `saml.parseSpMetadata` | `axiam_saml_parse_sp_metadata` | `saml().parse_sp_metadata` |
+| `saml.list_idp_credentials` | `saml().list_idp_credentials` | `saml.listIdpCredentials` | `saml.list_idp_credentials` | `saml().listIdpCredentials` | `saml.listIdpCredentials` | `Saml.ListIdpCredentialsAsync` | `saml()->listIdpCredentials` | `Saml().ListIdpCredentials` | `saml.listIdpCredentials` | `axiam_saml_list_idp_credentials` | `saml().list_idp_credentials` |
+| `saml.issue_idp_credential` | `saml().issue_idp_credential` | `saml.issueIdpCredential` | `saml.issue_idp_credential` | `saml().issueIdpCredential` | `saml.issueIdpCredential` | `Saml.IssueIdpCredentialAsync` | `saml()->issueIdpCredential` | `Saml().IssueIdpCredential` | `saml.issueIdpCredential` | `axiam_saml_issue_idp_credential` | `saml().issue_idp_credential` |
+| `saml.promote_idp_credential` | `saml().promote_idp_credential` | `saml.promoteIdpCredential` | `saml.promote_idp_credential` | `saml().promoteIdpCredential` | `saml.promoteIdpCredential` | `Saml.PromoteIdpCredentialAsync` | `saml()->promoteIdpCredential` | `Saml().PromoteIdpCredential` | `saml.promoteIdpCredential` | `axiam_saml_promote_idp_credential` | `saml().promote_idp_credential` |
+| `saml.retire_idp_credential` | `saml().retire_idp_credential` | `saml.retireIdpCredential` | `saml.retire_idp_credential` | `saml().retireIdpCredential` | `saml.retireIdpCredential` | `Saml.RetireIdpCredentialAsync` | `saml()->retireIdpCredential` | `Saml().RetireIdpCredential` | `saml.retireIdpCredential` | `axiam_saml_retire_idp_credential` | `saml().retire_idp_credential` |
+
+All eleven perform I/O, so §27.3's async discipline applies to each.
+
+### §29.7 Retry
+
+§27.4 rule 8 governs and is not widened: the four `GET`s MAY be retried per §16; the seven
+writes MUST NOT be, on any status or transport error. The reasons are concrete here:
+`issue_idp_credential` repeated after a lost response is a `409` that reads like a failure
+while the credential exists; `promote_idp_credential` repeated is a `409` because the
+first call already promoted; `create_service_provider` repeated is a `409` on the
+`entity_id`. A caller who lost an answer reads the state (`list_idp_credentials`,
+`get_service_provider`) instead.
+
+### §29.8 Required tests
+
+Eight per SDK that ships the namespace, against a mocked HTTP server:
+
+1. **Replacement.** `update_service_provider` sends `PUT` with a body carrying every
+   `SamlServiceProviderInput` member; the SDK's input type cannot be built without
+   `display_name`, `entity_id` and `acs_urls` (or its builder refuses, in a language
+   without the compile-time check); a `200` decodes to `SamlServiceProvider`.
+2. **No signing switch, open decoding.** The input and response types have no
+   `sign_assertions` member; decoding a `SamlServiceProvider` that carries
+   `"sign_assertions": false`, an unknown member and an unknown `binding` value succeeds,
+   and re-encoding the decoded value for `update_service_provider` sends no
+   `sign_assertions`.
+3. **Draft round trip.** `parse_sp_metadata` sends exactly `{"metadata_url": "…"}` or
+   exactly `{"metadata_xml": "…"}`; sending both or neither is impossible or raises a local
+   `ValidationError` with **no** request recorded; the `service_provider` of a mocked draft
+   is accepted by `create_service_provider` unchanged and sent as its body.
+4. **Credentials carry no key.** A `SamlIdpCredential` body that (wrongly) carries
+   `"private_key_pem": "<value>"` decodes to a value whose every stringification lacks the
+   value, and the type has no accessor for it; a `SamlIdpCredentialPromotion` with
+   `"retired": null` decodes.
+5. **Pagination.** `list_service_providers` returns the SDK's `Page<T>` with `total`; the
+   auto-paging form carries the same `search` on every request it issues;
+   `list_idp_credentials` returns a plain list, not a page.
+6. **No retry.** The mock answers `503` once to each of the seven writes: exactly one
+   request each, and the error is `NetworkError`.
+7. **Errors.** A `400 validation_error` is `ValidationError` carrying the `message`; a `409
+   conflict` on `create_service_provider` and on `promote_idp_credential` is
+   `ConflictError`; a `404 not_found` on `get_service_provider` is `NotFoundError`; a `503`
+   on `parse_sp_metadata` is `NetworkError`.
+8. **Readiness is read, not cached.** A mocked `get_idp` body carrying all ten members of
+   `SamlIdpInfo`, with `active_credential_id` present and `next_credential_id` null,
+   decodes with the null kept distinct from an absent member; two successive calls issue
+   two requests (§29.9); and, with the client's tenant configured, the call is made without
+   a `tenant_id` argument and the mock sees the configured tenant in the path (§27.4
+   rule 3).
+
+The server task adds its own tests for every rule in §29.3; they are not an SDK's to
+duplicate.
+
+### §29.9 What an SDK does not do
+
+It does not run the browser flow: no helper builds an `AuthnRequest`, consumes an
+assertion, starts a logout or fetches `/saml/v2/{tenant_id}/metadata` — an SP's SAML
+library does that, and the routes are not in `openapi.json`. It does not parse SP metadata
+locally (the server's parser and its DTD refusal are the authority, and a client copy
+would drift) and does not validate a registration beyond §27.4's UUID rule. It offers no
+way to read the IdP's private key, because none exists. It does not cache
+`get_idp` — the readiness it reports changes with every credential write (§27.4 rule 10).
+
+### §29.10 Per-SDK posture
+
+**No SDK implements §29 at contract 1.55.** The server task's merge (T23.2.5) regenerated
+`openapi.json` and `management-registry.json`, so the ports can now be made; they follow
+from the merge commit of the wave's pull request, one PR per repository, as the post-merge
+fan-out of D-35, and this table is filled in by the review that reads them (§28.10's
+rule). An SDK that ships the namespace states it by name — "§27 and §29" — rather than
+letting its §27 claim widen silently (Conformance Statement), even though its §27
+generator will produce the eleven operations on its own once the registry carries them:
+§29.2's absence rule, §29.3's call-site documentation and §29.8's tests are what the claim
+adds.
+
+**All eleven SDKs are in scope, and the transport does not split them.** §29 is management
+REST (§27), so Kotlin, Swift, C and C++ — which carry the REST surface only (§1–§7,
+§9–§11) — implement it exactly as the seven full-surface SDKs do: §27.10 records that all
+eleven implement the imperative management surface, and there is no gRPC or AMQP form of
+any §29 operation. No SDK runs the browser flow (§29.9). §27.6's manifest has no `saml`
+kind in this revision, so no SDK's declarative layer is touched by §29.
+
 ## §30 Directory configuration (management API, contract 1.54)
 
 **Requirement level: SHOULD, as part of §27. Additive; nothing in §1–§28 changes.**
-(§29 is reserved for the SAML service-provider registration of competitor-gap item G-2,
-which lands in a later wave; the number is held so the two do not trade places.) Server
+(§29, the SAML service-provider registration of competitor-gap item G-2, was reserved
+when this section was written and arrived in contract 1.55; the numbers did not trade
+places.) Server
 documentation: [`docs/deployment/README.md`](../docs/deployment/README.md), *What a
 tenant's directory needs*. Threat model: T-291 … T-303, T-331 … T-355; the F4 review's
 P23W2-01 and P23W2-09/-10 (`claude_dev/security-review-phase23-w2-2026-10-03.md`).
@@ -9681,6 +10185,415 @@ rather than letting its §27 claim widen silently (Conformance Statement), even 
 §27 generator will produce the six operations on its own once the registry carries them:
 §30.3's call-site documentation and §30.5's wrapping are what the claim adds.
 
+## §32 SSF stream registration and the receiver helper (contract 1.56)
+
+**Requirement level: §32.1 – §32.5 SHOULD, as part of §27 (a namespace `ssf`); §32.7 the
+receiver helper SHOULD in the seven full-surface SDKs (Rust, TypeScript, Python, Java, C#, PHP,
+Go) and MAY in Kotlin, Swift, C and C++. Additive; nothing in §1–§30 changes.**
+Server design: plan item G-5 and decisions D-44 … D-53 and D-55 in the plan's decision table
+([`competitor-gap-remediation-plan-2026-10-02.md`](../claude_dev/competitor-gap-remediation-plan-2026-10-02.md)
+§8). Threat model: T-385 … T-406. **§31 is reserved** for G-6's outbound SCIM management, which
+the plan named first (D-44).
+
+AXIAM can act as a **Shared Signals Framework transmitter** for a tenant (competitor-gap item
+G-5): it sends CAEP and RISC security events — `session-revoked`, `credential-change`,
+`assurance-level-change`, `account-disabled`, `account-enabled`, `account-purged` — as Security
+Event Tokens (RFC 8417) to the relying parties a tenant administrator registered, by push
+(RFC 8935) or poll (RFC 8936). The specification followed is **OpenID Shared Signals Framework
+1.0** (final, 2025-08-29), with **CAEP 1.0**, **RISC 1.0** and **RFC 9493** (D-44).
+
+Two audiences use this section. A **tenant administrator** registers streams through the
+management namespace `ssf` (§32.1 – §32.5), generated from the registry like every §27
+namespace. A **relying party** that *receives* events uses the SSF protocol (§32.6), which is
+not management surface and is not in the registry; what an SDK offers it is the optional
+receiver helper (§32.7), which verifies a SET and polls. An SDK never *transmits*.
+
+**Status: the routes and the delivery exist.** T23.5.2 added the five management routes, the
+receiver protocol routes and discovery, and regenerated `openapi.json` and
+`management-registry.json`; T23.5.3 added push and poll delivery and the event sources (§32.6),
+and regenerated `openapi.json` for the poll route (the registry is unchanged). An SDK implements
+§32 from the merge commit (§7 rule 1 of the plan; the 1.49 rule), in the post-merge fan-out
+(D-35).
+
+### §32.1 Canonical operation set
+
+A new §27 namespace, **`ssf`**, OpenAPI tag `ssf`. All five paths carry `{tenant_id}`,
+defaulted from the client's configured tenant per §27.4 rule 3.
+
+| Operation | HTTP | Request body | Response | `update_style` |
+|---|---|---|---|---|
+| `ssf.list_streams` | `GET /api/v1/tenants/{tenant_id}/ssf/streams` | — (`offset`, `limit`, `search`) | `200` page of `SsfStream` | — |
+| `ssf.create_stream` | `POST /api/v1/tenants/{tenant_id}/ssf/streams` | `SsfStreamInput` | `201` `SsfStream` | — |
+| `ssf.get_stream` | `GET /api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}` | — | `200` `SsfStream` | — |
+| `ssf.update_stream` | `PUT /api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}` | `SsfStreamInput` | `200` `SsfStream` | **`replace`** |
+| `ssf.delete_stream` | `DELETE /api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}` | — | `204` | — |
+
+`list_streams` is one of §27.4 rule 4's paginated operations (`{ items, total, offset, limit }`,
+`search` matched against `audience`, `receiver_client_id`, `description` and the id).
+
+### §32.2 Shapes (normative)
+
+**`SsfStream`** — what every read and write returns:
+
+| Field | Type | Notes |
+|---|---|---|
+| `id`, `tenant_id` | UUID | `id` is also the SSF `stream_id`. |
+| `receiver_client_id` | string | The OAuth2 `client_id` whose client-credentials token is this stream's receiver on the SSF protocol (§32.6). |
+| `audience` | string | The SETs' `aud`. 1–512 bytes; **unique across the deployment** (§32.3 rule 3). |
+| `description` | string \| null | At most 256 bytes. |
+| `delivery_method` | `"push"` \| `"poll"` | Set by the administrator only. |
+| `endpoint_url` | string \| null | The push endpoint; null for a poll stream (AXIAM serves its poll endpoint). |
+| `authorization_header_set` | bool | Whether a push `Authorization` header is stored. **The value is never returned.** |
+| `events_allowed` | array of event-type URI | The administrator's ceiling: 1–6 of the six URIs of §32.6. |
+| `events_requested` | array of event-type URI | What the receiver asked for; always a subset of `events_allowed`. |
+| `events_delivered` | array of event-type URI | What the stream carries: the intersection. Read-only. |
+| `subject_format` | `"iss_sub"` \| `"email"` | How users are named in the stream's SETs (D-46). |
+| `status` | `"enabled"` \| `"paused"` \| `"disabled"` | D-51: `paused` holds events for later, `disabled` drops them. |
+| `status_reason` | string \| null | |
+| `status_actor` | `"admin"` \| `"receiver"` | Who set the status. |
+| `last_verification_at` | RFC 3339 \| null | The receiver's last verification request. |
+| `created_at`, `updated_at` | RFC 3339 | |
+| `transmitter_active` | bool | Read-only. Whether the tenant's transmitter is active: its `ssf_enabled` is on **and** the shared-issuer gate does not hold (§32.3 rule 13). A stream of an inactive transmitter is kept and carries nothing. |
+| `transmitter_inactive_reason` | string, absent when active | Read-only. Why the transmitter is inactive. Text for a person: an SDK MUST NOT parse it. |
+
+Every string enum, and the event-type URIs, are **open**: an SDK MUST decode a value it does not
+know without failing and MUST NOT send one it does not know. An SDK SHOULD model event types as
+strings with the six URIs as named constants.
+
+**`SsfStreamInput`** (`create_stream`, and `update_stream` as a **replacement**) carries
+`receiver_client_id`, `audience`, `delivery_method` and `events_allowed` (required), and
+`description`, `endpoint_url`, `authorization_header`, `clear_authorization_header`,
+`events_requested`, `subject_format`, `status`, `status_reason` (optional). An omitted optional
+member takes its default **on every write, including an update** (§27.4 rule 5, repeated at the
+`update_stream` call site): `description`, `endpoint_url`, `status_reason` null;
+`events_requested` all of `events_allowed`; `subject_format` `iss_sub`; `status` `enabled`;
+`clear_authorization_header` false. **The one exception is `authorization_header`**: absent on
+an update keeps the stored header (unless rule 5 applies). `authorization_header` is
+write-only (§32.5); `clear_authorization_header: true` removes the stored one and is refused
+together with `authorization_header` and on create.
+
+### §32.3 Server rules every SDK can observe (normative)
+
+1. **Every write is validated before anything is stored**, each refusal `400
+   validation_error` with a `message` naming the rule (never echoing a header or a URL): an
+   empty, over-long, padded or control-character `audience`; a `description` over 256 bytes;
+   a `push` stream without `endpoint_url`, a `poll` stream with one or with a header; an
+   endpoint that is not absolute `https`, carries credentials or a fragment, is an IP literal
+   that is not globally routable (loopback, private, link-local, the metadata address, their
+   IPv4-mapped forms) or a `localhost`, `*.local` or `*.internal` name — the webhook outbound
+   address policy (D-49); a header over 4 096 bytes or with anything but visible ASCII and
+   spaces; an empty `events_allowed`; an `events_requested` outside `events_allowed`; an
+   unknown event-type URI.
+2. **The receiver binding (D-50).** `receiver_client_id` must be an OAuth2 client of the
+   tenant, registered for the `client_credentials` grant and with the `ssf.manage` scope —
+   otherwise `400` naming which.
+3. **The audience is unique across the deployment** (D-47): a create or update that reuses
+   one — in any tenant — is `409 conflict`, without saying where.
+4. **Update is a replacement** (`update_style: replace`), with `authorization_header`'s
+   exception (§32.2). It replaces the stream **as the server read it for this request**: if
+   another write — the receiver's (§32.6) — lands between that read and this write, the
+   update is refused with `409 conflict` rather than putting back what the other write
+   changed, and the administrator reads the stream again (F4 W4, T-406).
+5. **A stored header never follows the endpoint to another origin** (D-49): an update that
+   moves `endpoint_url` to another scheme, host or port while a header is stored must carry
+   `authorization_header` again or `clear_authorization_header: true`, else `400`.
+6. **The sealing key.** A write that stores a header on a deployment without
+   `pki_encryption_key` is `503 service_unavailable`; the same write without a header works.
+7. **Delete** answers `204` and removes the stream and every event buffered for it. A second
+   delete is `404`.
+8. **Status (D-51).** An administrator may set any status. A status an administrator set to
+   anything but `enabled` cannot be changed by the receiver. A status change is announced to
+   the receiver with an SSF stream-updated event (SSF §8.1.5).
+9. **The routes do not depend on the tenant's `ssf_enabled`** (D-45): an administrator
+   registers streams before switching the transmitter on. The setting — a disable-only layered
+   setting like `saml_idp_enabled`, default `false`, written through §27's `settings`
+   operations — governs everything a receiver sees (§32.6) and whether any event is sent, and
+   so does the deployment-wide gate of rule 13.
+10. **Authorization.** `ssf_streams:read` (`list_streams`, `get_stream`) and
+    `ssf_streams:write` (the three writes). The `{tenant_id}` in the path must be the caller's
+    (`403`). A service-account token is `401`, as on every human-only family: deciding which
+    third party receives security events about the tenant's users is a human administrator's
+    act.
+11. **Rate limiting.** Each of the three writes has a per-IP bucket of its own,
+    `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` (default 30): `429` per §2. Reads are not limited.
+12. **Audit.** `ssf_stream.created`, `ssf_stream.updated` (the **names** of the changed
+    members), `ssf_stream.deleted`; never the header.
+13. **SSF requires per-tenant issuers in a deployment of more than one tenant** (D-55, F4 W4
+    P23W4-11). Without per-tenant issuers (`AXIAM__AUTH__TENANT_ISSUER_PATHS` off) every
+    tenant's SETs would carry the same `iss` and be signed by the same key, so a tenant that
+    registered another tenant's receiver audience first — rule 3 cannot stop that — could push
+    SETs that receiver accepts. The **shared-issuer gate** holds when per-tenant issuers are
+    off **and** the deployment holds more than one tenant, counted across every organization
+    (an organization's own scope tenant is not counted beside its standard tenants, and an
+    organization with none counts as one). While it holds, SSF behaves for **every** tenant
+    exactly as with `ssf_enabled` off: discovery answers its one empty `404`, the receiver API
+    sees no stream, nothing is produced, held or verified, and no SET is signed — a push
+    already queued is dead-lettered and a poll answers nothing (§32.6). The check is made where
+    an event is produced, where a SET is signed and at discovery, never only when something is
+    written. **Turning `ssf_enabled` on** — at the organization or as a tenant override —
+    while the gate holds is `400 validation_error`, its `message` naming `ssf_enabled` and the
+    cause; turning it off, and a write that leaves it as it was, are accepted. The stream routes
+    keep working (rule 9): every `SsfStream` they return carries `transmitter_active: false`
+    and the reason (§32.2), and the §27 `settings` reads and writes carry the read-only
+    `oidc.ssf_inactive_reason` while `ssf_enabled` is on but the gate holds. The tenant count is
+    read from the datastore and reused for at most **60 seconds**; a tenant or organization
+    created or deleted through one server instance takes effect on that instance at once, and on
+    the others within that minute. A change of the gate's state is logged once at `WARN` and
+    audited as `ssf.inactive_shared_issuer` in every tenant whose `ssf_enabled` is on — never
+    per event. A single-tenant deployment keeps the root issuer, which no other tenant shares,
+    and a deployment that serves per-tenant issuers is never gated.
+
+### §32.4 Error mapping
+
+§2 and §27.4 rule 7, unchanged: `400` is `ValidationError`, `404` `NotFoundError`, `409`
+`ConflictError`, `403` `AuthzError`, `401` `AuthError`, `429` and `503` `NetworkError`. An SDK
+MUST NOT parse a `message` to recover the rule.
+
+### §32.5 `Sensitive<T>` applicability
+
+**`SsfStreamInput.authorization_header` is `Sensitive<T>`** (§7) from the first version an SDK
+ships: it is a credential AXIAM presents to a third party, write-only, sealed at rest and on no
+response. §27.5's table gains its row and the registry lists it in the namespace's
+`sensitive_request_fields`. No response type has a member for it (`SsfStream` has only
+`authorization_header_set`), and a decoder that meets one MUST drop it rather than surface it.
+
+### §32.6 The receiver protocol (informative for SDKs, normative for the server)
+
+What a relying party talks to. None of it is in the registry (`openapi.json` tags it
+`ssf-receiver`), and an SDK does not generate a client for it beyond §32.7.
+
+**Discovery.** `GET {root}/.well-known/ssf-configuration?tenant_id={tenant_id}` on every
+deployment, and — where the deployment serves per-tenant issuers (T21.6) — SSF §7.2's insertion
+form `GET {root}/.well-known/ssf-configuration/t/{tenant_id}` for the issuer
+`{root}/t/{tenant_id}`. Unauthenticated. The document carries `spec_version` `"1_0"`,
+`issuer`, `jwks_uri` (`{issuer}/oauth2/jwks`, the deployment key, D-13),
+`delivery_methods_supported` (`urn:ietf:rfc:8935`, `urn:ietf:rfc:8936`),
+`configuration_endpoint`, `status_endpoint`, `verification_endpoint`,
+`authorization_schemes` (`[{"spec_urn": "urn:ietf:rfc:6749"}]`), `default_subjects` `"ALL"`
+and the extension member `events_supported`. There are no add/remove-subject endpoints. An
+unknown tenant, a malformed id, a tenant whose `ssf_enabled` is off and every tenant while the
+shared-issuer gate holds (§32.3 rule 13) all answer the same empty `404`.
+
+**The stream management API** — `{root}/ssf/v1/stream` (`GET` one stream by `stream_id` or the
+receiver's list, `PATCH`, `PUT`; `POST` and `DELETE` are `403`: streams are an administrator's),
+`{root}/ssf/v1/status` (`GET`, `POST`) and `{root}/ssf/v1/verify` (`POST`, `204`) — and the
+poll endpoint `{root}/ssf/v1/poll/{stream_id}` (RFC 8936). Each takes a bearer access
+token issued to the receiver's OAuth2 client by the client-credentials grant with the
+`ssf.manage` scope (`403` otherwise); a stream bound to another client, another tenant's, or
+one in a tenant whose transmitter is off or inactive (§32.3 rule 13) answers the same `404`. A
+receiver may narrow its `events_requested` (never beyond `events_allowed`), change its
+`description`, repoint a push endpoint under §32.3 rules 1 and 5 and supply the push
+`authorization_header`; the method, the audience and the subject format are the administrator's. A receiver's `PATCH`, `PUT` and
+status `POST` are each decided against the stream as read for the request and written only
+if no other write — an administrator's — landed in between; when one did, the server decides
+again from a fresh read (so an administrator's `disabled` is never undone by a receiver's
+write that overlapped it), and answers `409` only if the stream kept changing over three
+attempts (F4 W4, T-406). Verification is limited to one request per
+`min_verification_interval` (60 s) per stream (`429`). Each route has a per-IP bucket,
+`AXIAM__RATE_LIMIT__SSF_PER_MIN` (default 60).
+
+**The SET** (D-45, D-46). JOSE header `{"alg": "EdDSA", "typ": "secevent+jwt", "kid": …}`.
+Claims: `iss` (the tenant's issuer, identical to the discovery `issuer`), `aud` (the stream's
+audience, one string), `iat`, `jti` (32 lower-case hex characters, 128 bits from a CSPRNG),
+`txn` (when the event has a cause shared by several SETs), `sub_id` and `events` with
+**exactly one** member. **No `sub` and no `exp`** (SSF §4.1.2, §4.1.7). `sub_id` is RFC 9493
+`{"format": "iss_sub", "iss": <issuer>, "sub": <user id>}` (the `sub` of AXIAM's ID tokens) or,
+on an `email` stream, `{"format": "email", "email": …}` — sent only for an address AXIAM vouches
+for, otherwise the event is not sent on that stream. `session-revoked` names the session too:
+`{"format": "complex", "user": <the above>, "session": {"format": "opaque", "id": <sid>}}`,
+`sid` being the ID token's. The verification and stream-updated events name the stream:
+`{"format": "opaque", "id": <stream_id>}`. The event objects:
+
+| Event | URI | Members |
+|---|---|---|
+| CAEP session revoked | `https://schemas.openid.net/secevent/caep/event-type/session-revoked` | `initiating_entity`?, `event_timestamp` |
+| CAEP credential change | `https://schemas.openid.net/secevent/caep/event-type/credential-change` | `credential_type` (`password`, `x509`, `fido2-platform`, `fido2-roaming`, `app`), `change_type` (`create`, `revoke`, `update`, `delete`), `initiating_entity`?, `event_timestamp`, `x509_issuer`? and `x509_serial`? (`x509` only), `fido2_aaguid`? (`fido2-*` only) |
+| CAEP assurance level change | `https://schemas.openid.net/secevent/caep/event-type/assurance-level-change` | `namespace` `"urn:axiam:acr"`, `current_level`, `previous_level`?, `change_direction`? (`increase` / `decrease`), `initiating_entity`?, `event_timestamp` |
+| RISC account disabled | `https://schemas.openid.net/secevent/risc/event-type/account-disabled` | `reason`? (`hijacking`, `bulk-account`) |
+| RISC account enabled | `https://schemas.openid.net/secevent/risc/event-type/account-enabled` | none |
+| RISC account purged | `https://schemas.openid.net/secevent/risc/event-type/account-purged` | none |
+| SSF verification | `https://schemas.openid.net/secevent/ssf/event-type/verification` | `state`? |
+| SSF stream updated | `https://schemas.openid.net/secevent/ssf/event-type/stream-updated` | `status`, `reason`? |
+
+`initiating_entity` is one of `admin`, `user`, `policy`, `system`; `event_timestamp` is seconds
+since the epoch; the levels are `urn:axiam:acr:1fa` and `urn:axiam:acr:mfa`. No member carries
+free text a person typed. A receiver MUST ignore members it does not understand (SSF §4.2.3).
+
+**Push** (RFC 8935): `POST` of the compact SET to the endpoint, `Content-Type:
+application/secevent+jwt`, with the stored `Authorization` header if there is one; the receiver
+answers `202`. **Poll** (RFC 8936): `POST` `{ "maxEvents", "returnImmediately", "ack",
+"setErrs" }` to the stream's poll endpoint; the answer is `{ "sets": { <jti>: <SET> },
+"moreAvailable" }`. An event stays in the stream's buffer — at most 1 000, the oldest dropped,
+seven days at most — until its `jti` is acknowledged (D-48).
+
+**The push response mapping** (D-49, D-53). Each attempt is one request, made to the address the
+endpoint resolves to *now* (every address must be globally routable, and the connection is
+pinned to the one validated; `https` is required) — an endpoint that was acceptable when it was
+registered and resolves to an internal address later is refused at delivery. **A redirect is
+never followed**: the one hop is made and a `3xx` is returned as the answer, so neither the SET
+nor the `Authorization` header can reach a host the administrator did not name. The header and
+the endpoint come from **one version** of the stream: an attempt that finds the stream changed
+between reading its endpoint and opening its header is retried, so a header supplied with a new
+endpoint is never sent to the old one (F4 W4, T-406). The response body is read to at most
+64 KiB and never logged or audited. What the answer means:
+
+| The receiver answers | Outcome |
+|---|---|
+| any `2xx` (RFC 8935: `202`) | delivered |
+| `400` with an RFC 8935 §2.4 `err` code (`invalid_request`, `invalid_key`, `invalid_issuer`, `invalid_audience`, `authentication_failed`, `access_denied`) | dead-lettered; the code is in the `ssf_push.delivery_failed` audit row |
+| `401`, `403` | dead-lettered: the credential is wrong until someone changes it |
+| any other `4xx` — a `400` without a known code, `410`, `422`, … | dead-lettered with the reason `HTTP <status>`: it will not change on retry — except `404`, `408` and `429` below |
+| `404`, `408`, `429`, any `5xx`, a timeout, no connection | retried |
+| a `3xx` (not followed), and anything else | retried |
+
+Retrying follows the shared outbound dispatcher's schedule, `base × 2^(attempt − 1)` clamped to a
+ceiling, set by `AXIAM__SSF_PUSH__MAX_ATTEMPTS` (default `5`, the first attempt counting as one),
+`AXIAM__SSF_PUSH__BACKOFF_BASE_MS` (`5000`) and `AXIAM__SSF_PUSH__BACKOFF_CEILING_MS`
+(`3600000`) — the webhook variables' names with the kind's prefix, read independently of them.
+A message that is dead-lettered waits in `axiam.ssf_push.dlq`, which discards it after **seven
+days** (`x-message-ttl`, D-53): it holds an unsigned event and so a subject. A retried push
+carries the byte-identical SET, one `jti`; the attempt re-reads the stream and signs against it as
+it is then (D-51), so a stream disabled meanwhile sends nothing and a paused one holds the event.
+While the shared-issuer gate holds (§32.3 rule 13) an attempt dead-letters its message before
+anything is signed, sent or held, whatever the stream's status.
+
+**The poll endpoint in detail** (RFC 8936; every reply here is `200` with the body above unless a
+status is named). A request body is optional — an empty one is `{}` — and at most 32 KiB
+(`413` beyond it). `400` for a body that is not the RFC 8936 JSON, a **negative `maxEvents`**,
+more than **1 000** `ack` entries or more than **100** `setErrs` entries, and for a **push**
+stream (there is nothing to poll). `maxEvents` is clamped to 100; `0` acknowledges and returns
+nothing. `ack` deletes exactly the named rows of *this* stream (an unknown `jti`, or another
+stream's, is ignored). Each `setErrs` entry deletes its row — the receiver will not accept that
+SET, so it is not offered again — and writes an audit row `ssf_stream.poll_set_error` carrying
+the `jti`, whether the event was still held, and the `err` code if it is one of RFC 8935's (else
+`unrecognized`); the receiver's free-text `description` is never stored. SETs are signed at poll
+time against the stream as it is then. **A paused or disabled stream answers an empty `sets`**
+and keeps what it holds (a disabled stream's held events stay until they expire). Without
+`returnImmediately` a poll *long-polls*: it waits up to **30 seconds** for an event. **At most one
+long poll waits per stream per server instance** (D-53): a second concurrent request on the same
+stream is answered at once, as if `returnImmediately` were true. A receiver that polls in a loop
+therefore keeps one connection open, not many.
+
+**What is emitted, and from where** (D-52, D-53). One emitter, a no-op while the tenant's
+`ssf_enabled` is off or the shared-issuer gate holds (§32.3 rule 13), one `txn` for every SET
+one operation produces:
+
+| Event | Emitted by |
+|---|---|
+| `session-revoked` | every revocation of a session — logout, an administrator's revoke, a password change or reset, an erasure — never an expiry or a refresh redemption |
+| `credential-change` | a password change or reset; the SCIM password write; creating a user with an OPAQUE record; TOTP confirmation; an MFA reset or method deletion; a WebAuthn registration (`Passkey` → `fido2-platform`, `SecurityKey` → `fido2-roaming`). An administrator's password write has no REST route, so the SCIM write is the source. **`x509` is never emitted:** certificates bind only to service accounts, and an SSF subject is a user — the member shapes stay for the day a user-certificate binding exists |
+| `assurance-level-change` | the honour lane's **step-up**: when an authorization request needs a higher `acr` and the browser presents a valid OP session, the server remembers (ten minutes, one record per user, the latest replacing) the session and its `acr`; the return leg that arrives with a **new** session of the same user consumes the record once and emits **only when the `acr` differs** — `previous_level` the old one, `change_direction` from the published order (`1fa` < `mfa`), `initiating_entity` `user`. No marker travels in `return_to`, so there is nothing for a relying party to forge or replay; no earlier session, another user, an expired record or the same session emit nothing |
+| `account-disabled`, `account-enabled` | an administrator's status write, SCIM `active`, and — for `account-disabled` only — a directory deactivation. **The directory sync never re-enables an account** (D-31), so `account-enabled` comes from the administrator and SCIM alone |
+| `account-purged` | `DELETE /api/v1/users/{id}`, SCIM `DELETE /Users/{id}` (the same tombstone) and the GDPR erasure; the subject is the account as it was **before** the write |
+| `stream-updated` | an administrator's or receiver's status change, announced only while the tenant's `ssf_enabled` is on and the shared-issuer gate does not hold |
+
+A lock-out is not an `account-disabled`; an unchanged status, a no-op patch and an equal `acr`
+tell nobody anything.
+
+### §32.7 The receiver helper (SHOULD, seven SDKs)
+
+Two operations on a receiver configuration `{ issuer, audience, jwks_uri | discovery_url,
+access_token_provider }`. Both are **pure client-side helpers**: neither is in the registry,
+and both perform I/O only to fetch the JWKS and, for `poll`, to call the poll endpoint.
+
+**`ssf.verify_set(set) → SecurityEvent`** verifies one compact SET, in this order, and refuses
+(§2 `AuthError`, with one of the reason codes in brackets) at the first failure:
+
+1. three base64url parts that decode, a JSON header and payload [`malformed`];
+2. header `typ` equal to `secevent+jwt` or `application/secevent+jwt`, case-insensitively
+   [`invalid_type`];
+3. header `alg` exactly `EdDSA` — `none`, every `HS*` and every other value refused
+   [`invalid_key`];
+4. the key named by `kid` in the JWKS fetched from `jwks_uri` over §6's TLS policy; on an
+   unknown `kid`, **one** refetch, no more often than once a minute, then refusal
+   [`invalid_key`];
+5. the signature [`invalid_key`];
+6. `iss` equal to the configured issuer, exactly [`invalid_issuer`];
+7. `aud` equal to the configured audience, or an array containing it [`invalid_audience`];
+8. no `exp` and no `sub`; `jti`, `iat`, `sub_id` present; `events` exactly one member
+   [`invalid_request`];
+9. a `jti` not seen before within the helper's replay window — default **seven days**, the
+   transmitter's buffer retention, configurable but never below it — kept in a pluggable store
+   (in-memory by default) [`replayed`]. The `jti` is recorded only after steps 1–8 passed.
+
+It returns `{ jti, iat, iss, aud, txn, event_type, event, sub_id }`, `event_type` the single
+`events` key, `event` its object, both opaque to the helper beyond that. The reason codes match
+RFC 8935 §2.4's `err` values, so a push endpoint can answer `400 {"err": <code>}` with them
+(`replayed` is answered as `invalid_request`).
+
+**`ssf.poll(stream_id, { max_events, return_immediately, ack, set_errs }) → { events,
+more_available, refused }`** calls the stream's poll endpoint with a bearer token from
+`access_token_provider` (a client-credentials token carrying `ssf.manage`, e.g. §12.1's
+`login_client_credentials`), passes `ack` and `set_errs` through, runs `verify_set` on every
+returned SET and returns the verified `events` and the `refused` ones as `{ jti, reason }`. It
+MUST NOT acknowledge anything itself: the caller acknowledges the `jti`s it **processed** on
+its next call, and SHOULD pass each refused one in `set_errs` (`{ <jti>: { "err": <reason> } }`)
+instead. `poll` is not retried on a `4xx`; §16 applies to transport errors and `5xx`.
+
+**Names.** `verify_set` and `poll` on an `ssf` receiver handle, not on the §27 `ssf`
+management namespace (the two are different audiences, §32):
+
+| Canonical | Rust | TypeScript | Python | Java | C# | PHP | Go |
+|---|---|---|---|---|---|---|---|
+| `ssf.verify_set` | `SsfReceiver::verify_set` | `SsfReceiver.verifySet` | `SsfReceiver.verify_set` | `SsfReceiver.verifySet` | `SsfReceiver.VerifySetAsync` | `SsfReceiver->verifySet` | `SsfReceiver.VerifySet` |
+| `ssf.poll` | `SsfReceiver::poll` | `SsfReceiver.poll` | `SsfReceiver.poll` | `SsfReceiver.poll` | `SsfReceiver.PollAsync` | `SsfReceiver->poll` | `SsfReceiver.Poll` |
+
+Both perform I/O (a JWKS fetch can happen inside `verify_set`), so §27.3's async discipline
+applies. An SDK MAY offer a synchronous `verify_set` that takes an already-fetched JWKS.
+
+### §32.8 Required tests
+
+**Management namespace** — six per SDK that ships it, against a mocked HTTP server:
+
+1. **Replacement.** `update_stream` sends `PUT` with every `SsfStreamInput` member it models;
+   the input cannot be built without `receiver_client_id`, `audience`, `delivery_method` and
+   `events_allowed`; a `200` decodes to `SsfStream`.
+2. **The header is Sensitive.** `authorization_header` set from a runtime value is sent in the
+   body and absent from every stringification of the input; an `SsfStream` body that (wrongly)
+   carries `"authorization_header": "<value>"` decodes to a value whose every stringification
+   lacks it, and the type has no accessor for it.
+3. **Open decoding.** An `SsfStream` with an unknown `status`, `delivery_method`,
+   `subject_format`, `status_actor` and an unknown event-type URI decodes, and so does one
+   with `transmitter_active: false` and a `transmitter_inactive_reason`, and one without the
+   reason.
+4. **Pagination.** `list_streams` returns `Page<T>` with `total`; the auto-pager carries
+   `search` on every request.
+5. **No retry.** A `503` to each of the three writes: exactly one request, `NetworkError`.
+6. **Errors.** `400` → `ValidationError` with the `message`; `409` on `create_stream` →
+   `ConflictError`; `404` on `get_stream` → `NotFoundError`; `401` → `AuthError`.
+
+**Receiver helper** — eight per SDK that ships it, with an Ed25519 key the test generates and
+SETs the test signs (no key literal):
+
+1. A SET signed by the JWKS key verifies, and every field of the result is the claim's.
+2. `typ` absent or `JWT` → `invalid_type`; `alg` `none` or `HS256` → `invalid_key`.
+3. A signature by another key, and a tampered payload → `invalid_key`.
+4. Another `iss` → `invalid_issuer`; another `aud` → `invalid_audience`.
+5. `exp` present, `sub` present, two events, no `jti` → `invalid_request`.
+6. The same SET twice → the second `replayed`; a replay window below seven days is refused at
+   configuration.
+7. An unknown `kid` → exactly one JWKS refetch, then `invalid_key`; a second unknown `kid`
+   within the minute → no refetch.
+8. `poll` sends `ack` and `set_errs` exactly as given, returns verified and refused SETs apart,
+   acknowledges nothing on its own, and is not retried on `400`.
+
+The server task adds its own tests for §32.3 and §32.6; they are not an SDK's to duplicate.
+
+### §32.9 What an SDK does not do
+
+It does not transmit, sign or register streams through the SSF protocol (`POST
+/ssf/v1/stream` is `403`); it does not generate a client for the stream management API or the
+poll endpoint beyond `poll`; it does not trust a SET it did not verify, and it never verifies
+one against a key it did not fetch from the configured `jwks_uri` (no `jwk` or `x5c` header
+member is honoured); it does not cache a stream's configuration (§27.4 rule 10).
+
+### §32.10 Per-SDK posture
+
+**No SDK implements §32 at contract 1.56.** The ports follow from the wave's merge commit, as
+the post-merge fan-out of D-35; T23.5.4 opens the tracking issue that lists them, SDK by SDK.
+An SDK that ships the namespace states "§27 and §32"; one that ships the receiver helper states
+"§32.7" by name, since it is independent of the management surface (Conformance Statement).
+
 ---
 
 ### OpenAPI Export Feature Flag
@@ -9731,6 +10644,6 @@ Comparing digests is exact where comparing versions was not.
 
 ---
 
-*Contract version: 1.54 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature; §20.2 rule 6's second reason restated 2026-08 (contract 1.14) — **documentation only, no SDK behaviour changes and no signature moves**. ilpanich/axiam#302 closed: the server now decides the ticket race with a transaction the storage engine arbitrates plus a nonce read back after it commits, so the "measured residual of roughly 1 in 640" the rule cited no longer exists. The rule is unchanged and its first reason (a spent ticket makes the retry useless) was always sufficient on its own; what changes is that the second reason now rests on what an SDK can actually know — it is talking to a server whose storage engine it cannot attest, and the guarantee is conditional on that engine being persistent; **§10.1 rule 9 (sender-constrained tokens) and §21 (FAPI 2.0 profile, mTLS client credentials, RFC 9207 `iss`) added 2026-08 (contract 1.15)** — one new normative rule for every SDK: a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one, and a `cnf` naming a confirmation method the SDK cannot check MUST be refused rather than read as unconstrained. No signature moves and no breaking change to any existing call; the compatibility risk runs the other way, and the required positive regression test (an **unbound** token is still accepted with or without a certificate) is there because the likeliest wrong implementation of rule 9 is one that starts demanding certificates from every caller. Everything else in §21 is informative: mTLS client authentication is optional for the client role, and RFC 9207 `iss` validation is a SHOULD that any SDK talking to more than one issuer should treat as a MUST; **§10.1 rule 9 extended for DPoP and §21.6–§21.9 added 2026-08 (contract 1.16)** — the server gained the second half of two X5.1 rows, `private_key_jwt` client authentication (RFC 7523 §2.2) and DPoP sender-constrained tokens (RFC 9449), and rule 9's four-row table becomes a ten-row one **extended in place** rather than duplicated. The SDK-visible surface is the resource-server side only: a `cnf` may now carry `jkt`, an SDK that cannot verify a DPoP proof MUST refuse such a token rather than accept it as a bearer, and a `cnf` naming **both** methods is a conjunction — "check whichever we can" is forbidden, as is reading an empty `cnf` as unbound. No signature moves and no breaking change to any existing call; the compatibility risk again runs the other way, and the positive regression test is widened to say an **unbound** token must still be accepted with no certificate *and* no proof. Client-side proof generation is a per-language judgement call and §21.7.3 makes declining a supported answer with exactly three obligations (reject, document, test) — §21.9 records each SDK's posture, and the C and C++ SDKs decline §21.7.2 deliberately rather than by omission. §21.8 (`private_key_jwt`) is informative throughout: the client role may keep using `client_secret_post` or mTLS; **§10.3 (sender-constrained tokens over gRPC) added 2026-08 (contract 1.17)** — the X5 work landed REST-first, and gRPC introspection was found to carry no `cnf` at all, which meant an SDK validating through `TokenService` could not satisfy rule 9 detail 4 even in principle: it had no way to tell a bound token from a bearer one and was forced into the exact downgrade rule 9 exists to prevent. `ValidateTokenResponse` and `IntrospectTokenResponse` now carry `cnf` and `token_type`, and introspection additionally gains the RFC 7662 §2.2 fields it had always been missing (`scope`, `client_id`) plus `permissions` (§20 UMA RPT) and `ext_exchange_iss` (X4 provenance). All additive proto fields, so an older client keeps working and simply does not see them — which is the risk, and why §10.3 is normative rather than informative. One wire-level subtlety has its own rule: proto3 cannot distinguish an absent string from an empty one, so an **empty** `CnfClaim` must be refused rather than read as unbound, exactly as rule 9's "names neither" row requires. SDKs must NOT copy the server's own gRPC-side refusal of DPoP-bound tokens — AXIAM's interceptor declines them because a tonic interceptor sees neither `htm` nor `htu`, whereas an SDK guarding a real endpoint knows both; **§22 (Reactors — AMQP extension actors) added 2026-08 (contract 1.18)** — **non-breaking / additive**, and additive in the strongest sense: no existing signature moves, no existing rule changes, and an SDK that ships no reactor runtime is exactly as conformant as it was under 1.17. The chapter documents a server surface that already exists (`crates/axiam-amqp/src/reactor/`, `crates/axiam-core/src/models/reactor.rs`): a Reactor is an external process that subscribes to hook events on the AMQP bus and answers allow/deny/mutate under a signed, timeout-bounded, field-allow-listed protocol — Zitadel-Actions parity without loading third-party code into the security kernel. Two things in it are new obligations rather than new options. The first is that §8's HMAC now runs in **both directions** on one exchange: the server signs the event, the reactor signs the reply with the same tenant subkey, and an unsigned or stale reply is discarded as though the reactor had never answered — with one canonicalization difference that will cost an implementer a day if it is not stated, namely that `hmac_signature` is serialized as `null` inside a reactor body rather than omitted as it is in §8's own two message types. That is why §22.13's vectors ship beside the §8 vectors, in the same fixture directory and under the same master key, tenant and derived subkey: one loader serves both, and the difference is a test rather than a paragraph to remember. The second is the hot-path exclusion (§22.7), written as a **MUST NOT** rather than a note — `authz.check`, `authz.check_batch` and `token.introspect` are not hookable and no SDK may present them as such, because a reactor round-trip is milliseconds and the check path's budget is microseconds; an application needing external input on a decision writes a deny grant, which the engine evaluates at hot-path cost. Swift, C and C++ ship no runtime (§22.11) for the same reason §8 has never listed them among the SDKs that speak AMQP — no vendorable client for those targets — but §22.1–§22.8 binds a hand-rolled integrator on them in full, a split that follows the §12.6 precedent contract 1.11 lifted while cutting at the seam between protocol and convenience rather than across a whole section. One scope note travels with the chapter: the server's lapin transport is not yet merged, so the two AMQP basic properties §22.1 names for reply addressing are the standard RPC convention rather than an implemented one — every signed body, field order, allow-list and validation rule in the chapter is implemented and tested today. Recorded here and not in the Breaking Changes Log above, which is untouched, because nothing breaks; **SDK-Q10 closed 2026-08 (contract 1.19)** — the last deferred contract item, and the one that had been deferred because every closure looked like a break. The gRPC decision's `deny_reason` and the REST decision's `reason` were the same string under two names, so an SDK speaking both transports reconciled them in its own mapper and the two same-named `AccessDecision` types could disagree about their own field list. Closed by **deprecate-and-add**: `CheckAccessResponse` gains `reason` (field 4, explicit presence — absent on an allow, present on every refusal, exactly the REST shape), `deny_reason` is marked `[deprecated = true]` and keeps carrying the identical string until it is **removed at AXIAM 2.0**, and §11.2 rule 9's amendment states the one migration rule: read `reason`, fall back to `deny_reason` only when `reason` is absent on a refusal, expose one reason accessor rather than two. Nothing breaks on the wire today and no signature moves. The same amendment settles the two shapes that went with it — the decision is `allowed` + `reason_code` + `reason` and carries no `resource_type`/`resourceType` (the server has never had one), and gRPC `subject_id` becomes optional the way REST's is, with an **empty** value meaning "the subject in the verified token". That last one is deliberately not proto3 `optional`: `buf breaking` refuses the cardinality change, so empty carries the meaning proto3 cannot express as absence — the same constraint §10.3 already records for an empty `CnfClaim`; **§15.2 rule 8, §22.8's listen/unreadable-registry paragraphs and §22.9 rule 3 added 2026-08 (contract 1.20)** — the medium-severity half of the F4-bis security review (SEC-096, SEC-099, SEC-100, SEC-101). One of the four is an SDK-visible **behaviour** change and it is the one to read: an exchanged token (and a §20 RPT) is now sender-constrained to whatever the *exchanging client* proved on that request, so `token_type` may be `DPoP` where it was always `Bearer`, the token may carry a `cnf` that §10.1 rule 9 governs, and a client registered for binding that exchanges without presenting its credential now receives `invalid_client` instead of an unbound token. No signature moves, and a client that registered no binding — every client that existed before X5.1 — receives byte-identical responses. The other three are statements of server behaviour an SDK could not have inferred: a `listen` registration can never deny even on the two out-of-chain failure paths, an unreadable registration store applies the *event's* default policy but exempts a tenant with no registrations at all, and a reactor registration is refused with `503` while the server's transport cannot dispatch — with `enabled: false`, `DELETE` and creating-already-disabled deliberately left open as the operator's way out; **§22.1's scope note closed and §22.9 rule 3 widened 2026-08 (contract 1.21)** — **no SDK behaviour changes and no signature moves**. The server's lapin `ReactorTransport` is merged (`crates/axiam-amqp/src/reactor/transport.rs`) and `axiam-server` composes it, so the one part of §22 that was not pinned by a running implementation — the two AMQP basic properties used for reply addressing — now is, exercised against a live broker in `crates/axiam-amqp/tests/reactor_containerized_test.rs`. An SDK that already echoed `reply_to`/`correlation_id` from the delivery, which the scope note told it to do, needs no change. Two things are worth reading anyway. The first is a server-side clarification with a security reason behind it: an `intercept` event goes to the reactor's queue directly rather than through the topic exchange, because the routing key is per `(tenant, event)` and a fan-out would let whichever reactor answered first be consumed as the reply of whichever reactor the priority-ordered chain was waiting on — the exchange and bindings are still declared by the server, and a reactor runtime still consumes its configured queue and still declares nothing. The second is that §22.9 rule 3's `503` now has a second trigger, `mode: "listen"`, for as long as no hook site fans out to listeners: such a registration receives nothing and, being a listener, produces no outcome in which its silence could be noticed, so refusing it is more honest than accepting it. `enabled: false`, `DELETE` and creating-already-disabled stay open, as they already did. A **broker outage is explicitly not** a `503` trigger — the merged transport reports itself dispatchable while disconnected and lets each registration's `failure_policy` decide, per §22.8, because refusing registrations for the duration of a blip would turn a broker problem into an admin-API problem; **§22.14 (declarative handler binding) added 2026-08 (contract 1.22)** — **additive, SHOULD-level, no signature moves and no behaviour change to any existing call.** §22.10's handler is one function from an event to one answer, which is right for the wire and wrong for the code: a reactor registered for three events opens with a dispatch on the event name, and the catch-all arm of that dispatch is almost always written `return allow()`. That line is §22.10 rule 2's defect — synthesizing an answer for a handler that never ran — relocated out of the runtime, where the rule binds, and into user code, where it does not. Every SDK example this project ships had one, which is how the pattern was found. The subsection defines the declarative form each language already uses for §11 (annotations in Java and Kotlin, attributes in C# and PHP, a decorator in Python, an attribute macro in Rust, a `ServeMux`-shaped binding table in Go and a typed record in TypeScript), and pins six rules on it. Five are restatements aimed one layer up — compose rather than replace, refuse an unregistered name at bind time, one handler per event, propagate a handler's own failure unchanged, never filter a patch. The sixth is the reason the subsection exists: an event with no bound handler MUST abstain, letting the registration's `failure_policy` decide exactly as it decides a timeout, and MUST NOT be answered `allow` or `deny`. Rule 2 carries one instruction that reads backwards until you see why: an SDK MUST NOT keep its own list of the three hot-path operations to give them a better error message, because that list would be a constant naming them and §22.13's hot-path assertion forbids exactly that — they are refused as unknown names, like any other name absent from the §22.5 registry. Nothing here is a new conformance claim: an SDK shipping §22 with the binder and one shipping §22 without it both write "conforms to … §22"; **§8b tightened and the server made TLS-only 2026-08 (contract 1.23)** — the server's `AXIAM__AMQP__ALLOW_PLAINTEXT` escape hatch is **removed**, so `AXIAM__AMQP__URL` must be `amqps://` in every build profile with no flag that changes it. The flag had existed for a year and four of this project's own stacks reached for it — dev compose, the e2e stack, the benchmark target and CI — each with a locally sound argument (throwaway data on a compose network, an ephemeral broker carrying synthetic fixtures for one job, a hop the benchmark harness measures rather than encrypts). None was wrong; the aggregate was that "AMQP is TLS-only" described the production compose file and the k8s manifests and nothing else the repository ran. Rule 1 is correspondingly restated as *refuse* every non-`amqps://` scheme rather than merely *support* `amqps://`, and two rules are added. **Rule 7** is the one with teeth: rules 1–5 MUST be enforced in code, not stated in documentation, because the review that produced this version found three SDKs asserting `amqps://` in a doc comment attached to a parameter that accepted anything — the TypeScript runtime's own comment read "there is no verification-skip switch and no plaintext fallback" directly above an `amqp.connect(url)` that would happily take `amqp://`. Where an SDK takes a caller-supplied channel (Java, Kotlin, C#) it must additionally ship a constructor that applies rules 1–4 and show that constructor in its README. **Rule 8** removes any loopback exception: §6's `http://localhost` dev carve-out for the HTTP transports does not extend to the broker URL, the server has no plaintext listener for it to reach, and the Rust SDK's AMQP path — the only one that had inherited it — no longer grants it. Two new required tests go with them: a refusal must be asserted as *no connection attempted* rather than as a thrown message, since rule 5 is a claim about the absence of a fallback and an implementation that dialled first and complained second would pass a message-only assertion; and an unparseable URL must fail closed, because a guard written as "check the scheme *if* the URL parses" silently exempts everything malformed — a defect this project shipped in the Rust SDK and fixed under this version. §8b also gains a normative per-SDK index naming each enforcement point, so "where is this actually checked" is answerable without a grep. No message format, field order or signing rule changes, and §22.2's transport paragraph is unchanged: it already deferred to §8b in full; **§23 (Secure Remote Password, SRP-6a) added 2026-08 (contract 1.24)** — **additive, no signature moves, no behaviour change to any existing call.** An SDK that does not implement §23 is exactly as conformant as it was under 1.23, and a server left at the `srp_mode: disabled` default — which is what every existing deployment gets on upgrade — behaves byte-identically to before. The chapter documents a second way to prove a password: an augmented PAKE in which the plaintext never reaches the server, which closes the holes TLS 1.3 does not — a TLS-terminating proxy, an accidental request-body log, a heap dump. §23.0 states the limits in the same breath, because an SDK's own README will repeat them and overclaiming is worse than not shipping the feature: SRP does not defend against a compromised AXIAM server, and in a browser it does not defend against AXIAM serving malicious JavaScript. Three things in it will cost an implementer a day each if they are skimmed. The first is `PAD()` (§23.3 rule 1): every hashed value is left-padded to the modulus width, and an implementation that skips it agrees with everyone else until a value happens to carry a leading zero byte, at which point roughly one login in 256 fails in a way that reads as a flaky network — which is why the vendored vectors are built with a leading-zero salt *and* a leading-zero `x` rather than random ones. The second is that the identity inside the KDF comes from the server's challenge response and never from what the human typed (rule 2): AXIAM lets a user sign in with a username or an email while only one of the two is bound into `x`. The third is that `M2` verification is mandatory (rule 6) — skipping it keeps the half of SRP that authenticates the client to the server and throws away the half that authenticates the server to the client, leaving a rogue endpoint that never knew the verifier indistinguishable from the real one. Two deliberate divergences from RFC 5054 are recorded rather than inherited: SHA-256 rather than SHA-1, and `x` as a memory-hard KDF output rather than a bare hash — the latter because a bare-hash verifier would be *cheaper* to attack offline than the Argon2id hashes AXIAM stores today, making adoption a net regression at rest. Both KDFs (`argon2id`, `pbkdf2_sha256`) are mandatory for login and the server dictates which per exchange; PBKDF2 exists because three languages have no vetted Argon2 binding in their standard distribution, and shipping SRP that only half the SDKs could speak would have been worse than shipping a weaker-but-universal fallback. §23.6 explains a server behaviour an SDK cannot infer and must not undo: `srp_mode: required` refuses password login for **every** principal in the tenant rather than only the enrolled ones, because the per-user variant would split the response on a fact about the account and turn `/auth/login` into an enumeration oracle costing one junk password per name. That uniformity is also why `required` is the last step of a migration and not the first — a verifier needs the plaintext password and a stored Argon2id hash is not invertible, so nobody can be enrolled retroactively. PHP is the one **conditional** posture in §23.8: it has no native bignum and neither `ext-gmp` nor `ext-bcmath` is guaranteed present, so its `srpAvailable()` reports `false` rather than throwing at login time; **§23.3 rule 4 errata and the §23.8 table corrected 2026-08 (contract 1.25)** — **documentation only; no SDK behaviour changes, no signature moves, and nothing that was conformant under 1.24 stops being so.** Implementing §23 across all eleven SDKs turned up a fact the chapter had assumed away: `argon2id` is not universally computable, and not for want of a dependency. PHP's only Argon2id that takes a caller-supplied salt (`sodium_crypto_pwhash`) requires exactly 16 bytes where §23.5's salt is 32, and `password_hash()` accepts no salt at all; Swift Crypto ships no Argon2 and none exists for every platform its SDK supports; C and C++ get it from OpenSSL only at 3.2 and later. Rule 4 already told an SDK what to do about a KDF it cannot perform — refuse with `NetworkError` naming it, never substitute — so no implementation changes; what the errata adds is that such a refusal is **conformant rather than a gap**, and that the SDK must say so in its README together with the trade-off. That trade-off is real and belongs in the open: a tenant serving those clients sets `srp_kdf: pbkdf2_sha256`, and PBKDF2 is not memory-hard, so a leaked verifier database enrolled under it is cheaper to attack with GPUs than one enrolled under Argon2id — while §23.0's threat model, which is about proxies, request logs and heap dumps rather than about the cost of an offline attack, is unaffected either way. The §23.8 table is corrected in the same pass to say what each SDK actually does rather than what was projected for it, and gains a second conditionality axis, because "can this build do SRP at all" and "can this build serve this tenant's KDF" are different questions answered at different times — the first by `srpAvailable()` before a login is attempted, the second by a `NetworkError` during one; **§23 rewritten from SRP-6a to OPAQUE (RFC 9807) 2026-08 (contract 1.26)** — **breaking for any SDK that implemented §23 under 1.24/1.25; no change to §1–§22 and no signature moves outside §23.** SRP is removed from AXIAM entirely rather than deprecated, and nothing migrates: a verifier cannot be converted into a registration record, because both are sealed against a plaintext the server has never had, and AXIAM is unreleased. Three reasons, in descending order of weight. OPAQUE was published as **RFC 9807** in July 2025, closing the one blocker 1.24's own text named — it was a draft when SRP was chosen, and improving implementation coverage was written down as the migration trigger. It resists the pre-computation attack SRP is open to, which is not a marginal gain: a stolen verifier database was offline-attackable at exactly the cost of the KDF, and that is why AXIAM's SRP had to bolt a memory-hard KDF onto RFC 5054's bare hash merely to *match* the Argon2id hashes it replaced, whereas a stolen OPAQUE record additionally requires the tenant's OPRF seed and without it there is no dictionary attack to mount at any cost. And it is specified to the byte, where AXIAM's SRP carried two documented divergences from its own RFC. **The structural change is §23.1, and it is the one to read first: an SDK MUST NOT implement the protocol.** SRP was hand-written eleven times because it is modular arithmetic and every language has a bignum; OPAQUE needs an OPRF, `hash_to_curve`, `expand_message_xmd`, an envelope and a three-message AKE, so every SDK binds one audited implementation — compiled, through WebAssembly, or through a C ABI — with Go the single permitted exception because a vetted RFC 9807 library exists for it and cgo would break `CGO_ENABLED=0` for every consumer. That costs SDKs their pure-source installs and buys back the whole of 1.25's errata: `pbkdf2_sha256` is gone, the second conditionality axis is gone, no tenant has to weaken its KDF policy to serve PHP or Swift clients, and the weaker KSF rung is now scrypt, which is memory-hard. Four §23 obligations disappear rather than change. There is **no server proof to verify** — RFC 9807's AKE authenticates the server during the handshake, so 1.24's rule 6, which had to mandate an `M2` check in capitals because skipping it silently discarded half the protocol, describes a failure mode that no longer exists. There is **no `PAD()`**. There is **no identity in the key derivation**, so `login/start` returns no identity field, `/auth/reset/context` no longer discloses the account's username, and a rename no longer invalidates a credential. And there is **no `register/finish` endpoint**: a record can only be built where the plaintext legitimately exists on the client, and every such moment is already an endpoint that takes a password. What is genuinely new is that enrolment now costs a server round trip — `POST /auth/opaque/register/start`, unauthenticated by necessity because it is called while creating a user who does not exist yet, and safe because the server mints the credential identifier itself. `POST /api/v1/admin/bootstrap` is the one endpoint that takes no enrolment object at all: it already receives the plaintext password because it has to hash it, so it runs both halves itself and stays a single call. §23.7's fixture is correspondingly smaller and an SDK author should read §23.7's first three paragraphs before concluding something is missing — what each SDK still owns is hex, field mapping, honouring the server's KSF parameters and the §2 error taxonomy, and that is what is pinned; **§22.5's firing list gains usernameless passkey sign-in 2026-08 (contract 1.27)** — **no SDK signature moves and no change to any SDK-implemented surface**; WebAuthn is a browser ceremony and no SDK speaks it. It is recorded here because §22.5 enumerates where `login.post_auth` fires, and a reactor author reading that list is the person who needs to know the list grew. The server gained `POST /api/v1/auth/webauthn/authenticate/discoverable/finish`, a sign-in that completes without a username and therefore without the password step that fired the event for the username-bound ceremony. The carve-out the section already carried — WebAuthn `authenticate/finish` does not fire, because it continues a login gated at its first step — reads as covering this one too, and does not: there is no first step to have been gated at. Left unfired it would have been SEC-095 a second time, with the bypass being a button rather than an identity provider. It behaves as the federated paths do, refusing `require_mfa` rather than dropping it, since a one-round-trip sign-in has no step-up branch — and the ceremony required user verification to complete, so the factor a step-up would demand was already presented; **§24 (WebAuthn and passkeys), §25 (account lifecycle and MFA enrolment) and §26 (pushed authorization requests) added, and §22.11's deferral narrowed, 2026-08 (contract 1.28)** — one breaking change, logged above, and everything else additive. Contract 1.27 had recorded in passing that “WebAuthn is a browser ceremony and no SDK speaks it”; the first half is true and the conclusion was wrong, because a ceremony is two exchanges stacked and only the one with the *authenticator* needs a browser. The one with AXIAM is four JSON round trips, which is what an SDK is for, and a Go service enrolling a passkey for a client it fronts or a Java backend completing a ceremony a handset ran speaks it without ever touching `navigator.credentials`. §24 therefore cuts three ways. The relying-party layer and the **JSON bridge** (§24.6a) bind all eleven SDKs; the linked-API helper (§24.6b) is offered only where the build can reach an authenticator — TypeScript's browser build, the Rust WASM build, and Swift on both iOS 16+ and macOS 13+. The bridge is the part worth reading twice, because it is what makes the third column a statement about convenience rather than about capability: Android's Credential Manager takes and returns the WebAuthn **JSON form as a string**, so `axiam-kotlin-sdk` stays a plain `kotlin("jvm")` library — no Android Gradle Plugin, no AAR, no second coordinate — and an Android app still runs a full ceremony by passing `requestJson` into `CreatePublicKeyCredentialRequest` and the response JSON straight back. §24.6b rule 2 then makes every remaining absence deliberate rather than a gap by **forbidding** an SDK from emulating an authenticator in software, which would put a key in process memory and call it a second factor. The rule the rest of §24 hangs off is §24.0: the server chooses every option and verifies every response, so an SDK passes both through byte-for-byte. Not because the fields are hard — they are not, and that is the hazard: relaxing `userVerification` to `“preferred”` because a CI authenticator kept prompting weakens a ceremony the server believes it configured, and the server cannot detect it, since an assertion produced under weaker options is a valid assertion. Two mappings override §2 and each loses something real if left generic: a `403` on `register/finish` is the tenant's attestation policy refusing *this* authenticator and its message is the only way the holder of a security key learns a different one would work, and a `503` on `register/start` is a server configuration state that §16 MUST NOT retry — the second documented exception to the retry policy after §20's. §24 also lands with a server fix it depends on: both `authenticate/*/finish` endpoints answered with the token pair in the body and set no cookies, which made a browser passkey sign-in impossible to complete and left `POST /api/v1/auth/refresh` — which reads the refresh token from `axiam_refresh`, never from a body — unreachable afterwards; they now set the same triple and the same `X-CSRF-Token` header as the password path, with the body unchanged so non-browser clients are not asked to read a cookie jar. §25 closes the other end of the same omission: §1 locked the *middle* of an account's life, so the nine operations that get an account into a state where §1 applies — both MFA enrolment paths, email verification, password reset — were reachable only by hand-rolling a POST against a path the SDK also knew, which is the divergence §1 exists to prevent arrived at through omission rather than disagreement. Its one breaking change is logged; its one field an implementer will get wrong is `totp_uri`, which *contains* `secret_base32`, so an SDK that wraps the secret and leaves the URI bare has wrapped nothing — which is why §25.6 requires scanning output for the secret **value** rather than the field name. §26 states PAR, whose likeliest defect is stated in the section rather than left to a table: it answers **`201`**, and a success predicate written `== 200` treats every successful push as a failure. Its other rule worth reading is that the authorization URL carries exactly `client_id` and `request_uri` and the server **refuses** a request mixing a `request_uri` with inline parameters rather than merging them — merging is where parameter confusion lives, and an SDK re-adding the parameters “for compatibility” would restore the attack. Finally §22.11: Swift, C and C++ still bundle no AMQP client, and the deferral is narrowed to that. Until now it also took the **protocol** with it — v2 HMAC over a canonical serialization with a `null` signature placeholder, freshness in both directions, nonce and correlation binding, the §22.5 allow-lists — which is the half with the sharp edges, none of them AMQP-shaped, left for each integrator to reimplement from prose. The three now ship §22.1–§22.8 and §22.14 over a caller-supplied transport and MAY claim §22; because the runtime never sees a URL, §8b rule 7 is satisfied by **exposing the guard as a public tested function** rather than by a paragraph, which is exactly the failure contract 1.23 was written to stop; §23.4 rule 7 and §23.5's `login/start` response gain the `mode` field 2026-08 (contract 1.29) — a failed `KE2` under `opaque_mode: optional` now REQUIRES a retry over `POST /auth/login`, where before every SDK was told the exchange was final. That reading locked out every user of a tenant that enabled `optional`, because an account with no registration record is the ordinary case under it and the server deliberately makes that indistinguishable from a wrong password. `required` is unchanged and an absent `mode` reads as `required`, so an SDK that does nothing stays correct against a `required` tenant and only a tenant mid-migration is affected; §5.2.3 tenant-scoped role assignments added 2026-08 (contract 1.35) — additive in both directions: `tenant_scope` on the three assignment bodies and `reachable_tenant_ids` on `/auth/me`, both absent against an older server and both meaning "unrestricted" when absent, so an SDK that does nothing stays correct; the acting-tenant header is corrected to `X-Axiam-Tenant` 2026-08 (contract 1.36, issue #395) — §5.2, §5.2.2 and §5.2.3 named it `X-Tenant-ID`, which the AXIAM server does not read, so a client following the contract to the letter switched nothing and got a successful response describing its own tenant's data. §5 rule 2's unconditional `X-Tenant-ID` is deliberately NOT renamed and now carries a note saying why: an unconditional header naming the constructor tenant would override the acting tenant on every request made after a switch. §5.2.2 rule 4 added 2026-08 (contract 1.36) — an errata, not a wire change: the server now scopes every self-service endpoint to `principal_tenant_id` rather than only `POST /auth/password/change`, so calls that answered `404` for an organization-level caller acting on a child tenant now succeed. Nothing is added to any request or response and no SDK needs a change; the rule is written down so that an SDK does not "fix" the old `404` by stripping `X-Tenant-ID`, which would break the administrative form of the same endpoints. `/api/v1/auth/me`, `/api/v1/auth/password/change` and `/api/v1/admin/bootstrap` also appear in `openapi.json` for the first time — all three were normative here and served by the server throughout, and were missing from the generated document only because their handlers were never listed in its `paths(…)`; §12.1 gains four operations and six normative rules 2026-08 (contract 1.37) — `sso_providers`, `sso_start_oauth2`, `sso_complete_oauth2` and `sso_complete_handoff`, covering the public "Sign in with X" surface: a providers listing that deliberately cannot distinguish an unknown organization from an unconfigured one, the plain-OAuth2 variant for providers that issue no ID token (GitHub, Facebook) with its reduced assurance and mandatory server-side PKCE stated rather than implied, single-use 60-second handoff codes that let a cross-site SAML or Apple return issue a `SameSite=Strict` session, organization→tenant inheritance of a federation config, and the accepted-tenant list a templated issuer (Entra's `common` authority) now requires. Additive: no existing operation, request or response changes, and an SDK that ships §12 as it stood remains conformant — it simply cannot render a login button. The leading version number above also jumps from a stale `1.29` to `1.37`, which is where the changelog chain had already reached; §12.1 rule 12a added 2026-08 (contract 1.38) — on the SAML and Apple flows the identity provider never sees the SPA `redirect_uri`, because it posts to an AXIAM server endpoint instead, so the server confines the handoff redirect to its own issuer origin plus whatever `AXIAM__AUTH__SSO_SPA_ORIGINS` names and answers `400` for anything else. Additive and restrictive on the server side only: an SDK that passes the deployment's own callback URL, which is the only value that ever worked, is unaffected; §12.1 rule 12a widened 2026-09 (contract 1.39) — the same deployment-origin rule now governs all four federated start operations rather than only the two cross-site ones, with the provider's registered-redirect comparison kept as a second, independent layer on the OIDC and OAuth2 flows rather than the only one. Additive and restrictive on the server side only, exactly as 12a itself was: no SDK code changes, and a deployment whose SPA is on a different origin than its issuer must set `AXIAM__AUTH__SSO_SPA_ORIGINS` for those two flows as it already had to for the other two; §21.3 rules 1–2 and the §21.5 `mtls_endpoint_aliases` row added 2026-09 (contract 1.40) — RFC 8705 §5 discovery metadata naming the endpoints of a deployment whose mutual TLS terminates on a separate host. **Additive and server-side only**: the member is absent unless an operator configures `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL`, so every existing SDK keeps working unchanged against every existing deployment. It becomes normative only for an SDK implementing the §21 *client* role, which must prefer an alias over the top-level endpoint on a call it makes over mTLS; the guard role (§10.1 rule 9) is untouched; §5 rule 3's rationale amended and the §21.5 `token_endpoint_auth_methods_supported` row widened 2026-09 (contract 1.41, W8) — the server now accepts `client_secret_basic` (RFC 6749 §2.3.1) for third-party relying parties and advertises it in discovery. **Text only: the rule itself is unchanged and no SDK changes any code.** SDKs keep `client_secret_post` because the two methods carry the identical credential and only the header channel is routinely logged by intermediaries; an advertised method is a statement about the deployment, not an instruction to the client; §21.5 gains `code_challenge_methods_supported` and `token_endpoint_auth_signing_alg_values_supported` 2026-09 (contract 1.42) — both are RFC 8414 members AXIAM already honoured and did not advertise, found by the first OpenID Foundation conformance run rather than by review; §21.3 rule 2 clause 4 (an alias is used verbatim), the §21.3.1 discovery test vectors and the §21.10 per-SDK alias table added 2026-09-12 (contract 1.43); §10.4 the revocation feed and §10.2's scoping of its MUST NOT to per-request polling added 2026-09-12 (contract 1.44); §27.1 gains `certificates.sign_csr` and §27.5 states its response carries no sensitive field, §24.1/§24.5/§24.7/§24.8/§25.1/§25.2 gain the `webauthn/setup/register/{start,finish}` pair, and §5.2 rule 4 gains the `403 mfa_enforced` self-service-reset refusal, all 2026-09 (contract 1.45); §26.2 rule 3 states both forms a spent-`request_uri` refusal takes and which one a conformant SDK can reach 2026-09-14 (contract 1.46) — documentation only, no SDK behaviour changes and `openapi.json` byte-identical; `token_endpoint_auth_methods_supported` gains `none` and `openapi.json` gains the `none` enum value with an optional `OAuth2ClientCreatedResponse.client_secret` 2026-09 (contract 1.47) — a capability statement about the deployment, not an instruction to a client, and no SDK operation changes; §28 MCP resource-server helpers added 2026-09-17 (contract 1.48), carrying with it the RFC 8707 `openapi.json` additions T21.3 recorded unnumbered for it to fold in. §28 is SHOULD-level, off by default and additive by construction — with its `resource_metadata_url` option unset a guard is byte-for-byte what it was — and it references §10.1 row 6, §10.2, §10.3, §11 and §21.7 without changing any of them; §28.11 cross-SDK conformance review and the §28.3 rule 1 media-type clarification 2026-09-17 (contract 1.49); `oauth2_clients.create_registration_token`'s `initial_access_token` made `Sensitive` in §27.5 2026-09-18 (contract 1.50); §1/§1.1.1 `authenticate_device`, `validate_token` and `introspect_token`, §5.2 rule 1's acting-tenant helper moved to SHOULD, §6.1's device login and certificate-bound device token, §27.0's five exclusions, §27's figures re-rendered at 162 operations, §27.5 rule 5 and §27.6.1's manifest additions, §27.10's per-SDK manifest table and §27.13's dogfooding-remediation model notes 2026-09-23 (contract 1.51) — every new request field optional, the one tolerance an existing SDK owes being the open decoding of `CertificateType`; §27.14's cross-SDK conformance review and its six clarifications (N1 §10.1 every entry point a guard, N2 §17.1 the acting tenant in the memo key, N3 §27.13 the shape of a `SubjectAltName`, N4 §6.1 rule 11 the device credential's lifecycle, N5 §5.2 rule 1 the acting-tenant helper's semantics, N6 §27.6.1 bindings) 2026-09-24 (contract 1.52) — no wire change, and `CONTRACT.md` the only artefact to re-sync; §28.12 RFC 7592 client configuration operations (`read_client_registration`, `update_client_registration`, `delete_client_registration`, with `registration_access_token` `Sensitive` throughout) and §28.0's scoping of its local-computation rules to §28.1–§28.11 2026-10-02 (contract 1.53) — additive, `openapi.json` gaining the three `/oauth2/register/{client_id}` operations and their security scheme; §30 directory configuration (the `directory` management namespace — `get`, `set`, `update`, `delete`, `link_account`, `get_sync_status` — with `bind_secret` `Sensitive` and write-only, the P23W2-01 rule, the address guard's refusals, the `opaque_mode = required` exclusion and the `directory:link` permission) and §29 reserved for SAML service-provider registration 2026-10-04 (contract 1.54) — additive, text ahead of the routes, `openapi.json` and `management-registry.json` unchanged until the server task regenerates them*
+*Contract version: 1.56 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07; §8b AMQP transport, §10.2 gRPC revocation modes, §12.7 logout helpers, §14 device authorization grant and §15 token exchange added 2026-08; §14.3 rule 4 / §14.6 credential-adoption errata 2026-08 (contract 1.7); §16 retry policy, §17 decision memo, §18 deterministic shutdown and §19 telemetry hooks added 2026-08, with §11.2 rules 5–6 and §14.2 rule 6 amended to point at them (contract 1.8); §16 preamble errata + §19 `config_clamped` event 2026-08 (contract 1.9) — the divergence table rewritten from wire-counting conformance tests rather than greps, and a clamped setting must now be reported through §19 rather than applied silently; §20 UMA 2.0 Protection API and ticket grant added 2026-08 (contract 1.10), carrying the one documented exception to §16 retry policy; §12.6's Swift/C/C++ deferral lifted 2026-08 (contract 1.11), porting §12 and §12.7 to those three SDKs and widening §7's C/C++ rows to rule 3's single explicit accessor; §2's `/oauth2/*` error rows and §12.3 rule 3 rewritten to dispatch on the `error` field at any status rather than enumerating 400/401 2026-08 (contract 1.12), so §20.4's 403 `access_denied` reaches the shared mapper and the nine grant-local mappers it forced become removable; §15.1's signature gains a REQUIRED `subject_token_type` and §15.7's prohibition on defaulting it becomes structural rather than documentary 2026-08 (contract 1.13) — a breaking change to all eleven SDKs, taken because an optional parameter with a default is the same guess §15.7 forbids, moved from the SDK's code into its signature; §20.2 rule 6's second reason restated 2026-08 (contract 1.14) — **documentation only, no SDK behaviour changes and no signature moves**. ilpanich/axiam#302 closed: the server now decides the ticket race with a transaction the storage engine arbitrates plus a nonce read back after it commits, so the "measured residual of roughly 1 in 640" the rule cited no longer exists. The rule is unchanged and its first reason (a spent ticket makes the retry useless) was always sufficient on its own; what changes is that the second reason now rests on what an SDK can actually know — it is talking to a server whose storage engine it cannot attest, and the guarantee is conditional on that engine being persistent; **§10.1 rule 9 (sender-constrained tokens) and §21 (FAPI 2.0 profile, mTLS client credentials, RFC 9207 `iss`) added 2026-08 (contract 1.15)** — one new normative rule for every SDK: a token carrying `cnf` is not a bearer token and MUST NOT be accepted as one, and a `cnf` naming a confirmation method the SDK cannot check MUST be refused rather than read as unconstrained. No signature moves and no breaking change to any existing call; the compatibility risk runs the other way, and the required positive regression test (an **unbound** token is still accepted with or without a certificate) is there because the likeliest wrong implementation of rule 9 is one that starts demanding certificates from every caller. Everything else in §21 is informative: mTLS client authentication is optional for the client role, and RFC 9207 `iss` validation is a SHOULD that any SDK talking to more than one issuer should treat as a MUST; **§10.1 rule 9 extended for DPoP and §21.6–§21.9 added 2026-08 (contract 1.16)** — the server gained the second half of two X5.1 rows, `private_key_jwt` client authentication (RFC 7523 §2.2) and DPoP sender-constrained tokens (RFC 9449), and rule 9's four-row table becomes a ten-row one **extended in place** rather than duplicated. The SDK-visible surface is the resource-server side only: a `cnf` may now carry `jkt`, an SDK that cannot verify a DPoP proof MUST refuse such a token rather than accept it as a bearer, and a `cnf` naming **both** methods is a conjunction — "check whichever we can" is forbidden, as is reading an empty `cnf` as unbound. No signature moves and no breaking change to any existing call; the compatibility risk again runs the other way, and the positive regression test is widened to say an **unbound** token must still be accepted with no certificate *and* no proof. Client-side proof generation is a per-language judgement call and §21.7.3 makes declining a supported answer with exactly three obligations (reject, document, test) — §21.9 records each SDK's posture, and the C and C++ SDKs decline §21.7.2 deliberately rather than by omission. §21.8 (`private_key_jwt`) is informative throughout: the client role may keep using `client_secret_post` or mTLS; **§10.3 (sender-constrained tokens over gRPC) added 2026-08 (contract 1.17)** — the X5 work landed REST-first, and gRPC introspection was found to carry no `cnf` at all, which meant an SDK validating through `TokenService` could not satisfy rule 9 detail 4 even in principle: it had no way to tell a bound token from a bearer one and was forced into the exact downgrade rule 9 exists to prevent. `ValidateTokenResponse` and `IntrospectTokenResponse` now carry `cnf` and `token_type`, and introspection additionally gains the RFC 7662 §2.2 fields it had always been missing (`scope`, `client_id`) plus `permissions` (§20 UMA RPT) and `ext_exchange_iss` (X4 provenance). All additive proto fields, so an older client keeps working and simply does not see them — which is the risk, and why §10.3 is normative rather than informative. One wire-level subtlety has its own rule: proto3 cannot distinguish an absent string from an empty one, so an **empty** `CnfClaim` must be refused rather than read as unbound, exactly as rule 9's "names neither" row requires. SDKs must NOT copy the server's own gRPC-side refusal of DPoP-bound tokens — AXIAM's interceptor declines them because a tonic interceptor sees neither `htm` nor `htu`, whereas an SDK guarding a real endpoint knows both; **§22 (Reactors — AMQP extension actors) added 2026-08 (contract 1.18)** — **non-breaking / additive**, and additive in the strongest sense: no existing signature moves, no existing rule changes, and an SDK that ships no reactor runtime is exactly as conformant as it was under 1.17. The chapter documents a server surface that already exists (`crates/axiam-amqp/src/reactor/`, `crates/axiam-core/src/models/reactor.rs`): a Reactor is an external process that subscribes to hook events on the AMQP bus and answers allow/deny/mutate under a signed, timeout-bounded, field-allow-listed protocol — Zitadel-Actions parity without loading third-party code into the security kernel. Two things in it are new obligations rather than new options. The first is that §8's HMAC now runs in **both directions** on one exchange: the server signs the event, the reactor signs the reply with the same tenant subkey, and an unsigned or stale reply is discarded as though the reactor had never answered — with one canonicalization difference that will cost an implementer a day if it is not stated, namely that `hmac_signature` is serialized as `null` inside a reactor body rather than omitted as it is in §8's own two message types. That is why §22.13's vectors ship beside the §8 vectors, in the same fixture directory and under the same master key, tenant and derived subkey: one loader serves both, and the difference is a test rather than a paragraph to remember. The second is the hot-path exclusion (§22.7), written as a **MUST NOT** rather than a note — `authz.check`, `authz.check_batch` and `token.introspect` are not hookable and no SDK may present them as such, because a reactor round-trip is milliseconds and the check path's budget is microseconds; an application needing external input on a decision writes a deny grant, which the engine evaluates at hot-path cost. Swift, C and C++ ship no runtime (§22.11) for the same reason §8 has never listed them among the SDKs that speak AMQP — no vendorable client for those targets — but §22.1–§22.8 binds a hand-rolled integrator on them in full, a split that follows the §12.6 precedent contract 1.11 lifted while cutting at the seam between protocol and convenience rather than across a whole section. One scope note travels with the chapter: the server's lapin transport is not yet merged, so the two AMQP basic properties §22.1 names for reply addressing are the standard RPC convention rather than an implemented one — every signed body, field order, allow-list and validation rule in the chapter is implemented and tested today. Recorded here and not in the Breaking Changes Log above, which is untouched, because nothing breaks; **SDK-Q10 closed 2026-08 (contract 1.19)** — the last deferred contract item, and the one that had been deferred because every closure looked like a break. The gRPC decision's `deny_reason` and the REST decision's `reason` were the same string under two names, so an SDK speaking both transports reconciled them in its own mapper and the two same-named `AccessDecision` types could disagree about their own field list. Closed by **deprecate-and-add**: `CheckAccessResponse` gains `reason` (field 4, explicit presence — absent on an allow, present on every refusal, exactly the REST shape), `deny_reason` is marked `[deprecated = true]` and keeps carrying the identical string until it is **removed at AXIAM 2.0**, and §11.2 rule 9's amendment states the one migration rule: read `reason`, fall back to `deny_reason` only when `reason` is absent on a refusal, expose one reason accessor rather than two. Nothing breaks on the wire today and no signature moves. The same amendment settles the two shapes that went with it — the decision is `allowed` + `reason_code` + `reason` and carries no `resource_type`/`resourceType` (the server has never had one), and gRPC `subject_id` becomes optional the way REST's is, with an **empty** value meaning "the subject in the verified token". That last one is deliberately not proto3 `optional`: `buf breaking` refuses the cardinality change, so empty carries the meaning proto3 cannot express as absence — the same constraint §10.3 already records for an empty `CnfClaim`; **§15.2 rule 8, §22.8's listen/unreadable-registry paragraphs and §22.9 rule 3 added 2026-08 (contract 1.20)** — the medium-severity half of the F4-bis security review (SEC-096, SEC-099, SEC-100, SEC-101). One of the four is an SDK-visible **behaviour** change and it is the one to read: an exchanged token (and a §20 RPT) is now sender-constrained to whatever the *exchanging client* proved on that request, so `token_type` may be `DPoP` where it was always `Bearer`, the token may carry a `cnf` that §10.1 rule 9 governs, and a client registered for binding that exchanges without presenting its credential now receives `invalid_client` instead of an unbound token. No signature moves, and a client that registered no binding — every client that existed before X5.1 — receives byte-identical responses. The other three are statements of server behaviour an SDK could not have inferred: a `listen` registration can never deny even on the two out-of-chain failure paths, an unreadable registration store applies the *event's* default policy but exempts a tenant with no registrations at all, and a reactor registration is refused with `503` while the server's transport cannot dispatch — with `enabled: false`, `DELETE` and creating-already-disabled deliberately left open as the operator's way out; **§22.1's scope note closed and §22.9 rule 3 widened 2026-08 (contract 1.21)** — **no SDK behaviour changes and no signature moves**. The server's lapin `ReactorTransport` is merged (`crates/axiam-amqp/src/reactor/transport.rs`) and `axiam-server` composes it, so the one part of §22 that was not pinned by a running implementation — the two AMQP basic properties used for reply addressing — now is, exercised against a live broker in `crates/axiam-amqp/tests/reactor_containerized_test.rs`. An SDK that already echoed `reply_to`/`correlation_id` from the delivery, which the scope note told it to do, needs no change. Two things are worth reading anyway. The first is a server-side clarification with a security reason behind it: an `intercept` event goes to the reactor's queue directly rather than through the topic exchange, because the routing key is per `(tenant, event)` and a fan-out would let whichever reactor answered first be consumed as the reply of whichever reactor the priority-ordered chain was waiting on — the exchange and bindings are still declared by the server, and a reactor runtime still consumes its configured queue and still declares nothing. The second is that §22.9 rule 3's `503` now has a second trigger, `mode: "listen"`, for as long as no hook site fans out to listeners: such a registration receives nothing and, being a listener, produces no outcome in which its silence could be noticed, so refusing it is more honest than accepting it. `enabled: false`, `DELETE` and creating-already-disabled stay open, as they already did. A **broker outage is explicitly not** a `503` trigger — the merged transport reports itself dispatchable while disconnected and lets each registration's `failure_policy` decide, per §22.8, because refusing registrations for the duration of a blip would turn a broker problem into an admin-API problem; **§22.14 (declarative handler binding) added 2026-08 (contract 1.22)** — **additive, SHOULD-level, no signature moves and no behaviour change to any existing call.** §22.10's handler is one function from an event to one answer, which is right for the wire and wrong for the code: a reactor registered for three events opens with a dispatch on the event name, and the catch-all arm of that dispatch is almost always written `return allow()`. That line is §22.10 rule 2's defect — synthesizing an answer for a handler that never ran — relocated out of the runtime, where the rule binds, and into user code, where it does not. Every SDK example this project ships had one, which is how the pattern was found. The subsection defines the declarative form each language already uses for §11 (annotations in Java and Kotlin, attributes in C# and PHP, a decorator in Python, an attribute macro in Rust, a `ServeMux`-shaped binding table in Go and a typed record in TypeScript), and pins six rules on it. Five are restatements aimed one layer up — compose rather than replace, refuse an unregistered name at bind time, one handler per event, propagate a handler's own failure unchanged, never filter a patch. The sixth is the reason the subsection exists: an event with no bound handler MUST abstain, letting the registration's `failure_policy` decide exactly as it decides a timeout, and MUST NOT be answered `allow` or `deny`. Rule 2 carries one instruction that reads backwards until you see why: an SDK MUST NOT keep its own list of the three hot-path operations to give them a better error message, because that list would be a constant naming them and §22.13's hot-path assertion forbids exactly that — they are refused as unknown names, like any other name absent from the §22.5 registry. Nothing here is a new conformance claim: an SDK shipping §22 with the binder and one shipping §22 without it both write "conforms to … §22"; **§8b tightened and the server made TLS-only 2026-08 (contract 1.23)** — the server's `AXIAM__AMQP__ALLOW_PLAINTEXT` escape hatch is **removed**, so `AXIAM__AMQP__URL` must be `amqps://` in every build profile with no flag that changes it. The flag had existed for a year and four of this project's own stacks reached for it — dev compose, the e2e stack, the benchmark target and CI — each with a locally sound argument (throwaway data on a compose network, an ephemeral broker carrying synthetic fixtures for one job, a hop the benchmark harness measures rather than encrypts). None was wrong; the aggregate was that "AMQP is TLS-only" described the production compose file and the k8s manifests and nothing else the repository ran. Rule 1 is correspondingly restated as *refuse* every non-`amqps://` scheme rather than merely *support* `amqps://`, and two rules are added. **Rule 7** is the one with teeth: rules 1–5 MUST be enforced in code, not stated in documentation, because the review that produced this version found three SDKs asserting `amqps://` in a doc comment attached to a parameter that accepted anything — the TypeScript runtime's own comment read "there is no verification-skip switch and no plaintext fallback" directly above an `amqp.connect(url)` that would happily take `amqp://`. Where an SDK takes a caller-supplied channel (Java, Kotlin, C#) it must additionally ship a constructor that applies rules 1–4 and show that constructor in its README. **Rule 8** removes any loopback exception: §6's `http://localhost` dev carve-out for the HTTP transports does not extend to the broker URL, the server has no plaintext listener for it to reach, and the Rust SDK's AMQP path — the only one that had inherited it — no longer grants it. Two new required tests go with them: a refusal must be asserted as *no connection attempted* rather than as a thrown message, since rule 5 is a claim about the absence of a fallback and an implementation that dialled first and complained second would pass a message-only assertion; and an unparseable URL must fail closed, because a guard written as "check the scheme *if* the URL parses" silently exempts everything malformed — a defect this project shipped in the Rust SDK and fixed under this version. §8b also gains a normative per-SDK index naming each enforcement point, so "where is this actually checked" is answerable without a grep. No message format, field order or signing rule changes, and §22.2's transport paragraph is unchanged: it already deferred to §8b in full; **§23 (Secure Remote Password, SRP-6a) added 2026-08 (contract 1.24)** — **additive, no signature moves, no behaviour change to any existing call.** An SDK that does not implement §23 is exactly as conformant as it was under 1.23, and a server left at the `srp_mode: disabled` default — which is what every existing deployment gets on upgrade — behaves byte-identically to before. The chapter documents a second way to prove a password: an augmented PAKE in which the plaintext never reaches the server, which closes the holes TLS 1.3 does not — a TLS-terminating proxy, an accidental request-body log, a heap dump. §23.0 states the limits in the same breath, because an SDK's own README will repeat them and overclaiming is worse than not shipping the feature: SRP does not defend against a compromised AXIAM server, and in a browser it does not defend against AXIAM serving malicious JavaScript. Three things in it will cost an implementer a day each if they are skimmed. The first is `PAD()` (§23.3 rule 1): every hashed value is left-padded to the modulus width, and an implementation that skips it agrees with everyone else until a value happens to carry a leading zero byte, at which point roughly one login in 256 fails in a way that reads as a flaky network — which is why the vendored vectors are built with a leading-zero salt *and* a leading-zero `x` rather than random ones. The second is that the identity inside the KDF comes from the server's challenge response and never from what the human typed (rule 2): AXIAM lets a user sign in with a username or an email while only one of the two is bound into `x`. The third is that `M2` verification is mandatory (rule 6) — skipping it keeps the half of SRP that authenticates the client to the server and throws away the half that authenticates the server to the client, leaving a rogue endpoint that never knew the verifier indistinguishable from the real one. Two deliberate divergences from RFC 5054 are recorded rather than inherited: SHA-256 rather than SHA-1, and `x` as a memory-hard KDF output rather than a bare hash — the latter because a bare-hash verifier would be *cheaper* to attack offline than the Argon2id hashes AXIAM stores today, making adoption a net regression at rest. Both KDFs (`argon2id`, `pbkdf2_sha256`) are mandatory for login and the server dictates which per exchange; PBKDF2 exists because three languages have no vetted Argon2 binding in their standard distribution, and shipping SRP that only half the SDKs could speak would have been worse than shipping a weaker-but-universal fallback. §23.6 explains a server behaviour an SDK cannot infer and must not undo: `srp_mode: required` refuses password login for **every** principal in the tenant rather than only the enrolled ones, because the per-user variant would split the response on a fact about the account and turn `/auth/login` into an enumeration oracle costing one junk password per name. That uniformity is also why `required` is the last step of a migration and not the first — a verifier needs the plaintext password and a stored Argon2id hash is not invertible, so nobody can be enrolled retroactively. PHP is the one **conditional** posture in §23.8: it has no native bignum and neither `ext-gmp` nor `ext-bcmath` is guaranteed present, so its `srpAvailable()` reports `false` rather than throwing at login time; **§23.3 rule 4 errata and the §23.8 table corrected 2026-08 (contract 1.25)** — **documentation only; no SDK behaviour changes, no signature moves, and nothing that was conformant under 1.24 stops being so.** Implementing §23 across all eleven SDKs turned up a fact the chapter had assumed away: `argon2id` is not universally computable, and not for want of a dependency. PHP's only Argon2id that takes a caller-supplied salt (`sodium_crypto_pwhash`) requires exactly 16 bytes where §23.5's salt is 32, and `password_hash()` accepts no salt at all; Swift Crypto ships no Argon2 and none exists for every platform its SDK supports; C and C++ get it from OpenSSL only at 3.2 and later. Rule 4 already told an SDK what to do about a KDF it cannot perform — refuse with `NetworkError` naming it, never substitute — so no implementation changes; what the errata adds is that such a refusal is **conformant rather than a gap**, and that the SDK must say so in its README together with the trade-off. That trade-off is real and belongs in the open: a tenant serving those clients sets `srp_kdf: pbkdf2_sha256`, and PBKDF2 is not memory-hard, so a leaked verifier database enrolled under it is cheaper to attack with GPUs than one enrolled under Argon2id — while §23.0's threat model, which is about proxies, request logs and heap dumps rather than about the cost of an offline attack, is unaffected either way. The §23.8 table is corrected in the same pass to say what each SDK actually does rather than what was projected for it, and gains a second conditionality axis, because "can this build do SRP at all" and "can this build serve this tenant's KDF" are different questions answered at different times — the first by `srpAvailable()` before a login is attempted, the second by a `NetworkError` during one; **§23 rewritten from SRP-6a to OPAQUE (RFC 9807) 2026-08 (contract 1.26)** — **breaking for any SDK that implemented §23 under 1.24/1.25; no change to §1–§22 and no signature moves outside §23.** SRP is removed from AXIAM entirely rather than deprecated, and nothing migrates: a verifier cannot be converted into a registration record, because both are sealed against a plaintext the server has never had, and AXIAM is unreleased. Three reasons, in descending order of weight. OPAQUE was published as **RFC 9807** in July 2025, closing the one blocker 1.24's own text named — it was a draft when SRP was chosen, and improving implementation coverage was written down as the migration trigger. It resists the pre-computation attack SRP is open to, which is not a marginal gain: a stolen verifier database was offline-attackable at exactly the cost of the KDF, and that is why AXIAM's SRP had to bolt a memory-hard KDF onto RFC 5054's bare hash merely to *match* the Argon2id hashes it replaced, whereas a stolen OPAQUE record additionally requires the tenant's OPRF seed and without it there is no dictionary attack to mount at any cost. And it is specified to the byte, where AXIAM's SRP carried two documented divergences from its own RFC. **The structural change is §23.1, and it is the one to read first: an SDK MUST NOT implement the protocol.** SRP was hand-written eleven times because it is modular arithmetic and every language has a bignum; OPAQUE needs an OPRF, `hash_to_curve`, `expand_message_xmd`, an envelope and a three-message AKE, so every SDK binds one audited implementation — compiled, through WebAssembly, or through a C ABI — with Go the single permitted exception because a vetted RFC 9807 library exists for it and cgo would break `CGO_ENABLED=0` for every consumer. That costs SDKs their pure-source installs and buys back the whole of 1.25's errata: `pbkdf2_sha256` is gone, the second conditionality axis is gone, no tenant has to weaken its KDF policy to serve PHP or Swift clients, and the weaker KSF rung is now scrypt, which is memory-hard. Four §23 obligations disappear rather than change. There is **no server proof to verify** — RFC 9807's AKE authenticates the server during the handshake, so 1.24's rule 6, which had to mandate an `M2` check in capitals because skipping it silently discarded half the protocol, describes a failure mode that no longer exists. There is **no `PAD()`**. There is **no identity in the key derivation**, so `login/start` returns no identity field, `/auth/reset/context` no longer discloses the account's username, and a rename no longer invalidates a credential. And there is **no `register/finish` endpoint**: a record can only be built where the plaintext legitimately exists on the client, and every such moment is already an endpoint that takes a password. What is genuinely new is that enrolment now costs a server round trip — `POST /auth/opaque/register/start`, unauthenticated by necessity because it is called while creating a user who does not exist yet, and safe because the server mints the credential identifier itself. `POST /api/v1/admin/bootstrap` is the one endpoint that takes no enrolment object at all: it already receives the plaintext password because it has to hash it, so it runs both halves itself and stays a single call. §23.7's fixture is correspondingly smaller and an SDK author should read §23.7's first three paragraphs before concluding something is missing — what each SDK still owns is hex, field mapping, honouring the server's KSF parameters and the §2 error taxonomy, and that is what is pinned; **§22.5's firing list gains usernameless passkey sign-in 2026-08 (contract 1.27)** — **no SDK signature moves and no change to any SDK-implemented surface**; WebAuthn is a browser ceremony and no SDK speaks it. It is recorded here because §22.5 enumerates where `login.post_auth` fires, and a reactor author reading that list is the person who needs to know the list grew. The server gained `POST /api/v1/auth/webauthn/authenticate/discoverable/finish`, a sign-in that completes without a username and therefore without the password step that fired the event for the username-bound ceremony. The carve-out the section already carried — WebAuthn `authenticate/finish` does not fire, because it continues a login gated at its first step — reads as covering this one too, and does not: there is no first step to have been gated at. Left unfired it would have been SEC-095 a second time, with the bypass being a button rather than an identity provider. It behaves as the federated paths do, refusing `require_mfa` rather than dropping it, since a one-round-trip sign-in has no step-up branch — and the ceremony required user verification to complete, so the factor a step-up would demand was already presented; **§24 (WebAuthn and passkeys), §25 (account lifecycle and MFA enrolment) and §26 (pushed authorization requests) added, and §22.11's deferral narrowed, 2026-08 (contract 1.28)** — one breaking change, logged above, and everything else additive. Contract 1.27 had recorded in passing that “WebAuthn is a browser ceremony and no SDK speaks it”; the first half is true and the conclusion was wrong, because a ceremony is two exchanges stacked and only the one with the *authenticator* needs a browser. The one with AXIAM is four JSON round trips, which is what an SDK is for, and a Go service enrolling a passkey for a client it fronts or a Java backend completing a ceremony a handset ran speaks it without ever touching `navigator.credentials`. §24 therefore cuts three ways. The relying-party layer and the **JSON bridge** (§24.6a) bind all eleven SDKs; the linked-API helper (§24.6b) is offered only where the build can reach an authenticator — TypeScript's browser build, the Rust WASM build, and Swift on both iOS 16+ and macOS 13+. The bridge is the part worth reading twice, because it is what makes the third column a statement about convenience rather than about capability: Android's Credential Manager takes and returns the WebAuthn **JSON form as a string**, so `axiam-kotlin-sdk` stays a plain `kotlin("jvm")` library — no Android Gradle Plugin, no AAR, no second coordinate — and an Android app still runs a full ceremony by passing `requestJson` into `CreatePublicKeyCredentialRequest` and the response JSON straight back. §24.6b rule 2 then makes every remaining absence deliberate rather than a gap by **forbidding** an SDK from emulating an authenticator in software, which would put a key in process memory and call it a second factor. The rule the rest of §24 hangs off is §24.0: the server chooses every option and verifies every response, so an SDK passes both through byte-for-byte. Not because the fields are hard — they are not, and that is the hazard: relaxing `userVerification` to `“preferred”` because a CI authenticator kept prompting weakens a ceremony the server believes it configured, and the server cannot detect it, since an assertion produced under weaker options is a valid assertion. Two mappings override §2 and each loses something real if left generic: a `403` on `register/finish` is the tenant's attestation policy refusing *this* authenticator and its message is the only way the holder of a security key learns a different one would work, and a `503` on `register/start` is a server configuration state that §16 MUST NOT retry — the second documented exception to the retry policy after §20's. §24 also lands with a server fix it depends on: both `authenticate/*/finish` endpoints answered with the token pair in the body and set no cookies, which made a browser passkey sign-in impossible to complete and left `POST /api/v1/auth/refresh` — which reads the refresh token from `axiam_refresh`, never from a body — unreachable afterwards; they now set the same triple and the same `X-CSRF-Token` header as the password path, with the body unchanged so non-browser clients are not asked to read a cookie jar. §25 closes the other end of the same omission: §1 locked the *middle* of an account's life, so the nine operations that get an account into a state where §1 applies — both MFA enrolment paths, email verification, password reset — were reachable only by hand-rolling a POST against a path the SDK also knew, which is the divergence §1 exists to prevent arrived at through omission rather than disagreement. Its one breaking change is logged; its one field an implementer will get wrong is `totp_uri`, which *contains* `secret_base32`, so an SDK that wraps the secret and leaves the URI bare has wrapped nothing — which is why §25.6 requires scanning output for the secret **value** rather than the field name. §26 states PAR, whose likeliest defect is stated in the section rather than left to a table: it answers **`201`**, and a success predicate written `== 200` treats every successful push as a failure. Its other rule worth reading is that the authorization URL carries exactly `client_id` and `request_uri` and the server **refuses** a request mixing a `request_uri` with inline parameters rather than merging them — merging is where parameter confusion lives, and an SDK re-adding the parameters “for compatibility” would restore the attack. Finally §22.11: Swift, C and C++ still bundle no AMQP client, and the deferral is narrowed to that. Until now it also took the **protocol** with it — v2 HMAC over a canonical serialization with a `null` signature placeholder, freshness in both directions, nonce and correlation binding, the §22.5 allow-lists — which is the half with the sharp edges, none of them AMQP-shaped, left for each integrator to reimplement from prose. The three now ship §22.1–§22.8 and §22.14 over a caller-supplied transport and MAY claim §22; because the runtime never sees a URL, §8b rule 7 is satisfied by **exposing the guard as a public tested function** rather than by a paragraph, which is exactly the failure contract 1.23 was written to stop; §23.4 rule 7 and §23.5's `login/start` response gain the `mode` field 2026-08 (contract 1.29) — a failed `KE2` under `opaque_mode: optional` now REQUIRES a retry over `POST /auth/login`, where before every SDK was told the exchange was final. That reading locked out every user of a tenant that enabled `optional`, because an account with no registration record is the ordinary case under it and the server deliberately makes that indistinguishable from a wrong password. `required` is unchanged and an absent `mode` reads as `required`, so an SDK that does nothing stays correct against a `required` tenant and only a tenant mid-migration is affected; §5.2.3 tenant-scoped role assignments added 2026-08 (contract 1.35) — additive in both directions: `tenant_scope` on the three assignment bodies and `reachable_tenant_ids` on `/auth/me`, both absent against an older server and both meaning "unrestricted" when absent, so an SDK that does nothing stays correct; the acting-tenant header is corrected to `X-Axiam-Tenant` 2026-08 (contract 1.36, issue #395) — §5.2, §5.2.2 and §5.2.3 named it `X-Tenant-ID`, which the AXIAM server does not read, so a client following the contract to the letter switched nothing and got a successful response describing its own tenant's data. §5 rule 2's unconditional `X-Tenant-ID` is deliberately NOT renamed and now carries a note saying why: an unconditional header naming the constructor tenant would override the acting tenant on every request made after a switch. §5.2.2 rule 4 added 2026-08 (contract 1.36) — an errata, not a wire change: the server now scopes every self-service endpoint to `principal_tenant_id` rather than only `POST /auth/password/change`, so calls that answered `404` for an organization-level caller acting on a child tenant now succeed. Nothing is added to any request or response and no SDK needs a change; the rule is written down so that an SDK does not "fix" the old `404` by stripping `X-Tenant-ID`, which would break the administrative form of the same endpoints. `/api/v1/auth/me`, `/api/v1/auth/password/change` and `/api/v1/admin/bootstrap` also appear in `openapi.json` for the first time — all three were normative here and served by the server throughout, and were missing from the generated document only because their handlers were never listed in its `paths(…)`; §12.1 gains four operations and six normative rules 2026-08 (contract 1.37) — `sso_providers`, `sso_start_oauth2`, `sso_complete_oauth2` and `sso_complete_handoff`, covering the public "Sign in with X" surface: a providers listing that deliberately cannot distinguish an unknown organization from an unconfigured one, the plain-OAuth2 variant for providers that issue no ID token (GitHub, Facebook) with its reduced assurance and mandatory server-side PKCE stated rather than implied, single-use 60-second handoff codes that let a cross-site SAML or Apple return issue a `SameSite=Strict` session, organization→tenant inheritance of a federation config, and the accepted-tenant list a templated issuer (Entra's `common` authority) now requires. Additive: no existing operation, request or response changes, and an SDK that ships §12 as it stood remains conformant — it simply cannot render a login button. The leading version number above also jumps from a stale `1.29` to `1.37`, which is where the changelog chain had already reached; §12.1 rule 12a added 2026-08 (contract 1.38) — on the SAML and Apple flows the identity provider never sees the SPA `redirect_uri`, because it posts to an AXIAM server endpoint instead, so the server confines the handoff redirect to its own issuer origin plus whatever `AXIAM__AUTH__SSO_SPA_ORIGINS` names and answers `400` for anything else. Additive and restrictive on the server side only: an SDK that passes the deployment's own callback URL, which is the only value that ever worked, is unaffected; §12.1 rule 12a widened 2026-09 (contract 1.39) — the same deployment-origin rule now governs all four federated start operations rather than only the two cross-site ones, with the provider's registered-redirect comparison kept as a second, independent layer on the OIDC and OAuth2 flows rather than the only one. Additive and restrictive on the server side only, exactly as 12a itself was: no SDK code changes, and a deployment whose SPA is on a different origin than its issuer must set `AXIAM__AUTH__SSO_SPA_ORIGINS` for those two flows as it already had to for the other two; §21.3 rules 1–2 and the §21.5 `mtls_endpoint_aliases` row added 2026-09 (contract 1.40) — RFC 8705 §5 discovery metadata naming the endpoints of a deployment whose mutual TLS terminates on a separate host. **Additive and server-side only**: the member is absent unless an operator configures `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL`, so every existing SDK keeps working unchanged against every existing deployment. It becomes normative only for an SDK implementing the §21 *client* role, which must prefer an alias over the top-level endpoint on a call it makes over mTLS; the guard role (§10.1 rule 9) is untouched; §5 rule 3's rationale amended and the §21.5 `token_endpoint_auth_methods_supported` row widened 2026-09 (contract 1.41, W8) — the server now accepts `client_secret_basic` (RFC 6749 §2.3.1) for third-party relying parties and advertises it in discovery. **Text only: the rule itself is unchanged and no SDK changes any code.** SDKs keep `client_secret_post` because the two methods carry the identical credential and only the header channel is routinely logged by intermediaries; an advertised method is a statement about the deployment, not an instruction to the client; §21.5 gains `code_challenge_methods_supported` and `token_endpoint_auth_signing_alg_values_supported` 2026-09 (contract 1.42) — both are RFC 8414 members AXIAM already honoured and did not advertise, found by the first OpenID Foundation conformance run rather than by review; §21.3 rule 2 clause 4 (an alias is used verbatim), the §21.3.1 discovery test vectors and the §21.10 per-SDK alias table added 2026-09-12 (contract 1.43); §10.4 the revocation feed and §10.2's scoping of its MUST NOT to per-request polling added 2026-09-12 (contract 1.44); §27.1 gains `certificates.sign_csr` and §27.5 states its response carries no sensitive field, §24.1/§24.5/§24.7/§24.8/§25.1/§25.2 gain the `webauthn/setup/register/{start,finish}` pair, and §5.2 rule 4 gains the `403 mfa_enforced` self-service-reset refusal, all 2026-09 (contract 1.45); §26.2 rule 3 states both forms a spent-`request_uri` refusal takes and which one a conformant SDK can reach 2026-09-14 (contract 1.46) — documentation only, no SDK behaviour changes and `openapi.json` byte-identical; `token_endpoint_auth_methods_supported` gains `none` and `openapi.json` gains the `none` enum value with an optional `OAuth2ClientCreatedResponse.client_secret` 2026-09 (contract 1.47) — a capability statement about the deployment, not an instruction to a client, and no SDK operation changes; §28 MCP resource-server helpers added 2026-09-17 (contract 1.48), carrying with it the RFC 8707 `openapi.json` additions T21.3 recorded unnumbered for it to fold in. §28 is SHOULD-level, off by default and additive by construction — with its `resource_metadata_url` option unset a guard is byte-for-byte what it was — and it references §10.1 row 6, §10.2, §10.3, §11 and §21.7 without changing any of them; §28.11 cross-SDK conformance review and the §28.3 rule 1 media-type clarification 2026-09-17 (contract 1.49); `oauth2_clients.create_registration_token`'s `initial_access_token` made `Sensitive` in §27.5 2026-09-18 (contract 1.50); §1/§1.1.1 `authenticate_device`, `validate_token` and `introspect_token`, §5.2 rule 1's acting-tenant helper moved to SHOULD, §6.1's device login and certificate-bound device token, §27.0's five exclusions, §27's figures re-rendered at 162 operations, §27.5 rule 5 and §27.6.1's manifest additions, §27.10's per-SDK manifest table and §27.13's dogfooding-remediation model notes 2026-09-23 (contract 1.51) — every new request field optional, the one tolerance an existing SDK owes being the open decoding of `CertificateType`; §27.14's cross-SDK conformance review and its six clarifications (N1 §10.1 every entry point a guard, N2 §17.1 the acting tenant in the memo key, N3 §27.13 the shape of a `SubjectAltName`, N4 §6.1 rule 11 the device credential's lifecycle, N5 §5.2 rule 1 the acting-tenant helper's semantics, N6 §27.6.1 bindings) 2026-09-24 (contract 1.52) — no wire change, and `CONTRACT.md` the only artefact to re-sync; §28.12 RFC 7592 client configuration operations (`read_client_registration`, `update_client_registration`, `delete_client_registration`, with `registration_access_token` `Sensitive` throughout) and §28.0's scoping of its local-computation rules to §28.1–§28.11 2026-10-02 (contract 1.53) — additive, `openapi.json` gaining the three `/oauth2/register/{client_id}` operations and their security scheme; §30 directory configuration (the `directory` management namespace — `get`, `set`, `update`, `delete`, `link_account`, `get_sync_status` — with `bind_secret` `Sensitive` and write-only, the P23W2-01 rule, the address guard's refusals, the `opaque_mode = required` exclusion and the `directory:link` permission) and §29 reserved for SAML service-provider registration 2026-10-04 (contract 1.54) — additive, text ahead of the routes, `openapi.json` and `management-registry.json` unchanged until the server task regenerates them; §29 SAML service-provider registration (the `saml` management namespace — the SP registry, `parse_sp_metadata` and the IdP signing-credential lifecycle with `promote` — nothing `Sensitive`, no key member on `SamlIdpCredential`, the `saml_sp:read` / `saml_sp:write` / `saml_idp:credential` permissions) 2026-10-04 (contract 1.55) — additive, text ahead of the routes, `openapi.json` and `management-registry.json` unchanged until T23.2.5 regenerates them; §32 SSF stream registration and the receiver helper (the `ssf` management namespace with `authorization_header` `Sensitive`, the receiver protocol for reference, `verify_set` and `poll` SHOULD in the seven full-surface SDKs) 2026-10-04 (contract 1.56) — additive, routes and regenerated `openapi.json` and `management-registry.json` in the same task*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*

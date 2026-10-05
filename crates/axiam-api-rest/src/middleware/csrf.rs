@@ -470,8 +470,15 @@ const AUTHORIZE_PATH: &str = axiam_oauth2::login_hop::AUTHORIZE_PATH;
 ///   scoped to a path that answers `404` is read by nothing; minting it the same
 ///   way in every build is also what keeps a build without SAML
 ///   indistinguishable from a tenant with SAML off (D-20). The path covers the
-///   endpoint's two sub-paths, `/continue` (the login hop's return leg) and
-///   `/idp-initiated`, and nothing else.
+///   endpoint's three sub-paths, `/continue` (the login hop's return leg),
+///   `/idp-initiated` and `/logout` (the IdP-initiated logout trigger, T23.2.4,
+///   D-39 — it sits **under** this path precisely so the cookie reaches it, as
+///   `/oauth2/authorize/logout` sits under the authorization endpoint), and
+///   nothing else. **No new path was minted for logout**: `/slo`, the endpoint
+///   that receives a service provider's `LogoutRequest`, is deliberately *not*
+///   under it (a cross-site POST would not carry a `Lax` cookie there anyway, and
+///   a fourth path would widen this layout), so it never sees the cookie and
+///   never decides anything by it.
 ///
 /// # Why one name for every path
 ///
@@ -1013,6 +1020,9 @@ mod tests {
             format!("/saml/v2/{TENANT_A}/sso"),
             format!("/saml/v2/{TENANT_A}/sso/continue"),
             format!("/saml/v2/{TENANT_A}/sso/idp-initiated"),
+            // T23.2.4: the IdP-initiated logout trigger is under the SSO path, so
+            // the same one copy reaches it and no path was added.
+            format!("/saml/v2/{TENANT_A}/sso/logout"),
             format!("/saml/v2/{TENANT_B}/sso/continue"),
         ] {
             let carried = paths.iter().filter(|p| path_matches(&request, p)).count();
@@ -1023,9 +1033,10 @@ mod tests {
             format!("/t/{TENANT_A}/oauth2/end_session"),
             format!("/t/{TENANT_A}/oauth2/token"),
             "/api/v1/auth/me".to_owned(),
-            // T23.2.3: the SAML copy reaches the SSO endpoint and its two
-            // sub-paths only — not the metadata or SLO endpoints, not a path
-            // that merely starts the same way.
+            // T23.2.3: the SAML copy reaches the SSO endpoint and its
+            // sub-paths only — not the metadata or SLO endpoints (the SLO endpoint
+            // never reads the cookie, T23.2.4), not a path that merely starts the
+            // same way.
             format!("/saml/v2/{TENANT_A}/metadata"),
             format!("/saml/v2/{TENANT_A}/slo"),
             format!("/saml/v2/{TENANT_A}/ssox"),

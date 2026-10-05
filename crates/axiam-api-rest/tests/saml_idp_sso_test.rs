@@ -113,21 +113,21 @@ fn test_password() -> String {
     axiam_test_support::test_password()
 }
 
-// Test-only Ed25519 keypair with no real-world value. nosemgrep
+/// The deployment's Ed25519 pair, generated once per test binary: no key is
+/// written down in this file (F4 W4, CodeQL hygiene).
+fn jwt_pair() -> &'static (String, String) {
+    static PAIR: OnceLock<(String, String)> = OnceLock::new();
+    PAIR.get_or_init(|| {
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("ed25519 keypair");
+        (pair.serialize_pem(), pair.public_key_pem())
+    })
+}
+
 fn auth_config() -> AuthConfig {
+    let (private_pem, public_pem) = jwt_pair().clone();
     AuthConfig {
-        jwt_private_key_pem: concat!(
-            "-----BEGIN PRIVATE KEY-----\n",
-            "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n",
-            "-----END PRIVATE KEY-----"
-        )
-        .into(),
-        jwt_public_key_pem: concat!(
-            "-----BEGIN PUBLIC KEY-----\n",
-            "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
-            "-----END PUBLIC KEY-----"
-        )
-        .into(),
+        jwt_private_key_pem: private_pem,
+        jwt_public_key_pem: public_pem,
         access_token_lifetime_secs: 900,
         refresh_token_lifetime_secs: SESSION_SECS,
         jwt_issuer: "axiam-test".into(),
@@ -1814,4 +1814,160 @@ async fn the_sso_routes_are_rate_limited() {
         let second = Browser::default().get(&app, &route).await;
         assert_eq!(second.status().as_u16(), 429, "the second is limited");
     }
+}
+
+// ---------------------------------------------------------------------------
+// T23.2.4 / D-37: the per-SP SessionIndex, recorded before signing
+// ---------------------------------------------------------------------------
+
+const SP_B_ENTITY: &str = "https://sp-b.example.test/metadata";
+const SP_B_ACS: &str = "https://sp-b.example.test/saml/acs";
+
+fn sp_b_input() -> SamlServiceProviderInput {
+    SamlServiceProviderInput {
+        display_name: "Wiki".into(),
+        entity_id: SP_B_ENTITY.into(),
+        acs_urls: vec![AcsEndpoint {
+            url: SP_B_ACS.into(),
+            binding: SamlBinding::HttpPost,
+            index: 0,
+            is_default: true,
+        }],
+        ..sp_input()
+    }
+}
+
+/// One SP-initiated sign-on for an already signed-in browser: the signed
+/// response XML.
+async fn sign_on(
+    app: &impl TestApp,
+    browser: &mut Browser,
+    tenant_id: Uuid,
+    entity: &str,
+) -> String {
+    let mut req = Req::new(tenant_id);
+    req.issuer = entity.to_owned();
+    let cont = start(
+        app,
+        browser,
+        tenant_id,
+        &redirect_query(&req.xml(None), None, None),
+    )
+    .await;
+    let issued = browser.get(app, &cont).await;
+    assert_eq!(issued.status().as_u16(), 200);
+    posted(&body_of(issued).await).1
+}
+
+struct ParticipantRow {
+    session_id: String,
+    sp_entity_id: String,
+    session_index: String,
+}
+
+async fn participants(w: &World) -> Vec<ParticipantRow> {
+    let mut result =
+        w.db.query("SELECT session_id, sp_entity_id, session_index FROM saml_sp_session")
+            .await
+            .unwrap();
+    let rows: Vec<serde_json::Value> = result.take(0).unwrap();
+    rows.iter()
+        .map(|r| ParticipantRow {
+            session_id: r["session_id"].as_str().unwrap().to_owned(),
+            sp_entity_id: r["sp_entity_id"].as_str().unwrap().to_owned(),
+            session_index: r["session_index"].as_str().unwrap().to_owned(),
+        })
+        .collect()
+}
+
+/// **Acceptance: per-SP index.** One session, two SPs: the `SessionIndex` differs
+/// per SP, is not the session id, is the one the participant record holds, and
+/// the session id appears nowhere in either assertion. A second sign-on to one SP
+/// in the same session reuses its index (SAML Core §2.7.2.1).
+#[actix_rt::test]
+async fn the_assertion_carries_a_per_sp_index_that_is_not_the_session_id() {
+    let w = world().await;
+    register_sp(&w, sp_input()).await;
+    register_sp(&w, sp_b_input()).await;
+    let app = app!(w);
+    let mut browser = Browser::default();
+    browser.sign_in(&app, &w, "alice").await;
+
+    let xml_a = sign_on(&app, &mut browser, w.tenant_id, SP_ENTITY).await;
+    let xml_b = sign_on(&app, &mut browser, w.tenant_id, SP_B_ENTITY).await;
+    let index_a = attr(&xml_a, "SessionIndex").expect("a SessionIndex");
+    let index_b = attr(&xml_b, "SessionIndex").expect("a SessionIndex");
+    assert_ne!(index_a, index_b, "one session, two SPs, two indexes");
+    assert_eq!(index_a.len(), 43, "32 bytes, base64url, no padding");
+
+    let rows = participants(&w).await;
+    assert_eq!(rows.len(), 2, "one participant row per (session, SP)");
+    let session_id = rows[0].session_id.clone();
+    assert_eq!(rows[1].session_id, session_id);
+    for (entity, index) in [(SP_ENTITY, &index_a), (SP_B_ENTITY, &index_b)] {
+        let row = rows
+            .iter()
+            .find(|r| r.sp_entity_id == entity)
+            .expect("a row for the SP");
+        assert_eq!(
+            &row.session_index, index,
+            "the assertion carries the recorded index"
+        );
+    }
+    for (label, text) in [("A", &xml_a), ("B", &xml_b)] {
+        assert!(
+            !text.contains(&session_id),
+            "SP {label}: the session id does not reach the XML"
+        );
+    }
+    assert!(!index_a.contains(&session_id) && !index_b.contains(&session_id));
+
+    let again = sign_on(&app, &mut browser, w.tenant_id, SP_ENTITY).await;
+    assert_eq!(
+        attr(&again, "SessionIndex").as_deref(),
+        Some(index_a.as_str()),
+        "a second sign-on to one SP in one session reuses its index"
+    );
+    assert_eq!(participants(&w).await.len(), 2, "and adds no row");
+
+    // The assertion is still signed by the tenant credential and still verifies.
+    axiam_federation::saml_idp::request::verify_post_signature(&xml_b, &idp_material().cert_der)
+        .expect("signed");
+}
+
+/// **T-382.** The participant row is written before the assertion is signed: a
+/// failed write answers `Responder` and issues nothing.
+#[actix_rt::test]
+async fn a_failed_participant_write_yields_no_assertion() {
+    let w = world().await;
+    register_sp(&w, sp_input()).await;
+    let app = app!(w);
+    let mut browser = Browser::default();
+    browser.sign_in(&app, &w, "alice").await;
+    // The datastore refuses every participant write from now on.
+    w.db.query("DEFINE FIELD OVERWRITE name_id ON TABLE saml_sp_session TYPE string ASSERT false")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let req = Req::new(w.tenant_id);
+    let cont = start(
+        &app,
+        &mut browser,
+        w.tenant_id,
+        &redirect_query(&req.xml(None), None, None),
+    )
+    .await;
+    let resp = browser.get(&app, &cont).await;
+    assert_eq!(resp.status().as_u16(), 200, "a failure response is posted");
+    let (action, xml, _) = posted(&body_of(resp).await);
+    assert_eq!(action, ACS);
+    assert!(!is_success(&xml), "no assertion");
+    assert!(!xml.contains("Assertion"), "nothing signed at all");
+    assert_eq!(
+        status_of(&xml),
+        vec!["urn:oasis:names:tc:SAML:2.0:status:Responder".to_string()]
+    );
+    assert!(participants(&w).await.is_empty(), "and no row");
 }

@@ -8,6 +8,8 @@ use tracing::{info, warn};
 
 use crate::config::AmqpConfig;
 use crate::error::AmqpError;
+use crate::outbound::OutboundTopology;
+use axiam_core::outbound::OutboundKind;
 
 /// Read the configured TLS material off disk into lapin's owned TLS config
 /// (A6).
@@ -440,85 +442,60 @@ impl AmqpManager {
         Ok(())
     }
 
-    /// Declare the durable webhook AMQP topology (primary + retry + DLQ,
-    /// CORR-03/D-07).
+    /// Declare the durable outbound-dispatcher topology for `kind`: a primary
+    /// queue, a retry-delay queue and a terminal DLQ (CORR-03/D-07, generalised
+    /// per kind by D-36).
+    ///
+    /// Names and arguments come from [`OutboundTopology::for_kind`]; for
+    /// [`OutboundKind::Webhook`] they are exactly the queues and arguments that
+    /// existed before the extraction (`axiam.webhook`, `.retry`, `.dlq`). Each
+    /// further kind gets a disjoint sibling trio from this same function.
     ///
     /// **Correct DLX form (Pitfall 4):** unlike [`Self::declare_queues`]'s
     /// existing `AUDIT_EVENTS`/`AUTHZ_REQUEST`/`MAIL_OUTBOUND` wiring above
     /// (which sets `x-dead-letter-exchange` to a queue NAME with no matching
-    /// `exchange_declare` anywhere in this crate — RabbitMQ silently drops
+    /// `exchange_declare` anywhere in this crate, so RabbitMQ silently drops
     /// dead-lettered messages in that case), this topology uses the default
     /// (nameless, `""`) exchange plus an explicit `x-dead-letter-routing-key`
-    /// for both dead-letter hops. The default exchange's implicit
-    /// per-queue-name routing makes this the well-known-correct,
-    /// minimal-surface form — never a bare undeclared exchange name.
+    /// for both dead-letter hops.
     ///
-    /// Declaration order (DLQ target first, same discipline as
+    /// Declaration order (the dead-letter target first, same discipline as
     /// [`Self::declare_queues`]'s `ALL_QUEUES` convention):
-    /// 1. [`queues::WEBHOOK_DLQ`] — terminal, plain durable, no DLX of its own.
-    /// 2. [`queues::WEBHOOK`] — primary; a terminal nack (requeue=false,
-    ///    attempts exhausted per `AXIAM__WEBHOOK__MAX_ATTEMPTS`) dead-letters
-    ///    to [`queues::WEBHOOK_DLQ`].
-    /// 3. [`queues::WEBHOOK_RETRY`] — no consumer ever attached; a message
-    ///    published here with a per-message TTL dead-letters back to
-    ///    [`queues::WEBHOOK`] once the TTL expires, so RabbitMQ (not an
-    ///    in-process `tokio::time::sleep`) schedules the delay
-    ///    (D-07/Pitfall 5).
-    pub async fn declare_webhook_topology(&self) -> Result<(), AmqpError> {
+    /// 1. the DLQ: terminal, plain durable, no DLX of its own.
+    /// 2. the primary: a terminal nack (`requeue=false`, attempts exhausted per
+    ///    the kind's `AXIAM__<SLUG>__MAX_ATTEMPTS`) dead-letters to the DLQ.
+    /// 3. the retry queue: no consumer ever attached; a message published here
+    ///    with a per-message TTL dead-letters back to the primary once the TTL
+    ///    expires, so RabbitMQ (not an in-process `tokio::time::sleep`)
+    ///    schedules the delay (D-07/Pitfall 5).
+    pub async fn declare_outbound_topology(&self, kind: OutboundKind) -> Result<(), AmqpError> {
         let options = QueueDeclareOptions {
             durable: true,
             ..QueueDeclareOptions::default()
         };
 
-        // 1. Terminal DLQ — plain durable, no DLX args of its own.
-        self.channel
-            .queue_declare(queues::WEBHOOK_DLQ.into(), options, FieldTable::default())
-            .await
-            .map_err(AmqpError::Declaration)?;
-        info!(queue = queues::WEBHOOK_DLQ, "Declared queue");
-
-        // 2. Primary webhook queue: terminal-exhaustion nacks dead-letter to
-        // WEBHOOK_DLQ via the default exchange + explicit routing key.
-        let mut webhook_args = FieldTable::default();
-        webhook_args.insert(
-            "x-dead-letter-exchange".into(),
-            lapin::types::AMQPValue::LongString("".into()),
-        );
-        webhook_args.insert(
-            "x-dead-letter-routing-key".into(),
-            lapin::types::AMQPValue::LongString(queues::WEBHOOK_DLQ.into()),
-        );
-        self.channel
-            .queue_declare(queues::WEBHOOK.into(), options, webhook_args)
-            .await
-            .map_err(AmqpError::Declaration)?;
-        info!(
-            queue = queues::WEBHOOK,
-            "Declared queue (with dead-letter routing to WEBHOOK_DLQ)"
-        );
-
-        // 3. Retry queue: per-message TTL (set at publish time) dead-letters
-        // back to the primary WEBHOOK queue via the default exchange — no
-        // consumer attached here, no in-process sleep holding a slot.
-        let mut retry_args = FieldTable::default();
-        retry_args.insert(
-            "x-dead-letter-exchange".into(),
-            lapin::types::AMQPValue::LongString("".into()),
-        );
-        retry_args.insert(
-            "x-dead-letter-routing-key".into(),
-            lapin::types::AMQPValue::LongString(queues::WEBHOOK.into()),
-        );
-        self.channel
-            .queue_declare(queues::WEBHOOK_RETRY.into(), options, retry_args)
-            .await
-            .map_err(AmqpError::Declaration)?;
-        info!(
-            queue = queues::WEBHOOK_RETRY,
-            "Declared queue (with dead-letter routing back to WEBHOOK)"
-        );
+        for spec in OutboundTopology::for_kind(kind).queue_specs() {
+            self.channel
+                .queue_declare(spec.name.as_str().into(), options, spec.arguments())
+                .await
+                .map_err(AmqpError::Declaration)?;
+            info!(
+                %kind,
+                queue = %spec.name,
+                dead_letter_routing_key = spec.dead_letter_routing_key.as_deref().unwrap_or("-"),
+                "Declared outbound queue"
+            );
+        }
 
         Ok(())
+    }
+
+    /// Declare the durable webhook AMQP topology (primary + retry + DLQ,
+    /// CORR-03/D-07). Equivalent to
+    /// `declare_outbound_topology(OutboundKind::Webhook)`; kept under its
+    /// original name so the existing call sites and tests are unchanged.
+    pub async fn declare_webhook_topology(&self) -> Result<(), AmqpError> {
+        self.declare_outbound_topology(OutboundKind::Webhook).await
     }
 
     /// Returns a reference to the underlying AMQP channel.

@@ -43,6 +43,16 @@
 //! An enveloped signature inside a Redirect-binding document is not a signature
 //! of that binding (§3.4.4.1 says it must be removed); it is refused rather than
 //! ignored, so no document carries a signature nobody checked.
+//!
+//! # Reused by single logout (T23.2.4)
+//!
+//! [`super::logout`] receives `LogoutRequest`s and `LogoutResponse`s with the same
+//! decoding, the same refusals before libxml, the same placement rule —
+//! [`signature_placement`] is a function over **any root element** — and the same
+//! two signature verifiers. [`RedirectQuery`] carries either `SAMLRequest` or
+//! `SAMLResponse` ([`MessageParam`]) and signs over whichever it was, exactly as
+//! received. `verify_signed_xml`, which checks only the first signature, is never
+//! called (D-23, D-38).
 
 use std::io::Read;
 
@@ -141,6 +151,25 @@ pub enum RequestError {
     /// The signature algorithm is not one this IdP accepts.
     #[error("the signature algorithm is not accepted")]
     SignatureAlgorithm,
+    /// The root is not a SAML 2.0 `samlp:LogoutRequest` or `samlp:LogoutResponse`.
+    #[error("the message is not a SAML 2.0 LogoutRequest or LogoutResponse")]
+    NotALogoutMessage,
+    /// A `LogoutRequest` that names no `NameID`, or more than one.
+    #[error("the LogoutRequest does not name exactly one NameID")]
+    NameIdMissing,
+    /// A `LogoutRequest` naming its principal by `BaseID` or `EncryptedID`,
+    /// neither of which this IdP issues.
+    #[error("a BaseID or EncryptedID is not supported")]
+    NameIdUnsupported,
+    /// More `SessionIndex` elements than one request may carry.
+    #[error("the LogoutRequest carries too many SessionIndex elements")]
+    TooManySessionIndexes,
+    /// The request's `NotOnOrAfter` has passed.
+    #[error("the LogoutRequest has expired")]
+    Expired,
+    /// The message carries no `Destination`.
+    #[error("the message has no Destination")]
+    DestinationMissing,
     /// The signature does not verify against the SP's certificate.
     #[error("the AuthnRequest signature does not verify")]
     SignatureInvalid,
@@ -259,7 +288,7 @@ pub fn refuse_markup_declarations(document: &str) -> Result<(), RequestError> {
 /// # Errors
 ///
 /// [`RequestError::Malformed`].
-fn refuse_other_encodings(document: &str) -> Result<(), RequestError> {
+pub fn refuse_other_encodings(document: &str) -> Result<(), RequestError> {
     if document.contains('\0') {
         return Err(RequestError::Malformed);
     }
@@ -293,23 +322,7 @@ pub fn parse_authn_request(
     document: &str,
     now: DateTime<Utc>,
 ) -> Result<ParsedAuthnRequest, RequestError> {
-    if document.len() > MAX_REQUEST_XML_BYTES {
-        return Err(RequestError::TooLarge);
-    }
-    refuse_markup_declarations(document)?;
-    refuse_other_encodings(document)?;
-
-    let options = libxml::parser::ParserOptions {
-        recover: false,
-        no_net: true,
-        no_def_dtd: true,
-        ignore_enc: true,
-        encoding: Some("UTF-8"),
-        ..Default::default()
-    };
-    let doc = libxml::parser::Parser::default()
-        .parse_string_with_options(document.as_bytes(), options)
-        .map_err(|_| RequestError::Malformed)?;
+    let doc = parse_xml(document)?;
     let root = doc.get_root_element().ok_or(RequestError::Malformed)?;
     if !is_element(&root, NS_PROTOCOL, "AuthnRequest") {
         return Err(RequestError::NotAnAuthnRequest);
@@ -321,36 +334,10 @@ pub fn parse_authn_request(
     let id = root.get_attribute("ID").ok_or(RequestError::InvalidId)?;
     super::check_request_id(&id).map_err(|_| RequestError::InvalidId)?;
 
-    let issue_instant = root
-        .get_attribute("IssueInstant")
-        .and_then(|raw| DateTime::parse_from_rfc3339(raw.trim()).ok())
-        .map(|t| t.with_timezone(&Utc))
-        .ok_or(RequestError::InvalidField)?;
-    let skew = Duration::seconds(crate::oidc::CLOCK_SKEW_LEEWAY_SECS as i64);
-    if issue_instant > now + skew
-        || issue_instant < now - Duration::seconds(REQUEST_MAX_AGE_SECS) - skew
-    {
-        return Err(RequestError::Stale);
-    }
+    let issue_instant = fresh_issue_instant(&root, now)?;
 
     let children = root.get_child_elements();
-    let issuers: Vec<_> = children
-        .iter()
-        .filter(|c| is_element(c, NS_ASSERTION, "Issuer"))
-        .collect();
-    let [issuer] = issuers.as_slice() else {
-        return Err(RequestError::InvalidField);
-    };
-    if issuer
-        .get_attribute("Format")
-        .is_some_and(|f| f != NAME_ID_FORMAT_ENTITY)
-    {
-        return Err(RequestError::InvalidField);
-    }
-    let issuer = issuer.get_content().trim().to_owned();
-    if issuer.is_empty() {
-        return Err(RequestError::InvalidField);
-    }
+    let issuer = read_issuer(&children)?;
     if children
         .iter()
         .any(|c| is_element(c, NS_ASSERTION, "Subject"))
@@ -388,6 +375,73 @@ pub fn parse_authn_request(
     })
 }
 
+/// Parse a document the way every message this IdP receives is parsed: size
+/// bound, no markup declaration, no other encoding — all on the bytes, before
+/// libxml — then libxml without recovery and without network access.
+pub(super) fn parse_xml(document: &str) -> Result<libxml::tree::Document, RequestError> {
+    if document.len() > MAX_REQUEST_XML_BYTES {
+        return Err(RequestError::TooLarge);
+    }
+    refuse_markup_declarations(document)?;
+    refuse_other_encodings(document)?;
+
+    let options = libxml::parser::ParserOptions {
+        recover: false,
+        no_net: true,
+        no_def_dtd: true,
+        ignore_enc: true,
+        encoding: Some("UTF-8"),
+        ..Default::default()
+    };
+    libxml::parser::Parser::default()
+        .parse_string_with_options(document.as_bytes(), options)
+        .map_err(|_| RequestError::Malformed)
+}
+
+/// `IssueInstant`, required, and inside the accepted window: at most
+/// [`REQUEST_MAX_AGE_SECS`] old and no further ahead than the clock-skew
+/// allowance.
+pub(super) fn fresh_issue_instant(
+    root: &libxml::tree::Node,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, RequestError> {
+    let issue_instant = root
+        .get_attribute("IssueInstant")
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw.trim()).ok())
+        .map(|t| t.with_timezone(&Utc))
+        .ok_or(RequestError::InvalidField)?;
+    let skew = Duration::seconds(crate::oidc::CLOCK_SKEW_LEEWAY_SECS as i64);
+    if issue_instant > now + skew
+        || issue_instant < now - Duration::seconds(REQUEST_MAX_AGE_SECS) - skew
+    {
+        return Err(RequestError::Stale);
+    }
+    Ok(issue_instant)
+}
+
+/// The one `saml:Issuer` among `children`: its text, the SP's entity id. Exactly
+/// one, non-empty, and when it carries a `Format` the entity one.
+pub(super) fn read_issuer(children: &[libxml::tree::Node]) -> Result<String, RequestError> {
+    let issuers: Vec<_> = children
+        .iter()
+        .filter(|c| is_element(c, NS_ASSERTION, "Issuer"))
+        .collect();
+    let [issuer] = issuers.as_slice() else {
+        return Err(RequestError::InvalidField);
+    };
+    if issuer
+        .get_attribute("Format")
+        .is_some_and(|f| f != NAME_ID_FORMAT_ENTITY)
+    {
+        return Err(RequestError::InvalidField);
+    }
+    let issuer = issuer.get_content().trim().to_owned();
+    if issuer.is_empty() {
+        return Err(RequestError::InvalidField);
+    }
+    Ok(issuer)
+}
+
 /// `xs:boolean`, absent meaning `false`.
 fn xs_boolean(raw: Option<String>) -> Result<bool, RequestError> {
     match raw.as_deref().map(str::trim) {
@@ -400,7 +454,13 @@ fn xs_boolean(raw: Option<String>) -> Result<bool, RequestError> {
 /// Where the document's signatures sit: `Ok(false)` for none, `Ok(true)` for
 /// exactly one enveloped child of the root referencing the root's `ID`, and
 /// [`RequestError::SignaturePlacement`] for anything else.
-fn signature_placement(
+///
+/// **A function over any root element** (D-38): `root` is whatever the caller
+/// established the document's root to be — an `AuthnRequest` here, a
+/// `LogoutRequest` or `LogoutResponse` in [`super::logout`] — and `root_id` its
+/// `ID`. The rule never looks at the root's name, so it cannot differ between
+/// message kinds.
+pub(super) fn signature_placement(
     doc: &libxml::tree::Document,
     root: &libxml::tree::Node,
     root_id: &str,
@@ -439,7 +499,7 @@ fn signature_placement(
     }
 }
 
-fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str) -> bool {
+pub(super) fn is_element(node: &libxml::tree::Node, namespace: &str, name: &str) -> bool {
     node.get_name() == name
         && node
             .get_namespace()
@@ -467,11 +527,35 @@ pub fn verify_post_signature(document: &str, sp_cert_der: &[u8]) -> Result<(), R
     .map_err(|_| RequestError::SignatureInvalid)
 }
 
-/// The four HTTP-Redirect parameters, **as received** — still percent-encoded.
+/// Which message parameter an HTTP-Redirect query carries (SAML Bindings
+/// §3.4.4: exactly one of the two).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageParam {
+    /// `SAMLRequest`.
+    Request,
+    /// `SAMLResponse`.
+    Response,
+}
+
+impl MessageParam {
+    /// The parameter's name, which is also the first octets of what a Redirect
+    /// signature covers.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Request => "SAMLRequest",
+            Self::Response => "SAMLResponse",
+        }
+    }
+}
+
+/// The HTTP-Redirect parameters, **as received** — still percent-encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RedirectQuery<'q> {
-    /// `SAMLRequest`, raw.
-    pub saml_request: &'q str,
+    /// Which of `SAMLRequest` and `SAMLResponse` the query carries.
+    pub param: MessageParam,
+    /// The message parameter's value, raw.
+    pub message: &'q str,
     /// `RelayState`, raw.
     pub relay_state: Option<&'q str>,
     /// `SigAlg`, raw.
@@ -481,23 +565,43 @@ pub struct RedirectQuery<'q> {
 }
 
 impl<'q> RedirectQuery<'q> {
-    /// Split a raw query string. Parameters other than the four are ignored;
-    /// each of the four may appear at most once, and `SAMLRequest` must.
+    /// Split a raw query string for the SSO endpoint, which takes a
+    /// `SAMLRequest`. Parameters other than the four are ignored (a
+    /// `SAMLResponse` among them); each of the four may appear at most once, and
+    /// `SAMLRequest` must.
     ///
     /// # Errors
     ///
     /// [`RequestError::DuplicateParameter`], [`RequestError::Encoding`] (no
     /// `SAMLRequest`), [`RequestError::TooLarge`].
     pub fn parse(query: &'q str) -> Result<Self, RequestError> {
+        Self::split(query, false)
+    }
+
+    /// Split a raw query string for the SLO endpoint, which takes **either**
+    /// `SAMLRequest` or `SAMLResponse`, never both: a query naming both is
+    /// ambiguous (two readers could pick different ones) and is refused. Each of
+    /// the parameters may appear at most once.
+    ///
+    /// # Errors
+    ///
+    /// [`RequestError::DuplicateParameter`] (a repeated parameter, or both
+    /// messages), [`RequestError::Encoding`] (neither), [`RequestError::TooLarge`].
+    pub fn parse_logout(query: &'q str) -> Result<Self, RequestError> {
+        Self::split(query, true)
+    }
+
+    fn split(query: &'q str, either: bool) -> Result<Self, RequestError> {
         if query.len() > MAX_ENCODED_REQUEST_BYTES * 3 {
             return Err(RequestError::TooLarge);
         }
-        let (mut saml_request, mut relay_state, mut sig_alg, mut signature) =
-            (None, None, None, None);
+        let (mut request, mut response, mut relay_state, mut sig_alg, mut signature) =
+            (None, None, None, None, None);
         for pair in query.split('&') {
             let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
             let slot = match name {
-                "SAMLRequest" => &mut saml_request,
+                "SAMLRequest" => &mut request,
+                "SAMLResponse" if either => &mut response,
                 "RelayState" => &mut relay_state,
                 "SigAlg" => &mut sig_alg,
                 "Signature" => &mut signature,
@@ -507,10 +611,17 @@ impl<'q> RedirectQuery<'q> {
                 return Err(RequestError::DuplicateParameter);
             }
         }
+        let request = request.filter(|v: &&str| !v.is_empty());
+        let response = response.filter(|v: &&str| !v.is_empty());
+        let (param, message) = match (request, response) {
+            (Some(message), None) => (MessageParam::Request, message),
+            (None, Some(message)) => (MessageParam::Response, message),
+            (Some(_), Some(_)) => return Err(RequestError::DuplicateParameter),
+            (None, None) => return Err(RequestError::Encoding),
+        };
         Ok(Self {
-            saml_request: saml_request
-                .filter(|v| !v.is_empty())
-                .ok_or(RequestError::Encoding)?,
+            param,
+            message,
             relay_state,
             sig_alg,
             signature,
@@ -523,11 +634,12 @@ impl<'q> RedirectQuery<'q> {
         self.sig_alg.is_some() || self.signature.is_some()
     }
 
-    /// `SAMLRequest`, URL-decoded. A base64 value contains no space, so a `+`
-    /// an SP left unencoded (and form decoding turned into a space) is put back.
+    /// The message parameter, URL-decoded. A base64 value contains no space, so a
+    /// `+` an SP left unencoded (and form decoding turned into a space) is put
+    /// back.
     #[must_use]
-    pub fn saml_request(&self) -> String {
-        url_decode(self.saml_request).replace(' ', "+")
+    pub fn message(&self) -> String {
+        url_decode(self.message).replace(' ', "+")
     }
 
     /// `RelayState`, URL-decoded, as it will be echoed.
@@ -537,7 +649,8 @@ impl<'q> RedirectQuery<'q> {
     }
 
     /// Verify the query signature against the SP's certificate (DER), over the
-    /// octets SAML Bindings §3.4.4.1 names, exactly as received.
+    /// octets SAML Bindings §3.4.4.1 names, exactly as received:
+    /// `SAMLRequest=…` (or `SAMLResponse=…`)`[&RelayState=…]&SigAlg=…`.
     ///
     /// # Errors
     ///
@@ -563,7 +676,7 @@ impl<'q> RedirectQuery<'q> {
             .decode(url_decode(signature_raw).replace(' ', "+").as_bytes())
             .map_err(|_| RequestError::SignatureInvalid)?;
 
-        let mut signed = format!("SAMLRequest={}", self.saml_request);
+        let mut signed = format!("{}={}", self.param.name(), self.message);
         if let Some(relay_state) = self.relay_state {
             signed.push_str("&RelayState=");
             signed.push_str(relay_state);

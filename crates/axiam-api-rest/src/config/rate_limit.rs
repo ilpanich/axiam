@@ -209,6 +209,12 @@ pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
 pub const ENV_DCR_PER_MIN: &str = "AXIAM__RATE_LIMIT__DCR_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` — G-3 / T23.3.8, never preset.
 pub const ENV_DIRECTORY_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN";
+/// `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` — G-2 / T23.2.5, never preset.
+pub const ENV_SAML_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN";
+/// `AXIAM__RATE_LIMIT__SSF_PER_MIN` — G-5 / T23.5.2, never preset.
+pub const ENV_SSF_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_PER_MIN";
+/// `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` — G-5 / T23.5.2, never preset.
+pub const ENV_SSF_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN` — X2.
 pub const ENV_UMA_PERM_PER_MIN: &str = "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN` — X2.
@@ -494,6 +500,49 @@ pub struct RateLimitConfig {
     /// its own, so a burst of edits does not spend the allowance for linking
     /// and the reverse. Per-IP, never client-keyed: the caller is a person.
     pub directory_admin_per_min: u32,
+    /// Max writes per minute per IP to the SAML service-provider registry
+    /// routes — the seven writes of contract §29: create, update and delete a
+    /// service provider, parse SP metadata, and issue, promote and retire the IdP
+    /// signing credential (default: 30 — G-2, T23.2.5, CONTRACT §29.3 rule 10,
+    /// D-42). Reads are not in it. Deliberately **not** part of
+    /// [`MachineLimitPreset`]: an administrator's console traffic, sized from
+    /// what a write costs, not from capacity.
+    ///
+    /// What a write costs is why it is limited: `issue_idp_credential` generates
+    /// an RSA-4096 key (seconds of CPU), `parse_sp_metadata` makes an outbound
+    /// request per call, and the rest rewrite where a tenant's signed assertions
+    /// go. Thirty a minute is far more than a person administering a registry
+    /// produces and far less than a loop run with a stolen administrator token
+    /// (T-363).
+    ///
+    /// **One bucket per route**, as every bucket here is keyed: each of the
+    /// seven writes has its own, so a burst of edits does not spend the
+    /// allowance for issuing a credential. Per-IP, never client-keyed: the
+    /// caller is a person.
+    pub saml_admin_per_min: u32,
+    /// Max requests per minute per IP to each route of the Shared Signals
+    /// Framework **receiver** surface — the stream management API
+    /// (`/ssf/v1/stream`, `/ssf/v1/status`, `/ssf/v1/verify`), the poll
+    /// endpoint (`/ssf/v1/poll/{stream_id}`, T23.5.3 — a long poll holds a
+    /// request for up to 30 s, so an honest receiver makes two a minute) and the
+    /// two `/.well-known/ssf-configuration` forms (default: 60 — G-5, T23.5.2,
+    /// plan §7 rule 6, CONTRACT §32). Deliberately **not** part of
+    /// [`MachineLimitPreset`]: a receiver reconfigures a stream at deploy time
+    /// and asks for a verification event rarely (every stream also has its own
+    /// `min_verification_interval`), so the honest traffic is small and a
+    /// capacity preset has no reason to move it.
+    ///
+    /// **One bucket per route**: a loop on the status endpoint does not spend
+    /// the allowance for discovery. Per-IP: a receiver's token is checked by
+    /// the handler, after the limiter.
+    pub ssf_per_min: u32,
+    /// Max writes per minute per IP to the SSF stream registry's management
+    /// routes — create, update and delete a stream (default: 30 — G-5,
+    /// T23.5.2, CONTRACT §32). Reads are not in it. Each write can repoint
+    /// where a tenant's security events are pushed, and the credential sent
+    /// there; thirty a minute is far more than a person administering streams
+    /// produces. One bucket per route; per-IP; never preset.
+    pub ssf_admin_per_min: u32,
     /// Max `/scim/v2/*` requests per minute per IP (default: 600 — R3.1/B4).
     ///
     /// **One bucket for the whole `/scim/v2` surface**, reads and writes
@@ -644,6 +693,12 @@ impl Default for RateLimitConfig {
             // G-3 / T23.3.8 — see the field docs. Administrator writes that
             // each resolve a tenant-chosen host name.
             directory_admin_per_min: 30,
+            // G-2 / T23.2.5 — see the field docs. Administrator writes that
+            // generate a key, fetch a URL or change where assertions go.
+            saml_admin_per_min: 30,
+            // G-5 / T23.5.2 — see the field docs.
+            ssf_per_min: 60,
+            ssf_admin_per_min: 30,
             // --- R3.1/B4 SCIM: the REST administrative surface -------------
             // 600/min == the gRPC Admin family's absolute ceiling
             // (ADMIN_PER_SEC_DEFAULT 10/s), copied deliberately and for the
@@ -854,6 +909,15 @@ impl RateLimitConfig {
             self.directory_admin_per_min >= 1,
             "directory_admin_per_min must be >= 1"
         );
+        assert!(
+            self.saml_admin_per_min >= 1,
+            "saml_admin_per_min must be >= 1"
+        );
+        assert!(self.ssf_per_min >= 1, "ssf_per_min must be >= 1");
+        assert!(
+            self.ssf_admin_per_min >= 1,
+            "ssf_admin_per_min must be >= 1"
+        );
         assert!(self.webauthn_per_min >= 1, "webauthn_per_min must be >= 1");
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates
@@ -989,6 +1053,9 @@ mod tests {
             (ENV_SCIM_PER_MIN, d.scim_per_min),
             (ENV_WEBAUTHN_PER_MIN, d.webauthn_per_min),
             (ENV_DIRECTORY_ADMIN_PER_MIN, d.directory_admin_per_min),
+            (ENV_SAML_ADMIN_PER_MIN, d.saml_admin_per_min),
+            (ENV_SSF_PER_MIN, d.ssf_per_min),
+            (ENV_SSF_ADMIN_PER_MIN, d.ssf_admin_per_min),
         ] {
             assert_eq!(
                 documented_u32(&table, env, 0),
@@ -1053,6 +1120,9 @@ mod tests {
             assert_eq!(cfg.scim_per_min, shipped.scim_per_min);
             assert_eq!(cfg.webauthn_per_min, shipped.webauthn_per_min);
             assert_eq!(cfg.directory_admin_per_min, shipped.directory_admin_per_min);
+            assert_eq!(cfg.saml_admin_per_min, shipped.saml_admin_per_min);
+            assert_eq!(cfg.ssf_per_min, shipped.ssf_per_min);
+            assert_eq!(cfg.ssf_admin_per_min, shipped.ssf_admin_per_min);
             for env in [
                 ENV_LOGIN_PER_MIN,
                 ENV_REGISTER_PER_MIN,
@@ -1061,6 +1131,9 @@ mod tests {
                 ENV_SCIM_PER_MIN,
                 ENV_WEBAUTHN_PER_MIN,
                 ENV_DIRECTORY_ADMIN_PER_MIN,
+                ENV_SAML_ADMIN_PER_MIN,
+                ENV_SSF_PER_MIN,
+                ENV_SSF_ADMIN_PER_MIN,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1272,6 +1345,9 @@ mod tests {
         assert_eq!(d.mfa_per_min, 5);
         assert_eq!(d.webauthn_per_min, 10);
         assert_eq!(d.directory_admin_per_min, 30);
+        assert_eq!(d.saml_admin_per_min, 30);
+        assert_eq!(d.ssf_per_min, 60);
+        assert_eq!(d.ssf_admin_per_min, 30);
         // The relationship is the point, not the literal. `RateLimitShared`
         // keys per `"{endpoint}:{ip}"`, so each of the six webauthn routes
         // carries this allowance independently and a ceremony spends one from

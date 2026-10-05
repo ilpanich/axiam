@@ -863,7 +863,6 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "futures",
- "futures-lite",
  "getrandom 0.4.3",
  "hex",
  "hmac 0.13.0",
@@ -880,6 +879,7 @@ dependencies = [
  "sha2 0.11.0",
  "subtle",
  "surrealdb",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-test",
@@ -1124,6 +1124,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "subtle",
+ "surrealdb",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -1132,6 +1133,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "x509-parser 0.18.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -1196,6 +1198,7 @@ dependencies = [
 name = "axiam-scim"
 version = "1.0.0-beta17"
 dependencies = [
+ "actix-http",
  "actix-rt",
  "actix-web",
  "axiam-api-rest",
@@ -1205,6 +1208,7 @@ dependencies = [
  "axiam-db",
  "axiam-test-support",
  "chrono",
+ "rcgen",
  "secrecy",
  "serde",
  "serde_json",

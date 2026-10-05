@@ -36,7 +36,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
         rows: [
           [
             "Authentication",
-            "Password (Argon2id), OPAQUE (RFC 9807, password never leaves the client), TOTP, WebAuthn passkeys and security keys, X.509 client certificates, and federated sign-in via SAML or OIDC.",
+            "Password (Argon2id), OPAQUE (RFC 9807, password never leaves the client), TOTP, WebAuthn passkeys and security keys, X.509 client certificates, and federated sign-in via SAML or OIDC. AXIAM can also be a SAML 2.0 identity provider for the applications a tenant registers.",
           ],
           [
             "Authorization",

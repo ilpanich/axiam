@@ -292,6 +292,9 @@ export interface SetOrgSettings {
   default_locale: string | null;
   // G-2 / D-20 — carried through unedited, for the same reason.
   saml_idp_enabled: boolean;
+  // G-5 / D-45 — carried through unedited, for the same reason. Optional so a
+  // caller written before the SSF transmitter still type-checks.
+  ssf_enabled?: boolean;
   dynamic_registration: DynamicRegistrationMode;
   dcr_allowed_scopes: string[];
   dcr_allowed_redirect_hosts: string[];

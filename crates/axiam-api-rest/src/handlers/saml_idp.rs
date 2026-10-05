@@ -1,6 +1,7 @@
 //! The SAML 2.0 identity provider's SSO endpoint (G-2, T23.2.3).
 //!
-//! Four routes under `/saml/v2/{tenant_id}`, behind the `saml` feature:
+//! The routes under `/saml/v2/{tenant_id}`, behind the `saml` feature (single
+//! logout, `/slo` and `/sso/logout`, is [`super::saml_idp_slo`]):
 //!
 //! | Route | What it does |
 //! |---|---|
@@ -8,6 +9,7 @@
 //! | `POST /sso` | HTTP-POST binding: the same, as a form post |
 //! | `GET /sso/idp-initiated?sp=…[&RelayState=…]` | IdP-initiated sign-on, for an SP that opted in (D-3) |
 //! | `GET /sso/continue?handle=…` | the second leg: resolve the browser's session, hop to sign in if needed, issue |
+//! | `GET`/`HEAD /metadata` | the tenant's IdP metadata (T23.2.5, D-40), unauthenticated |
 //!
 //! # Two legs, and why
 //!
@@ -48,6 +50,15 @@
 //! X6 arbiter immediately before issuing, so one handle yields at most one
 //! response.
 //!
+//! **The participant record (T23.2.4, D-37).** After the handle is consumed and
+//! before anything is signed, the second leg records — or reads back — the
+//! `saml_sp_session` row for this (session, SP): the `NameID` the SP is about to
+//! be given and its **per-SP random `SessionIndex`**. The assertion carries that
+//! index, never the session id, so single logout can map a `LogoutRequest` back
+//! to the session (`/slo`, [`super::saml_idp_slo`]) and SPs that compare notes
+//! cannot correlate a person's sessions. A failed write is a `Responder` failure
+//! and **no assertion**: nothing is signed that logout could not find again.
+//!
 //! # D-20
 //!
 //! Every route answers [`not_found`] — an empty `404`, the answer for a path
@@ -69,13 +80,14 @@ use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::saml_authn_request::{
     NewPendingSamlRequest, PENDING_SAML_REQUEST_TTL_SECS, PendingSamlRequest,
 };
+use axiam_core::models::saml_slo::NewSamlSpSession;
 use axiam_core::models::saml_sp::SamlServiceProvider;
 use axiam_core::models::session::Session;
 use axiam_core::models::user::User;
 use axiam_core::repository::{
     AuditLogRepository, GroupRepository, PendingSamlRequestRepository, RoleRepository,
-    SamlServiceProviderRepository, SessionRepository, SettingsRepository, TenantRepository,
-    UserRepository,
+    SamlServiceProviderRepository, SamlSpSessionRepository, SessionRepository, SettingsRepository,
+    TenantRepository, UserRepository,
 };
 use axiam_federation::saml_idp::request::{
     self as saml_request, BINDING_HTTP_POST, ParsedAuthnRequest, RedirectQuery, RequestError,
@@ -124,7 +136,7 @@ pub async fn not_found() -> HttpResponse {
 /// `(tenant_id, organization_id)` when the path names, in canonical form, a
 /// tenant whose effective `saml_idp_enabled` is on; `None` otherwise — and the
 /// caller answers [`not_found`] without saying which.
-async fn tenant_serving_saml<C: Connection + Clone>(
+pub(crate) async fn tenant_serving_saml<C: Connection + Clone>(
     state: &AppState<C>,
     raw_tenant: &str,
 ) -> Option<(Uuid, Uuid)> {
@@ -170,8 +182,10 @@ fn refusal_page(status: StatusCode, reason: Reason, tenant_id: Uuid) -> HttpResp
         .body(body)
 }
 
-fn request_refused(error: RequestError, tenant_id: Uuid) -> HttpResponse {
-    let reason: Reason = match error {
+/// The fixed reason a [`RequestError`] is logged under. Shared with the SLO
+/// endpoint, which receives with the same receiver.
+pub(crate) fn request_reason(error: RequestError) -> Reason {
+    match error {
         RequestError::TooLarge => "too_large",
         RequestError::Encoding => "encoding",
         RequestError::Inflate => "inflate",
@@ -187,13 +201,27 @@ fn request_refused(error: RequestError, tenant_id: Uuid) -> HttpResponse {
         RequestError::SignatureMissing => "signature_missing",
         RequestError::SignatureAlgorithm => "signature_algorithm",
         RequestError::SignatureInvalid => "signature_invalid",
-    };
-    let status = if error == RequestError::TooLarge {
+        RequestError::NotALogoutMessage => "not_a_logout_message",
+        RequestError::NameIdMissing => "name_id_missing",
+        RequestError::NameIdUnsupported => "name_id_unsupported",
+        RequestError::TooManySessionIndexes => "too_many_session_indexes",
+        RequestError::Expired => "expired",
+        RequestError::DestinationMissing => "destination_missing",
+    }
+}
+
+/// The status a [`RequestError`] is answered with: `413` for an oversized
+/// message, `400` for every other.
+pub(crate) fn request_status(error: RequestError) -> StatusCode {
+    if error == RequestError::TooLarge {
         StatusCode::PAYLOAD_TOO_LARGE
     } else {
         StatusCode::BAD_REQUEST
-    };
-    refusal_page(status, reason, tenant_id)
+    }
+}
+
+fn request_refused(error: RequestError, tenant_id: Uuid) -> HttpResponse {
+    refusal_page(request_status(error), request_reason(error), tenant_id)
 }
 
 /// HTML-escape a value for an attribute or text node.
@@ -230,16 +258,41 @@ fn post_page(
     clear: Option<Cookie<'static>>,
     tenant_id: Uuid,
 ) -> HttpResponse {
-    let Some(origin) = acs_origin(&binding.acs_url) else {
+    post_form_page(
+        &binding.acs_url,
+        "SAMLResponse",
+        &binding.saml_response,
+        binding.relay_state.as_deref(),
+        clear.into_iter().collect(),
+        tenant_id,
+    )
+}
+
+/// The one auto-submitting form page: `field` (`SAMLResponse`, or on the SLO
+/// endpoint `SAMLRequest` / `SAMLResponse`) posted to `action`, with the
+/// `RelayState` when there is one, setting `cookies` on the way.
+///
+/// **The only place a page sets its own content-security policy** (D-27): the
+/// SLO endpoint's HTTP-POST bindings render through here rather than adding a
+/// second setter, and `form-action` is always the origin of `action` — the ACS
+/// URL of an SSO response, the registered `slo_url` of a logout message — so the
+/// form can post nowhere else.
+pub(crate) fn post_form_page(
+    action: &str,
+    field: &str,
+    value: &str,
+    relay_state: Option<&str>,
+    cookies: Vec<Cookie<'static>>,
+    tenant_id: Uuid,
+) -> HttpResponse {
+    let Some(origin) = acs_origin(action) else {
         return refusal_page(StatusCode::INTERNAL_SERVER_ERROR, "acs_origin", tenant_id);
     };
     let mut nonce = [0u8; 16];
     rand::rng().fill_bytes(&mut nonce);
     let nonce = URL_SAFE_NO_PAD.encode(nonce);
 
-    let relay = binding
-        .relay_state
-        .as_deref()
+    let relay = relay_state
         .map(|r| {
             format!(
                 "<input type=\"hidden\" name=\"RelayState\" value=\"{}\">",
@@ -251,13 +304,14 @@ fn post_page(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <title>Signing in</title></head><body>\
          <form method=\"post\" action=\"{action}\">\
-         <input type=\"hidden\" name=\"SAMLResponse\" value=\"{response}\">{relay}\
-         <noscript><p>Press Continue to finish signing in.</p>\
+         <input type=\"hidden\" name=\"{field}\" value=\"{value}\">{relay}\
+         <noscript><p>Press Continue to finish.</p>\
          <button type=\"submit\">Continue</button></noscript></form>\
          <script nonce=\"{nonce}\">document.forms[0].submit();</script>\
          </body></html>",
-        action = html_escape(&binding.acs_url),
-        response = html_escape(&binding.saml_response),
+        action = html_escape(action),
+        field = html_escape(field),
+        value = html_escape(value),
     );
     let csp = format!(
         "default-src 'none'; script-src 'nonce-{nonce}'; form-action {origin}; \
@@ -269,7 +323,7 @@ fn post_page(
         .insert_header(("Content-Security-Policy", csp))
         .insert_header(("Cache-Control", "no-store"))
         .insert_header(("Pragma", "no-cache"));
-    if let Some(cookie) = clear {
+    for cookie in cookies {
         builder.cookie(cookie);
     }
     builder.body(body)
@@ -413,6 +467,74 @@ async fn post_failure<C: Connection + Clone>(
 // First leg: SP-initiated, both bindings
 // ---------------------------------------------------------------------------
 
+/// `GET`/`HEAD /saml/v2/{tenant_id}/metadata` — the tenant's IdP metadata
+/// (T23.2.5, D-40).
+///
+/// Unauthenticated, `application/samlmetadata+xml`, one `EntityDescriptor` from
+/// a fixed template carrying the signing certificates of the `active` credential
+/// and then the `next` one (so an SP has the successor before any assertion is
+/// signed with it), and nothing else that varies. **Unsigned**, on purpose:
+/// signing it with the key it publishes would anchor nothing.
+///
+/// **D-20.** The tenant check runs before anything else and every way of having
+/// nothing to say — a build without SAML (no route at all), an unknown tenant, a
+/// non-canonical id, the setting off, no publishable credential — is the same
+/// empty [`not_found`]: a `503` for a missing credential would tell anyone that
+/// the tenant exists and serves SAML (T-368). The administrator sees readiness
+/// through `get_idp`.
+///
+/// `Cache-Control: public, max-age=3600` and a strong `ETag`; `If-None-Match`
+/// answers `304`. It reads the keyless credential list only, never the sealed
+/// key.
+pub async fn metadata<C: Connection + Clone>(
+    state: web::Data<AppState<C>>,
+    req: HttpRequest,
+    path: web::Path<String>,
+) -> HttpResponse {
+    use axiam_federation::saml_idp::idp_metadata::{
+        IDP_METADATA_CACHE_CONTROL, IDP_METADATA_MEDIA_TYPE, build_idp_metadata,
+        if_none_match_matches,
+    };
+    use axiam_federation::saml_idp::{idp_entity_id, idp_slo_url, idp_sso_url};
+
+    let Some((tenant_id, _org)) = tenant_serving_saml(&state, &path).await else {
+        return not_found().await;
+    };
+    let Ok(credentials) = state.saml_idp.credential_service.list(tenant_id).await else {
+        return not_found().await;
+    };
+    let base = state.auth_config.root_issuer();
+    let Some(document) = build_idp_metadata(
+        &idp_entity_id(base, tenant_id),
+        &idp_sso_url(base, tenant_id),
+        // T23.2.4: the SLO route exists, so the document advertises it (D-40).
+        Some(&idp_slo_url(base, tenant_id)),
+        &credentials,
+    ) else {
+        return not_found().await;
+    };
+
+    let revalidated = req
+        .headers()
+        .get(actix_web::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| if_none_match_matches(v, &document.etag));
+    let mut response = if revalidated {
+        HttpResponse::NotModified()
+    } else {
+        HttpResponse::Ok()
+    };
+    response
+        .insert_header(("Cache-Control", IDP_METADATA_CACHE_CONTROL))
+        .insert_header(("ETag", document.etag.clone()));
+    if revalidated {
+        return response.finish();
+    }
+    response
+        .content_type(IDP_METADATA_MEDIA_TYPE)
+        .body(document.xml)
+}
+
 /// `GET /saml/v2/{tenant_id}/sso` — the HTTP-Redirect binding.
 pub async fn sso_redirect<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
@@ -426,7 +548,7 @@ pub async fn sso_redirect<C: Connection + Clone>(
         Ok(q) => q,
         Err(e) => return request_refused(e, tenant_id),
     };
-    let document = match saml_request::decode_redirect(&query.saml_request()) {
+    let document = match saml_request::decode_redirect(&query.message()) {
         Ok(d) => d,
         Err(e) => return request_refused(e, tenant_id),
     };
@@ -1071,6 +1193,41 @@ async fn issue<C: Connection + Clone>(
         }
     };
 
+    // D-37, T-382: the participant record is written **before** anything is
+    // signed. Single logout can only end what it can map back, so no assertion
+    // may exist for which this row does not. The `NameID` is asked of the issuer
+    // first, because the row holds the one this SP is about to be given.
+    let (name_id, name_id_format) = match state.saml_idp.issuer.name_id_for(tenant_id, sp, &user) {
+        Ok(named) => named,
+        Err(e) => return fail(e.status()).await,
+    };
+    let participant = match state
+        .saml_idp
+        .participant_repo
+        .record(NewSamlSpSession {
+            tenant_id,
+            session_id: session.id,
+            user_id: user.id,
+            sp_id: sp.id,
+            sp_entity_id: sp.entity_id.clone(),
+            name_id,
+            name_id_format: name_id_format.urn().to_owned(),
+            // 32 CSPRNG bytes, base64url without padding; kept only when this
+            // session has no row for this SP yet.
+            session_index: random_token(),
+            expires_at: session.expires_at,
+        })
+        .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            // No row, no assertion: `Responder`, and the SP is told nothing more.
+            tracing::error!(error = %e, %tenant_id, sp_id = %sp.id,
+                "SAML SSO: could not record the participant");
+            return fail(SamlStatus::Responder).await;
+        }
+    };
+
     // RSA-4096 signing and the self-check, off the async workers, under the
     // same gate that bounds the other CPU-heavy work.
     let permit = state.crypto_semaphore.clone().acquire_owned().await;
@@ -1080,6 +1237,7 @@ async fn issue<C: Connection + Clone>(
     let acs_url = pending.acs_url.clone();
     let request_id = pending.request_id.clone();
     let relay_state = pending.relay_state.clone();
+    let session_index = participant.session_index.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         issuer.issue(
@@ -1090,6 +1248,7 @@ async fn issue<C: Connection + Clone>(
                 in_response_to: request_id.as_deref(),
                 relay_state: relay_state.as_deref(),
                 session: &session,
+                session_index: &session_index,
                 user: &user_owned,
                 groups: &groups,
                 roles: &roles,
@@ -1100,6 +1259,17 @@ async fn issue<C: Connection + Clone>(
     })
     .await;
     match outcome {
+        // What was recorded must be what was asserted: the row is how a logout
+        // finds this assertion again. A mismatch (the address changed between the
+        // two reads) is posted nowhere.
+        Ok(Ok(issued))
+            if issued.name_id != participant.name_id
+                || issued.session_index != participant.session_index =>
+        {
+            tracing::error!(%tenant_id, sp_id = %sp.id,
+                "SAML SSO: the issued assertion does not match the participant record");
+            fail(SamlStatus::Responder).await
+        }
         Ok(Ok(issued)) => {
             tracing::info!(%tenant_id, sp_id = %sp.id, user_id = %user.id,
                 "SAML SSO: assertion issued");

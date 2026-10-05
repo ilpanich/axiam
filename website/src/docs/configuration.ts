@@ -300,7 +300,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__TENANT_ISSUER_PATHS",
-            "Serve a second, query-free issuer identifier per tenant: `{root}/t/{tenant_id}`. Default `false`. RFC 8414 §2 forbids a query component in an issuer, so the deployment-wide issuer plus `?tenant_id=` cannot be published as one tenant's issuer — which is what an MCP server needs to put in the `authorization_servers` of its RFC 9728 metadata, and what an MCP client turns into a discovery URL. With it set, discovery is served at all three conventional forms (RFC 8414 §3.1 insertion at both well-known paths, and the OpenID Connect Discovery §4 append), each returning the identical document whose endpoints carry no `tenant_id`; an Actix scope re-bases the existing OAuth2 endpoints without duplicating a handler; and the `iss` of the access token, the ID token, the RFC 9207 response parameter and the logout token is the tenant issuer. One JWKS signs every issuer, so a token's tenant is checked twice — its `iss` must agree with its `tenant_id` claim, and both must be the tenant the path named. The path is derived, never configured: the root issuer must be a bare URL and the server refuses to start with this set and no root issuer. With it off nothing is mounted and the `?tenant_id=` documents are byte-identical. Turn it on when one deployment fronts MCP servers for more than one tenant; a single-tenant deployment wants `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` instead.",
+            "Serve a second, query-free issuer identifier per tenant: `{root}/t/{tenant_id}`. Default `false`. RFC 8414 §2 forbids a query component in an issuer, so the deployment-wide issuer plus `?tenant_id=` cannot be published as one tenant's issuer — which is what an MCP server needs to put in the `authorization_servers` of its RFC 9728 metadata, and what an MCP client turns into a discovery URL. With it set, discovery is served at all three conventional forms (RFC 8414 §3.1 insertion at both well-known paths, and the OpenID Connect Discovery §4 append), each returning the identical document whose endpoints carry no `tenant_id`; an Actix scope re-bases the existing OAuth2 endpoints without duplicating a handler; and the `iss` of the access token, the ID token, the RFC 9207 response parameter and the logout token is the tenant issuer. One JWKS signs every issuer, so a token's tenant is checked twice — its `iss` must agree with its `tenant_id` claim, and both must be the tenant the path named. The path is derived, never configured: the root issuer must be a bare URL and the server refuses to start with this set and no root issuer. With it off nothing is mounted and the `?tenant_id=` documents are byte-identical. Turn it on when one deployment fronts MCP servers for more than one tenant; a single-tenant deployment wants `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` instead. A deployment of more than one tenant also needs it for the [Shared Signals transmitter](#/docs/ssf#enable): without it SSF is inactive for every tenant, so that tenants never share an issuer.",
             "true",
           ],
           [
@@ -418,8 +418,23 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "30",
           ],
           [
+            "AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the SAML service-provider registry API under /api/v1/tenants/{tenant_id}/saml: create, update and delete a service provider, parse-sp-metadata, and issue, promote and retire the IdP signing credential. Issuing generates an RSA-4096 key and parsing metadata makes an outbound request, so the limit bounds how fast an administrator \u2014 or a stolen administrator token \u2014 can burn CPU or use the server to reach an external host. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__SSF_PER_MIN",
+            "Max requests per minute, per IP, to each route of the Shared Signals Framework receiver surface: the stream management API (/ssf/v1/stream, /ssf/v1/status, /ssf/v1/verify, /ssf/v1/poll/{stream_id}) and both /.well-known/ssf-configuration forms. One bucket per route, checked before the receiver's token; each stream also enforces its own 60-second min_verification_interval. Never moved by a profile preset.",
+            "60",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the SSF stream registry API under /api/v1/tenants/{tenant_id}/ssf/streams: create, update and delete a stream. Each write can repoint where a tenant's security events, and the push credential, are sent. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
-            "Max /oauth2/end_session per minute. Never moved by a profile preset.",
+            "Max /oauth2/end_session per minute — and the same preset for the SAML identity provider's browser endpoints (sign-on, metadata, single logout /slo and the logout trigger), each in a bucket of its own so a flood on one cannot spend another's allowance. Never moved by a profile preset.",
             "30",
           ],
           [

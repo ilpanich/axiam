@@ -228,6 +228,9 @@ pub struct BootstrapResponse {
 // Handler
 // -----------------------------------------------------------------------
 
+/// Serialises [`bootstrap`] within one process (step 2b).
+static BOOTSTRAP_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// `POST /api/v1/admin/bootstrap` — first-run admin setup.
 ///
 /// Creates the initial admin user with the super-admin role and seeds the
@@ -337,6 +340,20 @@ pub async fn bootstrap<C: Connection + Clone>(
             message: "organization_name must contain at least one alphanumeric character".into(),
         }));
     }
+    // 2b. One bootstrap at a time in this process. Two concurrent first-run
+    //     requests used to both pass step 3 and seed the same tenant's
+    //     permissions and role grants side by side; once the permission
+    //     registry grew enough (Phase 23 W4), the loser's grant writes kept
+    //     losing write conflicts to the winner's until their retries ran out,
+    //     and it answered 500 instead of reaching `bootstrap_lock:global` and
+    //     its 409. Serialised, the second request waits, finds the committed
+    //     lock in step 3 and answers 409 without seeding anything. The lock is
+    //     held to the end of the handler. Across replicas the
+    //     `bootstrap_lock:global` CREATE below stays the single-admin
+    //     guarantee; this only keeps one process from racing itself. Taken
+    //     after the gate and validation, so a refused request never waits.
+    let _serial = BOOTSTRAP_SERIAL.lock().await;
+
     // 3. Fast-fail one-shot gate: if the global bootstrap lock already exists
     //    the system has been initialized. The authoritative guard is the
     //    `bootstrap_lock:global` CREATE inside the atomic transaction below;

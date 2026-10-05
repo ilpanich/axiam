@@ -108,6 +108,10 @@ export const OAUTH2_PAGES: DocPage[] = [
         type: "note",
         text: "Both halves are opt-in, and a feed nobody polls narrows nothing: turn it on where sign-out has to take effect faster than fifteen minutes *and* attach the SDK poller (contract §10.4, shipped by all eleven SDKs since `1.0.0-beta14`).",
       },
+      {
+        type: "note",
+        text: "The feed answers one narrow question for a resource server that holds a token. A system that needs to *be told* — and about more than sessions: credential changes, a disabled or erased account — is what the [Shared Signals (SSF) transmitter](#/docs/ssf) is for, with signed events pushed to a registered receiver or polled by it. It is off until `ssf_enabled` is on, and independent of this feed.",
+      },
       { type: "h", id: "tenant", text: "Naming the tenant" },
       {
         type: "p",
@@ -954,6 +958,10 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "note",
         text: "This is the mechanism that makes \"revoke this account now\" mean something across a federation. Register your relying parties for it before you need it — an incident is a bad time to discover that logging out of AXIAM does nothing anywhere else.",
+      },
+      {
+        type: "p",
+        text: "Back-channel logout speaks to OIDC relying parties about one session. For an application that is not a relying party, or that needs to hear about more than a logout — a credential replaced, an account disabled or erased — register it as a receiver of the [Shared Signals (SSF) transmitter](#/docs/ssf), which sends a signed `session-revoked` event for every session ended by a logout, an administrator or a policy.",
       },
     ],
   },

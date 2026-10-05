@@ -15,6 +15,7 @@ pub mod openapi;
 pub mod permissions;
 pub mod reactor_hooks;
 pub mod server;
+pub mod ssf_emitter;
 pub mod state;
 pub mod tenant_org_cache;
 pub mod token_exchange;

@@ -2100,11 +2100,14 @@ where
             scim_deliverers,
             // The dispatcher's `scim_push.delivery_failed` row is the record of a
             // dead letter and what a `scim_delivery_failed` notification rule
-            // matches (D-58): written through the notifying wrapper.
-            axiam_audit::NotifyingAuditLog::new(
+            // matches (D-58): written through the notifying wrapper, which lets
+            // one per target per hour reach the rules (W5 F4 review, T-418,
+            // D-73) — every row is still appended.
+            crate::scim_notification::scim_dead_letter_audit(
                 audit_repo.clone(),
                 notification_sink.clone(),
                 tenant_repo.clone(),
+                axiam_db::SurrealScimTargetStateRepository::new(db_handle.clone()),
             ),
             scim_retry,
         );

@@ -24,4 +24,5 @@ pub mod mds_job;
 pub mod messaging;
 pub mod mtls_anchors;
 pub mod profile;
+pub mod scim_notification;
 pub mod tls;

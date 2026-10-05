@@ -187,7 +187,10 @@ async fn decrypt_credential_round_trips() {
         .await
         .unwrap()
         .expect("a credential is stored");
-    assert_eq!(opened.as_str(), expected.as_str());
+    assert!(
+        opened.as_str() == expected.as_str(),
+        "the stored credential opens to the one written"
+    );
 }
 
 #[tokio::test]
@@ -453,7 +456,10 @@ async fn changing_a_bearer_targets_base_url_needs_the_credential() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(opened.as_str(), fresh.as_str());
+    assert!(
+        opened.as_str() == fresh.as_str(),
+        "the new credential is the one stored"
+    );
 }
 
 #[tokio::test]
@@ -480,17 +486,39 @@ async fn changing_a_client_credentials_token_url_needs_the_credential() {
 }
 
 #[tokio::test]
-async fn a_client_credentials_base_url_may_change_without_the_credential() {
-    // The client secret goes to `token_url`, not to `base_url`; only the access
-    // token it yields (never persisted) goes to the SCIM base.
+async fn a_client_credentials_base_url_needs_the_credential_too() {
+    // W5 F4, T-409: the client secret goes to `token_url`, but every access
+    // token minted with it goes to `base_url`. A `base_url` moved without the
+    // secret would hand the next freshly minted token to the new host, so the
+    // move is refused exactly like a `token_url` move (D-57, amended).
     let db = setup().await;
     let repo = targets(&db);
     let tenant = Uuid::new_v4();
     let created = repo.create(cc_input(tenant)).await.unwrap();
     let mut update = ScimTargetUpdate::from_target(&created);
     update.base_url = "https://scim2.example.com/v2".into();
+    assert!(
+        matches!(
+            repo.update(tenant, created.id, update.clone()).await,
+            Err(AxiamError::Validation { .. })
+        ),
+        "a client-credentials base_url moved without the secret must be refused"
+    );
+    // Refused means untouched.
+    let unchanged = repo.get(tenant, created.id).await.unwrap();
+    assert_eq!(unchanged.base_url, created.base_url);
+    assert_eq!(unchanged.updated_at, created.updated_at);
+
+    // With the secret in the same write it is an ordinary write.
+    update.credential = Some(credential_value());
     let written = repo.update(tenant, created.id, update).await.unwrap();
     assert_eq!(written.base_url, "https://scim2.example.com/v2");
+
+    // A change that moves neither URL still needs nothing.
+    let mut rename = ScimTargetUpdate::from_target(&written);
+    rename.name = "renamed".into();
+    let renamed = repo.update(tenant, created.id, rename).await.unwrap();
+    assert_eq!(renamed.name, "renamed");
 }
 
 #[tokio::test]
@@ -1026,6 +1054,91 @@ async fn concurrent_claims_have_one_winner() {
         let target_id = target.id;
         tasks.push(tokio::spawn(async move {
             repo.claim_reconciliation(tenant, target_id, now, 3600)
+                .await
+        }));
+    }
+    let mut winners = 0;
+    for task in tasks {
+        if task.await.unwrap().unwrap() {
+            winners += 1;
+        }
+    }
+    assert_eq!(winners, 1);
+}
+
+/// W5 F4 review, T-418 (D-73): one failure notification per target per
+/// interval, whoever asks; another tenant's target and a deleted one are
+/// `false`, never an error.
+#[tokio::test]
+async fn claim_failure_notification_succeeds_once_per_interval() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+    let target = targets(&db).create(bearer_input(tenant)).await.unwrap();
+    let other = targets(&db).create(bearer_input(tenant)).await.unwrap();
+    let repo = states(&db);
+    let now = Utc::now();
+    let hour = 3600;
+
+    assert!(
+        repo.claim_failure_notification(tenant, target.id, now, hour)
+            .await
+            .unwrap()
+    );
+    for later in [0, 1, 60, hour - 1] {
+        assert!(
+            !repo
+                .claim_failure_notification(tenant, target.id, now + Duration::seconds(later), hour)
+                .await
+                .unwrap(),
+            "a second notification inside the interval"
+        );
+    }
+    // Per target: another target of the tenant is its own claim.
+    assert!(
+        repo.claim_failure_notification(tenant, other.id, now, hour)
+            .await
+            .unwrap()
+    );
+    // After the interval: claimable again.
+    assert!(
+        repo.claim_failure_notification(tenant, target.id, now + Duration::seconds(hour), hour)
+            .await
+            .unwrap()
+    );
+    // The claim is not the reconciliation claim, and does not touch the counts.
+    let state = repo.get(tenant, target.id).await.unwrap();
+    assert!(state.last_reconciled_at.is_none());
+    assert_eq!(state.dead_lettered_total, 0);
+
+    // Another tenant's target, and a target that is gone: nothing to notify.
+    assert!(
+        !repo
+            .claim_failure_notification(Uuid::new_v4(), target.id, now, hour)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .claim_failure_notification(tenant, Uuid::new_v4(), now, hour)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_failure_notification_claims_have_one_winner() {
+    let db = setup().await;
+    let tenant = Uuid::new_v4();
+    let target = targets(&db).create(bearer_input(tenant)).await.unwrap();
+    let repo = states(&db);
+    let now = Utc::now();
+
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let repo = repo.clone();
+        let target_id = target.id;
+        tasks.push(tokio::spawn(async move {
+            repo.claim_failure_notification(tenant, target_id, now, 3600)
                 .await
         }));
     }

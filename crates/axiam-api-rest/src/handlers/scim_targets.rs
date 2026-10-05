@@ -22,9 +22,10 @@
 //!    [`MAX_SCOPE_GROUPS`], every group in this tenant);
 //! 3. on an update, **the credential's binding to its URL** (D-57): moving the
 //!    credential to another URL — `base_url` of a bearer target, `token_url`
-//!    of a client-credentials one — or switching the authentication kind
-//!    without supplying the credential in the same write is `400` naming the
-//!    field;
+//!    or `base_url` of a client-credentials one (the access tokens the secret
+//!    yields go to `base_url`; W5 F4, T-409) — or switching the
+//!    authentication kind without supplying the credential in the same write
+//!    is `400` naming the field;
 //! 4. `503` when a credential is to be stored and `pki_encryption_key` is not
 //!    configured;
 //! 5. the write — an update conditional on the `updated_at` it read, so a
@@ -199,8 +200,8 @@ pub struct ScimTargetInput {
     /// **Write-only.** The bearer token or the OAuth2 client secret, 1–4 096
     /// bytes. Required on create. On update, absent keeps the stored one —
     /// except that moving it to another URL (`base_url` of a bearer target,
-    /// `token_url` of a client-credentials one) or switching `auth.type`
-    /// requires it again.
+    /// `token_url` or `base_url` of a client-credentials one) or switching
+    /// `auth.type` requires it again.
     #[serde(default)]
     pub credential: Option<String>,
     /// `all_users`, or `groups` with 1–100 `group_ids` of this tenant: users
@@ -442,6 +443,15 @@ fn check_binding(
             ScimTargetAuth::OAuth2ClientCredentials { token_url: new, .. },
         ) if old != new => Err(validation(
             "changing auth.token_url requires the credential in the same write",
+        )),
+        // W5 F4, T-409: every access token minted with the secret goes to
+        // `base_url`, so moving it moves what the secret is worth.
+        (
+            ScimTargetAuth::OAuth2ClientCredentials { .. },
+            ScimTargetAuth::OAuth2ClientCredentials { .. },
+        ) if old.base_url != base_url => Err(validation(
+            "changing base_url of a client-credentials target requires the credential in the \
+             same write",
         )),
         (ScimTargetAuth::Bearer, ScimTargetAuth::Bearer)
         | (
@@ -745,9 +755,10 @@ pub async fn get_target<C: Connection + Clone>(
                                       starts a reconciliation",
          body = ScimTargetResponse),
         (status = 400, description = "A value rule, or a move of the credential to another URL \
-                                      (`base_url` of a bearer target, `auth.token_url` of a \
-                                      client-credentials one) or a switch of `auth.type` \
-                                      without the credential — the message names the field"),
+                                      (`base_url` of a bearer target, `auth.token_url` or \
+                                      `base_url` of a client-credentials one) or a switch of \
+                                      `auth.type` without the credential — the message names \
+                                      the field"),
         (status = 404, description = "No such target in this tenant"),
         (status = 409, description = "The target changed since it was read (reload it and retry)"),
         (status = 429, description = "Rate limit"),

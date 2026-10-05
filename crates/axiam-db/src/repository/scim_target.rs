@@ -175,16 +175,19 @@ fn scope_columns(scope: &ScimTargetScope) -> (&'static str, Vec<String>) {
     }
 }
 
-/// Whether `new` sends the stored credential somewhere it did not go before:
-/// a different authentication kind, a different `base_url` for a bearer
-/// target, or a different `token_url` for a client-credentials target (D-57).
+/// Whether `new` sends the stored credential — or what it yields — somewhere it
+/// did not go before: a different authentication kind, a different `base_url`
+/// for a bearer target, or a different `token_url` **or `base_url`** for a
+/// client-credentials target (D-57, amended by the W5 F4 review, T-409: the
+/// secret goes to `token_url`, and every access token minted with it goes to
+/// `base_url`, so moving either moves what the secret is worth).
 fn moves_credential(stored: &ScimTarget, new_base_url: &str, new_auth: &ScimTargetAuth) -> bool {
     match (&stored.auth, new_auth) {
         (ScimTargetAuth::Bearer, ScimTargetAuth::Bearer) => stored.base_url != new_base_url,
         (
             ScimTargetAuth::OAuth2ClientCredentials { token_url: old, .. },
             ScimTargetAuth::OAuth2ClientCredentials { token_url: new, .. },
-        ) => old != new,
+        ) => old != new || stored.base_url != new_base_url,
         _ => true,
     }
 }
@@ -1230,6 +1233,45 @@ impl<C: Connection> ScimTargetStateRepository for SurrealScimTargetStateReposito
                        last_reconciled_at = $now, reconcile_claimed_at = $now \
                      WHERE tenant_id = $tenant_id \
                        AND (last_reconciled_at = NONE OR last_reconciled_at <= $cutoff) \
+                     RETURN VALUE meta::id(id)",
+                )
+                .bind(("id", target_id.to_string()))
+                .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("now", now))
+                .bind(("cutoff", cutoff))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(|e| classify_write_error(e, "scim_target_state"))?;
+            let claimed: Vec<String> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(!claimed.is_empty())
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn claim_failure_notification(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        now: DateTime<Utc>,
+        min_interval_secs: i64,
+    ) -> AxiamResult<bool> {
+        let cutoff = now - Duration::seconds(min_interval_secs);
+        // The interval is the precondition of the write (the
+        // `claim_reconciliation` pattern): of two concurrent claimants one
+        // matches nothing or loses the optimistic write and then sees the
+        // winner's stamp. A target of another tenant, or one deleted since,
+        // matches nothing: `false`, never an error.
+        retry_hot_row(|| async {
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "UPDATE type::record('scim_target_state', $id) SET \
+                       failure_notified_at = $now \
+                     WHERE tenant_id = $tenant_id \
+                       AND (failure_notified_at = NONE OR failure_notified_at <= $cutoff) \
                      RETURN VALUE meta::id(id)",
                 )
                 .bind(("id", target_id.to_string()))

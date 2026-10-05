@@ -384,17 +384,29 @@ describe("ScimTargetsPage — edit", () => {
     });
   });
 
-  it("requires the secret again when a client-credentials target's token URL changes, but not its base URL", async () => {
+  it("requires the secret again when a client-credentials target's base URL or token URL changes", async () => {
     const dialog = await openEdit("Okta");
     apiMock.put.mockResolvedValue(res(oauthTarget));
-    // The base URL is not where the secret goes.
+    // The base URL is where every access token the secret yields goes (T-409).
     await userEvent.clear(within(dialog).getByLabelText("Base URL *"));
     await userEvent.type(
       within(dialog).getByLabelText("Base URL *"),
       "https://okta2.example.com/scim/v2",
     );
+    expect(within(dialog).getByLabelText("Client secret *")).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    expect(
+      await screen.findByText(/Changing the base URL requires the client secret to be entered again/),
+    ).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+    // Back to the stored base URL: nothing is required again.
+    await userEvent.clear(within(dialog).getByLabelText("Base URL *"));
+    await userEvent.type(
+      within(dialog).getByLabelText("Base URL *"),
+      oauthTarget.base_url,
+    );
     expect(within(dialog).getByLabelText("Client secret")).toBeInTheDocument();
-    // The token URL is.
+    // The token URL is the secret's own destination.
     await userEvent.clear(within(dialog).getByLabelText("Token URL *"));
     await userEvent.type(
       within(dialog).getByLabelText("Token URL *"),

@@ -3691,8 +3691,9 @@ pub trait ScimTargetRepository: Send + Sync {
     ///   the target has been written since — or is written between the
     ///   repository's read and its write.
     /// * `Validation` when the write moves the credential to another URL
-    ///   (`base_url` of a bearer target, `token_url` of a client-credentials
-    ///   target) or switches the authentication kind without a new credential.
+    ///   (`base_url` of a bearer target, `token_url` or `base_url` of a
+    ///   client-credentials target) or switches the authentication kind without
+    ///   a new credential.
     /// * `ServiceUnavailable` when a new credential is supplied and the
     ///   encryption key is not configured.
     ///
@@ -3861,6 +3862,21 @@ pub trait ScimTargetStateRepository: Send + Sync {
     /// callers cannot both succeed. `false` means too soon or already claimed.
     /// `NotFound` when the target does not exist in this tenant.
     fn claim_reconciliation(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        now: DateTime<Utc>,
+        min_interval_secs: i64,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Claim the right to notify administrators of the target's dead letters
+    /// at `now` **if** the last notification was at least `min_interval_secs`
+    /// ago (or there was none), atomically: of the dead letters of one target,
+    /// one per interval reaches the notification rules, on any replica (W5 F4
+    /// review, T-418). `false` — too soon, or no such target in this tenant —
+    /// means *do not notify*; it is never an error, so a target deleted since
+    /// the dead letter simply notifies nobody.
+    fn claim_failure_notification(
         &self,
         tenant_id: Uuid,
         target_id: Uuid,

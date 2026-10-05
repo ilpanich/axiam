@@ -239,7 +239,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address policy (https, no private or local address), a group scope of 1 to
   100 groups of the tenant, bounded name, client id and credential. **The
   credential is bound to its URL:** moving it (`base_url` of a bearer target,
-  `token_url` of a client-credentials one) or switching the authentication kind
+  `token_url` or `base_url` of a client-credentials one — the access tokens the
+  secret yields go to `base_url`) or switching the authentication kind
   without supplying it is `400` naming the field; an update is conditional on
   the version it read (`409` when overtaken); a credential without
   `pki_encryption_key` is `503`. Creating a target enabled, or enabling one,

@@ -457,6 +457,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "minimal_profile_lease",
         sql: SCHEMA_V83,
     },
+    Migration {
+        version: 84,
+        name: "scim_failure_notification_claim",
+        sql: SCHEMA_V84,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4532,9 +4537,52 @@ DEFINE FIELD IF NOT EXISTS renewed_at ON TABLE minimal_profile_lease TYPE dateti
 DEFINE FIELD IF NOT EXISTS expires_at ON TABLE minimal_profile_lease TYPE datetime;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v84 — W5 F4 review, T-418 (D-73): one SCIM failure mail per target
+// per hour
+// -----------------------------------------------------------------------
+//
+// Every dead-lettered outbound SCIM delivery writes its audit row, and a
+// tenant's `scim_delivery_failed` rule mailed each recipient once per row — a
+// downstream that is down, or that refuses AXIAM's credential, dead-letters
+// every reference, so a whole tenant's worth of mail at the next
+// reconciliation. The notification is now claimed per target with a
+// conditional write on this column (`claim_failure_notification`, the
+// `claim_reconciliation` pattern), so of one target's dead letters one per
+// hour reaches the rules, on any replica. The audit row per dead letter and
+// `dead_lettered_total` are unchanged. Additive: one optional column.
+const SCHEMA_V84: &str = "\
+DEFINE FIELD IF NOT EXISTS failure_notified_at ON TABLE scim_target_state
+    TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W5 F4 review, T-418 — v84 is one optional column on the SCIM delivery
+    /// state and nothing else.
+    #[test]
+    fn v84_adds_only_the_failure_notification_claim() {
+        for statement in SCHEMA_V84.lines().filter(|l| l.starts_with("DEFINE")) {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v84 statements must be idempotent definitions: {statement}"
+            );
+            assert!(
+                statement.contains("failure_notified_at"),
+                "v84 defined something outside its scope: {statement}"
+            );
+        }
+        assert!(SCHEMA_V84.contains("ON TABLE scim_target_state"));
+        assert!(SCHEMA_V84.contains("TYPE option<datetime>"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V84.contains(forbidden),
+                "v84 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
 
     /// T23.8.1 / G-8 — v83 is the additive lease table and nothing else.
     #[test]
@@ -5790,8 +5838,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&83),
-            "v83 is the newest migration (T23.8.1 / G-8 — the minimal profile's singleton \
+            Some(&84),
+            "v84 is the newest migration (the W5 F4 review, T-418 / D-73 — \
+             `scim_target_state.failure_notified_at`, one SCIM failure mail per target per \
+             hour; v83 was T23.8.1 / G-8 — the minimal profile's singleton \
              lease table `minimal_profile_lease`; v82 was T23.7.2 — the CIBA approval e-mail's template kind \
              `ciba_approval` in the `email_template.kind` ASSERT; v81 was T23.7.1 continued, \
              D-61 — signed CIBA authentication \

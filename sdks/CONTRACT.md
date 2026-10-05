@@ -7924,7 +7924,7 @@ property of the surface rather than a list somebody remembers to update.
 | `ssf.create_stream` | request | `authorization_header` | The `Authorization` header AXIAM presents to an SSF receiver's push endpoint — a credential to a third party. Write-only: never returned, on no response. (contract 1.56, [§32.5](#§325-sensitivet-applicability)) |
 | `ssf.update_stream` | request | `authorization_header` | As above; absent keeps the stored header, and moving the push endpoint to another origin without it is a `400` ([§32.3](#§323-server-rules-every-sdk-can-observe-normative) rule 5). (contract 1.56) |
 | `scim_targets.create` | request | `credential` | The bearer token or OAuth2 client secret AXIAM presents to a downstream SCIM service provider — a credential to a third party. Write-only: never returned, on no response. (contract 1.57, [§31.5](#§315-sensitivet-applicability)) |
-| `scim_targets.update` | request | `credential` | As above; absent keeps the stored credential, and moving it to another URL (`base_url` of a bearer target, `auth.token_url` of a client-credentials one) or switching `auth.type` without it is a `400` ([§31.3](#§313-server-rules-every-sdk-can-observe-normative) rule 2). (contract 1.57) |
+| `scim_targets.update` | request | `credential` | As above; absent keeps the stored credential, and moving it to another URL (`base_url` of a bearer target, `auth.token_url` or `base_url` of a client-credentials one) or switching `auth.type` without it is a `400` ([§31.3](#§313-server-rules-every-sdk-can-observe-normative) rule 2). (contract 1.57) |
 
 **RFC 7592's `registration_access_token` (contract 1.53) is Sensitive too, and is not in
 this table only because no §27 operation carries it**: it is returned by the protocol
@@ -10410,14 +10410,16 @@ is the one most often logged.
    rule 14).
 2. **The credential is bound to its URL (D-57).** A `create` without `credential` is `400`
    naming it. An `update` that omits it keeps the stored one — **except** that a write which
-   changes `base_url` of a **bearer** target, `auth.token_url` of a **client-credentials**
-   target, or `auth.type`, without `credential` in the same write is `400`, naming `base_url`,
-   `auth.token_url` or `auth.type`, and changes nothing. With the credential, the same change
-   is an ordinary write. The reason is disclosure by redirection: a kept credential sent to a
-   new host is the credential handed to whoever runs that host. An SDK MUST document the rule
-   at both call sites and MUST NOT work around it (it holds no credential to re-send, §31.5).
-   (Changing `base_url` of a client-credentials target is not the credential's destination and
-   needs nothing.)
+   changes `base_url` of a **bearer** target, `auth.token_url` **or `base_url`** of a
+   **client-credentials** target, or `auth.type`, without `credential` in the same write is
+   `400`, naming `base_url`, `auth.token_url` or `auth.type`, and changes nothing. With the
+   credential, the same change is an ordinary write. The reason is disclosure by redirection: a
+   kept credential sent to a new host is the credential handed to whoever runs that host — and
+   for a client-credentials target every access token minted with the secret is sent to
+   `base_url`, so a `base_url` moved alone would hand the next freshly minted token to the new
+   host (amended in place by the W5 F4 review, T-409; 1.57 is unreleased). An SDK MUST document
+   the rule at both call sites and MUST NOT work around it (it holds no credential to re-send,
+   §31.5).
 3. **The deployment may not have the feature.** Without `pki_encryption_key`
    (`AXIAM__AUTH__PKI_ENCRYPTION_KEY`) — the key webhook secrets are sealed under — a write
    that carries a `credential` (every `create`, every credential change) is `503

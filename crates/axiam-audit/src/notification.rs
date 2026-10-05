@@ -261,29 +261,56 @@ where
 /// given this wrapper instead of the bare repository.
 ///
 /// Only a row that **maps to a notification event** costs anything beyond the
-/// append: the tenant's organization is looked up (mail needs it to resolve the
-/// email configuration) and the sink is called, after the append has succeeded
-/// and with its failures swallowed, exactly as the middleware's worker does.
-/// Every other method is the inner repository's.
+/// append: the [`NotificationGate`] is asked whether it may notify now, the
+/// tenant's organization is looked up (mail needs it to resolve the email
+/// configuration) and the sink is called, after the append has succeeded and
+/// with its failures swallowed, exactly as the middleware's worker does. Every
+/// other method is the inner repository's.
+///
+/// **Every row is appended; only the notification is gated.** A background
+/// process can write the same notifiable row thousands of times in a minute —
+/// one dead letter per reference while a downstream is down — and a rule
+/// mails each recipient once per row it sees (W5 F4 review, T-418). The gate
+/// is how a wrapper's owner coalesces them; there is deliberately no
+/// constructor without one.
 pub struct NotifyingAuditLog<A, T> {
     inner: A,
     sink: std::sync::Arc<dyn crate::middleware::AuditEventSink>,
     tenants: T,
+    gate: std::sync::Arc<dyn NotificationGate>,
 }
 
 impl<A, T> NotifyingAuditLog<A, T> {
-    /// Wrap `inner`; `tenants` resolves a row's organization.
+    /// Wrap `inner`; `tenants` resolves a row's organization, and `gate`
+    /// decides which notifiable rows reach `sink`.
     pub fn new(
         inner: A,
         sink: std::sync::Arc<dyn crate::middleware::AuditEventSink>,
         tenants: T,
+        gate: std::sync::Arc<dyn NotificationGate>,
     ) -> Self {
         Self {
             inner,
             sink,
             tenants,
+            gate,
         }
     }
+}
+
+/// Decides whether a notifiable audit row a background process appended may
+/// reach the notification rules **now** (W5 F4 review, T-418, D-73).
+///
+/// Called only for a row that maps to a notification event, after it was
+/// appended. `false` drops the notification, never the row. An implementation
+/// must not fail open into a flood: when it cannot decide, it should say
+/// `false` and log once.
+pub trait NotificationGate: Send + Sync {
+    /// Whether `entry` may be handed to the notification sink.
+    fn admit<'a>(
+        &'a self,
+        entry: &'a axiam_core::models::audit::CreateAuditLogEntry,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
 }
 
 impl<A, T> axiam_core::repository::AuditLogRepository for NotifyingAuditLog<A, T>
@@ -299,7 +326,7 @@ where
         let outcome = format!("{:?}", input.outcome);
         let notifiable = !input.tenant_id.is_nil()
             && !NotificationEventType::from_audit_action(&input.action, &outcome).is_empty();
-        if notifiable {
+        if notifiable && self.gate.admit(&input).await {
             let org_id = match self.tenants.get_by_id(input.tenant_id).await {
                 Ok(tenant) => tenant.organization_id,
                 Err(error) => {

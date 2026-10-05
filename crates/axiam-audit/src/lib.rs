@@ -5,5 +5,7 @@ pub mod notification;
 pub mod service;
 
 pub use middleware::{AuditAttribution, AuditEvent, AuditEventSink, AuditMiddleware};
-pub use notification::{NotificationDispatcher, NotificationSink, NotifyingAuditLog};
+pub use notification::{
+    NotificationDispatcher, NotificationGate, NotificationSink, NotifyingAuditLog,
+};
 pub use service::AuditService;

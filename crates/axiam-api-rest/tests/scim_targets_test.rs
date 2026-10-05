@@ -636,7 +636,10 @@ async fn an_administrator_registers_reads_lists_replaces_and_deletes_a_target() 
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.as_str(), credential);
+    assert!(
+        stored.as_str() == credential,
+        "the stored credential is the one registered"
+    );
 
     // Delete: the target, its state.
     let (status, body) = send(
@@ -1026,7 +1029,10 @@ async fn a_bearer_credential_does_not_follow_the_base_url_to_another_one() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(opened.as_str(), replacement);
+    assert!(
+        opened.as_str() == replacement,
+        "the replacement is the one stored"
+    );
 }
 
 #[actix_rt::test]
@@ -1059,15 +1065,33 @@ async fn a_client_secret_does_not_follow_the_token_url_nor_a_switch_of_kind() {
     assert_eq!(status, 400, "{text}");
     assert!(json_of(&text).to_string().contains("token_url"));
 
-    // A move of base_url alone is not the secret's destination: allowed.
+    // A move of base_url alone: every access token the secret yields goes
+    // there, so it is the secret's destination too (W5 F4, T-409). 400,
+    // naming the field, and nothing changes.
     let mut other_base = oauth_body("Bound", TOKEN_URL, None);
     other_base["base_url"] = json!(OTHER_BASE_URL);
+    let (status, text) = send(
+        &app,
+        request(Method::PUT, &target_uri(&id), Some(&token)).set_json(other_base.clone()),
+    )
+    .await;
+    assert_eq!(status, 400, "{text}");
+    assert!(json_of(&text).to_string().contains("base_url"));
+    let (_, text) = send(&app, request(Method::GET, &target_uri(&id), Some(&token))).await;
+    assert_eq!(
+        json_of(&text)["base_url"],
+        BASE_URL,
+        "a refused move changes nothing"
+    );
+    // With the secret in the same write it is an ordinary write.
+    other_base["credential"] = json!(secret_value);
     let (status, text) = send(
         &app,
         request(Method::PUT, &target_uri(&id), Some(&token)).set_json(other_base),
     )
     .await;
     assert_eq!(status, 200, "{text}");
+    assert_eq!(json_of(&text)["base_url"], OTHER_BASE_URL);
 
     // A switch of kind without the credential: 400, naming the field.
     let (status, text) = send(
@@ -1111,7 +1135,10 @@ async fn a_client_secret_does_not_follow_the_token_url_nor_a_switch_of_kind() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(opened.as_str(), secret_value);
+    assert!(
+        opened.as_str() == secret_value,
+        "the secret registered first is still the one stored"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1253,14 +1280,14 @@ async fn reads_need_scim_targets_read_and_writes_need_scim_targets_write() {
     let nobody = w.token_for(user_holding(&w.db, w.tenant_id, &[]).await, w.tenant_id);
     let uri = target_uri(&target.id.to_string());
 
-    for (token, label) in [(&reader, "reader"), (&nobody, "nobody")] {
+    for (caller, label) in [(&reader, "reader"), (&nobody, "nobody")] {
         let expected = if label == "reader" { 200 } else { 403 };
         for path in [TARGETS.to_owned(), uri.clone()] {
-            let (status, _) = send(&app, request(Method::GET, &path, Some(token))).await;
+            let (status, _) = send(&app, request(Method::GET, &path, Some(caller))).await;
             assert_eq!(status, expected, "{label} GET {path}");
         }
     }
-    for token in [&reader, &nobody] {
+    for caller in [&reader, &nobody] {
         for (method, path, body) in [
             (
                 Method::POST,
@@ -1271,7 +1298,7 @@ async fn reads_need_scim_targets_read_and_writes_need_scim_targets_write() {
             (Method::DELETE, uri.clone(), None),
             (Method::POST, format!("{uri}/reconcile"), None),
         ] {
-            let mut req = request(method.clone(), &path, Some(token));
+            let mut req = request(method.clone(), &path, Some(caller));
             if let Some(body) = body {
                 req = req.set_json(body);
             }

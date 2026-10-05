@@ -136,9 +136,6 @@ export function credentialRequiredFor(
   if (stored.auth.type !== next.auth.type) {
     return "Switching the authentication kind";
   }
-  if (stored.auth.type === "bearer") {
-    return stored.base_url !== next.base_url ? "Changing the base URL" : null;
-  }
   if (
     stored.auth.type === "oauth2_client_credentials" &&
     next.auth.type === "oauth2_client_credentials" &&
@@ -146,7 +143,9 @@ export function credentialRequiredFor(
   ) {
     return "Changing the token URL";
   }
-  return null;
+  // Both kinds: a bearer token is sent to the base URL, and so is every access
+  // token a client secret yields (W5 F4 review, T-409).
+  return stored.base_url !== next.base_url ? "Changing the base URL" : null;
 }
 
 const encoder = new TextEncoder();

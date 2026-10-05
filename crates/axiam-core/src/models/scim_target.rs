@@ -34,8 +34,10 @@
 //! # The credential is bound to its URL
 //!
 //! A write that changes the URL the credential is sent to — `base_url` of a
-//! bearer target, `token_url` of a client-credentials target — or that switches
-//! the authentication kind, must supply the credential in the same write
+//! bearer target, `token_url` of a client-credentials target, and that
+//! target's `base_url` too, where every access token the secret yields is sent
+//! (W5 F4 review, T-409) — or that switches the authentication kind, must
+//! supply the credential in the same write
 //! ([`ScimTargetUpdate::credential`]); the repository refuses it otherwise
 //! with `Validation`. Without that, an administrator who may edit a target
 //! but not read its credential could aim the stored one at a host they control.
@@ -422,6 +424,18 @@ pub struct NewScimTargetLink {
     /// See [`ScimTargetLink::downstream_id`].
     pub downstream_id: String,
 }
+
+/// The audit action of a dead-lettered outbound SCIM delivery: the row the
+/// dispatcher writes (`<slug>.delivery_failed`), and the one the
+/// `scim_delivery_failed` notification event maps from.
+pub const SCIM_DEAD_LETTER_AUDIT_ACTION: &str = "scim_push.delivery_failed";
+
+/// At most one `scim_delivery_failed` notification per target per this many
+/// seconds (W5 F4 review, T-418). Every dead letter keeps its audit row and its
+/// count on [`ScimTargetState::dead_lettered_total`]; only the mail is
+/// coalesced, so a target that is down, or that refuses AXIAM's credential,
+/// mails each recipient of a rule once an hour instead of once per reference.
+pub const FAILURE_NOTIFICATION_INTERVAL_SECS: i64 = 60 * 60;
 
 /// What the deliverer and the reconciliation job record about a target's
 /// deliveries. One row per target, created with the target.

@@ -49,10 +49,11 @@ describe("credentialRequiredFor (D-57, contract §31.3 rule 2)", () => {
     ).toBe("Changing the base URL");
   });
 
-  it("is required when a client-credentials target's token URL changes, not its base URL", () => {
+  it("is required when a client-credentials target's token URL or base URL changes", () => {
+    // The access tokens the secret yields go to the base URL (T-409).
     expect(
       credentialRequiredFor(oauth, { ...oauth, base_url: "https://b.example.com/scim" }),
-    ).toBeNull();
+    ).toBe("Changing the base URL");
     expect(
       credentialRequiredFor(oauth, {
         ...oauth,
@@ -102,7 +103,9 @@ describe("validation mirrors the server's bounds", () => {
       ),
     ).toMatch(/at most 100/);
     expect(validateScimTargetInput(input({ credential: "x".repeat(4097) }))).toMatch(/at most 4096/);
-    expect(validateScimTargetInput(input({ credential: "two words" }))).toBe(
+    // Built at run time: no credential literal in the source (CodeQL hygiene).
+    const spaced = ["two", "words"].join(" ");
+    expect(validateScimTargetInput(input({ credential: spaced }))).toBe(
       "A bearer token must not contain spaces.",
     );
     // A client secret may hold a space; a bearer token may not.
@@ -114,7 +117,7 @@ describe("validation mirrors the server's bounds", () => {
             token_url: "https://a.example.com/token",
             client_id: "c",
           },
-          credential: "two words",
+          credential: spaced,
         }),
       ),
     ).toBeNull();

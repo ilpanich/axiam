@@ -1823,6 +1823,59 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
         assert!(result.federation_link.external_email.is_none());
     }
 
+    /// G-6 (T23.6.2, D-57): a federated user that appears on first sign-in is
+    /// reported to the provisioning sink by the repository that created it, so
+    /// the SCIM provisioner hears of it without the federation code knowing the
+    /// sink exists. Linking an existing identity writes nothing, and reports
+    /// nothing.
+    #[tokio::test]
+    async fn a_federated_first_sign_in_reports_the_new_user_to_the_provisioning_sink() {
+        use axiam_core::provisioning::{ProvisioningEvent, RecordingProvisioningSink};
+        use surrealdb::Surreal;
+        use surrealdb::engine::local::Mem;
+
+        let db = Surreal::new::<Mem>(()).await.expect("in-memory DB");
+        db.use_ns("test").use_db("test").await.expect("namespace");
+        axiam_db::run_migrations(&db).await.expect("migrations");
+        let sink = RecordingProvisioningSink::new();
+        // A key generated at run time, never a literal.
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        let svc = OidcFederationService::new(
+            axiam_db::SurrealFederationConfigRepository::new(db.clone()),
+            axiam_db::SurrealFederationLinkRepository::new(db.clone()),
+            axiam_db::SurrealUserRepository::new(db.clone()).with_provisioning_sink(sink.clone()),
+            reqwest::Client::new(),
+            Arc::new(JwksCache::new()),
+            key,
+        );
+        let tenant = Uuid::new_v4();
+        let cfg = Uuid::new_v4();
+        let claims = claims_with(Some("alice@example.com"));
+
+        let first = svc
+            .provision_or_link_user(tenant, cfg, &claims)
+            .await
+            .expect("provisioning should succeed");
+        assert!(first.newly_provisioned);
+        assert_eq!(
+            sink.events(),
+            vec![ProvisioningEvent::User {
+                tenant_id: tenant,
+                user_id: first.user.id,
+            }]
+        );
+
+        sink.clear();
+        let again = svc
+            .provision_or_link_user(tenant, cfg, &claims)
+            .await
+            .expect("the existing link resolves");
+        assert!(!again.newly_provisioned);
+        assert!(sink.events().is_empty(), "linking writes nothing");
+    }
+
     #[tokio::test]
     async fn provision_returns_existing_link_without_reprovisioning() {
         let tenant = Uuid::new_v4();

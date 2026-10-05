@@ -39,6 +39,7 @@ use axiam_core::models::user::{
     CreateDirectoryAccount, CreateUser, IdentityCollision, UpdateUser, User, UserStatus,
 };
 use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, WebauthnCredentialType};
+use axiam_core::provisioning::{ProvisioningEvent, RecordingProvisioningSink};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, CertificateRepository, FederationLinkRepository,
     OpaqueCredentialRepository, Pagination, RefreshTokenRepository, SessionRepository,
@@ -376,6 +377,35 @@ async fn unknown_user_cost(h: &Harness) -> Duration {
 // -----------------------------------------------------------------------
 // Just-in-time provisioning
 // -----------------------------------------------------------------------
+
+/// G-6 (T23.6.2, D-57): a just-in-time provisioned account is a user that
+/// appeared, so the repository that created it reports it to the provisioning
+/// sink — without the sign-in path knowing the sink exists.
+#[tokio::test]
+async fn a_first_directory_login_reports_the_new_account_to_the_provisioning_sink() {
+    let mut h = harness().await;
+    let sink = RecordingProvisioningSink::new();
+    h.users = h.users.clone().with_provisioning_sink(sink.clone());
+    let directory_credential = fresh_credential();
+    let directory = StubDirectory::arc(
+        identity(ENTRY, "alice", "alice@example.com"),
+        &directory_credential,
+    );
+    let svc = service(&h, Some(directory));
+    sink.clear();
+
+    let outcome = svc.login(input(&h, "alice", &directory_credential)).await;
+    assert!(matches!(outcome, Ok(LoginResult::Success(_))));
+
+    let created = h.users.get_by_username(h.tenant_id, "alice").await.unwrap();
+    assert!(
+        sink.events().contains(&ProvisioningEvent::User {
+            tenant_id: h.tenant_id,
+            user_id: created.id,
+        }),
+        "the new account is reported"
+    );
+}
 
 /// The happy path: an unknown name with the directory's password creates the
 /// account `Active`, marked with the entry's identifier, with the attributes

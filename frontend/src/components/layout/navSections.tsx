@@ -32,6 +32,7 @@ import {
   ShieldCheck,
   FolderTree,
   FileKey2,
+  Share2,
 } from "lucide-react";
 
 interface NavItem {
@@ -231,6 +232,15 @@ export const navSections: NavSection[] = [
         label: "SAML Service Providers",
         icon: <FileKey2 size={18} />,
         requiredPermission: "saml_sp:read",
+      },
+      {
+        // G-6: AXIAM as a SCIM 2.0 client — the downstream service providers
+        // this tenant's users and groups are pushed to. Acts on the caller's
+        // own tenant only, like the pages beside it.
+        to: "/scim-targets",
+        label: "SCIM Targets",
+        icon: <Share2 size={18} />,
+        requiredPermission: "scim_targets:read",
       },
     ],
   },

@@ -30,6 +30,7 @@ import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { AttestationPolicyPage } from "@/pages/settings/AttestationPolicyPage";
 import { DirectoryPage } from "@/pages/directory/DirectoryPage";
 import { SamlPage } from "@/pages/saml/SamlPage";
+import { ScimTargetsPage } from "@/pages/scim-targets/ScimTargetsPage";
 import { ProfilePage } from "@/pages/profile/ProfilePage";
 import { ChangePasswordPage } from "@/pages/profile/ChangePasswordPage";
 import { MfaManagementPage } from "@/pages/profile/MfaManagementPage";
@@ -313,6 +314,16 @@ export const router = createBrowserRouter([
             path: "saml",
             element: <SamlPage />,
             handle: { crumb: "SAML Service Providers" },
+          },
+        ],
+      },
+      {
+        element: <ProtectedRoute permission="scim_targets:read" />,
+        children: [
+          {
+            path: "scim-targets",
+            element: <ScimTargetsPage />,
+            handle: { crumb: "SCIM Targets" },
           },
         ],
       },

@@ -56,6 +56,9 @@ const STANDALONE: Record<string, string> = {
   reactors: "shown only on the Reactors page",
   "reactor-events": "append-only event feed, read-only",
   "scim-tokens": "shown only on the SCIM Tokens page",
+  "scim-targets": "shown only on the SCIM Targets page",
+  "scim-target-groups":
+    "the group picker of the SCIM Targets form: a read-only list of the tenant's groups, fetched when the picker opens, so a stale copy costs one reopen",
   webhooks: "shown only on the Webhooks page",
   "group-service-accounts":
     "service-account membership of a group, invalidated by its own page alongside `service-accounts`",

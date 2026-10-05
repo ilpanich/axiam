@@ -215,6 +215,18 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "ssf_streams:write",
         "Register, replace or delete SSF streams: which receiver gets which security events, and where they are pushed",
     ),
+    // Outbound SCIM provisioning — the target registry (G-6, T23.6.4,
+    // CONTRACT §31). A target decides which downstream service provider
+    // receives the tenant's users and groups, and holds the credential AXIAM
+    // pushes with.
+    (
+        "scim_targets:read",
+        "Read the tenant's outbound SCIM targets and their delivery state (the credential is never returned)",
+    ),
+    (
+        "scim_targets:write",
+        "Register, replace, delete or reconcile outbound SCIM targets: which downstream service provider receives the tenant's users and groups, and the credential used to push",
+    ),
     // Tenants
     ("tenants:list", "List tenants within an organization"),
     ("tenants:get", "Retrieve a single tenant"),
@@ -376,6 +388,10 @@ pub const HUMAN_ONLY_FAMILIES: &[&str] = &[
     // tenant's users, and the credential they are pushed with, is a human
     // administrator's act (§32.3).
     "ssf_streams",
+    // G-6: deciding which downstream service provider receives the tenant's
+    // users and groups, and the credential they are pushed with, is a human
+    // administrator's act (§31.3).
+    "scim_targets",
     "tenants",
     "organizations",
     "admin",
@@ -1266,6 +1282,17 @@ pub const ROUTE_PERMISSION_MAP: &[(&str, &str, &str)] = &[
         "DELETE",
         "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}",
         "ssf_streams:write",
+    ),
+    // Outbound SCIM target registry (G-6, T23.6.4, CONTRACT §31)
+    ("GET", "/api/v1/scim-targets", "scim_targets:read"),
+    ("POST", "/api/v1/scim-targets", "scim_targets:write"),
+    ("GET", "/api/v1/scim-targets/{id}", "scim_targets:read"),
+    ("PUT", "/api/v1/scim-targets/{id}", "scim_targets:write"),
+    ("DELETE", "/api/v1/scim-targets/{id}", "scim_targets:write"),
+    (
+        "POST",
+        "/api/v1/scim-targets/{id}/reconcile",
+        "scim_targets:write",
     ),
     // WebAuthn Attestation Policy (X3 wave 3)
     (

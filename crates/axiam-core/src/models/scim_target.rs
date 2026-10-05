@@ -49,7 +49,7 @@ use zeroize::Zeroizing;
 
 /// How AXIAM authenticates to the downstream service provider, without the
 /// credential itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ScimTargetAuth {
     /// A static bearer token, sent as `Authorization: Bearer <token>` to
@@ -80,7 +80,7 @@ impl ScimTargetAuth {
 }
 
 /// Which users a target provisions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", content = "group_ids", rename_all = "snake_case")]
 pub enum ScimTargetScope {
     /// Every user of the tenant.
@@ -102,7 +102,7 @@ impl ScimTargetScope {
 
 /// Which AXIAM attribute becomes the downstream `userName`. The mapping is a
 /// fixed attribute set, not a mapping language (D-57).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UserNameSource {
     /// The AXIAM username. The default.
@@ -135,7 +135,7 @@ impl UserNameSource {
 
 /// What happens downstream to a user who falls out of scope or is no longer
 /// active. Erasure always deletes, whatever this says.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DeprovisionPolicy {
     /// `PATCH active=false`. The default.

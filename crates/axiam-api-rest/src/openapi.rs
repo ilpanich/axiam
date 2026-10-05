@@ -321,6 +321,13 @@ use crate::handlers;
         handlers::ssf_admin::get_stream,
         handlers::ssf_admin::update_stream,
         handlers::ssf_admin::delete_stream,
+        // Outbound SCIM target registry (G-6, T23.6.4, CONTRACT §31).
+        handlers::scim_targets::list_targets,
+        handlers::scim_targets::create_target,
+        handlers::scim_targets::get_target,
+        handlers::scim_targets::update_target,
+        handlers::scim_targets::delete_target,
+        handlers::scim_targets::reconcile_target,
         // SSF 1.0 transmitter metadata and stream management API — the
         // receiver's protocol surface (G-5, T23.5.2, CONTRACT §32.6).
         handlers::ssf::ssf_configuration,
@@ -677,6 +684,14 @@ use crate::handlers;
         // pins.
         handlers::ssf_admin::SsfStream,
         handlers::ssf_admin::SsfStreamInput,
+        handlers::scim_targets::ScimTargetResponse,
+        handlers::scim_targets::ScimTargetInput,
+        handlers::scim_targets::ScimTargetDeliveryState,
+        handlers::scim_targets::ScimReconcileAccepted,
+        axiam_core::models::scim_target::ScimTargetAuth,
+        axiam_core::models::scim_target::ScimTargetScope,
+        axiam_core::models::scim_target::UserNameSource,
+        axiam_core::models::scim_target::DeprovisionPolicy,
         axiam_core::models::ssf::SsfEventType,
         axiam_core::models::ssf::SsfDeliveryMethod,
         axiam_core::models::ssf::SsfStreamStatus,
@@ -764,6 +779,7 @@ use crate::handlers;
         (name = "email-config", description = "Organization and tenant email provider configuration"),
         (name = "saml", description = "SAML 2.0 identity provider — service-provider registry, SP metadata import and the IdP signing credential (CONTRACT §29)"),
         (name = "ssf", description = "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"),
+        (name = "scim-targets", description = "Outbound SCIM provisioning — the registry of downstream SCIM 2.0 service providers a tenant administrator manages, with each target's delivery state (CONTRACT §31)"),
         (name = "ssf-receiver", description = "Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §32.6)"),
         (name = "directory", description = "Tenant LDAP / Active Directory identity source — configuration, account linking and sync status (CONTRACT §30)"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),

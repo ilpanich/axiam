@@ -1560,6 +1560,60 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                             )),
                     ),
             )
+            // --- Outbound SCIM target registry (G-6, T23.6.4, CONTRACT §31).
+            // The tenant is the token's, as for webhooks. Reads are unlimited;
+            // each of the four writes (create, update, delete, reconcile now)
+            // has a bucket of its own under `scim_target_admin_per_min`.
+            // `.to()` first, then `.wrap()`.
+            .service(
+                web::resource("/scim-targets")
+                    .app_data(handlers::scim_targets::json_config())
+                    .route(web::get().to(handlers::scim_targets::list_targets::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::scim_targets::create_target::<C>)
+                            .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "scim_target_create",
+                                rate_limit_cfg.scim_target_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/scim-targets/{id}")
+                    .app_data(handlers::scim_targets::json_config())
+                    .route(web::get().to(handlers::scim_targets::get_target::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::scim_targets::update_target::<C>)
+                            .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "scim_target_update",
+                                rate_limit_cfg.scim_target_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::scim_targets::delete_target::<C>)
+                            .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "scim_target_delete",
+                                rate_limit_cfg.scim_target_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/scim-targets/{id}/reconcile")
+                    .route(
+                        web::post()
+                            .to(handlers::scim_targets::reconcile_target::<C>)
+                            .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "scim_target_reconcile",
+                                rate_limit_cfg.scim_target_admin_per_min,
+                            )),
+                    ),
+            )
             // --- Tenant security overrides (explicit {tenant_id} path segment,
             // same convention as the email-config trio above) ---
             .service(

@@ -41,10 +41,13 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 surrealdb = { workspace = true }
+# T23.6.4: `start_reconcile_now` runs an on-demand reconciliation on a spawned
+# task, so that the management API can answer `202` when the claim is taken.
+# Already in the graph through actix-web and axiam-api-rest.
+tokio = { workspace = true }
 
 [dev-dependencies]
 axiam-db = { workspace = true }
-tokio = { workspace = true }
 axiam-authz = { workspace = true }
 axiam-test-support = { workspace = true }
 actix-rt = { workspace = true }

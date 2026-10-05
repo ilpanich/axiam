@@ -603,6 +603,63 @@ async fn a_disabled_target_is_not_reconciled_and_its_claim_is_not_taken() {
 }
 
 // ---------------------------------------------------------------------------
+// Started in the background (T23.6.4: the management API's 202 / 409)
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn a_background_start_answers_at_the_claim_and_the_run_finishes_on_its_own() {
+    use axiam_api_rest::state::bundles::{ScimReconcileStart, ScimReconcileTrigger};
+    use axiam_scim::outbound::ReconcileLauncher;
+
+    let w = World::new().await;
+    let (target, _user, _) = synced_user(&w, |_| {}).await;
+    let launcher = ReconcileLauncher::new(w.deliverer_arc());
+
+    assert_eq!(
+        launcher.start(w.tenant_id, target.id).await.unwrap(),
+        ScimReconcileStart::Started
+    );
+    // The claim is held at once: a second request is refused before the run
+    // has necessarily done anything.
+    assert_eq!(
+        launcher.start(w.tenant_id, target.id).await.unwrap(),
+        ScimReconcileStart::AlreadyClaimed
+    );
+    // The run is made in the background: it lists the downstream.
+    let mut listed = false;
+    for _ in 0..100 {
+        if !w.server.requests().is_empty() {
+            listed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(listed, "the background run read the downstream");
+    // The claim is the datastore's, so the in-process entry sees it too.
+    assert_eq!(
+        w.deliverer
+            .reconcile_now(w.tenant_id, target.id)
+            .await
+            .unwrap(),
+        ReconcileOutcome::AlreadyClaimed
+    );
+
+    // A disabled target takes no claim; an unknown one is NotFound.
+    let disabled = w.add_target(|t| t.enabled = false).await;
+    assert_eq!(
+        launcher.start(w.tenant_id, disabled.id).await.unwrap(),
+        ScimReconcileStart::TargetDisabled
+    );
+    assert!(matches!(
+        launcher
+            .start(w.tenant_id, Uuid::new_v4())
+            .await
+            .unwrap_err(),
+        axiam_core::error::AxiamError::NotFound { .. }
+    ));
+}
+
+// ---------------------------------------------------------------------------
 // Budgets and failures
 // ---------------------------------------------------------------------------
 

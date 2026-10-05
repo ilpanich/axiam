@@ -433,6 +433,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "30",
           ],
           [
+            "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the outbound SCIM target registry API under /api/v1/scim-targets: create, update, delete and reconcile now. Each write can repoint where a tenant's user directory, and the target's credential, are sent. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
             "Max /oauth2/end_session per minute — and the same preset for the SAML identity provider's browser endpoints (sign-on, metadata, single logout /slo and the logout trigger), each in a bucket of its own so a flood on one cannot spend another's allowance. Never moved by a profile preset.",
             "30",

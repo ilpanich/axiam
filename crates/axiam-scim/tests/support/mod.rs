@@ -185,6 +185,23 @@ impl World {
         }
     }
 
+    /// A second deliverer over the same repositories, loopback admitted, shared
+    /// by `Arc` — what a background run (`start_reconcile_now`) needs. Its
+    /// claims are the datastore's, so they are the first deliverer's too.
+    pub fn deliverer_arc(&self) -> Arc<Deliverer> {
+        Arc::new(
+            ScimPushDeliverer::new(
+                self.targets.clone(),
+                self.links.clone(),
+                self.states.clone(),
+                self.users.clone(),
+                self.groups.clone(),
+                self.queue.clone(),
+            )
+            .admitting_private_networks_for_tests(),
+        )
+    }
+
     /// The deliverer exactly as `axiam-server` builds it: loopback is refused.
     pub fn production_deliverer(&self) -> Deliverer {
         ScimPushDeliverer::new(

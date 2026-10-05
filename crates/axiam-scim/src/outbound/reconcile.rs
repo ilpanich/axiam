@@ -45,6 +45,7 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axiam_core::error::AxiamError;
@@ -160,6 +161,18 @@ pub enum ReconcileOutcome {
     TargetDisabled,
 }
 
+/// What a request to start a reconciliation in the background came to
+/// (T23.6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileStart {
+    /// The caller took the claim and the run is under way.
+    Started,
+    /// Another run holds the claim (or ran within the on-demand window).
+    AlreadyClaimed,
+    /// The target is disabled: nothing to reconcile, no claim taken.
+    TargetDisabled,
+}
+
 /// The totals of one pass of the scheduled job over every enabled target.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReconcileSweep {
@@ -229,6 +242,36 @@ where
             .await
     }
 
+    /// Reconcile one target **on demand, in the background**: the same claim as
+    /// [`Self::reconcile_now`], but the run is made on a spawned task and the
+    /// answer is given as soon as the claim is decided — what the management
+    /// API's `202` / `409` is (T23.6.4). The run's findings are logged once, as
+    /// they are for every run; nobody awaits them.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when the target does not exist in the tenant; any other
+    /// failure of AXIAM's own datastore while claiming.
+    pub async fn start_reconcile_now(
+        self: &Arc<Self>,
+        tenant_id: Uuid,
+        target_id: Uuid,
+    ) -> Result<ReconcileStart, AxiamError> {
+        let seconds = i64::try_from(RECONCILE_WALL_CLOCK.as_secs()).unwrap_or(i64::MAX);
+        match self.claim(tenant_id, target_id, seconds).await? {
+            Err(ReconcileOutcome::TargetDisabled) => Ok(ReconcileStart::TargetDisabled),
+            Err(_) => Ok(ReconcileStart::AlreadyClaimed),
+            Ok((target, started_at)) => {
+                let this = Arc::clone(self);
+                tokio::spawn(async move {
+                    // Findings are logged inside; there is nobody to return them to.
+                    let _ = this.run_and_log(target, started_at).await;
+                });
+                Ok(ReconcileStart::Started)
+            }
+        }
+    }
+
     /// Reconcile one target if its last claim is older than `min_interval`.
     async fn reconcile(
         &self,
@@ -236,20 +279,46 @@ where
         target_id: Uuid,
         min_interval: Duration,
     ) -> Result<ReconcileOutcome, AxiamError> {
+        let seconds = i64::try_from(min_interval.as_secs()).unwrap_or(i64::MAX);
+        match self.claim(tenant_id, target_id, seconds).await? {
+            Err(refused) => Ok(refused),
+            Ok((target, started_at)) => self
+                .run_and_log(target, started_at)
+                .await
+                .map(ReconcileOutcome::Ran),
+        }
+    }
+
+    /// Read the target and take the claim: `Ok(Ok(..))` when the caller holds
+    /// it, `Ok(Err(outcome))` when nothing was done (disabled, or claimed).
+    async fn claim(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        min_interval_secs: i64,
+    ) -> Result<Result<(ScimTarget, DateTime<Utc>), ReconcileOutcome>, AxiamError> {
         let target = self.targets.get(tenant_id, target_id).await?;
         if !target.enabled {
-            return Ok(ReconcileOutcome::TargetDisabled);
+            return Ok(Err(ReconcileOutcome::TargetDisabled));
         }
         let started_at = Utc::now();
-        let seconds = i64::try_from(min_interval.as_secs()).unwrap_or(i64::MAX);
         if !self
             .state
-            .claim_reconciliation(tenant_id, target_id, started_at, seconds)
+            .claim_reconciliation(tenant_id, target_id, started_at, min_interval_secs)
             .await?
         {
-            return Ok(ReconcileOutcome::AlreadyClaimed);
+            return Ok(Err(ReconcileOutcome::AlreadyClaimed));
         }
+        Ok(Ok((target, started_at)))
+    }
 
+    /// Make the run the caller claimed, and log its findings once.
+    async fn run_and_log(
+        &self,
+        target: ScimTarget,
+        started_at: DateTime<Utc>,
+    ) -> Result<ReconcileReport, AxiamError> {
+        let (tenant_id, target_id) = (target.tenant_id, target.id);
         let deadline = Instant::now() + RECONCILE_WALL_CLOCK;
         let mut report = ReconcileReport::new();
         let outcome = self
@@ -281,7 +350,7 @@ where
                 "SCIM reconciliation stopped: AXIAM's datastore could not be read"
             ),
         }
-        outcome.map(|()| ReconcileOutcome::Ran(report))
+        outcome.map(|()| report)
     }
 
     async fn run_claimed(
@@ -849,6 +918,60 @@ fn list_url(
         .append_pair("startIndex", &start_index.to_string())
         .append_pair("count", &LIST_PAGE_SIZE.to_string());
     Ok(url.to_string())
+}
+
+/// [`axiam_api_rest::state::bundles::ScimReconcileTrigger`] over the deliverer:
+/// what the management API's `POST /api/v1/scim-targets/{id}/reconcile` calls.
+pub struct ReconcileLauncher<T, L, S, U, G> {
+    deliverer: Arc<ScimPushDeliverer<T, L, S, U, G>>,
+}
+
+impl<T, L, S, U, G> ReconcileLauncher<T, L, S, U, G> {
+    /// Launch runs on `deliverer`, the instance the scheduled job and the
+    /// consumer use, so that all of them share its credential path and its
+    /// access-token cache.
+    #[must_use]
+    pub fn new(deliverer: Arc<ScimPushDeliverer<T, L, S, U, G>>) -> Self {
+        Self { deliverer }
+    }
+}
+
+impl<T, L, S, U, G> axiam_api_rest::state::bundles::ScimReconcileTrigger
+    for ReconcileLauncher<T, L, S, U, G>
+where
+    T: ScimTargetRepository + 'static,
+    L: ScimTargetLinkRepository + 'static,
+    S: ScimTargetStateRepository + 'static,
+    U: UserRepository + 'static,
+    G: GroupRepository + 'static,
+{
+    fn start<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<axiam_api_rest::state::bundles::ScimReconcileStart, AxiamError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        use axiam_api_rest::state::bundles::ScimReconcileStart as Api;
+        Box::pin(async move {
+            Ok(
+                match self
+                    .deliverer
+                    .start_reconcile_now(tenant_id, target_id)
+                    .await?
+                {
+                    ReconcileStart::Started => Api::Started,
+                    ReconcileStart::AlreadyClaimed => Api::AlreadyClaimed,
+                    ReconcileStart::TargetDisabled => Api::TargetDisabled,
+                },
+            )
+        })
+    }
 }
 
 #[cfg(test)]

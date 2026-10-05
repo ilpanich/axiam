@@ -2442,7 +2442,12 @@ async fn main() -> std::io::Result<()> {
     // The deliverer is also the reconciliation job's way out to the downstream
     // (T23.6.3, D-58): one instance, so that both share its credential path and
     // its access-token cache.
-    let scim_reconciliation: Arc<dyn axiam_scim::outbound::ScimReconciliation> = {
+    // The management API starts an on-demand run through the same instance
+    // (T23.6.4, `POST /api/v1/scim-targets/{id}/reconcile`).
+    let (scim_reconciliation, scim_reconcile_trigger): (
+        Arc<dyn axiam_scim::outbound::ScimReconciliation>,
+        Arc<dyn axiam_api_rest::state::bundles::ScimReconcileTrigger>,
+    ) = {
         let scim_publisher = {
             let channel = amqp
                 .create_publisher_channel()
@@ -2492,7 +2497,10 @@ async fn main() -> std::io::Result<()> {
             scim_retry,
         );
         tracing::info!("SCIM push consumer spawned");
-        scim_deliverer
+        (
+            scim_deliverer.clone(),
+            Arc::new(axiam_scim::outbound::ReconcileLauncher::new(scim_deliverer)),
+        )
     };
 
     // Spawn AMQP mail consumer on a background task (D-14).
@@ -3122,6 +3130,16 @@ async fn main() -> std::io::Result<()> {
             account_sink: ssf_account_sink,
             poll_waiters: Arc::default(),
             gate: ssf_gate,
+        },
+        // G-6 / T23.6.4 — the target registry's management routes seal the
+        // credential under the same key the deliverer opens it with.
+        scim_targets: bundles::ScimTargetsState {
+            target_repo: axiam_db::SurrealScimTargetRepository::new(
+                db_handle.clone(),
+                webhook_enc_key,
+            ),
+            state_repo: axiam_db::SurrealScimTargetStateRepository::new(db_handle.clone()),
+            reconcile: Some(scim_reconcile_trigger),
         },
     };
 

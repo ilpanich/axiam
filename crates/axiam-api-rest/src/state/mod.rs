@@ -422,6 +422,10 @@ pub struct AppState<C: Connection + Clone> {
     ///
     /// See [`bundles::SsfState`].
     pub ssf: bundles::SsfState<C>,
+    /// The outbound SCIM target registry (G-6, T23.6.4).
+    ///
+    /// See [`bundles::ScimTargetsState`].
+    pub scim_targets: bundles::ScimTargetsState<C>,
 }
 
 /// Assemble the OPAQUE server keys, requiring **both** or neither.
@@ -928,6 +932,14 @@ impl<C: Connection + Clone> AppState<C> {
                     poll_waiters: Arc::default(),
                     gate,
                 }
+            },
+            // No sealing key and no reconciliation trigger: a target cannot be
+            // stored and *reconcile now* answers 503, as on a deployment
+            // without either; a test that needs them replaces this field.
+            scim_targets: bundles::ScimTargetsState {
+                target_repo: axiam_db::SurrealScimTargetRepository::new(db.clone(), None),
+                state_repo: axiam_db::SurrealScimTargetStateRepository::new(db.clone()),
+                reconcile: None,
             },
         }
     }

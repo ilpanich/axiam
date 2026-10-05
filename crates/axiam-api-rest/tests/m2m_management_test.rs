@@ -485,6 +485,49 @@ async fn the_route_map_admits_a_service_account_exactly_on_the_d5_families() {
     );
 }
 
+/// G-6 / T23.6.4: the outbound SCIM target registry holds a credential to an
+/// outbound endpoint and decides where a tenant's people are sent, so its family
+/// is human-only and each of its six routes refuses a service account — whatever
+/// role it holds — with the audience refusal, before RBAC is asked. The sweep
+/// above covers the routes by derivation; this pins the decision by name.
+#[actix_rt::test]
+async fn the_scim_target_registry_is_human_only_and_refuses_every_service_account() {
+    assert!(HUMAN_ONLY_FAMILIES.contains(&"scim_targets"));
+    assert!(!M2M_MANAGEMENT_FAMILIES.contains(&"scim_targets"));
+    let w = world().await;
+    let auth = test_auth_config();
+    let authz = engine(&w.db);
+    let admin = service_account(&w.db, w.tenant_id, Some("super-admin")).await;
+    let token = service_account_token(&auth, admin, w.tenant_id, w.org_id);
+    let app = app!(w.db, auth, authz);
+    let id = Uuid::new_v4();
+    for (method, uri) in [
+        (Method::GET, "/api/v1/scim-targets".to_owned()),
+        (Method::POST, "/api/v1/scim-targets".to_owned()),
+        (Method::GET, format!("/api/v1/scim-targets/{id}")),
+        (Method::PUT, format!("/api/v1/scim-targets/{id}")),
+        (Method::DELETE, format!("/api/v1/scim-targets/{id}")),
+        (Method::POST, format!("/api/v1/scim-targets/{id}/reconcile")),
+    ] {
+        let (status, body) = call(&app, bearer(&method, &uri, &token)).await;
+        assert_eq!(status, 401, "{method} {uri}: {body}");
+        assert_eq!(body["message"], AUDIENCE_REFUSAL, "{method} {uri}");
+    }
+    // And the spec lists no service-account scheme on them.
+    let spec = serde_json::to_value(axiam_api_rest::openapi::api_doc()).unwrap();
+    for (path, item) in spec["paths"].as_object().unwrap() {
+        if !path.starts_with("/api/v1/scim-targets") {
+            continue;
+        }
+        for (method, op) in item.as_object().unwrap() {
+            assert!(
+                !security_schemes(op).contains("service_account"),
+                "{method} {path} advertises the service-account scheme"
+            );
+        }
+    }
+}
+
 /// The out-of-scope direction for the routes the permission map cannot see:
 /// self-service (`/auth/me`, MFA enrolment, password change), which carries no
 /// named permission and so is not in `ROUTE_PERMISSION_MAP`.

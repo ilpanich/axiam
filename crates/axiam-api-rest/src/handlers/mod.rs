@@ -37,6 +37,7 @@ pub mod saml_idp;
 /// (T23.2.4). Behind `saml`, like the SSO endpoint it sits beside.
 #[cfg(feature = "saml")]
 pub mod saml_idp_slo;
+pub mod scim_targets;
 pub mod scim_tokens;
 pub mod scopes;
 pub mod service_accounts;

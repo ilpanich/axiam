@@ -446,3 +446,60 @@ mod poll_waiter_tests {
         assert_eq!(waiters.waiting(), 0);
     }
 }
+
+/// What starting an on-demand SCIM reconciliation came to (G-6, T23.6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScimReconcileStart {
+    /// The caller took the claim and the run is under way (`202`).
+    Started,
+    /// A run holds the claim, or ran within the on-demand window (`409`).
+    AlreadyClaimed,
+    /// The target is disabled: it receives nothing, so there is nothing to
+    /// reconcile and no claim was taken (`409`).
+    TargetDisabled,
+}
+
+/// The management API's way to start a reconciliation. A port, because the
+/// deliverer that makes the run lives in `axiam-scim`, which sits **above**
+/// this crate (layer 7) and so cannot be named here; `axiam-scim` implements
+/// it (`ReconcileLauncher`) and the composition root binds it.
+pub trait ScimReconcileTrigger: Send + Sync {
+    /// Take the target's reconciliation claim and, when it is taken, make the
+    /// run in the background. Answers as soon as the claim is decided.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when the target does not exist in the tenant; any other
+    /// failure of the datastore while claiming.
+    fn start<'a>(
+        &'a self,
+        tenant_id: uuid::Uuid,
+        target_id: uuid::Uuid,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<ScimReconcileStart, axiam_core::error::AxiamError>,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// The outbound SCIM target registry (G-6, T23.6.4): the repository the
+/// management routes write — which seals the credential under
+/// `pki_encryption_key` — the delivery state they project, and the
+/// reconciliation trigger.
+///
+/// In every build; it reads nothing behind a feature.
+#[derive(Clone)]
+pub struct ScimTargetsState<C: Connection + Clone> {
+    /// The tenant's registered targets; seals the credential.
+    pub target_repo: axiam_db::SurrealScimTargetRepository<C>,
+    /// Per-target delivery state, projected by `GET`.
+    pub state_repo: axiam_db::SurrealScimTargetStateRepository<C>,
+    /// Starts an on-demand reconciliation, and the one a newly enabled target
+    /// begins with. `None` when delivery is not wired (a harness that does not
+    /// test it): *reconcile now* then answers `503`, and enabling a target
+    /// starts nothing.
+    pub reconcile: Option<Arc<dyn ScimReconcileTrigger>>,
+}

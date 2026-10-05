@@ -68,5 +68,6 @@ pub use deliverer::ScimPushDeliverer;
 pub use provisioner::{ScimProvisioner, group_in_scope, reference_message};
 pub use reconcile::{
     LIST_PAGE_SIZE, Listing, RECONCILE_INTERVAL, RECONCILE_MAX_PAGES, RECONCILE_WALL_CLOCK,
-    ReconcileOutcome, ReconcileReport, ReconcileSweep, ScimReconciliation,
+    ReconcileLauncher, ReconcileOutcome, ReconcileReport, ReconcileStart, ReconcileSweep,
+    ScimReconciliation,
 };

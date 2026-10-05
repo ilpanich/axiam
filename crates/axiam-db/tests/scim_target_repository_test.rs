@@ -326,6 +326,27 @@ async fn list_page_pages_and_list_enabled_skips_disabled_targets() {
     assert_eq!(enabled, vec![a.id, c.id]);
 }
 
+#[tokio::test]
+async fn list_all_enabled_spans_tenants_and_skips_disabled_targets() {
+    let db = setup().await;
+    let repo = targets(&db);
+    let (one, two) = (Uuid::new_v4(), Uuid::new_v4());
+    let a = repo.create(bearer_input(one)).await.unwrap();
+    let mut off = bearer_input(one);
+    off.enabled = false;
+    repo.create(off).await.unwrap();
+    let b = repo.create(cc_input(two)).await.unwrap();
+
+    let all: Vec<Uuid> = repo
+        .list_all_enabled()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(all, vec![a.id, b.id], "both tenants, enabled targets only");
+}
+
 // ---------------------------------------------------------------------------
 // Conditional update (acceptance 4) and URL binding (acceptance 5)
 // ---------------------------------------------------------------------------

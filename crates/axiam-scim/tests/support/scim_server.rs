@@ -54,6 +54,8 @@ struct Inner {
     issued: usize,
     require_auth: bool,
     token_expires_in: u64,
+    /// A list that never ends: every page is full and `totalResults` is huge.
+    endless_lists: bool,
 }
 
 /// The server. Dropping it stops it.
@@ -126,6 +128,13 @@ impl TestScimServer {
         self.inner.lock().unwrap().accepted.clear();
     }
 
+    /// From now on every `GET /Users` and `/Groups` answers a full page of
+    /// resources that are nobody's and reports a huge `totalResults`: a
+    /// downstream a reconciliation run must stop reading by its own budget.
+    pub fn set_endless_lists(&self) {
+        self.inner.lock().unwrap().endless_lists = true;
+    }
+
     /// The `expires_in` the token endpoint reports.
     pub fn set_token_expires_in(&self, seconds: u64) {
         self.inner.lock().unwrap().token_expires_in = seconds;
@@ -188,6 +197,27 @@ impl TestScimServer {
             .unwrap()
             .users
             .retain(|u| u["id"] != json!(id));
+    }
+
+    /// Edit a user behind AXIAM's back: set `path` (dotted, as in a `replace`
+    /// operation) to `value`, the way a downstream administrator would.
+    pub fn edit_user(&self, id: &str, path: &str, value: Value) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(user) = inner.users.iter_mut().find(|u| u["id"] == json!(id)) {
+            set_path(user, path, value);
+        }
+    }
+
+    /// As [`Self::edit_user`], for a group.
+    pub fn edit_group(&self, id: &str, path: &str, value: Value) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(group) = inner.groups.iter_mut().find(|g| g["id"] == json!(id)) {
+            set_path(group, path, value);
+        }
+    }
+
+    pub fn user(&self, id: &str) -> Option<Value> {
+        self.users().into_iter().find(|u| u["id"] == json!(id))
     }
 
     pub fn users(&self) -> Vec<Value> {
@@ -325,6 +355,7 @@ async fn handle(
     let collection = segments.next().unwrap_or_default();
     let id = segments.next().map(str::to_owned);
     let query = req.query_string().to_owned();
+    let endless = inner.endless_lists;
     let store = match collection {
         "Users" => &mut inner.users,
         "Groups" => &mut inner.groups,
@@ -347,8 +378,29 @@ async fn handle(
             resource_response(201, &created)
         }
         ("GET", None) => {
+            let (start_index, count) = paging(&query);
+            if endless {
+                let page: Vec<Value> = (0..count)
+                    .map(|n| {
+                        json!({
+                            "id": Uuid::new_v4().to_string(),
+                            "externalId": format!("downstream-own-{}", start_index + n as u64),
+                            "userName": format!("own-{}", start_index + n as u64),
+                        })
+                    })
+                    .collect();
+                return HttpResponse::Ok()
+                    .content_type("application/scim+json")
+                    .json(json!({
+                        "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+                        "totalResults": 1_000_000,
+                        "startIndex": start_index,
+                        "itemsPerPage": page.len(),
+                        "Resources": page,
+                    }));
+            }
             let wanted = filter_value(&query);
-            let resources: Vec<Value> = store
+            let matching: Vec<Value> = store
                 .iter()
                 .filter(|r| match &wanted {
                     Some((attribute, value)) => r[attribute.as_str()] == json!(value),
@@ -356,11 +408,21 @@ async fn handle(
                 })
                 .cloned()
                 .collect();
+            // RFC 7644 §3.4.2.4: `startIndex` is 1-based; a server may return
+            // fewer than `count`.
+            let resources: Vec<Value> = matching
+                .iter()
+                .skip((start_index as usize).saturating_sub(1))
+                .take(count)
+                .cloned()
+                .collect();
             HttpResponse::Ok()
                 .content_type("application/scim+json")
                 .json(json!({
                     "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
-                    "totalResults": resources.len(),
+                    "totalResults": matching.len(),
+                    "startIndex": start_index,
+                    "itemsPerPage": resources.len(),
                     "Resources": resources,
                 }))
         }
@@ -406,6 +468,19 @@ fn token_endpoint(inner: &mut Inner, authorization: Option<&str>) -> HttpRespons
         "token_type": "Bearer",
         "expires_in": inner.token_expires_in,
     }))
+}
+
+/// `startIndex` (1-based, default 1) and `count` (default: everything).
+fn paging(query: &str) -> (u64, usize) {
+    let value = |name: &str| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == name)
+            .and_then(|(_, v)| v.parse::<u64>().ok())
+    };
+    (
+        value("startIndex").unwrap_or(1).max(1),
+        value("count").map_or(usize::MAX, |c| c as usize),
+    )
 }
 
 /// `filter=externalId eq "x"` → `("externalId", "x")`.

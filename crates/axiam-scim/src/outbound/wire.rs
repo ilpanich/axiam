@@ -138,6 +138,106 @@ impl UserRepresentation {
     }
 }
 
+/// A string member of a downstream resource.
+fn text_at<'a>(resource: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut cursor = resource;
+    for part in path {
+        cursor = cursor.get(part)?;
+    }
+    cursor.as_str()
+}
+
+impl UserRepresentation {
+    /// Whether the downstream's `resource` differs from this representation in
+    /// any attribute the mapping sets (the fixed set of the module
+    /// documentation): reconciliation clears the link's digest when it does, so
+    /// that the next sync sends the representation again.
+    ///
+    /// An attribute AXIAM does not hold is not compared (the downstream may own
+    /// it). `userName` and the email are compared without regard to ASCII case
+    /// (RFC 7643 §4.1.1: `userName` is case-insensitive, and receivers
+    /// commonly fold both), `active` defaults to `true` when the downstream
+    /// states nothing (§4.1.1), and the email is found among the downstream's
+    /// `emails` whichever entry carries it.
+    #[must_use]
+    pub fn differs_from(&self, resource: &Value) -> bool {
+        let folded = |a: Option<&str>, b: &str| !a.is_some_and(|a| a.eq_ignore_ascii_case(b));
+        if folded(text_at(resource, &["userName"]), &self.user_name) {
+            return true;
+        }
+        if text_at(resource, &["externalId"]) != Some(self.external_id.as_str()) {
+            return true;
+        }
+        if resource
+            .get("active")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+            != self.active
+        {
+            return true;
+        }
+        if let Some(name) = &self.name {
+            if let Some(given) = &name.given_name
+                && text_at(resource, &["name", "givenName"]) != Some(given.as_str())
+            {
+                return true;
+            }
+            if let Some(family) = &name.family_name
+                && text_at(resource, &["name", "familyName"]) != Some(family.as_str())
+            {
+                return true;
+            }
+        }
+        if let Some(display) = &self.display_name
+            && text_at(resource, &["displayName"]) != Some(display.as_str())
+        {
+            return true;
+        }
+        if let Some(email) = self.emails.first() {
+            let present = resource
+                .get("emails")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|entry| {
+                    entry
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .is_some_and(|v| v.eq_ignore_ascii_case(&email.value))
+                });
+            if !present {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl GroupRepresentation {
+    /// Whether the downstream's `resource` differs from this representation:
+    /// `displayName`, `externalId`, or the set of `members` (the whole list is
+    /// what a `PATCH` sends, so the whole list is what is compared).
+    #[must_use]
+    pub fn differs_from(&self, resource: &Value) -> bool {
+        if text_at(resource, &["displayName"]) != Some(self.display_name.as_str())
+            || text_at(resource, &["externalId"]) != Some(self.external_id.as_str())
+        {
+            return true;
+        }
+        let mut downstream: Vec<&str> = resource
+            .get("members")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|member| member.get("value").and_then(Value::as_str))
+            .collect();
+        downstream.sort_unstable();
+        downstream.dedup();
+        let ours: Vec<&str> = self.members.iter().map(|m| m.value.as_str()).collect();
+        downstream != ours
+    }
+}
+
 /// One `members` entry of a Group: the **downstream** id of a linked user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemberRepresentation {
@@ -410,5 +510,79 @@ mod tests {
         assert_eq!(paths, ["displayName", "externalId", "members"]);
         let grown = GroupRepresentation::new(&group, vec!["a".into(), "b".into(), "c".into()]);
         assert_ne!(digest_of(&a), digest_of(&grown));
+    }
+
+    #[test]
+    fn drift_is_a_difference_in_a_mapped_attribute_the_mapping_holds() {
+        let u = user();
+        let t = target(UserNameSource::Username);
+        let repr = UserRepresentation::new(&u, &t, true);
+        // What a receiver that stored exactly what was sent answers with.
+        let mut downstream = serde_json::to_value(&repr).unwrap();
+        downstream["id"] = json!("d-1");
+        assert!(!repr.differs_from(&downstream));
+
+        // Attributes the downstream owns, and case folding, are not drift.
+        let mut owned = downstream.clone();
+        owned["title"] = json!("Engineer");
+        owned["userName"] = json!("ALICE");
+        owned["emails"] = json!([{"value": "other@example.com"}, {"value": "Alice@Example.com"}]);
+        assert!(!repr.differs_from(&owned));
+        let mut implicit = downstream.clone();
+        implicit.as_object_mut().unwrap().remove("active");
+        assert!(!repr.differs_from(&implicit), "active defaults to true");
+
+        for (path, value) in [
+            ("userName", json!("mallory")),
+            ("externalId", json!("someone-else")),
+            ("active", json!(false)),
+            ("displayName", json!("Renamed")),
+            (
+                "name",
+                json!({"givenName": "Alice", "familyName": "Changed"}),
+            ),
+            ("emails", json!([{"value": "changed@example.com"}])),
+        ] {
+            let mut edited = downstream.clone();
+            edited[path] = value;
+            assert!(repr.differs_from(&edited), "{path}");
+        }
+        let mut gone = downstream.clone();
+        gone.as_object_mut().unwrap().remove("userName");
+        assert!(repr.differs_from(&gone));
+    }
+
+    #[test]
+    fn a_group_drifts_in_its_name_its_external_id_or_its_member_set() {
+        let group = Group {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            name: "staff".into(),
+            description: String::new(),
+            metadata: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let repr = GroupRepresentation::new(&group, vec!["b".into(), "a".into()]);
+        let same = json!({
+            "displayName": "staff",
+            "externalId": group.id.to_string(),
+            "members": [{"value": "a"}, {"value": "b"}],
+        });
+        assert!(!repr.differs_from(&same));
+        let reordered = json!({
+            "displayName": "staff",
+            "externalId": group.id.to_string(),
+            "members": [{"value": "b"}, {"value": "a"}],
+        });
+        assert!(!repr.differs_from(&reordered), "order is not drift");
+        for edited in [
+            json!({"displayName": "x", "externalId": group.id.to_string(), "members": [{"value": "a"}, {"value": "b"}]}),
+            json!({"displayName": "staff", "externalId": "x", "members": [{"value": "a"}, {"value": "b"}]}),
+            json!({"displayName": "staff", "externalId": group.id.to_string(), "members": [{"value": "a"}]}),
+            json!({"displayName": "staff", "externalId": group.id.to_string()}),
+        ] {
+            assert!(repr.differs_from(&edited));
+        }
     }
 }

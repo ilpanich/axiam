@@ -79,38 +79,57 @@ const GROUPS: &str = "Groups";
 
 /// The [`OutboundDeliverer`] of [`OutboundKind::ScimPush`].
 pub struct ScimPushDeliverer<T, L, S, U, G> {
-    targets: T,
-    links: L,
-    state: S,
-    users: U,
-    groups: G,
-    /// For the convergence enqueue (a newly linked user's groups) only; the
-    /// consumer loop owns every retry.
-    publisher: Arc<dyn OutboundPublisher>,
+    pub(super) targets: T,
+    pub(super) links: L,
+    pub(super) state: S,
+    pub(super) users: U,
+    pub(super) groups: G,
+    /// For the convergence enqueue (a newly linked user's groups) and for
+    /// reconciliation's references only; the consumer loop owns every retry.
+    pub(super) publisher: Arc<dyn OutboundPublisher>,
     tokens: TokenCache,
     /// The guarded fetch's `allow_private`. **Always `false`** except for the
     /// integration tests' loopback server, which turn it on through
     /// [`Self::admitting_private_networks_for_tests`] and nothing else.
     allow_private: bool,
+    /// The consumer's attempt ceiling for this kind, when the composition root
+    /// told the deliverer: an attempt that fails retryably **and is the last**
+    /// is a dead letter in the dispatcher's eyes, so the target's delivery
+    /// state counts it as one (once).
+    max_attempts: Option<u32>,
 }
 
-/// What one attempt carries from step to step.
-struct Run {
+/// What one attempt (or one reconciliation run) carries from step to step.
+pub(super) struct Run {
     /// The target as the attempt read it first: the version every later read
     /// is compared with before the credential is sent.
-    target: ScimTarget,
+    pub(super) target: ScimTarget,
     /// Opened lazily, before the first request.
     authorization: Option<HeaderValue>,
     /// The status of the last response received, if any request was made.
     last_status: Option<u16>,
 }
 
+impl Run {
+    /// A run that has read `target` and made no request yet.
+    pub(super) fn new(target: ScimTarget) -> Self {
+        Self {
+            target,
+            authorization: None,
+            last_status: None,
+        }
+    }
+}
+
 /// What a user should be downstream, now.
-enum DesiredUser {
+pub(super) enum DesiredUser {
     /// Present, with `active` as given.
     Present { user: Box<User>, active: bool },
-    /// Gone: `DELETE` and remove the link.
-    Remove,
+    /// Gone: `DELETE` and remove the link. `erasure` is set when the account
+    /// was erased or deleted (the `DELETE` is owed whatever `deprovision`
+    /// says, and a failure leaves the link `erase_pending`); it is not set when
+    /// the target's `deprovision = delete` policy removes a live account.
+    Remove { erasure: bool },
 }
 
 impl<T, L, S, U, G> ScimPushDeliverer<T, L, S, U, G>
@@ -140,7 +159,19 @@ where
             publisher,
             tokens: TokenCache::default(),
             allow_private: false,
+            max_attempts: None,
         }
+    }
+
+    /// Tell the deliverer the consumer's attempt ceiling for this kind
+    /// (`OutboundRetryConfig::max_attempts`), so that a retryable failure of the
+    /// **last** attempt, which the dispatcher dead-letters, is counted as a dead
+    /// letter in the target's delivery state exactly once, and not as one more
+    /// failure.
+    #[must_use]
+    pub fn with_max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = Some(max_attempts);
+        self
     }
 
     /// **Test seam, never used by the composition root.** Lets the first hop
@@ -179,12 +210,7 @@ where
                 })
             }
             Err(Exit::Retry(reason)) => {
-                self.note(
-                    self.state
-                        .record_failure(msg.tenant_id, msg.target_id, &reason)
-                        .await,
-                    msg,
-                );
+                self.record_unsuccessful(msg, &reason).await;
                 Ok(DeliveryOutcome::Retry { reason })
             }
             Err(Exit::Dead(reason)) => {
@@ -197,15 +223,29 @@ where
                 Ok(DeliveryOutcome::DeadLetter { reason })
             }
             Err(Exit::Fail(reason)) => {
-                self.note(
-                    self.state
-                        .record_failure(msg.tenant_id, msg.target_id, &reason)
-                        .await,
-                    msg,
-                );
+                self.record_unsuccessful(msg, &reason).await;
                 Err(OutboundError::Delivery(reason))
             }
         }
+    }
+
+    /// A retryable failure: one more failure in the target's state, or, when
+    /// the consumer has no attempt left for this message (it dead-letters it
+    /// whatever the deliverer says), the dead letter it is. Written once.
+    async fn record_unsuccessful(&self, msg: &OutboundMessage, reason: &str) {
+        let last = self
+            .max_attempts
+            .is_some_and(|max| msg.attempt.saturating_add(1) >= max);
+        let written = if last {
+            self.state
+                .record_dead_letter(msg.tenant_id, msg.target_id, reason)
+                .await
+        } else {
+            self.state
+                .record_failure(msg.tenant_id, msg.target_id, reason)
+                .await
+        };
+        self.note(written, msg);
     }
 
     /// A delivery-state write that fails changes nothing about the outcome; it
@@ -239,11 +279,7 @@ where
             return Err(Exit::dead("target disabled"));
         }
 
-        let mut run = Run {
-            target,
-            authorization: None,
-            last_status: None,
-        };
+        let mut run = Run::new(target);
         match resource_type {
             ScimResourceType::User => self.sync_user(&mut run, axiam_id).await?,
             ScimResourceType::Group => self.sync_group(&mut run, axiam_id).await?,
@@ -267,8 +303,8 @@ where
             .await?;
 
         match self.desired_user(&target, user).await? {
-            DesiredUser::Remove => {
-                self.remove(run, ScimResourceType::User, user_id, link)
+            DesiredUser::Remove { erasure } => {
+                self.remove(run, ScimResourceType::User, user_id, link, erasure)
                     .await
             }
             // Nothing downstream to deactivate, and nothing worth creating
@@ -284,13 +320,17 @@ where
         }
     }
 
-    async fn desired_user(&self, target: &ScimTarget, user: Option<User>) -> Step<DesiredUser> {
+    pub(super) async fn desired_user(
+        &self,
+        target: &ScimTarget,
+        user: Option<User>,
+    ) -> Step<DesiredUser> {
         // Erasure and deletion always delete, whatever `deprovision` says.
         let Some(user) = user else {
-            return Ok(DesiredUser::Remove);
+            return Ok(DesiredUser::Remove { erasure: true });
         };
         if matches!(user.status, UserStatus::Deleted | UserStatus::Anonymized) {
-            return Ok(DesiredUser::Remove);
+            return Ok(DesiredUser::Remove { erasure: true });
         }
         let in_scope = self.user_in_scope(target, &user).await?;
         if user.status == UserStatus::Active && in_scope {
@@ -304,7 +344,7 @@ where
                 user: Box::new(user),
                 active: false,
             },
-            DeprovisionPolicy::Delete => DesiredUser::Remove,
+            DeprovisionPolicy::Delete => DesiredUser::Remove { erasure: false },
         })
     }
 
@@ -424,7 +464,7 @@ where
             // removed.
             _ => {
                 return self
-                    .remove(run, ScimResourceType::Group, group_id, link)
+                    .remove(run, ScimResourceType::Group, group_id, link, false)
                     .await;
             }
         };
@@ -439,7 +479,11 @@ where
     /// The downstream ids of the group's members that have a link on this
     /// target. A member with no link is skipped: it is pushed (and linked) by
     /// its own message, and linking enqueues the group again.
-    async fn linked_member_ids(&self, target: &ScimTarget, group: &Group) -> Step<Vec<String>> {
+    pub(super) async fn linked_member_ids(
+        &self,
+        target: &ScimTarget,
+        group: &Group,
+    ) -> Step<Vec<String>> {
         let mut ids = Vec::new();
         let mut offset = 0u64;
         loop {
@@ -558,21 +602,49 @@ where
 
     /// `DELETE` the downstream resource (a `404` is as good as a `204`) and
     /// remove the link. Nothing is sent for a resource that has no link.
+    ///
+    /// For an **erasure** (`erasure`: the account was erased or deleted) an
+    /// attempt that does not end in a successful `DELETE` first leaves the link
+    /// `deprovisioned` with `erase_pending` set, whatever the reason (a refusal
+    /// that dead-letters, a failure the dispatcher retries, a retry budget that
+    /// runs out): the person is gone from AXIAM, the downstream may still hold
+    /// them, and reconciliation retries a pending erasure until it succeeds. The
+    /// link holds ids only, and is what lets the `DELETE` be sent at all.
     async fn remove(
         &self,
         run: &mut Run,
         resource_type: ScimResourceType,
         axiam_id: Uuid,
         link: Option<ScimTargetLink>,
+        erasure: bool,
     ) -> Step<()> {
         let Some(link) = link else {
             return Ok(());
         };
-        let target = run.target.clone();
-        let collection = collection_of(resource_type);
+        let sent = self.delete_downstream(run, resource_type, &link).await;
+        if let Err(exit) = sent {
+            if erasure && !link.erase_pending {
+                self.mark_erase_pending(&link).await;
+            }
+            return Err(exit);
+        }
+        self.links
+            .delete(run.target.tenant_id, run.target.id, resource_type, axiam_id)
+            .await
+            .map_err(|_| Exit::fail("the link could not be removed"))?;
+        Ok(())
+    }
+
+    /// The `DELETE` itself: `Ok` for a `2xx` or a `404`.
+    async fn delete_downstream(
+        &self,
+        run: &mut Run,
+        resource_type: ScimResourceType,
+        link: &ScimTargetLink,
+    ) -> Step<()> {
         let url = resource_url(
-            &target.base_url,
-            collection,
+            &run.target.base_url,
+            collection_of(resource_type),
             Some(&link.downstream_id),
             None,
         )?;
@@ -586,14 +658,33 @@ where
             )
             .await?;
         match response.status {
-            200..=299 | 404 => {}
-            status => return Err(self.reject(run, status)),
+            200..=299 | 404 => Ok(()),
+            status => Err(self.reject(run, status)),
         }
-        self.links
-            .delete(target.tenant_id, target.id, resource_type, axiam_id)
-            .await
-            .map_err(|_| Exit::fail("the link could not be removed"))?;
-        Ok(())
+    }
+
+    /// Best effort: the attempt's own outcome stands whether or not this write
+    /// lands, and a failure is logged once, with ids only.
+    async fn mark_erase_pending(&self, link: &ScimTargetLink) {
+        let written = self
+            .links
+            .set_state(
+                link.tenant_id,
+                link.target_id,
+                link.resource_type,
+                link.axiam_id,
+                ScimLinkState::Deprovisioned,
+                true,
+            )
+            .await;
+        if written.is_err() {
+            tracing::warn!(
+                target: "axiam::scim_push",
+                tenant_id = %link.tenant_id,
+                target_id = %link.target_id,
+                "a pending erasure could not be recorded on its link"
+            );
+        }
     }
 
     /// `GET <collection>?filter=externalId eq "<axiam id>"`: the one downstream
@@ -631,7 +722,7 @@ where
         }
     }
 
-    async fn read_link(
+    pub(super) async fn read_link(
         &self,
         target: &ScimTarget,
         resource_type: ScimResourceType,
@@ -644,7 +735,7 @@ where
     }
 
     /// Record a new link, honouring both unique indexes.
-    async fn link_new(
+    pub(super) async fn link_new(
         &self,
         target: &ScimTarget,
         resource_type: ScimResourceType,
@@ -770,7 +861,7 @@ where
     // -----------------------------------------------------------------------
 
     /// One request, with the credential opened and checked first.
-    async fn call(
+    pub(super) async fn call(
         &self,
         run: &mut Run,
         method: Method,
@@ -879,7 +970,7 @@ where
 
     /// A non-success status that has no meaning of its own for the request that
     /// got it, as an [`Exit`] (see the module documentation's table).
-    fn reject(&self, run: &Run, status: u16) -> Exit {
+    pub(super) fn reject(&self, run: &Run, status: u16) -> Exit {
         match status {
             300..=399 => {
                 Exit::retry("the receiver answered with a redirect, which is not followed")
@@ -935,7 +1026,7 @@ fn parse_reference(payload: &serde_json::Value) -> Option<(ScimResourceType, Uui
     Some((resource_type, axiam_id))
 }
 
-fn collection_of(resource_type: ScimResourceType) -> &'static str {
+pub(super) fn collection_of(resource_type: ScimResourceType) -> &'static str {
     match resource_type {
         ScimResourceType::User => USERS,
         ScimResourceType::Group => GROUPS,
@@ -949,7 +1040,7 @@ fn encode<T: serde::Serialize>(value: &T) -> Step<Vec<u8>> {
 /// `<base>/<collection>[/<id>][?filter=<filter>]`, with the id and the filter
 /// percent-encoded, so that nothing a downstream (or a person) supplied can
 /// change the path or the query.
-fn resource_url(
+pub(super) fn resource_url(
     base_url: &str,
     collection: &str,
     id: Option<&str>,
@@ -971,7 +1062,7 @@ fn resource_url(
 }
 
 /// Whether a downstream-assigned id is safe to link and to put in a path.
-fn usable_downstream_id(id: &str) -> bool {
+pub(super) fn usable_downstream_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_DOWNSTREAM_ID_BYTES
         && id != "."
@@ -1066,6 +1157,7 @@ mod tests {
             include_str!("client.rs"),
             include_str!("deliverer.rs"),
             include_str!("provisioner.rs"),
+            include_str!("reconcile.rs"),
             include_str!("wire.rs"),
         ];
         let production: Vec<&str> = sources

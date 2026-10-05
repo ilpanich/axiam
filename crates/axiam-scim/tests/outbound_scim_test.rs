@@ -1131,6 +1131,9 @@ mod changing {
         ) -> impl Future<Output = AxiamResult<Vec<ScimTarget>>> + Send {
             self.inner.list_enabled(tenant_id)
         }
+        fn list_all_enabled(&self) -> impl Future<Output = AxiamResult<Vec<ScimTarget>>> + Send {
+            self.inner.list_all_enabled()
+        }
         fn update(
             &self,
             tenant_id: Uuid,

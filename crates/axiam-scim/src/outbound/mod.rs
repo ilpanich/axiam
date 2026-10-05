@@ -6,7 +6,7 @@
 //! ([`axiam_core::models::scim_target::ScimTarget`]) and AXIAM pushes user and
 //! group lifecycle changes to them.
 //!
-//! # Three pieces
+//! # Four pieces
 //!
 //! * [`ScimProvisioner`] — the **source**. It implements the core
 //!   [`ProvisioningSink`](axiam_core::provisioning::ProvisioningSink) the user
@@ -17,6 +17,14 @@
 //! * [`ScimPushDeliverer`] — the **attempt**. It implements the core
 //!   [`OutboundDeliverer`](axiam_core::outbound::OutboundDeliverer) the
 //!   dispatcher's consumer calls: one attempt, classify, never decide.
+//! * [`ScimReconciliation`] — the **repair** (T23.6.3, D-58): a nightly and an
+//!   on-demand run, claimed in the datastore so that one replica makes it, that
+//!   queues a reference for everything in scope and everything linked, reads
+//!   the downstream, clears the digest of what drifted, forgets links whose
+//!   resource is gone and deprovisions what AXIAM's tenant no longer wants
+//!   there — and **never touches an account the downstream's own application
+//!   made**. It is a method set of the deliverer (`reconcile_now`), because it
+//!   must go out through the very same guarded, credential-checked path.
 //! * [`wire`] — the RFC 7643 / RFC 7644 documents the deliverer sends and the
 //!   digest that lets it skip a `PATCH` that would change nothing.
 //!
@@ -53,7 +61,12 @@
 mod client;
 mod deliverer;
 mod provisioner;
+mod reconcile;
 pub mod wire;
 
 pub use deliverer::ScimPushDeliverer;
 pub use provisioner::{ScimProvisioner, group_in_scope, reference_message};
+pub use reconcile::{
+    LIST_PAGE_SIZE, Listing, RECONCILE_INTERVAL, RECONCILE_MAX_PAGES, RECONCILE_WALL_CLOCK,
+    ReconcileOutcome, ReconcileReport, ReconcileSweep, ScimReconciliation,
+};

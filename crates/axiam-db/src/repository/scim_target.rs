@@ -397,6 +397,22 @@ impl<C: Connection> ScimTargetRepository for SurrealScimTargetRepository<C> {
             .collect()
     }
 
+    async fn list_all_enabled(&self) -> AxiamResult<Vec<ScimTarget>> {
+        let mut result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT {PUBLIC_COLUMNS} FROM scim_target WHERE enabled = true \
+                 ORDER BY created_at ASC, record_id ASC"
+            ))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<TargetRow> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| row.into_domain().map_err(AxiamError::from))
+            .collect()
+    }
+
     async fn update(
         &self,
         tenant_id: Uuid,

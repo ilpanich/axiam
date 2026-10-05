@@ -39,6 +39,8 @@ pub const SWEEP_JOBS: &[&str] = &[
     "saml_logout_run",
     // G-3 (T23.3.5): the directory sync job.
     "directory_sync",
+    // G-6 (T23.6.3, D-58): the outbound SCIM reconciliation.
+    "scim_reconcile",
     // G-5 (T23.5.3): the SSF poll/hold buffer's seven-day expiry.
     "ssf_event_buffer",
     // G-5 (T23.5.3, D-53 (1)): the step-up record's ten-minute expiry.
@@ -167,6 +169,9 @@ mod tests {
             "saml_logout_run",
             "ssf_event_buffer",
             "ssf_step_up",
+            // T23.6.3 (P23W4-06): a job the loop records and `SWEEP_JOBS` forgets
+            // reads as "not deployed" on `/health/jobs`.
+            "scim_reconcile",
         ] {
             let recorded = source.match_indices("&self.job_health,").any(|(at, _)| {
                 let rest = &source[at + "&self.job_health,".len()..];
@@ -184,6 +189,7 @@ mod tests {
         assert!(names.iter().any(|n| n == "saml_logout_run"));
         assert!(names.iter().any(|n| n == "ssf_event_buffer"));
         assert!(names.iter().any(|n| n == "ssf_step_up"));
+        assert!(names.iter().any(|n| n == "scim_reconcile"));
     }
 
     #[test]

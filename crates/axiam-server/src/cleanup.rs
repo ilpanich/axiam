@@ -142,7 +142,52 @@ pub struct CleanupTask<C: Connection> {
     /// G-5 (D-52): tells SSF receivers an account was purged (the account as it
     /// was before the erasure). `None` — the default — tells nobody.
     ssf_sink: Option<Arc<dyn SsfSystemAccountSink>>,
+    /// G-6 (T23.6.3, D-58): the outbound SCIM reconciliation, which the
+    /// `scim_reconcile` job runs once a day per enabled target (the claim in
+    /// the datastore decides, so replicas do not double-run it). `None` — the
+    /// default — runs no reconciliation.
+    scim_reconciliation: Option<Arc<dyn axiam_scim::outbound::ScimReconciliation>>,
     shutdown: watch::Receiver<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Outbound SCIM reconciliation (G-6, T23.6.3, D-58)
+// ---------------------------------------------------------------------------
+
+/// One pass of the `scim_reconcile` job, as a sweep the scheduler can record.
+///
+/// A free function, and public, for the reason [`sweep_directories`] is one.
+/// The scheduler ticks far more often than a target is due: at every tick this
+/// walks the enabled targets and tries the claim, which succeeds for a target
+/// whose last run is older than 24 hours and only on one replica; everything
+/// else is a skipped target and costs a conditional write that matches nothing.
+///
+/// * `Ok(n)` is the number of targets whose run this pass made.
+/// * A target whose run could not do all of its work (the broker refused a
+///   reference, the downstream could not be read, AXIAM's datastore failed)
+///   makes the sweep fail, with a count and no target's data. The other targets
+///   still ran.
+/// * A shutdown signal stops the pass between targets.
+///
+/// # Errors
+///
+/// [`AxiamError::Internal`] when the enabled targets could not be listed or a
+/// run was incomplete, as described above.
+pub async fn sweep_scim_reconciliation(
+    reconciliation: &dyn axiam_scim::outbound::ScimReconciliation,
+    shutdown: &watch::Receiver<bool>,
+) -> Result<u64, AxiamError> {
+    let should_stop = || *shutdown.borrow();
+    let sweep = reconciliation.run_due(&should_stop).await.map_err(|_| {
+        AxiamError::Internal("SCIM reconciliation could not list the enabled targets".into())
+    })?;
+    if sweep.failed > 0 {
+        return Err(AxiamError::Internal(format!(
+            "SCIM reconciliation was incomplete for {} of {} target(s) run",
+            sweep.failed, sweep.reconciled
+        )));
+    }
+    Ok(sweep.reconciled)
 }
 
 // ---------------------------------------------------------------------------
@@ -816,8 +861,22 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             ssf_buffer_repo: None,
             ssf_step_up_repo: None,
             ssf_sink: None,
+            scim_reconciliation: None,
             shutdown,
         }
+    }
+
+    /// Run the outbound SCIM reconciliation on this scheduler (G-6, T23.6.3,
+    /// D-58), as the `scim_reconcile` job.
+    ///
+    /// A builder step for the reason [`Self::with_directory_sync`] is one.
+    #[must_use]
+    pub fn with_scim_reconciliation(
+        mut self,
+        reconciliation: Arc<dyn axiam_scim::outbound::ScimReconciliation>,
+    ) -> Self {
+        self.scim_reconciliation = Some(reconciliation);
+        self
     }
 
     /// Run the SSF sweep and report erasures to SSF receivers (G-5, T23.5.3).
@@ -1021,6 +1080,21 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                             &self.job_health,
                             "directory_sync",
                             sweep_directories(sync, self.shutdown.clone()).await,
+                            tracing::Level::INFO,
+                        );
+                    }
+
+                    // G-6 (T23.6.3, D-58) — the outbound SCIM reconciliation,
+                    // after the directory sync for the same reason: it talks to
+                    // other people's servers. INFO, because it deprovisions
+                    // accounts downstream. One log line per target per run is
+                    // written by the run itself, never one per page.
+                    if let Some(reconciliation) = &self.scim_reconciliation {
+                        Self::record(
+                            &self.job_health,
+                            "scim_reconcile",
+                            sweep_scim_reconciliation(reconciliation.as_ref(), &self.shutdown)
+                                .await,
                             tracing::Level::INFO,
                         );
                     }

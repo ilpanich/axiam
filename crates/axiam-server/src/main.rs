@@ -2421,6 +2421,17 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("SSF push consumer spawned");
     }
 
+    // Notification rules reach the audit stream through this sink: the HTTP audit
+    // middleware's worker (further down) feeds it every request's row, and, since
+    // T23.6.3 (D-58), the SCIM consumer below feeds it the dispatcher's own rows
+    // — a dead letter is not an HTTP request, so without that second path a rule
+    // for `scim_delivery_failed` would match nothing in a running server.
+    let notification_sink: Arc<dyn axiam_audit::AuditEventSink> =
+        Arc::new(axiam_audit::NotificationSink::new(
+            notification_rule_repo.clone(),
+            mail_outbound_publisher.clone(),
+        ));
+
     // G-6 / T23.6.2 (D-57) — outbound SCIM provisioning, the third kind of the
     // same dispatcher: one publisher channel (enqueue, and the consumer's
     // TTL-delayed retries), the provisioner every repository reports to, and the
@@ -2428,7 +2439,10 @@ async fn main() -> std::io::Result<()> {
     // Retry env vars are `AXIAM__SCIM_PUSH__*`. Targets' credentials are sealed
     // under the key webhook secrets use; without it the deliverer cannot open
     // one and a target cannot be stored (the management API is T23.6.4).
-    {
+    // The deliverer is also the reconciliation job's way out to the downstream
+    // (T23.6.3, D-58): one instance, so that both share its credential path and
+    // its access-token cache.
+    let scim_reconciliation: Arc<dyn axiam_scim::outbound::ScimReconciliation> = {
         let scim_publisher = {
             let channel = amqp
                 .create_publisher_channel()
@@ -2436,6 +2450,7 @@ async fn main() -> std::io::Result<()> {
                 .expect("Failed to create AMQP SCIM push publisher channel");
             axiam_amqp::AmqpOutboundPublisher::new(channel)
         };
+        let scim_retry = OutboundRetryConfig::from_env_for(OutboundKind::ScimPush);
         let scim_target_repo =
             axiam_db::SurrealScimTargetRepository::new(db_handle.clone(), webhook_enc_key);
         let bound = provisioning_sink.bind(Arc::new(axiam_scim::outbound::ScimProvisioner::new(
@@ -2443,27 +2458,42 @@ async fn main() -> std::io::Result<()> {
             Arc::new(scim_publisher.clone()),
         )));
         debug_assert!(bound, "the provisioning sink is bound exactly once");
-        let mut scim_deliverers = OutboundDeliverers::new();
-        scim_deliverers
-            .register(Arc::new(axiam_scim::outbound::ScimPushDeliverer::new(
+        // The attempt ceiling is told to the deliverer so that the dead letter
+        // the consumer makes of a last failed attempt is counted on the target
+        // once.
+        let scim_deliverer = Arc::new(
+            axiam_scim::outbound::ScimPushDeliverer::new(
                 scim_target_repo,
                 axiam_db::SurrealScimTargetLinkRepository::new(db_handle.clone()),
                 axiam_db::SurrealScimTargetStateRepository::new(db_handle.clone()),
                 user_repo.clone(),
                 group_repo.clone(),
                 Arc::new(scim_publisher.clone()),
-            )))
+            )
+            .with_max_attempts(scim_retry.max_attempts),
+        );
+        let mut scim_deliverers = OutboundDeliverers::new();
+        scim_deliverers
+            .register(scim_deliverer.clone())
             .expect("Failed to register the SCIM push deliverer");
         spawn_outbound_consumer(
             Arc::clone(&amqp),
             OutboundKind::ScimPush,
             scim_deliverers,
             scim_publisher,
-            audit_repo.clone(),
-            OutboundRetryConfig::from_env_for(OutboundKind::ScimPush),
+            // The dispatcher's `scim_push.delivery_failed` row is the record of a
+            // dead letter and what a `scim_delivery_failed` notification rule
+            // matches (D-58): written through the notifying wrapper.
+            axiam_audit::NotifyingAuditLog::new(
+                audit_repo.clone(),
+                notification_sink.clone(),
+                tenant_repo.clone(),
+            ),
+            scim_retry,
         );
         tracing::info!("SCIM push consumer spawned");
-    }
+        scim_deliverer
+    };
 
     // Spawn AMQP mail consumer on a background task (D-14).
     // Only spawned when AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is present; otherwise
@@ -2778,15 +2808,11 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    // Notification rules reach the audit stream here, and only here. Without
-    // this sink `NotificationDispatcher` is constructed nowhere and every rule an
+    // `notification_sink` (built above, before the outbound consumers) is how
+    // notification rules reach the audit stream. Without it
+    // `NotificationDispatcher` is constructed nowhere and every rule an
     // administrator configures is inert — stored, listed by the API, shown in the
     // admin UI, and consulted by nothing.
-    let notification_sink: Arc<dyn axiam_audit::AuditEventSink> =
-        Arc::new(axiam_audit::NotificationSink::new(
-            notification_rule_repo.clone(),
-            mail_outbound_publisher.clone(),
-        ));
     let audit_middleware =
         AuditMiddleware::spawn_with_sink(audit_repo.clone(), Some(notification_sink));
     // A handle kept outside the App factory closure, which takes ownership of
@@ -2897,6 +2923,8 @@ async fn main() -> std::io::Result<()> {
     )
     // G-5 (D-52): a directory deactivation is an SSF `account-disabled`.
     .with_ssf_sink(ssf_account_sink.clone())))
+    // G-6 (T23.6.3, D-58): the nightly SCIM reconciliation, last in each tick.
+    .with_scim_reconciliation(scim_reconciliation)
     // G-5 (T23.5.3): the buffer's seven-day sweep, and the `account-purged` of an
     // erasure.
     .with_ssf(

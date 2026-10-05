@@ -3554,6 +3554,13 @@ pub trait ScimTargetRepository: Send + Sync {
         tenant_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<crate::models::scim_target::ScimTarget>>> + Send;
 
+    /// Every enabled target of **every** tenant, oldest first: what the
+    /// reconciliation job walks (the directory sync's `list_enabled` is the
+    /// precedent). Not a tenant-scoped read; only the scheduler calls it.
+    fn list_all_enabled(
+        &self,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::scim_target::ScimTarget>>> + Send;
+
     /// Replace a target's configuration.
     ///
     /// * `NotFound` when it does not exist in this tenant.

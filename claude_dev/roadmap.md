@@ -1049,7 +1049,7 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
 
 ---
 
-## Phase 23: Competitor gap closure — IN PROGRESS (W1 and W2 merged 2026-10-03, W3 in progress)
+## Phase 23: Competitor gap closure — IN PROGRESS (W1–W4 merged 2026-10-03/04, W5 in progress)
 
 Close the gaps the three competitor comparisons
 ([Keycloak](competitor-comparison-keycloak.md),
@@ -1103,7 +1103,7 @@ with an F4 security review of the wave's diff against
 | T23.6.4 | CRUD, console, contract §31, OpenAPI, website, threat entries | Sonnet 5.5 | W5 | |
 | T23.7.1 | CIBA: `bc-authorize`, `auth_req_id` lifecycle, single-use redemption, polling back-off | Opus 5.5 | W5 | |
 | T23.7.2 | Approval on the identity pages, email notification, ping mode | Sonnet 5.5 | W5 | |
-| T23.7.3 | e2e poll and ping, contract §32, SDK helper (seven SDKs), website | Sonnet 5.5 | W5 | |
+| T23.7.3 | e2e poll and ping, contract §33 (D-56), SDK helper (seven SDKs, post-merge per D-35), website | Sonnet 5.5 | W5 | |
 | T23.8.1 | `AXIAM__AMQP__ENABLED=false` minimal profile | Sonnet 5.5 | W5 | |
 | T23.8.2 | Review of the direct audit-write path against T19.27 | Opus 5.5 | W5 | |
 | T23.8.3 | `docker-compose.minimal.yml`, docs, resting-RSS measurement | Sonnet 5.5 | W5 | |
@@ -1148,7 +1148,7 @@ where §5 says it depends on it.
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
 | Phase 22 | 20 | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates, gRPC client auth, service accounts on management, non-inheritable assignments, contracts 1.51/1.52 and the eleven SDK ports) |
-| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **in progress**, W1 and W2 merged, W3 in progress |
+| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **in progress**, W1–W4 merged, W5 in progress |
 
 **Total: 132 tasks across 23 complete phases, plus Phase 23 (47 tasks) in progress**
 

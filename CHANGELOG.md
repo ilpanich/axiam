@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`docker/docker-compose.minimal.yml` and the minimal-profile guide (G-8,
+  T23.8.3).** SurrealDB plus `axiam-server` with `AXIAM__AMQP__ENABLED=false`
+  and nothing else — no RabbitMQ, no Vault, no AMQP keys — in its own Compose
+  project (`axiam-minimal`), on **one replica by design** (no `deploy.replicas`,
+  a fixed container name that refuses `--scale`, the reason in a comment),
+  with healthchecks, a **30 s stop grace period**, and the **GDPR audit
+  dead-letter file on a named volume** (`AXIAM__GDPR_AUDIT_DLQ_FILE`; a
+  one-shot `volume-init` hands both volumes to uid 65532). `just minimal-up`,
+  `minimal-down` and `minimal-clean` mirror `dev-up`; `minimal-up` mints the
+  secrets the profile needs under `docker/.secrets/` (database credentials, JWT
+  keypair, pepper, email, GDPR, MFA, federation, PKI and OPAQUE keys).
+  `docs/deployment/README.md` gains the minimal profile's operating guide: how
+  to run it, what a restart loses in audit terms (deliveries without a terminal
+  row, a lost `ExportReady` mail, SSF events), the orderly stop and its grace
+  period, the dead-letter file and how to replay it into the trail, external
+  audit producers to stop before switching, when to choose it, and the steps to
+  move to and from the full profile. The website's Operate → Deploy page carves
+  the minimal profile out of its "stateless, scale horizontally" passage and
+  gains a "Minimal profile (no broker)" section;
+  `AXIAM__GDPR_AUDIT_DLQ_FILE` leaves the configuration-coverage exemption
+  table now that it is documented.
+- **Resting footprint, measured and published (G-8, T23.8.3).** At rest, not
+  under load, on a freshly migrated empty datastore, as the median resident set:
+  **207.3 MiB** for the minimal stack (server 120.7 + SurrealDB 86.6) against
+  **330.9 MiB** for the full one (server 130.3 + SurrealDB 86.0 + RabbitMQ
+  114.6) — about 124 MiB, 37 %, for the broker. The server ran as the native
+  release binary, not as an image; method, raw samples and the script are in
+  `benchmarks/resting-footprint/`, and `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5
+  gains the row with its caveats (not comparable with the under-load figures).
+  The Zitadel comparison's whole-stack cell and change log carry a dated note.
+
 - **Minimal profile — AXIAM without a broker (G-8, T23.8.1, D-59).**
   `AXIAM__AMQP__ENABLED=false` (default `true`) runs AXIAM with SurrealDB only:
   no RabbitMQ connection and no topology, and neither `AXIAM__AMQP__URL` nor the

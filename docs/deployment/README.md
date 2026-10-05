@@ -1903,8 +1903,9 @@ How it was measured, so the number can be reproduced and not over-read:
   RabbitMQ for the full stack) as containers, start the server, wait for
   `GET /ready` to answer `200`, settle for 60 s, then sample the resident set of
   every component every 5 s for 120 s (the run took 15–20 samples, because
-  reading a container's processes is not instantaneous). Raw samples, summaries
-  and server logs are in `benchmarks/resting-footprint/2026-10-05/`.
+  reading a container's processes is not instantaneous). Raw samples, summaries,
+  server logs and the environment (versions, digests, host) are in
+  `benchmarks/resting-footprint/2026-10-05/`.
 * **Envelope.** SurrealDB 2 CPU / 1 GiB and RabbitMQ 1 CPU / 512 MiB, the caps
   the benchmark harness uses; **the server ran as the native release binary**
   (`--features jemalloc`, as the shipped image is built, built from commit `21f1521`),

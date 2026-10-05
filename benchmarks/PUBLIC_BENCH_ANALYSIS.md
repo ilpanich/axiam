@@ -333,9 +333,11 @@ attempt is excluded from this table and reported in §1's login section.*
 under 5% of its allowance — while delivering §1's throughput.** Zitadel's
 Go server remains respectably small (135–169 MiB); its costs surface in
 CPU-per-request instead. Keycloak runs 674–853 MiB at the same envelope.
-Whole-stack (server + DB + broker): AXIAM 375–533 MiB (SurrealDB and
-RabbitMQ included), Keycloak 816–973 MiB, Zitadel 281–457 MiB — Zitadel's
-stack is the smallest at rest; AXIAM's does the most work per byte:
+Whole-stack (server + DB + broker), **under load**: AXIAM 375–533 MiB
+(SurrealDB and RabbitMQ included), Keycloak 816–973 MiB, Zitadel 281–457
+MiB — Zitadel's stack is the smallest; AXIAM's does the most work per byte
+(AXIAM's *resting* footprint, with and without the broker, is measured
+below the table):
 
 | scenario (p0) | metric | AXIAM | Keycloak | Zitadel |
 |---|---|---|---|---|
@@ -352,6 +354,40 @@ stack is the smallest at rest; AXIAM's does the most work per byte:
 The one cell Keycloak wins (whole-stack userinfo CPU/req — AXIAM's figure
 carries a pegged SurrealDB plus RabbitMQ) is kept in the open, as in every
 draft. Every other cell, both axes, AXIAM leads by 1.6× to 24×.
+
+**Whole-stack resting footprint, with and without the broker (T23.8.3,
+measured 2026-10-05 — at rest, not under load).** The numbers above were taken
+while the stack served load. The *minimal* profile
+(`AXIAM__AMQP__ENABLED=false`, [deployment guide](../docs/deployment/README.md#minimal-profile-no-broker))
+runs AXIAM on SurrealDB alone, and its idle footprint was measured next to the
+full stack's, with one method for both:
+
+| AXIAM stack, at rest | server | SurrealDB | RabbitMQ | **whole stack** |
+|---|---|---|---|---|
+| **minimal** (server + SurrealDB) | 120.7 MiB | 86.6 MiB | — | **207.3 MiB** |
+| full (server + SurrealDB + RabbitMQ) | 130.3 MiB | 86.0 MiB | 114.6 MiB | **330.9 MiB** |
+
+*Method.* Median resident set (`VmRSS`, summed over a component's processes) of
+each component, sampled for 120 s starting 60 s after `/ready` first answered
+`200`, on a freshly migrated empty datastore with no traffic; script, raw
+samples and logs in
+[`benchmarks/resting-footprint/`](resting-footprint/2026-10-05/). SurrealDB
+(2 CPU / 1 GiB) and RabbitMQ (1 CPU / 512 MiB) ran as containers under the caps
+of §0; **the server was the native release binary** (jemalloc, as the image is
+built; commit `21f1521`), uncapped — a measurement of the server image has not
+been taken. SurrealDB 3.2.5 and RabbitMQ 4 (digests, host and settings in the run's
+`environment.txt`), a 4-vCPU Linux 6.18 sandbox, not the §0 machine. Repeat runs of the minimal
+stack agreed to within 2 MiB.
+
+*How to read it.* Resident set counts file-backed pages (the server's own
+binary, about 32 MiB of its 121 MiB; SurrealDB's mapped datastore, about 62 MiB
+of its 87 MiB), which a container's cgroup accounting largely does not; the
+anonymous parts are 113.5 MiB (minimal) and 185.0 MiB (full). These resting
+figures are therefore **not comparable cell for cell** with the under-load,
+container-averaged figures above, and no Keycloak or Zitadel stack was measured
+at rest by this method, so the table makes no claim against them. What it does
+say is how much the broker costs: about 124 MiB, 37 % of the full stack, at
+rest.
 
 ## 6. Weaknesses and caveats (the honest section)
 

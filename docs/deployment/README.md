@@ -1626,7 +1626,10 @@ orchestrator's knowledge, not the process's): the minimal profile holds a
   refuses to start;
 * an orderly stop releases the lease, so a successor does not wait at all;
 * an instance whose renewal finds the lease **taken by another instance logs
-  once at `ERROR` and exits non-zero**, rather than keep running beside it.
+  once at `ERROR` and exits non-zero**, rather than keep running beside it. It
+  exits through the orderly stop a `SIGTERM` takes — no new connections,
+  in-flight requests finished, queued audit rows written — within **15 s**,
+  after which a backstop ends the process regardless.
 
 On Kubernetes that means `replicas: 1` and, for the rolling-update case,
 `strategy: Recreate` (or `maxSurge: 0`); the 45 s wait covers a surge pod that
@@ -1669,6 +1672,18 @@ messages per kind, 1 024 for mail) gets an enqueue error, which every producer
 already logs and swallows; a retry that finds no free retry slot (1 024 may be
 sleeping at once) is dead-lettered with the reason `in-process retry capacity
 exhausted`. If a lost webhook is not acceptable, run the full profile.
+
+### Audit durability
+
+AXIAM's own audit rows are written straight to SurrealDB in both profiles; the
+broker never carried them. An orderly stop — `SIGTERM`, or a lost lease — writes
+the rows the audit middleware still holds (for up to 5 s) before the process
+exits; a `SIGKILL` or an OOM kill does not. The GDPR erasure records keep their
+dead-letter fallback (`AXIAM__GDPR_AUDIT_DLQ_FILE`, on a mounted volume, plus
+the `axiam.audit.dlq` log event). What the profile changes for audit — the
+terminal rows of deliveries lost on restart, external audit ingestion — is
+reviewed path by path in
+[`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`](../../claude_dev/audit-durability-review-minimal-profile-2026-10-05.md).
 
 ### Boot refusals
 

@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **singleton lease** in the datastore (schema **v83**, `minimal_profile_lease`:
   TTL 30 s, renewed every 10 s; a boot that finds another instance's live lease
   waits up to 45 s and then refuses; an instance whose renewal finds the lease
-  taken exits non-zero; an orderly stop releases it). Two more boot refusals,
+  taken stops in order and exits non-zero; an orderly stop releases it). Two more boot refusals,
   each naming the switch and the fix: the decision-cache broadcast
   (`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true`) and **any enabled
   reactor registration in the datastore, in any tenant** (a `fail_closed` reactor
@@ -1162,6 +1162,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Audit rows survive an orderly stop, and a lost minimal-profile lease is one
+  (T23.8.2, P23W5-A1/A2).** An instance of the minimal profile whose singleton
+  lease another instance took over called `std::process::exit(1)` from the
+  renewal task, losing every audit row the audit middleware still had queued —
+  and a lease is lost exactly when the datastore was unreachable, which is when
+  that queue fills — together with any request between its write and its audit
+  row and a GDPR purge between the erasure and `gdpr.user_pseudonymized`. It now
+  stops through the `SIGTERM` path (no new connections, in-flight requests
+  finished, the cleanup task's tick finished, the audit queue written) and exits
+  non-zero within 15 s, a backstop ending it after that. Every orderly stop, in
+  both profiles, now waits up to 5 s for the audit middleware's queue
+  (`AuditMiddleware::drain`); before, the runtime's end dropped the queue even on
+  a clean `SIGTERM`. The review, path by path, is
+  `claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`; threat model
+  2.34.0 (T-444, T-445; T-405 amended; T-108 reopened).
 - **CI/harness: `fapi-conformance.yml` gets past its bring-up (D-60).** Its first run
   (37268155503) died in the bring-up and every later step would have failed too.
   `bench-up` no longer passes `docker compose up --wait` for the native-TLS

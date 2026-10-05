@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:e79506e7ae79c82d3ac093d6f7defe2e925d0bcc88fc4e0e0254bc003217be1f"
+    "x-axiam-spec-digest": "sha256:e17232bab9251d143920029b2efe662fecd12a407743781f7a81e5e22c65080b"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2569,6 +2569,168 @@
           },
           {
             "service_account": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ciba/requests/{request_id}": {
+      "get": {
+        "tags": [
+          "ciba"
+        ],
+        "summary": "Read a pending CIBA sign-in request addressed to the signed-in user.",
+        "operationId": "ciba_approval_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "description": "The request's record id, from the notification link",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pending request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaApprovalPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "Unknown, another user's, expired or already decided — one answer"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ciba/requests/{request_id}/approve": {
+      "post": {
+        "tags": [
+          "ciba"
+        ],
+        "summary": "Approve a pending CIBA sign-in request, conditional on the version read.",
+        "operationId": "ciba_approval_approve",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "description": "The request's record id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CibaDecisionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaDecisionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The request asked for an authentication class this session has not achieved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaStepUpRequired"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown, another user's, expired, already decided, or changed since read"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ciba/requests/{request_id}/deny": {
+      "post": {
+        "tags": [
+          "ciba"
+        ],
+        "summary": "Refuse a pending CIBA sign-in request, conditional on the version read.",
+        "operationId": "ciba_approval_deny",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "description": "The request's record id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CibaDecisionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaDecisionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "Unknown, another user's, expired, already decided, or changed since read"
+          }
+        },
+        "security": [
+          {
+            "session": []
           }
         ]
       }
@@ -16098,6 +16260,106 @@
           }
         }
       },
+      "CibaApprovalPage": {
+        "type": "object",
+        "description": "What the approval page shows. Never the `auth_req_id`, a token, or the\nclient's notification endpoint.",
+        "required": [
+          "request_id",
+          "version",
+          "client_id",
+          "client_name",
+          "scopes",
+          "requested_acr",
+          "expires_at"
+        ],
+        "properties": {
+          "binding_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client's `binding_message`, to compare with what the client's own\ndevice shows. Render it as **text**."
+          },
+          "client_id": {
+            "type": "string",
+            "description": "The client that asked, by `client_id`."
+          },
+          "client_name": {
+            "type": "string",
+            "description": "The client's display name (its `client_id` if the client was deleted)."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the request expires."
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The request's record id (the one in the URL)."
+          },
+          "requested_acr": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The authentication classes the request asked for that AXIAM implements\n(`urn:axiam:acr:1fa`, `urn:axiam:acr:mfa`). Empty when it asked for none."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The scopes requested, `openid` included."
+          },
+          "step_up_required": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when this session has not achieved a requested class: the class to\nstep up to before approving. `None` when approval can go ahead."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Send this back with the decision: approval and refusal are conditional on\nit (D-68), so a request changed since the page read it is not decided.",
+            "minimum": 0
+          }
+        }
+      },
+      "CibaDecisionBody": {
+        "type": "object",
+        "description": "The decision's body: the version the page read.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "[`CibaApprovalPage::version`].",
+            "minimum": 0
+          }
+        }
+      },
+      "CibaDecisionResponse": {
+        "type": "object",
+        "description": "A recorded decision.",
+        "required": [
+          "ok",
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "description": "`approved` or `denied`."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Always `true`: every other answer is an error status."
+          }
+        }
+      },
       "CibaDeliveryMode": {
         "type": "string",
         "description": "How a CIBA client learns that a request has been decided (CIBA Core §5).\n\n`push` is deliberately absent: AXIAM does not offer it, and the FAPI-CIBA\nprofile forbids it — push delivers the tokens themselves to a client\nendpoint, which makes the notification endpoint a token sink.",
@@ -16127,6 +16389,29 @@
           "ES256",
           "EdDSA"
         ]
+      },
+      "CibaStepUpRequired": {
+        "type": "object",
+        "description": "The `403` that asks the page to step up.",
+        "required": [
+          "error",
+          "message",
+          "required_acr"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "`step_up_required`."
+          },
+          "message": {
+            "type": "string",
+            "description": "A sentence for a person."
+          },
+          "required_acr": {
+            "type": "string",
+            "description": "The class the sign-in has to achieve."
+          }
+        }
       },
       "CimdPolicy": {
         "type": "object",

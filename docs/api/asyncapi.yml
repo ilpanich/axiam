@@ -378,6 +378,78 @@ channels:
       message:
         $ref: '#/components/messages/ScimPushMessage'
 
+  axiam.ciba_ping:
+    description: >-
+      Primary CIBA ping queue (G-7, T23.7.2, D-36, D-65) (queue: `axiam.ciba_ping`,
+      durable). The fourth kind of the shared outbound dispatcher, with queues of
+      its own so one kind's backlog never delays another's. A message is the
+      request's **record id** and tenant and nothing else: never the `auth_req_id`
+      or the client's `client_notification_token`, both of which stay sealed in the
+      request row. The `CibaPing` deliverer makes **one** attempt per
+      (re)delivery: it re-reads the request and the client, opens the sealed
+      credentials, and sends `POST {"auth_req_id": …}` with `Authorization: Bearer
+      <client_notification_token>` to the client's registered
+      `backchannel_client_notification_endpoint` (CIBA Core §10.2) through
+      `guarded_fetch_no_redirect` with `allow_private = false`, never following a
+      redirect. A message is queued after an approval **and** after a denial. A
+      terminal outcome (a `4xx` other than `408`/`429`, a request that is gone or
+      expired, a client that no longer receives pings, or `attempt` exhausted
+      against `AXIAM__CIBA_PING__MAX_ATTEMPTS`) dead-letters to
+      `axiam.ciba_ping.dlq`; a retryable one republishes to
+      `axiam.ciba_ping.retry` with an incremented `attempt`.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.ciba_ping
+          durable: true
+          autoDelete: false
+    subscribe:
+      summary: AXIAM's CIBA ping consumer makes one delivery attempt.
+      message:
+        $ref: '#/components/messages/CibaPingMessage'
+
+  axiam.ciba_ping.retry:
+    description: >-
+      CIBA ping retry-delay queue (queue: `axiam.ciba_ping.retry`, durable). No
+      consumer is ever attached: AXIAM publishes a `CibaPingMessage` here with a
+      per-message TTL (`base x 2^(attempt-1)` clamped to a ceiling, from
+      `AXIAM__CIBA_PING__BACKOFF_BASE_MS` and `AXIAM__CIBA_PING__BACKOFF_CEILING_MS`),
+      and when it expires RabbitMQ dead-letters it back to `axiam.ciba_ping` via
+      the default exchange.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.ciba_ping.retry
+          durable: true
+          autoDelete: false
+    publish:
+      summary: >-
+        AXIAM publishes a `CibaPingMessage` here (with TTL) to delay the next
+        attempt; no application ever subscribes to this queue.
+      message:
+        $ref: '#/components/messages/CibaPingMessage'
+
+  axiam.ciba_ping.dlq:
+    description: >-
+      Terminal dead-letter queue for CIBA pings that cannot or did not succeed
+      (queue: `axiam.ciba_ping.dlq`, durable, `x-message-ttl` of seven days, D-65).
+      **Bounded**, like the other new kinds' DLQs: a message holds a request's
+      record id, which names a person's sign-in attempt, and the broker discards
+      it after seven days. Replayable until then.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: axiam.ciba_ping.dlq
+          durable: true
+          autoDelete: false
+    publish:
+      summary: A CIBA ping was dead-lettered here; it is discarded after seven days.
+      message:
+        $ref: '#/components/messages/CibaPingMessage'
+
 components:
   messages:
     AuthzRequest:
@@ -455,6 +527,17 @@ components:
       contentType: application/json
       payload:
         $ref: '#/components/schemas/ScimPushMessage'
+
+    CibaPingMessage:
+      name: CibaPingMessage
+      title: CIBA ping delivery attempt
+      summary: >-
+        The shared outbound envelope (`axiam_core::outbound::OutboundMessage`)
+        for `kind` `ciba_ping`, carried on `axiam.ciba_ping` /
+        `axiam.ciba_ping.retry` / `axiam.ciba_ping.dlq` (T23.7.2, D-36, D-65).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/CibaPingMessage'
 
     WebhookMessage:
       name: WebhookMessage
@@ -807,6 +890,47 @@ components:
               format: uuid
               description: The AXIAM user or group id; sent downstream as `externalId`.
           additionalProperties: false
+        attempt:
+          type: integer
+          minimum: 0
+
+    CibaPingMessage:
+      type: object
+      description: >-
+        The shared outbound envelope for the CIBA ping kind. `target_id` is the
+        CIBA request's **record id**; `payload` is `null`. Neither the
+        `auth_req_id` nor the client's `client_notification_token` is ever in the
+        queue or the dead-letter queue: the deliverer reads the request and opens
+        its sealed credentials at each attempt. `attempt` is incremented on each
+        republish to `axiam.ciba_ping.retry` and checked against
+        `AXIAM__CIBA_PING__MAX_ATTEMPTS`.
+      required:
+        - kind
+        - tenant_id
+        - target_id
+        - delivery_id
+        - event_type
+        - payload
+        - attempt
+      properties:
+        kind:
+          type: string
+          enum: [ciba_ping]
+        tenant_id:
+          type: string
+          format: uuid
+        target_id:
+          type: string
+          format: uuid
+          description: The CIBA request's record id.
+        delivery_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          enum: [ciba.ping]
+        payload:
+          type: 'null'
         attempt:
           type: integer
           minimum: 0

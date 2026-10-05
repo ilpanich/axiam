@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CIBA — user approval, e-mail notification and ping mode (G-7, T23.7.2).**
+  The user's half of a backchannel authentication request, and the client's
+  notification that it was decided. **Approval API** (the device grant's user
+  routes' neighbours: a signed-in human session and the CSRF check):
+  `GET /api/v1/ciba/requests/{request_id}` returns what the page shows (client
+  name, scopes, `binding_message`, the requested authentication classes, expiry
+  and the `version` to send back — never the `auth_req_id`), and
+  `POST …/approve` / `POST …/deny` decide, conditional on that version. A request
+  that is unknown, another user's, expired, already decided or changed since it
+  was read is one `404`; a request that asks for a class the session has not
+  achieved answers `403 step_up_required` naming it (the page sends the user
+  through the existing login hop and back). Each route has its own rate-limit
+  bucket under the new `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` (default 30,
+  never moved by a profile). Both decisions are audited (`ciba.approved`,
+  `ciba.denied`: user, request, client, mode and the `acr` achieved — never the
+  `binding_message`). **Console page** `/ciba/approve?request_id=…`: shows the
+  client, scopes and binding message (as text), approves or refuses, offers the
+  step-up, and says one thing for every request that cannot be decided; a
+  signed-out visitor following the mail link is brought back to it after signing
+  in. **E-mail notification:** a stored request for a user who may sign in sends
+  one `ciba_approval` mail (built-in template, customisable per organization or
+  tenant — schema **v82** admits the kind) with the client's name, the binding
+  message and a link to the page by record id — never the `auth_req_id` or any
+  token; at most three a minute per user whatever the clients asking, so a flood
+  of `bc-authorize` requests cannot become a flood of prompts. **Ping mode:** an
+  approval or a refusal of a ping-mode request queues one message on the new
+  `ciba_ping` kind of the shared outbound dispatcher (`axiam.ciba_ping`,
+  `.retry`, `.dlq` with the seven-day TTL; retry variables
+  `AXIAM__CIBA_PING__MAX_ATTEMPTS`, `…__BACKOFF_BASE_MS`, `…__BACKOFF_CEILING_MS`,
+  defaults 5, 5000, 3600000) holding only the request's record id and tenant; the
+  deliverer re-reads the request and the client, opens the sealed credentials and
+  sends `POST {"auth_req_id": …}` with `Authorization: Bearer
+  <client_notification_token>` to the client's notification endpoint through
+  `guarded_fetch_no_redirect` (`https`, no internal address, a redirect is never
+  followed): `2xx` delivered, a redirect, 408, 429, 5xx or no answer retried,
+  any other `4xx` dead-lettered. `axiam.ciba_ping` is in AsyncAPI.
+
 - **CIBA — Client-Initiated Backchannel Authentication, core (G-7, T23.7.1).**
   OpenID Connect CIBA Core 1.0, poll and ping modes (push is not offered). A
   client that already knows whom it wants to authenticate calls the new

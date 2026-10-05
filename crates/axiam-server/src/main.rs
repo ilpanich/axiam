@@ -907,6 +907,12 @@ async fn main() -> std::io::Result<()> {
     amqp.declare_outbound_topology(OutboundKind::ScimPush)
         .await
         .expect("Failed to declare SCIM push AMQP topology");
+    // G-7 / T23.7.2: the CIBA ping kind (D-65) — `axiam.ciba_ping`, `.retry`,
+    // `.dlq` (the DLQ with the seven-day TTL: a record id names a person's
+    // sign-in attempt).
+    amqp.declare_outbound_topology(OutboundKind::CibaPing)
+        .await
+        .expect("Failed to declare CIBA ping AMQP topology");
     tracing::info!("RabbitMQ connected and queues declared");
 
     // LIVE pooled-connection reference — registered in `AppState` so handlers
@@ -1615,6 +1621,17 @@ async fn main() -> std::io::Result<()> {
     // The sweep below (`ciba_request` on `/health/jobs`) shares this store.
     let ciba_request_repo =
         axiam_db::SurrealCibaRequestRepository::new(pool.handle_for_repo(), webhook_enc_key);
+    // The ping kind's publisher (T23.7.2, D-65): one channel for the decision
+    // path's enqueue and for the consumer's TTL-delayed retries, below. A
+    // queued message is the request's record id and tenant — never the
+    // `auth_req_id` or the notification token.
+    let ciba_ping_publisher = {
+        let channel = amqp
+            .create_publisher_channel()
+            .await
+            .expect("Failed to create AMQP CIBA ping publisher channel");
+        axiam_amqp::AmqpOutboundPublisher::new(channel)
+    };
     let ciba_service = axiam_oauth2::ciba::CibaService::new(
         ciba_request_repo.clone(),
         user_repo.clone(),
@@ -1632,7 +1649,11 @@ async fn main() -> std::io::Result<()> {
             http_client.clone(),
             proof_replay_repo.clone(),
         ),
-    ));
+    ))
+    // D-65 — an approval or a refusal of a ping-mode request queues its
+    // notification on the dispatcher (the consumer is spawned with the other
+    // kinds' below).
+    .with_ping_publisher(Arc::new(ciba_ping_publisher.clone()));
 
     // B3 — token exchange (RFC 8693).
     //
@@ -2528,6 +2549,30 @@ async fn main() -> std::io::Result<()> {
         )
     };
 
+    // G-7 / T23.7.2 (D-65) — the CIBA ping kind of the same dispatcher: the
+    // deliverer re-reads the request and the client, opens the request's sealed
+    // notification credentials and POSTs through `guarded_fetch_no_redirect`.
+    // Retry env vars are `AXIAM__CIBA_PING__*`. No new loop: the same
+    // `spawn_outbound_consumer` as every other kind.
+    {
+        let mut ciba_ping_deliverers = OutboundDeliverers::new();
+        ciba_ping_deliverers
+            .register(Arc::new(axiam_oauth2::ciba_ping::CibaPingDeliverer::new(
+                ciba_request_repo.clone(),
+                oauth2_client_repo.clone(),
+            )))
+            .expect("Failed to register the CIBA ping deliverer");
+        spawn_outbound_consumer(
+            Arc::clone(&amqp),
+            OutboundKind::CibaPing,
+            ciba_ping_deliverers,
+            ciba_ping_publisher.clone(),
+            audit_repo.clone(),
+            OutboundRetryConfig::from_env_for(OutboundKind::CibaPing),
+        );
+        tracing::info!("CIBA ping consumer spawned");
+    }
+
     // Spawn AMQP mail consumer on a background task (D-14).
     // Only spawned when AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is present; otherwise
     // mail delivery is disabled and a warning was logged at startup (T-5-key-absent).
@@ -3108,9 +3153,15 @@ async fn main() -> std::io::Result<()> {
             token_service: token_service.clone(),
             device_authorization_service: device_authorization_service.clone(),
             ciba_service: ciba_service.clone(),
-            // G-7 — nobody is notified until T23.7.2 wires the e-mail
-            // notifier; the request waits on the identity pages.
-            ciba_notifier: Arc::new(axiam_core::models::ciba::NoopCibaUserNotifier),
+            // G-7 (T23.7.2) — a stored request reaches its user as one mail on
+            // the mail queue, linking to the approval page under the issuer's
+            // origin; the caller throttles it to three a minute per user.
+            ciba_notifier: Arc::new(axiam_oauth2::ciba_notifier::CibaMailNotifier::new(
+                user_repo.clone(),
+                tenant_repo.clone(),
+                mail_outbound_publisher.clone(),
+                &config.auth.oauth2_issuer_url,
+            )),
             token_exchange_service: token_exchange_service.clone(),
             par_service: par_service.clone(),
             // X2 — UMA 2.0. The repository rather than an assembled service,

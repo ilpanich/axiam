@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta17";
-export const API_OPERATION_COUNT = 273;
-export const API_PATH_COUNT = 186;
+export const API_OPERATION_COUNT = 276;
+export const API_PATH_COUNT = 189;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -187,6 +187,21 @@ export const API_INDEX: ApiGroup[] = [
     "path": "/api/v1/auth/webauthn/setup/register/start",
     "summary": "Begin registering a passkey or security key as the **first** factor, during a forced first-login enrolment.",
     "public": true
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/ciba/requests/{request_id}",
+    "summary": "Read a pending CIBA sign-in request addressed to the signed-in user."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/ciba/requests/{request_id}/approve",
+    "summary": "Approve a pending CIBA sign-in request, conditional on the version read."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/ciba/requests/{request_id}/deny",
+    "summary": "Refuse a pending CIBA sign-in request, conditional on the version read."
    },
    {
     "method": "POST",

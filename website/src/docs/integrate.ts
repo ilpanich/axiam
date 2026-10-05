@@ -2084,6 +2084,31 @@ w.WriteHeader(http.StatusOK)`,
         ],
       },
       {
+        type: "p",
+        text: "CIBA ping notifications (a decided backchannel authentication request, told to a client registered for ping mode) are the fourth kind, with queues of their own (`axiam.ciba_ping`, `.retry`, `.dlq`) and their own variables. A queued message holds only the request's record id and tenant — never the `auth_req_id` or the client's notification token, which stay sealed in the request — and the dead-letter queue discards after seven days. The ping goes to the endpoint the client registered, over `https`, without following a redirect; a `4xx` other than 408 and 429 is dead-lettered, because the endpoint or the token is wrong until someone fixes it.",
+      },
+      {
+        type: "table",
+        headers: ["Config key", "Default", "Meaning"],
+        rows: [
+          [
+            "AXIAM__CIBA_PING__MAX_ATTEMPTS",
+            "`5`",
+            "Total attempts per ping before it is dead-lettered; the first attempt counts as one.",
+          ],
+          [
+            "AXIAM__CIBA_PING__BACKOFF_BASE_MS",
+            "`5000`",
+            "Delay before the first retry of a ping.",
+          ],
+          [
+            "AXIAM__CIBA_PING__BACKOFF_CEILING_MS",
+            "`3600000`",
+            "Upper bound on any single ping retry delay — one hour.",
+          ],
+        ],
+      },
+      {
         type: "warn",
         text: "A webhook also carries a per-endpoint `retry_policy` (`max_retries`, `initial_delay_secs`, `backoff_multiplier`), which is validated and stored — `max_retries` at most 10, `initial_delay_secs` between 1 and 3600, `backoff_multiplier` between 0 and 10. The delivery consumer does **not** read it: the schedule that runs is the deployment-wide one above. Treat the field as recorded intent, not as a per-endpoint control.",
       },

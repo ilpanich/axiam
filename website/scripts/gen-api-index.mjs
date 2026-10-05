@@ -39,7 +39,7 @@ const DOMAINS = [
     label: "Authentication & sessions",
     blurb:
       "Signing in, keeping a session alive, the account lifecycle, and the WebAuthn ceremonies.",
-    tags: ["auth", "webauthn", "webauthn-policy", "mds", "device"],
+    tags: ["auth", "webauthn", "webauthn-policy", "mds", "device", "ciba"],
   },
   {
     label: "OAuth2 & OpenID Connect",

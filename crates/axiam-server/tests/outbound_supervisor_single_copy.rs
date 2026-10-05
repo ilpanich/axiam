@@ -21,13 +21,16 @@ fn code_occurrences(needle: &str) -> usize {
 fn every_kind_is_spawned_through_the_one_function() {
     assert_eq!(
         code_occurrences("spawn_outbound_consumer("),
-        3,
-        "one call per kind: webhook, SSF push and SCIM push"
+        4,
+        "one call per kind: webhook, SSF push, SCIM push and CIBA ping"
     );
     assert!(MAIN.contains("OutboundKind::Webhook,\n            outbound_deliverers,"));
     assert!(MAIN.contains("OutboundKind::SsfPush,\n            ssf_deliverers,"));
     assert!(MAIN.contains("OutboundKind::ScimPush,\n            scim_deliverers,"));
     assert!(MAIN.contains("OutboundRetryConfig::from_env_for(OutboundKind::ScimPush)"));
+    // T23.7.2 (D-65): the fourth kind is one more call, not a fourth loop.
+    assert!(MAIN.contains("OutboundKind::CibaPing,\n            ciba_ping_deliverers,"));
+    assert!(MAIN.contains("OutboundRetryConfig::from_env_for(OutboundKind::CibaPing)"));
 }
 
 #[test]
@@ -39,6 +42,26 @@ fn the_scim_push_topology_is_declared_beside_the_others() {
     assert_eq!(
         code_occurrences("declare_outbound_topology(OutboundKind::SsfPush)"),
         1
+    );
+}
+
+/// T23.7.2 (D-65): the CIBA ping topology is declared beside the others, and the
+/// decision path's publisher, the mail notifier and the consumer are all wired
+/// in `main` — a deployment that forgot one would record decisions and tell
+/// nobody.
+#[test]
+fn the_ciba_ping_kind_and_the_mail_notifier_are_wired() {
+    assert_eq!(
+        code_occurrences("declare_outbound_topology(OutboundKind::CibaPing)"),
+        1
+    );
+    assert_eq!(code_occurrences(".with_ping_publisher("), 1);
+    assert_eq!(code_occurrences("CibaPingDeliverer::new("), 1);
+    assert_eq!(code_occurrences("CibaMailNotifier::new("), 1);
+    assert_eq!(
+        code_occurrences("NoopCibaUserNotifier"),
+        0,
+        "the no-op notifier is no longer in the composition root"
     );
 }
 

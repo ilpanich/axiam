@@ -1382,6 +1382,34 @@ Sonnet 5.5 for delivery plumbing and docs.
 
 ### G-6 — Outbound SCIM provisioning — **P2**
 
+> **EXECUTED (partly) — G-6, W5: T23.6.1, 2026-10-05** (`4bd736c`, `a1aaf30`,
+> `03d7500`, `acd256c`; Sonnet 5.5). The dispatcher fold, the kind and the store
+> per **D-57**. The two copies of the consumer supervisor loop in `main.rs` are
+> one `axiam_amqp::spawn_outbound_consumer` (P23W4-08, ilpanich/axiam#537; same
+> 1 s → 30 s backoff, never exits the process, the kind slug in every log line),
+> and a source guard in `axiam-server`'s tests fails if a copy reappears.
+> `OutboundKind::ScimPush` (slug `scim_push`): its own sibling topology, the DLQ
+> with the seven-day `x-message-ttl`, pinned byte for byte; the webhook topology
+> pins pass unchanged. `axiam_core::models::scim_target` (`ScimTarget` with no
+> credential member, bearer or OAuth2 client-credentials auth, scope, `push_groups`,
+> `user_name_from`, `deprovision`; `ScimTargetLink`; `ScimTargetState`) and three
+> SurrealDB repositories: the credential sealed under `pki_encryption_key` in
+> separate columns, write-only, fail closed without the key; the update
+> conditional on the `updated_at` read (`409`), and **D-57's URL binding**
+> (changing `base_url` on a bearer target, `token_url` on a client-credentials
+> target or the auth kind without the credential is refused); links unique on
+> both axes; state written only by atomic statements; `claim_reconciliation` with
+> one winner. Schema **v79** (`scim_target`, `scim_target_link`,
+> `scim_target_state`); tenant deletion removes the three. Tests: 29 repository
+> tests (concurrent dead-letter counts and claims among them), 6 model tests, 3
+> schema tests, 2 topology pins and a backoff-schedule test, the supervisor guard.
+>
+> What the plan did not anticipate. The shared write-conflict retry (4 attempts)
+> lost increments when a dozen deliveries hit one state row, so state writes
+> retry up to 32 times. The claim stamps `last_reconciled_at` at the start of a
+> run, so a run that dies mid-way waits for the next interval; the on-demand
+> route uses the run's own budget as its interval.
+
 **Target.** A tenant can register downstream SCIM 2.0 service providers and
 AXIAM pushes user and group lifecycle changes to them, with reconciliation.
 

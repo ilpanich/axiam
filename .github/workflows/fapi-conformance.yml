@@ -212,6 +212,13 @@ jobs:
           # RFC 8705 §5 aliases. Exporting AXIAM__SERVER__TLS__CLIENT_CA_PATH
           # from here, as this step once did, reached nothing: compose forwards
           # only the names its files list, and the overlay pinned the benchmark CA.
+          # A per-run administrator password, masked in the log and handed to
+          # the seeder and the registrar through GITHUB_ENV, so no password
+          # literal lives in this workflow.
+          BENCH_ADMIN_PASSWORD="Cf-$(openssl rand -hex 16)-Aa1!"
+          echo "::add-mask::${BENCH_ADMIN_PASSWORD}"
+          echo "BENCH_ADMIN_PASSWORD=${BENCH_ADMIN_PASSWORD}" >> "$GITHUB_ENV"
+          export BENCH_ADMIN_PASSWORD
           cd benchmarks
           just target=axiam profile=p3-mtls build="${BUILD_FROM_SOURCE:-0}" bench-up
           # Bootstraps the organization and the administrator the registrar
@@ -226,8 +233,9 @@ jobs:
           # The seeder's administrator. A bearer token cannot be provisioned in
           # advance for a deployment that did not exist until this job started,
           # so the registrar signs in with a session instead (lib-admin.sh); the
-          # password is the seeder's, which is also what created the account.
-          AXIAM_ADMIN_PASSWORD: ${{ env.BENCH_ADMIN_PASSWORD || 'Bench@Admin123!' }}
+          # password is the per-run one the bring-up step generated and the
+          # seeder used to create the account.
+          AXIAM_ADMIN_PASSWORD: ${{ env.BENCH_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
           # All five clients are created with profile: "fapi2" and nothing else

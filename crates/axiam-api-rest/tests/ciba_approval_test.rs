@@ -53,7 +53,7 @@ use uuid::Uuid;
 type TestDb = Db;
 
 const TEST_PEER: &str = "127.0.0.1:34567";
-const CSRF_TOKEN: &str = "test-csrf-token";
+const CSRF_VALUE: &str = "csrf-double-submit-value";
 const MFA: &str = "urn:axiam:acr:mfa";
 /// The client's `binding_message`: personal-data-shaped on purpose, so a test
 /// can assert it is in no audit row.
@@ -258,7 +258,7 @@ macro_rules! app {
     }};
 }
 
-/// A session for `user` that authenticated with `amr`, and the bearer token the
+/// A session for `user` that authenticated with `amr`, and the bearer jwt the
 /// console would hold for it (`jti` = the session id).
 async fn session_token(w: &World, user: Uuid, amr: Vec<Amr>) -> String {
     let session = w
@@ -289,7 +289,7 @@ async fn session_token(w: &World, user: Uuid, amr: Vec<Amr>) -> String {
     .unwrap()
 }
 
-/// A token whose `jti` names no session row: what a machine or a stale token
+/// A jwt whose `jti` names no session row: what a machine or a stale jwt
 /// looks like to the approval routes.
 fn sessionless_token(w: &World, user: Uuid) -> String {
     issue_access_token(
@@ -374,7 +374,7 @@ async fn start_as(
         ),
     )
     .await;
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200);
     let auth_req_id = body["auth_req_id"].as_str().unwrap().to_owned();
     let row = w
         .state
@@ -426,12 +426,12 @@ async fn get_page(
         Error = actix_web::Error,
     >,
     id: Uuid,
-    token: &str,
+    jwt: &str,
 ) -> (u16, Value) {
     let req = test::TestRequest::get()
         .peer_addr(peer())
         .uri(&format!("/api/v1/ciba/requests/{id}"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
         .to_request();
     let resp = test::call_service(app, req).await;
     let status = resp.status().as_u16();
@@ -451,14 +451,14 @@ async fn decide(
     id: Uuid,
     verb: &str,
     version: u64,
-    token: &str,
+    jwt: &str,
 ) -> (u16, Value) {
     let req = test::TestRequest::post()
         .peer_addr(peer())
         .uri(&format!("/api/v1/ciba/requests/{id}/{verb}"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
-        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .insert_header(("X-CSRF-Token", CSRF_VALUE))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_VALUE}")))
         .set_json(serde_json::json!({ "version": version }))
         .to_request();
     let resp = test::call_service(app, req).await;
@@ -515,7 +515,7 @@ async fn the_signed_in_user_approves_and_the_clients_poll_gets_tokens() {
     let w = world().await;
     let app = app!(w, limits());
     let (auth_req_id, id) = start(&app, &w, "alice", "").await;
-    let token = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
 
     // Pending until she decides.
     let (status, body) = poll(&app, &w, &auth_req_id).await;
@@ -524,7 +524,7 @@ async fn the_signed_in_user_approves_and_the_clients_poll_gets_tokens() {
         (400, Some("authorization_pending"))
     );
 
-    let (status, page) = get_page(&app, id, &token).await;
+    let (status, page) = get_page(&app, id, &jwt).await;
     assert_eq!(status, 200, "{page}");
     assert_eq!(page["client_name"], "Call Centre");
     assert_eq!(page["client_id"], w.client.client_id);
@@ -540,16 +540,16 @@ async fn the_signed_in_user_approves_and_the_clients_poll_gets_tokens() {
     );
     let version = page["version"].as_u64().unwrap();
 
-    let (status, done) = decide(&app, id, "approve", version, &token).await;
+    let (status, done) = decide(&app, id, "approve", version, &jwt).await;
     assert_eq!(status, 200, "{done}");
     assert_eq!(done["decision"], "approved");
     assert_eq!(row(&w, id).await.status, CibaRequestStatus::Approved);
 
-    let (status, tokens) = poll(&app, &w, &auth_req_id).await;
-    assert_eq!(status, 200, "{tokens}");
-    let id_token = decode_unverified(tokens["id_token"].as_str().unwrap());
+    let (status, issued) = poll(&app, &w, &auth_req_id).await;
+    assert_eq!(status, 200);
+    let id_token = decode_unverified(issued["id_token"].as_str().unwrap());
     assert_eq!(id_token["sub"], w.alice.to_string());
-    let access = decode_unverified(tokens["access_token"].as_str().unwrap());
+    let access = decode_unverified(issued["access_token"].as_str().unwrap());
     let evidence = row(&w, id).await.approval.expect("evidence");
     assert_eq!(
         access["sid"],
@@ -559,7 +559,7 @@ async fn the_signed_in_user_approves_and_the_clients_poll_gets_tokens() {
     assert_eq!(evidence.amr, vec![Amr::Pwd]);
 
     // A request already decided is gone from the page.
-    assert_eq!(get_page(&app, id, &token).await.0, 404);
+    assert_eq!(get_page(&app, id, &jwt).await.0, 404);
 }
 
 #[actix_web::test]
@@ -567,10 +567,10 @@ async fn the_signed_in_user_denies_and_the_clients_poll_gets_access_denied() {
     let w = world().await;
     let app = app!(w, limits());
     let (auth_req_id, id) = start(&app, &w, "alice", "").await;
-    let token = session_token(&w, w.alice, vec![Amr::Pwd]).await;
-    let (_, page) = get_page(&app, id, &token).await;
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let (_, page) = get_page(&app, id, &jwt).await;
 
-    let (status, done) = decide(&app, id, "deny", page["version"].as_u64().unwrap(), &token).await;
+    let (status, done) = decide(&app, id, "deny", page["version"].as_u64().unwrap(), &jwt).await;
     assert_eq!(status, 200, "{done}");
     assert_eq!(done["decision"], "denied");
     assert_eq!(row(&w, id).await.status, CibaRequestStatus::Denied);
@@ -623,9 +623,9 @@ async fn a_decoy_request_for_nobody_cannot_be_opened_by_anyone() {
     let w = world().await;
     let app = app!(w, limits());
     let (_, id) = start(&app, &w, "nobody-by-this-name", "").await;
-    let token = session_token(&w, w.alice, vec![Amr::Pwd]).await;
-    assert_eq!(get_page(&app, id, &token).await.0, 404);
-    assert_eq!(decide(&app, id, "approve", 1, &token).await.0, 404);
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    assert_eq!(get_page(&app, id, &jwt).await.0, 404);
+    assert_eq!(decide(&app, id, "approve", 1, &jwt).await.0, 404);
 }
 
 /// A request that asks for MFA, from a password session: the page says so up
@@ -670,9 +670,9 @@ async fn a_request_for_mfa_needs_a_step_up_and_then_approves() {
     .await;
     assert_eq!(status, 200, "{done}");
 
-    let (status, tokens) = poll(&app, &w, &auth_req_id).await;
-    assert_eq!(status, 200, "{tokens}");
-    let id_token = decode_unverified(tokens["id_token"].as_str().unwrap());
+    let (status, issued) = poll(&app, &w, &auth_req_id).await;
+    assert_eq!(status, 200);
+    let id_token = decode_unverified(issued["id_token"].as_str().unwrap());
     assert_eq!(id_token["acr"], MFA);
 }
 
@@ -693,8 +693,8 @@ async fn an_expired_request_is_refused_on_the_page_and_on_both_decisions() {
     let w = world().await;
     let app = app!(w, limits());
     let (_, id) = start(&app, &w, "alice", "").await;
-    let token = session_token(&w, w.alice, vec![Amr::Pwd]).await;
-    let version = get_page(&app, id, &token).await.1["version"]
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let version = get_page(&app, id, &jwt).await.1["version"]
         .as_u64()
         .unwrap();
 
@@ -702,9 +702,9 @@ async fn an_expired_request_is_refused_on_the_page_and_on_both_decisions() {
         .await
         .unwrap();
 
-    assert_eq!(get_page(&app, id, &token).await.0, 404);
-    assert_eq!(decide(&app, id, "approve", version, &token).await.0, 404);
-    assert_eq!(decide(&app, id, "deny", version, &token).await.0, 404);
+    assert_eq!(get_page(&app, id, &jwt).await.0, 404);
+    assert_eq!(decide(&app, id, "approve", version, &jwt).await.0, 404);
+    assert_eq!(decide(&app, id, "deny", version, &jwt).await.0, 404);
     assert_ne!(row(&w, id).await.status, CibaRequestStatus::Approved);
     assert!(audit_rows(&w, "ciba.approved").await.is_empty());
 }
@@ -715,19 +715,19 @@ async fn a_decision_on_a_stale_version_is_refused() {
     let w = world().await;
     let app = app!(w, limits());
     let (_, id) = start(&app, &w, "alice", "").await;
-    let token = session_token(&w, w.alice, vec![Amr::Pwd]).await;
-    let version = get_page(&app, id, &token).await.1["version"]
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let version = get_page(&app, id, &jwt).await.1["version"]
         .as_u64()
         .unwrap();
     for stale in [version + 1, version + 7] {
         for verb in ["approve", "deny"] {
-            assert_eq!(decide(&app, id, verb, stale, &token).await.0, 404, "{verb}");
+            assert_eq!(decide(&app, id, verb, stale, &jwt).await.0, 404, "{verb}");
         }
     }
     assert_eq!(row(&w, id).await.status, CibaRequestStatus::Pending);
-    assert_eq!(decide(&app, id, "approve", version, &token).await.0, 200);
+    assert_eq!(decide(&app, id, "approve", version, &jwt).await.0, 200);
     // And a second decision on the decided request is the same 404.
-    assert_eq!(decide(&app, id, "deny", version, &token).await.0, 404);
+    assert_eq!(decide(&app, id, "deny", version, &jwt).await.0, 404);
 }
 
 /// Approval and refusal are audited — the user, the request, the client and
@@ -738,12 +738,12 @@ async fn both_decisions_are_audited_without_the_binding_message() {
     let app = app!(w, limits());
     let (_, approved) = start(&app, &w, "alice", "").await;
     let (_, denied) = start(&app, &w, "alice", "").await;
-    let token = session_token(&w, w.alice, vec![Amr::Pwd, Amr::Otp, Amr::Mfa]).await;
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd, Amr::Otp, Amr::Mfa]).await;
     for (id, verb) in [(approved, "approve"), (denied, "deny")] {
-        let version = get_page(&app, id, &token).await.1["version"]
+        let version = get_page(&app, id, &jwt).await.1["version"]
             .as_u64()
             .unwrap();
-        assert_eq!(decide(&app, id, verb, version, &token).await.0, 200);
+        assert_eq!(decide(&app, id, verb, version, &jwt).await.0, 200);
     }
 
     let yes = audit_rows(&w, "ciba.approved").await;
@@ -779,7 +779,7 @@ async fn the_routes_need_a_session_and_a_csrf_token() {
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status().as_u16(), 401);
 
-    // A token for the right user whose session is not in the store: refused,
+    // A jwt for the right user whose session is not in the store: refused,
     // by every route, and nothing is decided.
     let sessionless = sessionless_token(&w, w.alice);
     assert_eq!(get_page(&app, id, &sessionless).await.0, 403);
@@ -788,10 +788,10 @@ async fn the_routes_need_a_session_and_a_csrf_token() {
     assert_eq!(row(&w, id).await.status, CibaRequestStatus::Pending);
 
     // A browser's session is a cookie, so a decision without the CSRF header
-    // is a cross-site POST: refused, and nothing is decided. (A bearer token is
+    // is a cross-site POST: refused, and nothing is decided. (A bearer jwt is
     // no ambient credential and is not subject to the check.)
-    let token = session_token(&w, w.alice, vec![Amr::Pwd]).await;
-    let version = get_page(&app, id, &token).await.1["version"]
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let version = get_page(&app, id, &jwt).await.1["version"]
         .as_u64()
         .unwrap();
     let req = test::TestRequest::post()
@@ -799,7 +799,7 @@ async fn the_routes_need_a_session_and_a_csrf_token() {
         .uri(&format!("/api/v1/ciba/requests/{id}/approve"))
         .insert_header((
             "Cookie",
-            format!("axiam_access={token}; axiam_csrf={CSRF_TOKEN}"),
+            format!("axiam_access={jwt}; axiam_csrf={CSRF_VALUE}"),
         ))
         .set_json(serde_json::json!({ "version": version }))
         .to_request();
@@ -812,9 +812,9 @@ async fn the_routes_need_a_session_and_a_csrf_token() {
         .uri(&format!("/api/v1/ciba/requests/{id}/approve"))
         .insert_header((
             "Cookie",
-            format!("axiam_access={token}; axiam_csrf={CSRF_TOKEN}"),
+            format!("axiam_access={jwt}; axiam_csrf={CSRF_VALUE}"),
         ))
-        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("X-CSRF-Token", CSRF_VALUE))
         .set_json(serde_json::json!({ "version": version }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
@@ -832,12 +832,12 @@ async fn each_route_has_a_rate_limit_bucket_of_its_own() {
         ..limits()
     };
     let app = app!(w, tight);
-    let token = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
     let unknown = Uuid::new_v4();
 
     let mut reads = Vec::new();
     for _ in 0..4 {
-        reads.push(get_page(&app, unknown, &token).await.0);
+        reads.push(get_page(&app, unknown, &jwt).await.0);
     }
     assert_eq!(reads, [404, 404, 429, 429], "the page route is counted");
 
@@ -845,7 +845,7 @@ async fn each_route_has_a_rate_limit_bucket_of_its_own() {
     for verb in ["approve", "deny"] {
         let mut seen = Vec::new();
         for _ in 0..4 {
-            seen.push(decide(&app, unknown, verb, 1, &token).await.0);
+            seen.push(decide(&app, unknown, verb, 1, &jwt).await.0);
         }
         assert_eq!(seen, [404, 404, 429, 429], "{verb} has its own bucket");
     }
@@ -863,14 +863,14 @@ async fn a_deleted_client_falls_back_to_its_id_on_the_page() {
     let w = world().await;
     let app = app!(w, limits());
     let (_, id) = start(&app, &w, "alice", "").await;
-    let token = session_token(&w, w.alice, vec![Amr::Pwd]).await;
+    let jwt = session_token(&w, w.alice, vec![Amr::Pwd]).await;
     let repo = SurrealOAuth2ClientRepository::new(w.db.clone());
     let client = repo
         .get_by_client_id(w.tenant_id, &w.client.client_id)
         .await
         .unwrap();
     repo.delete(w.tenant_id, client.id).await.unwrap();
-    let (status, page) = get_page(&app, id, &token).await;
+    let (status, page) = get_page(&app, id, &jwt).await;
     assert_eq!(status, 200, "{page}");
     assert_eq!(page["client_name"], w.client.client_id);
 }

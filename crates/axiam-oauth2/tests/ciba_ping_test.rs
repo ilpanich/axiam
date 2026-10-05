@@ -58,7 +58,7 @@ fn sealing() -> [u8; 32] {
 }
 
 /// A token as a client would choose one: long, visible ASCII, run-time random.
-fn fresh_token() -> String {
+fn fresh_bearer() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
@@ -321,13 +321,13 @@ async fn world_with(publisher: RecordingPublisher, endpoint: &str) -> World {
 struct Pinged {
     request: CibaRequest,
     auth_req_id: String,
-    token: String,
+    bearer: String,
 }
 
 impl World {
     async fn ping_request(&self, mode: CibaDeliveryMode) -> Pinged {
         let auth_req_id = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let token = fresh_token();
+        let bearer = fresh_bearer();
         let request = self
             .requests
             .create(CreateCibaRequest {
@@ -342,7 +342,7 @@ impl World {
                 delivery_mode: mode,
                 ping: (mode == CibaDeliveryMode::Ping).then(|| CibaPingCredentials {
                     auth_req_id: auth_req_id.clone(),
-                    client_notification_token: token.clone(),
+                    client_notification_token: bearer.clone(),
                 }),
                 interval_secs: 5,
                 expires_at: Utc::now() + Duration::seconds(300),
@@ -352,7 +352,7 @@ impl World {
         Pinged {
             request,
             auth_req_id,
-            token,
+            bearer,
         }
     }
 
@@ -442,7 +442,7 @@ async fn a_decision_queues_a_message_with_nothing_secret_in_it() {
         assert!(message.payload.is_null(), "the payload is empty");
         let wire = serde_json::to_string(message).unwrap();
         assert!(
-            !wire.contains(&pinged.auth_req_id) && !wire.contains(&pinged.token),
+            !wire.contains(&pinged.auth_req_id) && !wire.contains(&pinged.bearer),
             "no credential is in the queued message"
         );
     }
@@ -539,7 +539,7 @@ async fn the_ping_after_an_approval_carries_the_bearer_token_and_the_auth_req_id
     assert_eq!(seen[0].method, "POST");
     assert_eq!(
         seen[0].headers.get("authorization").map(String::as_str),
-        Some(format!("Bearer {}", pinged.token).as_str())
+        Some(format!("Bearer {}", pinged.bearer).as_str())
     );
     assert_eq!(
         seen[0].headers.get("content-type").map(String::as_str),
@@ -568,7 +568,7 @@ async fn the_ping_after_a_denial_is_the_same_ping() {
     assert_eq!(seen.len(), 1);
     assert_eq!(
         seen[0].headers.get("authorization").map(String::as_str),
-        Some(format!("Bearer {}", pinged.token).as_str())
+        Some(format!("Bearer {}", pinged.bearer).as_str())
     );
     let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
     assert_eq!(
@@ -733,7 +733,7 @@ async fn no_reason_carries_a_credential_or_the_endpoint() {
         reasons.push(reason_of(&w.attempt(&pinged.request).await).to_owned());
     }
     for reason in reasons {
-        assert!(!reason.contains(&pinged.token), "{reason}");
+        assert!(!reason.contains(&pinged.bearer), "{reason}");
         assert!(!reason.contains(&pinged.auth_req_id), "{reason}");
         assert!(!reason.contains("127.0.0.1"), "{reason}");
     }

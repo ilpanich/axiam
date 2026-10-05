@@ -206,8 +206,10 @@ pub type DeviceAuthorizationServiceT<C> = DeviceAuthorizationService<
 /// G-7 — the CIBA service: `bc-authorize` and the approval API T23.7.2's
 /// identity pages call. The token endpoint redeems through
 /// `TokenService::exchange_ciba`, handed this service's request store.
-pub type CibaServiceT<C> =
-    axiam_oauth2::ciba::CibaService<axiam_db::SurrealCibaRequestRepository<C>, SurrealUserRepository<C>>;
+pub type CibaServiceT<C> = axiam_oauth2::ciba::CibaService<
+    axiam_db::SurrealCibaRequestRepository<C>,
+    SurrealUserRepository<C>,
+>;
 
 /// B3 — RFC 8693 token exchange. Needs only the tenant repository: the
 /// exchanging client is authenticated by `TokenService::authenticate_client`

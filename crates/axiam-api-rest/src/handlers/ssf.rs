@@ -239,7 +239,6 @@ fn extract_receiver(req: &HttpRequest) -> Result<SsfReceiverToken, AxiamApiError
         return Err(forbidden(
             "the SSF stream management API takes an OAuth2 client's client-credentials token",
         ));
-        ciba: Default::default(),
     }
     if !claims
         .scope

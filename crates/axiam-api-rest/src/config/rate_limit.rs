@@ -180,6 +180,8 @@ pub struct MachineLimitPreset {
     pub authz_check_per_min: u32,
     /// `POST /api/v1/auth/device` per minute per IP.
     pub device_login_per_min: u32,
+    /// `POST /oauth2/bc-authorize` per minute per bucket (G-7).
+    pub bc_authorize_per_min: u32,
     /// gRPC `AuthorizationService` per second per IP — applied to
     /// `axiam_api_grpc::GrpcConfig::grpc_authz_per_sec` by the composition
     /// root (`axiam-server::main`). Kept here so the whole family has one
@@ -203,6 +205,8 @@ pub const ENV_DEVICE_LOGIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_
 pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` — B5, never preset.
 pub const ENV_END_SESSION_PER_MIN: &str = "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN";
+/// `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` — G-7 (CIBA), preset.
+pub const ENV_BC_AUTHORIZE_PER_MIN: &str = "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__PAR_PER_MIN` — B5.
 pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DCR_PER_MIN` — T21.4, never preset.
@@ -278,6 +282,12 @@ impl RateLimitProfile {
                 revoke_per_min: 600,
                 authz_check_per_min: 6_000,
                 device_login_per_min: 300,
+                // G-7: 10/s per client, the token endpoint's gateway figure —
+                // a CIBA client's initiation precedes its token requests, so
+                // it can never need more. What protects a *user* from a flood
+                // of sign-in requests is the per-user notification bucket,
+                // which no preset moves.
+                bc_authorize_per_min: 600,
                 grpc_authz_per_sec: 1_000,
             }),
             // Private-network sizing: 6 000/min token = 100/s per client
@@ -292,6 +302,7 @@ impl RateLimitProfile {
                 revoke_per_min: 6_000,
                 authz_check_per_min: 60_000,
                 device_login_per_min: 3_000,
+                bc_authorize_per_min: 6_000,
                 grpc_authz_per_sec: 5_000,
             }),
         }
@@ -451,6 +462,22 @@ pub struct RateLimitConfig {
     /// there is a real identity to key on, and per-IP would collapse a whole
     /// deployment behind one NAT into a single bucket.
     pub par_per_min: u32,
+    /// Max `POST /oauth2/bc-authorize` requests per minute per bucket
+    /// (default: 60 — G-7, CIBA).
+    ///
+    /// Its own bucket, never the token endpoint's: every accepted request
+    /// **allocates state** (a pending request row) and may push a sign-in
+    /// request at a human, so a flood here costs storage and a user's
+    /// attention rather than CPU. Counted three ways — the per-IP governor and
+    /// the shared counter on the route (keyed like `/oauth2/token`, honouring
+    /// `AXIAM__RATE_LIMIT__KEY`, since the endpoint carries a `client_id`), and
+    /// a per-client bucket inside the handler after authentication, as PAR
+    /// does. The CIBA grant's token requests are counted by `token_per_min`
+    /// and by each request's own polling interval. A non-default profile
+    /// presets it ([`MachineLimitPreset::bc_authorize_per_min`]); the
+    /// notification a request sends a user is throttled per user by a fixed
+    /// bucket no preset moves (`axiam_oauth2::ciba`'s notification limit).
+    pub bc_authorize_per_min: u32,
     /// Max `/oauth2/end_session` requests per minute per IP (default: 30 —
     /// B5). Deliberately NOT part of [`MachineLimitPreset`]: like the other
     /// human-driven endpoints this is not sized from capacity.
@@ -697,6 +724,9 @@ impl Default for RateLimitConfig {
             uma_perm_per_min: 120,
             uma_ticket_per_min: 120,
             par_per_min: 120,
+            // G-7 — half the token endpoint's: an initiation is rarer than
+            // the token requests that follow it.
+            bc_authorize_per_min: 60,
             end_session_per_min: 30,
             // T21.4 — see the field docs. The smallest limit here, because
             // this is the only unauthenticated *write* endpoint.
@@ -797,6 +827,11 @@ impl RateLimitConfig {
                 ENV_DEVICE_LOGIN_PER_MIN,
                 &mut self.device_login_per_min,
                 preset.device_login_per_min,
+            ),
+            (
+                ENV_BC_AUTHORIZE_PER_MIN,
+                &mut self.bc_authorize_per_min,
+                preset.bc_authorize_per_min,
             ),
         ] {
             if is_set(env) {
@@ -912,6 +947,10 @@ impl RateLimitConfig {
             "uma_ticket_per_min must be >= 1"
         );
         assert!(self.par_per_min >= 1, "par_per_min must be >= 1");
+        assert!(
+            self.bc_authorize_per_min >= 1,
+            "bc_authorize_per_min must be >= 1"
+        );
         assert!(
             self.end_session_per_min >= 1,
             "end_session_per_min must be >= 1"
@@ -1062,6 +1101,7 @@ mod tests {
             (ENV_REVOKE_PER_MIN, d.revoke_per_min),
             (ENV_AUTHZ_CHECK_PER_MIN, d.authz_check_per_min),
             (ENV_DEVICE_LOGIN_PER_MIN, d.device_login_per_min),
+            (ENV_BC_AUTHORIZE_PER_MIN, d.bc_authorize_per_min),
             (
                 ENV_DEVICE_AUTHORIZATION_PER_MIN,
                 d.device_authorization_per_min,
@@ -1112,6 +1152,7 @@ mod tests {
                 (ENV_REVOKE_PER_MIN, cfg.revoke_per_min),
                 (ENV_AUTHZ_CHECK_PER_MIN, cfg.authz_check_per_min),
                 (ENV_DEVICE_LOGIN_PER_MIN, cfg.device_login_per_min),
+                (ENV_BC_AUTHORIZE_PER_MIN, cfg.bc_authorize_per_min),
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),

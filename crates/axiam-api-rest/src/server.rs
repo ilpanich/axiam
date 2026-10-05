@@ -1975,6 +1975,36 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::post().to(handlers::oauth2::device_authorization::<C>)),
             )
+            // G-7 / CIBA Core §7 — the backchannel authentication endpoint.
+            //
+            // Its own bucket and preset (`bc_authorize_per_min`), never the
+            // token endpoint's: every accepted request allocates a pending
+            // request and may push a sign-in prompt at a person, so a flood
+            // here costs storage and attention, and sharing `/token`'s bucket
+            // would let ordinary token traffic pay for it or mask it. Keyed
+            // like `/token` (it carries a `client_id` in the form or the Basic
+            // header, so `AXIAM__RATE_LIMIT__KEY` applies), with a per-client
+            // bucket inside the handler after authentication, as PAR has. Plan
+            // §7 rule 6: the limiter that forgets this route is the Keycloak
+            // 26.7 lesson, which `ciba_test` pins with a 429.
+            .service(
+                web::resource("/bc-authorize")
+                    .wrap(build_client_aware_governor(
+                        rate_limit_cfg.bc_authorize_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
+                        "oauth2_bc_authorize",
+                        rate_limit_cfg.bc_authorize_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    // A body `web::Form` cannot read is answered as the token
+                    // endpoint's errors are: a JSON object (CIBA Core §13).
+                    .app_data(web::FormConfig::default().error_handler(
+                        handlers::oauth2::par_form_error,
+                    ))
+                    .route(web::post().to(handlers::ciba::bc_authorize::<C>)),
+            )
             // B5 / RFC 9126. Its own bucket, and unlike
             // `/device_authorization` this one is client-keyed: PAR always
             // carries client credentials, so there is a real identity to key

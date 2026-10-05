@@ -107,6 +107,16 @@ pub struct OidcDiscoveryDocument {
     /// per-client answer here would leak one client's posture to every other
     /// reader of the document.
     pub require_pushed_authorization_requests: bool,
+    /// CIBA Core §4 — G-7. Advertised unconditionally because the endpoint
+    /// is always mounted; whether a client may use it is its registration.
+    pub backchannel_authentication_endpoint: String,
+    /// CIBA Core §4 — `poll` and `ping`. `push` is not offered.
+    pub backchannel_token_delivery_modes_supported: Vec<String>,
+    /// CIBA Core §4 — `false`: AXIAM accepts no `user_code`.
+    /// `backchannel_authentication_request_signing_alg_values_supported` is
+    /// absent rather than empty: signed authentication requests are not
+    /// supported, and absence is how CIBA Core §4 says so.
+    pub backchannel_user_code_parameter_supported: bool,
     /// OIDC RP-Initiated Logout 1.0 §3 — B5.
     pub end_session_endpoint: String,
     /// Back-Channel Logout 1.0 §3.
@@ -452,6 +462,13 @@ pub fn build_discovery_document_for(
             tenant_id,
         ),
         require_pushed_authorization_requests: false,
+        // G-7 — CIBA Core §4.
+        backchannel_authentication_endpoint: tenant_scoped(
+            endpoint!(issuer, "/oauth2/bc-authorize"),
+            tenant_id,
+        ),
+        backchannel_token_delivery_modes_supported: vec!["poll".into(), "ping".into()],
+        backchannel_user_code_parameter_supported: false,
         end_session_endpoint: tenant_scoped(format!("{issuer}/oauth2/end_session"), tenant_id),
         backchannel_logout_supported: true,
         backchannel_logout_session_supported: true,
@@ -574,6 +591,9 @@ pub fn build_discovery_document_for(
             // of band; whether a given client MAY exchange is still its own
             // registration's business.
             "urn:ietf:params:oauth:grant-type:token-exchange".into(),
+            // G-7 / CIBA Core §10.1; asserted against
+            // `axiam_core::models::ciba::CIBA_GRANT_TYPE` in the tests.
+            "urn:openid:params:grant-type:ciba".into(),
         ],
         authorization_response_iss_parameter_supported: true,
         request_parameter_supported: false,
@@ -853,6 +873,46 @@ mod tests {
             .expect("valid inputs build a document")
     }
 
+    /// G-7 — discovery lists exactly what CIBA implements: the endpoint (with
+    /// the tenant, like every client-authenticating endpoint), poll and ping,
+    /// no user code, the grant type — and no signing-algorithm list, because
+    /// signed authentication requests are not accepted. The endpoint is not an
+    /// mTLS alias: that set is pinned by contract §21.3.1 vector A.
+    #[test]
+    fn discovery_lists_exactly_the_ciba_that_is_implemented() {
+        let tenant_doc = doc_for_tenant(Some(MTLS));
+        let doc = &tenant_doc;
+        assert_eq!(
+            doc.backchannel_authentication_endpoint,
+            format!("{ISSUER}/oauth2/bc-authorize?tenant_id={TENANT}")
+        );
+        assert_eq!(
+            doc.backchannel_token_delivery_modes_supported,
+            ["poll", "ping"]
+        );
+        assert!(!doc.backchannel_user_code_parameter_supported);
+        assert!(
+            doc.grant_types_supported
+                .iter()
+                .any(|g| g == axiam_core::models::ciba::CIBA_GRANT_TYPE)
+        );
+        let json = serde_json::to_value(doc).unwrap();
+        assert!(
+            json.get("backchannel_authentication_request_signing_alg_values_supported")
+                .is_none()
+        );
+        assert!(
+            json["mtls_endpoint_aliases"]
+                .get("backchannel_authentication_endpoint")
+                .is_none()
+        );
+        // The root form carries no tenant.
+        assert_eq!(
+            super::tests::doc(None).backchannel_authentication_endpoint,
+            format!("{ISSUER}/oauth2/bc-authorize")
+        );
+    }
+
     /// The endpoints that authenticate a **client** all take a required
     /// `tenant_id`, and `/oauth2/authorize` needs one for a request with no
     /// principal — which is every browser arriving from a relying party.
@@ -876,6 +936,10 @@ mod tests {
             (
                 "pushed_authorization_request_endpoint",
                 &doc.pushed_authorization_request_endpoint,
+            ),
+            (
+                "backchannel_authentication_endpoint",
+                &doc.backchannel_authentication_endpoint,
             ),
             ("end_session_endpoint", &doc.end_session_endpoint),
         ] {

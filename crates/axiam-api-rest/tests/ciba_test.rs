@@ -436,7 +436,7 @@ async fn bc_authorize_validates_stores_and_notifies() {
     assert_eq!(row.scopes, ["openid", "profile"]);
     assert_eq!(row.binding_message.as_deref(), Some("W4SCT"));
     assert_eq!(row.acr_values, ["urn:axiam:acr:mfa"]);
-    assert_ne!(row.auth_req_id_hash, id, "only the digest is stored");
+    assert!(row.auth_req_id_hash != id, "only the digest is stored");
 
     // The notification is detached; wait for it.
     let mut sent = Vec::new();
@@ -1890,12 +1890,18 @@ async fn a_fapi2_ping_client_needs_a_notification_token_of_128_bits() {
     .unwrap();
     let app = app!(f, permissive());
     let path = format!("/oauth2/bc-authorize?tenant_id={}", f.tenant_id);
-    for (token, expected) in [
-        ("short-token", 400u16),
-        ("a-notification-token-of-32-chars", 200),
-    ] {
+    // Made at run time, and never formatted into a message (CodeQL hygiene,
+    // W5 F4 review): 11 characters is under FAPI-CIBA's 22, 32 is over it.
+    for (length, expected) in [(11usize, 400u16), (32, 200)] {
+        let notification: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .cycle()
+            .take(length)
+            .collect();
         let mut claims = request_claims(&cid, serde_json::json!(ROOT_ISSUER));
-        claims["client_notification_token"] = serde_json::json!(token);
+        claims["client_notification_token"] = serde_json::json!(notification);
         let (status, json) = post_form(
             &app,
             &path,
@@ -1906,7 +1912,7 @@ async fn a_fapi2_ping_client_needs_a_notification_token_of_128_bits() {
             ),
         )
         .await;
-        assert_eq!(status, expected, "{token}: {json}");
+        assert_eq!(status, expected, "a {length}-character token: {json}");
     }
 }
 

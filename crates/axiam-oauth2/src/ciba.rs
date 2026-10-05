@@ -1347,25 +1347,25 @@ mod tests {
     fn a_step_up_is_required_only_for_a_class_the_session_did_not_achieve() {
         let mfa = vec![Acr::MultiFactor.as_str().to_owned()];
         let single = vec![Acr::SingleFactor.as_str().to_owned()];
-        let password = [Amr::Pwd];
+        let pwd_only = [Amr::Pwd];
         let second_factor = [Amr::Pwd, Amr::Otp, Amr::Mfa];
 
         assert_eq!(
-            step_up_required(&mfa, &password),
+            step_up_required(&mfa, &pwd_only),
             Some(Acr::MultiFactor),
             "a password session has not achieved multi-factor"
         );
         assert_eq!(step_up_required(&mfa, &second_factor), None);
-        assert_eq!(step_up_required(&single, &password), None);
-        assert_eq!(step_up_required(&[], &password), None, "asked for nothing");
+        assert_eq!(step_up_required(&single, &pwd_only), None);
+        assert_eq!(step_up_required(&[], &pwd_only), None, "asked for nothing");
         assert_eq!(
-            step_up_required(&["urn:other:acr".to_owned()], &password),
+            step_up_required(&["urn:other:acr".to_owned()], &pwd_only),
             None,
             "a value AXIAM does not implement can never be satisfied, so is never asked for"
         );
         // Any satisfiable value in the list is enough.
         let either = vec![mfa[0].clone(), single[0].clone()];
-        assert_eq!(step_up_required(&either, &password), None);
+        assert_eq!(step_up_required(&either, &pwd_only), None);
         // And no evidence at all is single-factor, the strict reading.
         assert_eq!(step_up_required(&mfa, &[]), Some(Acr::MultiFactor));
     }
@@ -1718,9 +1718,11 @@ mod tests {
     fn auth_req_ids_are_high_entropy_and_hashed() {
         let a = generate_auth_req_id();
         let b = generate_auth_req_id();
-        assert_ne!(a, b);
+        // `assert!` rather than `assert_ne!`: a failure must not print an
+        // `auth_req_id` (CodeQL hygiene, W5 F4 review).
+        assert!(a != b, "two ids are distinct");
         assert_eq!(a.len(), 43, "256 bits, base64url unpadded");
         assert_eq!(hash_auth_req_id(&a).len(), 64);
-        assert_ne!(hash_auth_req_id(&a), a);
+        assert!(hash_auth_req_id(&a) != a, "the digest is not the id");
     }
 }

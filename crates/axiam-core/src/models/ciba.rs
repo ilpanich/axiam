@@ -430,13 +430,17 @@ mod tests {
 
     #[test]
     fn ping_credentials_never_print() {
+        // Made at run time: no credential literal in the source (CodeQL
+        // hygiene, W5 F4 review).
+        let id_part = uuid::Uuid::new_v4().simple().to_string();
+        let bearer_part = uuid::Uuid::new_v4().simple().to_string();
         let creds = CibaPingCredentials {
-            auth_req_id: "visible-only-to-the-deliverer".into(),
-            client_notification_token: "bearer-for-the-client-endpoint".into(),
+            auth_req_id: id_part.clone(),
+            client_notification_token: bearer_part.clone(),
         };
         let rendered = format!("{creds:?}");
-        assert!(!rendered.contains("visible-only"));
-        assert!(!rendered.contains("bearer-for"));
+        assert!(!rendered.contains(&id_part));
+        assert!(!rendered.contains(&bearer_part));
     }
 
     #[test]

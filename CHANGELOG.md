@@ -894,6 +894,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI/harness: `fapi-conformance.yml` gets past its bring-up (D-60).** Its first run
+  (37268155503) died in the bring-up and every later step would have failed too.
+  `bench-up` no longer passes `docker compose up --wait` for the native-TLS
+  overlay (`p2-tls13`, `p3-mtls`), whose `healthcheck: NONE` compose refuses; it
+  gates on its host-side `/health` probe and still fails fast, with the usual
+  ps+logs dump, when a container exits non-zero (`p0`/`p1` unchanged). A new
+  `benchmarks/targets/axiam/docker-compose.conformance.yml` (layered on by the new
+  `BENCH_COMPOSE_OVERLAYS` hook) makes the `p3-mtls` listener the conformance
+  target: it trusts the conformance and benchmark CAs, presents the conformance
+  server certificate, runs `optional_self_signed`, and forwards the mTLS-alias base
+  URL and default tenant that compose dropped. The workflow now builds the SPA,
+  publishes AXIAM on the port the front door proxies to with the front door's
+  issuer, seeds with `profile=p3-mtls` (it seeded the plaintext port), registers
+  the clients as the seeder's administrator instead of a bearer secret that cannot
+  exist for a deployment the job creates, restarts AXIAM once so discovery carries
+  the registered tenant, summarises only that run's reports, and uploads the
+  server and front-door logs. New `just bench-logs` prints compose logs without the
+  stack's secrets in the environment. Workflow, justfile, compose overlay and
+  runbook only; no server code.
+
 - **OpenAPI: `AcsEndpoint.index` is published with `maximum: 65535` (F4 W4
   P23W4-05).** The model and contract §29.2 say an unsigned 16-bit integer; the
   schema said an unbounded `int32`, so a generated SDK accepted values the server

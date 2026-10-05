@@ -40,7 +40,8 @@ Two consequences shape everything below.
   reads like forty failures and is one configuration problem. The benchmark
   harness's `p3-mtls` profile is the quickest way to get one:
   `cd benchmarks && just target=axiam profile=p3-mtls bench-up`.
-- **The listener must trust the conformance CA.** `just conformance-certs`
+- **The listener must trust the conformance CA.** (In CI this is done for you; see
+  "Running it in CI" below.) `just conformance-certs`
   writes `conformance/certs/ca.crt`; point
   `AXIAM__SERVER__TLS__CLIENT_CA_PATH` at it (or add it to the bundle already
   configured) and restart. Without this the `tls_client_auth` client's
@@ -97,6 +98,41 @@ Its client is registered with `dpop_bound_access_tokens` rather than
 `tls_client_certificate_bound_access_tokens`, so the plan also exercises the
 DPoP half of sender-constraining end to end. The suite generates the proof key;
 nothing in `conformance/certs/` is involved.
+
+---
+
+## Running it in CI (`fapi-conformance.yml`)
+
+`workflow_dispatch` only (see the workflow's header for why). It runs the same
+recipes as the local rig, with one difference in how AXIAM is brought up: the
+benchmark harness's `p3-mtls` profile is the vehicle, and
+`benchmarks/targets/axiam/docker-compose.conformance.yml` (layered on through
+`BENCH_COMPOSE_OVERLAYS`) makes it the conformance target. Steps, in order:
+`conformance-certs`, `conformance-frontend`, a staging step, `bench-up` +
+`bench-seed`, `conformance-up`, `conformance-register`, one AXIAM restart,
+`conformance-run`, `conformance-report`, artifacts, tear-down.
+
+What the overlay and the staging step do, because each was a reason the first
+run could not have produced a result (run 37268155503 stopped at the first):
+
+| Concern | Benchmark default | What the conformance run needs |
+|---|---|---|
+| `bench-up` readiness | `docker compose up --wait` | `--wait` refuses the native-TLS overlay's `healthcheck: NONE` on `axiam-server`. `bench-up` now omits it for `p2-tls13`/`p3-mtls` and relies on its host-side `/health` gate, polling for a container that exited non-zero so a rejected config still fails in seconds. `p0`/`p1` keep `--wait`. |
+| Listener port | `BENCH_TLS_PORT` 8443 | `AXIAM_MTLS_PORT` (8445): the front door (`AXIAM_TLS_PORT`, 8444) owns the issuer origin and proxies to this port. |
+| Client trust | `/certs/ca.crt` (benchmark CA only) | A bundle of the conformance CA **and** the benchmark CA, so the suite's clients are accepted and bench-up's readiness probe and the seeder (which present the benchmark client certificate) still pass. Exporting `AXIAM__SERVER__TLS__CLIENT_CA_PATH` from the workflow did nothing: compose forwards only the names its files list. |
+| Server identity | benchmark `server.crt` (CN=localhost) | `conformance/certs/server.crt`: the suite and the front door's `proxy_ssl_verify on` check `host.docker.internal`. |
+| Client-auth policy | `required` | `optional_self_signed`, as `serve-axiam.sh` runs it: the front door's nginx presents no certificate, and the self-signed client's certificate chains to nothing by design. |
+| Discovery | tenant and `mtls_endpoint_aliases` not forwarded | `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` and `AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID` are forwarded. The tenant is discovered by the registrar, so AXIAM is restarted once after registration (the CI form of "restart `conformance-serve` once"). |
+| Admin credential | `AXIAM_CONFORMANCE_ADMIN_TOKEN` secret | None can exist for a deployment created by the job. The registrar signs in with a session as the seeder's bootstrap administrator (`bench-org` / `admin@bench.dev`). |
+
+Failure logs: `just target=axiam bench-logs [tail] [service…]` (in `benchmarks/`)
+prints a target's compose logs without needing the stack's secrets in the
+environment. The workflow writes `axiam-server.log` and `conformance-rig.log`
+(the front door and the suite) into the artifact on a red run. AXIAM runs at
+`axiam=debug,info` for this; the reason a client was refused is only in that log.
+
+Time: no browser is driven, so every interactive module costs the full
+`module_timeout` (default 180 s). Dispatch with a small value for a smoke run.
 
 ---
 

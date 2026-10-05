@@ -39,7 +39,9 @@ use axiam_core::repository::{
     OrganizationRepository, TenantRepository, UserRepository,
 };
 
-use crate::mail_consumer::{SendError, SendOutcome, default_retry_delay, send_with_retry_and_audit};
+use crate::mail_consumer::{
+    SendError, SendOutcome, default_retry_delay, send_with_retry_and_audit,
+};
 
 /// Messages the channel holds before a publish is refused.
 pub const MAIL_CHANNEL_CAPACITY: usize = 1_024;
@@ -107,10 +109,7 @@ pub fn in_process_mail_channel_with_capacity(
         InProcessMailPublisher {
             tx: Some(tx.clone()),
         },
-        InProcessMailQueue {
-            rx,
-            redispatch: tx,
-        },
+        InProcessMailQueue { rx, redispatch: tx },
     )
 }
 
@@ -217,7 +216,9 @@ async fn run_mail_worker<M: MailAttempt>(
                         tokio::spawn(async move {
                             tokio::time::sleep(delay).await;
                             if tx.send(retry).await.is_err() {
-                                warn!("in-process mail worker stopped; a pending retry was dropped");
+                                warn!(
+                                    "in-process mail worker stopped; a pending retry was dropped"
+                                );
                             }
                             drop(permit);
                         });
@@ -395,7 +396,10 @@ mod tests {
         tokio::spawn(run_mail_worker(queue, attempts.clone(), fast(), 8));
 
         publisher.publish(msg(0)).await.unwrap();
-        wait_for("the attempt", || attempts.attempts.lock().unwrap().len() == 1).await;
+        wait_for("the attempt", || {
+            attempts.attempts.lock().unwrap().len() == 1
+        })
+        .await;
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(*attempts.attempts.lock().unwrap(), [0]);
     }

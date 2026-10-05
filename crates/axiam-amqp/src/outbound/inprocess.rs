@@ -174,7 +174,9 @@ impl RetryScheduler {
     /// channel. `Err(())` when [`IN_PROCESS_MAX_PENDING_RETRIES`] retries are
     /// already sleeping.
     fn schedule(&self, next: OutboundMessage, ttl_ms: u64) -> Result<(), ()> {
-        let permit = Arc::clone(&self.slots).try_acquire_owned().map_err(|_| ())?;
+        let permit = Arc::clone(&self.slots)
+            .try_acquire_owned()
+            .map_err(|_| ())?;
         let tx = self.redispatch.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(ttl_ms)).await;

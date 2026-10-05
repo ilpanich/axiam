@@ -430,8 +430,8 @@ mod tests {
     use axiam_core::models::audit::AuditOutcome;
     use axiam_core::outbound::{DeliveryOutcome, OutboundError, OutboundFuture};
     use std::sync::Mutex;
-    use uuid::Uuid;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use uuid::Uuid;
 
     #[test]
     fn supervisor_backoff_doubles_from_one_second_and_caps_at_thirty() {

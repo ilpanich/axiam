@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.34.0",
+ "version": "2.35.0",
  "diagramCount": 9,
- "total": 445,
- "open": 25,
- "mitigated": 420,
+ "total": 447,
+ "open": 21,
+ "mitigated": 426,
  "areas": [
   {
    "id": 0,
@@ -74,8 +74,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 83,
-   "open": 4
+   "total": 85,
+   "open": 1
   },
   {
    "id": 3,
@@ -99,7 +99,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 55,
-   "open": 6
+   "open": 5
   },
   {
    "id": 7,
@@ -118,7 +118,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Spoofing",
    "total": 98,
-   "open": 5
+   "open": 4
   },
   {
    "name": "Tampering",
@@ -128,22 +128,22 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Repudiation",
    "total": 15,
-   "open": 3
+   "open": 2
   },
   {
    "name": "Information disclosure",
-   "total": 104,
-   "open": 8
+   "total": 105,
+   "open": 6
   },
   {
    "name": "Denial of service",
    "total": 55,
-   "open": 5
+   "open": 4
   },
   {
    "name": "Elevation of privilege",
-   "total": 85,
-   "open": 2
+   "total": 86,
+   "open": 3
   }
  ],
  "severities": [
@@ -155,17 +155,17 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "High",
    "total": 187,
-   "open": 11
+   "open": 9
   },
   {
    "name": "Medium",
-   "total": 183,
-   "open": 10
+   "total": 185,
+   "open": 9
   },
   {
    "name": "Low",
    "total": 34,
-   "open": 2
+   "open": 1
   }
  ],
  "openRisks": [
@@ -280,26 +280,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Narrowed, not closed. `prod-up` now writes the read-only `axiam` policy from `docs/deployment/vault.md` §5.4 and issues a **scoped, periodic token** for the server, refusing to fall back to root if that fails; seeding keeps its own short-lived credential, because the seeding token and the serving token were never the same thing. Both the Compose stack and `k8s/vault/statefulset.yml` move from the `file` backend to **Raft**, which has a consistent backup story (`vault operator raft snapshot save`) and a migration path to three nodes that does not require a re-seed — a re-seed changes the OPAQUE setup key, i.e. a password reset for every user in every tenant. What remains **open** is auto-unseal, which cannot be closed from inside AXIAM: every Vault OSS seal type needs a cloud KMS or a second Vault elsewhere, and `pkcs11` is Enterprise-only, so a TPM is not an option whatever the hardware. `docs/deployment/vault.md` §5.3 and the Pi runbook §7.1 give the honest option table — GCP Cloud KMS at roughly $0.06 per key per month is the cheapest real answer — and state plainly that a deployment which configures none of them needs a human with three shares after every restart and is not production. A script that unseals from shares kept on the machine is explicitly **not** offered as an alternative: it removes the seal rather than automating it, and is strictly worse than Shamir because the shares are now in the one place an attacker already has. Two amendments since: the server's token is no longer strictly read-only — it holds `create`/`update` on the CA-key prefix, from the one policy file (T-232) — and the seeder that runs after unseal can no longer mistake a refused read for an empty Vault and mint fresh keys over the live ones (T-231). Vault itself runs unprivileged: the prod Compose stack chowns the Raft volume in a one-shot init container rather than running the process that holds every secret as root. Made **checkable** in 1.0.0-beta12 (R-7), the way H-4 made T-180's token scope checkable. `just vault-status` gains a Seal section from the unauthenticated `sys/seal-status` — so it answers even when the token is wrong and even when the Vault is sealed: it names the seal type, reads `OK` for any auto-unseal type, and for `shamir` says \"no auto-unseal; every restart needs t of n key shares, not production\" with the quorum quoted from the response. A Vault sealed at that instant gets its own line, because that is a state somebody is about to fix rather than a statement about the configured seal, and conflating the two would train an operator to ignore both; a request that fails reports `unknown`, never `OK`. `--strict` fails on an unconfirmed auto-unseal, and `just vault-status` still does not pass it so the dev stack's deliberate root-token-on-Shamir does not turn every local run red. **Status stays Open**: the control is a check, not a seal — nothing in this repository can configure auto-unseal, and R-7 does not pretend otherwise."
   },
   {
-   "number": 431,
-   "title": "The approval page approves without a full sign-in, or is driven cross-site",
-   "category": "Spoofing",
-   "severity": "High",
-   "diagramId": 2,
-   "area": "OAuth2 / OIDC authorization server",
-   "element": "approve / deny (identity pages)",
-   "residualRisk": "**Open until T23.7.2 builds the page.** T23.7.1 provides only the service API it calls (T-430): no route approves or denies a request today, so nothing is exposed yet. T23.7.2 must mount the page on the identity pages (T15.7) behind full authentication with MFA where the request or the tenant requires it, under `/api/v1`'s CSRF double-submit and the frame-ancestor policy, show the client and the binding message from `lookup_for_approval`, pass the version back, and audit the decision (T-435)."
-  },
-  {
-   "number": 433,
-   "title": "The ping notification endpoint is used to reach internal services",
-   "category": "Information disclosure",
-   "severity": "High",
-   "diagramId": 2,
-   "area": "OAuth2 / OIDC authorization server",
-   "element": "ping notification",
-   "residualRisk": "Write time is built (T23.7.1): the endpoint is required in ping mode, refused in poll mode, and held to the webhook outbound address policy (`validate_push_endpoint`: absolute `https`, a host, no credentials or fragment, no IP literal that is not globally routable, no `localhost`, `*.local` or `*.internal`) at the admin API and RFC 7591. Tests: `crates/axiam-oauth2/src/ciba.rs` `a_ping_registration_needs_a_public_https_endpoint`; `crates/axiam-api-rest/tests/ciba_test.rs` `admin_registration_accepts_and_validates_the_ciba_metadata` (the metadata address is refused). **Open until T23.7.2** builds delivery: it must go through `guarded_fetch_no_redirect` with `allow_private = false`, re-read the endpoint before it sends (W4 F4 §15), and keep failure text a fixed vocabulary."
-  },
-  {
    "number": 9,
    "title": "Connection flood exhausts ingress capacity",
    "category": "Denial of service",
@@ -308,6 +288,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "System diagram",
    "element": "Ingress / TLS 1.3 termination",
    "residualRisk": "Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is a deployment responsibility and is not shipped with AXIAM."
+  },
+  {
+   "number": 117,
+   "title": "Alert flooding buries a real incident",
+   "category": "Denial of service",
+   "severity": "Medium",
+   "diagramId": 6,
+   "area": "Audit, webhooks, email & notifications",
+   "element": "Notification rules (admin alerts)",
+   "residualRisk": "Reopened at model 2.35.0 by the W5 F4 review (P23W5-13). Until then this entry read “notifications are delivered in configurable batches through the mail queue, and rules are per-category so a noisy category can be tuned without disabling the rest”; nothing batches them. What is built: rules are per event, so a noisy event can be taken out of a rule without disabling the rest; a mail is fixed text; the events a caller can provoke ride rate-limited routes (sign-in per address and per account, with brute-force lockout, T-27); and the one event a background process raises, `scim_delivery_failed`, is coalesced to one notification per target per hour (T-418, D-73). What is not: `NotificationDispatcher::dispatch` enqueues one mail per matched recipient per audit row, so a request-path event an attacker can produce in volume — failed sign-ins spread over addresses and accounts — mails each recipient of a rule for it once per event, with no coalescing, cool-down or digest. Open until per-rule coalescing exists (issue body in the W5 F4 review, §14)."
   },
   {
    "number": 123,
@@ -360,36 +350,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost, in the full profile: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation. In the minimal profile (`AXIAM__AMQP__ENABLED=false`, D-59) a queued push waits in an in-process queue and is lost on restart, and a dead letter is its audit row alone (T-445)."
   },
   {
-   "number": 409,
-   "title": "An access token minted with the stored client secret follows a base URL moved without it",
-   "category": "Information disclosure",
-   "severity": "Medium",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "Outbound SCIM provisioning (target API, deliverer, reconciliation)",
-   "residualRisk": "Bounded, not closed. The move needs `scim_targets:write`, a human-only permission (T-411); it is audited as `scim_target.updated` naming `base_url` (T-420); and the new `base_url` is held to the outbound address policy and the delivery-time guard (T-410), so the host must be public. AXIAM uses a token for at most one hour, whatever `expires_in` says, but the token is the downstream's: it stays valid there for as long as its issuer says. The behaviour is pinned as decided: `crates/axiam-db/tests/scim_target_repository_test.rs` `a_client_credentials_base_url_may_change_without_the_credential`. Open, and carried to the W5 F4 review with T-418: what closes it is a decision — extend D-57's binding to `base_url` of a client-credentials target, so that moving it needs the secret again (that test then inverts, and §31.3 rule 2 with it), or keep the rule and state this residual in the contract, which today says the opposite. An authorization server that binds its tokens to an audience (RFC 8707 resource indicators) narrows it from the downstream's side; AXIAM's token request names none."
-  },
-  {
-   "number": 418,
-   "title": "One notification mail per dead letter floods a rule's recipients while a target is down",
-   "category": "Denial of service",
-   "severity": "Medium",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "dead-letter audit row",
-   "residualRisk": "Open — carried to the W5 F4 review, as the T23.6.3 execution note records (“one mail per dead letter can flood a rule's recipients while a target is down”). What bounds it today: nothing is mailed unless a tenant administrator created a rule for `scim_delivery_failed`, and removing or narrowing that rule stops it (rules are per event, T-117); a mail is fixed text — the action and its outcome, never a URL, a person or the downstream's answer (D-16); and the target's `state` carries one counter (`dead_lettered_total`) and one last reason, so the console shows the outage without the mails. T-117's “configurable batches” do not hold on this path: `NotificationDispatcher::dispatch` enqueues one message per matched recipient per audit row. The path is tested as built: `crates/axiam-server/tests/scim_dead_letter_notification_test.rs` `a_scim_dead_letter_row_mails_every_recipient_of_a_matching_rule`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_dead_letter_writes_the_counter_and_the_reason_once`. What closes it is that review's decision: notify once per target when it enters failure (or at most once per target per window) rather than once per dead letter, keeping the audit row per dead letter as the record."
-  },
-  {
-   "number": 424,
-   "title": "A flood of sign-in prompts wears a user down until one is approved by mistake",
-   "category": "Denial of service",
-   "severity": "Medium",
-   "diagramId": 2,
-   "area": "OAuth2 / OIDC authorization server",
-   "element": "sign-in request notification",
-   "residualRisk": "Partly built (T23.7.1); **open until T23.7.2** builds the notification and the approval page. Built: one user is sent at most **three** notifications a minute whatever the clients asking (a fixed shared bucket no preset moves); a request past it is still stored and answered as usual, so the throttle reveals nothing (T-422); every client has its own `bc-authorize` bucket after authentication besides the route's; the `binding_message` is bounded and printable (T-437); a request expires in at most ten minutes. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_validates_stores_and_notifies` (one notification per stored request, carrying the binding message and no secret), `the_limiter_counts_bc_authorize`. Closes with T23.7.2: the approval page shows the client and the binding message and requires a full sign-in, MFA included, before one deliberate approval — never an approval from the notification itself."
-  },
-  {
    "number": 445,
    "title": "The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart",
    "category": "Repudiation",
@@ -400,6 +360,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
   },
   {
+   "number": 447,
+   "title": "A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name",
+   "category": "Elevation of privilege",
+   "severity": "Medium",
+   "diagramId": 2,
+   "area": "OAuth2 / OIDC authorization server",
+   "element": "/oauth2/authorize (+ consent)",
+   "residualRisk": "Narrowed by the W5 F4 review (P23W5-04 closed it for CIBA; P23W5-06 reports the device grant, where it is pre-existing since B2). CIBA: the approval routes refuse a token that carries a `client_id` — only a console sign-in decides (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `/api/v1/device/verify` and `/decide` still admit it; bounded by the token itself (a live session of a user of the tenant) and by the device client's registered scopes. Closes when `/api/v1/device/*` applies the same rule (issue body in the W5 F4 review, §14)."
+  },
+  {
    "number": 161,
    "title": "A partner's IdP silently populates the AXIAM user table (X4)",
    "category": "Denial of service",
@@ -408,16 +378,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Federation — SAML SP & OIDC relying party",
    "element": "Attribute mapping & JIT provisioning",
    "residualRisk": "Off by default (linked_only refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit."
-  },
-  {
-   "number": 435,
-   "title": "CIBA requests and decisions are not attributable",
-   "category": "Repudiation",
-   "severity": "Low",
-   "diagramId": 2,
-   "area": "OAuth2 / OIDC authorization server",
-   "element": "CIBA: /oauth2/bc-authorize + approval service",
-   "residualRisk": "Partly built (T23.7.1): every stored request is audited as `oauth2.ciba_initiated` (the client, the request, the delivery mode and the expiry — never the hint or the binding message), and every client-authentication failure as `oauth2.client_auth_failed`. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_validates_stores_and_notifies` (one row per stored request), `ciba_client_authentication_failures_meet_the_same_lockout`. **Open until T23.7.2** audits each approval and denial with the approving user and session from the page that makes them."
   }
  ]
 };

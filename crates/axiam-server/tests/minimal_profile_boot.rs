@@ -22,6 +22,7 @@ use axiam_api_rest::webhook::WebhookDeliveryService;
 use axiam_auth::config::AuthConfig;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::reactor::{CreateReactor, ReactorMode};
+use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::settings::system_defaults;
 use axiam_core::models::ssf::{
     NewSsfStream, SsfDeliveryMethod, SsfEventType, SsfStreamStatus, SsfSubjectFormat,
@@ -34,12 +35,11 @@ use axiam_core::repository::{
     RoleRepository, SettingsRepository, SsfStreamRepository, TenantRepository, UserRepository,
     WebhookRepository,
 };
-use axiam_db::repository::{AssignmentScope, SurrealRoleRepository};
 use axiam_db::{
     DbPool, LeaseClaim, SurrealAuditLogRepository, SurrealMinimalProfileLeaseRepository,
-    SurrealOrganizationRepository, SurrealReactorRepository, SurrealSettingsRepository,
-    SurrealSsfStreamRepository, SurrealTenantRepository, SurrealUserRepository,
-    SurrealWebhookRepository, seed_default_roles, seed_permissions,
+    SurrealOrganizationRepository, SurrealReactorRepository, SurrealRoleRepository,
+    SurrealSettingsRepository, SurrealSsfStreamRepository, SurrealTenantRepository,
+    SurrealUserRepository, SurrealWebhookRepository, seed_default_roles, seed_permissions,
 };
 use axiam_server::boot::{AppConfig, ServeOptions, serve};
 use axiam_server::profile::LeaseTiming;
@@ -169,7 +169,10 @@ async fn boot_refuses_the_decision_cache_broadcast_without_a_broker() {
     let message = refused(config, &db, ServeOptions::default()).await;
     assert!(message.contains("AXIAM__AMQP__ENABLED=false"), "{message}");
     assert!(message.contains("BROADCAST"), "{message}");
-    assert!(message.contains("AXIAM__AMQP__ENABLED=true"), "names the fix");
+    assert!(
+        message.contains("AXIAM__AMQP__ENABLED=true"),
+        "names the fix"
+    );
     // Refused before the datastore was touched: no lease was taken.
     assert!(
         SurrealMinimalProfileLeaseRepository::new(db.clone())
@@ -203,7 +206,10 @@ async fn boot_refuses_an_enabled_reactor_registration() {
     let message = refused(minimal_config(), &db, ServeOptions::default()).await;
     assert!(message.contains("AXIAM__AMQP__ENABLED=false"), "{message}");
     assert!(message.contains("1 enabled reactor"), "{message}");
-    assert!(message.contains("enabled: false"), "names the fix: {message}");
+    assert!(
+        message.contains("enabled: false"),
+        "names the fix: {message}"
+    );
 }
 
 /// A disabled registration is not a reason to refuse: the check is about what
@@ -228,7 +234,11 @@ async fn boot_is_not_refused_by_a_disabled_reactor_registration() {
     // The lease is the next guard: hold it as another instance so this boot
     // stops there, proving the reactor check was passed.
     SurrealMinimalProfileLeaseRepository::new(db.clone())
-        .claim("another-instance", chrono::Utc::now(), chrono::Duration::hours(1))
+        .claim(
+            "another-instance",
+            chrono::Utc::now(),
+            chrono::Duration::hours(1),
+        )
         .await
         .unwrap();
 
@@ -252,7 +262,11 @@ async fn boot_refuses_a_second_live_instance_after_waiting() {
     let leases = SurrealMinimalProfileLeaseRepository::new(db.clone());
     assert_eq!(
         leases
-            .claim("the-first-instance", chrono::Utc::now(), chrono::Duration::hours(1))
+            .claim(
+                "the-first-instance",
+                chrono::Utc::now(),
+                chrono::Duration::hours(1)
+            )
             .await
             .unwrap(),
         LeaseClaim::Acquired
@@ -345,7 +359,9 @@ impl Receiver {
                         body: String::from_utf8_lossy(&body).into_owned(),
                     });
                     let _ = socket
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
                         .await;
                     let _ = socket.shutdown().await;
                 });
@@ -475,10 +491,8 @@ async fn the_server_boots_without_a_broker_and_serves_login_webhook_and_ssf_push
     let hook_receiver = Receiver::start().await;
     let ssf_receiver = Receiver::start().await;
 
-    let sealer = WebhookDeliveryService::new(
-        SurrealWebhookRepository::new(db.clone()),
-        Some(sealing),
-    );
+    let sealer =
+        WebhookDeliveryService::new(SurrealWebhookRepository::new(db.clone()), Some(sealing));
     let webhook = SurrealWebhookRepository::new(db.clone())
         .create(CreateWebhook {
             tenant_id: tenant.id,
@@ -726,7 +740,11 @@ async fn the_server_boots_without_a_broker_and_serves_login_webhook_and_ssf_push
         .send()
         .await
         .unwrap();
-    assert_eq!(staged.status().as_u16(), 201, "a disabled registration is fine");
+    assert_eq!(
+        staged.status().as_u16(),
+        201,
+        "a disabled registration is fine"
+    );
 
     // ---- and it is still serving ---------------------------------------------
     assert!(

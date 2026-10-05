@@ -1206,15 +1206,23 @@ dependencies = [
  "axiam-authz",
  "axiam-core",
  "axiam-db",
+ "axiam-federation",
  "axiam-test-support",
+ "base64 0.23.1",
  "chrono",
+ "hex",
  "rcgen",
+ "reqwest 0.12.28",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "surrealdb",
+ "tokio",
  "tracing",
+ "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

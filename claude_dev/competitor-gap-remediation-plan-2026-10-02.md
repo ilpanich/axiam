@@ -1696,6 +1696,31 @@ initiation helper); OpenAPI; threat model; website.
 > for the wave PR. Threat model **2.34.0** (445 threats, 420 mitigated, 25 open):
 > **T-444** (Mitigated) and **T-445** (Open, accepted under D-59), T-405 amended,
 > **T-108 reopened** for the F4 review.
+>
+> **EXECUTED — G-8, W5: T23.8.3, 2026-10-05** (`23a8bbb`, `41352dd`, `86242eb`,
+> `9f59b05`, `a7c6201`; Sonnet 5.5). `docker/docker-compose.minimal.yml`
+> (SurrealDB and the server, `AXIAM__AMQP__ENABLED=false`, one replica by
+> construction, `stop_grace_period: 30s`, the GDPR audit dead-letter file on a named
+> volume) with `just minimal-up`/`-down`/`-clean`; the deployment docs' minimal
+> section completed (run, stop and grace period, what a restart loses, the
+> dead-letter file with a replay recipe verified against SurrealDB, external audit
+> producers, choosing and moving between profiles — every point of T23.8.2's §7);
+> the website *Operate* `deploy` page carves the profile out of "scale
+> horizontally". **Resting footprint, measured 2026-10-05** (median `VmRSS` at rest
+> on an empty migrated datastore; native release binary with `jemalloc` beside
+> SurrealDB 3.2.5 and RabbitMQ 4 containers; raw samples in
+> `benchmarks/resting-footprint/2026-10-05/`): **minimal 207 MiB** (server 121,
+> SurrealDB 87) against **full 331 MiB** (server 130, SurrealDB 86, RabbitMQ 115);
+> `PUBLIC_BENCH_ANALYSIS.md` §5 gains it labelled "at rest, not under load", the
+> Zitadel comparison a dated note (partly closed, no Zitadel stack measured at
+> rest). **G-8 is complete.**
+>
+> What the plan did not anticipate. The minimal compose file needs more than the
+> two mandatory secrets for the GDPR path to work (without the pseudonym pepper the
+> purge never runs, so T19.27's dead-letter file never fires). The figures are RSS
+> including file-backed pages, so they are not comparable with §5's cgroup figures,
+> and the server ran natively, not as the image (the released image predates the
+> profile); the compose file itself was not booted end to end here.
 
 **Target.** A documented *minimal* profile in which AXIAM runs with SurrealDB
 only, and a re-measured whole-stack resting footprint.

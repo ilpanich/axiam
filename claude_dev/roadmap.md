@@ -1106,7 +1106,7 @@ with an F4 security review of the wave's diff against
 | T23.7.3 | e2e poll and ping, contract §33 (D-56), SDK helper (seven SDKs, post-merge per D-35), website | Sonnet 5.5 | W5 |✓ |
 | T23.8.1 | `AXIAM__AMQP__ENABLED=false` minimal profile | Sonnet 5.5 | W5 |✓ |
 | T23.8.2 | Review of the direct audit-write path against T19.27 | Opus 5.5 | W5 |✓ |
-| T23.8.3 | `docker-compose.minimal.yml`, docs, resting-RSS measurement | Sonnet 5.5 | W5 | |
+| T23.8.3 | `docker-compose.minimal.yml`, docs, resting-RSS measurement | Sonnet 5.5 | W5 |✓ |
 | T23.9.1 | [`verifiable-credentials-design.md`](verifiable-credentials-design.md), design only | Opus 5.5 | W1 | ✓ |
 | T23.10.1 | `benchmarks/targets/authentik/` profile | Sonnet 5.5 | W6 | |
 | T23.10.2 | Run 6, `PUBLIC_BENCH_ANALYSIS.md` seventh draft, comparison rows | Sonnet 5.5 | W6 | |

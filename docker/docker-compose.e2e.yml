@@ -244,6 +244,23 @@ services:
       # — moving that ceiling would change what it measures rather than let it
       # measure it.
       AXIAM__RATE_LIMIT__REGISTER_PER_MIN: "120"
+
+      # CIBA's `bc-authorize` budget for a TEST stack, and the opposite
+      # adjustment to the two above: LOWERED, from the shipped 60.
+      #
+      # `frontend/e2e/ciba.spec.ts` must prove that the limiter COUNTS this
+      # endpoint — the Keycloak 26.7.x class of defect is a brute-force control
+      # that forgot the CIBA grant — and the only honest way to prove a limiter
+      # is to exhaust it. At 60 a minute that is sixty-odd requests per run and a
+      # test that is slow and, because the bucket replenishes while it runs,
+      # marginal; at 20 it is a couple of seconds and unambiguous. The spec makes
+      # ten well-formed calls before the limiter test, so 20 leaves headroom for
+      # Playwright's retries, and the limiter test runs last in its file.
+      #
+      # Only this endpoint's own bucket moves (`bc_authorize_per_min`); the token
+      # endpoint's, which the CIBA grant is also counted by, is untouched. Nothing
+      # else in the suite calls `bc-authorize`. The shipped default is unchanged.
+      AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN: "20"
     volumes:
       # A6: read-only CA bundle for verifying the broker certificate.
       - ./.secrets/broker-tls/ca.pem:/etc/axiam/broker-tls/ca.pem:ro

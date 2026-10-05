@@ -1594,6 +1594,7 @@ configure and it is not covered here.
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `AXIAM__AMQP__ENABLED` | `true` | `false` selects the [minimal profile (no broker)](#minimal-profile-no-broker): no connection, no topology, no URL or signing key needed, single instance only. |
 | `AXIAM__AMQP__URL` | `amqps://localhost:5671` | **Must** be `amqps://`. Every other scheme is refused before a socket is opened. |
 | `AXIAM__AMQP__TLS__CA_CERT_PATH` | *(unset)* | PEM bundle for the broker's issuing CA, **added to** the platform roots (not substituted — see above). Unset = platform roots only. |
 | `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` | *(unset)* | PEM client certificate, for mutual TLS. Requires the key. |

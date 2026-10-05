@@ -53,6 +53,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ["AXIAM__DB__NAMESPACE", "SurrealDB namespace.", "axiam"],
           ["AXIAM__DB__DATABASE", "SurrealDB database.", "axiam"],
           [
+            "AXIAM__AMQP__ENABLED",
+            "Whether the broker is used at all (default `true`). `false` selects the minimal, broker-less profile: nothing connects to RabbitMQ, neither `AXIAM__AMQP__URL` nor the AMQP signing key is required, webhooks, SSF push, outbound SCIM, CIBA ping and transactional mail run on in-process queues (lost on restart), and Reactors, asynchronous authorization over AMQP, external audit ingestion and cross-replica cache invalidation are unavailable. The profile is single-instance by definition: the server refuses to boot beside another live instance, with the decision-cache broadcast switched on, or with an enabled Reactor registration in the datastore.",
+            "false",
+          ],
+          [
             "AXIAM__AMQP__URL",
             "RabbitMQ connection string, assembled from the broker credentials at the deployment layer. Must be amqps:// — AMQP is TLS-only and every other scheme is refused at startup. It embeds the broker password inline, which is why `AmqpConfig`'s `Debug` prints the host and never the userinfo. Also resolvable through the secret provider as `amqp_url`; this variable stays as a permanent fallback, and a non-`env` deployment that still supplies it here gets one `WARN` at boot.",
             "amqps://user:pass@rabbitmq:5671",

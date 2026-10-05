@@ -110,6 +110,19 @@ impl AmqpTlsConfig {
 #[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct AmqpConfig {
+    /// Whether the broker is used at all (G-8, D-59). `AXIAM__AMQP__ENABLED`,
+    /// default `true`.
+    ///
+    /// `false` selects the **minimal profile**: no connection, no topology, and
+    /// neither [`Self::url`] nor [`Self::signing_key`] is required. The
+    /// asynchronous authorization consumer, the external audit-ingestion
+    /// consumer, the reactor transport and the cross-replica cache-invalidation
+    /// machinery are not started; the outbound kinds (webhook, SSF push, SCIM
+    /// push, CIBA ping) and transactional mail run on in-process bounded
+    /// channels instead. The profile is single-instance by definition, which the
+    /// server enforces at boot with a datastore lease. With `true` (the default)
+    /// the SECHRD-08 refusal of a missing signing key stands unchanged.
+    pub enabled: bool,
     /// AMQP connection URI. **Must** be `amqps://host:5671` (A6).
     ///
     /// There is no plaintext option: see
@@ -169,6 +182,7 @@ impl std::fmt::Debug for AmqpConfig {
     /// answers it while "which password" is never the fact anybody needed.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AmqpConfig")
+            .field("enabled", &self.enabled)
             .field("url", &redact_amqp_url(&self.url))
             .field("tls", &self.tls)
             .field("prefetch_count", &self.prefetch_count)
@@ -211,6 +225,7 @@ fn default_replay_skew_secs() -> u64 {
 impl Default for AmqpConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             url: "amqps://localhost:5671".into(),
             tls: AmqpTlsConfig::default(),
             prefetch_count: 10,
@@ -338,6 +353,19 @@ impl AmqpConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G-8 (D-59): the broker is on unless an operator turns it off, and an
+    /// absent key in a config file does not turn it off.
+    #[test]
+    fn enabled_defaults_to_true_and_deserialises_false() {
+        assert!(AmqpConfig::default().enabled);
+        let empty: AmqpConfig = serde_json::from_str("{}").unwrap();
+        assert!(empty.enabled, "an absent `enabled` key keeps the broker on");
+        let off: AmqpConfig = serde_json::from_str(r#"{"enabled": false}"#).unwrap();
+        assert!(!off.enabled);
+        // The Debug rendering states the profile (the boot log prints it).
+        assert!(format!("{off:?}").contains("enabled: false"));
+    }
 
     #[test]
     fn resolve_signing_key_decodes_configured_hex() {

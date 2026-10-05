@@ -19,6 +19,11 @@
 //! no retry and no DLQ entry, while the audit trail claimed a retry was
 //! scheduled; CQ-B49).
 //!
+//! What an attempt's outcome *means* (retry, dead-letter or delivered, and the
+//! audit row) is decided by `outcome::decide`, which the in-process dispatcher
+//! of the minimal profile ([`super::inprocess`]) shares; this module only
+//! carries a verdict out against the broker.
+//!
 //! For the webhook kind the audit action names and metadata are exactly what
 //! they were before the extraction (`webhook.delivery_succeeded`,
 //! `webhook.delivery_attempt`, `webhook.delivery_failed`).
@@ -34,14 +39,14 @@ use lapin::types::FieldTable;
 use lapin::{Acker, Channel};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
-use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
-use axiam_core::outbound::{DeliveryOutcome, OutboundDeliverer, OutboundKind, OutboundMessage};
+use axiam_core::models::audit::CreateAuditLogEntry;
+use axiam_core::outbound::{OutboundDeliverer, OutboundKind, OutboundMessage};
 use axiam_core::repository::AuditLogRepository;
 
+use super::outcome::{self, Verdict};
 use super::publisher::AmqpOutboundPublisher;
-use super::retry::{OutboundRetryConfig, backoff_ttl_ms};
+use super::retry::OutboundRetryConfig;
 use super::topology::OutboundTopology;
 use super::wire;
 use crate::connection::AmqpManager;
@@ -166,6 +171,18 @@ impl RetryPublisher for AmqpOutboundPublisher {
     }
 }
 
+pub(crate) struct OwnedAuditSink<A>(pub(crate) A);
+
+impl<A: AuditLogRepository> AuditSink for OwnedAuditSink<A> {
+    async fn record(&self, entry: CreateAuditLogEntry) -> Result<(), String> {
+        self.0
+            .append(entry)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
 struct RepoAuditSink<'a, A>(&'a A);
 
 impl<A: AuditLogRepository> AuditSink for RepoAuditSink<'_, A> {
@@ -245,26 +262,6 @@ where
     Ok(())
 }
 
-/// Build a delivery audit entry. `actor_id` uses the `Uuid::nil()`
-/// system-actor convention: no human or service account initiated the attempt.
-fn audit_entry(
-    msg: &OutboundMessage,
-    action_suffix: &str,
-    outcome: AuditOutcome,
-    metadata: serde_json::Value,
-) -> CreateAuditLogEntry {
-    CreateAuditLogEntry {
-        tenant_id: msg.tenant_id,
-        actor_id: Uuid::nil(),
-        actor_type: ActorType::System,
-        action: format!("{}.{action_suffix}", msg.kind.as_str()),
-        resource_id: Some(msg.target_id),
-        outcome,
-        ip_address: None,
-        metadata: Some(metadata),
-    }
-}
-
 async fn record<A: AuditSink>(audit: &A, entry: CreateAuditLogEntry) {
     let action = entry.action.clone();
     if let Err(e) = audit.record(entry).await {
@@ -273,6 +270,10 @@ async fn record<A: AuditSink>(audit: &A, entry: CreateAuditLogEntry) {
 }
 
 /// Handle one delivery end to end. The unit the tests drive.
+///
+/// What an attempt's outcome *means* is decided by [`outcome::decide`], shared
+/// with the in-process dispatcher; this function only carries the verdict out
+/// against the broker (ack, TTL-delayed republish, nack to the DLQ).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_delivery<S, R, A>(
     kind: OutboundKind,
@@ -298,137 +299,55 @@ pub(crate) async fn process_delivery<S, R, A>(
         }
     };
 
-    // A deliverer that errors instead of classifying the attempt is a retry.
-    let outcome = match deliverer.deliver_attempt(&msg).await {
-        Ok(outcome) => outcome,
-        Err(e) => DeliveryOutcome::Retry {
-            reason: e.to_string(),
-        },
-    };
-
-    match outcome {
-        DeliveryOutcome::Delivered { response_status } => {
-            let mut metadata = serde_json::json!({
-                "delivery_id": msg.delivery_id,
-                "attempt": msg.attempt + 1,
-            });
-            if let (Some(status), Some(map)) = (response_status, metadata.as_object_mut()) {
-                map.insert("status".into(), serde_json::json!(status));
-            }
-            record(
-                audit,
-                audit_entry(&msg, "delivery_succeeded", AuditOutcome::Success, metadata),
-            )
-            .await;
+    let result = deliverer.deliver_attempt(&msg).await;
+    match outcome::decide(&msg, outcome::classify(result), cfg) {
+        Verdict::Delivered { audit: entry } => {
+            record(audit, entry).await;
             if let Err(e) = settle.ack().await {
                 error!(%kind, error = %e, delivery_tag, "Failed to ack outbound delivery");
             }
         }
-        DeliveryOutcome::Retry { reason } => {
-            handle_failure(&msg, true, reason, delivery_tag, settle, retry, audit, cfg).await;
-        }
-        DeliveryOutcome::DeadLetter { reason } => {
-            handle_failure(&msg, false, reason, delivery_tag, settle, retry, audit, cfg).await;
-        }
-    }
-}
-
-/// Retry-or-exhaust: shared by every "this attempt did not succeed" outcome.
-#[allow(clippy::too_many_arguments)]
-async fn handle_failure<S, R, A>(
-    msg: &OutboundMessage,
-    retryable: bool,
-    error_detail: String,
-    delivery_tag: u64,
-    settle: &S,
-    retry: &R,
-    audit: &A,
-    cfg: &OutboundRetryConfig,
-) where
-    S: Settlement,
-    R: RetryPublisher,
-    A: AuditSink,
-{
-    let kind = msg.kind;
-    let next_attempt = msg.attempt + 1;
-
-    if retryable && next_attempt < cfg.max_attempts {
-        let ttl_ms = backoff_ttl_ms(next_attempt, cfg);
-        let mut retry_msg = msg.clone();
-        retry_msg.attempt = next_attempt;
-
-        // CQ-B49: never ack the original if the retry copy was not enqueued.
-        if let Err(e) = retry.publish_retry(&retry_msg, ttl_ms).await {
-            error!(
-                %kind,
-                error = %e,
-                target_id = %msg.target_id,
-                delivery_id = %msg.delivery_id,
-                delivery_tag,
-                "Failed to publish outbound retry; requeuing original instead of acking"
-            );
-            if let Err(nack_err) = settle.nack(true).await {
+        Verdict::Retry {
+            next,
+            ttl_ms,
+            audit: entry,
+        } => {
+            // CQ-B49: never ack the original if the retry copy was not enqueued.
+            if let Err(e) = retry.publish_retry(&next, ttl_ms).await {
                 error!(
                     %kind,
-                    error = %nack_err,
+                    error = %e,
+                    target_id = %msg.target_id,
+                    delivery_id = %msg.delivery_id,
                     delivery_tag,
-                    "Failed to nack original outbound delivery after retry-publish failure"
+                    "Failed to publish outbound retry; requeuing original instead of acking"
                 );
+                if let Err(nack_err) = settle.nack(true).await {
+                    error!(
+                        %kind,
+                        error = %nack_err,
+                        delivery_tag,
+                        "Failed to nack original outbound delivery after retry-publish failure"
+                    );
+                }
+                return;
             }
-            return;
+
+            record(audit, entry).await;
+
+            // Ack the ORIGINAL: the retry copy re-enters the primary queue via
+            // TTL + DLX once the delay expires.
+            if let Err(e) = settle.ack().await {
+                error!(%kind, error = %e, delivery_tag, "Failed to ack original outbound delivery");
+            }
         }
+        Verdict::DeadLetter { audit: entry } => {
+            record(audit, entry).await;
 
-        record(
-            audit,
-            audit_entry(
-                msg,
-                "delivery_attempt",
-                AuditOutcome::Failure,
-                serde_json::json!({
-                    "delivery_id": msg.delivery_id,
-                    "attempt": next_attempt,
-                    "error": error_detail,
-                    "next_retry_in_ms": ttl_ms,
-                }),
-            ),
-        )
-        .await;
-
-        // Ack the ORIGINAL: the retry copy re-enters the primary queue via
-        // TTL + DLX once the delay expires.
-        if let Err(e) = settle.ack().await {
-            error!(%kind, error = %e, delivery_tag, "Failed to ack original outbound delivery");
+            // Terminal: nack requeue=false -> the primary queue's DLX -> the DLQ
+            // (replayable).
+            let _ = settle.nack(false).await;
         }
-    } else {
-        warn!(
-            %kind,
-            target_id = %msg.target_id,
-            delivery_id = %msg.delivery_id,
-            attempt = next_attempt,
-            max_attempts = cfg.max_attempts,
-            error = %error_detail,
-            "Outbound delivery exhausted retries or cannot succeed; dead-lettering"
-        );
-
-        record(
-            audit,
-            audit_entry(
-                msg,
-                "delivery_failed",
-                AuditOutcome::Failure,
-                serde_json::json!({
-                    "delivery_id": msg.delivery_id,
-                    "attempt": next_attempt,
-                    "error": error_detail,
-                    "next_retry_in_ms": null,
-                }),
-            ),
-        )
-        .await;
-
-        // Terminal: nack requeue=false -> the primary queue's DLX -> the DLQ
-        // (replayable).
-        let _ = settle.nack(false).await;
     }
 }
 
@@ -505,9 +424,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::outcome::table;
+    use super::super::retry::backoff_ttl_ms;
     use super::*;
-    use axiam_core::outbound::{OutboundError, OutboundFuture};
+    use axiam_core::models::audit::AuditOutcome;
+    use axiam_core::outbound::{DeliveryOutcome, OutboundError, OutboundFuture};
     use std::sync::Mutex;
+    use uuid::Uuid;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
@@ -614,11 +537,7 @@ mod tests {
 
     // ---- fixtures --------------------------------------------------------
 
-    const CFG: OutboundRetryConfig = OutboundRetryConfig {
-        max_attempts: 3,
-        backoff_base_ms: 100,
-        backoff_ceiling_ms: 10_000,
-    };
+    const CFG: OutboundRetryConfig = table::CFG;
 
     fn message(attempt: u32) -> OutboundMessage {
         OutboundMessage {
@@ -874,20 +793,44 @@ mod tests {
         assert!(rig.audit.entries().is_empty());
     }
 
-    #[test]
-    fn audit_entry_uses_the_system_actor_and_the_kind_prefix() {
-        let msg = message(0);
-        let entry = audit_entry(
-            &msg,
-            "delivery_attempt",
-            AuditOutcome::Failure,
-            serde_json::json!({"x": 1}),
-        );
-        assert_eq!(entry.tenant_id, msg.tenant_id);
-        assert_eq!(entry.actor_id, Uuid::nil());
-        assert!(matches!(entry.actor_type, ActorType::System));
-        assert_eq!(entry.action, "webhook.delivery_attempt");
-        assert_eq!(entry.resource_id, Some(msg.target_id));
-        assert!(entry.ip_address.is_none());
+    /// G-8: this loop and the in-process dispatcher share `outcome::decide`.
+    /// Every row of the shared table, driven through the AMQP loop, settles as
+    /// its shape says and writes the audit row the table's action names.
+    #[tokio::test]
+    async fn every_row_of_the_shared_outcome_table_settles_and_audits_as_documented() {
+        use table::Shape;
+        for case in table::cases() {
+            let rig = Rig::new();
+            let msg = message(case.attempt);
+            let d = Scripted::new(case.result.clone());
+            rig.run(&msg, &d).await;
+
+            let (settle, republished): (&[&str], usize) = match case.shape {
+                Shape::Delivered => (&["ack"], 0),
+                Shape::Retry => (&["ack"], 1),
+                Shape::DeadLetter => (&["nack(requeue=false)"], 0),
+            };
+            assert_eq!(rig.settle.calls(), settle, "{}", case.name);
+            assert_eq!(
+                rig.retry.published.lock().unwrap().len(),
+                republished,
+                "{}",
+                case.name
+            );
+            let entries = rig.audit.entries();
+            assert_eq!(entries.len(), 1, "{}", case.name);
+            assert_eq!(
+                entries[0].action,
+                format!("webhook.{}", case.action),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                matches!(entries[0].outcome, AuditOutcome::Success),
+                case.success,
+                "{}",
+                case.name
+            );
+        }
     }
 }

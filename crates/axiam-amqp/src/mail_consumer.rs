@@ -69,6 +69,13 @@ fn backoff_delay_secs(attempt_count: u32) -> f64 {
     delay.clamp(0.0, MAIL_RETRY_MAX_DELAY_SECS)
 }
 
+/// [`backoff_delay_secs`] as a [`std::time::Duration`]: the retry schedule the
+/// AMQP consumer sleeps, and the one the in-process mail worker of the minimal
+/// profile ([`crate::mail_inprocess`]) uses, so the two cannot drift.
+pub fn default_retry_delay(attempt_count: u32) -> std::time::Duration {
+    std::time::Duration::from_secs_f64(backoff_delay_secs(attempt_count))
+}
+
 // ---------------------------------------------------------------------------
 // MailType → TemplateKind mapping
 // ---------------------------------------------------------------------------
@@ -543,7 +550,7 @@ pub async fn start_mail_consumer<E, A, U, T, N, O>(
                     attempt = retry_msg.attempt_count,
                     delay_secs, "Backing off before mail retry republish"
                 );
-                tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+                tokio::time::sleep(default_retry_delay(retry_msg.attempt_count)).await;
 
                 match serde_json::to_vec(&retry_msg) {
                     Ok(payload) => {

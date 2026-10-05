@@ -11,7 +11,9 @@
 //! | bounded exponential retry policy and its env vars | [`retry`] |
 //! | the bytes on the queue | [`wire`] |
 //! | enqueue (implements `OutboundPublisher`) | [`publisher`] |
+//! | the outcome table: retry vs dead-letter vs delivered, and the audit row | `outcome` (crate-private) |
 //! | deliverer registry, the consume loop and its supervisor | [`consumer`] |
+//! | the in-process dispatcher of the minimal profile (no broker) | [`inprocess`] |
 //!
 //! The webhook kind keeps exactly the names, arguments, wire format and
 //! environment variables it had before the extraction. Renaming any of them
@@ -19,6 +21,8 @@
 //! redeclaration; `topology::tests` pins them byte for byte.
 
 pub mod consumer;
+pub mod inprocess;
+pub(crate) mod outcome;
 pub mod publisher;
 pub mod retry;
 pub mod topology;
@@ -26,6 +30,9 @@ pub mod wire;
 
 pub use consumer::{
     OutboundConsumerError, OutboundDeliverers, run_outbound_consumer, spawn_outbound_consumer,
+};
+pub use inprocess::{
+    InProcessConsumerEnd, InProcessOutbound, InProcessOutboundPublisher, spawn_in_process_consumer,
 };
 pub use publisher::AmqpOutboundPublisher;
 pub use retry::{OutboundRetryConfig, backoff_ttl_ms};

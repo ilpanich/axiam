@@ -7,6 +7,7 @@ pub mod config;
 pub mod connection;
 pub mod error;
 pub mod mail_consumer;
+pub mod mail_inprocess;
 pub mod mail_publisher;
 pub mod messages;
 pub mod notification_publisher;
@@ -23,12 +24,17 @@ pub use connection::AmqpManager;
 pub use connection::{exchanges, queues};
 pub use error::AmqpError;
 pub use mail_consumer::start_mail_consumer;
+pub use mail_inprocess::{
+    InProcessMailPublisher, InProcessMailQueue, in_process_mail_channel,
+    spawn_in_process_mail_worker, spawn_in_process_mail_worker_default,
+};
 pub use mail_publisher::MailOutboundPublisher;
 pub use messages::{MailType, OutboundMailMessage, WebhookMessage};
 pub use notification_publisher::NotificationPublisher;
 pub use outbound::{
-    AmqpOutboundPublisher, OutboundConsumerError, OutboundDeliverers, OutboundRetryConfig,
-    OutboundTopology, run_outbound_consumer, spawn_outbound_consumer,
+    AmqpOutboundPublisher, InProcessConsumerEnd, InProcessOutbound, InProcessOutboundPublisher,
+    OutboundConsumerError, OutboundDeliverers, OutboundRetryConfig, OutboundTopology,
+    run_outbound_consumer, spawn_in_process_consumer, spawn_outbound_consumer,
 };
 pub use reactor::{
     ChainResult, DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT, DEFAULT_HEALTH_LOOKBACK_HOURS,

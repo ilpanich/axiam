@@ -82,7 +82,15 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
         context.insert("action".into(), action.into());
         context.insert("outcome".into(), outcome.into());
         if actor_id.is_none() {
-            context.insert("username".into(), "an unauthenticated caller".into());
+            // An event AXIAM itself raises (a dead-lettered delivery) has no
+            // caller at all, authenticated or not; saying so would send an
+            // administrator looking for an intruder.
+            let who = if event_types.iter().all(|e| e.is_system_event()) {
+                "AXIAM (an automated process)"
+            } else {
+                "an unauthenticated caller"
+            };
+            context.insert("username".into(), who.into());
         }
 
         let mut enqueued = 0usize;
@@ -234,6 +242,134 @@ where
                 ),
             }
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit rows that are not HTTP requests
+// ---------------------------------------------------------------------------
+
+/// An [`AuditLogRepository`] that lets the notification rules see the rows it
+/// appends.
+///
+/// [`NotificationSink`] is driven by [`crate::AuditMiddleware`]'s worker, which
+/// only ever sees HTTP requests. A row a background process writes straight to
+/// the repository — the outbound dispatcher's `scim_push.delivery_failed`, the
+/// record of a dead letter — never reaches it, so a rule an administrator
+/// configured for that event (T19.13's mechanism, D-58: no second channel)
+/// would match nothing in a running server. The consumer that writes it is
+/// given this wrapper instead of the bare repository.
+///
+/// Only a row that **maps to a notification event** costs anything beyond the
+/// append: the tenant's organization is looked up (mail needs it to resolve the
+/// email configuration) and the sink is called, after the append has succeeded
+/// and with its failures swallowed, exactly as the middleware's worker does.
+/// Every other method is the inner repository's.
+pub struct NotifyingAuditLog<A, T> {
+    inner: A,
+    sink: std::sync::Arc<dyn crate::middleware::AuditEventSink>,
+    tenants: T,
+}
+
+impl<A, T> NotifyingAuditLog<A, T> {
+    /// Wrap `inner`; `tenants` resolves a row's organization.
+    pub fn new(
+        inner: A,
+        sink: std::sync::Arc<dyn crate::middleware::AuditEventSink>,
+        tenants: T,
+    ) -> Self {
+        Self {
+            inner,
+            sink,
+            tenants,
+        }
+    }
+}
+
+impl<A, T> axiam_core::repository::AuditLogRepository for NotifyingAuditLog<A, T>
+where
+    A: axiam_core::repository::AuditLogRepository,
+    T: axiam_core::repository::TenantRepository,
+{
+    async fn append(
+        &self,
+        input: axiam_core::models::audit::CreateAuditLogEntry,
+    ) -> AxiamResult<axiam_core::models::audit::AuditLogEntry> {
+        let appended = self.inner.append(input.clone()).await?;
+        let outcome = format!("{:?}", input.outcome);
+        let notifiable = !input.tenant_id.is_nil()
+            && !NotificationEventType::from_audit_action(&input.action, &outcome).is_empty();
+        if notifiable {
+            let org_id = match self.tenants.get_by_id(input.tenant_id).await {
+                Ok(tenant) => tenant.organization_id,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        tenant_id = %input.tenant_id,
+                        "a notifiable audit row's organization could not be resolved"
+                    );
+                    Uuid::nil()
+                }
+            };
+            self.sink
+                .on_event(&crate::middleware::AuditEvent {
+                    entry: input,
+                    org_id,
+                })
+                .await;
+        }
+        Ok(appended)
+    }
+
+    fn list(
+        &self,
+        tenant_id: Uuid,
+        filter: axiam_core::repository::AuditLogFilter,
+        pagination: axiam_core::repository::Pagination,
+    ) -> impl std::future::Future<
+        Output = AxiamResult<
+            axiam_core::repository::PaginatedResult<axiam_core::models::audit::AuditLogEntry>,
+        >,
+    > + Send {
+        self.inner.list(tenant_id, filter, pagination)
+    }
+
+    fn list_system(
+        &self,
+        filter: axiam_core::repository::AuditLogFilter,
+        pagination: axiam_core::repository::Pagination,
+    ) -> impl std::future::Future<
+        Output = AxiamResult<
+            axiam_core::repository::PaginatedResult<axiam_core::models::audit::AuditLogEntry>,
+        >,
+    > + Send {
+        self.inner.list_system(filter, pagination)
+    }
+
+    fn get_by_ids(
+        &self,
+        tenant_id: Uuid,
+        ids: &[Uuid],
+    ) -> impl std::future::Future<
+        Output = AxiamResult<Vec<axiam_core::models::audit::AuditLogEntry>>,
+    > + Send {
+        self.inner.get_by_ids(tenant_id, ids)
+    }
+
+    fn pseudonymize_actor(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        pseudonym: &str,
+    ) -> impl std::future::Future<Output = AxiamResult<u64>> + Send {
+        self.inner.pseudonymize_actor(tenant_id, user_id, pseudonym)
+    }
+
+    fn prune_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> impl std::future::Future<Output = AxiamResult<u64>> + Send {
+        self.inner.prune_older_than(cutoff)
     }
 }
 
@@ -785,5 +921,61 @@ mod tests {
             "a resolvable actor must be left to the consumer, not overlaid"
         );
         assert_eq!(msg.user_id, actor);
+    }
+
+    /// G-6 (D-58): a rule for `scim_delivery_failed` matches the row the outbound
+    /// dispatcher writes on a dead letter, and mails every recipient. The
+    /// actor line says an AXIAM process raised it, not "an unauthenticated
+    /// caller".
+    #[tokio::test]
+    async fn a_scim_dead_letter_mails_every_recipient_of_a_matching_rule() {
+        let mut rule = make_rule(vec!["soc@example.com", "oncall@example.com"]);
+        rule.events = vec![NotificationEventType::ScimDeliveryFailed];
+        let publisher = RecordingPublisher::new();
+        let dispatcher = NotificationDispatcher::new(MockRuleRepo::new(vec![rule]));
+
+        let count = dispatcher
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "scim_push.delivery_failed",
+                "Failure",
+                None,
+                "scim_push.delivery_failed (Failure)",
+                &publisher,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(count, 2);
+        let msgs = publisher.messages();
+        assert!(
+            msgs.iter()
+                .all(|m| matches!(m.mail_type, MailType::Notification))
+        );
+        let context = msgs[0].template_context.as_object().unwrap();
+        assert_eq!(context["event"], "scim_delivery_failed");
+        assert_eq!(context["action"], "scim_push.delivery_failed");
+        assert_eq!(context["username"], "AXIAM (an automated process)");
+
+        // A rule that did not ask for the event is not mailed.
+        let other = NotificationDispatcher::new(MockRuleRepo::new(vec![make_rule(vec![
+            "soc@example.com",
+        ])]));
+        let quiet = RecordingPublisher::new();
+        other
+            .dispatch(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "scim_push.delivery_failed",
+                "Failure",
+                None,
+                "",
+                &quiet,
+            )
+            .await
+            .unwrap();
+        // The mock returns every rule; the dispatcher's own match drops it.
+        assert_eq!(quiet.count(), 0);
     }
 }

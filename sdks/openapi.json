@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:672f10090fc04f2ef68f9bfc46df29f9447703dfced39eaaa2b58359fb7e1ea6"
+    "x-axiam-spec-digest": "sha256:4e5d9485699a012ad52631997da3b47932b1e081aa90d3e7581b4c477ea2bf16"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -18842,7 +18842,8 @@
           "user_deleted",
           "user_updated",
           "service_account_created",
-          "service_account_deleted"
+          "service_account_deleted",
+          "scim_delivery_failed"
         ]
       },
       "NotificationPolicy": {

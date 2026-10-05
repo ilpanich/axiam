@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Outbound SCIM provisioning: reconciliation, dead-letter notification and
+  erasure propagation (T23.6.3, G-6, D-58).** A `scim_reconcile` job in the
+  cleanup loop (listed in `/health/jobs`) reconciles each enabled target once a
+  day, claimed in the datastore so replicas do not double-run it: it re-queues a
+  reference for every in-scope user and group and every linked resource, pages
+  the downstream `GET /Users` and `/Groups` (100 per page, at most 100 pages and
+  five minutes per run, through the same no-redirect SSRF guard and credential
+  path as delivery), clears the digest of a resource whose downstream copy
+  differs, drops the link of one that is gone (it is created again), and
+  deprovisions a downstream account whose `externalId` is an out-of-scope,
+  disabled or erased user **of this tenant**. A downstream account with no
+  `externalId`, a foreign one, or another tenant's user is never touched. A
+  new `scim_delivery_failed` notification event (the console's rule editor lists
+  it) mails a tenant's rule recipients when a delivery is dead-lettered. GDPR
+  erasure reaches the downstream as `DELETE`: the link row (ids and a digest
+  only) survives the erasure cascade until that `DELETE` succeeds, a refused one
+  leaves it `deprovisioned` with `erase_pending`, and reconciliation retries it.
+  `NotificationEventType` gains `scim_delivery_failed`, so `sdks/openapi.json`'s
+  enum does too. Documented in the erasure section of
+  `docs/compliance/gdpr-compliance.md`.
+
 - **Outbound SCIM provisioning: the source, the client and the deliverer
   (T23.6.2, G-6, D-57).** AXIAM can now push user and group changes to a
   downstream SCIM 2.0 service provider. Management routes, the console and the

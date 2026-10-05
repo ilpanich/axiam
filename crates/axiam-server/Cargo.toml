@@ -113,6 +113,9 @@ rcgen = { workspace = true }
 # rsa 0.9 requires a rand_core 0.6 CryptoRng; the workspace `rand` (0.9) ThreadRng
 # does not satisfy it. Use rand_core 0.6 OsRng for RSA test-key generation.
 rand_core = { version = "0.6", features = ["getrandom"] }
+# T23.6.3: the loopback SCIM server's harness (shared with axiam-scim's tests by
+# path) seals target credentials with a zeroizing buffer.
+zeroize = { workspace = true }
 # S-8: tests/grpc_client_auth.rs drives the real gRPC listener with a real
 # tonic client (the generated stubs exist only under `client`) and probes the
 # handshake itself with tokio-rustls, to see who is asked for a certificate.

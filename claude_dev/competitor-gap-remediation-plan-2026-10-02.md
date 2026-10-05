@@ -1570,6 +1570,36 @@ first under Opus 5.
 > of the 2 MiB debug test stack on `main`, now overflows on every run (and
 > `saml_idp_e2e_test` as on `main`); fixed before T23.7.2 by a separate task. The
 > console's OAuth2 client form has no CIBA fields yet (coverage matrix, P3).
+>
+> **EXECUTED (partly) — G-7, W5: T23.7.2, 2026-10-05** (`bad1659`, `0e5b3ec`,
+> `771c993`, `10afb0f`, `508ede5`, `598cc2c`; Sonnet 5.5; preceded by `5a5bddf`,
+> the SAML test-harness stack fix). Approval, notification and ping per **D-65 …
+> D-68**. The signed-in user's approval API (`GET /api/v1/ciba/requests/{id}`,
+> `POST …/approve`, `…/deny`; human session and CSRF; one indistinguishable `404`
+> for unknown, another user's, expired, decided or stale; `403 step_up_required`
+> naming the class, the step-up through the login hop; conditional on the version;
+> `ciba.approved`/`ciba.denied` audited without the binding message; buckets
+> `ciba_approval_get`/`_approve`/`_deny` under `ciba_approval_per_min`, 30, never
+> preset) and the console page `/ciba/approve` (binding message as text, the mail
+> link carried through sign-in by `sanitizeReturnTo`). `CibaMailNotifier` over the
+> mail path (a `ciba_approval` template, schema **v82** widening the template kind;
+> client, binding message and link, never `auth_req_id`; only to an account that
+> may sign in, behind the three-per-minute throttle). **Ping** on the D-36
+> dispatcher: `OutboundKind::CibaPing` (slug `ciba_ping`, seven-day DLQ TTL, the
+> record id only on the queue), a level-triggered deliverer re-reading the request
+> and client, the notification token as a sensitive `Bearer` header, the one
+> `guarded_fetch_no_redirect` call with `allow_private = false`, enqueued by
+> `CibaService` after approve and deny, started through `spawn_outbound_consumer`.
+> Tests: 15 approval HTTP tests, 15 ping and 7 notifier tests, 12 page tests, the
+> topology and supervisor pins extended; the whole `axiam-api-rest` suite (1 487
+> tests) green at the default stack.
+>
+> What the plan did not anticipate. A new mail kind needed a schema migration (the
+> template kind is an `ASSERT`). Approval mail goes to an account's address
+> whether or not it was verified (it carries no secret and acting needs a
+> sign-in; carried to F4). T-424, T-431, T-433 and T-435 have their controls and
+> tests here and are flipped by the F4 review's threat reconciliation (threat
+> entries are Opus work).
 
 **Target.** OpenID Connect Client-Initiated Backchannel Authentication, poll
 and ping modes, as the FAPI-CIBA profile requires.

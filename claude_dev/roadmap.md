@@ -1103,7 +1103,7 @@ with an F4 security review of the wave's diff against
 | T23.6.4 | CRUD, console, contract §31, OpenAPI, website, threat entries | Sonnet 5.5 | W5 |✓ |
 | T23.7.1 | CIBA: `bc-authorize`, `auth_req_id` lifecycle, single-use redemption, polling back-off | Opus 5.5 | W5 |✓ |
 | T23.7.2 | Approval on the identity pages, email notification, ping mode | Sonnet 5.5 | W5 |✓ |
-| T23.7.3 | e2e poll and ping, contract §33 (D-56), SDK helper (seven SDKs, post-merge per D-35), website | Sonnet 5.5 | W5 | |
+| T23.7.3 | e2e poll and ping, contract §33 (D-56), SDK helper (seven SDKs, post-merge per D-35), website | Sonnet 5.5 | W5 |✓ |
 | T23.8.1 | `AXIAM__AMQP__ENABLED=false` minimal profile | Sonnet 5.5 | W5 | |
 | T23.8.2 | Review of the direct audit-write path against T19.27 | Opus 5.5 | W5 | |
 | T23.8.3 | `docker-compose.minimal.yml`, docs, resting-RSS measurement | Sonnet 5.5 | W5 | |

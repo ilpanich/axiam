@@ -1600,6 +1600,27 @@ first under Opus 5.
 > sign-in; carried to F4). T-424, T-431, T-433 and T-435 have their controls and
 > tests here and are flipped by the F4 review's threat reconciliation (threat
 > entries are Opus work).
+>
+> **EXECUTED — G-7, W5: T23.7.3, 2026-10-05** (`bf55929`, `1b61ce5`, `4cc200f`,
+> `e7f128f`, `5ae8b55`; Sonnet 5.5, in a worktree). **Contract 1.58, §33** (the
+> initiation helper SHOULD in the seven full-surface SDKs, MAY in the other four:
+> `ciba_initiate`, never retried; `ciba_poll`; `ciba_await` honouring `interval` and
+> `slow_down`; `ciba_handle_ping`, constant-time; the signed form; 16 portable
+> tests), and **§21.3.1 amended in place** for the seventh mTLS alias. Website
+> *Integrate* page **CIBA (backchannel authentication)**, linked from the OAuth2,
+> device and FAPI pages; the Keycloak comparison's CIBA row and gap item flipped with
+> a 2026-10-05 change-log line. E2e per **D-71**: `frontend/e2e/ciba.spec.ts` (poll to
+> tokens through the real approval page, a second redemption refused, denial, expiry,
+> `slow_down`, the decoy request, an MFA request a password session cannot approve,
+> unsupported parameters, and the limiter counting `bc-authorize` — the e2e compose
+> lowers the bucket to 20), run by CI's E2E job; `ciba_ping_flow_test` (3) for ping.
+> The SDK helper is the post-merge fan-out (D-35): its tracking issue (contract 1.58)
+> and G-6's (1.57) are drafted for the wave PR. **G-7 is complete in the server.**
+>
+> What the plan did not anticipate. The compose harness cannot host a ping receiver
+> without new production trust surface (D-71). The Playwright spec was typechecked
+> but not run here (no image build beside a parallel Rust task on the shared disk);
+> CI's E2E job is its first run.
 
 **Target.** OpenID Connect Client-Initiated Backchannel Authentication, poll
 and ping modes, as the FAPI-CIBA profile requires.
@@ -2175,6 +2196,7 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-68 | *Taken in T23.7.1 (Opus 5.5), 2026-10-05, accepted by the orchestrator.* The approval API T23.7.2 calls | Requests addressed by record id (not a secret: approval needs the request's own user signed in); `lookup_for_approval`, then `approve`/`deny` conditional on the version read; `acr` derived from the session's `amr`, `StepUpRequired` naming the class needed; only status changes bump `version`, polls are a compare-and-set on `last_polled_at`. Rejected: approval by marker (T-404's lesson); polls bumping `version` |
 | D-69 | *Taken in T23.7.1 (Opus 5.5), 2026-10-05, accepted by the orchestrator.* What lockout means for CIBA (the Keycloak 26.7.x class) | The user's `locked_until` and `account_may_act` are checked at `bc-authorize` (the request becomes a decoy), at approval and at redemption; client-authentication failures get the token endpoint's audit row and buckets; no client lockout keyed on a caller-supplied `client_id`. Rejected: a client lockout anyone can trigger against a known client |
 | D-70 | *Taken in T23.7.1 (Opus 5.5), 2026-10-05, accepted by the orchestrator.* Rate limits | **`bc_authorize_per_min`** in the machine presets (60 / 600 / 6 000), keyed like `/oauth2/token`, plus a per-client bucket after authentication; a fixed 3 user notifications per user per minute that no preset moves; the CIBA grant counts against `token_per_min`. Rejected: a never-preset limit like `device_authorization` (breaks NAT'd call-centre fleets) |
+| D-71 | *Taken by the orchestrator, 2026-10-05, on T23.7.3's report.* §4 G-7 asks for "poll and ping end to end in the e2e harness", but the compose e2e stack cannot reach a ping receiver without weakening production: the deliverer requires `https` and refuses private addresses (`AXIAM__PKI__SSRF_ALLOWED_HOSTS` exempts the address rule, never the scheme), its client trusts the webpki roots only, the write-time policy refuses private literals and local names, and the e2e compose sets no `pki_encryption_key` | **Poll runs end to end in the compose e2e harness** (`frontend/e2e/ciba.spec.ts`, real browser approval); **ping runs end to end at the Rust level** (`ciba_ping_flow_test`: the REST routes, `CibaService` and the production `CibaPingDeliverer` through its loopback test seam, against a loopback receiver), the precedent W4 set for SSF push. Rejected: an operator setting for extra trust anchors on guarded outbound fetches (new production surface and a threat entry, to serve a test); dropping ping from the acceptance |
 
 ---
 

@@ -3809,6 +3809,14 @@ Its receiver helper (§32.7) is independent of the management surface — a rely
 only receives events needs it and nothing else — so an SDK that ships it names it on its own,
 "§32.7", whether or not it states §32.
 
+§31 (outbound SCIM targets, contract 1.57) is a §27 namespace too, stated by name for §31.5's
+wrapping and §31.3's call-site documentation (rules 2 and 8):
+
+> "This SDK conforms to CONTRACT.md §1–§13, §14, §15, §17, §19, §27, §28, §28.12, §29, §30, §31 and §32."
+
+An SDK states it only after porting it from the merge commit that carries the routes
+([§31.10](#§3110-per-sdk-posture)); none does yet.
+
 Phase acceptance criteria in each SDK plan include: "CONTRACT.md §1–§10 conformance
 verified." (and §1–§11 where the §11 helpers are shipped, §1–§12 where the §12 helpers are
 shipped).
@@ -3846,6 +3854,30 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
+
+- **2026-10-05 (T23.6.4, G-6, contract 1.57)** — **non-breaking / additive.** A new
+  section, [§31](#§31-outbound-scim-targets-management-api-contract-157): AXIAM as a SCIM 2.0
+  **client** of downstream service providers a tenant administrator registers. The management
+  namespace `scim_targets` — `list` (paginated), `create`, `get` (with the target's delivery
+  state), `update` (**replace**, with the credential kept when absent), `delete` and
+  `reconcile` — with `ScimTargetInput.credential` **Sensitive** from the first version (§27.5
+  gains two rows); the server rules an SDK can observe (every write validated, `base_url` and
+  `token_url` held to the webhook outbound address policy, the group scope checked against the
+  tenant, the credential bound to its URL — moving it, or switching the authentication kind,
+  without it is a `400` naming the field — an overtaken `update` as `409`, `503` without the
+  sealing key, `reconcile` as `202` or `409`, `delete` deprovisioning nothing downstream, the
+  permissions `scim_targets:read` and `scim_targets:write`, human principals only, the bucket
+  `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN`, audit rows) and, as informative text, the
+  level-triggered delivery behind it. Six required tests per SDK. The Conformance Statement
+  gains §31's sentence.
+
+  - **The routes lead the ports.** `openapi.json` and `management-registry.json` are
+    regenerated in the same task (190 operations across 28 namespaces); the delivery, the
+    reconciliation and the dead-letter notification (T23.6.2, T23.6.3) change no shape here.
+  - **Re-sync required for 1.57** in all eleven SDK repositories: `CONTRACT.md`,
+    `openapi.json` and `management-registry.json`, from the **merged** commit (the 1.49 rule).
+    `proto/` is unchanged. Implementing §31 is the post-merge fan-out (D-35). Per-SDK tests:
+    §31.8.
 
 - **2026-10-04 (T23.5.2, G-5, contract 1.56)** — **non-breaking / additive.** A new
   section, [§32](#§32-ssf-stream-registration-and-the-receiver-helper-contract-156): AXIAM as a
@@ -7590,7 +7622,9 @@ which brings the registry to 168 operations across 25 namespaces. Contract 1.55 
 namespace ([§29](#§29-saml-service-provider-registration-management-api-contract-155)),
 eleven operations, which brings it to 179 across 26 once the server task regenerates it. Contract 1.56 adds the
 `ssf` namespace ([§32](#§32-ssf-stream-registration-and-the-receiver-helper-contract-156)), five
-operations, which brings the registry to 184 across 27. The figures quoted elsewhere
+operations, which brings the registry to 184 across 27. Contract 1.57 adds the `scim_targets`
+namespace ([§31](#§31-outbound-scim-targets-management-api-contract-157)), six operations, which
+brings it to 190 across 28. The figures quoted elsewhere
 in §27 were last re-rendered at 1.51 and are not re-rendered here; the registry is the
 authority ([§27.0](#§270-the-boundary)).
 
@@ -7827,6 +7861,8 @@ property of the surface rather than a list somebody remembers to update.
 | `directory.update` | request | `bind_secret` | As above; absent keeps the stored secret, and moving the connection without it is a `400` ([§30.3](#§303-server-rules-every-sdk-can-observe-normative) rule 2). (contract 1.54) |
 | `ssf.create_stream` | request | `authorization_header` | The `Authorization` header AXIAM presents to an SSF receiver's push endpoint — a credential to a third party. Write-only: never returned, on no response. (contract 1.56, [§32.5](#§325-sensitivet-applicability)) |
 | `ssf.update_stream` | request | `authorization_header` | As above; absent keeps the stored header, and moving the push endpoint to another origin without it is a `400` ([§32.3](#§323-server-rules-every-sdk-can-observe-normative) rule 5). (contract 1.56) |
+| `scim_targets.create` | request | `credential` | The bearer token or OAuth2 client secret AXIAM presents to a downstream SCIM service provider — a credential to a third party. Write-only: never returned, on no response. (contract 1.57, [§31.5](#§315-sensitivet-applicability)) |
+| `scim_targets.update` | request | `credential` | As above; absent keeps the stored credential, and moving it to another URL (`base_url` of a bearer target, `auth.token_url` of a client-credentials one) or switching `auth.type` without it is a `400` ([§31.3](#§313-server-rules-every-sdk-can-observe-normative) rule 2). (contract 1.57) |
 
 **RFC 7592's `registration_access_token` (contract 1.53) is Sensitive too, and is not in
 this table only because no §27 operation carries it**: it is returned by the protocol
@@ -10185,6 +10221,298 @@ rather than letting its §27 claim widen silently (Conformance Statement), even 
 §27 generator will produce the six operations on its own once the registry carries them:
 §30.3's call-site documentation and §30.5's wrapping are what the claim adds.
 
+## §31 Outbound SCIM targets (management API, contract 1.57)
+
+**Requirement level: SHOULD, as part of §27 (a namespace `scim_targets`), in all eleven SDKs.
+Additive; nothing in §1–§30 or §32 changes.** Server design: plan item G-6 and decisions D-57 and
+D-58 in the plan's decision table
+([`competitor-gap-remediation-plan-2026-10-02.md`](../claude_dev/competitor-gap-remediation-plan-2026-10-02.md)
+§8). Threat model: the G-6 entries, T-407 onward. (§31 was reserved for this section when §32
+was written, D-44; the numbers did not trade places.) Operator documentation: the website's
+*Integrate* page **Outbound SCIM provisioning**.
+
+AXIAM can act as a **SCIM 2.0 client** (RFC 7643, RFC 7644) for a tenant (competitor-gap item
+G-6): a tenant administrator registers **targets** — downstream SCIM service providers — and
+AXIAM pushes the tenant's user and group lifecycle changes to them. **Nothing is needed from an
+SDK to make that happen**; what this section adds is the administration: the registry of
+targets, read and written as a §27 namespace, with each target's delivery state, and the
+explicit *reconcile now* act. It is plain management CRUD, in the shape of §30 and §32.1–§32.5,
+and an SDK never *speaks SCIM to a target*: AXIAM does.
+
+**Status: the routes follow the text.** The server routes, their OpenAPI operations and their
+`management-registry.json` entries landed with the server task that wrote this revision
+(T23.6.4), which regenerated both files (190 operations across 28 namespaces). An SDK implements
+§31 from that merge commit (§7 rule 1 of the plan; the 1.49 rule), in the post-merge fan-out
+(D-35); none had when it landed (§31.10).
+
+### §31.1 Canonical operation set
+
+A new §27 namespace, **`scim_targets`**, OpenAPI tag `scim-targets`. The tenant is the
+**token's**, as for `webhooks`: no path carries `{tenant_id}`, and a target of another tenant is
+`404`, exactly as one that does not exist.
+
+| Operation | HTTP | Request body | Response | `update_style` |
+|---|---|---|---|---|
+| `scim_targets.list` | `GET /api/v1/scim-targets` | — (`offset`, `limit`, `search`) | `200` page of `ScimTargetResponse` | — |
+| `scim_targets.create` | `POST /api/v1/scim-targets` | `ScimTargetInput` | `201` `ScimTargetResponse` | — |
+| `scim_targets.get` | `GET /api/v1/scim-targets/{id}` | — | `200` `ScimTargetResponse` | — |
+| `scim_targets.update` | `PUT /api/v1/scim-targets/{id}` | `ScimTargetInput` | `200` `ScimTargetResponse` | **`replace`** |
+| `scim_targets.delete` | `DELETE /api/v1/scim-targets/{id}` | — | `204` | — |
+| `scim_targets.reconcile` | `POST /api/v1/scim-targets/{id}/reconcile` | — | `202` `ScimReconcileAccepted` | — |
+
+`list` is one of §27.4 rule 4's paginated operations (`{ items, total, offset, limit }`, `search`
+matched against `name`, `base_url` and the id, before paging). `update` is a **replacement**
+(§27.4 rule 5): a member left out takes its default, **except the credential**, which absent
+keeps (§31.3 rule 2).
+
+### §31.2 Shapes (normative)
+
+**`ScimTargetResponse`** — what every read and write returns. Field names are the server's:
+
+| Field | Type | Notes |
+|---|---|---|
+| `id`, `tenant_id` | UUID | |
+| `name` | string | |
+| `base_url` | string | The downstream's SCIM service root, e.g. `https://idp.example/scim/v2`. |
+| `enabled` | bool | A disabled target receives nothing. |
+| `auth` | `ScimTargetAuth` | How AXIAM authenticates to the downstream — **no credential** (below). |
+| `scope` | `ScimTargetScope` | Which users the target provisions. |
+| `push_groups` | bool | Whether groups are pushed too: every group for `all_users`, the listed ones for `groups`. |
+| `user_name_from` | `"username"` \| `"email"` | Which AXIAM attribute becomes the downstream `userName`. An open enum. |
+| `deprovision` | `"deactivate"` \| `"delete"` | What happens downstream to a user who leaves scope or is no longer active: `PATCH active=false`, or `DELETE`. An erasure always deletes. An open enum. |
+| `created_at`, `updated_at` | RFC 3339 | `updated_at` is the version an `update` is conditional on (§31.3 rule 4). |
+| `state` | `ScimTargetDeliveryState` \| null | The delivery state; null only if the row cannot be read. |
+
+**`ScimTargetAuth`** is a tagged object on `type`: `{ "type": "bearer" }`, or
+`{ "type": "oauth2_client_credentials", "token_url": string, "client_id": string, "scope":
+string \| null }`. An SDK MUST decode an unknown `type` without failing (§27.13's rule for open
+enums) and MUST NOT give any variant a member for the credential. **`ScimTargetScope`** is a
+tagged object on `type`: `{ "type": "all_users" }`, or `{ "type": "groups", "group_ids":
+[UUID] }` — users who are **direct members** of any listed group.
+
+**`ScimTargetDeliveryState`** — what the deliverer and the reconciliation job record, and the
+only place a failure is visible to an administrator:
+
+| Field | Type | Notes |
+|---|---|---|
+| `last_success_at` | RFC 3339 \| null | When a delivery last succeeded. |
+| `last_failure_at` | RFC 3339 \| null | When an attempt last failed or was dead-lettered. |
+| `last_failure_reason` | string \| null | A **fixed vocabulary** of short phrases chosen by the server — never a URL, a response body or a value. An SDK MUST NOT parse it. |
+| `consecutive_failures` | integer | Failed attempts since the last success. |
+| `dead_lettered_total` | integer | Deliveries dead-lettered over the target's lifetime. |
+| `last_reconciled_at` | RFC 3339 \| null | When reconciliation last ran or was claimed. |
+
+**`ScimTargetInput`** (`create` and `update`):
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | yes | 1–128 bytes. |
+| `base_url` | string | yes | An `https` URL under the outbound address policy (§31.3 rule 1). |
+| `enabled` | bool | no | `true` by default. |
+| `auth` | `ScimTargetAuth` | yes | For `oauth2_client_credentials`, `token_url` (the same URL policy) and `client_id` (1–256 bytes) are required, `scope` (at most 256 bytes) is optional. |
+| `credential` | string | on `create`; on `update` per rule 2 | **Write-only.** The bearer token, or the OAuth2 client secret, 1–4 096 bytes. |
+| `scope` | `ScimTargetScope` | yes | A `groups` scope lists 1–100 groups of the tenant. |
+| `push_groups` | bool | no | `false` by default. |
+| `user_name_from` | enum | no | `username` by default. |
+| `deprovision` | enum | no | `deactivate` by default. |
+
+**`ScimReconcileAccepted`** is `{ "target_id": UUID, "status": "started" }`.
+
+**There is no credential on a response, and an SDK MUST NOT give it one.** `ScimTargetResponse`
+has no `credential` member, no `credential_set` flag, and no hash, prefix or length of the
+credential: the server never returns it (D-57). An SDK's response types MUST NOT declare such a
+member, and a decoder that meets one MUST drop it rather than surface it — the response object
+is the one most often logged.
+
+### §31.3 Server rules every SDK can observe (normative)
+
+1. **Every write is validated before anything is stored** — each failure is `400
+   validation_error` whose `message` names the field or the rule and **never echoes a URL or the
+   credential**: `name` 1–128 bytes without control characters; `base_url` and, for a
+   client-credentials target, `auth.token_url`, under the **webhook outbound address policy**
+   (absolute `https`, a host, no userinfo, no fragment, at most 2 048 bytes, no IP literal that
+   is not globally routable — loopback, private, link-local, the cloud metadata address and the
+   rest — and no `localhost`, `*.localhost`, `*.local` or `*.internal` name); `auth.client_id`
+   1–256 bytes and `auth.scope` at most 256 bytes, neither with a control character;
+   `credential` 1–4 096 bytes without surrounding whitespace or control characters, and — for a
+   bearer target — visible ASCII without spaces (it travels in a header); a `groups` scope with
+   no group, with more than 100, or naming a group that does not exist **in this tenant**
+   (duplicates collapse, order kept). A request body that is not a valid `ScimTargetInput` is
+   `400` and the response never quotes the body. The policy at write time is the webhook one;
+   the real guard is at **delivery**, where every request goes to the host the name resolves to
+   *now*, only if every address is globally routable, with no redirect followed (informative,
+   rule 14).
+2. **The credential is bound to its URL (D-57).** A `create` without `credential` is `400`
+   naming it. An `update` that omits it keeps the stored one — **except** that a write which
+   changes `base_url` of a **bearer** target, `auth.token_url` of a **client-credentials**
+   target, or `auth.type`, without `credential` in the same write is `400`, naming `base_url`,
+   `auth.token_url` or `auth.type`, and changes nothing. With the credential, the same change
+   is an ordinary write. The reason is disclosure by redirection: a kept credential sent to a
+   new host is the credential handed to whoever runs that host. An SDK MUST document the rule
+   at both call sites and MUST NOT work around it (it holds no credential to re-send, §31.5).
+   (Changing `base_url` of a client-credentials target is not the credential's destination and
+   needs nothing.)
+3. **The deployment may not have the feature.** Without `pki_encryption_key`
+   (`AXIAM__AUTH__PKI_ENCRYPTION_KEY`) — the key webhook secrets are sealed under — a write
+   that carries a `credential` (every `create`, every credential change) is `503
+   service_unavailable`; reads, `delete` and an `update` that sends no credential still answer.
+   An SDK maps it per §2 (`NetworkError`) and MUST NOT retry it.
+4. **A write that was overtaken is `409` (T-406).** An `update` is conditional on the
+   `updated_at` of the target as the server read it **for this request**: if another write — an
+   administrator's — lands between that read and this write, the write changes nothing and is
+   `409 conflict` ("the SCIM target changed since it was read…"). The administrator reloads and
+   retries; an SDK MUST NOT retry it on its own (§31.7). The deliverer never writes the target
+   row (its state is the separate `state` projection), so a `409` always means another
+   administrator.
+5. **`state` is a projection, and the only one.** `get`, `list`, `create` and `update` return
+   the target's `ScimTargetDeliveryState`; it is how an administrator learns that a downstream
+   refuses AXIAM's credential (`consecutive_failures`, `last_failure_reason`) or that
+   deliveries were dead-lettered. The dead letter itself is an audit row
+   (`scim_push.delivery_failed`) that a tenant's notification rule for the event
+   `scim_delivery_failed` can mail to administrators.
+6. **Enabling starts the first synchronisation.** A `create` with `enabled: true`, or an
+   `update` that switches a disabled target on, starts a reconciliation (rule 7), which queues
+   a reference for every user and group in scope. It is best effort: the write stands whether
+   or not the run could be started, and the nightly reconciliation finds the target either way.
+7. **`reconcile` starts a reconciliation now, in the background.** `202
+   ScimReconcileAccepted` when the request took the target's claim; the run — queue a
+   reference for every user and group in scope and every linked resource, read the downstream,
+   repair drift, never touch an account the downstream's own application created — is not
+   awaited, and its outcome is on `state`. `409 conflict` when a run holds the claim or ran
+   within the last five minutes (the same claim the nightly job takes, so two replicas do not
+   both run), or when the target is **disabled**; `404` for an unknown target; `503` when
+   delivery is not available in the deployment. An SDK MUST NOT poll to wait for the run
+   (§31.9).
+8. **`delete` removes the target, its link rows and its delivery state, and deprovisions
+   nothing downstream.** The users and groups AXIAM created in the service provider stay
+   there, and AXIAM no longer knows them. An administrator who wants them gone sets
+   `deprovision` to `delete`, lets AXIAM push, and only then deletes the target. An SDK MUST
+   say so at the `delete` call site.
+9. **Authorization.** Two new permissions, seeded per tenant like every other:
+   `scim_targets:read` (`list`, `get`) and `scim_targets:write` (`create`, `update`, `delete`,
+   `reconcile`). **The namespace is human-only:** a service-account token is `401` (the
+   registry's `service_account` flag is false for all six, and §27.13's list of admitted
+   families does not grow) — the credential to an outbound endpoint, and the choice of where a
+   tenant's people are sent, are a human administrator's. A token that holds only
+   `scim_targets:write` cannot read.
+10. **Rate limiting.** The four writes each have a per-IP bucket of their own,
+    `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` (default 30 per minute, never moved by a
+    profile), because each can repoint where a tenant's directory is pushed and `reconcile`
+    queues work and reads the downstream: `429` per §2. Reads are not in it.
+11. **CSRF** is as for every `/api/v1` write (§3).
+12. **Audit.** `scim_target.created`, `scim_target.updated`, `scim_target.deleted` and
+    `scim_target.reconcile_requested` record the actor and the tenant and, for an update, the
+    **names** of the fields that changed (and whether the credential was replaced); never a
+    URL, never the credential.
+13. **Tenant isolation.** A target is found only in the token's tenant. Every route answers
+    `404` for another tenant's id, with no difference from a target that does not exist.
+14. **Informative — what a target does once it is registered.** Delivery is **level-triggered**.
+    A change to a user or a group — from any writer: the console, the API, SCIM inbound, a
+    directory sync, a federation sign-in, an erasure — queues one **reference** per enabled
+    target (`{resource_type, axiam_id}` and nothing else, on the queues `axiam.scim_push`,
+    `.retry` and `.dlq`); each attempt re-reads the target, the resource and its link and sends
+    what the downstream should look like *now*, so retries, reordering and duplicates converge
+    and no attribute of a person ever sits in a queue. A new user is `POST /Users` with
+    `externalId` set to the AXIAM id; a known one is a `PATCH` of the mapped attributes only
+    (skipped when nothing changed); a user who leaves scope or is no longer active is
+    deactivated or deleted per `deprovision`; an **erased** user is deleted whatever
+    `deprovision` says. A downstream `5xx`, `408` and `429` retry with backoff; another `4xx`
+    is dead-lettered and counted on `state`. A nightly reconciliation (and *reconcile now*)
+    repairs drift. AXIAM **never touches a downstream account that is not one it created or
+    adopted by `externalId`**. An SDK does none of this.
+
+### §31.4 Error mapping
+
+§2 and §27.4 rule 7, unchanged: `400` is `ValidationError` (carrying the server's `message`),
+`404` `NotFoundError`, `409` `ConflictError`, `403` `AuthzError`, `401` `AuthError`, `429` and
+`503` `NetworkError`. A `202` is success. An SDK MUST NOT parse a `message` to recover the rule.
+
+### §31.5 `Sensitive<T>` applicability
+
+**`ScimTargetInput.credential` MUST be `Sensitive<T>`** (§7) wherever it appears —
+`scim_targets.create` and `scim_targets.update`, the only two places — from the first version an
+SDK ships (the #480 lesson, §27.5, applied before the fact). It is a credential AXIAM presents
+to a third party, write-only, sealed at rest and on no response. §7 rule 1's redaction covers it
+in every stringification sink; §27.4 rule 11 keeps it out of §19 telemetry; an error raised by
+`create` or `update` MUST NOT include it, a prefix or a hash of it. An SDK MUST NOT cache it,
+persist it, or keep it after the request that carried it has been sent. Nothing else in §31 is
+wrapped (§27.5 rule 2): `token_url`, `client_id`, `base_url` and the failure reason are
+configuration and fixed vocabulary. The registry lists `(ScimTargetInput, credential)` in the
+namespace's `sensitive_request_fields`, and §27.5's table gains the two rows.
+
+### §31.6 Per-language naming map
+
+§27.3 applies unchanged; for the record (`list` shown for the namespace, the other five follow
+the same casing):
+
+| Canonical | Rust | TypeScript | Python | Java | Kotlin | C# | PHP | Go | Swift | C | C++ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `scim_targets.list` | `scim_targets().list` | `scimTargets.list` | `scim_targets.list` | `scimTargets().list` | `scimTargets.list` | `ScimTargets.ListAsync` | `scimTargets()->list` | `ScimTargets().List` | `scimTargets.list` | `axiam_scim_targets_list` | `scim_targets().list` |
+| `scim_targets.create` | `scim_targets().create` | `scimTargets.create` | `scim_targets.create` | `scimTargets().create` | `scimTargets.create` | `ScimTargets.CreateAsync` | `scimTargets()->create` | `ScimTargets().Create` | `scimTargets.create` | `axiam_scim_targets_create` | `scim_targets().create` |
+| `scim_targets.get` | `scim_targets().get` | `scimTargets.get` | `scim_targets.get` | `scimTargets().get` | `scimTargets.get` | `ScimTargets.GetAsync` | `scimTargets()->get` | `ScimTargets().Get` | `scimTargets.get` | `axiam_scim_targets_get` | `scim_targets().get` |
+| `scim_targets.update` | `scim_targets().update` | `scimTargets.update` | `scim_targets.update` | `scimTargets().update` | `scimTargets.update` | `ScimTargets.UpdateAsync` | `scimTargets()->update` | `ScimTargets().Update` | `scimTargets.update` | `axiam_scim_targets_update` | `scim_targets().update` |
+| `scim_targets.delete` | `scim_targets().delete` | `scimTargets.delete` | `scim_targets.delete` | `scimTargets().delete` | `scimTargets.delete` | `ScimTargets.DeleteAsync` | `scimTargets()->delete` | `ScimTargets().Delete` | `scimTargets.delete` | `axiam_scim_targets_delete` | `scim_targets().delete` |
+| `scim_targets.reconcile` | `scim_targets().reconcile` | `scimTargets.reconcile` | `scim_targets.reconcile` | `scimTargets().reconcile` | `scimTargets.reconcile` | `ScimTargets.ReconcileAsync` | `scimTargets()->reconcile` | `ScimTargets().Reconcile` | `scimTargets.reconcile` | `axiam_scim_targets_reconcile` | `scim_targets().reconcile` |
+
+All six perform I/O, so §27.3's async discipline applies to each.
+
+### §31.7 Retry
+
+§27.4 rule 8 governs and is not widened: `list` and `get` MAY be retried per §16; `create`,
+`update`, `delete` and `reconcile` MUST NOT be, on any status or transport error. For
+`reconcile` a repeat is merely refused (`409` while the claim is held), but it is a deliberate
+administrator act, and a caller who lost the answer can read `state.last_reconciled_at`
+instead of repeating it.
+
+### §31.8 Required tests
+
+Six per SDK that ships the namespace, against a mocked HTTP server:
+
+1. **Redaction.** A `ScimTargetInput` carrying a `credential` made at run time, and an error
+   raised by `create` given one, printed, debug-formatted and serialized for logs contain
+   neither the credential nor any 8-character substring of it; the credential **is** in the
+   request body.
+2. **No credential on the response.** Decoding a `ScimTargetResponse` body that (wrongly)
+   carries `"credential": "<value>"` yields a value whose every stringification lacks the value,
+   and the type has no accessor for it.
+3. **Replacement and the omitted credential.** `update` with no credential sends **no
+   `credential` key**; with one it sends it; the input cannot be built without `name`,
+   `base_url`, `auth` and `scope` (or its builder refuses, in a language without the
+   compile-time check); both `ScimTargetAuth` variants and both `ScimTargetScope` variants
+   serialize with the exact keys of §31.2.
+4. **Open decoding and pagination.** A `ScimTargetResponse` with an unknown `auth.type`,
+   `deprovision` and `user_name_from`, with `state: null`, and with a `last_failure_reason` the
+   SDK has never seen, decodes; `list` returns `Page<T>` with `total` and the auto-pager carries
+   `search` on every request.
+5. **No retry.** A `503` to each of `create`, `update`, `delete` and `reconcile`: exactly one
+   request each, and the error is `NetworkError`.
+6. **Errors and `reconcile`.** `400` → `ValidationError` with the `message`; `409` on `update`
+   and on `reconcile` → `ConflictError`; `404` on `get` → `NotFoundError`; `401` → `AuthError`;
+   `reconcile` sends no body, treats `202` as success and decodes `ScimReconcileAccepted`.
+
+The server task adds its own tests for every rule in §31.3; they are not an SDK's to duplicate.
+
+### §31.9 What an SDK does not do
+
+It does not validate a target locally beyond §27.4's UUID rule — the server's policy and the
+delivery-time guard are the authority, and a client-side copy would drift from them (the
+reason §27.4 rule 4 gives for the `search` cap). It does not call a target's SCIM endpoint, test
+a target's credential or offer a "test connection" helper: no such route exists, and a client
+cannot reach the downstream from the server's network anyway. It does not poll `state` to wait
+for a reconciliation to finish. It does not cache a target (§27.4 rule 10) or keep a credential
+after the request that carried it. And `scim_targets` is **not** a manifest namespace (§27.6): a
+declarative `apply` would have to carry a credential it could not read back.
+
+### §31.10 Per-SDK posture
+
+**No SDK implements §31 at contract 1.57.** All eleven are in scope — it is management REST,
+which Kotlin, Swift, C and C++ carry — and the ports follow from the merge commit that carries
+the routes, in the post-merge fan-out (D-35). An SDK that ships the namespace states it by name,
+"§27 and §31", rather than letting its §27 claim widen silently (Conformance Statement), even
+though its §27 generator will produce the six operations on its own once the registry carries
+them: §31.3's call-site documentation (rules 2 and 8) and §31.5's wrapping are what the claim
+adds.
+
 ## §32 SSF stream registration and the receiver helper (contract 1.56)
 
 **Requirement level: §32.1 – §32.5 SHOULD, as part of §27 (a namespace `ssf`); §32.7 the
@@ -10192,8 +10520,8 @@ receiver helper SHOULD in the seven full-surface SDKs (Rust, TypeScript, Python,
 Go) and MAY in Kotlin, Swift, C and C++. Additive; nothing in §1–§30 changes.**
 Server design: plan item G-5 and decisions D-44 … D-53 and D-55 in the plan's decision table
 ([`competitor-gap-remediation-plan-2026-10-02.md`](../claude_dev/competitor-gap-remediation-plan-2026-10-02.md)
-§8). Threat model: T-385 … T-406. **§31 is reserved** for G-6's outbound SCIM management, which
-the plan named first (D-44).
+§8). Threat model: T-385 … T-406. (§31, G-6's outbound SCIM management, which the plan named
+first (D-44), arrived in contract 1.57; the numbers did not trade places.)
 
 AXIAM can act as a **Shared Signals Framework transmitter** for a tenant (competitor-gap item
 G-5): it sends CAEP and RISC security events — `session-revoked`, `credential-change`,

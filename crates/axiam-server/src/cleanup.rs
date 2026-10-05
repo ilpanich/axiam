@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axiam_amqp::MailOutboundPublisher;
+use crate::messaging::MailTransportPublisher;
 use axiam_api_rest::handlers::gdpr::write_erasure_audit_with_dlq;
 use axiam_api_rest::ssf_emitter::{InitiatingEntity, with_cause};
 use axiam_auth::AuthService;
@@ -107,7 +107,7 @@ pub struct CleanupTask<C: Connection> {
     // for the ExportReady mail producer (SECHRD-06/SECHRD-08, D-03c/D-05d).
     tenant_repo: Arc<SurrealTenantRepository<C>>,
     session_repo: Arc<SurrealSessionRepository<C>>,
-    mail_publisher: Arc<MailOutboundPublisher>,
+    mail_publisher: Arc<MailTransportPublisher>,
     // Keys (None = skip the respective sweep with a warning).
     gdpr_pepper: Option<[u8; 32]>,
     export_encryption_key: Option<[u8; 32]>,
@@ -806,7 +806,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         consent_repo: Arc<SurrealConsentRepository<C>>,
         tenant_repo: Arc<SurrealTenantRepository<C>>,
         session_repo: Arc<SurrealSessionRepository<C>>,
-        mail_publisher: Arc<MailOutboundPublisher>,
+        mail_publisher: Arc<MailTransportPublisher>,
         gdpr_pepper: Option<[u8; 32]>,
         export_encryption_key: Option<[u8; 32]>,
         interval: Duration,

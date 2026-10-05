@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Minimal profile — AXIAM without a broker (G-8, T23.8.1, D-59).**
+  `AXIAM__AMQP__ENABLED=false` (default `true`) runs AXIAM with SurrealDB only:
+  no RabbitMQ connection and no topology, and neither `AXIAM__AMQP__URL` nor the
+  AMQP signing key is required (the refusal of a missing key stands unchanged
+  for `true`). **Single-instance by definition**, enforced at boot by a
+  **singleton lease** in the datastore (schema **v83**, `minimal_profile_lease`:
+  TTL 30 s, renewed every 10 s; a boot that finds another instance's live lease
+  waits up to 45 s and then refuses; an instance whose renewal finds the lease
+  taken exits non-zero; an orderly stop releases it). Two more boot refusals,
+  each naming the switch and the fix: the decision-cache broadcast
+  (`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true`) and **any enabled
+  reactor registration in the datastore, in any tenant** (a `fail_closed` reactor
+  with no transport would deny logins). Not started: the asynchronous
+  authorization consumer, the external audit-ingestion consumer, the reactor
+  transport, the cross-replica cache invalidation. Webhooks, SSF push, outbound
+  SCIM, CIBA ping and transactional mail run on **in-process bounded queues**
+  (1 024 per kind) with the same deliverers, the same retry policy
+  (`AXIAM__<KIND>__MAX_ATTEMPTS` and the backoff variables), the same outcome
+  table and the same audit rows as the AMQP path — a dead letter is the audit
+  row only, and **queued messages and mail are lost on restart**. At runtime,
+  enabling a reactor registration answers **`409`** naming the profile (the
+  build that composes no transport keeps `503`), the gRPC reactor administration
+  answers `FAILED_PRECONDITION`, and `GET /health` gains `profile`
+  (`"full"` | `"minimal"`) and, in `minimal`, `unavailable`
+  (`reactors`, `amqp_authz`, `amqp_audit_ingestion`,
+  `decision_cache_broadcast`) — additive; `sdks/openapi.json` regenerated. The
+  composition root is now `axiam_server::boot::serve`, generic over the
+  datastore connection, so a test boots the whole server with no broker over the
+  embedded engine and runs a login, a webhook delivery and an SSF push through
+  it. See *Minimal profile (no broker)* in `docs/deployment/README.md`.
 - **CIBA — user approval, e-mail notification and ping mode (G-7, T23.7.2).**
   The user's half of a backchannel authentication request, and the client's
   notification that it was decided. **Approval API** (the device grant's user

@@ -184,3 +184,55 @@ async fn jobs_reports_ok_with_an_empty_list_when_nothing_is_registered() {
     assert_eq!(body["status"], "ok");
     assert!(body["jobs"].as_array().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// G-8 / D-59 — `/health` states the deployment profile
+// ---------------------------------------------------------------------------
+
+#[actix_rt::test]
+async fn health_reports_the_full_profile_with_no_unavailable_list() {
+    let state = state_with_checker(Arc::new(MockHealthy)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(health_routes::<TestDb>),
+    )
+    .await;
+
+    let resp = test::call_service(&app, test::TestRequest::get().uri("/health").to_request()).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["profile"], "full");
+    assert!(
+        body.get("unavailable").is_none(),
+        "the full profile gives nothing up, so the field is absent: {body}"
+    );
+}
+
+#[actix_rt::test]
+async fn health_reports_the_minimal_profile_and_what_it_does_not_provide() {
+    let mut state = state_with_checker(Arc::new(MockHealthy)).await;
+    state.deployment_profile = axiam_core::models::deployment::DeploymentProfile::Minimal;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(health_routes::<TestDb>),
+    )
+    .await;
+
+    let resp = test::call_service(&app, test::TestRequest::get().uri("/health").to_request()).await;
+    assert_eq!(resp.status().as_u16(), 200, "liveness is unaffected");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["profile"], "minimal");
+    assert_eq!(
+        body["unavailable"],
+        serde_json::json!([
+            "reactors",
+            "amqp_authz",
+            "amqp_audit_ingestion",
+            "decision_cache_broadcast"
+        ])
+    );
+}

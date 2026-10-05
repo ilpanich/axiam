@@ -134,6 +134,11 @@ pub struct WebhookDeliveryService<W> {
     /// delivery (`deliver_once`) both refuse to operate rather than falling
     /// back to an all-zero/constant key.
     encryption_key: Option<[u8; 32]>,
+    /// The guarded fetch's `allow_private`. **Always `false`** except for the
+    /// integration tests' loopback receiver, which turn it on through
+    /// [`Self::admitting_private_networks_for_tests`] and nothing else — the
+    /// same seam, with the same name, as the SSF push deliverer's.
+    allow_private: bool,
 }
 
 impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
@@ -146,7 +151,21 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
         Self {
             repo,
             encryption_key,
+            allow_private: false,
         }
+    }
+
+    /// Let a delivery reach a loopback / private-network `http://` receiver.
+    ///
+    /// Test-only: turns the first hop's address rule and the HTTPS requirement
+    /// off, exactly like the guarded fetch's own `allow_private` seam. The
+    /// composition root's tests that deliver to a loopback receiver call it
+    /// (through `ServeOptions`); production never does.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn admitting_private_networks_for_tests(mut self) -> Self {
+        self.allow_private = true;
+        self
     }
 
     /// Encrypt a plaintext webhook secret with AES-256-GCM for storage
@@ -262,13 +281,14 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
         // for the POST — no separate, independently-resolving `client.post()`
         // call remains, so `reqwest` cannot re-resolve DNS between the check
         // and the send (D-01c). `allow_private=false`: this is the
-        // production delivery path, never the test seam.
+        // production delivery path, never the test seam (`self.allow_private`
+        // is `false` unless a test turned it on).
         let body_for_send = body.clone();
         let timestamp_header = timestamp.to_string();
         let signature_header = signature.clone();
         let event_type_header = event_type.to_string();
         let delivery_id_header = delivery_id.to_string();
-        let result = ssrf::guarded_fetch(&webhook.url, false, move |c, u| {
+        let result = ssrf::guarded_fetch(&webhook.url, self.allow_private, move |c, u| {
             c.post(u)
                 .header("Content-Type", "application/json")
                 .header("X-Axiam-Timestamp", &timestamp_header)

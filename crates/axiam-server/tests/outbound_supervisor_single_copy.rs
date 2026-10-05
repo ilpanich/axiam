@@ -1,17 +1,33 @@
 //! P23W4-08 / T23.6.1: every outbound kind's consumer is supervised by the one
-//! `spawn_outbound_consumer`; `main.rs` holds no copy of the reconnect loop.
+//! `spawn_outbound_consumer`; the composition root holds no copy of the
+//! reconnect loop.
 //!
-//! A source-level guard, because the loop lives in `main`, which no test can
-//! call: a third kind (outbound SCIM, T23.6.2) is one more call, not a third copy
-//! of the loop. The same file pins the rest of the SCIM wiring that only `main`
-//! can express: its topology, and the provisioning sink every repository that
-//! writes a provisioned field carries (D-57).
+//! A source-level guard: a third kind (outbound SCIM, T23.6.2) is one more call,
+//! not a third copy of the loop. The same file pins the rest of the SCIM wiring
+//! the composition root expresses: its topology, and the provisioning sink every
+//! repository that writes a provisioned field carries (D-57).
+//!
+//! Since G-8 (T23.8.1) the composition root is `boot.rs`, and a kind is
+//! consumed through `OutboundTransport::spawn_consumer`, which picks the AMQP
+//! loop (`spawn_outbound_consumer`) or the in-process one at start-up. The guard
+//! therefore also pins that `messaging.rs` — the only place that chooses —
+//! holds exactly one call of each.
 
-const MAIN: &str = include_str!("../src/main.rs");
+const MAIN: &str = include_str!("../src/boot.rs");
+const MESSAGING: &str = include_str!("../src/messaging.rs");
 
-/// Occurrences of `needle` in the non-comment lines of `main.rs`.
+/// Occurrences of `needle` in the non-comment lines of `boot.rs`.
 fn code_occurrences(needle: &str) -> usize {
     MAIN.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .map(|line| line.matches(needle).count())
+        .sum()
+}
+
+/// Occurrences of `needle` in the non-comment lines of `messaging.rs`.
+fn messaging_occurrences(needle: &str) -> usize {
+    MESSAGING
+        .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
         .map(|line| line.matches(needle).count())
         .sum()
@@ -20,9 +36,24 @@ fn code_occurrences(needle: &str) -> usize {
 #[test]
 fn every_kind_is_spawned_through_the_one_function() {
     assert_eq!(
-        code_occurrences("spawn_outbound_consumer("),
+        code_occurrences("outbound.spawn_consumer("),
         4,
         "one call per kind: webhook, SSF push, SCIM push and CIBA ping"
+    );
+    assert_eq!(
+        code_occurrences("spawn_outbound_consumer("),
+        0,
+        "the composition root never starts the AMQP loop itself"
+    );
+    assert_eq!(
+        messaging_occurrences("spawn_outbound_consumer("),
+        1,
+        "the AMQP loop is started in exactly one place"
+    );
+    assert_eq!(
+        messaging_occurrences("spawn_in_process_consumer("),
+        1,
+        "and so is the in-process one"
     );
     assert!(MAIN.contains("OutboundKind::Webhook,\n            outbound_deliverers,"));
     assert!(MAIN.contains("OutboundKind::SsfPush,\n            ssf_deliverers,"));
@@ -94,7 +125,7 @@ fn the_provisioning_sink_reaches_every_repository_that_writes_a_provisioned_fiel
 }
 
 #[test]
-fn main_holds_no_copy_of_the_supervisor_loop() {
+fn the_composition_root_holds_no_copy_of_the_supervisor_loop() {
     assert_eq!(
         code_occurrences("run_outbound_consumer("),
         0,

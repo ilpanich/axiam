@@ -302,6 +302,11 @@ pub struct AppState<C: Connection + Clone> {
     /// `GET /health/jobs` so a job that silently stopped running is
     /// alertable rather than merely logged.
     pub job_health: Arc<dyn crate::health::JobHealthReporter>,
+    /// G-8 / D-59: whether this process runs with a broker (`full`) or without
+    /// one (`minimal`, `AXIAM__AMQP__ENABLED=false`). Read by `GET /health`
+    /// (`profile`, `unavailable`) and by the reactor-administration routes,
+    /// which answer `409` rather than `503` in the minimal profile.
+    pub deployment_profile: axiam_core::models::deployment::DeploymentProfile,
     pub audit_repo: SurrealAuditLogRepository<C>,
     pub org_repo: SurrealOrganizationRepository<C>,
     pub tenant_repo: SurrealTenantRepository<C>,
@@ -529,10 +534,12 @@ impl<C: Connection + Clone> AppState<C> {
     }
 
     /// Dispatch a domain event to any webhooks subscribed to `event_type` in
-    /// `tenant_id` (CQ-B22). Best-effort: if no AMQP publisher is wired
-    /// (`webhook_publisher` is `None`, e.g. tests or AMQP disabled) this is a
-    /// no-op, and publish failures inside `emit` are logged, never propagated —
-    /// a webhook side effect must not fail the originating API request.
+    /// `tenant_id` (CQ-B22). Best-effort: if no publisher is wired
+    /// (`webhook_publisher` is `None`, e.g. tests) this is a no-op, and
+    /// publish failures inside `emit` are logged, never propagated — a webhook
+    /// side effect must not fail the originating API request. The publisher is
+    /// the `OutboundPublisher` port: the AMQP one in the full profile, the
+    /// in-process dispatcher in the minimal one (G-8).
     pub async fn emit_webhook(
         &self,
         tenant_id: uuid::Uuid,
@@ -787,6 +794,7 @@ impl<C: Connection + Clone> AppState<C> {
             db: db.clone(),
             health_checker: Arc::new(crate::health::AlwaysHealthy),
             job_health: Arc::new(crate::health::NoJobs),
+            deployment_profile: axiam_core::models::deployment::DeploymentProfile::Full,
             audit_repo: SurrealAuditLogRepository::new(db.clone()),
             org_repo: SurrealOrganizationRepository::new(db.clone()),
             tenant_repo,

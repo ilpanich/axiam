@@ -230,6 +230,13 @@ pub struct ReactorEventDescriptor {
 /// transport is missing, so only a write that would leave an enabled
 /// registration in place is refused. `DELETE` is never refused for the same
 /// reason.
+///
+/// # 409 in the minimal profile
+///
+/// With `AXIAM__AMQP__ENABLED=false` the transport is absent *by choice*
+/// (G-8, D-59), and the answer is `409` with a message naming the profile and
+/// the way out, not `503`: a retry cannot help, a different request (`enabled:
+/// false`) can.
 fn require_dispatchable_transport<C: Connection + Clone>(
     state: &AppState<C>,
     would_be_enabled: bool,
@@ -242,6 +249,18 @@ fn require_dispatchable_transport<C: Connection + Clone>(
     }
 
     if !state.events.reactor_gate.can_dispatch() {
+        // G-8 / D-59: absent *because the deployment chose to run without a
+        // broker* is a state of the deployment the caller can act on (enable it,
+        // or register the reactor disabled), so it is a 409 naming the profile.
+        // Absent because this build composes no transport at all keeps 503.
+        if state.deployment_profile.is_minimal() {
+            return Err(axiam_core::error::AxiamError::Conflict {
+                reason: axiam_core::models::deployment::DeploymentProfile::reactor_refusal_message(
+                )
+                .into(),
+            }
+            .into());
+        }
         return Err(axiam_core::error::AxiamError::ServiceUnavailable(
             "the AMQP reactor transport is not available in this build, so a registered \
              reactor could never be reached. Registering one would apply its failure_policy \
@@ -323,6 +342,8 @@ pub async fn list_events<C: Connection + Clone>(
     responses(
         (status = 201, description = "Reactor registered", body = ReactorResponse),
         (status = 400, description = "Unknown event, non-interceptable event, or out-of-range timeout"),
+        (status = 409, description = "The registration would be enabled in the minimal profile (AXIAM__AMQP__ENABLED=false), which has no reactor transport; register it with enabled: false"),
+        (status = 503, description = "This build composes no reactor transport, so an enabled registration is refused"),
     ),
     security(("bearer" = []))
 )]
@@ -455,6 +476,8 @@ pub async fn get<C: Connection + Clone>(
     responses(
         (status = 200, description = "Reactor updated", body = ReactorResponse),
         (status = 400, description = "The merged registration is invalid"),
+        (status = 409, description = "The merged registration would be enabled in the minimal profile (AXIAM__AMQP__ENABLED=false), which has no reactor transport"),
+        (status = 503, description = "This build composes no reactor transport, so an enabled registration is refused"),
     ),
     security(("bearer" = []))
 )]

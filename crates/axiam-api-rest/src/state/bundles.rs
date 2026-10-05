@@ -174,11 +174,13 @@ pub struct EventsState<C: Connection + Clone> {
     pub reactor_routing_invalidator: Option<Arc<dyn Fn(uuid::Uuid) + Send + Sync>>,
     pub webhook_repo: SurrealWebhookRepository<C>,
     pub webhook_delivery: WebhookDeliveryServiceT<C>,
-    /// AMQP publisher used by [`AppState::emit_webhook`] to dispatch domain
-    /// events onto the durable webhook queue (CQ-B22). `None` in tests and when
-    /// AMQP is unavailable — `emit_webhook` becomes a no-op rather than failing
-    /// the originating request (webhook delivery is a best-effort side effect).
-    pub webhook_publisher: Option<Arc<axiam_amqp::WebhookPublisher>>,
+    /// The publisher [`AppState::emit_webhook`] dispatches domain events
+    /// through (CQ-B22): the core `OutboundPublisher` port, so the durable AMQP
+    /// queue in the full profile and the in-process dispatcher in the minimal
+    /// one (G-8, D-59) are interchangeable here. `None` in tests —
+    /// `emit_webhook` becomes a no-op rather than failing the originating
+    /// request (webhook delivery is a best-effort side effect).
+    pub webhook_publisher: Option<Arc<dyn axiam_core::outbound::OutboundPublisher>>,
     pub notification_rule_repo: SurrealNotificationRuleRepository<C>,
 }
 

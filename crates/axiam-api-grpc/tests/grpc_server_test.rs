@@ -212,6 +212,7 @@ async fn boot(tls: GrpcTls) -> Result<(), Box<dyn std::error::Error + Send + Syn
             axiam_auth::lockout::policy_from_config(&test_auth_config()),
         )),
         tls,
+        axiam_core::models::deployment::DeploymentProfile::Full,
     )
     .await
 }

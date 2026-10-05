@@ -24,6 +24,7 @@ use axiam_amqp::reactor::gate::{
 use axiam_auth::token::ValidatedClaims;
 use axiam_authz::AuthorizationEngine;
 use axiam_authz::types::{AccessRequest, SubjectScope};
+use axiam_core::models::deployment::DeploymentProfile;
 use axiam_core::models::reactor::{
     CreateReactor, DEFAULT_TIMEOUT_MS, EVENT_REGISTRY, FailurePolicy, Reactor, ReactorMode,
     UpdateReactor, default_failure_policy_for, validate_registration,
@@ -72,6 +73,11 @@ where
     /// `axiam-api-rest` alone would leave a second, unguarded door onto the
     /// same outage.
     dispatch_available: bool,
+    /// G-8 / D-59: the messaging profile. In the minimal profile the transport
+    /// is absent *by the deployment's choice*, and the refusal is
+    /// `FAILED_PRECONDITION` (the REST twin's `409`) naming the profile, not
+    /// `UNAVAILABLE`.
+    profile: DeploymentProfile,
 }
 
 impl<Rr, Rl, P, Res, S, G, A> ReactorAdminServiceImpl<Rr, Rl, P, Res, S, G, A>
@@ -97,7 +103,15 @@ where
             audit_repo,
             routing_invalidator,
             dispatch_available,
+            profile: DeploymentProfile::Full,
         }
+    }
+
+    /// Compose the service for a deployment profile (G-8, D-59). The default is
+    /// [`DeploymentProfile::Full`].
+    pub fn with_profile(mut self, profile: DeploymentProfile) -> Self {
+        self.profile = profile;
+        self
     }
 
     /// SEC-101 — refuse to leave an ENABLED registration in place while the
@@ -114,6 +128,11 @@ where
     fn require_dispatchable_transport(&self, would_be_enabled: bool) -> Result<(), Status> {
         if !would_be_enabled || self.dispatch_available {
             return Ok(());
+        }
+        if self.profile.is_minimal() {
+            return Err(Status::failed_precondition(
+                DeploymentProfile::reactor_refusal_message(),
+            ));
         }
         Err(Status::unavailable(
             "the AMQP reactor transport is not implemented in this build, so a registered \

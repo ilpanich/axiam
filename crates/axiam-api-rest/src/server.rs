@@ -98,7 +98,7 @@ fn build_client_aware_governor(
 /// Generic over `C` (QUAL-01) since `/ready` now extracts
 /// `web::Data<AppState<C>>` for its `HealthChecker`.
 pub fn health_routes<C: surrealdb::Connection + Clone>(cfg: &mut web::ServiceConfig) {
-    cfg.route("/health", web::get().to(crate::health::health))
+    cfg.route("/health", web::get().to(crate::health::health::<C>))
         .route("/ready", web::get().to(crate::health::ready::<C>))
         // T-129. Unauthenticated like the other two probes: it reports
         // whether background sweeps are running and when they last

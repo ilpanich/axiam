@@ -802,7 +802,9 @@ async fn t9_4_the_request_logging_layer_records_no_headers_at_all() {
     // `RedactingRootSpanBuilder`, which records the default's field set with
     // query values redacted. The question is asked again here, of its source:
     // it reads exactly one header, `User-Agent`.
-    let source = include_str!("../../axiam-server/src/main.rs");
+    // The composition root moved from `main.rs` into `boot.rs` (G-8, T23.8.1),
+    // where a test can call it; the layer is wired there.
+    let source = include_str!("../../axiam-server/src/boot.rs");
     assert!(
         source.contains("TracingLogger::<RedactingRootSpanBuilder>::new()"),
         "the request-logging layer is no longer the redacting root span builder; \

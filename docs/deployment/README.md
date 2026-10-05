@@ -1601,6 +1601,112 @@ configure and it is not covered here.
 | `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
 | `AXIAM__AMQP__CONNECT_TIMEOUT_MS` | `30000` | Budget for one connection attempt. lapin has none of its own, so without this a broker whose port is published but whose TLS listener never answers leaves the connect pending forever — no error, no retry, no log line. Raise it for a broker behind a slow link; do not disable it. |
 
+## Minimal profile (no broker)
+
+`AXIAM__AMQP__ENABLED=false` runs AXIAM with **SurrealDB only**: no RabbitMQ, no
+`AXIAM__AMQP__URL`, no AMQP signing key. It is meant for a single node, an edge
+site or a small deployment where a broker is more infrastructure than the
+workload justifies. The default is `true`, and with it nothing on this page
+applies.
+
+### It is single-instance, by definition
+
+**Run exactly one instance.** Without a broker nothing tells a second replica
+about the first one's mutations — a revoked role, a changed permission — so a
+second instance would serve stale authorization decisions and no setting makes
+it correct. AXIAM does not trust a replica count to say so (it is the
+orchestrator's knowledge, not the process's): the minimal profile holds a
+**singleton lease** in SurrealDB and refuses to run beside another instance.
+
+* the lease is the row `minimal_profile_lease:instance` (schema v83), claimed
+  with a conditional write at start-up, valid for **30 s** and renewed every
+  **10 s**;
+* a boot that finds another instance's live lease **waits up to 45 s** for it
+  to expire — a rolling update's old pod stops renewing when it stops — and then
+  refuses to start;
+* an orderly stop releases the lease, so a successor does not wait at all;
+* an instance whose renewal finds the lease **taken by another instance logs
+  once at `ERROR` and exits non-zero**, rather than keep running beside it.
+
+On Kubernetes that means `replicas: 1` and, for the rolling-update case,
+`strategy: Recreate` (or `maxSurge: 0`); the 45 s wait covers a surge pod that
+starts before the old one is gone, and a crash-looping pod simply tries again.
+The clocks of two instances sharing a datastore must agree to well within the
+30 s TTL, which any NTP-disciplined host does.
+
+### What it does not provide
+
+`GET /health` says so, in `unavailable` (see below):
+
+| Not available | What happens instead |
+|---|---|
+| **Reactors** (`reactors`) | Enabling a registration through `POST`/`PUT /api/v1/reactors` answers **`409`** naming the profile, and the gRPC `ReactorAdminService` answers `FAILED_PRECONDITION`. A registration created with `enabled: false` is accepted, and so are disabling and deleting one. |
+| **Asynchronous authorization over AMQP** (`amqp_authz`) | The authorization request consumer is not started. REST and gRPC authorization checks are unaffected. |
+| **External audit ingestion over AMQP** (`amqp_audit_ingestion`) | The consumer that ingests audit events *published by other services* is not started. AXIAM's **own** audit events never touched AMQP — the audit middleware writes SurrealDB directly — and are unchanged. |
+| **Cross-replica decision-cache invalidation** (`decision_cache_broadcast`) | There is no second replica to tell. The decision cache itself (`AXIAM__AUTHZ__DECISION_CACHE_ENABLED`) works, process-locally and exactly. |
+
+Everything that rode a broker queue still works, on **in-process queues**:
+
+* **webhooks, SSF push, outbound SCIM and CIBA ping** run on one in-process
+  dispatcher with the *same* deliverers, the *same* retry policy
+  (`AXIAM__WEBHOOK__*`, `AXIAM__SSF_PUSH__*`, `AXIAM__SCIM_PUSH__*`,
+  `AXIAM__CIBA_PING__*`: attempts, base and ceiling of the exponential
+  backoff) and the *same* audit rows (`<kind>.delivery_attempt`,
+  `.delivery_succeeded`, `.delivery_failed`) as the AMQP path;
+* **transactional mail** (verification, password reset, notification rules, GDPR
+  export notices, CIBA approval) is sent by an in-process worker with the same
+  retry count and the same PII-minimal `email.delivery_failed` audit row, and
+  needs `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` exactly as before.
+
+### What is lost on restart
+
+**Queued outbound messages and queued mail do not survive a restart.** There is
+no durable queue: a delivery that is waiting for its turn or sleeping for a
+retry when the process stops is gone, and there is **no dead-letter queue** —
+for a delivery that exhausts its attempts the `<kind>.delivery_failed` audit row
+is the whole record, so alert on it. A producer whose queue is full (1 024
+messages per kind, 1 024 for mail) gets an enqueue error, which every producer
+already logs and swallows; a retry that finds no free retry slot (1 024 may be
+sleeping at once) is dead-lettered with the reason `in-process retry capacity
+exhausted`. If a lost webhook is not acceptable, run the full profile.
+
+### Boot refusals
+
+Each is an error that names `AXIAM__AMQP__ENABLED=false` and the fix; the
+process does not start.
+
+| Refused | Why | Fix |
+|---|---|---|
+| `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` | the broadcast has no transport | unset it |
+| **any enabled reactor registration** in the datastore, in any tenant | a `fail_closed` reactor with no transport would deny `login.post_auth`, `user.pre_create`, `user.pre_update` and `grant.pre_assign` in every tenant that registered one | `PUT /api/v1/reactors/{id}` with `enabled: false` (or delete it), or run the full profile |
+| **a second live instance** | see above | stop the other instance |
+
+### `/health`
+
+`GET /health` always answers `200` and now states the profile (additive — a
+client that reads only `status` is unaffected):
+
+```json
+{ "status": "ok", "profile": "minimal",
+  "unavailable": ["reactors", "amqp_authz", "amqp_audit_ingestion", "decision_cache_broadcast"] }
+```
+
+`profile` is `"full"` or `"minimal"`; `unavailable` is present only in
+`minimal`.
+
+### Tests, by profile
+
+The full REST and gRPC suites run without a broker (they build their state with
+`AppState::for_test`), and `crates/axiam-server/tests/minimal_profile_boot.rs`
+boots the real composition root with the flag off — no broker, no datastore
+server — signs in, and watches a webhook and an SSF Security Event Token arrive
+through the in-process dispatcher. The tests that need a live RabbitMQ (they are `#[ignore]`d and run against
+`just dev-up`) are specific to the full profile and are skipped for the minimal
+one: `amqp_recovery_test` and `reactor_containerized_test` in `axiam-amqp`, and
+`webhook_consumer_test` in `axiam-api-rest`. Everything else — including the
+reactor administration tests, which run both ways: `409` in the minimal profile,
+`503` for a build that composes no transport — needs no broker.
+
 ## Outbound SSRF guard — same-network IdPs (`AXIAM__PKI__SSRF_ALLOWED_HOSTS`)
 
 Every outbound fetch to an admin- or IdP-supplied URL is refused if the host

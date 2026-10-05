@@ -14,11 +14,14 @@
 //! `main.rs` depends on this crate automatically (a package's binary target
 //! always links its own library target when both are present).
 
+pub mod boot;
 pub mod cleanup;
 pub mod cli;
 pub mod healthcheck;
 pub mod job_health;
 pub mod legacy_env;
 pub mod mds_job;
+pub mod messaging;
 pub mod mtls_anchors;
+pub mod profile;
 pub mod tls;

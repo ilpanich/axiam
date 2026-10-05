@@ -1619,7 +1619,20 @@ async fn main() -> std::io::Result<()> {
         ciba_request_repo.clone(),
         user_repo.clone(),
         config.auth.jwt_public_key_pem.clone(),
-    );
+    )
+    // D-61 — signed authentication requests (CIBA Core §7.1.1, FAPI-CIBA).
+    // The keys come through the same federation JWKS cache the
+    // `private_key_jwt` verifier above uses (one SSRF guard, one cache entry
+    // per client), and the `jti` goes into the same proof-replay table. Not
+    // wiring it would refuse every signed request with `server_error` — never
+    // accept one unverified.
+    .with_signed_request_verifier(Arc::new(
+        axiam_oauth2::ciba_signed_request::JwksSignedRequestVerifier::new(
+            (*jwks_cache).clone(),
+            http_client.clone(),
+            proof_replay_repo.clone(),
+        ),
+    ));
 
     // B3 — token exchange (RFC 8693).
     //

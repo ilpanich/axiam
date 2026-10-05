@@ -728,11 +728,23 @@ impl<C: Connection + Clone> AppState<C> {
         // G-7: no sealing key in a test harness, so a ping-mode request is
         // refused as on a deployment without one; a test that needs ping
         // replaces this field.
+        // D-61: signed authentication requests are verified against the
+        // client's registered keys through the same JWKS cache the app's
+        // federation and client-assertion paths use, and their `jti` spent in
+        // the proof-replay table.
+        let jwks_cache = Arc::new(JwksCache::new());
         let ciba_service = axiam_oauth2::ciba::CibaService::new(
             axiam_db::SurrealCibaRequestRepository::new(db.clone(), None),
             user_repo.clone(),
             auth_config.jwt_public_key_pem.clone(),
-        );
+        )
+        .with_signed_request_verifier(Arc::new(
+            axiam_oauth2::ciba_signed_request::JwksSignedRequestVerifier::new(
+                (*jwks_cache).clone(),
+                reqwest::Client::new(),
+                proof_replay_repo.clone(),
+            ),
+        ));
         let device_authorization_service = DeviceAuthorizationService::new(
             device_grant_repo.clone(),
             oauth2_client_repo.clone(),
@@ -803,7 +815,7 @@ impl<C: Connection + Clone> AppState<C> {
             opaque_setup_repo: SurrealOpaqueServerSetupRepository::new(db.clone()),
             opaque_server: opaque_keys.map(OpaqueServer::new),
             http_client: reqwest::Client::new(),
-            jwks_cache: Arc::new(JwksCache::new()),
+            jwks_cache,
             crypto_semaphore,
             // Tests get a real, env-configured counter over the same
             // in-memory DB, so the shared-store layer behaves in tests

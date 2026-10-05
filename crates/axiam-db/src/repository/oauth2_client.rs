@@ -3,7 +3,7 @@
 use axiam_auth::client_secret;
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
-use axiam_core::models::ciba::{CibaClientMetadata, CibaDeliveryMode};
+use axiam_core::models::ciba::{CibaClientMetadata, CibaDeliveryMode, CibaRequestSigningAlg};
 use axiam_core::models::oauth2_client::{
     AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client,
     DcrRegistrationReplacement, ManagedBy, OAuth2Client, UpdateOAuth2Client,
@@ -115,6 +115,9 @@ struct OAuth2ClientRow {
     backchannel_token_delivery_mode: Option<String>,
     #[surreal(default)]
     backchannel_client_notification_endpoint: Option<String>,
+    // D-61 (schema v81). Absent on older rows: a client sending plain requests.
+    #[surreal(default)]
+    backchannel_authentication_request_signing_alg: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -186,6 +189,9 @@ struct OAuth2ClientRowWithId {
     backchannel_token_delivery_mode: Option<String>,
     #[surreal(default)]
     backchannel_client_notification_endpoint: Option<String>,
+    // D-61 (schema v81). Absent on older rows: a client sending plain requests.
+    #[surreal(default)]
+    backchannel_authentication_request_signing_alg: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -278,6 +284,7 @@ fn decode_managed_by(raw: Option<&str>) -> Result<ManagedBy, DbError> {
 fn decode_ciba(
     mode: Option<&str>,
     endpoint: Option<String>,
+    signing_alg: Option<&str>,
 ) -> Result<CibaClientMetadata, DbError> {
     let backchannel_token_delivery_mode = match mode {
         None => None,
@@ -288,9 +295,23 @@ fn decode_ciba(
             ))
         })?),
     };
+    // Fails closed for the same reason: a row naming an algorithm this binary
+    // does not verify must not be served as if it named none, which would
+    // quietly accept the unsigned requests the client registered against.
+    let backchannel_authentication_request_signing_alg = match signing_alg {
+        None => None,
+        Some(raw) => Some(CibaRequestSigningAlg::from_wire(raw).ok_or_else(|| {
+            DbError::Migration(format!(
+                "oauth2_client.backchannel_authentication_request_signing_alg holds an \
+                 unrecognised value {raw:?}; this binary cannot verify a CIBA request signed \
+                 with an algorithm it does not implement"
+            ))
+        })?),
+    };
     Ok(CibaClientMetadata {
         backchannel_token_delivery_mode,
         backchannel_client_notification_endpoint: normalise_optional(endpoint),
+        backchannel_authentication_request_signing_alg,
     })
 }
 
@@ -334,6 +355,8 @@ impl OAuth2ClientRow {
             ciba: decode_ciba(
                 self.backchannel_token_delivery_mode.as_deref(),
                 self.backchannel_client_notification_endpoint,
+                self.backchannel_authentication_request_signing_alg
+                    .as_deref(),
             )?,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -383,6 +406,8 @@ impl OAuth2ClientRowWithId {
             ciba: decode_ciba(
                 self.backchannel_token_delivery_mode.as_deref(),
                 self.backchannel_client_notification_endpoint,
+                self.backchannel_authentication_request_signing_alg
+                    .as_deref(),
             )?,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -472,6 +497,7 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
                  registration_access_token_hash = $registration_access_token_hash, \
                  backchannel_token_delivery_mode = $ciba_mode, \
                  backchannel_client_notification_endpoint = $ciba_endpoint, \
+                 backchannel_authentication_request_signing_alg = $ciba_signing_alg, \
                  last_authorized_at = NONE",
             )
             .bind(("id", id_str.clone()))
@@ -532,6 +558,13 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
                     .ciba
                     .backchannel_token_delivery_mode
                     .map(|m| m.as_str().to_owned()),
+            ))
+            .bind((
+                "ciba_signing_alg",
+                input
+                    .ciba
+                    .backchannel_authentication_request_signing_alg
+                    .map(|a| a.as_str().to_owned()),
             ))
             .bind((
                 "ciba_endpoint",
@@ -842,6 +875,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         if input.ciba.is_some() {
             sets.push("backchannel_token_delivery_mode = $ciba_mode");
             sets.push("backchannel_client_notification_endpoint = $ciba_endpoint");
+            sets.push("backchannel_authentication_request_signing_alg = $ciba_signing_alg");
         }
         sets.push("updated_at = time::now()");
 
@@ -939,6 +973,11 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                     "ciba_mode",
                     ciba.backchannel_token_delivery_mode
                         .map(|m| m.as_str().to_owned()),
+                ))
+                .bind((
+                    "ciba_signing_alg",
+                    ciba.backchannel_authentication_request_signing_alg
+                        .map(|a| a.as_str().to_owned()),
                 ))
                 .bind((
                     "ciba_endpoint",
@@ -1248,6 +1287,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                      allowed_resources = $allowed_resources, \
                      backchannel_token_delivery_mode = $ciba_mode, \
                      backchannel_client_notification_endpoint = $ciba_endpoint, \
+                     backchannel_authentication_request_signing_alg = $ciba_signing_alg, \
                      registration_access_token_hash = $new_hash, \
                      updated_at = time::now() \
                      WHERE tenant_id = $tenant_id AND client_id = $client_id \
@@ -1278,6 +1318,13 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
                     .ciba
                     .backchannel_token_delivery_mode
                     .map(|m| m.as_str().to_owned()),
+            ))
+            .bind((
+                "ciba_signing_alg",
+                replacement
+                    .ciba
+                    .backchannel_authentication_request_signing_alg
+                    .map(|a| a.as_str().to_owned()),
             ))
             .bind((
                 "ciba_endpoint",

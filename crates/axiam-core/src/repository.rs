@@ -2683,6 +2683,9 @@ pub enum ProofKind {
     ClientAssertion,
     /// RFC 9449 DPoP proof, scoped by the proof key's `jkt`.
     DpopProof,
+    /// CIBA Core §7.1.1 signed authentication request (G-7, D-61), scoped by
+    /// `client_id` — the request object's `iss`, for RFC 7523's reason.
+    CibaRequestObject,
 }
 
 impl ProofKind {
@@ -2690,6 +2693,7 @@ impl ProofKind {
         match self {
             Self::ClientAssertion => "client_assertion",
             Self::DpopProof => "dpop_proof",
+            Self::CibaRequestObject => "ciba_request_object",
         }
     }
 }

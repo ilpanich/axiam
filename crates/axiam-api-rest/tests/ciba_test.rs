@@ -8,7 +8,8 @@
 //! back-off, every token-endpoint answer of §11, tokens carrying the approval's
 //! evidence, single use under concurrency, the rate limits that must count this
 //! grant (the Keycloak 26.7.x class), lockout, discovery in both issuer forms,
-//! and the admin and RFC 7591 registration of the metadata.
+//! the admin and RFC 7591 registration of the metadata, and (D-61) signed
+//! authentication requests and the `fapi2` CIBA client.
 //!
 //! No credential literal appears here: client secrets come from the
 //! repository, passwords from `axiam_test_support`, keys from `rcgen`.
@@ -23,8 +24,8 @@ use axiam_api_rest::{RateLimitConfig, RouteOptions, register_api_v1_routes_with}
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, IdTokenEvidence, issue_access_token, issue_id_token};
 use axiam_core::models::ciba::{
-    CIBA_GRANT_TYPE, CibaClientMetadata, CibaDeliveryMode, CibaNotifyFuture, CibaRequestStatus,
-    CibaUserNotification, CibaUserNotifier,
+    CIBA_GRANT_TYPE, CibaClientMetadata, CibaDeliveryMode, CibaNotifyFuture, CibaRequestSigningAlg,
+    CibaRequestStatus, CibaUserNotification, CibaUserNotifier,
 };
 use axiam_core::models::oauth2_client::{
     AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
@@ -137,7 +138,7 @@ fn create_input(
 fn poll_mode() -> CibaClientMetadata {
     CibaClientMetadata {
         backchannel_token_delivery_mode: Some(CibaDeliveryMode::Poll),
-        backchannel_client_notification_endpoint: None,
+        ..Default::default()
     }
 }
 
@@ -1112,9 +1113,11 @@ async fn discovery_lists_exactly_what_is_implemented_in_both_issuer_forms() {
             serde_json::json!(["poll", "ping"])
         );
         assert_eq!(doc["backchannel_user_code_parameter_supported"], false);
-        assert!(
-            doc.get("backchannel_authentication_request_signing_alg_values_supported")
-                .is_none()
+        // D-61: signed authentication requests, under the three algorithms
+        // AXIAM verifies on any client-signed JWT.
+        assert_eq!(
+            doc["backchannel_authentication_request_signing_alg_values_supported"],
+            serde_json::json!(["PS256", "ES256", "EdDSA"])
         );
         assert!(
             doc["grant_types_supported"]
@@ -1362,4 +1365,656 @@ async fn a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize() {
             .unwrap();
     let n: Option<i64> = count.take("n").unwrap();
     assert_eq!(n.unwrap_or(0), 0);
+}
+
+// ---------------------------------------------------------------------------
+// D-61 — signed authentication requests (CIBA Core §7.1.1) and the `fapi2`
+// CIBA client (FAPI-CIBA)
+// ---------------------------------------------------------------------------
+
+const ROOT_ISSUER: &str = "https://id.test.example";
+
+struct SigningKey {
+    encoding: jsonwebtoken::EncodingKey,
+    jwk: Value,
+    alg: jsonwebtoken::Algorithm,
+}
+
+fn b64url(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn ed25519_signing_key() -> SigningKey {
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let raw = kp.public_key_raw();
+    SigningKey {
+        encoding: jsonwebtoken::EncodingKey::from_ed_pem(kp.serialize_pem().as_bytes()).unwrap(),
+        jwk: serde_json::json!({"kty": "OKP", "crv": "Ed25519", "x": b64url(&raw[raw.len() - 32..])}),
+        alg: jsonwebtoken::Algorithm::EdDSA,
+    }
+}
+
+fn p256_signing_key() -> SigningKey {
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let raw = kp.public_key_raw();
+    SigningKey {
+        encoding: jsonwebtoken::EncodingKey::from_ec_pem(kp.serialize_pem().as_bytes()).unwrap(),
+        jwk: serde_json::json!({
+            "kty": "EC", "crv": "P-256", "x": b64url(&raw[1..33]), "y": b64url(&raw[33..65]),
+        }),
+        alg: jsonwebtoken::Algorithm::ES256,
+    }
+}
+
+fn jwks_of(keys: &[&SigningKey]) -> String {
+    serde_json::json!({"keys": keys.iter().map(|k| k.jwk.clone()).collect::<Vec<_>>()}).to_string()
+}
+
+fn sign_jwt(key: &SigningKey, claims: &Value) -> String {
+    jsonwebtoken::encode(&jsonwebtoken::Header::new(key.alg), claims, &key.encoding).unwrap()
+}
+
+/// A complete, valid signed-request claim set for `client_id`.
+fn request_claims(client_id: &str, aud: Value) -> Value {
+    let now = Utc::now().timestamp();
+    serde_json::json!({
+        "iss": client_id,
+        "aud": aud,
+        "iat": now,
+        "nbf": now,
+        "exp": now + 300,
+        "jti": Uuid::new_v4().to_string(),
+        "scope": "openid profile",
+        "login_hint": "alice",
+        "binding_message": "W4SCT",
+        "requested_expiry": 120,
+    })
+}
+
+fn signing_metadata() -> CibaClientMetadata {
+    CibaClientMetadata {
+        backchannel_authentication_request_signing_alg: Some(CibaRequestSigningAlg::EdDsa),
+        ..poll_mode()
+    }
+}
+
+/// A `client_secret_post` CIBA client that registered EdDSA and `keys`.
+async fn signing_client(f: &Fixture, name: &str, keys: &[&SigningKey]) -> CibaClient {
+    let mut input = create_input(f.tenant_id, name, &[CIBA_GRANT_TYPE], signing_metadata());
+    input.jwks = Some(jwks_of(keys));
+    let (client, secret) = SurrealOAuth2ClientRepository::new(f.db.clone())
+        .create(input)
+        .await
+        .unwrap();
+    CibaClient {
+        client_id: client.client_id,
+        secret,
+    }
+}
+
+fn signed_body(client: &CibaClient, request: &str, extra: &str) -> String {
+    format!(
+        "client_id={}&client_secret={}&request={}{extra}",
+        client.client_id,
+        client.secret,
+        enc(request)
+    )
+}
+
+async fn ciba_rows(f: &Fixture) -> i64 {
+    let mut count =
+        f.db.query("SELECT count() AS n FROM ciba_request GROUP ALL")
+            .await
+            .unwrap();
+    let n: Option<i64> = count.take("n").unwrap();
+    n.unwrap_or(0)
+}
+
+/// The happy path: a signed request is verified against the client's
+/// registered key, its claims — and only its claims — become the request, the
+/// issuer is accepted in both forms, and the flow completes to tokens.
+#[actix_web::test]
+async fn a_signed_request_is_verified_and_its_claims_are_the_request() {
+    let mut f = setup().await;
+    f.auth.tenant_issuer_paths = true;
+    f.state.auth_config.tenant_issuer_paths = true;
+    let app = app!(f, permissive(), true);
+    let key = ed25519_signing_key();
+    let client = signing_client(&f, "signed", &[&key]).await;
+    let tenant_issuer = format!("{ROOT_ISSUER}/t/{}", f.tenant_id);
+
+    let mut ids = Vec::new();
+    for aud in [
+        serde_json::json!(ROOT_ISSUER),
+        serde_json::json!(tenant_issuer),
+        serde_json::json!(["https://elsewhere.example", ROOT_ISSUER]),
+    ] {
+        let jwt = sign_jwt(&key, &request_claims(&client.client_id, aud.clone()));
+        let (status, body) = post_form(
+            &app,
+            &format!("/oauth2/bc-authorize?tenant_id={}", f.tenant_id),
+            signed_body(&client, &jwt, ""),
+        )
+        .await;
+        assert_eq!(status, 200, "aud {aud}: {body}");
+        assert_eq!(
+            body["expires_in"], 120,
+            "requested_expiry came from the JWT"
+        );
+        ids.push(body["auth_req_id"].as_str().unwrap().to_owned());
+    }
+    let row = stored(&f, &ids[0]).await;
+    assert_eq!(row.client_id, client.client_id);
+    assert_eq!(row.user_id, Some(f.user_id));
+    assert_eq!(row.scopes, ["openid", "profile"]);
+    assert_eq!(row.binding_message.as_deref(), Some("W4SCT"));
+    // The user is notified with what the client signed (detached; wait).
+    let mut notified = false;
+    for _ in 0..100 {
+        notified = f
+            .notifier
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|n| n.binding_message.as_deref() == Some("W4SCT"));
+        if notified {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(notified);
+
+    // And it completes like any other request.
+    approve(&f, &ids[0], Uuid::new_v4()).await;
+    let (status, json) = post_form(
+        &app,
+        &format!("/oauth2/token?tenant_id={}", f.tenant_id),
+        token_body(&client, &ids[0]),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+    assert!(json["access_token"].is_string() && json["id_token"].is_string());
+}
+
+/// Every way a signed request can be wrong is `invalid_request`, and nothing
+/// is stored for it.
+#[actix_web::test]
+async fn signed_request_refusals_are_invalid_request_and_store_nothing() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    let key = ed25519_signing_key();
+    let ec = p256_signing_key();
+    // The client publishes a P-256 key as well, so the wrong-algorithm case is
+    // a signature by one of its own keys under an algorithm it did not
+    // register.
+    let client = signing_client(&f, "signed", &[&key, &ec]).await;
+    let cid = client.client_id.clone();
+    let path = format!("/oauth2/bc-authorize?tenant_id={}", f.tenant_id);
+    let valid = || request_claims(&cid, serde_json::json!(ROOT_ISSUER));
+    let with = |edit: &dyn Fn(&mut Value)| {
+        let mut c = valid();
+        edit(&mut c);
+        sign_jwt(&key, &c)
+    };
+    let now = Utc::now().timestamp();
+
+    let cases: Vec<(&str, String)> = vec![
+        (
+            "bad signature",
+            signed_body(&client, &sign_jwt(&ed25519_signing_key(), &valid()), ""),
+        ),
+        (
+            "wrong alg (ES256 by a registered P-256 key, EdDSA registered)",
+            signed_body(&client, &sign_jwt(&ec, &valid()), ""),
+        ),
+        (
+            "missing jti",
+            signed_body(
+                &client,
+                &with(&|c| {
+                    c.as_object_mut().unwrap().remove("jti");
+                }),
+                "",
+            ),
+        ),
+        (
+            "expired",
+            signed_body(
+                &client,
+                &with(&|c| {
+                    c["exp"] = serde_json::json!(now - 3600);
+                    c["nbf"] = serde_json::json!(now - 3700);
+                    c["iat"] = serde_json::json!(now - 3700);
+                }),
+                "",
+            ),
+        ),
+        (
+            "longer than sixty minutes",
+            signed_body(
+                &client,
+                &with(&|c| c["exp"] = serde_json::json!(now + 3700)),
+                "",
+            ),
+        ),
+        (
+            "wrong aud",
+            signed_body(
+                &client,
+                &with(&|c| c["aud"] = serde_json::json!("https://evil.example")),
+                "",
+            ),
+        ),
+        (
+            "aud is the endpoint, not the issuer",
+            signed_body(
+                &client,
+                &with(&|c| {
+                    c["aud"] = serde_json::json!(format!("{ROOT_ISSUER}/oauth2/bc-authorize"))
+                }),
+                "",
+            ),
+        ),
+        (
+            "iss is another client",
+            signed_body(
+                &client,
+                &with(&|c| c["iss"] = serde_json::json!(f.other.client_id)),
+                "",
+            ),
+        ),
+        (
+            "a parameter outside the JWT",
+            signed_body(&client, &sign_jwt(&key, &valid()), "&login_hint=alice"),
+        ),
+        (
+            "a request_uri",
+            format!(
+                "client_id={}&client_secret={}&request_uri={}",
+                client.client_id,
+                client.secret,
+                enc("https://rp.example.com/request.jwt")
+            ),
+        ),
+        (
+            "an unsigned request from a client that registered an algorithm",
+            bc_body(&client, "&login_hint=alice"),
+        ),
+        (
+            "a signed request from a client that registered none",
+            signed_body(
+                &f.ciba,
+                &sign_jwt(
+                    &key,
+                    &request_claims(&f.ciba.client_id, serde_json::json!(ROOT_ISSUER)),
+                ),
+                "",
+            ),
+        ),
+        (
+            "login_hint_token inside the JWT",
+            signed_body(
+                &client,
+                &with(&|c| c["login_hint_token"] = serde_json::json!("t")),
+                "",
+            ),
+        ),
+    ];
+    for (why, body) in cases {
+        let (status, json) = post_form(&app, &path, body).await;
+        assert_eq!(
+            (status, json["error"].as_str()),
+            (400, Some("invalid_request")),
+            "{why}: {json}"
+        );
+    }
+    assert_eq!(ciba_rows(&f).await, 0, "nothing refused was stored");
+
+    // Single use: the same signed request twice.
+    let jwt = sign_jwt(&key, &valid());
+    let (status, json) = post_form(&app, &path, signed_body(&client, &jwt, "")).await;
+    assert_eq!(status, 200, "{json}");
+    let (status, json) = post_form(&app, &path, signed_body(&client, &jwt, "")).await;
+    assert_eq!(
+        (status, json["error"].as_str()),
+        (400, Some("invalid_request")),
+        "replayed: {json}"
+    );
+    assert!(
+        json["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("already been used")
+    );
+    assert_eq!(ciba_rows(&f).await, 1);
+    // The jti is scoped to the client: another client may use the same value.
+    let other = signing_client(&f, "signed-2", &[&key]).await;
+    let mut c = request_claims(&other.client_id, serde_json::json!(ROOT_ISSUER));
+    c["jti"] = decode_unverified(&jwt)["jti"].clone();
+    let (status, json) = post_form(&app, &path, signed_body(&other, &sign_jwt(&key, &c), "")).await;
+    assert_eq!(status, 200, "{json}");
+}
+
+/// A `fapi2` row as `fapi::validate_registration` and the CIBA rules admit
+/// it: `private_key_jwt`, DPoP-bound tokens, PAR required, EdDSA requests.
+async fn fapi2_ciba_client(f: &Fixture, key: &SigningKey) -> String {
+    let mut input = create_input(
+        f.tenant_id,
+        "fapi-ciba",
+        &[CIBA_GRANT_TYPE],
+        signing_metadata(),
+    );
+    input.profile = ClientProfile::Fapi2;
+    input.require_par = true;
+    input.token_endpoint_auth_method = ClientAuthMethod::PrivateKeyJwt;
+    input.jwks = Some(jwks_of(&[key]));
+    input.dpop_bound_access_tokens = true;
+    axiam_oauth2::fapi::validate_registration(&input).expect("a valid fapi2 registration");
+    let (client, _) = SurrealOAuth2ClientRepository::new(f.db.clone())
+        .create(input)
+        .await
+        .unwrap();
+    client.client_id
+}
+
+fn client_assertion(key: &SigningKey, client_id: &str) -> String {
+    let now = Utc::now().timestamp();
+    sign_jwt(
+        key,
+        &serde_json::json!({
+            "iss": client_id, "sub": client_id, "aud": ROOT_ISSUER,
+            "iat": now, "exp": now + 60, "jti": Uuid::new_v4().to_string(),
+        }),
+    )
+}
+
+fn assertion_auth(key: &SigningKey, client_id: &str) -> String {
+    format!(
+        "client_id={client_id}&client_assertion_type={}&client_assertion={}",
+        enc("urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
+        client_assertion(key, client_id)
+    )
+}
+
+/// The `private_key_jwt` verifier, as `axiam-server` wires it.
+fn with_assertion_verifier(f: &mut Fixture) {
+    f.state.oauth2.token_service = f
+        .state
+        .oauth2
+        .token_service
+        .clone()
+        .with_assertion_verifier(Arc::new(
+            axiam_oauth2::private_key_jwt::JwksAssertionVerifier::new(
+                axiam_federation::jwks_cache::JwksCache::new(),
+                reqwest::Client::new(),
+                axiam_db::repository::SurrealProofReplayRepository::new(f.db.clone()),
+                ROOT_ISSUER.into(),
+                vec![format!("{ROOT_ISSUER}/oauth2/token")],
+            ),
+        ));
+}
+
+/// FAPI-CIBA: a `fapi2` client authenticates with `private_key_jwt`, signs
+/// every request, sends a binding message, and its tokens are
+/// sender-constrained; a row edited to drop the signing algorithm is refused.
+#[actix_web::test]
+async fn a_fapi2_ciba_client_signs_authenticates_strongly_and_is_sender_constrained() {
+    let mut f = setup().await;
+    with_assertion_verifier(&mut f);
+    let key = ed25519_signing_key();
+    let cid = fapi2_ciba_client(&f, &key).await;
+    let app = app!(f, permissive());
+    let path = format!("/oauth2/bc-authorize?tenant_id={}", f.tenant_id);
+    let signed = |claims: &Value| {
+        format!(
+            "{}&request={}",
+            assertion_auth(&key, &cid),
+            enc(&sign_jwt(&key, claims))
+        )
+    };
+
+    // Happy path.
+    let (status, body) = post_form(
+        &app,
+        &path,
+        signed(&request_claims(&cid, serde_json::json!(ROOT_ISSUER))),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let id = body["auth_req_id"].as_str().unwrap().to_owned();
+
+    // Without a signed request: refused.
+    let (status, json) = post_form(
+        &app,
+        &path,
+        format!(
+            "{}&scope=openid&login_hint=alice&binding_message=W4SCT",
+            assertion_auth(&key, &cid)
+        ),
+    )
+    .await;
+    assert_eq!(
+        (status, json["error"].as_str()),
+        (400, Some("invalid_request")),
+        "{json}"
+    );
+
+    // Without a binding message: refused (FAPI-CIBA's unique authorization
+    // context).
+    let mut no_binding = request_claims(&cid, serde_json::json!(ROOT_ISSUER));
+    no_binding
+        .as_object_mut()
+        .unwrap()
+        .remove("binding_message");
+    let (status, json) = post_form(&app, &path, signed(&no_binding)).await;
+    assert_eq!(
+        (status, json["error"].as_str()),
+        (400, Some("invalid_request")),
+        "{json}"
+    );
+
+    // Sender-constrained: the approved request is not redeemed without the
+    // DPoP proof the client's registration requires.
+    approve(&f, &id, Uuid::new_v4()).await;
+    let (status, json) = post_form(
+        &app,
+        &format!("/oauth2/token?tenant_id={}", f.tenant_id),
+        format!(
+            "grant_type={}&{}&auth_req_id={}",
+            enc(CIBA_GRANT_TYPE),
+            assertion_auth(&key, &cid),
+            enc(&id)
+        ),
+    )
+    .await;
+    assert_eq!(
+        (status, json["error"].as_str()),
+        (400, Some("invalid_dpop_proof")),
+        "{json}"
+    );
+
+    // A row edited to drop the signing algorithm is refused, signed or not.
+    f.db.query(
+        "UPDATE oauth2_client SET backchannel_authentication_request_signing_alg = NONE \
+         WHERE client_id = $c",
+    )
+    .bind(("c", cid.clone()))
+    .await
+    .unwrap();
+    let (status, json) = post_form(
+        &app,
+        &path,
+        format!(
+            "{}&scope=openid&login_hint=alice&binding_message=W4SCT",
+            assertion_auth(&key, &cid)
+        ),
+    )
+    .await;
+    assert_eq!(
+        (status, json["error"].as_str()),
+        (400, Some("unauthorized_client")),
+        "{json}"
+    );
+}
+
+/// FAPI-CIBA ping: a `fapi2` client's notification token must be long enough
+/// to carry 128 bits.
+#[actix_web::test]
+async fn a_fapi2_ping_client_needs_a_notification_token_of_128_bits() {
+    let mut f = setup().await;
+    with_assertion_verifier(&mut f);
+    // Ping needs the sealing key the harness leaves out.
+    f.state.oauth2.ciba_service = axiam_oauth2::ciba::CibaService::new(
+        axiam_db::SurrealCibaRequestRepository::new(f.db.clone(), Some([7u8; 32])),
+        SurrealUserRepository::new(f.db.clone()),
+        f.auth.jwt_public_key_pem.clone(),
+    )
+    .with_signed_request_verifier(Arc::new(
+        axiam_oauth2::ciba_signed_request::JwksSignedRequestVerifier::new(
+            axiam_federation::jwks_cache::JwksCache::new(),
+            reqwest::Client::new(),
+            axiam_db::repository::SurrealProofReplayRepository::new(f.db.clone()),
+        ),
+    ));
+    let key = ed25519_signing_key();
+    let cid = fapi2_ciba_client(&f, &key).await;
+    f.db.query(
+        "UPDATE oauth2_client SET backchannel_token_delivery_mode = 'ping', \
+         backchannel_client_notification_endpoint = 'https://rp.example.com/ciba/notify' \
+         WHERE client_id = $c",
+    )
+    .bind(("c", cid.clone()))
+    .await
+    .unwrap();
+    let app = app!(f, permissive());
+    let path = format!("/oauth2/bc-authorize?tenant_id={}", f.tenant_id);
+    for (token, expected) in [
+        ("short-token", 400u16),
+        ("a-notification-token-of-32-chars", 200),
+    ] {
+        let mut claims = request_claims(&cid, serde_json::json!(ROOT_ISSUER));
+        claims["client_notification_token"] = serde_json::json!(token);
+        let (status, json) = post_form(
+            &app,
+            &path,
+            format!(
+                "{}&request={}",
+                assertion_auth(&key, &cid),
+                enc(&sign_jwt(&key, &claims))
+            ),
+        )
+        .await;
+        assert_eq!(status, expected, "{token}: {json}");
+    }
+}
+
+/// Registration (admin API): the signing algorithm is accepted with keys that
+/// can verify it and echoed; a `fapi2` CIBA client needs it, a strong method
+/// and sender-constrained tokens.
+#[actix_web::test]
+async fn admin_registration_validates_signed_requests_and_the_fapi2_ciba_client() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    let ed = ed25519_signing_key();
+    let base = |extra: Value| {
+        let mut body = serde_json::json!({
+            "name": "signed ciba",
+            "redirect_uris": [],
+            "grant_types": [CIBA_GRANT_TYPE],
+            "scopes": ["openid"],
+            "token_endpoint_auth_method": "client_secret_basic",
+            "backchannel_token_delivery_mode": "poll",
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        body
+    };
+    let fapi = |extra: Value| {
+        let mut body = base(serde_json::json!({
+            "profile": "fapi2",
+            "require_par": true,
+            "token_endpoint_auth_method": "private_key_jwt",
+            "jwks": jwks_of(&[&ed]),
+            "dpop_bound_access_tokens": true,
+            "backchannel_authentication_request_signing_alg": "EdDSA",
+        }));
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        body
+    };
+
+    let (status, created) = admin_create(
+        &app,
+        &f,
+        base(serde_json::json!({
+            "jwks": jwks_of(&[&ed]),
+            "backchannel_authentication_request_signing_alg": "EdDSA",
+        })),
+    )
+    .await;
+    assert_eq!(status, 201, "{created}");
+    let stored = SurrealOAuth2ClientRepository::new(f.db.clone())
+        .get_by_id(
+            f.tenant_id,
+            created["id"].as_str().unwrap().parse().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.ciba.backchannel_authentication_request_signing_alg,
+        Some(CibaRequestSigningAlg::EdDsa)
+    );
+    // The read-back echoes it.
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/oauth2-clients/{}", stored.id))
+        .insert_header(("Authorization", format!("Bearer {}", admin_token(&f))))
+        .to_request();
+    let read: Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(
+        read["backchannel_authentication_request_signing_alg"],
+        "EdDSA"
+    );
+    let (status, created) = admin_create(&app, &f, fapi(serde_json::json!({}))).await;
+    assert_eq!(status, 201, "a complete fapi2 CIBA client: {created}");
+
+    for (body, why) in [
+        (
+            base(serde_json::json!({"backchannel_authentication_request_signing_alg": "EdDSA"})),
+            "no keys to verify with",
+        ),
+        (
+            base(serde_json::json!({
+                "jwks": jwks_of(&[&ed]),
+                "backchannel_authentication_request_signing_alg": "ES256",
+            })),
+            "no key of the registered algorithm",
+        ),
+        (
+            base(serde_json::json!({
+                "jwks": jwks_of(&[&ed]),
+                "backchannel_authentication_request_signing_alg": "RS256",
+            })),
+            "an algorithm AXIAM does not verify",
+        ),
+        (
+            fapi(serde_json::json!({"backchannel_authentication_request_signing_alg": null})),
+            "fapi2 without signed requests",
+        ),
+        (
+            fapi(serde_json::json!({"token_endpoint_auth_method": "client_secret_basic"})),
+            "fapi2 with a shared secret",
+        ),
+        (
+            fapi(serde_json::json!({"dpop_bound_access_tokens": false})),
+            "fapi2 without sender-constrained tokens",
+        ),
+    ] {
+        let (status, json) = admin_create(&app, &f, body).await;
+        assert_eq!(status, 400, "{why}: {json}");
+    }
 }

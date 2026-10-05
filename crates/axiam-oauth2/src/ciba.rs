@@ -20,13 +20,23 @@
 //! | a confidential client (any method but `none`) | CIBA Core §7.1: the client authenticates at `bc-authorize` exactly as at the token endpoint |
 //! | `backchannel_token_delivery_mode` = `poll` or `ping` | §4; `push` is not offered (FAPI-CIBA forbids it) |
 //! | ping ⇒ an `https` notification endpoint under the webhook URL policy | §4; the endpoint is an outbound target |
-//! | the `standard` profile | FAPI-CIBA requires signed authentication requests, which AXIAM does not yet verify — a `fapi2` client is refused the grant rather than served a profile it does not get |
-//! | no `backchannel_authentication_request_signing_alg` | signed requests are not implemented |
+//! | `backchannel_authentication_request_signing_alg`, if registered, is `PS256`, `ES256` or `EdDSA`, with exactly one key source (`jwks` or `jwks_uri`) and, inline, a key of that algorithm | §7.1.1; the three algorithms AXIAM verifies on any client-signed JWT |
+//! | a registered signing algorithm ⇒ **every** request is a signed `request` JWT under it; no algorithm ⇒ a `request` is refused | §4 "when omitted, the Client will not send signed authentication requests"; a registered switch that accepted unsigned requests anyway would be the SEC-097 shape |
+//! | `fapi2` ⇒ the signing algorithm is registered | FAPI-CIBA §5.2.2: signed authentication requests are required |
+//! | `fapi2` ⇒ `tls_client_auth`, `self_signed_tls_client_auth` or `private_key_jwt`, and sender-constrained tokens | the `fapi2` profile's own rules (`fapi::validate_registration`), which already apply to every grant a `fapi2` client holds |
 //! | no `backchannel_user_code_parameter` | AXIAM has no per-user secret to check a user code against that is not the password |
 //!
+//! At request time a `fapi2` client must also send a `binding_message`
+//! (FAPI-CIBA §5.2.2: a unique authorization context, which AXIAM has no other
+//! carrier for) and, in ping mode, a `client_notification_token` of at least
+//! [`MIN_FAPI_NOTIFICATION_TOKEN_BYTES`] characters.
+//!
 //! Sender-constraining follows the client's registration exactly as for every
-//! other grant (`certificate_binding_for`), and a `fapi2`-style row edited in
-//! the datastore still meets D-17's request-time rule at `bc-authorize`.
+//! other grant (`certificate_binding_for`, and `fapi::enforce_token_request` at
+//! the token endpoint), and a row edited in the datastore past these gates
+//! still meets D-17's request-time rule and the signed-request rule at
+//! `bc-authorize`. Signed requests themselves are
+//! [`crate::ciba_signed_request`].
 //!
 //! # Not a user oracle (D-63)
 //!
@@ -40,7 +50,8 @@
 
 use axiam_core::models::ciba::{
     CIBA_GRANT_TYPE, CibaApprovalEvidence, CibaClientMetadata, CibaDeliveryMode,
-    CibaPingCredentials, CibaRequest, CibaRequestStatus, CibaUserNotification, CreateCibaRequest,
+    CibaPingCredentials, CibaRequest, CibaRequestSigningAlg, CibaRequestStatus,
+    CibaUserNotification, CreateCibaRequest,
 };
 use axiam_core::models::oauth2_client::{ClientAuthMethod, ClientProfile, OAuth2Client};
 use axiam_core::models::session::Amr;
@@ -88,6 +99,16 @@ pub const MAX_BINDING_MESSAGE_CHARS: usize = 64;
 /// Longest `client_notification_token`, in bytes (CIBA Core §7.1 suggests
 /// 1024 as the minimum an OP accepts).
 pub const MAX_NOTIFICATION_TOKEN_BYTES: usize = 1024;
+
+/// Shortest `client_notification_token` a `fapi2` client may send, in bytes.
+///
+/// The token is the bearer credential AXIAM presents at the client's
+/// notification endpoint, so a guessable one lets anybody forge a ping. The
+/// authorization server cannot measure entropy; it can refuse a token too
+/// short to carry 128 bits in base64url, which is the floor FAPI-CIBA's
+/// security considerations ask of it. A `standard` client keeps CIBA Core's
+/// rule (any non-empty token).
+pub const MIN_FAPI_NOTIFICATION_TOKEN_BYTES: usize = 22;
 
 /// Longest `login_hint`, in bytes.
 pub const MAX_LOGIN_HINT_BYTES: usize = 256;
@@ -148,11 +169,25 @@ pub enum CibaRegistrationError {
     MetadataWithoutGrant,
     /// A public client asked for the grant.
     PublicClient,
-    /// A `fapi2` client asked for the grant (signed requests are not
-    /// implemented, and FAPI-CIBA requires them).
-    FapiClient,
-    /// `backchannel_authentication_request_signing_alg` was registered.
-    SignedRequestsUnsupported,
+    /// `backchannel_authentication_request_signing_alg` names an algorithm
+    /// AXIAM does not verify.
+    UnsupportedSigningAlg {
+        /// What was asked for.
+        alg: String,
+    },
+    /// A `fapi2` client asked for the grant without registering a signing
+    /// algorithm (FAPI-CIBA requires signed authentication requests).
+    FapiRequiresSignedRequests,
+    /// A signing algorithm without exactly one key source.
+    SigningKeysRequired {
+        /// How many of `jwks` and `jwks_uri` were registered.
+        registered: usize,
+    },
+    /// An inline `jwks` holding no key of the registered algorithm.
+    NoKeyForSigningAlg {
+        /// The registered algorithm.
+        alg: &'static str,
+    },
     /// `backchannel_user_code_parameter: true` was registered.
     UserCodeUnsupported,
 }
@@ -192,15 +227,26 @@ impl std::fmt::Display for CibaRegistrationError {
                  token_endpoint_auth_method none cannot authenticate at the backchannel \
                  authentication endpoint"
             ),
-            Self::FapiClient => write!(
+            Self::UnsupportedSigningAlg { alg } => write!(
                 f,
-                "a fapi2 client cannot hold the CIBA grant yet: the FAPI-CIBA profile requires \
-                 signed authentication requests, which this server does not verify"
+                "backchannel_authentication_request_signing_alg {alg:?} is not supported: this \
+                 server verifies PS256, ES256 and EdDSA"
             ),
-            Self::SignedRequestsUnsupported => write!(
+            Self::FapiRequiresSignedRequests => write!(
                 f,
-                "backchannel_authentication_request_signing_alg is not supported: this server \
-                 does not accept signed authentication requests"
+                "a fapi2 client holding the CIBA grant must register \
+                 backchannel_authentication_request_signing_alg: the FAPI-CIBA profile requires \
+                 signed authentication requests"
+            ),
+            Self::SigningKeysRequired { registered } => write!(
+                f,
+                "backchannel_authentication_request_signing_alg requires exactly one of jwks and \
+                 jwks_uri, to verify the signed requests against (registered: {registered})"
+            ),
+            Self::NoKeyForSigningAlg { alg } => write!(
+                f,
+                "the registered jwks holds no {alg} key, so no request signed with \
+                 backchannel_authentication_request_signing_alg {alg} could be verified"
             ),
             Self::UserCodeUnsupported => write!(
                 f,
@@ -232,6 +278,10 @@ pub struct CibaRegistrationView<'a> {
     pub signing_alg: Option<&'a str>,
     /// `backchannel_user_code_parameter` as sent.
     pub user_code_parameter: Option<bool>,
+    /// The registered inline `jwks`, as the row will hold it.
+    pub jwks: Option<&'a str>,
+    /// The registered `jwks_uri`, as the row will hold it.
+    pub jwks_uri: Option<&'a str>,
 }
 
 /// Validate a registration's CIBA metadata and resolve what is stored.
@@ -251,17 +301,22 @@ pub fn validate_client_registration(
     let mode_raw = blank(reg.delivery_mode);
     let endpoint = blank(reg.notification_endpoint);
 
-    // The two members AXIAM does not implement, first: whatever else the
+    // The member AXIAM does not implement, first: whatever else the
     // registration says, it asked for something it will not get.
-    if blank(reg.signing_alg).is_some() {
-        return Err(CibaRegistrationError::SignedRequestsUnsupported);
-    }
     if reg.user_code_parameter == Some(true) {
         return Err(CibaRegistrationError::UserCodeUnsupported);
     }
+    let signing_alg = match blank(reg.signing_alg) {
+        None => None,
+        Some(raw) => Some(CibaRequestSigningAlg::from_wire(raw).ok_or_else(|| {
+            CibaRegistrationError::UnsupportedSigningAlg {
+                alg: raw.to_owned(),
+            }
+        })?),
+    };
 
     if !holds_ciba_grant(reg.grant_types) {
-        if mode_raw.is_some() || endpoint.is_some() {
+        if mode_raw.is_some() || endpoint.is_some() || signing_alg.is_some() {
             return Err(CibaRegistrationError::MetadataWithoutGrant);
         }
         return Ok(CibaClientMetadata::default());
@@ -270,8 +325,32 @@ pub fn validate_client_registration(
     if reg.token_endpoint_auth_method.is_public() {
         return Err(CibaRegistrationError::PublicClient);
     }
-    if reg.profile.is_fapi2() {
-        return Err(CibaRegistrationError::FapiClient);
+    // FAPI-CIBA §5.2.2. The profile's client-authentication and
+    // sender-constraining rules are `fapi::validate_registration`'s, which
+    // every registration path runs as well: one statement of them.
+    if reg.profile.is_fapi2() && signing_alg.is_none() {
+        return Err(CibaRegistrationError::FapiRequiresSignedRequests);
+    }
+    if let Some(alg) = signing_alg {
+        let inline = blank(reg.jwks);
+        let sources = usize::from(inline.is_some()) + usize::from(blank(reg.jwks_uri).is_some());
+        if sources != 1 {
+            return Err(CibaRegistrationError::SigningKeysRequired {
+                registered: sources,
+            });
+        }
+        // An inline set is checked now; a `jwks_uri` can only be checked when
+        // it is fetched, and a request whose key cannot be found is refused
+        // then. An unparseable inline set is reported by
+        // `fapi::validate_registration` with the parser's detail; here it
+        // simply holds no usable key.
+        if let Some(raw) = inline {
+            let usable = serde_json::from_str::<jsonwebtoken::jwk::JwkSet>(raw)
+                .is_ok_and(|set| crate::ciba_signed_request::key_set_supports(&set, alg));
+            if !usable {
+                return Err(CibaRegistrationError::NoKeyForSigningAlg { alg: alg.as_str() });
+            }
+        }
     }
     let Some(mode_raw) = mode_raw else {
         return Err(CibaRegistrationError::DeliveryModeRequired);
@@ -303,6 +382,7 @@ pub fn validate_client_registration(
     Ok(CibaClientMetadata {
         backchannel_token_delivery_mode: Some(mode),
         backchannel_client_notification_endpoint: endpoint,
+        backchannel_authentication_request_signing_alg: signing_alg,
     })
 }
 
@@ -311,7 +391,7 @@ pub fn validate_client_registration(
 // ---------------------------------------------------------------------------
 
 /// `POST /oauth2/bc-authorize` (CIBA Core §7.1), form-encoded.
-#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Deserialize, utoipa::ToSchema)]
 pub struct BackchannelAuthenticationRequest {
     /// The client, unless it authenticates with HTTP Basic or an assertion
     /// that names it.
@@ -340,9 +420,13 @@ pub struct BackchannelAuthenticationRequest {
     pub user_code: Option<String>,
     /// Requested lifetime in seconds.
     pub requested_expiry: Option<String>,
-    /// A signed authentication request. Not supported; refused.
+    /// A signed authentication request (CIBA Core §7.1.1): a JWT whose claims
+    /// are this request's parameters, signed with the client's registered
+    /// `backchannel_authentication_request_signing_alg`. Required from a
+    /// client that registered one, refused from a client that did not; sent
+    /// alone, with no authentication-request parameter beside it.
     pub request: Option<String>,
-    /// Not supported; refused.
+    /// Not part of CIBA; refused.
     pub request_uri: Option<String>,
     /// RFC 8707 target service.
     pub resource: Option<String>,
@@ -371,12 +455,43 @@ pub fn refuse_unsupported_parameters(
     req: &BackchannelAuthenticationRequest,
 ) -> Result<(), OAuth2Error> {
     let present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
-    if present(&req.request) || present(&req.request_uri) {
+    if present(&req.request_uri) {
         return Err(OAuth2Error::InvalidRequest(
-            "signed authentication requests (request, request_uri) are not supported; send the \
-             parameters directly"
+            "request_uri is not supported: CIBA Core section 7.1.1 defines the signed \
+             authentication request by value, in the request parameter"
                 .into(),
         ));
+    }
+    if present(&req.request) {
+        // CIBA Core §7.1.1: the parameters "MUST NOT be present outside of the
+        // JWT, in particular they MUST NOT appear as HTTP request parameters".
+        // Refused rather than ignored: a parameter the client believes it sent
+        // and the server silently dropped is a request the two read
+        // differently.
+        let outside: Vec<&str> = [
+            ("scope", &req.scope),
+            ("client_notification_token", &req.client_notification_token),
+            ("acr_values", &req.acr_values),
+            ("login_hint_token", &req.login_hint_token),
+            ("id_token_hint", &req.id_token_hint),
+            ("login_hint", &req.login_hint),
+            ("binding_message", &req.binding_message),
+            ("user_code", &req.user_code),
+            ("requested_expiry", &req.requested_expiry),
+            ("resource", &req.resource),
+        ]
+        .into_iter()
+        .filter(|(_, v)| v.is_some())
+        .map(|(name, _)| name)
+        .collect();
+        if !outside.is_empty() {
+            return Err(OAuth2Error::InvalidRequest(format!(
+                "a signed authentication request carries every parameter inside the request JWT; \
+                 these were also sent outside it: {}",
+                outside.join(", ")
+            )));
+        }
+        return Ok(());
     }
     if present(&req.login_hint_token) {
         return Err(OAuth2Error::InvalidRequest(
@@ -696,6 +811,11 @@ pub struct CibaService<CR, UR> {
     users: UR,
     /// The deployment's ID-token verification key, for `id_token_hint`.
     public_key_pem: String,
+    /// Verifies signed authentication requests (CIBA Core §7.1.1). `None`
+    /// refuses every signed request with `server_error` — never accepts one
+    /// unverified, and never lets a client that registered a signing
+    /// algorithm fall back to plain requests.
+    signed_requests: Option<std::sync::Arc<dyn crate::ciba_signed_request::SignedRequestVerifier>>,
 }
 
 impl<CR, UR> CibaService<CR, UR>
@@ -709,6 +829,80 @@ where
             requests,
             users,
             public_key_pem,
+            signed_requests: None,
+        }
+    }
+
+    /// Wire the signed-request verifier (D-61). Builder-style, like
+    /// `TokenService::with_assertion_verifier`.
+    #[must_use]
+    pub fn with_signed_request_verifier(
+        mut self,
+        verifier: std::sync::Arc<dyn crate::ciba_signed_request::SignedRequestVerifier>,
+    ) -> Self {
+        self.signed_requests = Some(verifier);
+        self
+    }
+
+    /// Resolve the parameters this request is made of: the signed `request`
+    /// JWT's claims for a client that registered a signing algorithm, the
+    /// form for one that did not — never a mixture, and never the other form.
+    async fn effective_request<'r>(
+        &self,
+        client: &OAuth2Client,
+        req: &'r BackchannelAuthenticationRequest,
+        acceptable_issuers: &[String],
+    ) -> Result<std::borrow::Cow<'r, BackchannelAuthenticationRequest>, OAuth2Error> {
+        use std::borrow::Cow;
+        let signed = req
+            .request
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (
+            client.ciba.backchannel_authentication_request_signing_alg,
+            signed,
+        ) {
+            (None, None) => {
+                // A `fapi2` row reaches here only if edited past the
+                // registration gate (`FapiRequiresSignedRequests`).
+                if client.profile.is_fapi2() {
+                    tracing::error!(
+                        client_id = %client.client_id,
+                        "a fapi2 CIBA client has no backchannel_authentication_request_signing_alg; \
+                         this registration cannot have passed validate_client_registration"
+                    );
+                    return Err(OAuth2Error::UnauthorizedClient(
+                        "a fapi2 client must send signed authentication requests".into(),
+                    ));
+                }
+                Ok(Cow::Borrowed(req))
+            }
+            (Some(alg), None) => Err(OAuth2Error::InvalidRequest(format!(
+                "this client registered backchannel_authentication_request_signing_alg {}: send \
+                 the authentication request as a signed request JWT (CIBA Core section 7.1.1)",
+                alg.as_str()
+            ))),
+            (None, Some(_)) => Err(OAuth2Error::InvalidRequest(
+                "this client has not registered backchannel_authentication_request_signing_alg, \
+                 so it cannot send a signed request; register the algorithm it signs with"
+                    .into(),
+            )),
+            (Some(_), Some(jwt)) => {
+                let Some(verifier) = self.signed_requests.as_ref() else {
+                    tracing::error!(
+                        client_id = %client.client_id,
+                        "a signed CIBA request arrived and no signed-request verifier is wired"
+                    );
+                    return Err(OAuth2Error::ServerError(
+                        "signed authentication requests are not available on this deployment"
+                            .into(),
+                    ));
+                };
+                Ok(Cow::Owned(
+                    verifier.verify(client, jwt, acceptable_issuers).await?,
+                ))
+            }
         }
     }
 
@@ -782,6 +976,30 @@ where
             )
         })?;
 
+        // D-61: a signed request is verified (and its `jti` spent) before
+        // anything it carries is read; from here on `req` is what the client
+        // signed, or the form of a client that signs nothing.
+        let req = self
+            .effective_request(client, req, acceptable_issuers)
+            .await?;
+        let req: &BackchannelAuthenticationRequest = &req;
+        // The parameters AXIAM does not implement, again: inside a signed
+        // request they could not be seen before it was verified.
+        refuse_unsupported_parameters(req)?;
+        let fapi = client.profile.is_fapi2();
+        if fapi
+            && req
+                .binding_message
+                .as_deref()
+                .is_none_or(|m| m.trim().is_empty())
+        {
+            // FAPI-CIBA §5.2.2: a unique authorization context or a binding
+            // message. AXIAM has no other carrier for the former.
+            return Err(OAuth2Error::InvalidRequest(
+                "a fapi2 client must send a binding_message (FAPI-CIBA)".into(),
+            ));
+        }
+
         let scopes = resolve_scopes(req.scope.as_deref(), &client.scopes)?;
         let hint = select_hint(req)?;
         let binding_message = validate_binding_message(req.binding_message.as_deref())?;
@@ -809,6 +1027,12 @@ where
                     return Err(OAuth2Error::InvalidRequest(format!(
                         "client_notification_token must be at most {MAX_NOTIFICATION_TOKEN_BYTES} \
                          visible ASCII characters"
+                    )));
+                }
+                if fapi && token.len() < MIN_FAPI_NOTIFICATION_TOKEN_BYTES {
+                    return Err(OAuth2Error::InvalidRequest(format!(
+                        "a fapi2 client's client_notification_token must be at least \
+                         {MIN_FAPI_NOTIFICATION_TOKEN_BYTES} characters (128 bits of entropy)"
                     )));
                 }
                 Some(CibaPingCredentials {
@@ -1040,7 +1264,18 @@ mod tests {
             notification_endpoint: endpoint,
             signing_alg: None,
             user_code_parameter: None,
+            jwks: None,
+            jwks_uri: None,
         }
+    }
+
+    /// A one-key inline JWK Set with an Ed25519 key, as a registration holds it.
+    fn ed25519_jwks() -> String {
+        use base64::Engine as _;
+        let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let raw = kp.public_key_raw();
+        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&raw[raw.len() - 32..]);
+        serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "x": x}]}).to_string()
     }
 
     fn ciba_grants() -> Vec<String> {
@@ -1119,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn stray_metadata_public_and_fapi_clients_and_unimplemented_members_are_refused() {
+    fn stray_metadata_public_clients_and_unimplemented_members_are_refused() {
         let none: Vec<String> = vec!["authorization_code".into()];
         assert_eq!(
             validate_client_registration(view(&none, Some("poll"), None)),
@@ -1137,18 +1372,6 @@ mod tests {
             validate_client_registration(public),
             Err(CibaRegistrationError::PublicClient)
         );
-        let mut fapi = view(&grants, Some("poll"), None);
-        fapi.profile = ClientProfile::Fapi2;
-        assert_eq!(
-            validate_client_registration(fapi),
-            Err(CibaRegistrationError::FapiClient)
-        );
-        let mut signed = view(&grants, Some("poll"), None);
-        signed.signing_alg = Some("PS256");
-        assert_eq!(
-            validate_client_registration(signed),
-            Err(CibaRegistrationError::SignedRequestsUnsupported)
-        );
         let mut user_code = view(&grants, Some("poll"), None);
         user_code.user_code_parameter = Some(true);
         assert_eq!(
@@ -1159,6 +1382,96 @@ mod tests {
         let mut no_user_code = view(&grants, Some("poll"), None);
         no_user_code.user_code_parameter = Some(false);
         assert!(validate_client_registration(no_user_code).is_ok());
+    }
+
+    /// D-61 — a signing algorithm is one AXIAM verifies, comes with exactly
+    /// one key source holding a key of that algorithm, needs the grant, and is
+    /// stored when accepted.
+    #[test]
+    fn a_signing_algorithm_is_verified_keyed_and_stored() {
+        let grants = ciba_grants();
+        let jwks = ed25519_jwks();
+
+        let mut signed = view(&grants, Some("poll"), None);
+        signed.signing_alg = Some("EdDSA");
+        signed.jwks = Some(&jwks);
+        assert_eq!(
+            validate_client_registration(signed)
+                .unwrap()
+                .backchannel_authentication_request_signing_alg,
+            Some(CibaRequestSigningAlg::EdDsa)
+        );
+        // A published key set is accepted unread; it is checked when fetched.
+        let mut remote = view(&grants, Some("poll"), None);
+        remote.signing_alg = Some("PS256");
+        remote.jwks_uri = Some("https://rp.example.com/jwks.json");
+        assert!(validate_client_registration(remote).is_ok());
+
+        for bad in ["RS256", "HS256", "none", "eddsa"] {
+            let mut v = view(&grants, Some("poll"), None);
+            v.signing_alg = Some(bad);
+            v.jwks = Some(&jwks);
+            assert_eq!(
+                validate_client_registration(v),
+                Err(CibaRegistrationError::UnsupportedSigningAlg { alg: bad.into() }),
+                "{bad}"
+            );
+        }
+        let mut keyless = view(&grants, Some("poll"), None);
+        keyless.signing_alg = Some("EdDSA");
+        assert_eq!(
+            validate_client_registration(keyless),
+            Err(CibaRegistrationError::SigningKeysRequired { registered: 0 })
+        );
+        let mut both = view(&grants, Some("poll"), None);
+        both.signing_alg = Some("EdDSA");
+        both.jwks = Some(&jwks);
+        both.jwks_uri = Some("https://rp.example.com/jwks.json");
+        assert_eq!(
+            validate_client_registration(both),
+            Err(CibaRegistrationError::SigningKeysRequired { registered: 2 })
+        );
+        let mut wrong_key = view(&grants, Some("poll"), None);
+        wrong_key.signing_alg = Some("ES256");
+        wrong_key.jwks = Some(&jwks);
+        assert_eq!(
+            validate_client_registration(wrong_key),
+            Err(CibaRegistrationError::NoKeyForSigningAlg { alg: "ES256" })
+        );
+        let none: Vec<String> = vec!["client_credentials".into()];
+        let mut stray = view(&none, None, None);
+        stray.signing_alg = Some("EdDSA");
+        stray.jwks = Some(&jwks);
+        assert_eq!(
+            validate_client_registration(stray),
+            Err(CibaRegistrationError::MetadataWithoutGrant)
+        );
+    }
+
+    /// D-61 / FAPI-CIBA §5.2.2 — a `fapi2` client may hold the grant only
+    /// with signed requests. (Its client-authentication method and
+    /// sender-constraining are `fapi::validate_registration`'s rules, run on
+    /// every registration path beside this one.)
+    #[test]
+    fn a_fapi2_client_holds_the_grant_only_with_signed_requests() {
+        let grants = ciba_grants();
+        let jwks = ed25519_jwks();
+        let mut unsigned = view(&grants, Some("poll"), None);
+        unsigned.profile = ClientProfile::Fapi2;
+        unsigned.token_endpoint_auth_method = ClientAuthMethod::PrivateKeyJwt;
+        unsigned.jwks = Some(&jwks);
+        assert_eq!(
+            validate_client_registration(unsigned),
+            Err(CibaRegistrationError::FapiRequiresSignedRequests)
+        );
+        let mut signed = unsigned;
+        signed.signing_alg = Some("EdDSA");
+        assert!(validate_client_registration(signed).is_ok());
+        // Ping is offered to a fapi2 client too (FAPI-CIBA permits it).
+        let mut ping = signed;
+        ping.delivery_mode = Some("ping");
+        ping.notification_endpoint = Some("https://rp.example.com/ciba/notify");
+        assert!(validate_client_registration(ping).is_ok());
     }
 
     #[test]
@@ -1244,8 +1557,28 @@ mod tests {
     fn unsupported_parameters_are_refused_before_anything_else() {
         let mut req = BackchannelAuthenticationRequest::default();
         assert!(refuse_unsupported_parameters(&req).is_ok());
+        // A signed request alone passes this gate (it is verified later).
+        req.request = Some("eyJ".into());
+        assert!(refuse_unsupported_parameters(&req).is_ok());
+        // Beside any authentication-request parameter it is refused, naming it
+        // (CIBA Core §7.1.1: they "MUST NOT be present outside of the JWT").
+        req.login_hint = Some("alice".into());
+        req.binding_message = Some("W4SCT".into());
+        match refuse_unsupported_parameters(&req) {
+            Err(OAuth2Error::InvalidRequest(msg)) => {
+                assert!(msg.contains("login_hint, binding_message"), "{msg}");
+            }
+            other => panic!("expected invalid_request, got {other:?}"),
+        }
+        // The client-authentication members are not request parameters.
+        req = BackchannelAuthenticationRequest {
+            request: Some("eyJ".into()),
+            client_id: Some("c".into()),
+            client_secret: Some("s".into()),
+            ..Default::default()
+        };
+        assert!(refuse_unsupported_parameters(&req).is_ok());
         for setter in [
-            |r: &mut BackchannelAuthenticationRequest| r.request = Some("eyJ".into()),
             |r: &mut BackchannelAuthenticationRequest| r.request_uri = Some("urn:x".into()),
             |r: &mut BackchannelAuthenticationRequest| r.login_hint_token = Some("t".into()),
             |r: &mut BackchannelAuthenticationRequest| r.user_code = Some("1234".into()),

@@ -442,6 +442,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "ciba_backchannel_authentication",
         sql: SCHEMA_V80,
     },
+    Migration {
+        version: 81,
+        name: "ciba_signed_authentication_requests",
+        sql: SCHEMA_V81,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4456,6 +4461,29 @@ DEFINE INDEX IF NOT EXISTS idx_ciba_request_expires ON TABLE ciba_request
     COLUMNS expires_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v81 — T23.7.1 (continued) / G-7, D-61: signed CIBA authentication
+// requests (CIBA Core §7.1.1, FAPI-CIBA)
+// -----------------------------------------------------------------------
+//
+// **`oauth2_client`** gains the third CIBA Core §4 member AXIAM stores,
+// `backchannel_authentication_request_signing_alg`: one of the three JWS
+// algorithms AXIAM verifies on any client-signed JWT. Absent on every older
+// row, which is what such a client registered — it sends plain requests.
+//
+// **`oauth2_proof_replay.kind`** is re-defined to admit
+// `ciba_request_object`: a signed authentication request's `jti` is recorded
+// in the same table, under the same UNIQUE `(tenant_id, kind, scope, jti)`
+// index, as a client assertion's — first sighting by `CREATE`, replay by index
+// violation, no read in the path. The re-definition only widens the ASSERT;
+// every stored row satisfies the new one.
+const SCHEMA_V81: &str = "\
+DEFINE FIELD IF NOT EXISTS backchannel_authentication_request_signing_alg ON TABLE oauth2_client
+    TYPE option<string> ASSERT $value = NONE OR $value IN ['PS256', 'ES256', 'EdDSA'];
+DEFINE FIELD OVERWRITE kind ON TABLE oauth2_proof_replay TYPE string
+    ASSERT $value IN ['client_assertion', 'dpop_proof', 'ciba_request_object'];
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5900,6 +5928,33 @@ mod tests {
             assert!(
                 window[0].version < window[1].version,
                 "Migrations must be in ascending version order"
+            );
+        }
+    }
+
+    /// T23.7.1 (continued) / D-61 — v81 stores the signing algorithm, admits
+    /// only the three AXIAM verifies, and widens the replay table's `kind` to
+    /// the signed request without narrowing it for the two existing kinds.
+    #[test]
+    fn v81_admits_the_signing_alg_and_the_request_object_replay_kind() {
+        assert!(SCHEMA_V81.contains(
+            "backchannel_authentication_request_signing_alg ON TABLE oauth2_client\n    TYPE \
+             option<string> ASSERT $value = NONE OR $value IN ['PS256', 'ES256', 'EdDSA']"
+        ));
+        assert!(SCHEMA_V81.contains(
+            "ASSERT $value IN ['client_assertion', 'dpop_proof', 'ciba_request_object']"
+        ));
+        for kind in [
+            axiam_core::repository::ProofKind::ClientAssertion,
+            axiam_core::repository::ProofKind::DpopProof,
+            axiam_core::repository::ProofKind::CibaRequestObject,
+        ] {
+            assert!(SCHEMA_V81.contains(&format!("'{}'", kind.as_str())));
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "CREATE"] {
+            assert!(
+                !SCHEMA_V81.contains(forbidden),
+                "v81 must not contain {forbidden}"
             );
         }
     }

@@ -159,8 +159,9 @@ pub struct RegistrationRequest {
     /// under the webhook URL policy.
     #[serde(default)]
     pub backchannel_client_notification_endpoint: Option<String>,
-    /// CIBA Core §4 — refused: signed authentication requests are not
-    /// implemented.
+    /// CIBA Core §4 — `PS256`, `ES256` or `EdDSA`, with `jwks` or `jwks_uri`
+    /// holding a key of that algorithm. When registered, every backchannel
+    /// authentication request must be a signed `request` JWT (D-61).
     #[serde(default)]
     pub backchannel_authentication_request_signing_alg: Option<String>,
     /// CIBA Core §4 — `true` is refused: there is no user code to check.
@@ -467,6 +468,9 @@ pub fn validate(
         resolve_auth_method(req.token_endpoint_auth_method.as_deref())?;
 
     // G-7 — the CIBA metadata, under the same rules the admin API applies.
+    // The key source is read as it will be stored, so a signing algorithm is
+    // checked against the keys the row will actually hold (D-61).
+    let jwks_document = req.jwks.as_ref().map(ToString::to_string);
     let ciba = crate::ciba::validate_client_registration(crate::ciba::CibaRegistrationView {
         grant_types: &grant_types,
         token_endpoint_auth_method,
@@ -478,6 +482,8 @@ pub fn validate(
             .backchannel_authentication_request_signing_alg
             .as_deref(),
         user_code_parameter: req.backchannel_user_code_parameter,
+        jwks: jwks_document.as_deref(),
+        jwks_uri: req.jwks_uri.as_deref(),
     })
     .map_err(|e| DcrError::InvalidClientMetadata(e.to_string()))?;
     let browser_driven = grant_types.iter().any(|g| g == "authorization_code");
@@ -674,6 +680,10 @@ pub struct RegistrationResponse {
     /// CIBA Core §4, as stored. Present only for a ping-mode client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backchannel_client_notification_endpoint: Option<String>,
+    /// CIBA Core §4, as stored. Present only for a client that signs its
+    /// authentication requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backchannel_authentication_request_signing_alg: Option<String>,
     /// RFC 7592 §3 `registration_client_uri`: where this client reads,
     /// replaces and deletes its registration.
     ///
@@ -788,6 +798,10 @@ pub fn client_information(
             .ciba
             .backchannel_client_notification_endpoint
             .clone(),
+        backchannel_authentication_request_signing_alg: client
+            .ciba
+            .backchannel_authentication_request_signing_alg
+            .map(|a| a.as_str().to_owned()),
         registration_client_uri,
         registration_access_token,
     }
@@ -1637,8 +1651,29 @@ mod tests {
         let mut public = ciba_request(Some("poll"), None);
         public.token_endpoint_auth_method = Some("none".into());
         assert!(validate(Uuid::new_v4(), &public, &protected).is_err());
+        // D-61: a signing algorithm needs keys to verify against, and one
+        // AXIAM verifies; with both, it is accepted and echoed.
         let mut signed = ciba_request(Some("poll"), None);
         signed.backchannel_authentication_request_signing_alg = Some("PS256".into());
+        assert!(validate(Uuid::new_v4(), &signed, &protected).is_err());
+        signed.jwks_uri = Some("https://rp.example.com/jwks.json".into());
+        let out = validate(Uuid::new_v4(), &signed, &protected).unwrap();
+        assert_eq!(
+            out.create
+                .ciba
+                .backchannel_authentication_request_signing_alg
+                .map(|a| a.as_str()),
+            Some("PS256")
+        );
+        let mut stored_signed = stored(&inspector_request());
+        stored_signed.ciba = out.create.ciba.clone();
+        let info = serde_json::to_value(client_information(&stored_signed, "u".into(), None, None))
+            .unwrap();
+        assert_eq!(
+            info["backchannel_authentication_request_signing_alg"],
+            "PS256"
+        );
+        signed.backchannel_authentication_request_signing_alg = Some("RS256".into());
         assert!(validate(Uuid::new_v4(), &signed, &protected).is_err());
         let mut user_code = ciba_request(Some("poll"), None);
         user_code.backchannel_user_code_parameter = Some(true);

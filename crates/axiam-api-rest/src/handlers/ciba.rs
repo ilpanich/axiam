@@ -9,9 +9,11 @@
 //!
 //! # Order
 //!
-//! 1. Parameters AXIAM does not implement (`request`, `request_uri`,
-//!    `login_hint_token`, `user_code`) are refused before anything else: the
-//!    refusal names a parameter the caller sent and nothing about a client.
+//! 1. Parameters AXIAM does not implement (`request_uri`, `login_hint_token`,
+//!    `user_code`), and a signed `request` with any authentication-request
+//!    parameter beside it (CIBA Core §7.1.1), are refused before anything
+//!    else: the refusal names a parameter the caller sent and nothing about a
+//!    client.
 //! 2. **The client authenticates exactly as at the token endpoint** — the same
 //!    context (`Authorization: Basic`, the client certificate rustls verified,
 //!    a client assertion) and the same `TokenService::authenticate_client`, so
@@ -19,13 +21,19 @@
 //!    uniform `invalid_client` and recorded as the token endpoint's
 //!    `oauth2.client_auth_failed` audit row, detached from the response.
 //! 3. D-17: the profile's request-time client-authentication rule.
-//! 4. The client must hold the CIBA grant; a `fapi2` row edited to hold it is
-//!    refused here too (the registration gate is not the only line).
+//! 4. The client must hold the CIBA grant and be confidential; a row edited
+//!    to `none` is refused here too (the registration gate is not the only
+//!    line).
 //! 5. A per-client bucket, counted only after authentication so a stranger
 //!    cannot spend a real client's allowance (the route's governor and shared
 //!    counter already counted every request, authenticated or not).
-//! 6. The service validates and stores; the response never waits on the user
-//!    notification, which is sent detached and throttled per user.
+//! 6. The service resolves the request — the signed `request` JWT for a
+//!    client that registered `backchannel_authentication_request_signing_alg`
+//!    (verified against its registered keys, its `jti` spent), the form for
+//!    one that did not, a mismatch refused either way (D-61) — then validates
+//!    and stores it, applying the FAPI-CIBA request rules to a `fapi2` client.
+//!    The response never waits on the user notification, which is sent
+//!    detached and throttled per user.
 //!
 //! # What the response never says
 //!
@@ -173,15 +181,6 @@ async fn bc_authorize_inner<C: Connection + Clone>(
         // answer, uniform with any other failed client authentication.
         return build_oauth2_error_response(&OAuth2Error::InvalidClient(
             axiam_oauth2::token::CLIENT_AUTH_FAILED.into(),
-        ));
-    }
-    if client.profile.is_fapi2() {
-        // D-61: the registration gate refuses this combination; a row edited
-        // in the datastore meets the same answer here.
-        return build_oauth2_error_response(&OAuth2Error::UnauthorizedClient(
-            "a fapi2 client cannot use the CIBA grant: signed authentication requests are not \
-             supported"
-                .into(),
         ));
     }
 

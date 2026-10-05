@@ -1,7 +1,9 @@
 //! OAuth2 client management endpoints (tenant-scoped via JWT).
 
 use actix_web::{HttpResponse, web};
-use axiam_core::models::ciba::{CIBA_GRANT_TYPE, CibaClientMetadata, CibaDeliveryMode};
+use axiam_core::models::ciba::{
+    CIBA_GRANT_TYPE, CibaClientMetadata, CibaDeliveryMode, CibaRequestSigningAlg,
+};
 use axiam_core::models::oauth2_client::{
     AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
     OAuth2Client, UpdateOAuth2Client,
@@ -153,8 +155,8 @@ pub struct CreateOAuth2ClientRequest {
     /// G-7 — CIBA Core §4 `backchannel_token_delivery_mode`: `poll` or
     /// `ping`. Required when `grant_types` holds
     /// `urn:openid:params:grant-type:ciba`, refused otherwise; `push` is not
-    /// offered. A CIBA client must be confidential and on the `standard`
-    /// profile.
+    /// offered. A CIBA client must be confidential; a `fapi2` one must also
+    /// register `backchannel_authentication_request_signing_alg`.
     #[serde(default)]
     pub backchannel_token_delivery_mode: Option<String>,
     /// G-7 — CIBA Core §4: where a ping-mode client is notified. Required in
@@ -163,8 +165,11 @@ pub struct CreateOAuth2ClientRequest {
     /// loopback or internal host).
     #[serde(default)]
     pub backchannel_client_notification_endpoint: Option<String>,
-    /// G-7 — CIBA Core §4. **Refused**: signed authentication requests are not
-    /// supported by this server.
+    /// G-7 — CIBA Core §4: `PS256`, `ES256` or `EdDSA`. When set, every
+    /// backchannel authentication request must be a signed `request` JWT under
+    /// this algorithm, verified against `jwks` or `jwks_uri` (exactly one is
+    /// required; an inline `jwks` must hold a key of the algorithm). Required
+    /// for a `fapi2` client holding the CIBA grant.
     #[serde(default)]
     pub backchannel_authentication_request_signing_alg: Option<String>,
     /// G-7 — CIBA Core §4. `true` is **refused**: this server holds no user
@@ -211,7 +216,7 @@ pub struct UpdateOAuth2ClientRequest {
     pub backchannel_token_delivery_mode: Option<String>,
     /// G-7 — see the create DTO. `""` clears.
     pub backchannel_client_notification_endpoint: Option<String>,
-    /// G-7 — refused, as on create.
+    /// G-7 — see the create DTO. `""` clears.
     pub backchannel_authentication_request_signing_alg: Option<String>,
     /// G-7 — `true` refused, as on create.
     pub backchannel_user_code_parameter: Option<bool>,
@@ -289,6 +294,10 @@ pub struct OAuth2ClientResponse {
     /// G-7 — the ping-mode notification endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backchannel_client_notification_endpoint: Option<String>,
+    /// G-7 / D-61 — the algorithm this client signs its authentication
+    /// requests with; absent for a client sending plain requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backchannel_authentication_request_signing_alg: Option<CibaRequestSigningAlg>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -324,6 +333,9 @@ impl From<OAuth2Client> for OAuth2ClientResponse {
             backchannel_client_notification_endpoint: c
                 .ciba
                 .backchannel_client_notification_endpoint,
+            backchannel_authentication_request_signing_alg: c
+                .ciba
+                .backchannel_authentication_request_signing_alg,
             require_par: c.require_par,
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -637,6 +649,8 @@ pub async fn create<C: Connection + Clone>(
             .backchannel_authentication_request_signing_alg
             .as_deref(),
         user_code_parameter: req.backchannel_user_code_parameter,
+        jwks: req.jwks.as_deref(),
+        jwks_uri: req.jwks_uri.as_deref(),
     })?;
 
     let create = CreateOAuth2Client {
@@ -890,10 +904,14 @@ pub async fn update<C: Connection + Clone>(
         || req.backchannel_client_notification_endpoint.is_some()
         || req.backchannel_authentication_request_signing_alg.is_some()
         || req.backchannel_user_code_parameter.is_some();
+    // D-61: the key source is read too — removing the keys a signing
+    // algorithm is verified against must not leave the algorithm stranded.
     let ciba = if ciba_touched
         || req.grant_types.is_some()
         || req.profile.is_some()
         || req.token_endpoint_auth_method.is_some()
+        || req.jwks.is_some()
+        || req.jwks_uri.is_some()
     {
         let stored = state
             .oauth2_client_repo
@@ -911,11 +929,23 @@ pub async fn update<C: Connection + Clone>(
             .backchannel_client_notification_endpoint
             .clone()
             .filter(|_| keep_stored);
+        let stored_signing_alg = stored
+            .ciba
+            .backchannel_authentication_request_signing_alg
+            .filter(|_| keep_stored)
+            .map(|a| a.as_str().to_owned());
         let mode = req.backchannel_token_delivery_mode.clone().or(stored_mode);
         let endpoint = req
             .backchannel_client_notification_endpoint
             .clone()
             .or(stored_endpoint);
+        let signing_alg = req
+            .backchannel_authentication_request_signing_alg
+            .clone()
+            .or(stored_signing_alg);
+        // `Some("")` clears, as the repository will store it.
+        let jwks = req.jwks.clone().or(stored.jwks.clone());
+        let jwks_uri = req.jwks_uri.clone().or(stored.jwks_uri.clone());
         Some(validate_ciba(axiam_oauth2::ciba::CibaRegistrationView {
             grant_types: grants,
             token_endpoint_auth_method: req
@@ -924,10 +954,10 @@ pub async fn update<C: Connection + Clone>(
             profile: req.profile.unwrap_or(stored.profile),
             delivery_mode: mode.as_deref(),
             notification_endpoint: endpoint.as_deref(),
-            signing_alg: req
-                .backchannel_authentication_request_signing_alg
-                .as_deref(),
+            signing_alg: signing_alg.as_deref(),
             user_code_parameter: req.backchannel_user_code_parameter,
+            jwks: jwks.as_deref(),
+            jwks_uri: jwks_uri.as_deref(),
         })?)
     } else {
         None

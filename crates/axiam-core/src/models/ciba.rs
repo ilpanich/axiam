@@ -80,14 +80,55 @@ impl CibaDeliveryMode {
     }
 }
 
+/// The JWS algorithm a CIBA client signs its authentication requests with
+/// (CIBA Core §4 `backchannel_authentication_request_signing_alg`, §7.1.1).
+///
+/// Exactly the three algorithms AXIAM verifies on any client-signed JWT
+/// (`axiam_oauth2::jose::PERMITTED_ALGORITHMS`): FAPI 2.0 §5.3.1.1's list. A
+/// registration naming anything else — `RS256`, `HS256`, `none` — is refused
+/// rather than stored, so no row can hold an algorithm the verifier would not
+/// honour (D-61).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+pub enum CibaRequestSigningAlg {
+    /// RSASSA-PSS with SHA-256.
+    #[serde(rename = "PS256")]
+    Ps256,
+    /// ECDSA on P-256 with SHA-256.
+    #[serde(rename = "ES256")]
+    Es256,
+    /// Ed25519.
+    #[serde(rename = "EdDSA")]
+    EdDsa,
+}
+
+impl CibaRequestSigningAlg {
+    /// Every algorithm, in discovery order.
+    pub const ALL: [Self; 3] = [Self::Ps256, Self::Es256, Self::EdDsa];
+
+    /// The JOSE spelling, on the wire and in storage.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ps256 => "PS256",
+            Self::Es256 => "ES256",
+            Self::EdDsa => "EdDSA",
+        }
+    }
+
+    /// Parse the JOSE spelling, exactly (JOSE names are case-sensitive).
+    #[must_use]
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.as_str() == raw.trim())
+    }
+}
+
 /// The CIBA client metadata AXIAM stores (CIBA Core §4).
 ///
-/// Two of the four members §4 defines. The other two are refused at
-/// registration rather than stored, because AXIAM does not implement what they
-/// ask for (D-61): `backchannel_authentication_request_signing_alg` (signed
-/// authentication requests) and `backchannel_user_code_parameter` (a user
-/// code). A stored value nothing reads would be a security switch that does
-/// nothing — the SEC-097 shape.
+/// Three of the four members §4 defines. The fourth,
+/// `backchannel_user_code_parameter`, is refused at registration rather than
+/// stored, because AXIAM holds no user code to check (D-64). A stored value
+/// nothing reads would be a security switch that does nothing — the SEC-097
+/// shape.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CibaClientMetadata {
     /// `backchannel_token_delivery_mode` — required when the client holds the
@@ -98,6 +139,13 @@ pub struct CibaClientMetadata {
     /// refused in `poll` mode. Held to the outbound URL policy webhooks use.
     #[serde(default)]
     pub backchannel_client_notification_endpoint: Option<String>,
+    /// `backchannel_authentication_request_signing_alg` — when set, **every**
+    /// backchannel authentication request from this client must be a signed
+    /// `request` JWT under exactly this algorithm (CIBA Core §7.1.1), and an
+    /// unsigned one is refused. Required for a `fapi2` client (FAPI-CIBA
+    /// §5.2.2). When absent, a `request` parameter is refused.
+    #[serde(default)]
+    pub backchannel_authentication_request_signing_alg: Option<CibaRequestSigningAlg>,
 }
 
 impl CibaClientMetadata {
@@ -105,6 +153,9 @@ impl CibaClientMetadata {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.backchannel_token_delivery_mode.is_none()
+            && self
+                .backchannel_authentication_request_signing_alg
+                .is_none()
             && self
                 .backchannel_client_notification_endpoint
                 .as_deref()
@@ -389,11 +440,32 @@ mod tests {
     }
 
     #[test]
+    fn signing_algs_round_trip_and_nothing_else_parses() {
+        for alg in CibaRequestSigningAlg::ALL {
+            assert_eq!(CibaRequestSigningAlg::from_wire(alg.as_str()), Some(alg));
+            assert_eq!(
+                serde_json::to_value(alg).unwrap(),
+                serde_json::json!(alg.as_str())
+            );
+        }
+        for bad in ["RS256", "HS256", "none", "ps256", "eddsa", ""] {
+            assert_eq!(CibaRequestSigningAlg::from_wire(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn empty_metadata_is_empty() {
         assert!(CibaClientMetadata::default().is_empty());
         assert!(
             !CibaClientMetadata {
                 backchannel_token_delivery_mode: Some(CibaDeliveryMode::Poll),
+                ..Default::default()
+            }
+            .is_empty()
+        );
+        assert!(
+            !CibaClientMetadata {
+                backchannel_authentication_request_signing_alg: Some(CibaRequestSigningAlg::EdDsa),
                 ..Default::default()
             }
             .is_empty()

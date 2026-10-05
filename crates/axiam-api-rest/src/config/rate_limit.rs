@@ -221,6 +221,8 @@ pub const ENV_SSF_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_PER_MIN";
 pub const ENV_SSF_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` — G-6 / T23.6.4, never preset.
 pub const ENV_SCIM_TARGET_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN";
+/// `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` — G-7 / T23.7.2, never preset.
+pub const ENV_CIBA_APPROVAL_PER_MIN: &str = "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN` — X2.
 pub const ENV_UMA_PERM_PER_MIN: &str = "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN` — X2.
@@ -581,6 +583,20 @@ pub struct RateLimitConfig {
     /// administering targets produces. One bucket per route; per-IP; never
     /// preset.
     pub scim_target_admin_per_min: u32,
+    /// Max requests per minute per IP to each of the CIBA approval routes — the
+    /// signed-in user's half of a backchannel authentication request:
+    /// `GET /api/v1/ciba/requests/{id}`, `POST …/approve` and `POST …/deny`
+    /// (default: 30 — G-7, T23.7.2).
+    ///
+    /// **One bucket per route** (the counter is keyed by the route's name), so a
+    /// page that reads a request and then decides it spends one from two
+    /// buckets, and a flood of reads cannot starve decisions. Not sized from
+    /// capacity: a person opens a handful of requests a minute at most, the
+    /// routes sit behind a session and a CSRF token, and a request id is a
+    /// handle rather than a secret (D-68), so the bound is on a signed-in
+    /// account probing ids — which all answer `404` whoever's they are. Per-IP;
+    /// never preset.
+    pub ciba_approval_per_min: u32,
     /// Max `/scim/v2/*` requests per minute per IP (default: 600 — R3.1/B4).
     ///
     /// **One bucket for the whole `/scim/v2` surface**, reads and writes
@@ -742,6 +758,8 @@ impl Default for RateLimitConfig {
             ssf_admin_per_min: 30,
             // G-6 / T23.6.4 — see the field docs.
             scim_target_admin_per_min: 30,
+            // G-7 / T23.7.2 — see the field docs. Human-driven, per route.
+            ciba_approval_per_min: 30,
             // --- R3.1/B4 SCIM: the REST administrative surface -------------
             // 600/min == the gRPC Admin family's absolute ceiling
             // (ADMIN_PER_SEC_DEFAULT 10/s), copied deliberately and for the
@@ -974,6 +992,10 @@ impl RateLimitConfig {
             self.scim_target_admin_per_min >= 1,
             "scim_target_admin_per_min must be >= 1"
         );
+        assert!(
+            self.ciba_approval_per_min >= 1,
+            "ciba_approval_per_min must be >= 1"
+        );
         assert!(self.webauthn_per_min >= 1, "webauthn_per_min must be >= 1");
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates
@@ -1114,6 +1136,7 @@ mod tests {
             (ENV_SSF_PER_MIN, d.ssf_per_min),
             (ENV_SSF_ADMIN_PER_MIN, d.ssf_admin_per_min),
             (ENV_SCIM_TARGET_ADMIN_PER_MIN, d.scim_target_admin_per_min),
+            (ENV_CIBA_APPROVAL_PER_MIN, d.ciba_approval_per_min),
         ] {
             assert_eq!(
                 documented_u32(&table, env, 0),
@@ -1186,6 +1209,7 @@ mod tests {
                 cfg.scim_target_admin_per_min,
                 shipped.scim_target_admin_per_min
             );
+            assert_eq!(cfg.ciba_approval_per_min, shipped.ciba_approval_per_min);
             for env in [
                 ENV_LOGIN_PER_MIN,
                 ENV_REGISTER_PER_MIN,
@@ -1198,6 +1222,7 @@ mod tests {
                 ENV_SSF_PER_MIN,
                 ENV_SSF_ADMIN_PER_MIN,
                 ENV_SCIM_TARGET_ADMIN_PER_MIN,
+                ENV_CIBA_APPROVAL_PER_MIN,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1413,6 +1438,7 @@ mod tests {
         assert_eq!(d.ssf_per_min, 60);
         assert_eq!(d.ssf_admin_per_min, 30);
         assert_eq!(d.scim_target_admin_per_min, 30);
+        assert_eq!(d.ciba_approval_per_min, 30);
         // The relationship is the point, not the literal. `RateLimitShared`
         // keys per `"{endpoint}:{ip}"`, so each of the six webauthn routes
         // carries this allowance independently and a ceremony spends one from

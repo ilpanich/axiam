@@ -72,6 +72,8 @@ EXCLUDED_TAGS: dict[str, str] = {
                     "stream management API a relying party's receiver calls with its own "
                     "client-credentials token (ssf.manage), not administration",
     "device": "§14 device-grant user-interaction endpoints",
+    "ciba": "G-7 CIBA user-approval endpoints -- the signed-in user's own page over their own "
+            "pending request (the CONTRACT section lands with T23.7.3), never administration",
 }
 
 # Individual routes excluded from an otherwise-included tag.

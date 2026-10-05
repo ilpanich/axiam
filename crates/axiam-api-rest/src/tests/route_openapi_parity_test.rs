@@ -74,6 +74,14 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     // authorised here is the caller acting on their own behalf.
     "/api/v1/device/verify",
     "/api/v1/device/decide",
+    // CIBA user approval (G-7, T23.7.2): the same class as the device routes
+    // above. JWT-authenticated and deliberately not permission-gated — the
+    // caller approves or refuses a request addressed to *themselves*, and the
+    // service answers `404` for anyone else's; "may approve sign-in requests"
+    // is not a capability an operator should hand out.
+    "/api/v1/ciba/requests/{request_id}",
+    "/api/v1/ciba/requests/{request_id}/approve",
+    "/api/v1/ciba/requests/{request_id}/deny",
     // GDPR data-subject endpoints (D-12/D-13/D-07). Session-guarded by the
     // `AuthenticatedUser` extractor and deliberately not route-gated: acting on
     // your OWN account needs no permission, and the `gdpr:export` / `users:erase`

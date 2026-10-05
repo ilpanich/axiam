@@ -242,6 +242,9 @@ use crate::handlers;
         handlers::oauth2::end_session_at_cookie_path,
         handlers::device::verify,
         handlers::device::decide,
+        handlers::ciba_approval::get_request,
+        handlers::ciba_approval::approve,
+        handlers::ciba_approval::deny,
         // OIDC. `add_oauth_authorization_server_alias` (below) documents the
         // RFC 8414 `/.well-known/oauth-authorization-server` alias of this
         // same handler as its own path entry — it needs no listing here.
@@ -611,6 +614,10 @@ use crate::handlers;
         handlers::device::VerifyResponse,
         handlers::device::DecideRequest,
         handlers::device::DecideResponse,
+        handlers::ciba_approval::CibaApprovalPage,
+        handlers::ciba_approval::CibaDecisionBody,
+        handlers::ciba_approval::CibaDecisionResponse,
+        handlers::ciba_approval::CibaStepUpRequired,
         // Token Exchange (RFC 8693, B3). The request rides on `TokenRequest`
         // at `POST /oauth2/token`; these are the projected shape and the
         // distinct response body, both of which an SDK generator needs.

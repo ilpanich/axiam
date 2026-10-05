@@ -443,6 +443,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "30",
           ],
           [
+            "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN",
+            "Max requests per minute, per IP, to each CIBA approval route under /api/v1/ciba/requests: read a pending request, approve it, refuse it. One bucket per route, so reads cannot starve decisions. Human-driven, behind a session and a CSRF token; a request id that is not the caller's own answers 404. Never moved by a profile preset.",
+            "30",
+          ],
+          [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
             "Max /oauth2/end_session per minute — and the same preset for the SAML identity provider's browser endpoints (sign-on, metadata, single logout /slo and the logout trigger), each in a bucket of its own so a flood on one cannot spend another's allowance. Never moved by a profile preset.",
             "30",

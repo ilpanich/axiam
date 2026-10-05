@@ -796,6 +796,40 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     ))
                     .route(web::post().to(handlers::device::decide::<C>)),
             )
+            // G-7 / T23.7.2 — the signed-in user's half of a CIBA request, the
+            // device routes' neighbours with the same two properties of the
+            // /api/v1 placement (a human session, a CSRF token). One bucket
+            // per route under `ciba_approval_per_min`, so a flood of reads
+            // cannot spend the allowance a decision needs; a request id is a
+            // handle, not a secret (D-68), and every id that is not the
+            // caller's own answers 404.
+            .service(
+                web::resource("/ciba/requests/{request_id}")
+                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ciba_approval_get",
+                        rate_limit_cfg.ciba_approval_per_min,
+                    ))
+                    .route(web::get().to(handlers::ciba_approval::get_request::<C>)),
+            )
+            .service(
+                web::resource("/ciba/requests/{request_id}/approve")
+                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ciba_approval_approve",
+                        rate_limit_cfg.ciba_approval_per_min,
+                    ))
+                    .route(web::post().to(handlers::ciba_approval::approve::<C>)),
+            )
+            .service(
+                web::resource("/ciba/requests/{request_id}/deny")
+                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ciba_approval_deny",
+                        rate_limit_cfg.ciba_approval_per_min,
+                    ))
+                    .route(web::post().to(handlers::ciba_approval::deny::<C>)),
+            )
             .service(
                 web::resource("/organizations")
                     .route(web::post().to(handlers::organizations::create::<C>))

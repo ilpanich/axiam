@@ -11,7 +11,7 @@
 //! | bounded exponential retry policy and its env vars | [`retry`] |
 //! | the bytes on the queue | [`wire`] |
 //! | enqueue (implements `OutboundPublisher`) | [`publisher`] |
-//! | deliverer registry and the consume loop | [`consumer`] |
+//! | deliverer registry, the consume loop and its supervisor | [`consumer`] |
 //!
 //! The webhook kind keeps exactly the names, arguments, wire format and
 //! environment variables it had before the extraction. Renaming any of them
@@ -24,7 +24,9 @@ pub mod retry;
 pub mod topology;
 pub mod wire;
 
-pub use consumer::{OutboundConsumerError, OutboundDeliverers, run_outbound_consumer};
+pub use consumer::{
+    OutboundConsumerError, OutboundDeliverers, run_outbound_consumer, spawn_outbound_consumer,
+};
 pub use publisher::AmqpOutboundPublisher;
 pub use retry::{OutboundRetryConfig, backoff_ttl_ms};
 pub use topology::{OutboundTopology, QueueSpec};

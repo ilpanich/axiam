@@ -34,7 +34,7 @@ use std::time::Duration;
 use actix_web::{App, HttpServer, web};
 use axiam_amqp::{
     AmqpConfig, AmqpManager, MailOutboundPublisher, OutboundDeliverers, OutboundRetryConfig,
-    WebhookPublisher, run_outbound_consumer,
+    WebhookPublisher, spawn_outbound_consumer,
 };
 use axiam_api_grpc::{GrpcConfig, start_grpc_server};
 use axiam_api_rest::middleware::request_span::RedactingRootSpanBuilder;
@@ -2347,46 +2347,16 @@ async fn main() -> std::io::Result<()> {
         outbound_deliverers
             .register(Arc::new(webhook_delivery.clone()))
             .expect("Failed to register the webhook deliverer");
-        let webhook_publisher_for_consumer = webhook_publisher.clone();
-        let webhook_audit_repo = audit_repo.clone();
-        let webhook_retry_cfg = OutboundRetryConfig::from_env_for(OutboundKind::Webhook);
-        let webhook_amqp = Arc::clone(&amqp);
-        // CQ-B53: a transient broker disconnect (consumer stream ends, or the
-        // channel fails to open) must NOT kill the whole API server. Recreate
-        // the consume channel on the shared connection and restart the consumer
-        // with bounded exponential backoff instead of `process::exit(1)`.
-        tokio::spawn(async move {
-            let mut backoff = Duration::from_secs(1);
-            let max_backoff = Duration::from_secs(30);
-            loop {
-                match webhook_amqp.create_channel().await {
-                    Ok(webhook_channel) => {
-                        backoff = Duration::from_secs(1);
-                        if let Err(e) = run_outbound_consumer(
-                            webhook_channel,
-                            OutboundKind::Webhook,
-                            &outbound_deliverers,
-                            webhook_publisher_for_consumer.as_outbound(),
-                            &webhook_audit_repo,
-                            webhook_retry_cfg,
-                        )
-                        .await
-                        {
-                            tracing::error!(error = %e, "Webhook AMQP consumer failed");
-                        }
-                        tracing::warn!("Webhook AMQP consumer exited — reconnecting");
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Failed to (re)create webhook consumer channel — retrying"
-                        );
-                    }
-                }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(max_backoff);
-            }
-        });
+        // CQ-B53: the supervisor never exits the process; see
+        // `spawn_outbound_consumer` for the reconnect backoff.
+        spawn_outbound_consumer(
+            Arc::clone(&amqp),
+            OutboundKind::Webhook,
+            outbound_deliverers,
+            webhook_publisher.as_outbound().clone(),
+            audit_repo.clone(),
+            OutboundRetryConfig::from_env_for(OutboundKind::Webhook),
+        );
         tracing::info!("Webhook consumer spawned");
     }
 
@@ -2418,42 +2388,14 @@ async fn main() -> std::io::Result<()> {
                 ssf_gate.clone(),
             )))
             .expect("Failed to register the SSF push deliverer");
-        let ssf_publisher_for_consumer = ssf_publisher.clone();
-        let ssf_audit_repo = audit_repo.clone();
-        let ssf_retry_cfg = OutboundRetryConfig::from_env_for(OutboundKind::SsfPush);
-        let ssf_amqp = Arc::clone(&amqp);
-        tokio::spawn(async move {
-            let mut backoff = Duration::from_secs(1);
-            let max_backoff = Duration::from_secs(30);
-            loop {
-                match ssf_amqp.create_channel().await {
-                    Ok(ssf_channel) => {
-                        backoff = Duration::from_secs(1);
-                        if let Err(e) = run_outbound_consumer(
-                            ssf_channel,
-                            OutboundKind::SsfPush,
-                            &ssf_deliverers,
-                            &ssf_publisher_for_consumer,
-                            &ssf_audit_repo,
-                            ssf_retry_cfg,
-                        )
-                        .await
-                        {
-                            tracing::error!(error = %e, "SSF push AMQP consumer failed");
-                        }
-                        tracing::warn!("SSF push AMQP consumer exited — reconnecting");
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Failed to (re)create SSF push consumer channel — retrying"
-                        );
-                    }
-                }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(max_backoff);
-            }
-        });
+        spawn_outbound_consumer(
+            Arc::clone(&amqp),
+            OutboundKind::SsfPush,
+            ssf_deliverers,
+            ssf_publisher.clone(),
+            audit_repo.clone(),
+            OutboundRetryConfig::from_env_for(OutboundKind::SsfPush),
+        );
         tracing::info!("SSF push consumer spawned");
     }
 

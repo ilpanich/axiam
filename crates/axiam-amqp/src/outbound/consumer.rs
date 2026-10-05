@@ -26,11 +26,13 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_lite::StreamExt;
 use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions};
 use lapin::types::FieldTable;
 use lapin::{Acker, Channel};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -42,6 +44,7 @@ use super::publisher::AmqpOutboundPublisher;
 use super::retry::{OutboundRetryConfig, backoff_ttl_ms};
 use super::topology::OutboundTopology;
 use super::wire;
+use crate::connection::AmqpManager;
 
 /// Why a consumer could not be set up (or a deliverer registered).
 #[derive(Debug, thiserror::Error)]
@@ -429,12 +432,94 @@ async fn handle_failure<S, R, A>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// The supervisor
+// ---------------------------------------------------------------------------
+
+/// First delay of the supervisor's reconnect backoff.
+const SUPERVISOR_BACKOFF_START: Duration = Duration::from_secs(1);
+/// Ceiling of the supervisor's reconnect backoff.
+const SUPERVISOR_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// The delay that follows `current` in the supervisor's reconnect schedule:
+/// doubled, capped at 30 s (1, 2, 4, 8, 16, 30, 30, ...).
+fn next_supervisor_backoff(current: Duration) -> Duration {
+    (current * 2).min(SUPERVISOR_BACKOFF_MAX)
+}
+
+/// Spawn the supervised consumer for one outbound kind and return its handle.
+///
+/// The task never exits and never takes the process down (CQ-B53): a transient
+/// broker disconnect (the consume stream ends, `basic.consume` is refused, or a
+/// channel cannot be opened) recreates the consume channel on the shared
+/// connection and restarts [`run_outbound_consumer`] after a bounded
+/// exponential backoff (1 s doubling to 30 s; a successful channel open resets
+/// it). Every log line carries the kind slug.
+///
+/// `publisher` is the kind's publisher, used for the TTL-delayed retry
+/// republish; clone it from the one the producers hold.
+pub fn spawn_outbound_consumer<A>(
+    amqp: Arc<AmqpManager>,
+    kind: OutboundKind,
+    deliverers: OutboundDeliverers,
+    publisher: AmqpOutboundPublisher,
+    audit_repo: A,
+    cfg: OutboundRetryConfig,
+) -> JoinHandle<()>
+where
+    A: AuditLogRepository + 'static,
+{
+    tokio::spawn(async move {
+        let mut backoff = SUPERVISOR_BACKOFF_START;
+        loop {
+            match amqp.create_channel().await {
+                Ok(channel) => {
+                    backoff = SUPERVISOR_BACKOFF_START;
+                    if let Err(e) = run_outbound_consumer(
+                        channel,
+                        kind,
+                        &deliverers,
+                        &publisher,
+                        &audit_repo,
+                        cfg,
+                    )
+                    .await
+                    {
+                        error!(%kind, error = %e, "{kind} AMQP consumer failed");
+                    }
+                    warn!(%kind, "{kind} AMQP consumer exited - reconnecting");
+                }
+                Err(e) => {
+                    error!(
+                        %kind,
+                        error = %e,
+                        "Failed to (re)create {kind} consumer channel - retrying"
+                    );
+                }
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = next_supervisor_backoff(backoff);
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axiam_core::outbound::{OutboundError, OutboundFuture};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn supervisor_backoff_doubles_from_one_second_and_caps_at_thirty() {
+        let mut d = SUPERVISOR_BACKOFF_START;
+        let mut seen = vec![d.as_secs()];
+        for _ in 0..7 {
+            d = next_supervisor_backoff(d);
+            seen.push(d.as_secs());
+        }
+        assert_eq!(seen, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+    }
 
     // ---- fakes -----------------------------------------------------------
 

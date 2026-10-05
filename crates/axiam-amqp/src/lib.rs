@@ -28,7 +28,7 @@ pub use messages::{MailType, OutboundMailMessage, WebhookMessage};
 pub use notification_publisher::NotificationPublisher;
 pub use outbound::{
     AmqpOutboundPublisher, OutboundConsumerError, OutboundDeliverers, OutboundRetryConfig,
-    OutboundTopology, run_outbound_consumer,
+    OutboundTopology, run_outbound_consumer, spawn_outbound_consumer,
 };
 pub use reactor::{
     ChainResult, DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT, DEFAULT_HEALTH_LOOKBACK_HOURS,

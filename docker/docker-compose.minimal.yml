@@ -124,21 +124,36 @@ services:
       AXIAM__GRPC__HOST: "0.0.0.0"
       # Secrets from the environment (`env` is the secret provider default; it is
       # stated so a reader does not have to look it up). `just minimal-up`
-      # generates each one on first run and keeps them under docker/.secrets/.
+      # generates each one on first run and keeps them under docker/.secrets/ —
+      # the same set the production stack seeds into Vault, minus the AMQP
+      # signing key, which has nothing to sign with the broker off:
       #  * the JWT signing pair is required by every build;
-      #  * the pepper is mandatory in a release build — client secrets are stored
-      #    as a keyed tag with no unkeyed fallback, so the server refuses to boot
-      #    without it;
-      #  * the email key is what lets the in-process mail worker decrypt the
-      #    tenant mail configuration. Without it no mail is sent (verification,
-      #    password reset, GDPR export notices, notification rules).
-      # The AMQP signing key is NOT needed: with the broker off there is nothing
-      # to sign.
+      #  * the auth pepper is mandatory in a release build — client secrets are
+      #    stored as a keyed tag with no unkeyed fallback, so the server refuses
+      #    to boot without it;
+      #  * the email key lets the in-process mail worker decrypt the tenant mail
+      #    configuration; without it no mail is sent (verification, password
+      #    reset, GDPR export notices, notification rules);
+      #  * the GDPR pseudonym pepper: without it the GDPR purge sweep is skipped,
+      #    so no erasure completes (and no `gdpr.user_pseudonymized` record, or
+      #    its dead-letter fallback, is ever written);
+      #  * the MFA, federation, PKI and OPAQUE keys enable TOTP/WebAuthn secrets
+      #    at rest, external-IdP secrets, CA key custody and OPAQUE. Losing any
+      #    of them makes what was sealed with it unreadable.
+      # The directory (LDAP) and SAML pairwise keys are optional features and are
+      # not minted; add AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY /
+      # AXIAM__AUTH__SAML_PAIRWISE_KEY when you turn those on.
       AXIAM__AUTH__SECRET_PROVIDER: "env"
       AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?JWT private key missing - run 'just minimal-up' instead of raw docker compose}"
       AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?JWT public key missing - run 'just minimal-up' instead of raw docker compose}"
       AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:?auth pepper missing - run 'just minimal-up' instead of raw docker compose}"
       AXIAM__AUTH__EMAIL_ENCRYPTION_KEY: "${AXIAM__AUTH__EMAIL_ENCRYPTION_KEY:?email encryption key missing - run 'just minimal-up' instead of raw docker compose}"
+      AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER: "${AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER:?GDPR pseudonym pepper missing - run 'just minimal-up' instead of raw docker compose}"
+      AXIAM__AUTH__MFA_ENCRYPTION_KEY: "${AXIAM__AUTH__MFA_ENCRYPTION_KEY:?MFA encryption key missing - run 'just minimal-up' instead of raw docker compose}"
+      AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY: "${AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY:?federation encryption key missing - run 'just minimal-up' instead of raw docker compose}"
+      AXIAM__AUTH__PKI_ENCRYPTION_KEY: "${AXIAM__AUTH__PKI_ENCRYPTION_KEY:?PKI encryption key missing - run 'just minimal-up' instead of raw docker compose}"
+      AXIAM__AUTH__OPAQUE_SESSION_KEY: "${AXIAM__AUTH__OPAQUE_SESSION_KEY:?OPAQUE session key missing - run 'just minimal-up' instead of raw docker compose}"
+      AXIAM__AUTH__OPAQUE_SETUP_KEY: "${AXIAM__AUTH__OPAQUE_SETUP_KEY:?OPAQUE setup key missing - run 'just minimal-up' instead of raw docker compose}"
       # WebAuthn and the issuer are validated against what the BROWSER and the
       # relying parties see, not the address the API listens on — set these to
       # your public name before enrolling a passkey or pointing a client at it

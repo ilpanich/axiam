@@ -1409,6 +1409,43 @@ Sonnet 5.5 for delivery plumbing and docs.
 > retry up to 32 times. The claim stamps `last_reconciled_at` at the start of a
 > run, so a run that dies mid-way waits for the next interval; the on-demand
 > route uses the run's own budget as its interval.
+>
+> **EXECUTED (partly) — G-6, W5: T23.6.2, 2026-10-05** (`c54b765`, `b64a5ce`,
+> `48d5ba2`, `2152c8d`, `9d82de9`; Sonnet 5.5). The source, the client and the
+> deliverer per **D-57**. `axiam_core::provisioning::ProvisioningSink`
+> (`user_changed`, `group_changed`, `membership_changed`), held as a `Late` by the
+> SurrealDB user, group and account-deletion repositories and called after every
+> successful write D-57 names (a user `update` only when username, email, status or
+> metadata changes; login bookkeeping never), so REST, SCIM inbound, directory JIT,
+> sync and group mapping, OIDC and SAML JIT and erasure are covered without a call
+> site each; the server binds it once. `axiam_scim::outbound`: `ScimProvisioner`
+> enqueues one reference (`resource_type`, `axiam_id`) per enabled target —
+> nothing about a person travels; `ScimPushDeliverer` is level-triggered (re-reads
+> target, resource and link; `POST` with `externalId`, `409` adopts by
+> `externalId`, `PATCH` replace on the mapped attributes skipped when the digest is
+> unchanged, `DELETE` for every erased or deleted user whatever the policy, `404`
+> on `PATCH` re-creates); every request, the token request included, through the
+> crate's one `guarded_fetch_no_redirect` call with `allow_private = false`; the
+> target re-read and its version compared before any credential leaves; client
+> credential tokens cached in memory per target version. The server declares the
+> `scim_push` topology and starts the consumer through `spawn_outbound_consumer`;
+> `axiam.scim_push` in AsyncAPI; `AXIAM__SCIM_PUSH__*` documented. Tests: 30
+> end-to-end tests against a loopback SCIM server (create, rename, unchanged
+> re-sync, membership, scope entry and exit, disable under both policies, erasure,
+> 5xx/408/429 retry, 4xx dead-letter, redirect not followed, adopt, token reuse,
+> `expires_in`, `401` flush, a target changed between read and send, nothing
+> personal in any message, reason or state row), 7 provisioner, 14 repository-hook
+> and 2 REST recording-sink tests, SCIM inbound, directory JIT and OIDC JIT
+> sink tests, the supervisor guard extended to three kinds.
+>
+> What the plan did not anticipate. The account-deletion repository writes
+> `status` in its own transaction and the directory mapper owns a group
+> repository, so both carry the sink; a group delete also reports each member who
+> left a `Groups` scope that way. A group out of scope with a link is deleted
+> downstream (a SCIM Group has no `active`); a user not provisionable and not
+> linked is never created inactive. A no-op attempt records no success: it proves
+> nothing about the endpoint. Groups of more than 10 000 members dead-letter, since
+> the member list travels in one `PATCH`.
 
 **Target.** A tenant can register downstream SCIM 2.0 service providers and
 AXIAM pushes user and group lifecycle changes to them, with reconciliation.

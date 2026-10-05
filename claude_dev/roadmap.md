@@ -1098,7 +1098,7 @@ with an F4 security review of the wave's diff against
 | T23.5.3 | Push (RFC 8935) and poll (RFC 8936) delivery, event sources, test receiver | Sonnet 5.5 | W4 |✓ |
 | T23.5.4 | Website, optional receiver helper (seven SDKs); threat entries on Opus 5.5 | Sonnet 5.5 / Opus 5.5 | W4 |✓ |
 | T23.6.1 | `ScimTarget` model and credentials | Sonnet 5.5 | W5 |✓ |
-| T23.6.2 | Lifecycle-event to SCIM translation on the shared dispatcher | Sonnet 5.5 | W5 | |
+| T23.6.2 | Lifecycle-event to SCIM translation on the shared dispatcher | Sonnet 5.5 | W5 |✓ |
 | T23.6.3 | Reconciliation, dead-letter, GDPR erasure propagation | Sonnet 5.5 | W5 | |
 | T23.6.4 | CRUD, console, contract §31, OpenAPI, website, threat entries | Sonnet 5.5 | W5 | |
 | T23.7.1 | CIBA: `bc-authorize`, `auth_req_id` lifecycle, single-use redemption, polling back-off | Opus 5.5 | W5 | |

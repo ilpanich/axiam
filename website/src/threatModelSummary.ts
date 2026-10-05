@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.31.0",
+ "version": "2.32.0",
  "diagramCount": 9,
- "total": 406,
- "open": 17,
- "mitigated": 389,
+ "total": 420,
+ "open": 19,
+ "mitigated": 401,
  "areas": [
   {
    "id": 0,
@@ -98,8 +98,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "total": 40,
-   "open": 3
+   "total": 54,
+   "open": 5
   },
   {
    "id": 7,
@@ -122,27 +122,27 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Tampering",
-   "total": 81,
+   "total": 83,
    "open": 2
   },
   {
    "name": "Repudiation",
-   "total": 11,
+   "total": 12,
    "open": 0
   },
   {
    "name": "Information disclosure",
-   "total": 93,
-   "open": 6
+   "total": 99,
+   "open": 7
   },
   {
    "name": "Denial of service",
-   "total": 48,
-   "open": 3
+   "total": 52,
+   "open": 4
   },
   {
    "name": "Elevation of privilege",
-   "total": 81,
+   "total": 82,
    "open": 2
   }
  ],
@@ -154,17 +154,17 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 174,
+   "total": 178,
    "open": 8
   },
   {
    "name": "Medium",
-   "total": 162,
-   "open": 6
+   "total": 169,
+   "open": 8
   },
   {
    "name": "Low",
-   "total": 29,
+   "total": 32,
    "open": 1
   }
  ],
@@ -328,6 +328,26 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Audit, webhooks, email & notifications",
    "element": "SET push / poll response",
    "residualRisk": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation."
+  },
+  {
+   "number": 409,
+   "title": "An access token minted with the stored client secret follows a base URL moved without it",
+   "category": "Information disclosure",
+   "severity": "Medium",
+   "diagramId": 6,
+   "area": "Audit, webhooks, email & notifications",
+   "element": "Outbound SCIM provisioning (target API, deliverer, reconciliation)",
+   "residualRisk": "Bounded, not closed. The move needs `scim_targets:write`, a human-only permission (T-411); it is audited as `scim_target.updated` naming `base_url` (T-420); and the new `base_url` is held to the outbound address policy and the delivery-time guard (T-410), so the host must be public. AXIAM uses a token for at most one hour, whatever `expires_in` says, but the token is the downstream's: it stays valid there for as long as its issuer says. The behaviour is pinned as decided: `crates/axiam-db/tests/scim_target_repository_test.rs` `a_client_credentials_base_url_may_change_without_the_credential`. Open, and carried to the W5 F4 review with T-418: what closes it is a decision — extend D-57's binding to `base_url` of a client-credentials target, so that moving it needs the secret again (that test then inverts, and §31.3 rule 2 with it), or keep the rule and state this residual in the contract, which today says the opposite. An authorization server that binds its tokens to an audience (RFC 8707 resource indicators) narrows it from the downstream's side; AXIAM's token request names none."
+  },
+  {
+   "number": 418,
+   "title": "One notification mail per dead letter floods a rule's recipients while a target is down",
+   "category": "Denial of service",
+   "severity": "Medium",
+   "diagramId": 6,
+   "area": "Audit, webhooks, email & notifications",
+   "element": "dead-letter audit row",
+   "residualRisk": "Open — carried to the W5 F4 review, as the T23.6.3 execution note records (“one mail per dead letter can flood a rule's recipients while a target is down”). What bounds it today: nothing is mailed unless a tenant administrator created a rule for `scim_delivery_failed`, and removing or narrowing that rule stops it (rules are per event, T-117); a mail is fixed text — the action and its outcome, never a URL, a person or the downstream's answer (D-16); and the target's `state` carries one counter (`dead_lettered_total`) and one last reason, so the console shows the outage without the mails. T-117's “configurable batches” do not hold on this path: `NotificationDispatcher::dispatch` enqueues one message per matched recipient per audit row. The path is tested as built: `crates/axiam-server/tests/scim_dead_letter_notification_test.rs` `a_scim_dead_letter_row_mails_every_recipient_of_a_matching_rule`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_dead_letter_writes_the_counter_and_the_reason_once`. What closes it is that review's decision: notify once per target when it enters failure (or at most once per target per window) rather than once per dead letter, keeping the audit row per dead letter as the record."
   },
   {
    "number": 161,

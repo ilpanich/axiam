@@ -22,6 +22,38 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The 2026-10-05 outbound SCIM threat entries (Phase 23 T23.6.4, model
+> 2.32.0 — T-407 … T-420 enter).** AXIAM becomes a SCIM 2.0 **client** (G-6):
+> a tenant registers downstream service providers and AXIAM pushes its users
+> and groups to them. T23.6.1 … T23.6.3 built it under **D-57** and **D-58**,
+> and this pass enters what they built, against the tests they landed. On the
+> *Audit, webhooks, email & notifications* diagram: a new external entity, the
+> **downstream SCIM service provider**, in a boundary of its own; the
+> **outbound SCIM provisioning** process (the management routes, the
+> provisioning source, the deliverer on the shared dispatcher, reconciliation);
+> the **scim_target + scim_target_link + scim_target_state** store; the push
+> flow and a dead-letter flow into the notification rules. Fourteen threats
+> enter: the target credential at rest (**T-407**) and carried to another host
+> (**T-408**) — sealed, write-only, bound to its URL, re-checked before it
+> leaves, never sent through a redirect; `base_url` and `token_url` as an SSRF
+> surface (**T-410**); cross-tenant and non-administrator access (**T-411**);
+> over-provisioning, with the trust assumption stated — a tenant administrator
+> sending the tenant's directory to an endpoint of their choosing is the
+> feature (**T-412**); a lying downstream (**T-413**) and an exhausting one
+> (**T-414**); erasure that must reach the downstream (**T-415**); overlapping
+> writers (**T-416**); queue flooding and a loop through inbound SCIM
+> (**T-417**); reconciliation run twice (**T-419**); attribution (**T-420**).
+> Twelve are mitigated. **Two are open**, both carried to the W5 F4 review for
+> a decision: **T-418**, one notification mail per dead letter while a target
+> is down, which T23.6.3 recorded, and **T-409**, found in this pass — D-57
+> binds a client-credentials secret to `token_url` only, so moving `base_url`
+> needs nothing, and the next attempt presents a fresh access token at the new
+> host. **T-402** is amended: the SSF push dead-letter queue is no longer the
+> only one with a TTL, and the test it cited was renamed. The coverage tables
+> below are recomputed from the model, and now also count **T-406**, which the
+> 2.30.0 pass added to the totals but not to the area, category and severity
+> tables. The model is **420 threats, 401 mitigated / 19 open**.
+>
 > **The 2026-10-04 D-55 entry (Phase 23 W4, P23W4-11, model 2.31.0 — no
 > count changes).** The maintainer decided P23W4-11 (option (b) of
 > ilpanich/axiam#539): **SSF requires per-tenant issuers in a deployment of more
@@ -977,7 +1009,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 406 threats** and a
+The system is verified against a **STRIDE threat model of 420 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1000,8 +1032,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 9 |
-| Threats identified | 406 |
-| Mitigated / Open | 389 / 17 |
+| Threats identified | 420 |
+| Mitigated / Open | 401 / 19 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
@@ -1020,7 +1052,7 @@ optimistic closed one.
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
 | PKI, certificates & IoT device identity | 30 | 1 |
-| Audit, webhooks, email & notifications | 39 | 3 |
+| Audit, webhooks, email & notifications | 54 | 5 |
 | Deployment & platform (Kubernetes) | 28 | 5 |
 | Client SDKs & admin-UI integration surface | 28 | 3 |
 
@@ -1072,7 +1104,14 @@ T-395 are mitigated, leaving only T-388. The four delivery entries of model
 2.29.0 (T-402 … T-405) add one open item, and it is accepted rather than
 deferred: an SSF event that cannot be produced or queued is lost with a log line
 and nothing else, because a logout must not fail when a receiver's queue is
-down (T-405).
+down (T-405). The fourteen outbound SCIM entries of model 2.32.0 (T-407 …
+T-420) add two open items of another kind: decisions carried to the next
+security review rather than trade-offs. A dead-lettered SCIM delivery mails
+every recipient of a matching notification rule once per dead letter, so a
+downstream that is down or refuses AXIAM's credential floods them (T-418); and
+a client-credentials target's `base_url` may be moved without its secret, so
+the next attempt presents a fresh access token at the new host (T-409). Both
+sit in background delivery, not on the request path.
 
 ### Coverage by STRIDE category
 
@@ -1085,24 +1124,24 @@ the category recorded against it in the model.
 | Category | Threats | Open |
 |---|---|---|
 | Spoofing | 92 | 4 |
-| Tampering | 80 | 2 |
-| Repudiation | 11 | 0 |
-| Information disclosure | 93 | 6 |
-| Denial of service | 48 | 3 |
-| Elevation of privilege | 81 | 2 |
+| Tampering | 83 | 2 |
+| Repudiation | 12 | 0 |
+| Information disclosure | 99 | 7 |
+| Denial of service | 52 | 4 |
+| Elevation of privilege | 82 | 2 |
 
 ### Coverage by severity
 
 | Severity | Threats | Open |
 |---|---|---|
 | Critical | 41 | 2 |
-| High | 174 | 8 |
-| Medium | 162 | 6 |
-| Low | 28 | 1 |
+| High | 178 | 8 |
+| Medium | 169 | 8 |
+| Low | 32 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 17 still-open items are listed one by one in
+the weight the control carries. The 19 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -1110,7 +1149,7 @@ with the element it sits on and where responsibility for it lands.
 
 ## Trust boundaries
 
-Eight trust boundaries recur across the system. A data flow that crosses one is a
+Nine trust boundaries recur across the system. A data flow that crosses one is a
 place where authentication, authorization, validation and transport protection all
 have to be re-established — nothing is assumed across a boundary.
 
@@ -1123,6 +1162,7 @@ have to be re-established — nothing is assumed across a boundary.
 | **AXIAM ↔ tenant directory** | AXIAM ↔ a tenant's own LDAP or Active Directory server | TLS before any bind or search — `ldaps://`, or StartTLS that fails closed — verified against the tenant's own anchors and the URL's host; referrals never followed; login names enter filters only through RFC 4515 escaping; a bounded per-tenant pool; a read-only bind account; the host resolved once and held to the deployment's address rule, the connection pinned to the vetted address; every message from the directory measured and checked before it is parsed |
 | **AXIAM ↔ SAML service provider** | AXIAM's SAML identity provider ↔ the applications a tenant registered to receive assertions | Assertions always signed with the tenant's own credential, inside its validity window, under the `Issuer` of the tenant in the request path; delivered only to a registered ACS URL; five-minute validity; a pairwise `NameID` by default; failure responses never signed; once single logout lands (D-38), an SP's logout messages accepted only signed by its registered certificate and verified per node, and AXIAM's own signed only for a session holder or a verified SP |
 | **AXIAM ↔ SSF receiver** | AXIAM's Shared Signals Framework transmitter ↔ the relying parties a tenant registered a stream for | Every SET signed with the deployment key, explicitly typed, under the tenant issuer and an audience unique across the deployment; signed only when delivered, for an enabled stream that carries the event; pushed only to an endpoint held to the outbound address policy, with a sealed credential that never follows the endpoint to another origin; stream management and polling only with the receiver's own client-credentials token carrying `ssf.manage`, for its own streams |
+| **AXIAM ↔ SCIM downstream** | AXIAM's outbound SCIM client ↔ the SCIM 2.0 service providers a tenant registered as targets | Every request — the OAuth2 token request too — only to an `https` host resolved fresh to public addresses and pinned, with no redirect followed; a sealed credential bound to the URL it was registered for and opened only after the target is read again unchanged; only references on the queue and a fixed attribute set on the wire; nothing a downstream answers written into AXIAM's directory, and no downstream account touched unless its `externalId` is an id of this tenant |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
 
 ### The assets worth protecting
@@ -1138,6 +1178,7 @@ have to be re-established — nothing is assumed across a boundary.
 | Refresh tokens & sessions | Stored hashed, single-use rotation; a 60-second grace after rotation for FAPI 2.0 clients only, and any presentation after rotation is marked and audited | Sustained impersonation |
 | Client & webhook secrets | Hashed / encrypted, redacted from logs | Service-account impersonation; forged events |
 | Directory bind secret | AES-256-GCM at rest under an optional key; write-only, never returned or logged | The tenant's directory readable by whoever holds it |
+| SCIM target credentials | AES-256-GCM at rest; write-only, never returned or logged; sent only to the URL it was registered for | The tenant's downstream directory writable as AXIAM |
 | Authorization graph | Private data tier, API-only mutation, audited | Silent privilege escalation |
 | Audit log | Append-only, OpenPGP-signed | Loss of accountability |
 
@@ -2346,8 +2387,8 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 17 of
-406. On the website this table is generated from the Threat Dragon model, so it
+Every threat the model does not record as mitigated, most severe first — 19 of
+420. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -2371,11 +2412,15 @@ each.
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
 | T-388 — A captured SET is replayed to its receiver | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
+| T-409 — An access token minted with the stored client secret follows a base URL moved without it | Medium | Outbound SCIM provisioning (target API, deliverer, reconciliation) · *Audit, webhooks, email & notifications* |
+| T-418 — One notification mail per dead letter floods a rule's recipients while a target is down | Medium | dead-letter audit row · *Audit, webhooks, email & notifications* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 None of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
-or gaps on the SDK and distribution side. The rest of this section is the same
+gaps on the SDK and distribution side, or — for two in outbound SCIM's
+background delivery, T-409 and T-418 — decisions carried to the next security
+review. The rest of this section is the same
 list read as a checklist — what to do about each, grouped by who does it.
 
 **Platform & operations**

@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.31.0",
+ "version": "2.32.0",
  "diagramCount": 9,
- "total": 406,
- "open": 17,
- "mitigated": 389,
+ "total": 420,
+ "open": 19,
+ "mitigated": 401,
  "diagrams": [
   {
    "id": 0,
@@ -7545,16 +7545,16 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules. Since Phase 23 (G-5, T23.5.2, model 2.27.0) it also covers the Shared Signals Framework transmitter: the SSF stream registry and its per-stream event buffer (`ssf_stream`, `ssf_event_buffer`), SET issuance with the deployment key, the stream management API and transmitter metadata a receiver calls with its own client credentials, and the push and poll flows to the receiver, across a boundary of their own (D-44 … D-52). Since model 2.29.0 (T23.5.4) the store also holds the step-up record (`ssf_step_up`, D-53 (1)) the authorization endpoint keeps for `assurance-level-change`. Since model 2.31.0 (D-55) the transmitter is inactive for every tenant while the deployment holds more than one tenant and serves no per-tenant issuers, so tenants never share an issuer.",
+   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules. Since Phase 23 (G-5, T23.5.2, model 2.27.0) it also covers the Shared Signals Framework transmitter: the SSF stream registry and its per-stream event buffer (`ssf_stream`, `ssf_event_buffer`), SET issuance with the deployment key, the stream management API and transmitter metadata a receiver calls with its own client credentials, and the push and poll flows to the receiver, across a boundary of their own (D-44 … D-52). Since model 2.29.0 (T23.5.4) the store also holds the step-up record (`ssf_step_up`, D-53 (1)) the authorization endpoint keeps for `assurance-level-change`. Since model 2.31.0 (D-55) the transmitter is inactive for every tenant while the deployment holds more than one tenant and serves no per-tenant issuers, so tenants never share an issuer. Since model 2.32.0 (G-6, T23.6.4) it also covers outbound SCIM provisioning: the target registry and its management routes (`scim_target`, contract §31), the link rows and delivery state (`scim_target_link`, `scim_target_state`), the provisioning source every user and group repository reports to, the `ScimPush` deliverer on the shared dispatcher, reconciliation, and the dead-letter row that reaches the notification rules, with the downstream SCIM service provider across a boundary of its own (D-57, D-58).",
    "width": 1438,
-   "height": 1088,
+   "height": 1348,
    "boundaries": [
     {
      "id": "c0d71a54-aac0-5a7f-84bf-d3ac20259104",
      "x": 324,
      "y": 24,
      "w": 660,
-     "h": 1040,
+     "h": 1300,
      "label": "AXIAM eventing & audit services"
     },
     {
@@ -7570,7 +7570,7 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 1034,
      "y": 84,
      "w": 380,
-     "h": 900,
+     "h": 1220,
      "label": "Data tier"
     },
     {
@@ -7580,6 +7580,14 @@ export const THREAT_MODEL: ThreatModel = {
      "w": 260,
      "h": 220,
      "label": "SSF receivers"
+    },
+    {
+     "id": "07e47d12-b530-5a19-9c32-1e4b1df891bd",
+     "x": 24,
+     "y": 1084,
+     "w": 260,
+     "h": 220,
+     "label": "SCIM downstreams"
     }
    ],
    "nodes": [
@@ -8122,7 +8130,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "What waits to be delivered is the unsigned pending event (D-48), and it names a person: an `iss_sub` subject, or on an `email` stream an address. It waits in three places: the poll and pause buffer in the datastore, and the push kind's queues on the broker, the last of which, `axiam.ssf_push.dlq`, receives every event that exhausted its attempts or can never be accepted, and nothing drains it. Without a lifetime, a dead-lettered event would keep its subject indefinitely, outside every sweep and every erasure path, readable by anyone with access to the broker.",
-       "mitigation": "Built (T23.5.3, 2026-10-04; D-48, D-53 (10)). Every place a pending event waits has a lifetime of at most seven days, D-48's bound for held events. **The dead-letter queue**: `axiam.ssf_push.dlq` is declared with an `x-message-ttl` of 604 800 000 ms and no other argument, so the broker drops a dead-lettered event seven days after it arrives. It is the only queue that carries a TTL: the primary and the retry queue keep the declaration every kind uses, and the webhook DLQ keeps the arguments a running broker already holds (RabbitMQ refuses a redeclaration with other arguments). **The buffer**: seven days at most, swept on `/health/jobs`, 1 000 events per stream (T-395). No queue or table holds a signed SET or the push credential (T-391, T-398), and the broker's transport and credentials are T-121's. Tests: `crates/axiam-amqp/src/outbound/topology.rs` `the_ssf_push_dlq_declaration_is_pinned` (the DLQ's arguments are exactly the 604 800 000 ms TTL; the primary and the retry queue carry only their dead-letter routing), `only_the_ssf_push_dlq_has_a_message_ttl` (no other queue of any kind carries one); `crates/axiam-db/tests/ssf_event_buffer_test.rs` `expired_events_are_not_served_and_the_sweep_removes_them`. Residuals, stated rather than hidden. **Erasure**: the Art. 17 erasure and the administrator's delete remove the person's step-up record (T-404) but not events already held in a buffer or a queue, so an erased person's subject can outlive the erasure there for up to seven days (carried from T23.5.2). The `account-purged` event does so on purpose: telling recipients of an erasure is its job. **The primary and retry queues** declare no TTL: a message there lives through its retry schedule (`AXIAM__SSF_PUSH__MAX_ATTEMPTS` attempts, each delay at most `AXIAM__SSF_PUSH__BACKOFF_CEILING_MS`), and waits in the primary queue for as long as no consumer runs."
+       "mitigation": "Built (T23.5.3, 2026-10-04; D-48, D-53 (10)). Every place a pending event waits has a lifetime of at most seven days, D-48's bound for held events. **The dead-letter queue**: `axiam.ssf_push.dlq` is declared with an `x-message-ttl` of 604 800 000 ms and no other argument, so the broker drops a dead-lettered event seven days after it arrives. Besides it, only `axiam.scim_push.dlq` carries a TTL — the same seven days, since G-6 (T23.6.1; model 2.32.0 records it), on a queue that holds only references (T-415): the primary and the retry queue of every kind keep the declaration every kind uses, and the webhook DLQ keeps the arguments a running broker already holds (RabbitMQ refuses a redeclaration with other arguments). **The buffer**: seven days at most, swept on `/health/jobs`, 1 000 events per stream (T-395). No queue or table holds a signed SET or the push credential (T-391, T-398), and the broker's transport and credentials are T-121's. Tests: `crates/axiam-amqp/src/outbound/topology.rs` `the_ssf_push_dlq_declaration_is_pinned` (the DLQ's arguments are exactly the 604 800 000 ms TTL; the primary and the retry queue carry only their dead-letter routing), `only_the_ssf_push_and_scim_push_dlqs_have_a_message_ttl` (renamed in T23.6.1: exactly the SSF push and SCIM push DLQs carry one, and no primary or retry queue of any kind); `crates/axiam-db/tests/ssf_event_buffer_test.rs` `expired_events_are_not_served_and_the_sweep_removes_them`. Residuals, stated rather than hidden. **Erasure**: the Art. 17 erasure and the administrator's delete remove the person's step-up record (T-404) but not events already held in a buffer or a queue, so an erased person's subject can outlive the erasure there for up to seven days (carried from T23.5.2). The `account-purged` event does so on purpose: telling recipients of an erasure is its job. **The primary and retry queues** declare no TTL: a message there lives through its retry schedule (`AXIAM__SSF_PUSH__MAX_ATTEMPTS` attempts, each delay at most `AXIAM__SSF_PUSH__BACKOFF_CEILING_MS`), and waits in the primary queue for as long as no consumer runs."
       },
       {
        "number": 404,
@@ -8141,6 +8149,155 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Every write of an SSF stream is read-modify-write: the receiver's `PATCH`, `PUT` and status write and the administrator's replacement each read the stream, decide, and write back the whole configuration they read. Two writes that overlap lose one: a receiver's write prepared before an administrator disabled, narrowed, re-bound or switched the subject format of its stream, landing after, puts the old status, allowance, binding and subject format back — undoing a `disabled` that D-51 says only an administrator may lift, without the administrator's page or audit row showing it, and a receiver can widen the window by writing at its rate limit. The push deliverer has the same shape across two reads: it reads the stream's endpoint, then opens its `Authorization` header, so a header supplied with a new endpoint in between is sent to the old one, against D-49's rule that a credential never follows an endpoint to another origin.",
        "mitigation": "Decided in the W4 F4 review (P23W4-01, 2026-10-04). Every stream write is conditional on the version it was prepared from: `SsfStreamUpdate::from_stream` carries the stream's `updated_at` and `SsfStreamRepository::update` writes `WHERE updated_at = $expected`, answering `Conflict` (not `NotFound`) when the stream exists but changed. The receiver's `PATCH`, `PUT` and status `POST` decide again from a fresh read when overtaken — so the D-51 check always judges the status the write would replace, and an administrator's `disabled` makes the retry a `403` — and answer `409` only if the stream kept changing over three attempts; the administrator's `PUT` answers `409` and the console reloads. The deliverer reads the stream again after opening the header and pushes only if it is still the version it signed against and whose endpoint it holds; otherwise the attempt is a retry. Contract §32.3 rule 4 and §32.6 say so (1.56, amended in place). Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `a_write_prepared_from_an_overtaken_read_does_not_land`; `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `a_credential_supplied_for_a_new_endpoint_never_reaches_the_old_one`. Residual: the deliverer's second read and the send are not one step, so an endpoint moved after that read is used for one attempt with the header that was stored for it — the header and the endpoint still belong together."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "7a537749-2b71-511e-804c-75a29eff8ae7",
+     "kind": "actor",
+     "x": 49,
+     "y": 1154,
+     "w": 150,
+     "h": 80,
+     "name": "Downstream SCIM service provider",
+     "lines": [
+      "Downstream SCIM",
+      "service provider"
+     ],
+     "description": "A SCIM 2.0 service provider a tenant administrator registered as a target (G-6): it receives `POST`, `PATCH`, `DELETE` and list requests for the tenant's users and groups, authenticated with a bearer token or with an OAuth2 client-credentials access token from its `token_url`. Trusted with the people the tenant sends it; never a source of AXIAM's directory data.",
+     "outOfScope": false,
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "1116d6a2-4538-5cfe-8a2e-83ed3df4d0fc",
+     "kind": "process",
+     "x": 374,
+     "y": 1114,
+     "w": 140,
+     "h": 160,
+     "name": "Outbound SCIM provisioning (target API, deliverer, reconciliation)",
+     "lines": [
+      "Outbound",
+      "SCIM",
+      "provisioning",
+      "(target",
+      "API,",
+      "deliverer,",
+      "reconciliation)"
+     ],
+     "description": "`axiam_scim::outbound` and `handlers::scim_targets` (T23.6.1 … T23.6.4; D-57, D-58): the target registry's management routes (contract §31, human-only), the `ScimProvisioner` every user and group repository reports a committed change to (`ProvisioningSink`), the `ScimPushDeliverer` the shared dispatcher's `scim_push` consumer calls — one level-triggered attempt per queued reference — and reconciliation, nightly (`scim_reconcile`) and on demand, through the same deliverer. Its one way out is `guarded_fetch_no_redirect` with `allow_private = false`.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 408,
+       "title": "The stored credential is sent to a host it was not registered for",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "AXIAM sends the stored bearer token to `base_url` and the client secret to `token_url`, from inside the deployment. If either URL could change without the credential being supplied again — by an administrator who may edit the target, by a write that overlaps another, or by a redirect the downstream answers with — AXIAM itself would hand the credential to whoever runs the new host, and an administrator who may change a target but was never given its credential could read it off a server of their own.",
+       "mitigation": "Built (T23.6.1, T23.6.2, T23.6.4; D-57). **Bound on write**: changing `base_url` of a bearer target, `token_url` of a client-credentials target, or the authentication kind, without the credential in the same write is `400` naming the field and changes nothing (contract §31.3 rule 2). The repository applies the rule against the very row it replaces — its write is conditional on the version it checked, so a write racing it is a `409`, never a credential aimed at a URL the rule did not see — and applies it to an unconditional update too. **Checked again before it leaves**: the deliverer reads the target, opens the credential, reads the target once more and sends only if `updated_at` is still the version whose URL it holds; otherwise the attempt is a retry and nothing leaves (the T-406 precedent). The access-token cache is keyed by target **and** `updated_at`, so any administrator write retires a cached token. **No redirect followed**: every request, the token request included, goes through the outbound client's one `guarded_fetch_no_redirect` call, which returns a `3xx` as a response whose `Location` is never resolved or fetched; the deliverer and the token fetch treat it as a retry. Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `changing_a_bearer_targets_base_url_needs_the_credential`, `changing_a_client_credentials_token_url_needs_the_credential`, `switching_the_auth_kind_needs_the_credential_both_ways`, `an_unconditional_update_still_checks_the_url_binding`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_bearer_credential_does_not_follow_the_base_url_to_another_one`, `a_client_secret_does_not_follow_the_token_url_nor_a_switch_of_kind`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_target_changed_between_the_read_and_the_send_is_a_retry_and_sends_nothing`, `a_redirect_is_a_retry_and_is_never_followed` (301, 302, 307 and 308: the `Location` host receives nothing), `the_client_credentials_token_is_fetched_once_and_reused`; `crates/axiam-scim/src/outbound/client.rs` `the_cache_is_per_target_version_and_flushable`; `crates/axiam-scim/src/outbound/deliverer.rs` `the_outbound_modules_use_the_no_redirect_guarded_fetch_and_nothing_else` (one call site across the five outbound modules, no redirect-following guard, no other HTTP client); `crates/axiam-pki/src/ssrf.rs` `no_redirect_returns_a_3xx_and_never_fetches_its_target`. Residuals: the second read and the send are not one step, and the requests of one attempt (a `POST`, the `GET` that adopts on `409`, the `PATCH` after it) or of one reconciliation run reuse the header opened at its start — always with the URLs of the version that header was checked against, so the credential and its URL still belong together. A client-credentials target's `base_url` is outside the binding by decision; what that lets reach another host is the access token rather than the secret, and T-409 carries it."
+      },
+      {
+       "number": 409,
+       "title": "An access token minted with the stored client secret follows a base URL moved without it",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "D-57 binds a client-credentials target's secret to `token_url` only: `base_url` may change without the secret (contract §31.3 rule 2 calls it “not the credential's destination”). But every SCIM request carries the access token AXIAM obtained with that secret, and a write that moves `base_url` also moves `updated_at`, so the next attempt fetches a fresh token from the unchanged `token_url` and presents it to the new `base_url`. An administrator who may change the target, and was never given its secret, can point `base_url` at a host they run and collect a live access token for the real downstream — usable there for its whole lifetime and with whatever the downstream grants AXIAM, which is more than AXIAM itself ever does with it (AXIAM touches no account whose `externalId` is not one of its tenant's, T-413).",
+       "mitigation": "Bounded, not closed. The move needs `scim_targets:write`, a human-only permission (T-411); it is audited as `scim_target.updated` naming `base_url` (T-420); and the new `base_url` is held to the outbound address policy and the delivery-time guard (T-410), so the host must be public. AXIAM uses a token for at most one hour, whatever `expires_in` says, but the token is the downstream's: it stays valid there for as long as its issuer says. The behaviour is pinned as decided: `crates/axiam-db/tests/scim_target_repository_test.rs` `a_client_credentials_base_url_may_change_without_the_credential`. Open, and carried to the W5 F4 review with T-418: what closes it is a decision — extend D-57's binding to `base_url` of a client-credentials target, so that moving it needs the secret again (that test then inverts, and §31.3 rule 2 with it), or keep the rule and state this residual in the contract, which today says the opposite. An authorization server that binds its tokens to an audience (RFC 8707 resource indicators) narrows it from the downstream's side; AXIAM's token request names none."
+      },
+      {
+       "number": 410,
+       "title": "The SCIM base URL or token URL is used to reach internal services",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A tenant administrator chooses `base_url` and, for a client-credentials target, `token_url`, and AXIAM sends requests to both from inside the deployment — with a credential attached, and, for reconciliation, reading the answers. Pointed at a metadata service, a loopback admin port or a private address, or at a public name that resolves to one, the deliverer becomes a request forger with a credential, and the target's delivery state an oracle for what answered.",
+       "mitigation": "Built (T23.6.2, T23.6.4; D-57). **Write time**: both URLs are held to the webhook outbound address policy (`validate_push_endpoint`, as SSF push endpoints are, T-392): absolute `https`, a host, no userinfo or fragment, at most 2 048 bytes, no IP literal that is not globally routable (loopback, private, link-local, the metadata address, IPv4-mapped forms), no `localhost`, `*.localhost`, `*.local` or `*.internal`; a refused URL is `400` naming the field and is never echoed. **Delivery time**: every request — SCIM calls, reconciliation's listing and the OAuth2 token request alike — goes through `guarded_fetch_no_redirect` with `allow_private = false`, which only a hidden test seam sets: the name is resolved fresh, every address must be globally routable, the validated address is pinned into the connection, `https` is required, a `3xx` is returned and never followed, a request gets ten seconds, and a body is read to at most 64 KiB (1 MiB for a list). A name the write-time policy admitted that resolves to an internal address is caught here. What is recorded on the target's state and in the audit row is a fixed phrase (“the endpoint resolves to an address AXIAM does not connect to”), never the transport error's text, a URL or a body. Tests: `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_base_url_or_token_url_that_breaks_the_outbound_address_policy_is_400_and_never_echoed`; `crates/axiam-scim/tests/outbound_scim_test.rs` `the_production_deliverer_refuses_a_loopback_endpoint` (the production deliverer: nothing reaches the loopback server); `crates/axiam-scim/tests/outbound_reconcile_test.rs` `the_production_deliverer_reads_no_loopback_downstream`; `crates/axiam-scim/src/outbound/deliverer.rs` `the_outbound_modules_use_the_no_redirect_guarded_fetch_and_nothing_else` (one guarded call; `allow_private` false but in the hidden seam); `crates/axiam-scim/src/outbound/client.rs` `a_transport_reason_never_carries_the_error_text`; `crates/axiam-pki/src/ssrf.rs` `no_redirect_keeps_the_guard_on_the_one_hop`, `no_redirect_returns_a_redirect_to_an_internal_address_without_fetching_it`, `no_redirect_honours_the_content_length_cap`. Residuals: the guard honours the operator's `AXIAM__PKI__SSRF_ALLOWED_HOSTS` exception (SEC-107) exactly as it does for webhooks and SSF; and the fixed phrases still tell an administrator, through `state`, whether a name was blocked, did not resolve or did not answer — what a public DNS lookup tells anyone."
+      },
+      {
+       "number": 411,
+       "title": "Cross-tenant or non-administrator access to a target, its links or its state",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Targets, link rows and delivery state of every tenant live in shared tables, and a target decides where a tenant's people are sent and holds the credential to send them. A tenant administrator who could name another tenant's target — in a path, or another tenant's group in a scope — or a service account, a machine token or a principal allowed only to read, could repoint another tenant's directory, read where it goes, enrol another tenant's group into a push, or start reconciliations against it.",
+       "mitigation": "Built (T23.6.1, T23.6.4). The tenant is the token's, never the request's: every route answers `404` for another tenant's target, exactly as for one that does not exist, and changes nothing; every repository verb of the three tables is tenant-scoped in its `WHERE`, so a foreign id is `NotFound` to every read, update, delete, credential opening and delivery-state write. A `groups` scope may name only groups of this tenant (`400` otherwise), on create and on replace. The namespace is **human-only**: `scim_targets:read` for `list` and `get`, `scim_targets:write` for the four writes, both in a `HUMAN_ONLY_FAMILIES` family, so a service-account token is `401` at the extractor whatever roles it holds (contract §31.3 rule 9). Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `every_verb_is_tenant_scoped`, `deleting_a_target_removes_its_links_and_state_and_only_its_own`, `the_tenant_delete_takes_the_tenants_scim_rows_and_only_those`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `another_tenants_target_is_404_on_every_route_and_is_not_touched`, `a_group_scope_cannot_name_another_tenants_group_even_when_replacing`, `reads_need_scim_targets_read_and_writes_need_scim_targets_write`, `a_service_account_token_is_refused_on_every_route_even_with_every_role`, `the_family_is_human_only_and_every_route_requires_its_permission`. Residual: inside its own tenant an administrator holding `scim_targets:write` is trusted to choose where its people go (assumption 7); T-412 states what that trust covers."
+      },
+      {
+       "number": 417,
+       "title": "The provisioning queue is flooded, or AXIAM and a downstream feed each other in a loop",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Every user or group change of a tenant becomes work for every enabled target: a directory sync that touches thousands of accounts, a bulk import, a reconciliation that queues the whole tenant. And a downstream that is also an inbound SCIM client of AXIAM — an identity provider that receives AXIAM's pushes and pushes its own changes to `/scim/v2` — could turn each push into a write back into AXIAM, which reports the change, which is pushed again, without end.",
+       "mitigation": "Built (T23.6.2, T23.6.3; D-57). **One reference per change per target**: the repositories report only after a committed write, a user `update` only when it writes a provisioned field (username, email, status, the name and display metadata), and login bookkeeping never. **Level-triggered and idempotent**: the deliverer computes the representation at the attempt and skips the `PATCH` when its digest equals the link's `synced_digest`, so a reference whose change was already sent — a duplicate, a retry, a reconciliation, or the echo of AXIAM's own push coming back through inbound SCIM — sends nothing, and a loop stops after one round trip because the echo carries what AXIAM sent. **Bounded per kind**: `scim_push` has a topology of its own, so a backlog delays only SCIM pushes, and the per-kind ceiling (`AXIAM__SCIM_PUSH__MAX_ATTEMPTS`, exponential backoff with a ceiling, then the dead-letter queue); a broker that refuses a reference costs one log line per report and never fails the write that reported it. Tests: `crates/axiam-db/tests/provisioning_sink_test.rs` `user_update_reports_only_a_change_to_a_provisioned_field`, `login_bookkeeping_never_reports`, `a_failed_write_reports_nothing`; `crates/axiam-scim/tests/outbound_scim_test.rs` `rename_propagates_as_patch_and_an_unchanged_resync_sends_nothing`, `a_5xx_and_a_429_retry_and_are_recorded_as_failures`; `crates/axiam-scim/tests/outbound_provisioner_test.rs` `a_user_change_enqueues_one_reference_per_enabled_target_of_the_tenant`, `a_tenant_with_no_target_enqueues_nothing`, `a_broker_that_is_down_never_fails_the_report`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `reconciliation_queues_references_only`; `crates/axiam-amqp/src/outbound/topology.rs` `the_scim_push_declaration_is_pinned`; `crates/axiam-amqp/src/outbound/retry.rs` `backoff_doubles_and_clamps` (the shared schedule). Residuals. A change is reported when a provisioned field is **written**, not only when its value changes, so an inbound SCIM client that rewrites every user queues one reference per user per target — each of which then sends nothing. A downstream that normalises a value (the case of an address) and writes it back changes AXIAM's copy once and converges on the next push; one that transforms a value differently every time keeps the loop going at the rate of its own inbound writes, which the `/scim/v2` bucket (600 a minute per address) bounds and nothing in AXIAM detects. Every attempt, a no-op included, writes a `scim_push.delivery_*` audit row, so the nightly reconciliation adds one row per in-scope resource per target per day, bounded by audit retention (T-119)."
+      },
+      {
+       "number": 419,
+       "title": "Reconciliation runs twice across replicas, or is driven in a loop",
+       "type": "Denial of service",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "A reconciliation run queues a reference for every resource in scope and pages the downstream with AXIAM's credential. Run by every replica's cleanup loop at once, or started on demand again and again, it would multiply the queue, the downstream's load and the audit trail, and two runs adopting and dropping the same links at once could undo each other's repairs.",
+       "mitigation": "Built (T23.6.1, T23.6.3, T23.6.4; D-58). A run first **claims** the target with a conditional write on `scim_target_state.last_reconciled_at` (the `claim_verification` pattern): one caller wins per interval across every replica, and the others match nothing. The scheduled job `scim_reconcile` (in the cleanup loop, registered in `SWEEP_JOBS`) claims for 24 hours; the on-demand `POST …/reconcile` claims for five minutes — the longest a run may take — and answers `409` while a run holds the claim or ran within it, `409` for a disabled target (no claim taken), and otherwise `202`, with the run on a task of its own. The route has its own bucket (`AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN`, 30 a minute, never moved by a profile), needs `scim_targets:write` (T-411) and is audited (T-420). Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `claim_reconciliation_succeeds_once_within_the_interval`, `concurrent_claims_have_one_winner`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_second_run_within_the_interval_is_already_claimed_and_does_nothing`, `two_concurrent_requests_make_one_run`, `the_scheduled_job_runs_a_due_target_once_a_day_and_the_on_demand_entry_sees_its_claim`, `a_disabled_target_is_not_reconciled_and_its_claim_is_not_taken`, `a_background_start_answers_at_the_claim_and_the_run_finishes_on_its_own`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `reconcile_now_is_202_when_claimed_then_409_while_the_claim_is_held`, `reconcile_now_on_a_disabled_target_is_409_and_on_an_unknown_one_404`, `every_write_route_has_its_own_bucket_and_reads_are_not_limited`, `the_shipped_bucket_is_thirty_a_minute`; `crates/axiam-server/tests/scim_reconcile_sweep_test.rs` `the_sweep_reconciles_a_due_target_once_and_reports_a_failed_run`; `crates/axiam-server/src/job_health.rs` `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (extended to `scim_reconcile`). Residuals: the claim stamps the **start** of a run and nothing marks its end, so a run that dies half way waits for the next interval (a day, or five minutes on demand); and an administrator can start one run per target every five minutes, each bounded by its page and time budgets (T-414)."
+      },
+      {
+       "number": 420,
+       "title": "Target changes and deliveries are not attributable",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Where a tenant's people are sent is a security and a data-protection decision. Without a record, a target repointed at a collection host, a scope widened to everyone, a credential replaced, a reconciliation started, or a stream of deliveries a downstream later disputes could not be traced to the administrator or the attempt behind it.",
+       "mitigation": "Built (T23.6.2, T23.6.4). One audit row per write, with the administrator as actor: `scim_target.created`, `scim_target.updated` (the **names** of the changed fields, and whether the credential was replaced), `scim_target.deleted` and `scim_target.reconcile_requested` — never a URL, never the credential. Every delivery attempt writes the dispatcher's row, with the system actor and a fixed-vocabulary reason: `scim_push.delivery_succeeded`, `.delivery_attempt`, `.delivery_failed`; the target's `state` counts failures and dead letters once each, and a reconciliation run logs its findings as one line. Tests: `crates/axiam-api-rest/tests/scim_targets_test.rs` `every_write_is_audited_with_names_never_a_url_or_the_credential`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_dead_letter_writes_the_counter_and_the_reason_once`, `the_last_retryable_attempt_is_counted_as_the_dead_letter_the_consumer_makes_of_it`; `crates/axiam-amqp/src/outbound/consumer.rs` `audit_entry_uses_the_system_actor_and_the_kind_prefix`. Residual: a reconciliation's repairs (digests cleared, links dropped, accounts adopted for deprovisioning) are counts in a log line, not audit rows; the deliveries they cause are audited one by one."
+      }
+     ],
+     "open": 1
+    },
+    {
+     "id": "833f36e5-7889-59c2-ac8f-1c476fa445fa",
+     "kind": "store",
+     "x": 1079,
+     "y": 1154,
+     "w": 170,
+     "h": 80,
+     "name": "scim_target + scim_target_link + scim_target_state",
+     "lines": [
+      "scim_target +",
+      "scim_target_link +",
+      "scim_target_state"
+     ],
+     "description": "Schema v79 (T23.6.1, D-57): `scim_target` (the registry; the credential sealed under `pki_encryption_key`, write-only), `scim_target_link` (an AXIAM id and the downstream id per target, unique on both, the digest of the last representation sent, `erase_pending`; ids only) and `scim_target_state` (delivery counters, the last failure in a fixed vocabulary, the reconciliation claim; written only atomically, never by the administrator). The push kind's broker queues (`axiam.scim_push`, `.retry`, `.dlq`) hold only references (`{resource_type, axiam_id}`) and are drawn with the store rather than as an element of their own.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 407,
+       "title": "The target credential is disclosed at rest, in a response or in a log",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A SCIM target holds a credential to a third party: the bearer token AXIAM presents to the downstream SCIM service provider, or the OAuth2 client secret it exchanges there for an access token. It is a key to the tenant's downstream directory: whoever reads it — from the datastore or a backup, a management response, a log line, an error or a `Debug` print — can create, change and delete accounts there as AXIAM, without AXIAM ever being involved.",
+       "mitigation": "Built (T23.6.1, T23.6.4; D-57, in D-49's shape). Sealed with AES-256-GCM under `pki_encryption_key` (the key webhook secrets and SSF push headers use) with a fresh nonce per write, nonce and ciphertext in their own columns and a key version. Every read projects `PUBLIC_COLUMNS`, so the ciphertext leaves the datastore only through `ScimTargetRepository::decrypt_credential`, which only the deliverer calls; a value sealed under another key does not open. `ScimTarget` has no member for it, the write inputs redact it from `Debug`, the management API never returns it (no member of `ScimTargetResponse` says anything about it), audit rows name the field and whether the credential was replaced, never the value, and contract §31.5 makes it `Sensitive<T>`. Without the key, a write that carries a credential (every `create`) is `503` and stores nothing, while reads, `delete` and an update without a credential still answer. On the wire it is a header value marked sensitive; the client-credentials access token lives in memory only, per target version, for at most one hour, and is never persisted. Failure reasons are a fixed vocabulary, never a URL, a body or a value. Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `create_round_trips_every_field_and_never_reads_the_credential_back`, `decrypt_credential_round_trips`, `create_without_the_key_fails_closed_and_stores_nothing`, `an_update_that_supplies_a_credential_without_the_key_fails_closed`, `a_credential_sealed_under_another_key_does_not_open`; `crates/axiam-core/src/models/scim_target.rs` `the_target_serializes_with_the_decided_names_and_no_credential_member`, `debug_of_the_write_inputs_never_prints_the_credential`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_client_credentials_target_round_trips_and_shows_its_token_endpoint_but_no_secret`, `without_the_sealing_key_a_credential_cannot_be_stored`, `every_write_is_audited_with_names_never_a_url_or_the_credential`; `crates/axiam-scim/tests/outbound_scim_test.rs` `no_reason_state_row_or_message_carries_a_credential_or_a_person`; `crates/axiam-scim/src/outbound/client.rs` `a_transport_reason_never_carries_the_error_text`, `a_token_lifetime_is_capped_at_one_hour`. Residual: `pki_encryption_key` together with the datastore opens every target's credential, as it opens every webhook secret and SSF push header; and once sent, the credential is the downstream's to keep — T-408 bounds where it is sent."
+      },
+      {
+       "number": 415,
+       "title": "An erased person lingers downstream, in AXIAM's queues or in its link rows",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Provisioning copies a person to a third party. An Art. 17 erasure or an administrator's delete that ended at AXIAM's own tables would leave the person in every downstream directory; a `DELETE` that failed once, with nothing remembering it, would leave them there for good; and the machinery that carries the `DELETE` — queued messages, the dead-letter queue, the link row that knows the downstream id — would itself keep something of the person after the erasure.",
+       "mitigation": "Built (T23.6.2, T23.6.3; D-57, D-58). **Propagated**: `anonymize_user` and the delete path report to the provisioning sink like every other write, and the deliverer sends `DELETE` for an account that is `Deleted`, `Anonymized` or gone, **whatever** `deprovision` says; a `404` counts as done. **Remembered until it lands**: the link row survives the erasure cascade until that `DELETE` succeeds; an attempt that does not end in one (refused, retried, out of attempts) leaves the link `deprovisioned` with `erase_pending`; reconciliation re-queues every linked resource, so the `DELETE` is retried nightly until it lands, and a downstream account whose `externalId` names an erased user of this tenant is deleted when reconciliation finds it. **Nothing personal waits**: a queued message is `{resource_type, axiam_id}` and nothing else, the deliverer reads the person at the attempt, a link row holds ids and a digest, and `axiam.scim_push.dlq` drops a message seven days after it arrives (`x-message-ttl` 604 800 000 ms). `docs/compliance/gdpr-compliance.md` names the link table. Tests: `crates/axiam-server/tests/scim_erasure_propagation_test.rs` `an_erased_user_is_deleted_downstream_and_only_then_loses_the_link`, `a_failing_downstream_is_retried_and_the_link_goes_when_the_delete_succeeds`, `a_refused_erasure_keeps_the_link_pending_until_reconciliation_succeeds`, `the_admin_delete_endpoint_anonymises_and_deletes_downstream`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_deleted_user_is_deleted_downstream_whatever_the_policy_and_the_link_goes`, `an_anonymized_user_is_deleted_downstream_whatever_the_policy_and_the_link_goes`, `a_downstream_that_already_lost_the_user_counts_an_erasure_delete_as_done`, `no_attribute_of_a_person_is_ever_enqueued`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_pending_erasure_is_retried_by_reconciliation_until_the_delete_succeeds`, `an_erased_user_of_this_tenant_that_survives_downstream_is_deleted`, `reconciliation_queues_references_only`; `crates/axiam-db/tests/provisioning_sink_test.rs` `user_delete_and_anonymize_report_the_user`; `crates/axiam-amqp/src/outbound/topology.rs` `the_scim_push_declaration_is_pinned`, `only_the_ssf_push_and_scim_push_dlqs_have_a_message_ttl`. Residuals, stated rather than hidden. **Deleting a target** removes its links and state and deprovisions nothing downstream (contract §31.3 rule 8; the console says so before it deletes): the people AXIAM created there stay, a pending erasure included, and AXIAM no longer knows them — an administrator who wants them gone sets `deprovision` to `delete` and lets AXIAM push before deleting the target; deleting the tenant leaves the downstream the same way. **A downstream that refuses every `DELETE`** keeps the person; AXIAM retries nightly and says so on `state` and, where a rule asks, by mail (T-418). **A disabled target** sends nothing, an erasure included, until it is enabled again, which starts a reconciliation. An id in a dead-lettered reference lives up to seven days; the primary and retry queues declare no TTL and hold a reference through its retry schedule, or for as long as no consumer runs."
+      },
+      {
+       "number": 416,
+       "title": "A target write that overlaps another, or a delivery, puts back what the other changed",
+       "type": "Tampering",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Three writers meet on a target: administrators replacing its configuration, the deliverer recording each attempt, and reconciliation claiming runs and adopting links. Read-modify-write among them (T-406's class) would let a replacement prepared before another land after it and put back the old URL, scope or `enabled`; let a delivery's bookkeeping overwrite an administrator's change; lose dead-letter counts when many deliveries finish at once; or let two attempts link one resource twice.",
+       "mitigation": "Built (T23.6.1, T23.6.4; D-57, T-406's rule). A replacement is conditional on the `updated_at` the route read for that request (`ScimTargetUpdate::expected_updated_at`): a write landing in between makes it change nothing, and it answers `409` (contract §31.3 rule 4). The deliverer and reconciliation **never write the target row**: delivery state lives in `scim_target_state`, written only with atomic increments and plain sets, retried on a write conflict up to 32 times so that no count is lost; the reconciliation claim is a conditional write (T-419). Links are written through both unique indexes, and an attempt that finds the resource linked meanwhile keeps that link if it names the same downstream id and retries otherwise. The deliverer reads the target again before the credential leaves (T-408). Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `a_stale_expected_updated_at_is_a_conflict_and_writes_nothing`, `update_with_the_current_version_writes_and_moves_the_version`, `an_update_of_a_missing_target_is_not_found_not_a_conflict`, `concurrent_dead_letters_are_all_counted`, `concurrent_failures_are_all_counted`, `the_link_unique_indexes_hold_on_both_axes`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_replacement_overtaken_by_another_is_409_and_does_not_land`, `two_reads_then_two_writes_the_second_is_a_conflict`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_target_changed_between_the_read_and_the_send_is_a_retry_and_sends_nothing`. Residuals: the `PUT` carries no version from the client, so an administrator who saves a form loaded before another administrator's save replaces that save whole — last writer wins between two humans, each audited with the names of what it changed (T-420), and never a way to move the credential, whose binding is checked against the stored row (T-408). An attempt under way when an administrator narrows the scope or disables the target finishes on the version it read, and so does a reconciliation run, for up to its five-minute budget; the next attempt sees the change."
       }
      ],
      "open": 0
@@ -8485,14 +8642,108 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "SurrealQL",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "dbedd6d1-2ad1-558f-91af-a1a4e13ff6bd",
+     "path": "M374,1194 L199,1194",
+     "name": "SCIM push / list",
+     "description": "",
+     "label": "SCIM push / list (HTTPS, RFC 7644)",
+     "labelLines": [
+      "SCIM push / list (HTTPS, RFC 7644)"
+     ],
+     "lx": 286.5,
+     "ly": 1194,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS, RFC 7644",
+     "threats": [
+      {
+       "number": 412,
+       "title": "More people, or more about them, leave the tenant than the administrator chose",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A target pushes a tenant's people to a third party. Provisioning that reaches beyond the scope the administrator set — users outside the listed groups, groups never asked for, accounts that are not active, service accounts — or that carries more of a person than a directory needs (a password hash, factors, a telephone number, an address, free-form metadata), or that keeps sending after a target was disabled, discloses personal data the tenant never agreed to share. A tenant administrator exporting the tenant's directory to a SCIM endpoint of their choosing is the feature itself, so the threat is everything beyond that choice.",
+       "mitigation": "Built (T23.6.2; D-57). **Who**: `all_users`, or `groups` — the direct members of up to 100 listed groups of this tenant; `push_groups` is off by default and, when on, pushes every group for `all_users` and only the listed ones otherwise; a group's `members` names only members already linked on that target, and a service account's membership is never reported. A user is created downstream only while `Active` and in scope — one who is not is never created inactive — and one who leaves scope or `Active` is deactivated or deleted per `deprovision`. A disabled target receives nothing: its queued references dead-letter (`target disabled`). **What**: a fixed attribute set, not a mapping language — `userName` (the username, or the email when the target says so), `name.givenName`, `name.familyName`, `displayName`, the primary email, `active` and `externalId` (the AXIAM id); an attribute AXIAM does not hold is omitted, and nothing else about a person is ever sent. Inside AXIAM only a reference travels (T-415). **The trust assumption**, stated rather than hidden (assumption 7): an administrator of the tenant holding `scim_targets:write` — a human (T-411) — decides which endpoint receives which of the tenant's people, and enabling a target starts a reconciliation that pushes everyone in scope at once; the choice is audited (T-420), shown in the console, and stated in contract §31. Tests: `crates/axiam-scim/tests/outbound_scim_test.rs` `create_propagates_as_post_with_the_axiam_id_as_external_id`, `the_user_name_follows_the_targets_mapping`, `a_change_to_a_name_the_mapping_carries_is_sent_and_one_it_does_not_is_not`, `a_user_entering_and_leaving_a_groups_scope_is_created_and_deprovisioned`, `group_membership_change_propagates_as_a_group_patch_of_linked_members`, `a_disabled_target_and_a_deleted_one_dead_letter`, `no_attribute_of_a_person_is_ever_enqueued`; `crates/axiam-scim/tests/outbound_provisioner_test.rs` `a_user_change_enqueues_one_reference_per_enabled_target_of_the_tenant`, `a_group_change_goes_only_to_targets_that_push_that_group`, `group_in_scope_is_push_groups_and_the_scope`; `crates/axiam-scim/src/outbound/wire.rs` `an_attribute_axiam_does_not_hold_is_omitted`, `a_patch_replaces_the_mapped_attributes_only`; `crates/axiam-db/tests/provisioning_sink_test.rs` `a_service_accounts_membership_is_not_provisioned`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_group_scope_cannot_name_another_tenants_group_even_when_replacing`, `an_enabled_target_starts_a_reconciliation_when_created_or_switched_on`. Residual: what reaches a downstream is that downstream's to keep and protect; AXIAM's erasure reaches it (T-415), AXIAM's retention does not."
+      },
+      {
+       "number": 413,
+       "title": "A hostile or lying downstream steers what AXIAM links, overwrites or deprovisions",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The downstream's answers decide what AXIAM does next: the `id` of a created resource is linked and put into later paths, a `409` makes AXIAM look a resource up by `externalId` and adopt it, and reconciliation lists the downstream and repairs, re-creates or deprovisions what it finds. A downstream that lies — a compromised service provider, or one whose answers an attacker shapes — could try to make AXIAM adopt or overwrite an account that is not AXIAM's, deprovision accounts its own application created, link one AXIAM user to another's account, aim a later request at another path, or feed something back into AXIAM's directory.",
+       "mitigation": "Built (T23.6.2, T23.6.3; D-57, D-58). **One way only**: nothing read from a downstream is ever written into an AXIAM user or group; an answer yields at most an id to link, a match to adopt or a digest to clear. **Adoption** takes exactly one resource whose `externalId` is the AXIAM id — a provider that ignores the filter and answers with everything matches nothing else — and none or several is a dead letter, `conflict`. **Links** are unique on (target, type, AXIAM id) and on (target, type, downstream id), so one downstream id never stands for two AXIAM resources. A downstream id is linked only if it is 1–256 bytes, not `.` or `..`, and free of control characters, and it is percent-encoded into every path, as the filter is into the query. **Reconciliation never touches** a downstream resource whose `externalId` is missing, not a UUID, or not the id of a resource of **this tenant** that should not be there; it deletes no account it did not create or adopt; an attribute the mapping does not carry is not drift; and only a listing read to its end may drop a link. What a lying downstream can do is to its own data: refuse, mis-report, or make AXIAM send again what it already holds. Tests: `crates/axiam-scim/tests/outbound_scim_test.rs` `a_409_on_post_adopts_the_resource_that_carries_our_external_id`, `a_409_with_no_resource_of_ours_dead_letters_as_a_conflict`, `a_404_on_patch_drops_the_link_and_retries_then_recreates`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_downstream_user_with_a_foreign_or_missing_external_id_is_never_touched`, `a_downstream_user_whose_external_id_is_a_user_of_another_tenant_is_untouched`, `an_unchanged_downstream_is_not_patched_and_attributes_it_owns_are_not_drift`, `an_unreachable_downstream_fails_the_run_without_dropping_anything`; `crates/axiam-scim/src/outbound/deliverer.rs` `a_downstream_id_that_could_redirect_a_path_is_not_linked`, `urls_are_built_from_the_base_with_the_id_and_filter_encoded`; `crates/axiam-db/tests/scim_target_repository_test.rs` `the_link_unique_indexes_hold_on_both_axes`. Residual: a downstream that answers `404` to every `PATCH`, or leaves a linked resource out of a complete listing, makes AXIAM drop the link and `POST` the person again — one more copy of what it already holds, on every attempt or every nightly run, bounded by T-414 and T-417."
+      },
+      {
+       "number": 414,
+       "title": "A downstream exhausts the deliverer or reconciliation with large, endless or slow answers",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A downstream controls the size, the number and the pace of its answers. A response body without end, a list whose `totalResults` never runs out, pages that arrive slowly, or a group so large that its member list cannot travel in one request would hold the consumer, a reconciliation run or AXIAM's memory for as long as the downstream likes — and with it the provisioning of every other target behind it.",
+       "mitigation": "Built (T23.6.2, T23.6.3; D-57, D-58). Every request has ten seconds, connect to last byte. A body is read to at most 64 KiB for a write and 1 MiB for a list; a larger one is a retry and is never buffered whole. A reconciliation run reads at most 100 pages of 100 per collection, for at most five minutes of wall clock, and a listing cut short by a budget is audited in part and never drops a link for what it did not reach. A group of more than 10 000 members dead-letters instead of being read whole, and AXIAM reads members 100 at a time. Retries follow the per-kind schedule (`AXIAM__SCIM_PUSH__*`: backoff with a ceiling, then the dead-letter queue), and `scim_push` has a topology of its own, so a slow downstream delays SCIM pushes and never webhooks or SSF events. Tests: `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_downstream_with_endless_pages_is_read_to_the_page_budget_and_no_link_is_dropped_for_it`, `a_large_downstream_is_read_in_pages_of_a_hundred`, `an_unreachable_downstream_fails_the_run_without_dropping_anything`; `crates/axiam-scim/src/outbound/reconcile.rs` `the_budgets_are_the_decided_ones`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_5xx_and_a_429_retry_and_are_recorded_as_failures`; `crates/axiam-pki/src/ssrf.rs` `read_capped_body_rejects_body_over_cap`, `no_redirect_honours_the_content_length_cap`; `crates/axiam-amqp/src/outbound/topology.rs` `the_scim_push_declaration_is_pinned`. Residuals: the 10 000-member bound is in the code (`MAX_GROUP_MEMBERS`) and no test pins it. And each replica's `scim_push` consumer makes one attempt at a time, for every tenant: a downstream that answers every request just inside ten seconds slows the SCIM pushes of every target on that replica — one tenant's chosen endpoint can delay another tenant's provisioning, never its webhooks, SSF events or sign-ins."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "e42d7a8d-dcd9-5dd4-bec1-b2adc69052e6",
+     "path": "M514,1194 L1079,1194",
+     "name": "read targets, write links / state",
+     "description": "",
+     "label": "read targets, write links / state (SurrealQL)",
+     "labelLines": [
+      "read targets, write links / state",
+      "(SurrealQL)"
+     ],
+     "lx": 796.5,
+     "ly": 1194,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealQL",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "8dfb48c8-5a7d-5d6f-913e-b8d0db1045a0",
+     "path": "M510.7,1172.7 L678.8,1118.9 Q694,1114 694,1098 L694,644",
+     "name": "dead-letter audit row",
+     "description": "",
+     "label": "scim_push.delivery_failed (in-process)",
+     "labelLines": [
+      "scim_push.delivery_failed",
+      "(in-process)"
+     ],
+     "lx": 694,
+     "ly": 975.2,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [
+      {
+       "number": 418,
+       "title": "One notification mail per dead letter floods a rule's recipients while a target is down",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "D-58 lets a tenant's notification rules mail administrators when an outbound SCIM delivery is dead-lettered: the dispatcher's `scim_push.delivery_failed` audit row maps to the event `scim_delivery_failed`, and the notifying audit log hands it to the rule dispatcher, which enqueues one mail per matching rule per recipient — **for every dead letter**, with no coalescing, cool-down or batching. A target that is down past its retry budget, or that refuses AXIAM's credential (a bearer `401` or `403` dead-letters at once), dead-letters every reference: each change of each user, and the whole tenant at once at the next reconciliation or when the target is switched on. A tenant of 10 000 users in scope whose downstream credential was revoked mails each recipient of such a rule some 10 000 times a night, burying every other alert (T-117's class) and spending the deployment's mail quota and sender reputation — and whoever can make the downstream refuse can set it off.",
+       "mitigation": "Open — carried to the W5 F4 review, as the T23.6.3 execution note records (“one mail per dead letter can flood a rule's recipients while a target is down”). What bounds it today: nothing is mailed unless a tenant administrator created a rule for `scim_delivery_failed`, and removing or narrowing that rule stops it (rules are per event, T-117); a mail is fixed text — the action and its outcome, never a URL, a person or the downstream's answer (D-16); and the target's `state` carries one counter (`dead_lettered_total`) and one last reason, so the console shows the outage without the mails. T-117's “configurable batches” do not hold on this path: `NotificationDispatcher::dispatch` enqueues one message per matched recipient per audit row. The path is tested as built: `crates/axiam-server/tests/scim_dead_letter_notification_test.rs` `a_scim_dead_letter_row_mails_every_recipient_of_a_matching_rule`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_dead_letter_writes_the_counter_and_the_reason_once`. What closes it is that review's decision: notify once per target when it enters failure (or at most once per target per window) rather than once per dead letter, keeping the audit row per dead letter as the record."
+      }
+     ],
+     "open": 1
     }
    ],
-   "total": 40,
-   "open": 3,
+   "total": 54,
+   "open": 5,
    "bySeverity": {
-    "Medium": 26,
-    "High": 8,
-    "Low": 6
+    "Medium": 33,
+    "High": 12,
+    "Low": 9
    }
   },
   {

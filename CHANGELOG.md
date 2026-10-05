@@ -1142,6 +1142,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The W5 F4 security review (Phase 23, threat model 2.35.0,
+  [`security-review-phase23-w5-2026-10-05.md`](claude_dev/security-review-phase23-w5-2026-10-05.md)).**
+  Behaviour changes, all to surfaces new in this unreleased wave:
+  - **Outbound SCIM: a client-credentials target's secret is bound to
+    `base_url` too** (T-409). Every access token the secret yields is sent to
+    `base_url`, so an update that moves `base_url` of a client-credentials
+    target without `credential` in the same write is now `400` naming
+    `base_url`, exactly like a moved `auth.token_url`; the console asks for the
+    secret when either URL is edited. Contract 1.57 §31.3 rule 2 amended in
+    place.
+  - **Outbound SCIM: one `scim_delivery_failed` notification per target per
+    hour** (T-418, D-73). Every dead letter still writes its
+    `scim_push.delivery_failed` audit row and its count on the target's
+    `state`; only the mail to a rule's recipients is coalesced, claimed in the
+    datastore so replicas agree. Schema **v84** adds
+    `scim_target_state.failure_notified_at`.
+  - **CIBA: only a console sign-in decides a request** (T-447). The approval
+    routes (`GET /api/v1/ciba/requests/{id}`, `…/approve`, `…/deny`) answer
+    `403` to an access token AXIAM minted for an OAuth2 client (code, refresh
+    or CIBA grant), which names the user and a session but is not the user at
+    the console. Contract 1.58 §33 amended in place; OpenAPI describes the
+    `403`.
+  - **CIBA: the approval mail goes only to an address something vouches for**
+    (D-74, D-25's rule): `email_verified_at` set, or the account `Active`. A
+    request for an account whose address is unproven is stored and answered as
+    before and waits on the approval page unmailed. A federated account, which
+    stays `PendingVerification`, therefore gets no approval mail unless its
+    address was verified.
+  - **CIBA: `ciba.approved` and `ciba.denied` audit rows carry the deciding
+    `session_id`** (T-435).
+
 - **The SAML assertion's `SessionIndex` is a per-SP random token, not the AXIAM
   session id (T23.2.4, D-37, closes T-312).** SPs that compared notes could
   correlate one person's sessions through a `SessionIndex` that was the same at

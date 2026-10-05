@@ -147,6 +147,10 @@ pub struct CleanupTask<C: Connection> {
     /// the datastore decides, so replicas do not double-run it). `None` — the
     /// default — runs no reconciliation.
     scim_reconciliation: Option<Arc<dyn axiam_scim::outbound::ScimReconciliation>>,
+    /// G-7 (T23.7.1): the CIBA pending-request store, whose expired requests
+    /// the `ciba_request` sweep marks `expired` and, after a retention, deletes.
+    /// `None` runs no sweep.
+    ciba_request_repo: Option<Arc<axiam_db::SurrealCibaRequestRepository<C>>>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -862,8 +866,19 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             ssf_step_up_repo: None,
             ssf_sink: None,
             scim_reconciliation: None,
+            ciba_request_repo: None,
             shutdown,
         }
+    }
+
+    /// Sweep the CIBA pending-request store (G-7, T23.7.1), as the
+    /// `ciba_request` job.
+    ///
+    /// A builder step for the reason [`Self::with_ssf`] is one.
+    #[must_use]
+    pub fn with_ciba(mut self, repo: Arc<axiam_db::SurrealCibaRequestRepository<C>>) -> Self {
+        self.ciba_request_repo = Some(repo);
+        self
     }
 
     /// Run the outbound SCIM reconciliation on this scheduler (G-6, T23.6.3,
@@ -1029,6 +1044,18 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         &self.job_health,
                         "ssf_step_up",
                         self.sweep_ssf_step_up().await,
+                        tracing::Level::DEBUG,
+                    );
+
+                    // G-7 (T23.7.1): CIBA requests past their expiry are
+                    // marked `expired`, and deleted ten minutes later (a client
+                    // still polling is told `expired_token` meanwhile). DEBUG:
+                    // an expired request is one nobody can still approve or
+                    // redeem.
+                    Self::record(
+                        &self.job_health,
+                        "ciba_request",
+                        self.sweep_ciba_requests().await,
                         tracing::Level::DEBUG,
                     );
 
@@ -1208,6 +1235,25 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             return Ok(0);
         };
         repo.delete_expired(Utc::now()).await
+    }
+
+    /// Mark and delete expired CIBA requests (G-7, T23.7.1).
+    ///
+    /// A size bound and a state bound, not a correctness one: approval and
+    /// redemption both refuse a request past `expires_at` in their own `WHERE`
+    /// clause, so a sweep that never ran would answer correctly over a table
+    /// that keeps rows — and the user ids, binding messages and approval
+    /// evidence in them — nobody can use. `Ok(0)` without the repository.
+    async fn sweep_ciba_requests(&self) -> Result<u64, AxiamError> {
+        use axiam_core::repository::CibaRequestRepository as _;
+        let Some(repo) = &self.ciba_request_repo else {
+            return Ok(0);
+        };
+        repo.sweep_expired(
+            Utc::now(),
+            chrono::Duration::seconds(axiam_oauth2::ciba::EXPIRED_RETENTION_SECS),
+        )
+        .await
     }
 
     // -----------------------------------------------------------------------

@@ -218,8 +218,18 @@ async fn register_inner<C: Connection + Clone>(
     // reimplemented (the plan's item 3) so that "what is a usable redirect
     // URI" has one answer in this server; its message is carried into the RFC
     // 7591 error shape rather than answered as the admin API's `400`.
-    crate::handlers::oauth2_clients::validate_redirect_uris(&req.redirect_uris)
-        .map_err(|e| DcrError::InvalidRedirectUri(e.0.to_string()))?;
+    //
+    // G-7: a registration naming no browser-driven grant (a CIBA-only client)
+    // may name no redirect URI, and is then not held to the "must not be
+    // empty" rule; any URI it does name is still checked.
+    let browser_driven = req
+        .grant_types
+        .as_ref()
+        .is_none_or(|g| g.iter().any(|x| x.trim() == "authorization_code"));
+    if browser_driven || !req.redirect_uris.is_empty() {
+        crate::handlers::oauth2_clients::validate_redirect_uris(&req.redirect_uris)
+            .map_err(|e| DcrError::InvalidRedirectUri(e.0.to_string()))?;
+    }
     let validated = dcr::validate(tenant_id, &req, &policy)?;
 
     // 4 — the per-tenant ceiling. After validation so that a malformed
@@ -853,8 +863,16 @@ async fn update_inner<C: Connection + Clone>(
     }
 
     // The same two structural gates a registration passes.
-    crate::handlers::oauth2_clients::validate_redirect_uris(&validated.create.redirect_uris)
-        .map_err(|e| ConfigRefusal::Metadata(DcrError::InvalidRedirectUri(e.0.to_string())))?;
+    // G-7: as at registration, a CIBA-only client may name no redirect URI.
+    let browser_driven = validated
+        .create
+        .grant_types
+        .iter()
+        .any(|g| g == "authorization_code");
+    if browser_driven || !validated.create.redirect_uris.is_empty() {
+        crate::handlers::oauth2_clients::validate_redirect_uris(&validated.create.redirect_uris)
+            .map_err(|e| ConfigRefusal::Metadata(DcrError::InvalidRedirectUri(e.0.to_string())))?;
+    }
     axiam_oauth2::fapi::validate_registration(&validated.create)
         .map_err(|e| ConfigRefusal::Metadata(DcrError::InvalidClientMetadata(e.to_string())))?;
 

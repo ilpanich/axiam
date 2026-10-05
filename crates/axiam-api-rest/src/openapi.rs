@@ -230,6 +230,7 @@ use crate::handlers;
         // `grant_type` — so only the two extra paths appear here.
         handlers::oauth2::device_authorization,
         handlers::oauth2::pushed_authorization_request,
+        handlers::ciba::bc_authorize,
         // T21.4 / RFC 7591 §3.1 — dynamic client registration. Unauthenticated,
         // so I9 applies twice over: the path is in `PUBLIC_PATHS` and here, in
         // the same commit.
@@ -600,6 +601,10 @@ use crate::handlers;
         axiam_oauth2::token::TokenRequest,
         // Device Authorization Grant (RFC 8628, B2)
         axiam_oauth2::device_service::DeviceAuthorizationRequest,
+        axiam_oauth2::ciba::BackchannelAuthenticationRequest,
+        axiam_oauth2::ciba::BackchannelAuthenticationResponse,
+        axiam_core::models::ciba::CibaDeliveryMode,
+        axiam_core::models::ciba::CibaPingNotification,
         axiam_oauth2::device_service::DeviceAuthorizationResponse,
         handlers::oauth2::PushedAuthorizationRequest,
         handlers::oauth2::PushedAuthorizationResponse,

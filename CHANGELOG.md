@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CIBA — Client-Initiated Backchannel Authentication, core (G-7, T23.7.1).**
+  OpenID Connect CIBA Core 1.0, poll and ping modes (push is not offered). A
+  client that already knows whom it wants to authenticate calls the new
+  **`POST /oauth2/bc-authorize`** (also under `/t/{tenant_id}`), authenticating
+  exactly as at the token endpoint (the registered method decides; D-17 applies
+  to `fapi2` rows), with `scope` (must include `openid`), exactly one of
+  `login_hint` (username or e-mail) or `id_token_hint` (an ID token this
+  server issued to this client), an optional `binding_message` (at most 64
+  printable characters), `requested_expiry` (30–600 s, default 300),
+  `acr_values` and RFC 8707 `resource`; a ping-mode client also sends
+  `client_notification_token`. The answer is `auth_req_id` (256 bits, stored
+  only as its SHA-256), `expires_in` and `interval` (5 s). `login_hint_token`,
+  `user_code` and signed authentication requests (`request`) are refused
+  `invalid_request`; CIBA Core §13's `invalid_binding_message` is new. **A hint
+  naming nobody, a user who may not sign in or a user under brute-force lockout
+  is answered exactly like a real one** and the request simply expires —
+  `unknown_user_id` is never sent, so the endpoint is not a user oracle. The
+  token endpoint accepts `grant_type=urn:openid:params:grant-type:ciba` with
+  `auth_req_id`: `authorization_pending`, `slow_down` (the interval grows by 5 s
+  per early poll, to 60 s, as for the device grant), `access_denied`,
+  `expired_token`, and `invalid_grant` for another client's or tenant's,
+  unknown or already-redeemed `auth_req_id`; redemption is single-use on the X6
+  two-layer arbiter, and the account is re-read after it (status and lockout).
+  Tokens carry the approval's evidence: the ID token's `auth_time`, `acr` and
+  `amr`, the access token's `sid` naming the approving session, and a refresh
+  token (for a client holding `refresh_token`) with the same snapshot. New
+  pending-request store (schema **v80**, `ciba_request`; a ping-mode request's
+  `auth_req_id` and notification token sealed under `pki_encryption_key`, so
+  ping needs that key), swept by the new `ciba_request` job on `/health/jobs`
+  and removed with its user (erasure) and tenant. The approval service API the
+  identity pages will call (T23.7.2) is in `axiam_oauth2::ciba::CibaService`
+  (`lookup_for_approval`, `approve`, `deny`), every transition conditional on the
+  version read and on the request's own user; the user-notification port is
+  `CibaUserNotifier` (no notifier is wired yet). **Client metadata:**
+  `backchannel_token_delivery_mode` (`poll`/`ping`) and
+  `backchannel_client_notification_endpoint` (ping only, under the webhook
+  outbound URL policy) on `POST`/`PUT /api/v1/oauth2-clients` and RFC 7591/7592
+  registration (the CIBA grant only with an initial access token, never
+  anonymously); `backchannel_authentication_request_signing_alg` and
+  `backchannel_user_code_parameter: true` are refused; a CIBA client must be
+  confidential and on the `standard` profile (a `fapi2` client cannot hold the
+  grant until signed authentication requests exist). Discovery, in both issuer
+  forms, gains `backchannel_authentication_endpoint`,
+  `backchannel_token_delivery_modes_supported` (`poll`, `ping`),
+  `backchannel_user_code_parameter_supported: false` and the grant type. **Rate
+  limits:** the new `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` (default 60;
+  `gateway` 600, `mesh` 6000) is the endpoint's own bucket, keyed like
+  `/oauth2/token`, plus a per-client bucket after authentication and a fixed
+  three notifications per user per minute; the CIBA grant is counted by
+  `TOKEN_PER_MIN` like every grant, and client-authentication failures at
+  either endpoint are audited as `oauth2.client_auth_failed`. Every stored
+  request is audited as `oauth2.ciba_initiated`. `sdks/openapi.json` is
+  regenerated; the contract section (§33), the SDK helper and the website page
+  follow in T23.7.3.
+
 - **Outbound SCIM provisioning (G-6, T23.6.1 – T23.6.4, contract 1.57).** A
   tenant administrator can register downstream SCIM 2.0 service providers
   (**targets**) and AXIAM pushes the tenant's user and group lifecycle to them,

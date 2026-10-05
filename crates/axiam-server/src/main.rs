@@ -2951,7 +2951,9 @@ async fn main() -> std::io::Result<()> {
         Arc::new(ssf_event_buffer_repo.clone()),
         Arc::new(ssf_step_up_repo.clone()),
         ssf_account_sink.clone(),
-    );
+    )
+    // G-7 (T23.7.1): the CIBA pending-request expiry.
+    .with_ciba(Arc::new(ciba_request_repo.clone()));
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared

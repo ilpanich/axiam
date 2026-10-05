@@ -534,6 +534,11 @@ pub const PUBLIC_PATHS: &[&str] = &[
     // `authenticate_client` path the token endpoint uses. Unauthenticated by
     // the middleware's definition, not by the endpoint's.
     "/oauth2/par",
+    // G-7 / CIBA Core §7. Public to `AuthzMiddleware` for the reason `/par`
+    // is: the caller is a client authenticating with its own credentials
+    // (form body, Basic header, client certificate or assertion), verified by
+    // the handler through the token endpoint's `authenticate_client`.
+    "/oauth2/bc-authorize",
     // T21.4 / RFC 7591 §3.1. Necessarily public in the strongest sense of any
     // entry in this list: it is the endpoint a client that does not exist yet
     // calls in order to exist, so there is by construction no credential it

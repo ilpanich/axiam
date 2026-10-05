@@ -159,7 +159,20 @@ yourself, the profile leaves it alone (and the startup log names it in
 Per-minute values are **per bucket**, and the bucket is whatever
 `AXIAM__RATE_LIMIT__KEY` selects — per IP under `internet`, per OAuth2
 `client_id` under both presets (on `/oauth2/token`, `/oauth2/revoke`,
-`/oauth2/introspect` only; everything else is always per-IP).
+`/oauth2/introspect` and `/oauth2/bc-authorize` only; everything else is always
+per-IP).
+
+`BC_AUTHORIZE_PER_MIN` (G-7, CIBA) is the backchannel authentication endpoint's
+own bucket — never the token endpoint's, because every accepted request stores
+a pending request and may push a sign-in prompt at a person. It is counted on
+the route (per key, as above) and again per authenticated client inside the
+handler, and a profile preset scales it like the other machine endpoints. Two
+things no preset moves sit beside it: each user is sent at most **three** CIBA
+notifications a minute whatever the clients asking (the request is still
+stored and answered, so the response reveals nothing about the user), and each
+`auth_req_id` carries its own polling interval at the token endpoint, raised by
+`slow_down`. The CIBA grant's token requests are counted by `TOKEN_PER_MIN`
+like every other grant.
 
 The three `AXIAM__GRPC__*_PER_SEC` values are per **second** per IP, one
 bucket per gRPC **method family** (see §3.1). Leave `GRPC_IDENTITY_PER_SEC`

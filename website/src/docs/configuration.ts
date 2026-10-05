@@ -408,6 +408,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           ["AXIAM__RATE_LIMIT__PAR_PER_MIN", "Max /oauth2/par per minute.", "120"],
           [
+            "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN",
+            "Max CIBA backchannel authentication requests (POST /oauth2/bc-authorize) per minute, in its own bucket \u2014 never the token endpoint's, because each accepted request stores a pending request and may send a person a sign-in prompt. Keyed like /oauth2/token (AXIAM__RATE_LIMIT__KEY applies), with a second per-client bucket of the same size after authentication. In the machine family, so a profile preset scales it (gateway 600, mesh 6000). The CIBA grant's token requests are counted by AXIAM__RATE_LIMIT__TOKEN_PER_MIN and by each request's own polling interval, and a user is sent at most three notifications a minute whatever the clients asking.",
+            "60",
+          ],
+          [
             "AXIAM__RATE_LIMIT__DCR_PER_MIN",
             "Max RFC 7591 dynamic client registrations per minute, per IP. The smallest limit here, because it is the only unauthenticated write endpoint: every accepted request allocates a client row against the tenant's dcr_max_clients. Sized for one person registering one MCP client once, with room for a retry \u2014 not for throughput. Never client-keyed, since obtaining a client identity is what the call is for.",
             "5",

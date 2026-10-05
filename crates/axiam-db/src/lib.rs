@@ -62,6 +62,7 @@ pub use repository::{
     SurrealResourceRepository, SurrealRevokedSessionRepository, SurrealRoleRepository,
     SurrealSamlIdpCredentialRepository, SurrealSamlLogoutRunRepository,
     SurrealSamlServiceProviderRepository, SurrealSamlSpSessionRepository,
+    SurrealScimTargetLinkRepository, SurrealScimTargetRepository, SurrealScimTargetStateRepository,
     SurrealScimTokenRepository, SurrealScopeRepository, SurrealServiceAccountRepository,
     SurrealSessionClientRepository, SurrealSessionRepository, SurrealSettingsRepository,
     SurrealSsfEventBufferRepository, SurrealSsfStepUpRepository, SurrealSsfStreamRepository,

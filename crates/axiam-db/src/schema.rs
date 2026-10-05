@@ -432,6 +432,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "ssf_step_up",
         sql: SCHEMA_V78,
     },
+    Migration {
+        version: 79,
+        name: "scim_target",
+        sql: SCHEMA_V79,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4271,9 +4276,196 @@ DEFINE INDEX IF NOT EXISTS idx_ssf_step_up_expires ON TABLE ssf_step_up
     COLUMNS expires_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v79 — T23.6.1 / G-6 / D-57, D-58: outbound SCIM targets
+// -----------------------------------------------------------------------
+//
+// Additive DDL only, nothing backfilled: no tenant pushes until an
+// administrator registers a target.
+//
+// **`scim_target`** is the registry of downstream SCIM service providers, one
+// SCHEMAFULL row each, tenant-scoped, written by administrators only (its
+// update is conditional on `updated_at`). The bearer token or OAuth2 client
+// secret is AES-256-GCM ciphertext under `pki_encryption_key` (the key webhook
+// secrets and SSF push headers use) with its nonce in its own column and a key
+// version; no read of the table projects either (the repository's
+// `PUBLIC_COLUMNS`). `auth_kind` selects the credential's use: `bearer` (the
+// credential goes to `base_url`) or `oauth2_client_credentials` (the client
+// secret goes to `token_url`, with `client_id` and an optional scope).
+// `scope_kind` is `all_users` or `groups`, the latter with `scope_group_ids`.
+//
+// **`scim_target_link`** maps an AXIAM user or group to the downstream
+// resource, one row each: ids, the SHA-256 digest of the last representation
+// sent and a state, never an attribute of a person. UNIQUE on
+// `(target_id, resource_type, axiam_id)` and on
+// `(target_id, resource_type, downstream_id)`, so a resource is linked once per
+// target and a downstream id belongs to one resource. `erase_pending` marks an
+// erasure `DELETE` reconciliation must retry.
+//
+// **`scim_target_state`** is the delivery state, one row per target, its record
+// id the target id. It is written only with atomic increments and plain sets
+// (D-57), by the deliverer and the reconciliation claim (D-58), never through
+// the target row. The failure reason is a fixed-vocabulary string, at most 256
+// characters.
+//
+// Rows go with their target (the repository's delete transaction) and with
+// their tenant (the tenant-delete transaction).
+const SCHEMA_V79: &str = "\
+DEFINE TABLE IF NOT EXISTS scim_target SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE scim_target TYPE string;
+DEFINE FIELD IF NOT EXISTS name ON TABLE scim_target TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 256;
+DEFINE FIELD IF NOT EXISTS base_url ON TABLE scim_target TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 2048;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE scim_target TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS auth_kind ON TABLE scim_target TYPE string
+    ASSERT $value IN ['bearer', 'oauth2_client_credentials'];
+DEFINE FIELD IF NOT EXISTS token_url ON TABLE scim_target TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) <= 2048;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE scim_target TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS oauth_scope ON TABLE scim_target TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS cred_ciphertext ON TABLE scim_target TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS cred_nonce ON TABLE scim_target TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS secret_key_version ON TABLE scim_target TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS scope_kind ON TABLE scim_target TYPE string
+    ASSERT $value IN ['all_users', 'groups'];
+DEFINE FIELD IF NOT EXISTS scope_group_ids ON TABLE scim_target TYPE array<string>
+    DEFAULT [];
+DEFINE FIELD IF NOT EXISTS scope_group_ids.* ON TABLE scim_target TYPE string;
+DEFINE FIELD IF NOT EXISTS push_groups ON TABLE scim_target TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS user_name_from ON TABLE scim_target TYPE string
+    ASSERT $value IN ['username', 'email'];
+DEFINE FIELD IF NOT EXISTS deprovision ON TABLE scim_target TYPE string
+    ASSERT $value IN ['deactivate', 'delete'];
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE scim_target TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE scim_target TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_tenant ON TABLE scim_target
+    COLUMNS tenant_id;
+DEFINE TABLE IF NOT EXISTS scim_target_link SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE scim_target_link TYPE string;
+DEFINE FIELD IF NOT EXISTS target_id ON TABLE scim_target_link TYPE string;
+DEFINE FIELD IF NOT EXISTS resource_type ON TABLE scim_target_link TYPE string
+    ASSERT $value IN ['user', 'group'];
+DEFINE FIELD IF NOT EXISTS axiam_id ON TABLE scim_target_link TYPE string;
+DEFINE FIELD IF NOT EXISTS downstream_id ON TABLE scim_target_link TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 512;
+DEFINE FIELD IF NOT EXISTS synced_digest ON TABLE scim_target_link TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS state ON TABLE scim_target_link TYPE string
+    ASSERT $value IN ['active', 'deprovisioned'];
+DEFINE FIELD IF NOT EXISTS erase_pending ON TABLE scim_target_link TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE scim_target_link TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE scim_target_link TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_link_resource ON TABLE scim_target_link
+    COLUMNS target_id, resource_type, axiam_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_link_downstream ON TABLE scim_target_link
+    COLUMNS target_id, resource_type, downstream_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_link_tenant ON TABLE scim_target_link
+    COLUMNS tenant_id, target_id;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_link_axiam ON TABLE scim_target_link
+    COLUMNS tenant_id, resource_type, axiam_id;
+DEFINE TABLE IF NOT EXISTS scim_target_state SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE scim_target_state TYPE string;
+DEFINE FIELD IF NOT EXISTS target_id ON TABLE scim_target_state TYPE string;
+DEFINE FIELD IF NOT EXISTS last_success_at ON TABLE scim_target_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_failure_at ON TABLE scim_target_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_failure_reason ON TABLE scim_target_state TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) <= 256;
+DEFINE FIELD IF NOT EXISTS consecutive_failures ON TABLE scim_target_state TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS dead_lettered_total ON TABLE scim_target_state TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS last_reconciled_at ON TABLE scim_target_state
+    TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS reconcile_claimed_at ON TABLE scim_target_state
+    TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_state_tenant ON TABLE scim_target_state
+    COLUMNS tenant_id;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.6.1 / D-57, D-58 — v79 adds the target registry, the link rows and
+    /// the delivery state, additively, with the two unique indexes the link is
+    /// defined by and a tenant index on each table.
+    #[test]
+    fn v79_defines_the_scim_target_tables_additively() {
+        for table in ["scim_target", "scim_target_link", "scim_target_state"] {
+            assert!(
+                SCHEMA_V79.contains(&format!("DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL")),
+                "{table}"
+            );
+            assert!(
+                SCHEMA_V79.contains(&format!("idx_{table}_tenant ON TABLE {table}")),
+                "{table} has a tenant index"
+            );
+        }
+        // D-57: a resource is linked once per target, and a downstream id
+        // belongs to one resource.
+        assert!(SCHEMA_V79.contains(
+            "idx_scim_target_link_resource ON TABLE scim_target_link\n    COLUMNS target_id, resource_type, axiam_id UNIQUE"
+        ));
+        assert!(SCHEMA_V79.contains(
+            "idx_scim_target_link_downstream ON TABLE scim_target_link\n    COLUMNS target_id, resource_type, downstream_id UNIQUE"
+        ));
+        assert!(SCHEMA_V79.contains("$value IN ['bearer', 'oauth2_client_credentials']"));
+        assert!(SCHEMA_V79.contains("$value IN ['all_users', 'groups']"));
+        assert!(SCHEMA_V79.contains("$value IN ['username', 'email']"));
+        assert!(SCHEMA_V79.contains("$value IN ['deactivate', 'delete']"));
+        assert!(SCHEMA_V79.contains("$value IN ['user', 'group']"));
+        assert!(SCHEMA_V79.contains("$value IN ['active', 'deprovisioned']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V79.contains(forbidden),
+                "v79 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V79
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v79 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("scim_target"),
+                "v79 defined something outside its tables: {statement}"
+            );
+        }
+    }
+
+    /// D-57: the credential is stored only as ciphertext and nonce; the link
+    /// rows hold ids and a digest, no attribute of a person.
+    #[test]
+    fn v79_stores_the_credential_sealed_and_no_attribute_of_a_person() {
+        assert!(SCHEMA_V79.contains("cred_ciphertext ON TABLE scim_target"));
+        assert!(SCHEMA_V79.contains("cred_nonce ON TABLE scim_target"));
+        for forbidden in [
+            "password",
+            "bearer_token",
+            "client_secret",
+            "display_name",
+            "given_name",
+            "family_name",
+            "phone",
+        ] {
+            assert!(!SCHEMA_V79.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    /// v79 takes the next number and keeps v78 as it was.
+    #[test]
+    fn v79_follows_v78_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| (78..=79).contains(&m.version))
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(names, vec![(78, "ssf_step_up"), (79, "scim_target")]);
+    }
 
     /// T23.5.3 / D-53 (1) — v78 adds the step-up record additively, one row per
     /// `(tenant, user)`, with the expiry index the sweep reads.
@@ -5344,8 +5536,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&78),
-            "v78 is the newest migration (T23.5.3 — the SSF step-up record `ssf_step_up`; \
+            Some(&79),
+            "v79 is the newest migration (T23.6.1 — outbound SCIM targets: `scim_target`, \
+             `scim_target_link` and `scim_target_state`; v78 was T23.5.3 — the SSF step-up record `ssf_step_up`; \
              v77 was T23.5.2 — the SSF transmitter: `ssf_stream`, \
              `ssf_event_buffer` and `security_settings.oidc_ssf_enabled`; v76 was T23.2.4 — SAML \
              single logout: the participant record \

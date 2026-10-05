@@ -35,6 +35,7 @@ pub mod saml_authn_request;
 pub mod saml_idp_credential;
 pub mod saml_slo;
 pub mod saml_sp;
+pub mod scim_target;
 pub mod scim_token;
 pub mod scope;
 pub mod server_names;

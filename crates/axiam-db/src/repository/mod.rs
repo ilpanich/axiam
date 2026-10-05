@@ -45,6 +45,7 @@ mod saml_logout_run;
 mod saml_replay;
 mod saml_service_provider;
 mod saml_sp_session;
+mod scim_target;
 mod scim_token;
 mod scope;
 mod service_account;
@@ -106,6 +107,9 @@ pub use saml_logout_run::SurrealSamlLogoutRunRepository;
 pub use saml_replay::SurrealAssertionReplayRepository;
 pub use saml_service_provider::SurrealSamlServiceProviderRepository;
 pub use saml_sp_session::SurrealSamlSpSessionRepository;
+pub use scim_target::{
+    SurrealScimTargetLinkRepository, SurrealScimTargetRepository, SurrealScimTargetStateRepository,
+};
 pub use scim_token::SurrealScimTokenRepository;
 pub use scope::SurrealScopeRepository;
 pub use service_account::SurrealServiceAccountRepository;

@@ -28,6 +28,9 @@ use uuid::Uuid;
 struct RecordingRepo {
     entries: Arc<Mutex<Vec<CreateAuditLogEntry>>>,
     fail: bool,
+    /// How long each append takes: a datastore that is slow, so the worker's
+    /// queue holds entries that have not been written yet.
+    delay: Option<Duration>,
 }
 
 impl RecordingRepo {
@@ -37,8 +40,15 @@ impl RecordingRepo {
 
     fn failing() -> Self {
         Self {
-            entries: Arc::new(Mutex::new(Vec::new())),
             fail: true,
+            ..Self::default()
+        }
+    }
+
+    fn slow(delay: Duration) -> Self {
+        Self {
+            delay: Some(delay),
+            ..Self::default()
         }
     }
 
@@ -53,6 +63,9 @@ impl RecordingRepo {
 
 impl AuditLogRepository for RecordingRepo {
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
         if self.fail {
             return Err(AxiamError::Internal("boom".into()));
         }
@@ -756,6 +769,73 @@ async fn worker_exits_when_all_senders_dropped() {
     // worker's recv loop terminates (the "channel closed" branch).
     drop(mw);
     tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+// ---------------------------------------------------------------------------
+// Draining the queue before the process stops (T23.8.2, P23W5-A1)
+// ---------------------------------------------------------------------------
+//
+// The worker writes one entry at a time, so an entry the middleware queued may
+// still be waiting when the process decides to stop: a slow datastore, or the
+// minimal profile's lost lease, which correlates with exactly that. `drain` is
+// the composition root's way to wait for the queue to be written before the
+// runtime goes, bounded so a datastore that never answers cannot hold the stop.
+
+async fn audit_requests(mw: &AuditMiddleware, n: usize) {
+    let app = test::init_service(App::new().wrap(mw.clone()).route(
+        "/api/thing",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    ))
+    .await;
+    for _ in 0..n {
+        let req = test::TestRequest::get().uri("/api/thing").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+    }
+}
+
+#[actix_web::test]
+async fn drain_returns_once_every_queued_entry_is_written() {
+    let repo = RecordingRepo::slow(Duration::from_millis(20));
+    let mw = AuditMiddleware::spawn(repo.clone());
+    audit_requests(&mw, 25).await;
+    assert!(
+        repo.len() < 25,
+        "the responses went out before their audit rows were written"
+    );
+
+    assert!(mw.drain(Duration::from_secs(10)).await, "drained in time");
+    assert_eq!(
+        repo.len(),
+        25,
+        "every entry queued before the drain is written"
+    );
+    assert!(mw.is_shutting_down(), "a drain is the orderly stop");
+}
+
+#[actix_web::test]
+async fn drain_is_bounded_when_the_datastore_does_not_answer() {
+    let repo = RecordingRepo::slow(Duration::from_secs(3600));
+    let mw = AuditMiddleware::spawn(repo.clone());
+    audit_requests(&mw, 3).await;
+
+    let started = std::time::Instant::now();
+    assert!(
+        !mw.drain(Duration::from_millis(100)).await,
+        "a drain that cannot finish says so"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "and does not wait"
+    );
+}
+
+#[actix_web::test]
+async fn drain_of_a_dead_worker_reports_failure_at_once() {
+    let mw = AuditMiddleware::spawn(PanicRepo);
+    audit_requests(&mw, 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!mw.drain(Duration::from_secs(10)).await);
 }
 
 /// Audit repository whose `append` panics, killing the worker task so the

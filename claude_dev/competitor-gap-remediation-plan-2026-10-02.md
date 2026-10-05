@@ -1678,6 +1678,24 @@ initiation helper); OpenAPI; threat model; website.
 > it out of `main.rs`; two source-guard tests followed the move. Webhook delivery to
 > a loopback receiver needed the test seam the SSF deliverer has. The live-broker
 > tests remain CI's.
+>
+> **EXECUTED — G-8, W5: T23.8.2, 2026-10-05** (`fe75e1b`, `d28c618`, `25dace0`,
+> `5d5c7fa`; Opus 5.5). The audit-write path in the minimal profile, reviewed
+> against T19.27:
+> [`audit-durability-review-minimal-profile-2026-10-05.md`](audit-durability-review-minimal-profile-2026-10-05.md)
+> (A1 … A12). **T19.27 holds** — the profile does not touch
+> `write_erasure_audit_with_dlq` or its callers. One regression, **fixed** with
+> failing-first tests: a lost lease killed the process mid-flight, dropping up to
+> 4 096 queued audit rows and a purge between its erasure and its audit row (A1);
+> now an orderly stop per **D-72**, with `AuditMiddleware::drain`, a bounded FIFO
+> barrier, used by every orderly stop (closing A2, SIGTERM never waited for the
+> queue). The rest holds (A3, A4, A5, A6, A9) or is pre-existing (A7 the GDPR
+> dead-letter file configured in no shipped deployment, A8 GDPR request audits
+> fire-and-forget, A10 T-108's claimed controls absent, A11 the gRPC listener
+> outside the orderly stop, A12 the full profile's four `exit(1)`s) — issue bodies
+> for the wave PR. Threat model **2.34.0** (445 threats, 420 mitigated, 25 open):
+> **T-444** (Mitigated) and **T-445** (Open, accepted under D-59), T-405 amended,
+> **T-108 reopened** for the F4 review.
 
 **Target.** A documented *minimal* profile in which AXIAM runs with SurrealDB
 only, and a re-measured whole-stack resting footprint.
@@ -2227,6 +2245,7 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-69 | *Taken in T23.7.1 (Opus 5.5), 2026-10-05, accepted by the orchestrator.* What lockout means for CIBA (the Keycloak 26.7.x class) | The user's `locked_until` and `account_may_act` are checked at `bc-authorize` (the request becomes a decoy), at approval and at redemption; client-authentication failures get the token endpoint's audit row and buckets; no client lockout keyed on a caller-supplied `client_id`. Rejected: a client lockout anyone can trigger against a known client |
 | D-70 | *Taken in T23.7.1 (Opus 5.5), 2026-10-05, accepted by the orchestrator.* Rate limits | **`bc_authorize_per_min`** in the machine presets (60 / 600 / 6 000), keyed like `/oauth2/token`, plus a per-client bucket after authentication; a fixed 3 user notifications per user per minute that no preset moves; the CIBA grant counts against `token_per_min`. Rejected: a never-preset limit like `device_authorization` (breaks NAT'd call-centre fleets) |
 | D-71 | *Taken by the orchestrator, 2026-10-05, on T23.7.3's report.* §4 G-7 asks for "poll and ping end to end in the e2e harness", but the compose e2e stack cannot reach a ping receiver without weakening production: the deliverer requires `https` and refuses private addresses (`AXIAM__PKI__SSRF_ALLOWED_HOSTS` exempts the address rule, never the scheme), its client trusts the webpki roots only, the write-time policy refuses private literals and local names, and the e2e compose sets no `pki_encryption_key` | **Poll runs end to end in the compose e2e harness** (`frontend/e2e/ciba.spec.ts`, real browser approval); **ping runs end to end at the Rust level** (`ciba_ping_flow_test`: the REST routes, `CibaService` and the production `CibaPingDeliverer` through its loopback test seam, against a loopback receiver), the precedent W4 set for SSF push. Rejected: an operator setting for extra trust anchors on guarded outbound fetches (new production surface and a threat entry, to serve a test); dropping ping from the acceptance |
+| D-72 | *Raised in T23.8.2 (Opus 5.5), 2026-10-05; taken by the orchestrator.* D-59 says an instance that loses its singleton lease "exits non-zero" but not how soon; the first build exited at once, wherever it was, losing queued audit rows (T23.8.2's A1) | **An orderly stop with a 15 s backstop.** A lost lease raises a flag; the instance stops accepting at once, finishes in-flight requests, drains the audit queue (bounded at 5 s), joins the cleanup task and exits non-zero; `std::process::exit(1)` remains only as the backstop after 15 s (`LeaseTiming::lost_stop_deadline`). The audit drain applies to every orderly stop, SIGTERM in the full profile included. Rejected: an immediate exit (the regression); waiting the 30 s lease TTL (two instances serve longer) |
 
 ---
 

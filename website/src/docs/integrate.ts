@@ -835,6 +835,230 @@ export const INTEGRATE_PAGES: DocPage[] = [
             to: "docs",
             doc: "federation",
           },
+          {
+            title: "Outbound SCIM provisioning →",
+            body: "The other direction: AXIAM as the SCIM client, pushing this tenant's users and groups to downstream applications.",
+            to: "docs",
+            doc: "scim-outbound",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    slug: "scim-outbound",
+    section: "APIs & integration",
+    navLabel: "Outbound SCIM",
+    title: "Outbound SCIM provisioning",
+    intro:
+      "Push this tenant's users and groups to the applications that keep their own account lists. You register a downstream SCIM 2.0 service provider as a target; AXIAM creates, updates, deactivates and deletes the matching accounts there as people change here, and repairs drift every night.",
+    verifiedRelease: DOCS_VERIFIED_RELEASE,
+    blocks: [
+      { type: "h", id: "what", text: "What it does" },
+      {
+        type: "p",
+        text: "[SCIM provisioning](#/docs/scim) is the inbound direction: an identity provider pushes people *into* AXIAM. This is the other one. AXIAM is the **SCIM client** (RFC 7643, RFC 7644) and the system you register is the **service provider**: a SaaS application, a ticketing tool, a wiki — anything that exposes `/Users` and `/Groups` and would otherwise need an administrator to add and remove people by hand. When someone joins, changes name, moves team, is disabled or is erased in AXIAM, the application hears about it.",
+      },
+      {
+        type: "list",
+        items: [
+          "**A target is one downstream.** A tenant can register several; each has its own URL, credential, scope and policy.",
+          "**What is sent is a fixed set of attributes.** A user's `userName` (the AXIAM username, or the e-mail address, your choice), `name.givenName`, `name.familyName`, `displayName`, the primary `emails` value, `active` and `externalId`. A group's `displayName`, `externalId` and `members`. There is no mapping language, and no attribute is sent that is not in that list.",
+          "**`externalId` is the AXIAM id**, and the id the downstream assigns is remembered on a *link* record. That pair is how AXIAM finds its own accounts again.",
+          "**Delivery is level-triggered.** A change queues a *reference* (a user or group id and nothing else), and every attempt re-reads the target, the person and the link and sends what the downstream should look like *now*. Retries, reordering and duplicates therefore converge, and no attribute of a person ever sits in a queue.",
+          "**Human administrators only.** The registry holds a credential to an outbound endpoint and decides where a tenant's people are sent, so a service-account token is refused with `401`. Reading needs `scim_targets:read`; registering, replacing, deleting and reconciling need `scim_targets:write`. Both are seeded per tenant.",
+        ],
+      },
+      { type: "h", id: "register", text: "Register a target" },
+      {
+        type: "p",
+        text: "In the console, **Identity → SCIM Targets**. Over the API it is `/api/v1/scim-targets` (the `scim_targets` namespace of the SDKs' management surface). The tenant is the one your token belongs to.",
+      },
+      {
+        type: "steps",
+        steps: [
+          {
+            title: "Get a credential from the downstream",
+            body: "A bearer token, or an OAuth 2.0 client id and secret that can obtain a token with the client-credentials grant, with the right to manage users and groups through the downstream's SCIM endpoint.",
+          },
+          {
+            title: "Create the target",
+            body: "A name, the SCIM service root as `base_url`, how to authenticate, the credential, which users are in scope, and the policy. The credential is accepted here and **never returned by any call**.",
+            code: 'POST /api/v1/scim-targets\n{\n  "name": "HR system",\n  "base_url": "https://scim.example.com/scim/v2",\n  "auth": { "type": "bearer" },\n  "credential": "<token>",\n  "scope": { "type": "all_users" },\n  "push_groups": false,\n  "user_name_from": "username",\n  "deprovision": "deactivate"\n}',
+          },
+          {
+            title: "Let the first synchronisation run",
+            body: "A target created enabled starts a reconciliation straight away, which queues a reference for every user and group in scope. Its progress is on the target: `GET /api/v1/scim-targets/{id}` carries the last success and failure, the consecutive failures, the dead-lettered total and the last reconciliation.",
+          },
+        ],
+      },
+      {
+        type: "api",
+        endpoints: [
+          { method: "GET", path: "/api/v1/scim-targets", summary: "List the tenant's targets with their delivery state. Paged and searchable (name, base URL, id)." },
+          { method: "POST", path: "/api/v1/scim-targets", summary: "Register a target. The credential is required and write-only." },
+          { method: "GET", path: "/api/v1/scim-targets/{id}", summary: "One target and its delivery state. Never the credential." },
+          { method: "PUT", path: "/api/v1/scim-targets/{id}", summary: "Replace the configuration. `409` when the target changed since it was read." },
+          { method: "DELETE", path: "/api/v1/scim-targets/{id}", summary: "Delete the target, its links and its state. Nothing is deprovisioned downstream." },
+          { method: "POST", path: "/api/v1/scim-targets/{id}/reconcile", summary: "Start a reconciliation now: `202` when claimed, `409` while one is running or the target is disabled." },
+        ],
+      },
+      { type: "h", id: "auth", text: "Authentication and the credential" },
+      {
+        type: "table",
+        headers: ["`auth.type`", "What AXIAM sends", "Needs"],
+        rows: [
+          ["`bearer`", "`Authorization: Bearer <token>` to `base_url`", "The token as `credential`."],
+          [
+            "`oauth2_client_credentials`",
+            "A token request to `token_url` with the client id and secret, then `Authorization: Bearer <access token>` to `base_url`",
+            "`auth.token_url`, `auth.client_id`, optionally `auth.scope`, and the secret as `credential`. The access token is cached in memory for at most an hour (less if the response says so) and never stored.",
+          ],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**Write-only, and sealed at rest.** The credential is encrypted with AES-256-GCM under `pki_encryption_key` (`AXIAM__AUTH__PKI_ENCRYPTION_KEY`), the key webhook secrets use. No response carries it, and none says whether one is set. Without that key a write that carries a credential is `503`.",
+          "**Bound to its URL.** A credential does not follow the endpoint it was registered for. Changing `base_url` of a bearer target, `auth.token_url` of a client-credentials target, or switching `auth.type` requires the credential again in the same write, and is `400` naming the field otherwise. Without this rule an administrator who may edit a target but not read its credential could aim the stored one at a host they control. Leaving the credential out of a replacement otherwise keeps the stored one.",
+          "**Two administrators, no lost update.** A replacement is conditional on the version it read: if another administrator saved first, it is `409` and nothing is written. Reload and retry.",
+          "**The URL is checked twice.** At write time `base_url` and `token_url` are held to the webhook address policy: `https`, no credentials or fragment in the URL, at most 2 048 bytes, no IP literal that is not publicly routable and no `localhost`, `*.local` or `*.internal` name. At delivery every request resolves the host *again* and goes only to a publicly routable address, with the validated address pinned and **no redirect followed**, so a name that later points somewhere private, or a downstream that redirects, cannot carry the credential or a person's attributes anywhere you did not name.",
+        ],
+      },
+      { type: "h", id: "scope", text: "Scope and groups" },
+      {
+        type: "table",
+        headers: ["`scope`", "Who is provisioned"],
+        rows: [
+          ["`{ \"type\": \"all_users\" }`", "Every user of the tenant whose status is *active*."],
+          ["`{ \"type\": \"groups\", \"group_ids\": [...] }`", "Users who are **direct members** of any listed group (1 to 100 groups of this tenant; each is checked when you save). Membership through nesting or through a role is not followed."],
+        ],
+      },
+      {
+        type: "p",
+        text: "`push_groups` also creates the groups downstream, with their members: every group of the tenant for `all_users`, the listed groups otherwise. A group's `members` are the downstream ids of the users that are linked, so a member appears there once the user does. A group with more than 10 000 members is not pushed (it is dead-lettered with that reason).",
+      },
+      { type: "h", id: "deprovision", text: "Deprovisioning and erasure" },
+      {
+        type: "table",
+        headers: ["The user", "What happens downstream"],
+        rows: [
+          ["Active and in scope, not yet there", "`POST /Users` with `externalId` set to the AXIAM id. A `409` from the downstream is resolved by looking the account up by `externalId`: exactly one match is adopted; anything else is dead-lettered as a conflict."],
+          ["Active and in scope, already linked", "`PATCH` with `replace` operations on the mapped attributes only, skipped when nothing changed since the last send. Never a `PUT`: attributes the downstream owns are not overwritten."],
+          ["Leaves scope, or is disabled or otherwise not active", "Per `deprovision`: **`deactivate`** (the default) sets `active` to `false`; **`delete`** removes the account. A user who was never provisioned there is not created in order to be deactivated."],
+          ["Deleted or **erased** (GDPR)", "**`DELETE`, whatever `deprovision` says.** The link record survives the erasure only until that `DELETE` succeeds; it holds ids and a digest, never a personal attribute. A `DELETE` that is dead-lettered is retried by the nightly reconciliation."],
+        ],
+      },
+      {
+        type: "note",
+        text: "Deprovisioning and erasure are different decisions. A person who leaves a team is *deactivated* (or deleted) according to the target's policy, because you may want the account's history downstream. A person who exercises the right to erasure is *deleted* from every target, always.",
+      },
+      { type: "h", id: "triggers", text: "What triggers a push" },
+      {
+        type: "p",
+        text: "Changes are reported by the user and group stores themselves, after a write succeeds, so every writer is covered with nothing to configure: the console and the REST API, SCIM inbound, directory just-in-time provisioning and sync, SAML and OIDC federation sign-ins, and GDPR erasure. A user update pushes only when it touches something provisioned (username, e-mail, status, name and display fields), so a sign-in's bookkeeping queues nothing. A group's creation, rename, deletion and membership changes push, and linking a user also queues the groups they are in. A queue that is down never fails the change that caused it: the change is logged and the nightly reconciliation catches it.",
+      },
+      { type: "h", id: "reconcile", text: "Reconciliation" },
+      {
+        type: "p",
+        text: "Delivery cannot see a change nobody reported: a downstream administrator who edited or deleted an account, a message lost to a broker outage, an erasure the downstream refused. Reconciliation is the repair. It runs **nightly for every enabled target**, claimed in the datastore so that one replica runs it, and on demand with *Reconcile now* (`POST /api/v1/scim-targets/{id}/reconcile`) under the same claim: a second request while a run is held, or within five minutes of one, is `409`.",
+      },
+      {
+        type: "list",
+        items: [
+          "It **queues a reference** for every user and group in scope and for every linked resource, and the deliverer converges each.",
+          "It **reads the downstream** (`GET /Users`, and `/Groups` when groups are pushed, 100 at a time, within a page and a time budget). A linked account whose downstream form differs from what AXIAM would send has its digest cleared so the next sync re-sends it; a link whose downstream account has gone is dropped and the account created again.",
+          "It **deprovisions** a downstream account whose `externalId` names a user of this tenant that is out of scope, disabled or erased.",
+        ],
+      },
+      { type: "h", id: "untouched", text: "What is never touched downstream" },
+      {
+        type: "p",
+        text: "AXIAM only ever acts on accounts it created or adopted by `externalId`. A downstream account with no `externalId`, with one that is not an AXIAM id, or with the id of a user of *another tenant*, is an account the application made for itself: reconciliation never updates, deactivates or deletes it, and AXIAM never deletes accounts it does not know. **Deleting a target does not deprovision anything either**: the accounts AXIAM created stay in the service provider and AXIAM forgets them. To remove them, set `deprovision` to `delete`, let AXIAM push, and delete the target afterwards.",
+      },
+      { type: "h", id: "limits", text: "Delivery limits and retries" },
+      {
+        type: "p",
+        text: "One attempt is one pass of read, decide and send. The deliverer reports the outcome and the dispatcher decides what happens next, as for webhooks and SSF.",
+      },
+      {
+        type: "table",
+        headers: ["The downstream answers", "Outcome"],
+        rows: [
+          ["`2xx`", "Delivered. A `404` on a `DELETE` also counts as done."],
+          ["`408`, `429`, `5xx`, a timeout, a connection failure, a redirect", "Retried with backoff. A redirect is never followed."],
+          ["`401` on a client-credentials target", "The cached access token is dropped and the attempt retried."],
+          ["`401` or `403` on a bearer target, and any other `4xx`", "Dead-lettered: retrying will not change the answer until someone fixes the credential or the request."],
+          ["`404` on a `PATCH`", "The link is dropped and the account created again."],
+          ["The target is disabled or deleted since the message was queued", "Dead-lettered (`target disabled`, `target not found`)."],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**Per request:** 10 seconds from connect to last byte; a response body is read to 64 KiB (1 MiB for a list) and never logged.",
+          "**Retry schedule:** up to five attempts with exponential backoff from five seconds to one hour. The three variables are `AXIAM__SCIM_PUSH__MAX_ATTEMPTS`, `AXIAM__SCIM_PUSH__BACKOFF_BASE_MS` and `AXIAM__SCIM_PUSH__BACKOFF_CEILING_MS`; see [Webhooks → retry](#/docs/webhooks) for the table.",
+          "**Ordering is not promised and is not needed**, because each attempt computes the desired state fresh.",
+          "**Rate limit:** the registry's four writes (create, replace, delete, reconcile now) each have a per-IP bucket under `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` (default 30 a minute); reads are not limited, and no rate-limit profile moves it.",
+        ],
+      },
+      { type: "h", id: "failures", text: "Failures and notifications" },
+      {
+        type: "p",
+        text: "Every target carries its own delivery state, which is how you see that a downstream is refusing AXIAM: `last_success_at`, `last_failure_at`, a `last_failure_reason`, `consecutive_failures`, `dead_lettered_total` and `last_reconciled_at`. The reason is always one of a fixed set of short phrases (for example that the receiver refused the credential, answered with an HTTP status, or could not be reached): never a URL, a response body or a value.",
+      },
+      {
+        type: "p",
+        text: "A dead letter is recorded as an audit row, `scim_push.delivery_failed`. To be told, create a **notification rule** for the event type `scim_delivery_failed` (`/api/v1/notification-rules`): it mails the tenant's administrators through the same mechanism as every other rule, with no separate channel. The audit rows for the registry itself are `scim_target.created`, `scim_target.updated`, `scim_target.deleted` and `scim_target.reconcile_requested`; they name what changed and never a URL or a credential.",
+      },
+      { type: "h", id: "queues", text: "The AMQP queues" },
+      {
+        type: "p",
+        text: "Outbound SCIM is the third kind on the outbound dispatcher and has queues of its own, declared at startup: `axiam.scim_push`, `axiam.scim_push.retry` (the delay between attempts) and `axiam.scim_push.dlq` (dead letters). The webhook and SSF queues are untouched. A message is `{ target_id, resource_type, axiam_id }` and nothing else; the dead-letter queue discards after seven days, because the ids are user ids. They are described in `docs/api/asyncapi.yml`.",
+      },
+      { type: "h", id: "not-supported", text: "What is not supported" },
+      {
+        type: "list",
+        items: [
+          "**No attribute mapping language.** The attribute set is fixed; the only choice is whether `userName` is the username or the e-mail address.",
+          "**No enterprise-user or custom schema extensions, no `password`, no roles or entitlements, no photos or addresses.**",
+          "**No SCIM `Bulk`, and no `PUT` replace.** Users and groups are created with `POST`, changed with `PATCH` and removed with `DELETE`.",
+          "**No nested groups and no membership through roles.** Scope follows direct group membership.",
+          "**No two-way sync.** Nothing is read back into AXIAM; the downstream is only read to find drift, and its own accounts are left alone.",
+          "**No private downstream.** A service provider on a private address, a `.local` or `.internal` name or plain `http` is refused, at write time and again at delivery.",
+          "**No deprovisioning on delete,** as above.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "CONTRACT §31 — Outbound SCIM targets",
+            href: contractLink("31"),
+            note: "The normative text: shapes, every server rule an SDK can observe, error mapping, and `Sensitive<T>` for the credential.",
+          },
+          {
+            label: "RFC 7644 — SCIM protocol",
+            href: "https://www.rfc-editor.org/rfc/rfc7644",
+          },
+        ],
+      },
+      {
+        type: "cards",
+        cards: [
+          {
+            title: "SCIM provisioning (inbound) →",
+            body: "The other direction: let Okta, Entra or another IdP push people into AXIAM.",
+            to: "docs",
+            doc: "scim",
+          },
+          {
+            title: "Webhooks →",
+            body: "The retry schedule outbound deliveries share, and event notifications for systems that are not SCIM.",
+            to: "docs",
+            doc: "webhooks",
+          },
         ],
       },
     ],

@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.56";
+export const CONTRACT_VERSION = "1.57";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -40,6 +40,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "28": "#§28-mcp-resource-server-helpers-rfc-9728",
  "29": "#§29-saml-service-provider-registration-management-api-contract-155",
  "30": "#§30-directory-configuration-management-api-contract-154",
+ "31": "#§31-outbound-scim-targets-management-api-contract-157",
  "32": "#§32-ssf-stream-registration-and-the-receiver-helper-contract-156",
  "1.1": "#§11-grpc-only-operations",
  "1.1.1": "#§111-validate_token-and-introspect_token-contract-151",
@@ -225,6 +226,16 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "30.8": "#§308-required-tests",
  "30.9": "#§309-what-an-sdk-does-not-do",
  "30.10": "#§3010-per-sdk-posture",
+ "31.1": "#§311-canonical-operation-set",
+ "31.2": "#§312-shapes-normative",
+ "31.3": "#§313-server-rules-every-sdk-can-observe-normative",
+ "31.4": "#§314-error-mapping",
+ "31.5": "#§315-sensitivet-applicability",
+ "31.6": "#§316-per-language-naming-map",
+ "31.7": "#§317-retry",
+ "31.8": "#§318-required-tests",
+ "31.9": "#§319-what-an-sdk-does-not-do",
+ "31.10": "#§3110-per-sdk-posture",
  "32.1": "#§321-canonical-operation-set",
  "32.2": "#§322-shapes-normative",
  "32.3": "#§323-server-rules-every-sdk-can-observe-normative",

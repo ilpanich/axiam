@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta17";
-export const API_OPERATION_COUNT = 266;
-export const API_PATH_COUNT = 182;
+export const API_OPERATION_COUNT = 272;
+export const API_PATH_COUNT = 185;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -1349,8 +1349,38 @@ export const API_INDEX: ApiGroup[] = [
  {
   "id": "api-provisioning",
   "label": "Provisioning",
-  "blurb": "SCIM provisioning tokens. The SCIM 2.0 endpoints themselves are served under `/scim/v2`.",
+  "blurb": "SCIM provisioning tokens, and the outbound SCIM targets AXIAM pushes users and groups to. The SCIM 2.0 endpoints themselves are served under `/scim/v2`.",
   "operations": [
+   {
+    "method": "GET",
+    "path": "/api/v1/scim-targets",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/scim-targets",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/scim-targets/{id}",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/scim-targets/{id}",
+    "summary": "A **replacement**: an omitted optional member takes its default, except the credential, which absent keeps."
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/scim-targets/{id}",
+    "summary": "The target, its link rows and its delivery state."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/scim-targets/{id}/reconcile",
+    "summary": "Start a reconciliation now."
+   },
    {
     "method": "GET",
     "path": "/api/v1/scim-tokens",

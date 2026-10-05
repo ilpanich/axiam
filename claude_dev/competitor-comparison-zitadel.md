@@ -56,7 +56,7 @@ ahead on the polish of a mature hosted product.
 | RP-initiated / back-channel logout | Yes | Yes | [Z7][Z13] |
 | SAML 2.0 | **IdP** (G-2, Phase 23) and SP | **IdP** (and SAML external IdPs) | [Z14][Z15] |
 | External IdPs | OIDC, OAuth2, SAML, **LDAP / Active Directory** (G-3), Google, GitHub, Microsoft, Apple | OIDC, OAuth2, JWT, SAML, **LDAP**, Azure AD, GitHub, GitLab, Google, Apple, Zitadel | [Z15] |
-| SCIM 2.0 server | Yes (users and groups) | **Preview**; users documented | [Z16] |
+| SCIM 2.0 server | Yes (users and groups); and, since G-6 (Phase 23, W5), an outbound SCIM client for downstream applications | **Preview**; users documented | [Z16] |
 | Extension model | Reactors (external AMQP actors, any SDK language), HMAC-signed webhooks | Actions v2: signed webhook/call targets on request, response, function and event | [Z17] |
 | APIs | REST, gRPC, AMQP | gRPC, connectRPC and REST for every resource (management-oriented) | [Z1] |
 | Rate limiting | **On by default**, posture presets | No built-in limiter; lockout off by default (`MaxPasswordAttempts: 0`) | [Z18] |
@@ -140,6 +140,7 @@ ahead on the polish of a mature hosted product.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-05 | G-6 (outbound SCIM provisioning) complete on the Phase 23 W5 branch: AXIAM can push a tenant's users and groups to downstream SCIM 2.0 service providers (contract §31). The compared Zitadel surface is the SCIM *server*, so the row's Zitadel cell is unchanged; AXIAM's cell now also names the outbound client. | — |
 | 2026-10-04 | G-2 (SAML 2.0 identity provider) complete on the Phase 23 W4 branch: per-tenant IdP with SP- and IdP-initiated Web Browser SSO over HTTP-Redirect and HTTP-POST, always-signed assertions under a tenant credential issued by the tenant's own CA (issue / promote / retire), a pairwise persistent `NameID` by default, per-SP `SessionIndex` and single logout tied to session revocation and the revocation feed, IdP metadata, SP metadata import as a reviewed draft, the SP registry API (contract §29) and console page; round-tripped with samael as a reference SP and with a real Keycloak 26.7.0 brokering to AXIAM. Assertion encryption and the artifact binding stay out (D-2). | — |
 | 2026-10-04 | G-3 (LDAP / Active Directory identity source) complete on the Phase 23 W3 branch: bind-as-user over mandatory TLS, JIT provisioning, explicit group mapping with nesting, incremental and nightly sync with soft-delete, the address guard, the management API (contract §30) and the console page; tested against a real OpenLDAP and a real Samba AD DC. The external-IdP row now lists LDAP / Active Directory and P1 item 2 is closed. | — |
 | 2026-10-02 | Baseline written. Since the run-5 baseline (v4.16.2): v4.17.0 added RFC 7591/7592 dynamic client registration, "Sign in with Zitadel" and native app links for passkeys. v4.17.2 fixed token-exchange downscoping. v4.18.0 was withdrawn ("skip this release"). v4.19.2 made session-cookie signing mandatory (breaking change). Several critical and high advisories were fixed. The CIMD pull request is still open. `zitadel/nextgen` appeared as the preview of the next major version. | [Z9][Z10][Z19][Z20] |

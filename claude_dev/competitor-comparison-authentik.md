@@ -59,7 +59,7 @@ would turn it into an application-portal product.
 | Front-channel logout | No — declined by design (D-6); back-channel logout shipped | Yes | [A15] |
 | OpenID certification | Not yet (conformance suites run and published) | **OpenID Certified** for OP and logout profiles (2026.8) | [A5] |
 | SAML 2.0 | IdP (G-2, Phase 23) **and** SP | IdP **and** SP; WS-Federation (enterprise) | [A5][A16] |
-| SCIM 2.0 | Inbound endpoint (RFC 7643/7644) | Inbound SCIM source **and** outbound SCIM provider | [A17][A18] |
+| SCIM 2.0 | Inbound endpoint (RFC 7643/7644) **and** outbound SCIM client (G-6, Phase 23: per-tenant targets, users and groups, reconciliation) | Inbound SCIM source **and** outbound SCIM provider | [A17][A18] |
 | LDAP / Kerberos as user source | LDAP/AD yes (G-3, Phase 23; nested groups, sync); Kerberos no (D-1) | Yes | [A16] |
 | LDAP / RADIUS / proxy / RAC outposts | No | Yes (RADIUS EAP-TLS enterprise) | [A2] |
 | MFA | TOTP, WebAuthn passkeys and security keys, attestation policy (FIDO MDS) | TOTP, WebAuthn (AAGUID allowlist via FIDO MDS), Duo, SMS, email OTP, recovery codes, device trust | [A19][A20] |
@@ -98,7 +98,11 @@ not authentik's.
 **P2 — valuable, not blocking**
 
 4. **Outbound SCIM provisioning.** Authentik pushes users and groups to
-   downstream applications [A18]; AXIAM only receives SCIM.
+   downstream applications [A18]; AXIAM only receives SCIM. *Closed by G-6
+   (Phase 23, W5): AXIAM is a SCIM 2.0 client of the downstream service
+   providers a tenant registers (bearer or OAuth 2.0 client credentials,
+   users and groups, `deactivate` or `delete`, erasure always `DELETE`,
+   nightly and on-demand reconciliation, contract §31).*
 5. **Shared Signals Framework (CAEP/RISC).** Offered by authentik (enterprise)
    and Keycloak (experimental). It fits AXIAM's event story (webhooks, AMQP)
    and would let relying parties revoke sessions in near real time. *Closed
@@ -162,6 +166,7 @@ unreliable. Adding it as a benchmark target is the honest way to settle that.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-05 | G-6 (outbound SCIM provisioning) complete on the Phase 23 W5 branch: a tenant registers downstream SCIM 2.0 service providers (bearer token or OAuth 2.0 client credentials, sealed and write-only, bound to its URL; scope of every user or the members of chosen groups; deactivate or delete on leaving scope), AXIAM pushes user and group lifecycle changes as `POST` / `PATCH` / `DELETE` through the outbound address guard with retry and dead-lettering, a GDPR erasure always deletes downstream, reconciliation repairs drift nightly and on demand and never touches an account the downstream's own application made, and a dead letter can notify the tenant's administrators; management API (contract §31) and console page. The authentik row and gap item 4 now read as closed. | [A18] |
 | 2026-10-04 | G-2 (SAML 2.0 identity provider) complete on the Phase 23 W4 branch: per-tenant IdP with SP- and IdP-initiated Web Browser SSO over HTTP-Redirect and HTTP-POST, always-signed assertions under a tenant credential issued by the tenant's own CA (issue / promote / retire), a pairwise persistent `NameID` by default, per-SP `SessionIndex` and single logout tied to session revocation and the revocation feed, IdP metadata, SP metadata import as a reviewed draft, the SP registry API (contract §29) and console page; round-tripped with samael as a reference SP and with a real Keycloak 26.7.0 brokering to AXIAM. Assertion encryption and the artifact binding stay out (D-2). | — |
 | 2026-10-04 | G-5 (Shared Signals Framework transmitter) complete on the Phase 23 W4 branch: SSF 1.0 with CAEP `session-revoked`, `credential-change`, `assurance-level-change` and RISC `account-disabled` / `account-enabled` / `account-purged` as EdDSA-signed SETs, push (RFC 8935) through the outbound address guard and poll (RFC 8936), the receiver's stream management API under an `ssf.manage` client credential, discovery, administrator-registered streams (contract §32). The optional SDK receiver helper follows the merge (D-35). | — |
 | 2026-10-04 | G-3 (LDAP / Active Directory identity source) complete on the Phase 23 W3 branch: bind-as-user over mandatory TLS, JIT provisioning, explicit group mapping with nesting, incremental and nightly sync with soft-delete, the address guard, the management API (contract §30) and the console page; tested against a real OpenLDAP and a real Samba AD DC. Kerberos stays out of scope (D-1), so the row reads LDAP/AD yes, Kerberos no. | — |

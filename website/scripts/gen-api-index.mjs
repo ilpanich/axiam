@@ -87,8 +87,9 @@ const DOMAINS = [
   },
   {
     label: "Provisioning",
-    blurb: "SCIM provisioning tokens. The SCIM 2.0 endpoints themselves are served under `/scim/v2`.",
-    tags: ["scim-tokens"],
+    blurb:
+      "SCIM provisioning tokens, and the outbound SCIM targets AXIAM pushes users and groups to. The SCIM 2.0 endpoints themselves are served under `/scim/v2`.",
+    tags: ["scim-tokens", "scim-targets"],
   },
   {
     label: "Shared signals",

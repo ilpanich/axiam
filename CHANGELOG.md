@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Outbound SCIM provisioning (G-6, T23.6.1 – T23.6.4, contract 1.57).** A
+  tenant administrator can register downstream SCIM 2.0 service providers
+  (**targets**) and AXIAM pushes the tenant's user and group lifecycle to them,
+  with reconciliation. T23.6.1 added the model (schema v79: `scim_target`,
+  `scim_target_link` and `scim_target_state`; the credential, a bearer token or
+  an OAuth 2.0 client secret, sealed with AES-256-GCM under
+  `pki_encryption_key`, write-only); T23.6.2 the lifecycle-to-SCIM translation
+  and delivery on the shared dispatcher; T23.6.3 the nightly and on-demand
+  reconciliation, the dead-letter notification (`scim_delivery_failed`) and
+  erasure propagation. **T23.6.4 adds the management surface:**
+  `GET`/`POST /api/v1/scim-targets`, `GET`/`PUT`/`DELETE
+  /api/v1/scim-targets/{id}` and `POST /api/v1/scim-targets/{id}/reconcile`
+  (`202` when the run was claimed, `409` while one holds the claim or the
+  target is disabled), for human administrators only (a service-account token
+  is `401`) under the new permissions `scim_targets:read` and
+  `scim_targets:write`. `GET` returns the target with its delivery state (last
+  success and failure, a fixed-vocabulary reason, consecutive failures,
+  dead-lettered total, last reconciliation) and **never the credential**. Every
+  write is validated: `base_url` and `token_url` under the webhook outbound
+  address policy (https, no private or local address), a group scope of 1 to
+  100 groups of the tenant, bounded name, client id and credential. **The
+  credential is bound to its URL:** moving it (`base_url` of a bearer target,
+  `token_url` of a client-credentials one) or switching the authentication kind
+  without supplying it is `400` naming the field; an update is conditional on
+  the version it read (`409` when overtaken); a credential without
+  `pki_encryption_key` is `503`. Creating a target enabled, or enabling one,
+  starts a reconciliation. Deleting a target removes its links and state and
+  **does not deprovision anything downstream.** New setting
+  `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` (default 30, one bucket per
+  write route, never moved by a profile), documented in
+  `docs/deployment/rate-limit-sizing.md` and the deployment guide. The admin
+  console gains **Identity → SCIM Targets** (list with delivery state, create
+  and edit with the auth-kind switch, a write-only credential field that is
+  required when the URL or kind changes, a group scope picker, the deprovision
+  policy, delete with the downstream warning, *Reconcile now*). `CONTRACT.md`
+  gains **§31 Outbound SCIM targets** (contract **1.57**, non-breaking: SHOULD
+  as part of §27, in all eleven SDKs; `ScimTargetInput.credential` is
+  `Sensitive<T>`); `sdks/openapi.json` and `sdks/management-registry.json` are
+  regenerated (190 operations across 28 namespaces, the new `scim_targets`
+  namespace). The website's *Integrate* section gains **Outbound SCIM
+  provisioning**, and the three competitor comparisons now record the feature.
+  **The SDKs must re-sync `CONTRACT.md`, `openapi.json` and
+  `management-registry.json` from the merged commit.**
+
 - **Outbound SCIM provisioning: reconciliation, dead-letter notification and
   erasure propagation (T23.6.3, G-6, D-58).** A `scim_reconcile` job in the
   cleanup loop (listed in `/health/jobs`) reconciles each enabled target once a

@@ -69,7 +69,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           ],
           [
             "Entity collections",
-            "`users`, `groups`, `roles`, `permissions`, `resources`, `service-accounts`, `oauth2-clients`, `organizations`, `tenants`, `certificates`, `pgp-keys`, `webhooks`, `reactors`, `notification-rules`, `federation-configs`, `scim-tokens`, `audit-logs`, `settings`.",
+            "`users`, `groups`, `roles`, `permissions`, `resources`, `service-accounts`, `oauth2-clients`, `organizations`, `tenants`, `certificates`, `pgp-keys`, `webhooks`, `reactors`, `notification-rules`, `federation-configs`, `scim-tokens`, `scim-targets`, `audit-logs`, `settings`.",
           ],
           ["`/oauth2/*`", "The authorization-server endpoints. See [OAuth2 & OIDC](#/docs/oauth2)."],
           ["`/uma2/*`", "The UMA 2.0 Protection API. See [UMA 2.0](#/docs/uma)."],
@@ -109,7 +109,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "An operation that lists both admits either. In `1.0.0-beta17` those are the eight **management families** — resources, scopes, permissions, roles (the assignment routes included), groups, service accounts, certificates (generate, sign-csr, bind, list, get, revoke) and webhooks — plus `POST /api/v1/authz/check` and `/api/v1/authz/check/batch`. Every other route is human-only and answers a service-account token with `401`: self-service (`/auth/me`, MFA, sessions, password change), users, organizations and tenants, settings, CA certificates, PGP keys, SCIM tokens, federation configuration, OAuth2 clients, reactors, audit logs, notification rules, email config and WebAuthn policy. Before `1.0.0-beta17` every management route took a user token only, so a service account could authenticate and then reach nothing but `/authz/check`.",
+        text: "An operation that lists both admits either. In `1.0.0-beta17` those are the eight **management families** — resources, scopes, permissions, roles (the assignment routes included), groups, service accounts, certificates (generate, sign-csr, bind, list, get, revoke) and webhooks — plus `POST /api/v1/authz/check` and `/api/v1/authz/check/batch`. Every other route is human-only and answers a service-account token with `401`: self-service (`/auth/me`, MFA, sessions, password change), users, organizations and tenants, settings, CA certificates, PGP keys, SCIM tokens, outbound SCIM targets, federation configuration, OAuth2 clients, reactors, audit logs, notification rules, email config and WebAuthn policy. Before `1.0.0-beta17` every management route took a user token only, so a service account could authenticate and then reach nothing but `/authz/check`.",
       },
       {
         type: "list",

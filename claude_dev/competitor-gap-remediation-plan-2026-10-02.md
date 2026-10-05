@@ -1861,6 +1861,18 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > **T-407** (model 2.31.0: 406 threats, 389 mitigated), next schema **v79**,
 > next contract version **1.57** (versions follow merge order: §31 = 1.57,
 > §33 = 1.58), findings **P23W5-NN**.
+>
+> **G-7 gate met, 2026-10-05 (D-60).** Four harness commits (`0dc5419`, `27abb89`,
+> `8655355`, `abfdb08`) made `fapi-conformance.yml` run end to end for the first
+> time; run 3 (37286570424, `claude/phase23-w5` at `abfdb08`, before any CIBA code,
+> `module_timeout=30`) completed every step but the final gate. Every module that
+> finishes without a browser `PASSED` and matches the 2026-09-25 baseline —
+> mTLS 10/37, self-signed 10/37, `private_key_jwt` 15/56 (+1 `SKIPPED`, as the
+> baseline) — with no `FAILED`, `INTERRUPTED` or timeout; the rest sat `WAITING`
+> for a browser, as D-60 expects, among them the three judged `REVIEW`/`WARNING`
+> modules, which therefore produced no verdict in CI. The baseline for those stays
+> the 2026-09-25 runs. It is a smoke run (built from the checkout), not
+> submission evidence. T23.7.1 may start.
 
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This

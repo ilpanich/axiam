@@ -1,0 +1,192 @@
+# AXIAM minimal profile (no broker): SurrealDB + axiam-server, nothing else.
+# Usage: just minimal-up   (docker compose -f docker/docker-compose.minimal.yml up -d)
+#
+# This is the T23.8.3 / G-8 stack. `AXIAM__AMQP__ENABLED=false` runs AXIAM
+# without RabbitMQ: no connection, no topology, no broker URL, no AMQP signing
+# key. Outbound deliveries (webhooks, SSF push, outbound SCIM, CIBA ping) and
+# transactional mail run on in-process queues instead. Read
+# docs/deployment/README.md, "Minimal profile (no broker)", before relying on
+# it: it is single-instance by definition, it loses queued deliveries on a
+# restart, and it has no Reactors, no asynchronous authorization over AMQP and
+# no external audit ingestion over AMQP.
+#
+# Like docker-compose.prod.yml this file is a local / single-node stack and is
+# not a production blueprint. The released server image is pulled from the
+# project's registry, so AXIAM_IMAGE_TAG must name a release that contains the
+# profile (T23.8.1). `just minimal-up` supplies the workspace version and mints
+# the secrets the server needs under docker/.secrets/ (gitignored).
+#
+# What is deliberately NOT here, against the prod stack: RabbitMQ and its TLS
+# material, the broker CA mount, AXIAM__AMQP__* and Vault. The server reads its
+# secrets from the environment (the secret provider default, `env`) — the
+# Vault path of docker-compose.prod.yml is a hardening step, not a
+# prerequisite, and a profile whose point is being small does not start a
+# second service to hold six values. docs/deployment/vault.md applies to this
+# profile unchanged if you want it: set AXIAM__AUTH__SECRET_PROVIDER=vault.
+# There is no plaintext AMQP key anywhere in this file, and it sets no
+# AXIAM__AMQP__URL (scripts/check-amqp-transport.py only inspects services that
+# do).
+
+# Its own Compose project, so its volumes (axiam-minimal_surrealdb-data,
+# axiam-minimal_gdpr-audit-dlq) can never be the dev or prod stack's: those share
+# the project name `docker` and, with it, a datastore whose credentials this
+# stack does not know.
+name: axiam-minimal
+
+services:
+  # ---------------------------------------------------------------------------
+  # One-shot init: hand both named volumes to the non-root user (65532) that
+  # SurrealDB and the distroless server image both run as. Docker creates a
+  # named volume's mount point owned by root when the path is absent from the
+  # image, and neither process can then write — SurrealDB cannot open its
+  # datastore, and the server could not append the GDPR dead-letter file (the
+  # failure would only surface on the day the datastore is already failing).
+  # Same shape as surrealdb-init in the other compose files. Idempotent.
+  # ---------------------------------------------------------------------------
+  volume-init:
+    image: busybox
+    container_name: axiam-minimal-volume-init
+    command: ["sh", "-c", "chown -R 65532:65532 /data /dlq && chmod -R u+rwX /data /dlq"]
+    volumes:
+      - surrealdb-data:/data
+      - gdpr-audit-dlq:/dlq
+    # Nothing to reach; a root container with no network.
+    network_mode: "none"
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # SurrealDB — the only datastore, and in this profile also the singleton
+  # lease's home (see the axiam-server comment on replicas).
+  # ---------------------------------------------------------------------------
+  surrealdb:
+    image: surrealdb/surrealdb:v3
+    container_name: axiam-minimal-surrealdb
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    # Persist on the mounted volume. Without a PATH argument the default is
+    # `memory`, which wipes all state on every container restart.
+    command: start --user ${AXIAM__DB__USERNAME:?SurrealDB username required - run 'just minimal-up' or export AXIAM__DB__USERNAME} --pass ${AXIAM__DB__PASSWORD:?SurrealDB password required - run 'just minimal-up' or export AXIAM__DB__PASSWORD} --log info surrealkv:/data/axiam.db
+    volumes:
+      - surrealdb-data:/data
+    healthcheck:
+      test: ["CMD", "/surreal", "isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - axiam-minimal
+
+  # ---------------------------------------------------------------------------
+  # AXIAM server (REST + gRPC), minimal profile
+  # ---------------------------------------------------------------------------
+  axiam-server:
+    # Same registry, signing and tag rules as docker-compose.prod.yml: no moving
+    # `latest` tag exists for a pre-release, so AXIAM_IMAGE_TAG is mandatory and
+    # `just minimal-up` defaults it to the workspace version. The tag must be a
+    # release that contains AXIAM__AMQP__ENABLED; an older image ignores the
+    # variable and then refuses to boot for want of a broker.
+    image: ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:?image tag required - run 'just minimal-up', which defaults it to the workspace version, or export AXIAM_IMAGE_TAG=1.0.0-betaNN}
+    # Build from local source instead — uncomment this block (and comment out
+    # `image:` above), then `docker compose -f docker/docker-compose.minimal.yml
+    # up -d --build`:
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile.server
+    container_name: axiam-minimal-server
+    # ONE REPLICA, ON PURPOSE, and no `deploy.replicas` / `--scale` here. Without
+    # a broker nothing carries a decision-cache invalidation from one instance
+    # to another, so a second instance would serve stale authorization
+    # decisions after a revoked role or a changed permission. AXIAM enforces
+    # this itself rather than trusting a replica count: the minimal profile
+    # holds a singleton lease row in SurrealDB, a second live instance is
+    # refused at boot after a 45 s wait, and an instance that loses its lease
+    # stops in order and exits non-zero (D-59, D-72). The fixed container_name
+    # below also makes Compose refuse `--scale axiam-server=2` outright.
+    ports:
+      # Loopback only, exactly as in docker-compose.prod.yml: put a TLS-
+      # terminating proxy on this host in front of it. Remove the mappings when
+      # something else on the compose network is the only client.
+      - "127.0.0.1:8090:8090"   # REST API
+      - "127.0.0.1:50051:50051" # gRPC
+    environment:
+      # The minimal profile. Default `true`; `false` skips the broker entirely
+      # and starts the in-process outbound dispatcher and mail worker.
+      AXIAM__AMQP__ENABLED: "false"
+      # SurrealDB's Ws engine takes a bare `host:port`, not a URL.
+      AXIAM__DB__URL: "surrealdb:8000"
+      AXIAM__DB__USERNAME: "${AXIAM__DB__USERNAME:?SurrealDB username required - run 'just minimal-up' or export AXIAM__DB__USERNAME}"
+      AXIAM__DB__PASSWORD: "${AXIAM__DB__PASSWORD:?SurrealDB password required - run 'just minimal-up' or export AXIAM__DB__PASSWORD}"
+      AXIAM__DB__NAMESPACE: "axiam"
+      AXIAM__DB__DATABASE: "axiam"
+      AXIAM__SERVER__HOST: "0.0.0.0"
+      AXIAM__GRPC__HOST: "0.0.0.0"
+      # Secrets from the environment (`env` is the secret provider default; it is
+      # stated so a reader does not have to look it up). `just minimal-up`
+      # generates each one on first run and keeps them under docker/.secrets/.
+      #  * the JWT signing pair is required by every build;
+      #  * the pepper is mandatory in a release build — client secrets are stored
+      #    as a keyed tag with no unkeyed fallback, so the server refuses to boot
+      #    without it;
+      #  * the email key is what lets the in-process mail worker decrypt the
+      #    tenant mail configuration. Without it no mail is sent (verification,
+      #    password reset, GDPR export notices, notification rules).
+      # The AMQP signing key is NOT needed: with the broker off there is nothing
+      # to sign.
+      AXIAM__AUTH__SECRET_PROVIDER: "env"
+      AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?JWT private key missing - run 'just minimal-up' instead of raw docker compose}"
+      AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?JWT public key missing - run 'just minimal-up' instead of raw docker compose}"
+      AXIAM__AUTH__PEPPER: "${AXIAM__AUTH__PEPPER:?auth pepper missing - run 'just minimal-up' instead of raw docker compose}"
+      AXIAM__AUTH__EMAIL_ENCRYPTION_KEY: "${AXIAM__AUTH__EMAIL_ENCRYPTION_KEY:?email encryption key missing - run 'just minimal-up' instead of raw docker compose}"
+      # WebAuthn and the issuer are validated against what the BROWSER and the
+      # relying parties see, not the address the API listens on — set these to
+      # your public name before enrolling a passkey or pointing a client at it
+      # (see the notes on the same variables in docker-compose.prod.yml; RP_ID
+      # cannot change later without invalidating every enrolled passkey).
+      AXIAM__AUTH__WEBAUTHN_RP_ID: "${AXIAM_WEBAUTHN_RP_ID:-localhost}"
+      AXIAM__AUTH__WEBAUTHN_RP_ORIGIN: "${AXIAM_WEBAUTHN_RP_ORIGIN:-https://localhost}"
+      AXIAM__AUTH__OAUTH2_ISSUER_URL: "${AXIAM__AUTH__OAUTH2_ISSUER_URL:-http://localhost:8090}"
+      # T19.27 / T23.8.2: the second sink for a failed GDPR erasure audit write
+      # (`gdpr.user_pseudonymized`, `tenants.deleted`) — an append-only file, one
+      # JSON line per record, on a NAMED VOLUME so it outlives the container.
+      # The `axiam.audit.dlq` log event is the first sink and the only one when
+      # this is unset; collect the container log as well. Replaying the file
+      # into the audit trail is a manual step (docs/deployment/README.md).
+      AXIAM__GDPR_AUDIT_DLQ_FILE: "/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl"
+      # One proxy in front of /api: trusted_hops = proxies - 1 (see the long note
+      # in docker-compose.prod.yml). Raise it only if you add a hop.
+      AXIAM__RATE_LIMIT__TRUSTED_HOPS: "${AXIAM__RATE_LIMIT__TRUSTED_HOPS:-0}"
+      RUST_LOG: "${RUST_LOG:-axiam=info}"
+    volumes:
+      - gdpr-audit-dlq:/var/lib/axiam/audit-dlq
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      surrealdb:
+        condition: service_healthy
+    # An orderly stop writes the audit rows the middleware still holds (up to 5 s)
+    # and lets in-flight requests finish before the process exits; SIGKILL does
+    # not. Compose's default grace period is 10 s, which is shorter than a slow
+    # stop needs, so give it 30 s (the Kubernetes default, and above the 20 s the
+    # audit-durability review asks for).
+    stop_grace_period: 30s
+    healthcheck:
+      # Distroless has no shell; the binary carries its own healthcheck subcommand.
+      test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # The first boot runs the schema migrations.
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - axiam-minimal
+
+networks:
+  axiam-minimal:
+
+volumes:
+  surrealdb-data:
+  # The GDPR audit dead-letter file. Back this volume up with the datastore.
+  gdpr-audit-dlq:

@@ -1677,7 +1677,7 @@ where
             // would be reported as success — the exact silent failure §4.2
             // exists to remove.
             let publisher = Arc::new(axiam_amqp::CacheInvalidationPublisher::new(
-                Arc::clone(&amqp) as Arc<dyn axiam_amqp::PublisherChannelFactory>,
+                Arc::clone(amqp) as Arc<dyn axiam_amqp::PublisherChannelFactory>,
                 amqp_signing_key.clone(),
                 replica_id,
             ));
@@ -1694,7 +1694,7 @@ where
             // invalidate. It must NOT take the process down: that would turn a
             // broker blip into an availability outage, which is precisely the
             // trade §4.2 refuses to make.
-            let consumer_amqp = Arc::clone(&amqp);
+            let consumer_amqp = Arc::clone(amqp);
             let consumer_cache = Arc::clone(cache);
             let consumer_key = amqp_signing_key.clone();
             let consumer_liveness = Arc::clone(&liveness);

@@ -691,7 +691,10 @@ async fn creating_an_enabled_reactor_in_the_minimal_profile_is_409_naming_the_pr
     assert_eq!(resp.status().as_u16(), 409);
     let body: Value = test::read_body_json(resp).await;
     let text = body.to_string();
-    assert!(text.contains("minimal profile"), "names the profile: {body}");
+    assert!(
+        text.contains("minimal profile"),
+        "names the profile: {body}"
+    );
     assert!(
         text.contains("AXIAM__AMQP__ENABLED=false"),
         "names the switch: {body}"
@@ -717,22 +720,35 @@ async fn enabling_a_reactor_in_the_minimal_profile_is_409_but_disabled_writes_an
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 201, "a disabled registration is fine");
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "a disabled registration is fine"
+    );
     let created: Value = test::read_body_json(resp).await;
     let id = created["id"].as_str().unwrap().to_string();
 
     let enable = authed!(put, &format!("/api/v1/reactors/{id}"), token)
         .set_json(json!({ "enabled": true }))
         .to_request();
-    assert_eq!(test::call_service(&app, enable).await.status().as_u16(), 409);
+    assert_eq!(
+        test::call_service(&app, enable).await.status().as_u16(),
+        409
+    );
 
     let rename = authed!(put, &format!("/api/v1/reactors/{id}"), token)
         .set_json(json!({ "description": "still disabled" }))
         .to_request();
-    assert_eq!(test::call_service(&app, rename).await.status().as_u16(), 200);
+    assert_eq!(
+        test::call_service(&app, rename).await.status().as_u16(),
+        200
+    );
 
     let delete = authed!(delete, &format!("/api/v1/reactors/{id}"), token).to_request();
-    assert_eq!(test::call_service(&app, delete).await.status().as_u16(), 204);
+    assert_eq!(
+        test::call_service(&app, delete).await.status().as_u16(),
+        204
+    );
 }
 
 /// A disabled registration may be created even when nothing can reach it: it

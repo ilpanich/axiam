@@ -363,7 +363,7 @@ impl World {
     /// `AppState` whose PKI services share this world's custodians, so a CA made
     /// by `ca_service` is one the credential service can sign under, and a key
     /// this file seals is one the service can open.
-    fn state(&self) -> AppState<TestDb> {
+    fn state(&self) -> web::Data<AppState<TestDb>> {
         let mut state = AppState::for_test(self.db.clone(), self.auth.clone());
         let pki_config = PkiConfig::default();
         state.saml_idp.credential_service = SamlIdpCredentialService::new(
@@ -383,7 +383,7 @@ impl World {
             Arc::clone(&state.crypto_semaphore),
             Arc::clone(&self.custodians),
         );
-        state
+        web::Data::new(state)
     }
 
     fn credentials(&self) -> SurrealSamlIdpCredentialRepository<TestDb> {
@@ -555,7 +555,7 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($w.auth.clone()))
                 .app_data(web::Data::new($w.authz.clone()))
-                .app_data(web::Data::new($state))
+                .app_data($state)
                 .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &$limits)),
         )
         .await

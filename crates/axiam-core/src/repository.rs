@@ -2924,6 +2924,21 @@ pub trait ReactorRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// How many reactor registrations are **enabled**, counted across *all*
+    /// tenants.
+    ///
+    /// The one deployment-wide question the minimal (broker-less) profile asks
+    /// at boot (G-8, D-59): an enabled `fail_closed` reactor with no transport
+    /// would deny logins in every tenant that registered one, so the server
+    /// refuses to start while the answer is not zero. Deliberately not
+    /// tenant-scoped, and deliberately a count rather than a listing — it is
+    /// read once, by the composition root, never by a request.
+    ///
+    /// Required, with no provided default: a default that answered zero would
+    /// compile everywhere and make every test double say "no reactors" without
+    /// having been asked.
+    fn count_enabled(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 // ---------------------------------------------------------------------------

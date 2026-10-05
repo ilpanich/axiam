@@ -452,6 +452,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "ciba_approval_email_template",
         sql: SCHEMA_V82,
     },
+    Migration {
+        version: 83,
+        name: "minimal_profile_lease",
+        sql: SCHEMA_V83,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4505,9 +4510,52 @@ DEFINE FIELD OVERWRITE kind ON TABLE email_template TYPE string
                       'ciba_approval'];
 ";
 
+// -----------------------------------------------------------------------
+// Schema v83 — T23.8.1 / G-8, D-59: the minimal profile's singleton lease
+// -----------------------------------------------------------------------
+//
+// With `AXIAM__AMQP__ENABLED=false` there is no broker to carry a cache
+// invalidation to another replica, so the profile is single-instance by
+// definition — and no configuration can *prove* it is (a replica count is the
+// orchestrator's, not the process's). A lease can: one row, record id
+// `minimal_profile_lease:instance`, claimed with a conditional write, renewed
+// by its holder and taken over by a successor once it has expired.
+//
+// Deployment-wide, not tenant-scoped, like `rate_limit_bucket`: it names a
+// running process, not data. `holder` is the per-process instance id. No
+// authoritative data is kept here and none is read by any request.
+const SCHEMA_V83: &str = "\
+DEFINE TABLE IF NOT EXISTS minimal_profile_lease SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS holder ON TABLE minimal_profile_lease TYPE string;
+DEFINE FIELD IF NOT EXISTS acquired_at ON TABLE minimal_profile_lease TYPE datetime;
+DEFINE FIELD IF NOT EXISTS renewed_at ON TABLE minimal_profile_lease TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE minimal_profile_lease TYPE datetime;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T23.8.1 / G-8 — v83 is the additive lease table and nothing else.
+    #[test]
+    fn v83_defines_only_the_minimal_profile_lease() {
+        for statement in SCHEMA_V83.lines().filter(|l| l.starts_with("DEFINE")) {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v83 statements must be idempotent definitions: {statement}"
+            );
+            assert!(
+                statement.contains("minimal_profile_lease"),
+                "v83 defined something outside its scope: {statement}"
+            );
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V83.contains(forbidden),
+                "v83 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
 
     /// T23.7.2 / G-7 — v82 widens the template-kind ASSERT by exactly the CIBA
     /// approval mail, keeping every earlier kind.
@@ -5742,8 +5790,9 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&82),
-            "v82 is the newest migration (T23.7.2 — the CIBA approval e-mail's template kind \
+            Some(&83),
+            "v83 is the newest migration (T23.8.1 / G-8 — the minimal profile's singleton \
+             lease table `minimal_profile_lease`; v82 was T23.7.2 — the CIBA approval e-mail's template kind \
              `ciba_approval` in the `email_template.kind` ASSERT; v81 was T23.7.1 continued, \
              D-61 — signed CIBA authentication \
              requests: `oauth2_client.backchannel_authentication_request_signing_alg` and the \

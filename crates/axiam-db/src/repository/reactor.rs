@@ -451,6 +451,23 @@ impl<C: Connection> ReactorRepository for SurrealReactorRepository<C> {
         // ordinary race into a logged error on every subsequent message.
         Ok(())
     }
+
+    async fn count_enabled(&self) -> AxiamResult<u64> {
+        // Not tenant-scoped on purpose; see the trait. `idx_reactor_tenant_enabled`
+        // cannot serve this (its leading column is the tenant), so it scans the
+        // table — which holds one row per registration and is read once at boot.
+        let result = self
+            .db
+            .current()
+            .query("SELECT count() AS total FROM reactor WHERE enabled = true GROUP ALL")
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().map_or(0, |r| r.total))
+    }
 }
 
 #[cfg(test)]

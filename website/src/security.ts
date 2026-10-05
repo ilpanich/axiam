@@ -167,7 +167,7 @@ export const SEC_SECTIONS: SecSection[] = [
     blocks: [
       {
         type: "p",
-        text: "Five trust boundaries recur across the system. A data flow that crosses one is a place where authentication, authorization, validation and transport protection all have to be re-established — nothing is assumed across a boundary.",
+        text: "Ten trust boundaries recur across the system. A data flow that crosses one is a place where authentication, authorization, validation and transport protection all have to be re-established — nothing is assumed across a boundary.",
       },
       {
         type: "table",
@@ -193,6 +193,31 @@ export const SEC_SECTIONS: SecSection[] = [
             "AXIAM ↔ third parties",
             "Outbound to IdPs, email providers, webhook receivers",
             "SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries",
+          ],
+          [
+            "AXIAM ↔ tenant directory",
+            "AXIAM ↔ a tenant's own LDAP or Active Directory server (G-3)",
+            "TLS before any bind or search — `ldaps://`, or StartTLS that fails closed — verified against the tenant's anchors and the URL's host; referrals never followed; filters built only through RFC 4515 escaping; no DN ever constructed; a bounded per-tenant pool; a read-only bind account",
+          ],
+          [
+            "AXIAM ↔ SAML service providers",
+            "AXIAM's SAML identity provider ↔ the applications a tenant registered to receive assertions (G-2)",
+            "Assertions always signed with the tenant's own credential and posted only to a registered ACS URL; an SP's requests and logout messages trusted only as far as its registered certificate verifies them, per node and SHA-2 only; logout messages signed by AXIAM only for a session holder or a verified SP (D-38); every browser route the same `404` when SAML is unavailable or off (D-20)",
+          ],
+          [
+            "AXIAM ↔ SSF receivers",
+            "AXIAM's Shared Signals Framework transmitter ↔ the relying parties a tenant administrator registered a stream for (G-5)",
+            "Every SET signed with the deployment key, `typ: secevent+jwt`, the tenant issuer and the stream's audience, unique across the deployment (D-47); signed only at delivery for an enabled stream that carries the event (D-48, D-51); pushed only to an endpoint under the webhook outbound address policy, with a sealed credential that never follows the endpoint to another origin (D-49); inbound stream management and polling only with an OAuth2 client-credentials token carrying `ssf.manage`, and only for the streams bound to that `client_id` (D-50)",
+          ],
+          [
+            "AXIAM ↔ SCIM downstreams",
+            "AXIAM's outbound SCIM client ↔ the SCIM 2.0 service providers a tenant administrator registered as targets (G-6)",
+            "Every request — the OAuth2 token request too — only to an `https` host resolved fresh to globally routable addresses and pinned, with no redirect followed (`guarded_fetch_no_redirect`, `allow_private = false`); a sealed credential bound to the URL it was registered for and opened only after the target is read again unchanged (D-57); only references on the queue and a fixed attribute set on the wire; nothing a downstream answers written into AXIAM's directory, and no downstream account touched unless its `externalId` is an id of this tenant (D-58)",
+          ],
+          [
+            "CIBA consumption device ↔ authentication device",
+            "The device a CIBA client runs on, which names a user but holds none of the user's credentials ↔ the user's own device, where AXIAM authenticates them (G-7)",
+            "The client authenticated exactly as at the token endpoint and never standing in for the user: only the request's own user, after a full sign-in, moves it to approved, with the `acr` derived from that sign-in; the hint resolving silently (no `unknown_user_id`); the binding message the only content shown on both sides, bounded and printable; the `auth_req_id` stored hashed and redeemable once, by the client that started it; prompts throttled per user; a ping only to a registered `https` endpoint under the outbound address policy",
           ],
           [
             "Server ↔ SDK / admin UI",

@@ -5703,9 +5703,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&80),
-            "v80 is the newest migration (T23.7.1 — CIBA: the `ciba_request` store and the two \
-             backchannel metadata columns on `oauth2_client`; v79 was T23.6.1 — outbound SCIM targets: `scim_target`, \
+            Some(&81),
+            "v81 is the newest migration (T23.7.1 continued, D-61 — signed CIBA authentication \
+             requests: `oauth2_client.backchannel_authentication_request_signing_alg` and the \
+             `ciba_request_object` replay kind; v80 was T23.7.1 — CIBA: the `ciba_request` store \
+             and the two backchannel metadata columns on `oauth2_client`; v79 was T23.6.1 — outbound SCIM targets: `scim_target`, \
              `scim_target_link` and `scim_target_state`; v78 was T23.5.3 — the SSF step-up record `ssf_step_up`; \
              v77 was T23.5.2 — the SSF transmitter: `ssf_stream`, \
              `ssf_event_buffer` and `security_settings.oidc_ssf_enabled`; v76 was T23.2.4 — SAML \

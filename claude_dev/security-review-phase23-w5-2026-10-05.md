@@ -761,3 +761,27 @@ contract 1.58 §33 amended in place; OpenAPI describes the `403`); the CIBA
 approval mail goes only to a vouched address, so a federated account in
 `PendingVerification` is no longer mailed (`f380891`); the CIBA decision audit
 rows gain `session_id` (`f380891`). No SDK-visible field changed shape.
+
+---
+
+## Addendum — the remaining checks (2026-10-06)
+
+The review session was stopped by a container restart after its last commit; the
+orchestrator ran the remaining checks on the merged branch (`9d1a095` plus the
+documentation commit linking the findings to their issues), with every exit code
+taken from cargo itself:
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo +1.99.0 clippy --workspace --all-targets -- -D warnings` (CI's command) | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` (stable) | pass |
+| `cargo +1.99.0 clippy -p axiam-api-rest -p axiam-server --all-targets --no-default-features -- -D warnings` | pass |
+| every `axiam-api-rest` integration test binary, one by one, and `--lib` | pass, default stack |
+| every other workspace crate (`axiam-db`, `axiam-scim`, `axiam-server` re-run binary by binary after the disk filled) | pass |
+| totals | **6 526 passed, 0 failed, 5 ignored** (live-broker and Keycloak tests) |
+| `check-crate-layering`, `check-spec-digest`, `gen-management-registry --check`, `check-config-key-coverage`, `check-frontend-coverage`, `check-amqp-transport`, `check-audit-ignore-sync`, `check-docker-context`, `check-locale-bundle-sync`, `check-conflict-markers`, `check-doc-links` | pass |
+| `node website/scripts/gen-threat-model.mjs` | 447 threats (426 mitigated, 21 open), no diff |
+
+`check-remediation-evidence.py` cannot pass in this sandbox's shallow clone (it
+looks up commits older than the clone); CI checks it with full history.

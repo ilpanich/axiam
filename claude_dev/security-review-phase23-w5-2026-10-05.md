@@ -6,8 +6,8 @@ commits, 204 files, about 49 200 lines added and 5 200 removed; `3ddd8b8` is the
 W4 merge on `main`). T23.8.3 (the minimal profile's compose file, measurement and
 documentation) ran in parallel and touches only `docker/`, `docs/`, the website's
 *Operate* page, `benchmarks/` and the CHANGELOG; it is not in this diff. The fixes
-of this review sit on top: `d4ff514` (P23W5-01, P23W5-02), `f380891` (P23W5-03,
--04, -05), `6ac3671` (P23W5-08), `7439a28` (P23W5-12), `9e52b1f` (the threat
+of this review sit on top: `e6586fb` (P23W5-01, P23W5-02), `5a763b4` (P23W5-03,
+-04, -05), `2a149f4` (P23W5-08), `60b19e0` (P23W5-12), `7f24273` (the threat
 model, 2.35.0), the spec and registry regeneration, and the documentation commit
 that carries this file.
 **Scope:** every W5 task of
@@ -72,20 +72,20 @@ composes the full profile exactly as `main.rs` did (§9).
 
 | ID | Finding | Severity | Surface / threat | Disposition |
 |---|---|---|---|---|
-| **P23W5-01** | A client-credentials SCIM target's `base_url` could be moved without the secret; the next attempt minted a fresh access token at the unchanged `token_url` and presented it to the new host — an administrator who never held the secret collects a live token for the real downstream. | Medium | §31 `PUT`, deliverer; D-57 → **T-409** | **Fixed** — `d4ff514` (T-409 Mitigated; contract §31.3 rule 2 amended) |
-| **P23W5-02** | One notification mail per SCIM dead letter: a target down, or refusing AXIAM's credential, mails each recipient of a `scim_delivery_failed` rule once per reference — a tenant's worth at the next reconciliation. | Medium | dead-letter row, notification rules; D-58 → **T-418** | **Fixed** — `d4ff514` (proposed D-73, schema v84; T-418 Mitigated) |
-| **P23W5-03** | The CIBA approval mail went to whatever address an account carried, proven or not: a self-registered account with a stranger's address plus a client that can call `bc-authorize` makes AXIAM mail that stranger up to three times a minute, quoting client-chosen text. | Low | `CibaMailNotifier` → **T-446** (new) | **Fixed** — `f380891` (proposed D-74) |
-| **P23W5-04** | The approval routes admitted an access token AXIAM minted for an OAuth2 client (it names the user and a live session): the CIBA client holding one from an earlier redemption could open and approve its next request in the user's name. | Medium | `/api/v1/ciba/requests/*` → **T-447** (new), T-431 | **Fixed** — `f380891` (contract §33 amended) |
-| **P23W5-05** | `ciba.approved` / `ciba.denied` recorded the user but not the deciding session, which T-435 required; the request row that holds it is swept, and a refusal stores none. | Low | approval audit → **T-435** | **Fixed** — `f380891` (T-435 Mitigated) |
+| **P23W5-01** | A client-credentials SCIM target's `base_url` could be moved without the secret; the next attempt minted a fresh access token at the unchanged `token_url` and presented it to the new host — an administrator who never held the secret collects a live token for the real downstream. | Medium | §31 `PUT`, deliverer; D-57 → **T-409** | **Fixed** — `e6586fb` (T-409 Mitigated; contract §31.3 rule 2 amended) |
+| **P23W5-02** | One notification mail per SCIM dead letter: a target down, or refusing AXIAM's credential, mails each recipient of a `scim_delivery_failed` rule once per reference — a tenant's worth at the next reconciliation. | Medium | dead-letter row, notification rules; D-58 → **T-418** | **Fixed** — `e6586fb` (proposed D-73, schema v84; T-418 Mitigated) |
+| **P23W5-03** | The CIBA approval mail went to whatever address an account carried, proven or not: a self-registered account with a stranger's address plus a client that can call `bc-authorize` makes AXIAM mail that stranger up to three times a minute, quoting client-chosen text. | Low | `CibaMailNotifier` → **T-446** (new) | **Fixed** — `5a763b4` (proposed D-74) |
+| **P23W5-04** | The approval routes admitted an access token AXIAM minted for an OAuth2 client (it names the user and a live session): the CIBA client holding one from an earlier redemption could open and approve its next request in the user's name. | Medium | `/api/v1/ciba/requests/*` → **T-447** (new), T-431 | **Fixed** — `5a763b4` (contract §33 amended) |
+| **P23W5-05** | `ciba.approved` / `ciba.denied` recorded the user but not the deciding session, which T-435 required; the request row that holds it is swept, and a refusal stores none. | Low | approval audit → **T-435** | **Fixed** — `5a763b4` (T-435 Mitigated) |
 | **P23W5-06** | The device grant's `/api/v1/device/decide` admits the same client-minted token: a relying party holding a user's `openid` token approves a device flow it started and gets its device client's scopes and a refresh token. | Medium | device grant (B2) → **T-447** | **Reported** (ilpanich/axiam#549; pre-existing; §14) |
 | **P23W5-07** | One `scim_push` consumer per replica, one attempt at a time for every tenant: a downstream that never answers costs 10–20 s per attempt, and a reconciliation of 10 000 users stalls every tenant's provisioning on that replica for more than a day. The 10 000-member dead-letter bound is untested. | Medium | deliverer, reconciliation; T-414 | **Reported** (ilpanich/axiam#550; wave-introduced, needs a decision; §14) |
-| **P23W5-08** | CodeQL hygiene: credential literals in two tests, `assert_eq!`/`assert_ne!` on decrypted credentials and `auth_req_id`s (printed on failure), loop bindings named `token`, one formatted into an assertion. | Informational | tests | **Fixed** — `d4ff514`, `6ac3671` |
+| **P23W5-08** | CodeQL hygiene: credential literals in two tests, `assert_eq!`/`assert_ne!` on decrypted credentials and `auth_req_id`s (printed on failure), loop bindings named `token`, one formatted into an assertion. | Informational | tests | **Fixed** — `e6586fb`, `2a149f4` |
 | **P23W5-09** | The SCIM admin `PUT` is conditional on the version the server reads, not one the client read: two administrators saving forms are last-writer-wins on everything but the credential binding. | Low | §31 `PUT`; T-416 | **Reported** (ilpanich/axiam#555; §14) |
 | **P23W5-10** | The webhook deliverer still uses `guarded_fetch` and re-sends the signed request to a redirect target. No credential travels (an HMAC over a timestamped body), every hop is SSRF-checked. | Informational | webhooks; T-112 | **Reported** (ilpanich/axiam#555; pre-existing; §14) |
 | **P23W5-11** | `fapi-conformance.yml`: the gate is red on every unattended run (interactive modules), and the report step interpolates `inputs.axiam_image` into a shell script. | Informational | CI harness (D-60) | **Reported** (ilpanich/axiam#555; §14) |
-| **P23W5-12** | The website's Security page said "Five trust boundaries"; the model has ten. | Informational | `website/src/security.ts` | **Fixed** — `7439a28` |
+| **P23W5-12** | The website's Security page said "Five trust boundaries"; the model has ten. | Informational | `website/src/security.ts` | **Fixed** — `60b19e0` |
 | **P23W5-13** | T-117 claimed notifications are "delivered in configurable batches"; nothing batches them, and a request-path event an attacker can produce in volume mails each recipient once per event. | Medium | notification rules → **T-117** | **Reported** (ilpanich/axiam#551; pre-existing; T-117 reopened; §14) |
-| **P23W5-14** | The model's `threatTop` stayed at 443 when T-444 and T-445 entered. | Informational | `Axiam.json` | **Fixed** — `9e52b1f` (447) |
+| **P23W5-14** | The model's `threatTop` stayed at 443 when T-444 and T-445 entered. | Informational | `Axiam.json` | **Fixed** — `7f24273` (447) |
 
 **Verdict on merge.** Nothing open blocks W5. The eight fixes are in and pinned,
 the threat model is at **2.35.0 — 447 threats, 426 mitigated / 21 open** — and the
@@ -125,7 +125,7 @@ conformance suite (no network).
 
 ## 2. P23W5-01 — a client-credentials `base_url` moved without the secret (T-409)
 
-**Severity: Medium. Fixed in `d4ff514`; T-409 Mitigated.**
+**Severity: Medium. Fixed in `e6586fb`; T-409 Mitigated.**
 
 D-57 bound a credential to "its URL": `base_url` for a bearer target, `token_url`
 for a client-credentials target. The client secret does go to `token_url` only —
@@ -161,7 +161,7 @@ secret; `scimTargets.test.ts` and `ScimTargetsPage.test.tsx` pin the console.
 
 ## 3. P23W5-02 — one mail per dead letter (T-418, proposed D-73)
 
-**Severity: Medium. Fixed in `d4ff514`; T-418 Mitigated.**
+**Severity: Medium. Fixed in `e6586fb`; T-418 Mitigated.**
 
 T23.6.3 wrapped the `scim_push` consumer's audit log in `NotifyingAuditLog`, so
 the dispatcher's `scim_push.delivery_failed` row reaches a tenant's rules for
@@ -205,7 +205,7 @@ through the composition's own builder.
 
 ## 4. P23W5-03 — the approval mail to an unproven address (T-446, proposed D-74)
 
-**Severity: Low. Fixed in `f380891`.**
+**Severity: Low. Fixed in `5a763b4`.**
 
 `CibaMailNotifier` mailed an account that "may take part in the grant", and
 `account_may_act` admits `PendingVerification` whatever its age (deliberately —
@@ -239,7 +239,7 @@ mailed"); with `email_verified_at` set the same account is mailed.
 
 ## 5. P23W5-04 and -05 — who decides, and the record of it (T-447, T-431, T-435)
 
-**P23W5-04 — Severity: Medium. Fixed in `f380891`.** The approval routes take an
+**P23W5-04 — Severity: Medium. Fixed in `5a763b4`.** The approval routes take an
 `AuthenticatedUser`, and the extractor admits any `axiam:user` access token whose
 session is live — reading `sid` before `jti` precisely so that OAuth2-issued
 tokens work at UserInfo. A token from the code, refresh **or CIBA** grant
@@ -256,7 +256,7 @@ Contract §33 already said the page "is the console's job and is not SDK surface
 it now says this too (amended in place, 1.58 unreleased), and the OpenAPI
 describes the `403` on all three routes.
 
-**P23W5-05 — Severity: Low. Fixed in `f380891`.** T-435 was to close with each
+**P23W5-05 — Severity: Low. Fixed in `5a763b4`.** T-435 was to close with each
 decision audited "with the approving user and session"; the rows named the user
 but not the session. The request row holds `approval_session_id` for an approval
 only, and is swept ten minutes after expiry. The rows now carry `session_id`.
@@ -267,7 +267,7 @@ deciding session is recorded" (`Null`).
 
 ## 6. P23W5-08 — CodeQL hygiene
 
-**Severity: Informational. Fixed in `d4ff514` and `6ac3671`.**
+**Severity: Informational. Fixed in `e6586fb` and `2a149f4`.**
 
 Every added Rust and TypeScript line was scanned by script (PEM blocks; `let`,
 loop and format bindings named `secret`, `key`, `password`, `token`; credential-
@@ -524,7 +524,7 @@ P23W5-02, notified — minor, noted in §15.
 ## 12. Threat-model reconciliation
 
 Model **2.35.0** (from 2.34.0), in all three artifacts and the website, in
-`9e52b1f`; `node website/scripts/gen-threat-model.mjs` → *447 threats (426
+`7f24273`; `node website/scripts/gen-threat-model.mjs` → *447 threats (426
 mitigated, 21 open)*, no diff left.
 
 | Change | Entry |
@@ -605,7 +605,7 @@ device authorization for a device client it controls, so it knows the
 `user_code`, and approves it with the user's token: the device client then
 redeems tokens for that user with its own registered scopes and a refresh token,
 without the user ever seeing a consent page. Present since B2. The W5 F4 review
-closed the same hole on the CIBA approval routes (`f380891`,
+closed the same hole on the CIBA approval routes (`5a763b4`,
 `session_evidence` refuses a token carrying `client_id`). **Proposed fix:** the
 same rule on `/api/v1/device/verify` and `/decide` — a token with a `client_id`
 claim is `403` — with a test that redeems a code-grant token and fails to
@@ -753,14 +753,14 @@ and the comparison refresh. From this review:
 I1 (nothing registered today changes behaviour) holds with these deliberate,
 CHANGELOG-recorded changes, all to surfaces new in this unreleased wave: an update
 that moves `base_url` of a client-credentials SCIM target without the credential
-is `400` (`d4ff514`; contract 1.57 §31.3 rule 2 amended in place); a target's
+is `400` (`e6586fb`; contract 1.57 §31.3 rule 2 amended in place); a target's
 dead letters reach the notification rules at most once an hour, and schema **v84**
-adds `scim_target_state.failure_notified_at` (`d4ff514`); the CIBA approval
-routes answer `403` to an access token minted for an OAuth2 client (`f380891`;
+adds `scim_target_state.failure_notified_at` (`e6586fb`); the CIBA approval
+routes answer `403` to an access token minted for an OAuth2 client (`5a763b4`;
 contract 1.58 §33 amended in place; OpenAPI describes the `403`); the CIBA
 approval mail goes only to a vouched address, so a federated account in
-`PendingVerification` is no longer mailed (`f380891`); the CIBA decision audit
-rows gain `session_id` (`f380891`). No SDK-visible field changed shape.
+`PendingVerification` is no longer mailed (`5a763b4`); the CIBA decision audit
+rows gain `session_id` (`5a763b4`). No SDK-visible field changed shape.
 
 ---
 

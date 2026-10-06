@@ -1061,6 +1061,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *Identity for agents* guide and website page (T23.15.1)
 
+- Comparison documents refreshed (W6a, G-10 and G-11; documentation only): the RADIUS decision (D-77: native front end declined for now, FreeRADIUS-backend route when a named adopter asks, no CRL published yet) in the authentik comparison's outposts row and gap item 6; a run-6 note beside every run-5 citation (run 6 re-measures Keycloak 26.8.0, Zitadel v4.19.4 and authentik 2026.8.3 against `1.0.0-beta18`, numbers follow); and what AXIAM does not do — CIBA has no push mode and no `user_code`, a federated account gets no approval mail (D-74), and outbound SCIM delivers one attempt at a time per replica until #550 is decided. The website's CIBA, outbound SCIM and PKI pages carry the same limits
+
 - **RFC 7592 client configuration endpoint (T23.4.1).** A dynamically
   registered client can now read, replace and delete its own registration at
   `GET`/`PUT`/`DELETE /oauth2/register/{client_id}`. `POST /oauth2/register`

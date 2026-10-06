@@ -795,6 +795,10 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "note",
+        text: `**Revocation is checked where AXIAM terminates the connection, and nowhere else.** A revoked certificate is refused on its next mTLS or certificate sign-in, but AXIAM publishes no CRL and runs no OCSP responder yet (T-102), so a relying party that validates AXIAM-issued certificates itself, such as a FreeRADIUS server or a VPN gateway, cannot learn of a revocation; keep leaf lifetimes short there. AXIAM does not speak RADIUS either: the G-11 spike declined a native front end for now and keeps a FreeRADIUS-backend route for when a named adopter asks, with publishing a CRL as the step that stands on its own ([decision record](${GH_BLOB}/claude_dev/radius-eap-tls-spike-2026-10-06.md)).`,
+      },
+      {
+        type: "note",
         text: "Every CA operation, and creating or deleting a tenant, requires an **organization-level principal** — a caller whose own record lives in the organization's reserved scope. Holding `ca_certificates:manage` from a tenant role is not enough, and those actions are no longer seeded into an ordinary tenant's roles. A tenant's *signing* CA is the deliberate middle case: organization-level, but allowed to an organization account whose reach covers that tenant. See [Organization-level principals](#/docs/organization-scope).",
       },
       { type: "h", id: "issuing-ca", text: "Which CA a caller may issue under" },

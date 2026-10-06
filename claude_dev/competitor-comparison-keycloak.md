@@ -14,6 +14,11 @@
 > tree linked below. Feature maturity comes from `Profile.java` (the server's
 > own feature registry) and the specification table. Performance figures come
 > from this repository's run-5 benchmark, which measured Keycloak 26.7.0.
+> **Run 6 is the re-measurement:** it measures Keycloak 26.8.0, Zitadel
+> v4.19.4 and authentik 2026.8.3 against AXIAM `1.0.0-beta18` on the same G-box
+> with the run-5 caps (G-10; the authentik target now exists in
+> `benchmarks/targets/authentik/`). Its numbers follow the run; until then every
+> performance figure here is run 5's, taken against Keycloak 26.7.0.
 
 ## 1. Overview
 
@@ -46,7 +51,7 @@ question.
 | Fine-grained authorization / UMA 2.0 | Yes (UMA 2.0 mapped onto RBAC) | Yes — Authorization Services (supported, on by default), UMA 2.0 | [K3][K5] |
 | Decision API for services | **REST, gRPC and AMQP, single and batch** | Authorization Services evaluation over HTTP; OpenID AuthZEN API **experimental** | [K3][K5] |
 | Device grant, PAR, DPoP | Yes | Yes (all supported, on by default) | [K5] |
-| CIBA | **Yes** (since G-7, Phase 23 W5): poll and ping, signed authentication requests and the FAPI-CIBA client; no push mode | Yes | [K5] |
+| CIBA | **Yes** (since G-7, Phase 23 W5): poll and ping, signed authentication requests and the FAPI-CIBA client. *Not done:* no push mode, no `user_code`, and a federated account gets no approval mail (D-74); see item 6 below | Yes | [K5] |
 | FAPI 2.0 | Conformance runs published, not yet certified | Security Profile and Message Signing marked "Passed" | [K3] |
 | mTLS client auth, X.509 user auth | Yes, plus an **integrated per-org CA** | Yes (RFC 8705, X.509 authenticator); no built-in CA | [K3][K12] |
 | WebAuthn / passkeys / OTP | Yes, with a FIDO MDS attestation policy | Yes (passkeys supported, HOTP and TOTP, recovery codes) | [K13] |
@@ -57,7 +62,7 @@ question.
 | Dynamic client registration | Yes (RFC 7591 + RFC 7592) | Yes | [K16] |
 | Client ID Metadata Document | **Yes** | Experimental | [K3] |
 | MCP authorization server | **Yes**, end to end | Documentation for MCP integration; CIMD experimental | [K15] |
-| SCIM 2.0 server | Yes; and, since G-6 (Phase 23, W5), an outbound SCIM client for downstream applications | Yes — promoted to supported in 26.8 (the specification table still reads "Tech Preview") | [K3][K15] |
+| SCIM 2.0 server | Yes; and, since G-6 (Phase 23, W5), an outbound SCIM client for downstream applications (*one delivery attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 is decided*) | Yes — promoted to supported in 26.8 (the specification table still reads "Tech Preview") | [K3][K15] |
 | SAML 2.0 | IdP (G-2, Phase 23) and SP | IdP and broker | [K3][K17] |
 | LDAP/AD, Kerberos federation | LDAP/AD yes (G-3, Phase 23; read-only, JIT, group mapping, sync); Kerberos no (D-1) | Yes | [K18] |
 | Social login | Google, GitHub, Microsoft, Apple, generic OIDC/OAuth2 | Large catalogue (Google, GitHub, Microsoft, LinkedIn, …) | [K17] |
@@ -67,7 +72,7 @@ question.
 | Brute-force / abuse protection | Rate limits **on by default**, posture presets | Brute-force detection **disabled by default** | [K19] |
 | gRPC API | **Yes** (authz, userinfo data plane) | None found | [K5] |
 | Async (AMQP) authz | **Yes** | No | — |
-| Server RSS (run 5, 26.7.0) | 88–119 MiB | 710–853 MiB | `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5 |
+| Server RSS (run 5, 26.7.0; run 6 re-measures 26.8.0) | 88–119 MiB | 710–853 MiB | `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5 |
 | Licence | Apache-2.0 | Apache-2.0 | [K1] |
 
 ## 3. AXIAM gaps, by priority
@@ -106,8 +111,20 @@ question.
    AXIAM serves OpenID Connect CIBA Core 1.0 in poll and ping modes with the
    FAPI-CIBA signed-request profile; the user approves on the console after a
    full sign-in with step-up, and the limiter and the brute-force lockout both
-   cover the grant (the class of defect in the 26.7.x CVEs). Push mode is not
-   offered; contract §33.*
+   cover the grant (the class of defect in the 26.7.x CVEs); contract §33.*
+   **What it does not do:** there is **no push mode** (poll and ping only; FAPI-CIBA
+   forbids push, D-65) and **no `user_code`** (`user_code` is refused at
+   registration and on the request, and discovery says
+   `backchannel_user_code_parameter_supported: false`; a code checked against
+   the password would be a password oracle, D-64). The approval e-mail goes only
+   to an address D-25's rule vouches for (`email_verified_at` set, or the account
+   `Active`), so **a federated account gets no approval mail** unless an address
+   was verified: it stays `PendingVerification` for life (T-160). The request is
+   still stored and answered as before, but the console approval page is reached
+   by a link only the mail carries, so without it the request runs to expiry
+   unless the user is given the link another way (D-74). The user is told by
+   e-mail only, with no phone push channel
+   (`crates/axiam-oauth2/src/ciba.rs`, `ciba_notifier.rs`, `oidc.rs`).
 
 **P3 — watch**
 
@@ -131,8 +148,9 @@ all shipped. They now appear in §2 as parity or advantage.
    server memory (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §1, §5). For
    infrastructure that sits in front of every request, that is a cost and
    latency floor, not a vanity number. Keycloak 26.8 reports reduced memory
-   usage [K15], so the next benchmark run should re-measure rather than
-   assume.
+   usage [K15], so the figure is re-measured rather than assumed: run 6
+   measures Keycloak 26.8.0 against AXIAM `1.0.0-beta18` on the same G-box with
+   the run-5 caps. Until its numbers land, this paragraph is run 5's.
 2. **Deny that means deny.** AXIAM's explicit deny overrides every allow at any
    depth (`claude_dev/deny-override-design.md`). Keycloak instead combines
    per-policy NEGATIVE logic with per-permission decision strategies, and its
@@ -162,6 +180,7 @@ all shipped. They now appear in §2 as parity or advantage.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-06 | W6 comparison refresh (G-10, G-11). **G-10 (benchmark currency)**: the run-5 figures stay as they are, because they are still run 5's against Keycloak 26.7.0; the header, the RSS row and §4 item 1 now say that run 6 re-measures Keycloak 26.8.0, Zitadel v4.19.4 and authentik 2026.8.3 against AXIAM `1.0.0-beta18` on the same G-box with the run-5 caps, and that numbers follow. **G-11 (RADIUS)**: decided (D-77) to decline a native RADIUS front end for now; Keycloak has no RADIUS in the product (a community extension only), so no row here changes, and AXIAM publishes no CRL today (T-102 reopened), see [the record](radius-eap-tls-spike-2026-10-06.md). **Not-do statements:** CIBA has no push mode and no `user_code`, and a federated account gets no approval mail (D-74); outbound SCIM delivers one attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 (P23W5-07) is decided. | [K5][K15] |
 | 2026-10-05 | G-7 (CIBA) complete on the Phase 23 W5 branch: `POST /oauth2/bc-authorize` and the CIBA grant at the token endpoint, poll and ping modes (no push), `login_hint` and `id_token_hint`, signed authentication requests and the FAPI-CIBA client, user approval on the console after a full sign-in with step-up, an approval e-mail, rate-limit and lockout coverage of the grant (the Keycloak 26.7.x CVE class: tested), contract §33 and the website page; the row's AXIAM cell flips from No to Yes and the P2 gap item is closed. The compared Keycloak surface is unchanged. | [K5][K20] |
 | 2026-10-05 | G-6 (outbound SCIM provisioning) complete on the Phase 23 W5 branch: AXIAM can push a tenant's users and groups to downstream SCIM 2.0 service providers (contract §31). The compared Keycloak surface is the SCIM *server*, so the row's Keycloak cell is unchanged; AXIAM's cell now also names the outbound client. | — |
 | 2026-10-04 | G-2 (SAML 2.0 identity provider) complete on the Phase 23 W4 branch: per-tenant IdP with SP- and IdP-initiated Web Browser SSO over HTTP-Redirect and HTTP-POST, always-signed assertions under a tenant credential issued by the tenant's own CA (issue / promote / retire), a pairwise persistent `NameID` by default, per-SP `SessionIndex` and single logout tied to session revocation and the revocation feed, IdP metadata, SP metadata import as a reviewed draft, the SP registry API (contract §29) and console page; round-tripped with samael as a reference SP and with a real Keycloak 26.7.0 brokering to AXIAM. Assertion encryption and the artifact binding stay out (D-2). | — |

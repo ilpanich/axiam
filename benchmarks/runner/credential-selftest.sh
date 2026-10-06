@@ -263,6 +263,39 @@ command -v openssl >/dev/null || { say "openssl is required"; exit 1; }
 ) > "$T/names.out" 2>&1 || true
 if [ -s "$T/names.out" ]; then while IFS= read -r line; do say "$line"; done < "$T/names.out"; fi
 
+# --- 4b: every file holding a credential is private FROM CREATION (P23W6-03) ---------
+# Mode 600 set after the bytes are written leaves a window in which the file is the
+# caller's umask (0644 on most hosts) with the credentials already in it, and `>` into
+# an existing file keeps whatever mode that file had. The seed env carries the bench
+# user's, the bootstrap admin's and Keycloak's admin password and the client secrets.
+(
+  set -euo pipefail
+  umask 022
+  export BENCH_SEED_DIR="$T/modes/seed"
+  # shellcheck source=bench-creds.sh
+  . "$HERE/bench-creds.sh"
+  for name in $(bench_creds_spec keycloak | awk '{print $1}'); do unset "$name"; done
+  # a stack file left empty and world-readable by something else
+  mkdir -p "$BENCH_SEED_DIR"; : > "$(bench_creds_file keycloak)"; chmod 644 "$(bench_creds_file keycloak)"
+  bench_creds_load keycloak 2>/dev/null
+  m="$(stat -c %a "$(bench_creds_file keycloak)")"
+  [ "$m" = "600" ] || echo "a pre-existing empty stack file kept mode $m when the credentials were written into it"
+  rm -rf "$BENCH_SEED_DIR"
+  bench_creds_load keycloak 2>/dev/null
+  m="$(stat -c %a "$BENCH_SEED_DIR")"
+  [ "$m" = "700" ] || echo "bench-creds.sh created the seed directory mode $m, not 700"
+  # seed.sh's write_seed, run as it is written, with chmod observed: the file must
+  # already be 600 when chmod is reached.
+  SEED_ENV="$T/modes/seed.env"; TARGET=keycloak; BENCH_USERNAME=u; BENCH_PASSWORD=x
+  KC_ADMIN_PASSWORD=x; CLIENT_SECRET=x
+  chmod() { stat -c %a "${@: -1}" > "$T/modes/at-chmod"; command chmod "$@"; }
+  eval "$(sed -n '/^seed_env_extra_credentials() {/,/^}/p; /^write_seed() {/,/^}/p' "$HERE/seed.sh")"
+  write_seed >/dev/null
+  m="$(cat "$T/modes/at-chmod" 2>/dev/null || echo none)"
+  [ "$m" = "600" ] || echo "seed.sh's write_seed created the seed env mode $m and only then made it 600"
+) > "$T/modes.out" 2>&1 || echo "the file-mode checks could not run" >> "$T/modes.out"
+if [ -s "$T/modes.out" ]; then while IFS= read -r line; do say "$line"; done < "$T/modes.out"; fi
+
 # --- 6: no generated credential reaches a cell's meta.json (P23W6-01) ---------------
 # meta.json's `axiam_env` copies the server container's AXIAM__* environment and redacts
 # a value by its KEY's name. AXIAM__AMQP__URL carries the broker password in its

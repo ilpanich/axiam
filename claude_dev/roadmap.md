@@ -1110,7 +1110,8 @@ with an F4 security review of the wave's diff against
 | T23.8.3 | `docker-compose.minimal.yml`, docs, resting-RSS measurement | Sonnet 5.5 | W5 |✓ |
 | T23.9.1 | [`verifiable-credentials-design.md`](verifiable-credentials-design.md), design only | Opus 5.5 | W1 | ✓ |
 | T23.10.1 | `benchmarks/targets/authentik/` profile (authentik 2026.8.3, smoke-tested in the sandbox; D-79) | Sonnet 5.5 | W6 | ✓ |
-| T23.10.2 | Run 6, `PUBLIC_BENCH_ANALYSIS.md` seventh draft, comparison rows | Sonnet 5.5 | W6 | |
+| T23.10.2(a) | Run-6 runbook ([`run6-runbook.md`](run6-runbook.md)), pins, per-run credentials, minimal-profile overlay (D-75, D-76) | Sonnet 5.5 | W6a | ✓ |
+| T23.10.2(b) | Run 6 on the G-box (maintainer), `PUBLIC_BENCH_ANALYSIS.md` seventh draft, comparison performance rows, website numbers | Sonnet 5.5 | W6b | |
 | T23.11.1 | RADIUS / EAP-TLS spike, decision record ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)); threat entries T-448 … T-468 on Opus 5.5; D-77, D-78 | Sonnet 5.5 | W6 | ✓ |
 | T23.12.1 | Front-channel logout declined and recorded (D-6) | Sonnet 5.5 | W1 | ✓ |
 | T23.15.1 | *Identity for agents* guide and website page | Sonnet 5.5 | W1 | ✓ |

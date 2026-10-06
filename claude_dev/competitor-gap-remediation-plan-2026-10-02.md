@@ -1831,6 +1831,41 @@ criterion (specification stability, one concrete adopter).
 > self-signed TLS listener (TLS 1.2 and 1.3, HTTP/1.1). Its cheap endpoints are
 > PostgreSQL-bound (JWKS ≈ 14, userinfo ≈ 23, introspection ≈ 72, client
 > credentials ≈ 203 transactions per request in the sandbox).
+>
+> **EXECUTED — G-10, T23.10.2(a), 2026-10-06** (`7924cf4`, `d2b4c5a`,
+> `70fd055`, `c211018`, Sonnet 5.5). [`run6-runbook.md`](run6-runbook.md), built
+> like `run5-runbook.md`, with §12 as the complete copy-paste reference (every
+> environment variable spelled out), §10 as the list of what the maintainer sends
+> back for W6b and §11 as what the seventh draft consumes. It measures the
+> released **`1.0.0-beta18`** (D-75; the tag's commit is a blank the maintainer
+> fills when cutting it), **Keycloak 26.8.0** (pins bumped; §1.3 re-checks
+> quay.io for a later 26.8.x patch first), **Zitadel v4.19.4** and **authentik
+> 2026.8.3**, on the G-box with the run-5 caps. Keycloak 26.8's "reduced memory
+> usage" is verified as a release-note claim with no figure and no new default
+> flag; run 6 measures it at defaults, at rest (`runner/resting-sample.sh`) and
+> under load, untuned. The **minimal profile** is measured as T23.8.3 documents
+> it — `deploy=minimal` (`targets/axiam/docker-compose.minimal.yml`), one
+> instance, the profile recorded in `meta.json` and asserted per cell — at rest
+> and in seven p0 cells with a full-profile control, and the report must say its
+> deliveries are lost on restart (T-445). W5 F4 §15's rules are §2.5, §2.6 and
+> §9: SCIM targets disabled or on a loopback that answers (P23W5-07), every
+> raised limit named (`scim_per_min` only for `scim_provisioning`), the approval
+> and SCIM limits never preset. **Every benchmark credential is now generated per
+> stack** (`runner/bench-creds.sh`, mode 600, masked under CI, removed by
+> `bench-down`; an exported value wins, so the FAPI conformance workflow is
+> unchanged) — the literal defaults of the AXIAM, Keycloak and Zitadel targets,
+> the probes and the eleven SDK benches are gone, and a hermetic
+> `credential-selftest.sh` keeps them gone. Harness defects found and fixed on the
+> way: `rl=prod` left seven REST families neutralized while `rl-prod-check`
+> compared them with shipped values (now pinned from the Rust source, with a
+> self-test); `meta.json`'s `image_digest` was the local image id; a stale bulk
+> fixture survived `bench-down`. Keycloak 26.8.0 was smoke-tested in the sandbox
+> end to end (`bench-dry-run` p0/p2/p3: 18 PASS, 0 FAIL), authentik re-checked
+> after the credential refactor (10 PASS, 2 WARN — the documented refresh
+> fallback); AXIAM beta18 does not exist yet and Zitadel v4.19.4 cannot be pulled
+> here (`ghcr.io` blobs blocked), so the runbook's §12.5 dry run is their first
+> check. T23.10.2(b) — the seventh draft, the comparisons' performance rows and
+> the website's numbers — is W6b (D-76).
 
 **Target.** Re-measure Keycloak at 26.8 (which reports reduced memory) and
 Zitadel at v4.19, and add authentik 2026.8 as a fourth benchmark target, so

@@ -360,18 +360,28 @@ fn row_mentions(row: &AuditLogEntry, needle: &str) -> bool {
         .contains(needle)
 }
 
-/// The cost of the plain unknown-user answer on this machine: the smallest of
-/// three, so the bound below is a floor and not an average.
+/// The cost of one plain unknown-user answer on this machine.
 async fn unknown_user_cost(h: &Harness) -> Duration {
-    let svc = service(h, None);
-    let mut least = Duration::MAX;
-    for _ in 0..3 {
-        let started = Instant::now();
-        let outcome = svc.login(input(h, "nobody", &fresh_credential())).await;
-        assert!(is_invalid_credentials(&outcome));
-        least = least.min(started.elapsed());
-    }
-    least
+    let started = Instant::now();
+    let outcome = service(h, None)
+        .login(input(h, "nobody", &fresh_credential()))
+        .await;
+    assert!(is_invalid_credentials(&outcome));
+    started.elapsed()
+}
+
+/// The floor a refusal's cost is held to: half the plain unknown-user answer,
+/// measured immediately before *and* after the attempt, taking the smaller.
+///
+/// A single reference taken at the start of a test is not comparable with an
+/// attempt made later: the reference is paid while the binary's other tests
+/// are hashing in parallel, the late attempts after they have finished, and on
+/// a busy CI runner that contention alone is more than the factor of two. A
+/// reference that brackets the attempt sees the same load the attempt did; a
+/// skipped dummy verify (milliseconds against an Argon2 verify) is still far
+/// below it.
+async fn bracketed_floor(h: &Harness, before: Duration) -> Duration {
+    before.min(unknown_user_cost(h).await) / 2
 }
 
 // -----------------------------------------------------------------------
@@ -488,7 +498,6 @@ async fn a_second_login_uses_the_existing_marked_account() {
 #[tokio::test]
 async fn every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify() {
     let h = harness().await;
-    let floor = unknown_user_cost(&h).await / 2;
     let before = account_count(&h).await;
     let directory_credential = fresh_credential();
     let wrong = fresh_credential();
@@ -552,6 +561,7 @@ async fn every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify() {
     ];
     for (case, directory, presented) in cases {
         let svc = service(&h, directory);
+        let reference = unknown_user_cost(&h).await;
         let started = Instant::now();
         let outcome = svc.login(input(&h, "alice", presented)).await;
         let elapsed = started.elapsed();
@@ -559,7 +569,11 @@ async fn every_refusal_is_the_unknown_user_answer_and_pays_the_dummy_verify() {
             is_invalid_credentials(&outcome),
             "{case}: must be the unknown-user answer"
         );
-        assert!(elapsed >= floor, "{case}: the dummy verify must have run");
+        let floor = bracketed_floor(&h, reference).await;
+        assert!(
+            elapsed >= floor,
+            "{case}: the dummy verify must have run ({elapsed:?} < {floor:?})"
+        );
     }
     // An empty password never reaches the directory at all.
     let directory = StubDirectory::arc(
@@ -612,7 +626,6 @@ async fn saturation_answers_the_same_503_before_the_directory_is_contacted() {
 #[tokio::test]
 async fn an_entry_that_collides_with_a_local_account_is_refused_and_audited() {
     let h = harness().await;
-    let floor = unknown_user_cost(&h).await / 2;
     // Give bob something to lose: a session.
     let bob_session = match service(&h, None)
         .login(input(&h, "bob", &h.local_credential))
@@ -639,6 +652,7 @@ async fn an_entry_that_collides_with_a_local_account_is_refused_and_audited() {
             &directory_credential,
         );
         let svc = service(&h, Some(Arc::clone(&directory)));
+        let reference = unknown_user_cost(&h).await;
         let started = Instant::now();
         let outcome = svc.login(input(&h, typed, &directory_credential)).await;
         let elapsed = started.elapsed();
@@ -646,7 +660,11 @@ async fn an_entry_that_collides_with_a_local_account_is_refused_and_audited() {
             is_invalid_credentials(&outcome),
             "collision case {attribute}: a collision is the generic failure"
         );
-        assert!(elapsed >= floor, "the dummy verify runs beside the bind");
+        let floor = bracketed_floor(&h, reference).await;
+        assert!(
+            elapsed >= floor,
+            "collision case {attribute}: the dummy verify runs beside the bind ({elapsed:?} < {floor:?})"
+        );
         assert_eq!(directory.provision_calls(), 1, "the bind did happen");
         let rows = audit_rows(&h, AUDIT_JIT_REFUSED).await;
         let row = rows

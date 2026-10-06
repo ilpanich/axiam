@@ -216,7 +216,18 @@ bench-up:
         # they would keep their 1 000 000 under `rl=prod` and rl-prod-check would
         # FAIL a posture the harness never applied. Values come from the Rust
         # source, read-only, like everything rl-prod-check compares against.
-        eval "$(python3 runner/rl_prod_check.py --print-exports)"
+        # P23W6-02: fail CLOSED. `eval "$(…)"` alone discards the script's exit
+        # status, so a moved source left the families unpinned under an `rl=prod`
+        # label; the assignment carries the status to `set -e`, and every line must
+        # be a pin before any is applied (runner/rl-prod-posture-selftest.sh).
+        # rl-prod-pin: begin
+        RL_PIN_EXPORTS="$(python3 runner/rl_prod_check.py --print-exports)"
+        if [ -z "$RL_PIN_EXPORTS" ] || grep -qvE '^export AXIAM__RATE_LIMIT__[A-Z_]+_PER_MIN=[1-9][0-9]*$' <<<"$RL_PIN_EXPORTS"; then
+          echo "[bench-up] rl=prod: rl_prod_check.py --print-exports printed no usable pins — refusing to run a 'prod' posture with families left neutralized" >&2
+          exit 1
+        fi
+        eval "$RL_PIN_EXPORTS"
+        # rl-prod-pin: end
       elif [ "{{rl}}" != "neutralized" ]; then
         echo "[bench-up] unknown rl='{{rl}}' (use rl=neutralized or rl=prod)" >&2; exit 1
       else

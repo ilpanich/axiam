@@ -820,15 +820,20 @@ async fn an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_row
             .unwrap();
     }
 
-    // Another instance takes the lease over.
-    db.query(
-        "UPDATE type::record('minimal_profile_lease', 'instance') \
-         SET holder = 'the-usurper', renewed_at = time::now(), expires_at = time::now() + 1h",
-    )
+    // Another instance takes the lease over. Its write can collide with the
+    // running instance's renewal (every 100 ms here); a conflicted write
+    // commits nothing, so it is retried as the repository's own writes are.
+    axiam_db::helpers::retry_on_write_conflict(|| async {
+        db.query(
+            "UPDATE type::record('minimal_profile_lease', 'instance') \
+             SET holder = 'the-usurper', renewed_at = time::now(), expires_at = time::now() + 1h",
+        )
+        .await?
+        .check()
+        .map(drop)
+    })
     .await
-    .unwrap()
-    .check()
-    .unwrap();
+    .expect("the takeover is written");
 
     // The instance stops on its own, in order, and says why.
     let result = tokio::time::timeout(Duration::from_secs(20), stopped)

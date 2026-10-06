@@ -156,6 +156,16 @@ not need it, and needing it means the checkout is wrong.
   RabbitMQ and possibly Keycloak and authentik from it.
 - **`docker compose config`** needs every required variable; a bare run fails with
   `required variable … is missing a value`. That is the compose files failing closed.
+- **The stacks listen on every interface** (W6 F4 review, P23W6-06). Every target's
+  compose file publishes its application port (`BENCH_APP_PORT`, 8090), its TLS port
+  (`BENCH_TLS_PORT`, 8443) and, for AXIAM, gRPC (`BENCH_GRPC_PORT`, 50051) on all host
+  addresses, and the benchmark posture raises AXIAM's limiters and its lockout threshold
+  to 1 000 000. The credentials are generated per run, but on a G-box that sits on a LAN
+  anyone on that LAN reaches four identity servers with their limits off, and can disturb
+  a measurement. Firewall the three ports for anything but loopback for the length of the
+  run (Docker publishes past `ufw`, so a rule in the `DOCKER-USER` chain, or a host with
+  no LAN), and say in `RUN6-NOTES.md` which you did. The FAPI conformance rig needs the
+  ports on the Docker bridge, which is why the compose files do not bind loopback.
 
 ### 1.3 Re-check for a later patch release (quay.io is unreachable from the sandbox)
 
@@ -180,7 +190,9 @@ check for Zitadel `v4.19.*` and authentik `2026.8.*` is there too):
 Everything the stacks need is generated per run (`runner/bench-creds.sh`, §0.3). You do not
 export a password. If you export one anyway (`BENCH_ADMIN_PASSWORD`, say), it wins and is
 what the stack file records. **Never paste a credential into `RUN6-NOTES.md`, a log, or a
-chat**; `bench-pack` refuses an archive that contains `SECRET`/`PASSWORD` text.
+chat**; `bench-pack` refuses an archive that contains `SECRET`/`PASSWORD` text or a URL that
+carries a `user:password` pair (P23W6-01: `meta.json` used to record the broker URL with the
+generated broker password in it; it now records `amqps://<redacted>@…`).
 
 ---
 
@@ -305,6 +317,13 @@ the compose file refuses `--scale`, and the server itself refuses a second live 
 - No default-matrix scenario uses reactors, asynchronous authorization over AMQP, external audit
   ingestion over AMQP or the decision-cache broadcast (all four are `unavailable` in the profile),
   and nothing here exercises a restart, so the lost-delivery trade is stated, not measured.
+- **The harness overlay is not a deployment file** (W6 F4 review). It puts the GDPR audit
+  dead-letter file (T19.27) on a **tmpfs**, so that `bench-down` leaves nothing behind; no
+  benchmark makes a GDPR request, so the file is never written. A deployment that copied it
+  would lose, on every restart, the erasure and tenant-deletion records that could not be
+  written to the datastore, which is the one fallback those records have. The deployable
+  minimal profile is `docker/docker-compose.minimal.yml`, which keeps that file on a named
+  volume. Say this wherever the overlay is quoted.
 
 ### 2.6 Rate-limit posture, pass by pass
 

@@ -1,0 +1,150 @@
+# Benchmark target: authentik (resource-capped reference setup).
+#
+# Same CPU/memory envelope as the Keycloak and Zitadel targets so resource
+# efficiency is comparable. Pinned to authentik 2026.8.3 (override the image
+# with BENCH_AUTHENTIK_IMAGE, e.g. the identical Docker Hub mirror
+# authentik/server:2026.8.3 where ghcr.io is unreachable).
+#
+# SHAPE. authentik 2025.10 dropped Redis (cache, channels and the task queue
+# moved into PostgreSQL), so the stack is exactly the one authentik's own
+# compose ships: a `server` (the HTTP/HTTPS listener, the thing k6 talks to), a
+# `worker` (background tasks, and the process that applies the bootstrap
+# blueprint which creates the admin account) and PostgreSQL. No Redis service.
+#
+#   server  -> bench-authentik            (role "server")
+#   worker  -> bench-authentik-worker     (role "worker")
+#   db      -> bench-authentik-postgres   (role "db")
+#
+# CAPS. Run-5 caps, applied per container exactly as the other targets apply
+# them: server 2 CPU / 2 GiB (BENCH_CPUS / BENCH_MEM), db 2 CPU / 1 GiB
+# (BENCH_DB_CPUS / BENCH_DB_MEM). The worker carries the SAME server cap
+# (BENCH_AUTHENTIK_WORKER_CPUS / BENCH_AUTHENTIK_WORKER_MEM default to
+# BENCH_CPUS / BENCH_MEM), so the stack's configured ceiling is 6 CPU / 5 GiB
+# against Keycloak's 4 CPU / 3 GiB. The worker is mostly idle while a k6 cell
+# runs (the sampler records it and the report's per-container appendix shows
+# it), but its memory is resident and is counted in the whole-stack figure.
+# report.py's "server only" efficiency variant sums server + worker, because
+# authentik cannot be deployed without both.
+#
+# CREDENTIALS. No credential literal lives in this file. Every credential below
+# is a REQUIRED variable, generated per run by `just target=authentik bench-up`
+# and handed to compose through the environment:
+#   BENCH_AUTHENTIK_SECRET_KEY      authentik's signing/encryption key
+#   BENCH_AUTHENTIK_PG_PASSWORD     PostgreSQL
+#   BENCH_AUTHENTIK_ADMIN_PASSWORD  the bootstrap admin (akadmin) password
+#   BENCH_AUTHENTIK_ADMIN_TOKEN     the bootstrap API token runner/seed.sh
+#                                   drives the REST API with
+# Compose interpolates them into the containers' environment, so they are
+# visible to `docker inspect` on this disposable stack and nowhere else
+# (run-benchmark.sh never records authentik's environment in meta.json).
+#
+# Run `bench-down` to wipe the volumes: the bootstrap variables only take
+# effect on the very first start against an empty database.
+name: bench-authentik
+
+x-authentik-env: &authentik-env
+  AUTHENTIK_SECRET_KEY: "${BENCH_AUTHENTIK_SECRET_KEY:?generated per run by just target=authentik bench-up}"
+  AUTHENTIK_POSTGRESQL__HOST: postgres
+  AUTHENTIK_POSTGRESQL__PORT: "5432"
+  AUTHENTIK_POSTGRESQL__NAME: authentik
+  AUTHENTIK_POSTGRESQL__USER: authentik
+  AUTHENTIK_POSTGRESQL__PASSWORD: "${BENCH_AUTHENTIK_PG_PASSWORD:?generated per run by just target=authentik bench-up}"
+  # No outbound calls from a benchmark container: the update check and the
+  # startup analytics ping would otherwise fire on boot.
+  AUTHENTIK_DISABLE_UPDATE_CHECK: "true"
+  AUTHENTIK_DISABLE_STARTUP_ANALYTICS: "true"
+  # authentik's defaults bind `[::]` (IPv6 wildcard) and exit at startup with
+  # "Address family not supported by protocol" on a host whose kernel has no
+  # IPv6 (found in the sandbox this target was written in). IPv4 wildcards work
+  # everywhere and change nothing on the wire; set BENCH_AUTHENTIK_LISTEN_*
+  # to "[::]:<port>" to get the shipped binding back on a dual-stack host.
+  AUTHENTIK_LISTEN__HTTP: "${BENCH_AUTHENTIK_LISTEN_HTTP:-0.0.0.0:9000}"
+  AUTHENTIK_LISTEN__HTTPS: "${BENCH_AUTHENTIK_LISTEN_HTTPS:-0.0.0.0:9443}"
+  AUTHENTIK_LISTEN__METRICS: "${BENCH_AUTHENTIK_LISTEN_METRICS:-0.0.0.0:9300}"
+
+x-authentik-common: &authentik-common
+  image: ${BENCH_AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:2026.8.3}
+  # authentik keeps scratch state in /dev/shm (TMPDIR=/dev/shm/), and its own
+  # compose gives it 512 MiB. tmpfs pages count against the container's memory
+  # limit, so this is part of the memory accounting.
+  shm_size: 512mb
+  restart: "no"
+  networks: [bench]
+  depends_on:
+    postgres: { condition: service_healthy }
+  healthcheck:
+    # The image's own probe (`ak healthcheck`). It is NOT cheap: every run
+    # starts a process inside the container and makes a deep request (about
+    # 0.2 s of CPU), and that CPU lands in the very container the sampler is
+    # measuring. So the steady-state interval stays at the image's 30 s, and the
+    # faster `start_interval` applies only during `start_period`, so that
+    # `up --wait` still returns promptly once the process serves.
+    test: ["CMD", "ak", "healthcheck"]
+    interval: 30s
+    timeout: 30s
+    retries: 4
+    # Generous: the first start applies every migration under the 2-CPU cap.
+    start_period: 150s
+    start_interval: 5s
+
+services:
+  authentik:
+    <<: *authentik-common
+    container_name: bench-authentik
+    command: server
+    cpus: ${BENCH_CPUS:-2}
+    mem_limit: ${BENCH_MEM:-2048m}
+    environment:
+      <<: *authentik-env
+      # First-start bootstrap of the admin account (akadmin) and an API token
+      # for it. runner/seed.sh reads the token back out of this container's
+      # environment and provisions the benchmark fixture through the REST API.
+      AUTHENTIK_BOOTSTRAP_EMAIL: "akadmin@bench.invalid"
+      AUTHENTIK_BOOTSTRAP_PASSWORD: "${BENCH_AUTHENTIK_ADMIN_PASSWORD:?generated per run by just target=authentik bench-up}"
+      AUTHENTIK_BOOTSTRAP_TOKEN: "${BENCH_AUTHENTIK_ADMIN_TOKEN:?generated per run by just target=authentik bench-up}"
+    ports:
+      # 9000 is the plaintext listener, 9443 the built-in HTTPS listener (a
+      # self-signed certificate authentik generates itself; see README).
+      - "${BENCH_APP_PORT:-8090}:9000"
+      - "${BENCH_TLS_PORT:-8443}:9443"
+
+  worker:
+    <<: *authentik-common
+    container_name: bench-authentik-worker
+    command: worker
+    cpus: ${BENCH_AUTHENTIK_WORKER_CPUS:-${BENCH_CPUS:-2}}
+    mem_limit: ${BENCH_AUTHENTIK_WORKER_MEM:-${BENCH_MEM:-2048m}}
+    environment:
+      <<: *authentik-env
+
+  postgres:
+    # Same image, same tuning and same caps as the Keycloak and Zitadel targets'
+    # PostgreSQL (see the A9 note in targets/keycloak/docker-compose.yml for
+    # pinning a digest via BENCH_PG_IMAGE).
+    image: ${BENCH_PG_IMAGE:-postgres:16-alpine}
+    container_name: bench-authentik-postgres
+    cpus: ${BENCH_DB_CPUS:-2}
+    mem_limit: ${BENCH_DB_MEM:-1024m}
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=512MB"
+      - "-c"
+      - "max_connections=200"
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: "${BENCH_AUTHENTIK_PG_PASSWORD:?generated per run by just target=authentik bench-up}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authentik -d authentik"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+    networks: [bench]
+
+networks:
+  bench:
+    driver: bridge

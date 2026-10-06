@@ -32,7 +32,7 @@ every metric we report.
 result = f(target, security_profile, scenario)
 ```
 
-* **target** ∈ { axiam, keycloak, zitadel, … }
+* **target** ∈ { axiam, keycloak, zitadel, authentik }
 * **security_profile** ∈ { p0-plaintext, p1-tls12, p2-tls13, p3-mtls } (see
   `docs/security-profiles.md`)
 * **scenario** ∈ the k6 scripts under `scenarios/`
@@ -558,16 +558,16 @@ invocation still records whatever cap the DB container actually started
 with, and the "Appendix: per-container resource breakdown" table renders
 both `cpu_cap` and `mem_cap(MiB)` per cell.
 
-**Fair competitor DB tuning.** Both Keycloak's and Zitadel's `postgres`
+**Fair competitor DB tuning.** Keycloak's, Zitadel's and authentik's `postgres`
 service now start with minimal, uniform, non-durability tuning applied
-identically to both — `shared_buffers=256MB`, `effective_cache_size=512MB`,
+identically to all three — `shared_buffers=256MB`, `effective_cache_size=512MB`,
 `max_connections=200` via compose `command:` flags — sized sensibly for the
 standard 1 GiB cap rather than left at Postgres's stock defaults (which
 target a much larger box). This is a "same DB, sane settings" fix, not a
-thumb on the scale: both competitors get the exact same flags, and nothing
+thumb on the scale: every competitor gets the exact same flags, and nothing
 about *durability* is touched (see below).
 
-**Durability parity note.** Postgres (used by both Keycloak and Zitadel here)
+**Durability parity note.** Postgres (used by Keycloak, Zitadel and authentik here)
 defaults to `synchronous_commit = on`: a transaction's WAL record is written
 and fsynced to disk before the client's `COMMIT` returns — durable-by-default.
 AXIAM's bench target (`targets/axiam/docker-compose.yml`) runs

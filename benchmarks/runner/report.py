@@ -335,12 +335,18 @@ def bottleneck(meta, res):
     return ",".join(sorted(hot)) if hot else "none"
 
 
-# Primary app/server container per target (excludes db/mq/edge), used for the
-# server-container-only efficiency variant (A5.5).
+# Primary app/server container(s) per target (excludes db/mq/edge), used for
+# the server-container-only efficiency variant (A5.5). A tuple, because
+# authentik cannot be deployed as one process: its application tier is the
+# `server` AND the `worker` (Redis is gone since 2025.10, but the worker still
+# applies blueprints and runs every background task), so "server only" for
+# authentik is their SUM. Leaving the worker out would make authentik's
+# server-only memory look ~300 MiB smaller than the thing a deployer must run.
 SERVER_CONTAINER = {
-    "axiam": "bench-axiam-server",
-    "keycloak": "bench-keycloak",
-    "zitadel": "bench-zitadel",
+    "axiam": ("bench-axiam-server",),
+    "keycloak": ("bench-keycloak",),
+    "zitadel": ("bench-zitadel",),
+    "authentik": ("bench-authentik", "bench-authentik-worker"),
 }
 
 
@@ -393,6 +399,20 @@ PROTOCOL_EFFICIENCY_PAIRS = {
 # (never excluded, like cc-token-setup) with a caveat naming the divergence.
 PROTOCOL_VARIANT_SCENARIOS = {"token_refresh"}
 
+# The same label, for a single (scenario, target) cell rather than for every
+# target's cell of a scenario. authentik's password login is a three-call
+# flow-executor conversation (about six server requests) measured as ONE
+# operation, while AXIAM, Keycloak and Zitadel answer a login in one request;
+# the other three targets' login cells are not variants of anything, so the
+# label cannot be a per-scenario one without relabelling their published
+# cells. Same semantics as above: kept in the table, never excluded.
+PROTOCOL_VARIANT_CELLS = {("oauth2_password_login", "authentik")}
+
+
+def is_protocol_variant(scenario, target):
+    """True when this cell carries the protocol-variant label."""
+    return scenario in PROTOCOL_VARIANT_SCENARIOS or (scenario, target) in PROTOCOL_VARIANT_CELLS
+
 # Per-scenario, per-target prose naming exactly what that target's cell
 # measures, for the caveat rendered next to PROTOCOL_VARIANT_SCENARIOS rows.
 # token_refresh: AXIAM deliberately ships no OAuth 2.1 ROPC/password grant
@@ -410,7 +430,39 @@ PROTOCOL_VARIANT_NOTES = {
                     "the realm token endpoint)",
         "zitadel": "OAuth2 refresh grant (via a Session-API-v2-seeded login; "
                    "see the fallback flag if this cell also reads fallback-op)",
+        "authentik": "OAuth2 refresh grant (grant_type=refresh_token against "
+                     "the global token endpoint); authentik 2026.8 issues "
+                     "refresh tokens only from the authorization-code and "
+                     "device grants, so this harness cannot obtain one "
+                     "non-interactively and the cell normally reads "
+                     "fallback-op (client_credentials re-mint)",
     },
+    "oauth2_password_login": {
+        "authentik": "password login through the flow executor — three client "
+                     "calls (GET the identification challenge, POST the "
+                     "username, POST the password; about six server requests "
+                     "with the executor's redirects) measured as ONE login. "
+                     "The real password is verified against authentik's real "
+                     "hash (PBKDF2-SHA256, 1 000 000 iterations) and an "
+                     "authenticated session is created. Its ROPC grant is NOT "
+                     "used: it accepts an app-password token, not the password",
+    },
+}
+
+# What a reader should take from a protocol-variant table, per scenario — the
+# sentence rendered after the per-target descriptions.
+PROTOCOL_VARIANT_READING = {
+    "token_refresh": (
+        "Read this table as each target's own capability at renewing a "
+        "credential without re-authenticating, never as \"target A is Nx "
+        "target B\" (see claude_dev/refresh-harness-diagnosis.md §6)."),
+    "oauth2_password_login": (
+        "Every target verifies the real password with its own real hash, so "
+        "the cell is a genuine password login everywhere; but the variant "
+        "target's latency also includes its extra client round trips, which "
+        "the others' single-request logins do not have. Read the throughput "
+        "as logins per second with each product's own hash cost and wire "
+        "shape, not as a like-for-like protocol race."),
 }
 
 # H10: which AXIAM scenarios can actually be affected by the settle gate's
@@ -522,11 +574,14 @@ def derive_server_only(perf, res, target):
     container's CPU/mem — so AXIAM's broker (RabbitMQ) + DB inclusion in the
     whole-stack numbers doesn't silently understate its per-request cost
     relative to a single-process competitor (A5.5)."""
-    cname = SERVER_CONTAINER.get(target)
-    stats = (res.get("containers") or {}).get(cname) if cname else None
+    containers = res.get("containers") or {}
+    stats = [containers[n] for n in SERVER_CONTAINER.get(target, ()) if n in containers]
     if not stats:
         return {"throughput_per_core": 0.0, "throughput_per_gib": 0.0, "cpu_ms_per_request": 0.0}
-    server_res = {"cpu_cores_avg": stats.get("cpu_avg", 0.0), "mem_mib_avg": stats.get("mem_avg", 0.0)}
+    server_res = {
+        "cpu_cores_avg": sum(s.get("cpu_avg", 0.0) for s in stats),
+        "mem_mib_avg": sum(s.get("mem_avg", 0.0) for s in stats),
+    }
     return derive(perf, server_res)
 
 
@@ -979,7 +1034,7 @@ def build_report(cells, multi_run=False):
         # PROTOCOL_VARIANT_SCENARIOS above), orthogonal to bench_fallback —
         # append rather than replace so a cell that's ALSO fallback-op (e.g.
         # Zitadel's token_refresh) still shows both.
-        if c["scenario"] in PROTOCOL_VARIANT_SCENARIOS:
+        if is_protocol_variant(c["scenario"], c["target"]):
             fb_label = (fb_label + "+protocol-variant") if fb_label != "no" else "protocol-variant"
         row = [
             c["scenario"], c["profile"], c["target"], c["rate_limits"],
@@ -1089,20 +1144,19 @@ def build_report(cells, multi_run=False):
                     "token used to reach it was minted via client_credentials "
                     "once in setup() (comparability: cc-token-setup).", "",
                 ]
-            if sc in PROTOCOL_VARIANT_SCENARIOS:
+            variant_cells = [c for c in group if is_protocol_variant(sc, c["target"])]
+            if variant_cells:
                 notes = PROTOCOL_VARIANT_NOTES.get(sc, {})
                 desc = "; ".join(
                     f"**{c['target']}** = {notes.get(c['target'], 'operation shape not documented')}"
-                    for c in sorted(group, key=lambda c: c["target"])
+                    for c in sorted(variant_cells, key=lambda c: c["target"])
                 )
+                reading = PROTOCOL_VARIANT_READING.get(sc, "")
                 lines += [
                     "> ⚠️ **comparability: protocol-variant** (kept in this "
                     "head-to-head, never excluded — each target's cell is a "
                     "real, correct measurement of ITS OWN op, they're just not "
-                    f"the same op): {desc}. Read this table as each target's own "
-                    "capability at renewing a credential without "
-                    "re-authenticating, never as \"target A is Nx target B\" "
-                    "(see claude_dev/refresh-harness-diagnosis.md §6).", "",
+                    f"the same op): {desc}. {reading}", "",
                 ]
             if len(group) < 2:
                 lines += ["_Fewer than 2 non-fallback targets — nothing to compare._", ""]
@@ -1130,7 +1184,7 @@ def build_report(cells, multi_run=False):
                 d, ds, p = c["der"], c["der_server"], c["perf"]
                 marker = " 🏆" if c is best else ""
                 note = " (cc-token-setup)" if p.get("fallback_class") == "cc-token-setup" else ""
-                if sc in PROTOCOL_VARIANT_SCENARIOS:
+                if is_protocol_variant(sc, c["target"]):
                     note += " (protocol-variant)"
                 rows.append([c["target"] + marker + note, f"{p['throughput']:.0f}",
                              f"{p['p50']:.1f}", f"{p['p95']:.1f}",

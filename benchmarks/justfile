@@ -15,7 +15,7 @@
 # Before committing hours to a matrix, rehearse it in minutes — same cells, same
 # bring-up/seed/run/tear-down path, measurement window collapsed to seconds:
 #
-#   just targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13" bench-dry-run
+#   just targets="axiam keycloak zitadel authentik" profiles="p0-plaintext p2-tls13" bench-dry-run
 
 set shell := ["bash", "-uc"]
 
@@ -225,6 +225,56 @@ bench-up:
       fi
     fi
 
+    # --- authentik target: per-run credentials + profile limits ---
+    #
+    # authentik needs four credentials (its signing/encryption secret key, the
+    # PostgreSQL password, the bootstrap admin password and the bootstrap API
+    # token runner/seed.sh provisions through). None is a literal anywhere in
+    # the repo: they are generated here, once per stack, into a mode-600 file
+    # under the gitignored .seed/ and exported for compose (targets/authentik/
+    # docker-compose.yml lists each as a REQUIRED variable). The file exists so
+    # a second `bench-up` against a still-running stack passes compose the SAME
+    # values — a fresh PostgreSQL password against the old data volume would
+    # lock authentik out of its own database. `bench-down` removes it together
+    # with the volumes it belongs to. Nothing here prints a credential; under
+    # GitHub Actions each is registered with the log scrubber first.
+    if [ "{{target}}" = "authentik" ]; then
+      if [ "{{profile}}" = "p3-mtls" ]; then
+        echo "[bench-up] authentik cannot run p3-mtls: its API listener has no client-certificate mode" >&2
+        echo "           (client certificates belong to its outposts and flow stages, not to the listener)." >&2
+        echo "           Refusing rather than measuring plain TLS under an mTLS label." >&2
+        exit 1
+      fi
+      command -v openssl >/dev/null || { echo "[bench-up] openssl is required to generate authentik's per-run credentials"; exit 1; }
+      AK_STACK_ENV=".seed/authentik.stack.env"
+      mkdir -p .seed
+      if [ ! -s "$AK_STACK_ENV" ]; then
+        echo "[bench-up] generating per-run authentik credentials into $AK_STACK_ENV (mode 600; bench-down removes it)"
+        (
+          umask 077
+          {
+            echo "export BENCH_AUTHENTIK_SECRET_KEY=$(openssl rand -hex 32)"
+            echo "export BENCH_AUTHENTIK_PG_PASSWORD=$(openssl rand -hex 16)"
+            echo "export BENCH_AUTHENTIK_ADMIN_PASSWORD=Ak-$(openssl rand -hex 16)-Aa1"
+            echo "export BENCH_AUTHENTIK_ADMIN_TOKEN=$(openssl rand -hex 32)"
+          } > "$AK_STACK_ENV"
+        )
+      fi
+      # shellcheck disable=SC1090
+      source "$AK_STACK_ENV"
+      if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        for v in BENCH_AUTHENTIK_SECRET_KEY BENCH_AUTHENTIK_PG_PASSWORD BENCH_AUTHENTIK_ADMIN_PASSWORD BENCH_AUTHENTIK_ADMIN_TOKEN; do
+          printf '::add-mask::%s\n' "${!v}"
+        done
+      fi
+      if [ "{{profile}}" != "p0-plaintext" ]; then
+        echo "[bench-up] NOTE: authentik's built-in HTTPS listener (container :9443) serves its own self-signed" >&2
+        echo "           certificate, accepts TLS 1.2 AND 1.3 (k6 negotiates 1.3) and speaks HTTP/1.1 only." >&2
+        echo "           It cannot be pinned to TLS 1.3 or switched to HTTP/2, so {{profile}} is runnable but is not" >&2
+        echo "           the same transport as AXIAM's or Keycloak's {{profile}} — say so wherever a number is quoted." >&2
+      fi
+    fi
+
     # DB CPU/mem envelope (C2, all targets — see `dbcaps` at the top of this
     # file). BENCH_DB_CPUS/BENCH_DB_MEM are already read directly by every
     # target's docker-compose.yml (surrealdb/postgres `cpus:`/`mem_limit:`),
@@ -357,8 +407,9 @@ bench-up:
       check_port "${BENCH_TLS_PORT:-8443}" "TLS / BENCH_TLS_PORT" || port_conflict=1
     else
       check_port "${BENCH_APP_PORT:-8090}" "app / BENCH_APP_PORT" || port_conflict=1
-      # Targets that also publish the TLS port: keycloak always; axiam with its edge.
-      if [ "{{target}}" = "keycloak" ] || { [ "{{target}}" = "axiam" ] && [ -n "$PROFILE_ARG" ]; }; then
+      # Targets that also publish the TLS port: keycloak and authentik always;
+      # axiam with its edge.
+      if [ "{{target}}" = "keycloak" ] || [ "{{target}}" = "authentik" ] || { [ "{{target}}" = "axiam" ] && [ -n "$PROFILE_ARG" ]; }; then
         check_port "${BENCH_TLS_PORT:-8443}" "TLS / BENCH_TLS_PORT" || port_conflict=1
       fi
     fi
@@ -436,6 +487,7 @@ bench-up:
     case "{{target}}" in
       zitadel)  READY_URL="$READY_BASE/debug/ready" ;;    # 200 only when fully initialized
       keycloak) READY_URL="$READY_BASE/realms/master" ;;  # 200 once the server serves
+      authentik) READY_URL="$READY_BASE/-/health/ready/" ;; # 200 once the server serves (its default blueprints land later; bench-seed waits for them)
       *)        READY_URL="$READY_BASE/health" ;;         # axiam liveness/readiness
     esac
     echo "[bench-up] waiting for {{target}} to serve at $READY_URL (timeout 180s)"
@@ -567,6 +619,11 @@ bench-down:
              | sed 's/^\${//; s/:?$//' | sort -u)
     docker compose -f "$COMPOSE" --profile tls down -v || \
       docker compose -f "$COMPOSE" down -v
+    # authentik: its per-run credentials belong to the volumes just removed
+    # (see bench-up); a surviving file would hand the next stack a database
+    # password and bootstrap token for data that no longer exists, and keep
+    # secrets on disk for no reason.
+    if [ "{{target}}" = "authentik" ]; then rm -f .seed/authentik.stack.env; fi
 
 # Dump a target's compose logs: every service, or only the ones named.
 #
@@ -654,6 +711,12 @@ bench-matrix:
       export BENCH_RUN_INDEX="$i"
       for t in {{targets}}; do
         for p in {{profiles}}; do
+          # authentik has no client-certificate mode on its API listener, so
+          # there is no p3-mtls cell to run for it (bench-up refuses it too).
+          if [ "$t" = "authentik" ] && [ "$p" = "p3-mtls" ]; then
+            echo "=== run $i: $t / $p — SKIPPED: authentik has no mTLS listener mode ==="
+            continue
+          fi
           echo "=== run $i: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
           just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up
           just target=$t profile=$p bench-seed
@@ -721,6 +784,10 @@ bench-dry-run:
 
     for t in {{targets}}; do
       for p in {{profiles}}; do
+        if [ "$t" = "authentik" ] && [ "$p" = "p3-mtls" ]; then
+          note "$t" "$p" "(profile)" SKIP "authentik has no client-certificate mode on its API listener — no p3-mtls cell exists for it (expected)"
+          continue
+        fi
         echo "=== dry-run: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
         if ! just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up; then
           note "$t" "$p" "(bench-up)" FAIL "stack never came up / never became ready — see the compose ps+logs dumped above"
@@ -1075,6 +1142,13 @@ bench-nested-report:
 # k6, no seeded stack — CI runs the same script on every PR.
 bench-nested-selftest:
     bash runner/nested-selftest.sh
+
+# Hermetic guard for the authentik target's wiring (T23.10.1): no credential
+# literal in its compose file, the compose/runner/report container-name lists
+# agreeing, the report's server-only figure summing server + worker, and the
+# p3-mtls refusal still in place. No docker, no k6 — CI runs it on every PR.
+bench-authentik-selftest:
+    bash runner/authentik-selftest.sh
 
 # Verify every language bench presents its p3-mtls client certificate
 # (CONTRACT.md §6.1) — no AXIAM stack, no seed, no containers required: the

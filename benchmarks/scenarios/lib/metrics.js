@@ -80,9 +80,65 @@ export function protoCode(proto) {
   }
 }
 
+// Execute one LOGICAL operation that takes several client calls, and record it
+// as ONE operation: one bench_ok / bench_failed, one error-rate sample, one
+// latency sample covering the whole sequence.
+//
+// Only authentik needs this (targets.js: its password login is a flow-executor
+// conversation, not a single request). `built.steps` is a list of ordinary
+// built requests, run in order, each with its own `expect`/`require`; the first
+// step that fails ends the operation as a failure. All steps share ONE cookie
+// jar that is created fresh per call — a flow session is the state being
+// carried, and it must not leak from one iteration (one login) into the next:
+// k6's default per-VU jar would hand iteration N+1 the session iteration N
+// established.
+//
+// Latency is the wall clock of the whole sequence. k6's own `timings.duration`
+// is that of the last response only and leaves out the redirect legs the
+// executor answers with, so summing it would under-report the operation.
+// Returns the last step's parsed JSON on success, or null on failure.
+export function doSteps(built) {
+  const jar = new http.CookieJar();
+  const started = Date.now();
+  let passed = true;
+  let last = null;
+  let lastRes = null;
+  for (let i = 0; i < built.steps.length; i++) {
+    const step = built.steps[i];
+    const reqParams = Object.assign({}, step.params || {}, { jar });
+    const res = http.request(step.method, step.url, step.body || null, reqParams);
+    lastRes = res;
+    if (res.proto) m.httpProto.add(protoCode(res.proto));
+    const expected = step.expect || 200;
+    const accepted = Array.isArray(expected) ? expected : [expected];
+    const checks = { [`step ${i + 1} status is ${accepted.join(' or ')}`]: (r) => accepted.indexOf(r.status) !== -1 };
+    const require = step.require || {};
+    for (const name in require) checks[`step ${i + 1}: ${name}`] = require[name];
+    if (!check(res, checks)) {
+      passed = false;
+      break;
+    }
+    try {
+      last = res.json();
+    } catch (_e) {
+      last = {};
+    }
+  }
+  m.latency.add(Date.now() - started);
+  m.errorRate.add(!passed);
+  if (passed) {
+    m.ok.add(1);
+  } else {
+    m.failed.add(1);
+    if (lastRes && lastRes.status === 429) m.throttled.add(1);
+  }
+  return passed ? last : null;
+}
+
 // Execute one built request (from targets.js) and record uniform metrics.
 // Returns the parsed JSON body on success, or null on failure.
 export function doOp(built, params) {
+  if (built.steps) return doSteps(built);
   const reqParams = Object.assign({}, built.params || {}, params || {});
   const res = http.request(built.method, built.url, built.body || null, reqParams);
 

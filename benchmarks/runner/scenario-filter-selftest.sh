@@ -16,8 +16,10 @@
 # So this asserts the filters, not the filename: it drives the REAL runner in
 # dry-run mode with extension-less names that must be skipped, and checks the
 # dry-run ledger records the skip against the normalized `.js` cell name.
-# Passing names the filters do NOT skip is out of scope here — that path needs
-# k6 and a live stack.
+# Running a scenario the filters let through needs k6 and a live stack and is out
+# of scope here — but WHICH scenarios get through is not: BENCH_LIST_SCENARIOS=1
+# makes the runner print its survivors and stop, and check_runs below pins that
+# set per competitor target (keycloak, zitadel, authentik).
 #
 # Hermetic: no docker, no k6, no seeded stack (BENCH_SKIP_SEED_CHECK=1; the
 # runner never reaches its k6 invocation because every scenario is filtered
@@ -81,6 +83,49 @@ check_skip zitadel  oauth2_code_pkce      oauth2_code_pkce      "AXIAM-only scen
 # idempotent, not a second code path.
 check_skip axiam    oauth2_client_credentials_reactor_hook.js \
                     oauth2_client_credentials_reactor_hook "pending scenario, spelled with .js"
+
+# authentik (T23.10.1). The AXIAM-only / Zitadel-only lists are written as "every
+# target except X", so a new target inherits the exclusions without being named —
+# which is exactly how a new target could silently be handed a cell that cannot
+# run on it (a red cell that reads as "the product is broken"). These pin that for
+# the fourth target, one cell per reason a scenario is not runnable there.
+check_skip authentik authz_check_rest        authz_check_rest        "AXIAM-only scenario"
+check_skip authentik opaque_login_start      opaque_login_start      "AXIAM-only scenario"
+check_skip authentik userinfo_grpc           userinfo_grpc           "AXIAM-only scenario (gRPC identity read)"
+check_skip authentik oauth2_discovery        oauth2_discovery        "AXIAM-only scenario"
+check_skip authentik zitadel_userinfo_grpc   zitadel_userinfo_grpc   "Zitadel-only scenario"
+
+# The positive half: the EXACT set each competitor runs under `--scenario all`,
+# via the runner's own BENCH_LIST_SCENARIOS=1 (it prints the survivors of every
+# filter and stops — no k6, no stack). A skip-assertion proves a cell is dropped;
+# only this proves nothing else got through, and that the shared five (client
+# credentials, introspection, JWKS, userinfo, password login) plus token_refresh
+# are still there. A scenario added to scenarios/ without a decision about the
+# competitors lands here and fails, which is the point: decide (extend a filter
+# list in run-benchmark.sh, or extend this expectation) in the same commit.
+check_runs() {
+  local target="$1"; shift
+  local out="$FIX/runs-$target"
+  mkdir -p "$out"
+  local got want
+  got="$(BENCH_LIST_SCENARIOS=1 BENCH_SKIP_SEED_CHECK=1 BENCH_RESULTS_DIR="$out" \
+          bash "$HERE/run-benchmark.sh" --target "$target" --profile p0-plaintext --scenario all 2>/dev/null \
+          | grep -E '^[a-z0-9_]+\.js$' | sort | tr '\n' ' ')"
+  want="$(printf '%s\n' "$@" | sort | tr '\n' ' ')"
+  if [ "$got" != "$want" ]; then
+    echo "[scenario-filter-selftest] target $target would run a different scenario set than expected." >&2
+    echo "  want: $want" >&2
+    echo "  got:  $got" >&2
+    fail=1
+  fi
+}
+SHARED="jwks_fetch.js oauth2_client_credentials.js oauth2_password_login.js token_introspection.js token_refresh.js userinfo.js"
+# shellcheck disable=SC2086
+check_runs keycloak  $SHARED
+# shellcheck disable=SC2086
+check_runs zitadel   $SHARED zitadel_userinfo_grpc.js
+# shellcheck disable=SC2086
+check_runs authentik $SHARED
 
 [ "$fail" -eq 0 ] || { echo "[scenario-filter-selftest] FAILED" >&2; exit 1; }
 echo "[scenario-filter-selftest] OK — extension-less --scenario names are normalized before filtering."

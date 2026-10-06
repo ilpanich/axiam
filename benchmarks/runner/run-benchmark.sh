@@ -417,6 +417,17 @@ rotate_scenarios() {
 }
 rotate_scenarios
 
+# BENCH_LIST_SCENARIOS=1: print the scenarios this target/profile WOULD run
+# (one per line, after every filter above) and stop. Hermetic by construction —
+# no k6, no stack, nothing measured — which is what lets
+# runner/scenario-filter-selftest.sh pin the exact set a target runs, including
+# the sets a filter list should have excluded (an AXIAM-only cell that reaches a
+# competitor is a red cell that reads as "the product is broken").
+if [ "${BENCH_LIST_SCENARIOS:-0}" = "1" ]; then
+  [ "${#SCENARIOS[@]}" -eq 0 ] || printf '%s\n' "${SCENARIOS[@]}"
+  exit 0
+fi
+
 command -v k6 >/dev/null || { echo "[run] k6 not installed — see https://k6.io/docs/get-started/installation/" >&2; exit 1; }
 
 # Container name filter for the resource sampler (matches this target's stack).
@@ -588,7 +599,24 @@ json_escape() {
 BENCH_SETTLE="${BENCH_SETTLE:-1}"                                # 0 to skip entirely (quick manual runs)
 BENCH_SETTLE_BURST_VUS="${BENCH_SETTLE_BURST_VUS:-20}"            # concurrent probe workers
 BENCH_SETTLE_BURST_SECS="${BENCH_SETTLE_BURST_SECS:-15}"          # seconds each probe attempt runs
-BENCH_SETTLE_PROBE_THR="${BENCH_SETTLE_PROBE_THR:-400}"           # ops/s pass threshold (OR'd with p50 below)
+# The 400 ops/s default is calibrated on AXIAM's post-seed clamp (settled ~730
+# ops/s vs ~44 in-window) and is trivially cleared by Keycloak's and Zitadel's JWKS,
+# which is all the fallback probe asks of a competitor. authentik cannot reach it
+# at any point: its JWKS costs roughly a dozen PostgreSQL transactions per request
+# (cache and sessions live in the database since 2025.10), and on the small host
+# its target was developed on the probe read ~15-30 ops/s from the first probe to
+# the last — no clamp, just a slow endpoint. With 400 it would burn the whole
+# BENCH_SETTLE_TIMEOUT_SECS on every run and stamp `settle_timeout: true` on every
+# cell, which report.py turns into refused cells. So for authentik the default is
+# "it serves 10 ops/s under 20-way concurrency" — a does-it-answer check, and
+# honestly nothing more than that: no post-seed transient has been characterised
+# for this target. Raise BENCH_SETTLE_PROBE_THR once run 6 shows its settled rate;
+# the value used is recorded in every cell's meta.json (`settle_probe_thr`).
+case "$TARGET" in
+  authentik) _SETTLE_THR_DEFAULT=10 ;;
+  *)         _SETTLE_THR_DEFAULT=400 ;;
+esac
+BENCH_SETTLE_PROBE_THR="${BENCH_SETTLE_PROBE_THR:-$_SETTLE_THR_DEFAULT}"           # ops/s pass threshold (OR'd with p50 below)
 BENCH_SETTLE_PROBE_P50_MS="${BENCH_SETTLE_PROBE_P50_MS:-150}"     # p50-under-load pass threshold (ms)
 BENCH_SETTLE_RETRY_SECS="${BENCH_SETTLE_RETRY_SECS:-30}"          # gap between failed probe attempts
 BENCH_SETTLE_TIMEOUT_SECS="${BENCH_SETTLE_TIMEOUT_SECS:-600}"     # hard cap, then warn + proceed
@@ -659,6 +687,7 @@ _burst_worker() {
   case "$TARGET" in
     keycloak) url="$BASE/realms/${BENCH_REALM:-bench}/protocol/openid-connect/certs" ;;
     zitadel)  url="$BASE/oauth/v2/keys" ;;
+    authentik) url="$BASE/application/o/${BENCH_AUTHENTIK_APP_SLUG:-bench-app}/jwks/" ;;
   esac
   while [ "$(date +%s)" -lt "$deadline" ]; do
     curl -sSk --max-time 5 "${_SETTLE_CURL_MTLS[@]}" -o /dev/null -w '%{http_code}\t%{time_total}\n' "$url" 2>/dev/null >> "$outfile"
@@ -914,6 +943,15 @@ bench-zitadel server
 bench-zitadel-postgres db
 EOF
       ;;
+    authentik)
+      # authentik is deployed as a server AND a worker (Redis is gone since
+      # 2025.10); both carry the server cap and both are in the stack's footprint.
+      cat <<EOF
+bench-authentik server
+bench-authentik-worker worker
+bench-authentik-postgres db
+EOF
+      ;;
   esac
 }
 
@@ -923,6 +961,7 @@ EOF
 role_default_cpu_cap() {
   case "$1" in
     server) echo "${BENCH_CPUS:-2}" ;;
+    worker) echo "${BENCH_AUTHENTIK_WORKER_CPUS:-${BENCH_CPUS:-2}}" ;;
     db)     echo "${BENCH_DB_CPUS:-2}" ;;
     mq)     echo "${BENCH_MQ_CPUS:-1}" ;;
     edge)   echo "${BENCH_EDGE_CPUS:-1}" ;;
@@ -938,6 +977,7 @@ role_default_mem_mib() {
   local raw
   case "$1" in
     server) raw="${BENCH_MEM:-1024m}" ;;
+    worker) raw="${BENCH_AUTHENTIK_WORKER_MEM:-${BENCH_MEM:-1024m}}" ;;
     db)     raw="${BENCH_DB_MEM:-1024m}" ;;
     mq)     raw="${BENCH_MQ_MEM:-512m}" ;;
     edge)   raw="${BENCH_EDGE_MEM:-128m}" ;;

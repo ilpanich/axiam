@@ -51,6 +51,14 @@ configured per target:
 * **Keycloak** — supports `https-protocols` and client-cert (`x509`) auth natively;
   the profile env maps onto Keycloak's own settings in its compose file.
 * **Zitadel** — TLS mode set via `ZITADEL_TLS_*`.
+* **authentik** — only `p0` and `p2` are meaningful, and `p2` is approximate. Its
+  built-in HTTPS listener (container `:9443`) serves its own self-signed
+  certificate, accepts TLS 1.2 **and** 1.3 (k6 negotiates 1.3) and speaks HTTP/1.1
+  only; the shared throwaway certs are not used and the listener cannot be pinned
+  to TLS 1.3 or switched to HTTP/2. It has no client-certificate mode (those belong
+  to its outposts and flow stages), so **`p3-mtls` is not run**: `bench-up` refuses
+  it and `bench-matrix`/`bench-dry-run` skip it, rather than measure plain TLS
+  under an mTLS label. See the README's "The authentik target".
 
 ## Certificate material
 

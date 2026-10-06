@@ -726,6 +726,16 @@ jobs:
       - name: Nested-authz sweep self-test
         working-directory: benchmarks
         run: bash runner/nested-selftest.sh
+      # T23.10.1: the authentik target's wiring. A credential literal slipping
+      # into its compose file (every one is a generated, required variable), the
+      # compose/runner/report container-name lists drifting apart (the report's
+      # "server only" figure for authentik silently going to 0.0 or losing the
+      # worker), the protocol-variant label spreading to the other targets' login
+      # cells, and the p3-mtls refusal being lost (a plain-TLS number published
+      # under an mTLS label). Hermetic: no docker, no k6.
+      - name: authentik target self-test
+        working-directory: benchmarks
+        run: bash runner/authentik-selftest.sh
       # Shell syntax gate for the runner scripts. `bash -n` is not a linter,
       # but the runner is 1 000+ lines of bash that only ever executes inside a
       # multi-hour matrix run — a syntax error there is otherwise discovered at

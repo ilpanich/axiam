@@ -62,6 +62,20 @@ export const cfg = {
   introspectClientId: str('BENCH_INTROSPECT_CLIENT_ID', ''),
   introspectClientSecret: str('BENCH_INTROSPECT_CLIENT_SECRET', ''),
 
+  // authentik-only (runner/seed.sh seed_authentik). authentik's OIDC endpoints
+  // are global (`/application/o/token/`, `/introspect/`, `/userinfo/`) except
+  // the JWKS, which lives under the application slug, so the slug is the one
+  // piece of routing the adapter needs. The flow slug names the authentication
+  // flow oauth2_password_login drives. The user token is the bench user's
+  // app-password token, which authentik's `grant_type=password` accepts in
+  // place of a password — used ONLY by setup() to mint a real user-subject
+  // token (never by a measured request; see the authentik adapter in
+  // targets.js for why that grant is not a password login). Empty for every
+  // other target, and the token is a generated per-run value, never a default.
+  authentikAppSlug: str('BENCH_AUTHENTIK_APP_SLUG', 'bench-app'),
+  authentikFlowSlug: str('BENCH_AUTHENTIK_FLOW_SLUG', 'default-authentication-flow'),
+  authentikUserToken: str('BENCH_AUTHENTIK_USER_TOKEN', ''),
+
   // --- TLS (from the security profile) ---
   // Default OFF: the bench TLS edge uses a throwaway private-CA cert
   // (runner/gen-certs.sh) that k6's OS trust store can't verify, and k6 has no

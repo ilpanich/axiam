@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta18] - 2026-10-06
+
 ### Added
 
 - **Benchmark run 6: the runbook and the harness it needs (G-10, T23.10.2(a), D-75,

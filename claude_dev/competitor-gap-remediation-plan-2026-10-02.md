@@ -2215,6 +2215,38 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > open), schema **v84** (W6 should need none), contract **1.58** (unchanged),
 > findings **P23W6-NN**.
 
+> **W6 F4, 2026-10-06:** [`security-review-phase23-w6-2026-10-06.md`](security-review-phase23-w6-2026-10-06.md).
+> Twelve findings, no merge blocker after fixes. Fixed on the branch: the generated
+> broker password reached every full-profile cell's `meta.json` and the
+> `bench-pack` archive inside `AXIAM__AMQP__URL` (**P23W6-01**, Low); `rl=prod`'s
+> source pin failed open, `eval` discarding the script's status (**P23W6-02**,
+> Low); the seed env, now holding the admin passwords, was readable between write
+> and `chmod` (**P23W6-03**, Low); `check-amqp-transport.py` read the minimal
+> overlay's `!reset null` as a URL and would have turned W6a's CI red
+> (**P23W6-08**, Low); T-102's text, the design document and the website said
+> revocation reaches every connection AXIAM terminates, but OAuth2
+> `tls_client_auth` reads no certificate status (**P23W6-04**, text); the "own
+> request path" count said three (write-up) and two (website), "none a defect" —
+> it is seven, three of them not trade-offs (P23W6-05); the run-6 runbook now says
+> the targets listen on every interface and the overlay is no deployment file
+> (P23W6-06); **D-74 amended** — an unvouched account's request cannot be reached,
+> nothing lists it, so a federated account cannot approve CIBA (P23W6-07; the
+> decision stands). Reported with issue bodies (not filed), all pre-existing: a
+> locked account is refused before any password verify — faster than an unknown
+> name, and `401` against `503` under saturation, shown by a timing-free test;
+> gRPC `ValidateCredentials` verifies nothing on any refusal (**P23W6-09**, Medium,
+> new **T-469**, Open); the CRL, and `tls_client_auth`'s missing status check
+> (**P23W6-10**, Medium, T-102); loopback binding for the benchmark targets
+> (P23W6-06); a CIBA pending list on the console (P23W6-07); eight families with
+> no `rl-prod-check` row (P23W6-11); the stop grace against actix's shutdown, and
+> `genhex`'s write-then-chmod (P23W6-12). The harness otherwise held: no
+> credential literal, eight self-test mutations caught, CI masking right, and the
+> FAPI workflow's exported password wins through both `bench-up`s (traced). D-78
+> is sound and the generator hides no open entry. Threat model **2.36.1 — 469
+> threats, 425 mitigated / 23 open / 21 not applicable**. Its §15 is for the
+> project: what stays open, the preconditions future work inherits, and what to
+> schedule before 1.0 (#549, T-469, the CRL first). New ids start at **T-470**.
+
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This
 plan does not edit `roadmap.md`; the phase is added when the maintainer

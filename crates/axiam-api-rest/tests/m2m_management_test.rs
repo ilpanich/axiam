@@ -55,8 +55,8 @@ use axiam_db::repository::{
     SurrealUserRepository,
 };
 use axiam_db::{
-    SurrealCaCertificateRepository, SurrealCertificateRepository, seed_default_roles,
-    seed_permissions,
+    SharedRateLimitConfig, SharedRateLimitCounter, SurrealCaCertificateRepository,
+    SurrealCertificateRepository, seed_default_roles, seed_permissions,
 };
 use axiam_pki::{CaService, CertService, PkiConfig};
 use surrealdb::Surreal;
@@ -282,16 +282,29 @@ macro_rules! app {
                     Arc::new(SurrealRoleRepository::new($db.clone()))
                         as Arc<dyn PrincipalReachResolver>,
                 ))
-                .app_data(web::Data::new(AppState::for_test(
-                    $db.clone(),
-                    $auth.clone(),
-                )))
+                .app_data(web::Data::new(sweep_state(&$db, &$auth)))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
         )
         .await
     };
+}
+
+/// The application state the sweep runs against, with the cross-replica rate
+/// limiter switched off; each route's in-memory governor still applies.
+///
+/// The shared counter seeds a key it first sees partway through a wall-clock
+/// minute with up to 90% of the bucket's limit (`COLD_ENTRY_BURST_FRACTION`,
+/// for limits of 20 and above). The sweep sends two requests to every route,
+/// so a shared bucket's third route reached in the last seconds of a minute
+/// answered 429 (`DELETE /tenants/{tenant_id}/directory`, the
+/// `directory_config` bucket at 30): a flake by time of day, in a file that
+/// tests the audience refusal and RBAC, not the limiter.
+fn sweep_state(db: &Surreal<TestDb>, auth: &AuthConfig) -> AppState<TestDb> {
+    let mut state = AppState::for_test(db.clone(), auth.clone());
+    state.shared_rate_limit = SharedRateLimitCounter::disabled(SharedRateLimitConfig::default());
+    state
 }
 
 /// A bearer-only request: no cookie, so no CSRF token is needed (T-200).

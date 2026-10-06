@@ -252,6 +252,26 @@ impl<C: Connection> DbPool<C> {
         Ok(())
     }
 
+    /// A one-handle pool over an already-open connection, with no background
+    /// renewal tasks: for an embedded engine (`kv-mem`), whose connection never
+    /// expires, so the composition root can be driven in-process by a test
+    /// without a datastore server. Production builds its pool with
+    /// [`DbPool::connect`].
+    pub fn from_embedded(db: Surreal<C>) -> Self {
+        let handles = vec![PooledHandle {
+            db: crate::handle::new_slot(db),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            refresh_handle: None,
+            reconnect_handle: None,
+        }];
+        Self {
+            handles,
+            semaphore: None,
+            acquire_timeout: Duration::from_secs(5),
+            rr: AtomicUsize::new(0),
+        }
+    }
+
     /// Test-only constructor: build a pool directly over already-open handles
     /// (e.g. embedded `kv-mem` instances) with no background renewal tasks, so
     /// the checkout/selection/cap logic can be exercised without a live server.

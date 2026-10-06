@@ -1822,6 +1822,110 @@ pub trait DeviceGrantRepository: Send + Sync {
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
+/// Storage for CIBA backchannel authentication requests (G-7).
+///
+/// Two parties write to one row — the user deciding on the identity pages and
+/// the client asking the token endpoint — so every transition is a single
+/// statement whose `WHERE` clause carries its precondition (T-406's lesson),
+/// and nothing is written for a request before the request carrying it has
+/// been validated (T-404's lesson): the token endpoint authenticates the
+/// client and matches it to the row before [`Self::record_poll`] is called.
+pub trait CibaRequestRepository: Send + Sync {
+    /// Store a new request. A ping-mode request's credentials are sealed; a
+    /// repository with no sealing key refuses one with
+    /// `AxiamError::ServiceUnavailable`.
+    fn create(
+        &self,
+        input: crate::models::ciba::CreateCibaRequest,
+    ) -> impl Future<Output = AxiamResult<crate::models::ciba::CibaRequest>> + Send;
+
+    /// Look a request up by the hash of its `auth_req_id`, in one tenant.
+    fn get_by_hash(
+        &self,
+        tenant_id: Uuid,
+        auth_req_id_hash: &str,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
+
+    /// Look a request up by record id, in one tenant.
+    fn get_by_id(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
+
+    /// `pending → approved`, conditional on `version = expected_version`, on
+    /// the row's user being `user_id`, and on the request being unexpired.
+    /// `false` when any precondition fails — the caller cannot tell which.
+    fn approve(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+        user_id: Uuid,
+        evidence: crate::models::ciba::CibaApprovalEvidence,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// `pending → denied`, under the same three preconditions as
+    /// [`Self::approve`].
+    fn deny(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+        user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// `pending | approved → expired` once `expires_at` has passed,
+    /// conditional on `version = expected_version`.
+    fn mark_expired(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        expected_version: u64,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Record a token request against the request: compare-and-set on the
+    /// `last_polled_at` the caller read, writing `polled_at` and
+    /// `interval_secs`. `false` means another token request for the same
+    /// request landed in between — which is itself polling too fast.
+    fn record_poll(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        seen_last_polled_at: Option<chrono::DateTime<chrono::Utc>>,
+        polled_at: chrono::DateTime<chrono::Utc>,
+        interval_secs: u64,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Atomically redeem an **approved**, unexpired request started by
+    /// `client_id`, returning it exactly once — the X6 two-layer arbiter
+    /// (`device_grant.redeem`'s). `None` means it was not approved, belongs to
+    /// another client, expired, or another token request redeemed it.
+    fn redeem(
+        &self,
+        tenant_id: Uuid,
+        auth_req_id_hash: &str,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
+
+    /// Open a ping-mode request's sealed credentials, for the deliverer
+    /// (T23.7.2). `None` for a poll-mode request.
+    fn ping_credentials(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaPingCredentials>>> + Send;
+
+    /// The expiry sweep: every `pending`/`approved` request past `expires_at`
+    /// becomes `expired`, and every request that expired more than
+    /// `retention` before `now` is deleted. Returns the number deleted.
+    fn sweep_expired(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        retention: chrono::Duration,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
 /// Storage for session/client participation (B5, back-channel logout).
 ///
 /// One AXIAM session serves many relying parties — that is what SSO is — so
@@ -2579,6 +2683,9 @@ pub enum ProofKind {
     ClientAssertion,
     /// RFC 9449 DPoP proof, scoped by the proof key's `jkt`.
     DpopProof,
+    /// CIBA Core §7.1.1 signed authentication request (G-7, D-61), scoped by
+    /// `client_id` — the request object's `iss`, for RFC 7523's reason.
+    CibaRequestObject,
 }
 
 impl ProofKind {
@@ -2586,6 +2693,7 @@ impl ProofKind {
         match self {
             Self::ClientAssertion => "client_assertion",
             Self::DpopProof => "dpop_proof",
+            Self::CibaRequestObject => "ciba_request_object",
         }
     }
 }
@@ -2816,6 +2924,21 @@ pub trait ReactorRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// How many reactor registrations are **enabled**, counted across *all*
+    /// tenants.
+    ///
+    /// The one deployment-wide question the minimal (broker-less) profile asks
+    /// at boot (G-8, D-59): an enabled `fail_closed` reactor with no transport
+    /// would deny logins in every tenant that registered one, so the server
+    /// refuses to start while the answer is not zero. Deliberately not
+    /// tenant-scoped, and deliberately a count rather than a listing — it is
+    /// read once, by the composition root, never by a request.
+    ///
+    /// Required, with no provided default: a default that answered zero would
+    /// compile everywhere and make every test double say "no reactors" without
+    /// having been asked.
+    fn count_enabled(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -3508,6 +3631,258 @@ pub trait SsfStepUpRepository: Send + Sync {
     /// Remove every record whose `expires_at` is at or before `now`, in every
     /// tenant; returns how many. The sweep job registered in `/health/jobs`.
     fn delete_expired(&self, now: DateTime<Utc>) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Outbound SCIM targets, links and delivery state (tenant-scoped) (G-6, T23.6.1)
+// ---------------------------------------------------------------------------
+
+/// Storage for the outbound SCIM target registry; see
+/// [`crate::models::scim_target`].
+///
+/// Every method is tenant-scoped: a target of another tenant is not found,
+/// exactly as one that does not exist. The repository does not validate URLs
+/// (that is the management API's write-time policy); it enforces what needs
+/// the datastore — the version check, the URL binding of the credential — and
+/// it seals the credential.
+pub trait ScimTargetRepository: Send + Sync {
+    /// Register a target, together with its (empty) delivery state, in one
+    /// transaction. The credential is sealed; without the encryption key the
+    /// write is refused (`ServiceUnavailable`).
+    fn create(
+        &self,
+        input: crate::models::scim_target::NewScimTarget,
+    ) -> impl Future<Output = AxiamResult<crate::models::scim_target::ScimTarget>> + Send;
+
+    /// One target. `NotFound` when it does not exist in this tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::scim_target::ScimTarget>> + Send;
+
+    /// One page of the tenant's targets, oldest first, narrowed by
+    /// [`Pagination::search`] over `name`, `base_url` and the id before
+    /// `offset`/`limit`.
+    fn list_page(
+        &self,
+        tenant_id: Uuid,
+        pagination: Pagination,
+    ) -> impl Future<Output = AxiamResult<PaginatedResult<crate::models::scim_target::ScimTarget>>> + Send;
+
+    /// Every enabled target of the tenant, oldest first: what an event source
+    /// fans a change out to.
+    fn list_enabled(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::scim_target::ScimTarget>>> + Send;
+
+    /// Every enabled target of **every** tenant, oldest first: what the
+    /// reconciliation job walks (the directory sync's `list_enabled` is the
+    /// precedent). Not a tenant-scoped read; only the scheduler calls it.
+    fn list_all_enabled(
+        &self,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::scim_target::ScimTarget>>> + Send;
+
+    /// Replace a target's configuration.
+    ///
+    /// * `NotFound` when it does not exist in this tenant.
+    /// * `Conflict` when [`ScimTargetUpdate::expected_updated_at`] is `Some` and
+    ///   the target has been written since — or is written between the
+    ///   repository's read and its write.
+    /// * `Validation` when the write moves the credential to another URL
+    ///   (`base_url` of a bearer target, `token_url` or `base_url` of a
+    ///   client-credentials target) or switches the authentication kind without
+    ///   a new credential.
+    /// * `ServiceUnavailable` when a new credential is supplied and the
+    ///   encryption key is not configured.
+    ///
+    /// [`ScimTargetUpdate::expected_updated_at`]: crate::models::scim_target::ScimTargetUpdate::expected_updated_at
+    fn update(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        update: crate::models::scim_target::ScimTargetUpdate,
+    ) -> impl Future<Output = AxiamResult<crate::models::scim_target::ScimTarget>> + Send;
+
+    /// The stored credential in plaintext. **The single path to the
+    /// plaintext**; only the deliverer calls it. `None` only for a row written
+    /// without one. `NotFound` when the target does not exist in this tenant.
+    fn decrypt_credential(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<Zeroizing<String>>>> + Send;
+
+    /// Remove a target **and its link rows and delivery state**, in one
+    /// transaction. Nothing is deprovisioned downstream. `NotFound` when it
+    /// does not exist in this tenant.
+    fn delete(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+}
+
+/// Storage for the links between AXIAM resources and their downstream
+/// counterparts. Every method is scoped by tenant **and** target; the two
+/// UNIQUE indexes (`(target, type, axiam_id)` and `(target, type,
+/// downstream_id)`) are the datastore's, not the application's.
+pub trait ScimTargetLinkRepository: Send + Sync {
+    /// The link for an AXIAM resource on a target, if any.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        resource_type: crate::models::scim_target::ScimResourceType,
+        axiam_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::scim_target::ScimTargetLink>>> + Send;
+
+    /// The link whose downstream id is `downstream_id`, if any.
+    fn get_by_downstream_id(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        resource_type: crate::models::scim_target::ScimResourceType,
+        downstream_id: &str,
+    ) -> impl Future<Output = AxiamResult<Option<crate::models::scim_target::ScimTargetLink>>> + Send;
+
+    /// Record a new link. `AlreadyExists` when either unique index is hit (the
+    /// resource is already linked on the target, or the downstream id is
+    /// already linked to another resource). `NotFound` when the target does
+    /// not exist in this tenant.
+    fn create(
+        &self,
+        input: crate::models::scim_target::NewScimTargetLink,
+    ) -> impl Future<Output = AxiamResult<crate::models::scim_target::ScimTargetLink>> + Send;
+
+    /// Record a link, or — when the resource is already linked on the target —
+    /// repoint it at `downstream_id`, clearing the digest and the pending
+    /// erasure and making it active. `AlreadyExists` when `downstream_id` is
+    /// linked to a *different* resource; `NotFound` when the target does not
+    /// exist in this tenant.
+    fn upsert(
+        &self,
+        input: crate::models::scim_target::NewScimTargetLink,
+    ) -> impl Future<Output = AxiamResult<crate::models::scim_target::ScimTargetLink>> + Send;
+
+    /// Set (or clear, with `None`) the digest of the last representation sent.
+    /// `NotFound` when there is no such link.
+    fn set_digest(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        resource_type: crate::models::scim_target::ScimResourceType,
+        axiam_id: Uuid,
+        digest: Option<String>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Set the link's state and its pending-erasure flag. `NotFound` when
+    /// there is no such link.
+    fn set_state(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        resource_type: crate::models::scim_target::ScimResourceType,
+        axiam_id: Uuid,
+        state: crate::models::scim_target::ScimLinkState,
+        erase_pending: bool,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Remove a link. `true` when one was removed, `false` when there was none.
+    fn delete(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        resource_type: crate::models::scim_target::ScimResourceType,
+        axiam_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// One page of the target's links, oldest first, optionally of one resource
+    /// type. [`Pagination::search`] is not applied.
+    fn list_by_target(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        resource_type: Option<crate::models::scim_target::ScimResourceType>,
+        pagination: Pagination,
+    ) -> impl Future<
+        Output = AxiamResult<PaginatedResult<crate::models::scim_target::ScimTargetLink>>,
+    > + Send;
+
+    /// Remove every link of the target; returns how many.
+    fn delete_all_for_target(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+/// Storage for a target's delivery state. Writes are atomic increments and
+/// plain sets, never read-modify-write, so the deliverer and the
+/// reconciliation job — which run on any replica — never lose each other's
+/// updates, and none of them writes the target row.
+///
+/// The row is created with its target; a method on a target that does not
+/// exist in the tenant is `NotFound`.
+pub trait ScimTargetStateRepository: Send + Sync {
+    /// The target's state. `NotFound` when the target does not exist in this
+    /// tenant.
+    fn get(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<crate::models::scim_target::ScimTargetState>> + Send;
+
+    /// A delivery succeeded: stamp `last_success_at` and zero
+    /// `consecutive_failures`.
+    fn record_success(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// A delivery attempt failed (and will be retried): increment
+    /// `consecutive_failures`, stamp `last_failure_at` and keep `reason`
+    /// (fixed vocabulary; truncated to 256 characters).
+    fn record_failure(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        reason: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// A delivery was dead-lettered: increment `dead_lettered_total`, stamp
+    /// `last_failure_at` and keep `reason`.
+    fn record_dead_letter(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        reason: &str,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Claim a reconciliation run at `now` **if** the last claim was at least
+    /// `min_interval_secs` ago (or there was none), atomically: two concurrent
+    /// callers cannot both succeed. `false` means too soon or already claimed.
+    /// `NotFound` when the target does not exist in this tenant.
+    fn claim_reconciliation(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        now: DateTime<Utc>,
+        min_interval_secs: i64,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
+
+    /// Claim the right to notify administrators of the target's dead letters
+    /// at `now` **if** the last notification was at least `min_interval_secs`
+    /// ago (or there was none), atomically: of the dead letters of one target,
+    /// one per interval reaches the notification rules, on any replica (W5 F4
+    /// review, T-418). `false` — too soon, or no such target in this tenant —
+    /// means *do not notify*; it is never an error, so a target deleted since
+    /// the dead letter simply notifies nobody.
+    fn claim_failure_notification(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+        now: DateTime<Utc>,
+        min_interval_secs: i64,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send;
 }
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.56";
+export const CONTRACT_VERSION = "1.58";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -40,7 +40,9 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "28": "#§28-mcp-resource-server-helpers-rfc-9728",
  "29": "#§29-saml-service-provider-registration-management-api-contract-155",
  "30": "#§30-directory-configuration-management-api-contract-154",
+ "31": "#§31-outbound-scim-targets-management-api-contract-157",
  "32": "#§32-ssf-stream-registration-and-the-receiver-helper-contract-156",
+ "33": "#§33-ciba--client-initiated-backchannel-authentication-contract-158",
  "1.1": "#§11-grpc-only-operations",
  "1.1.1": "#§111-validate_token-and-introspect_token-contract-151",
  "3a": "#§3a-resource-server-middleware-csrf-inbound",
@@ -225,6 +227,16 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "30.8": "#§308-required-tests",
  "30.9": "#§309-what-an-sdk-does-not-do",
  "30.10": "#§3010-per-sdk-posture",
+ "31.1": "#§311-canonical-operation-set",
+ "31.2": "#§312-shapes-normative",
+ "31.3": "#§313-server-rules-every-sdk-can-observe-normative",
+ "31.4": "#§314-error-mapping",
+ "31.5": "#§315-sensitivet-applicability",
+ "31.6": "#§316-per-language-naming-map",
+ "31.7": "#§317-retry",
+ "31.8": "#§318-required-tests",
+ "31.9": "#§319-what-an-sdk-does-not-do",
+ "31.10": "#§3110-per-sdk-posture",
  "32.1": "#§321-canonical-operation-set",
  "32.2": "#§322-shapes-normative",
  "32.3": "#§323-server-rules-every-sdk-can-observe-normative",
@@ -234,7 +246,17 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "32.7": "#§327-the-receiver-helper-should-seven-sdks",
  "32.8": "#§328-required-tests",
  "32.9": "#§329-what-an-sdk-does-not-do",
- "32.10": "#§3210-per-sdk-posture"
+ "32.10": "#§3210-per-sdk-posture",
+ "33.1": "#§331-operations",
+ "33.2": "#§332-shapes-normative",
+ "33.3": "#§333-server-rules-every-sdk-can-observe-normative",
+ "33.4": "#§334-error-mapping",
+ "33.5": "#§335-sensitivet-applicability",
+ "33.6": "#§336-per-language-naming-map",
+ "33.7": "#§337-retry-and-polling-normative",
+ "33.8": "#§338-required-tests",
+ "33.9": "#§339-what-an-sdk-does-not-do",
+ "33.10": "#§3310-per-sdk-posture"
 };
 
 /**

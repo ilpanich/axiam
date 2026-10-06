@@ -461,6 +461,54 @@ pub fn key_source_of(client: &axiam_core::models::oauth2_client::OAuth2Client) -
     ClientKeySource::None
 }
 
+/// Resolve the key set a client registered — inline, or fetched from its
+/// `jwks_uri` through the federation JWKS cache — or `None`, logged.
+///
+/// Shared by every verifier of a JWT a *client* signs: the RFC 7523 client
+/// assertion here, and the CIBA Core §7.1.1 signed authentication request
+/// (`crate::ciba_signed_request`). One resolution path means one SSRF guard,
+/// one cache key, one rotation story: a client that rotates its `jwks_uri`
+/// keys rotates them for both at once, and a fix to either is a fix to both.
+///
+/// `None` is every failure — no source, an unparseable inline document, an
+/// unreachable or refused `jwks_uri` — because each caller answers all of them
+/// with one uniform refusal; the distinction goes to the log.
+pub async fn resolve_registered_keys(
+    jwks: &axiam_federation::jwks_cache::JwksCache,
+    http: &reqwest::Client,
+    tenant_id: uuid::Uuid,
+    client: &axiam_core::models::oauth2_client::OAuth2Client,
+) -> Option<JwkSet> {
+    match key_source_of(client) {
+        ClientKeySource::Inline(set) => Some(*set),
+        ClientKeySource::Remote(uri) => {
+            // The cache is keyed by `(tenant_id, client.id)`, which is the
+            // natural unit here: two clients that happen to publish the same
+            // URI still get independent entries, so one client's rotation
+            // cannot serve another client a stale key set.
+            match jwks.get_or_fetch(http, (tenant_id, client.id), &uri).await {
+                Ok(set) => Some(set),
+                Err(e) => {
+                    tracing::warn!(
+                        client_id = %client.client_id,
+                        error = %e,
+                        "could not obtain the client's jwks_uri key set; refusing the \
+                         signed request rather than accepting it without checking it"
+                    );
+                    None
+                }
+            }
+        }
+        ClientKeySource::None => {
+            tracing::warn!(
+                client_id = %client.client_id,
+                "client signs requests but has no usable key source"
+            );
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The authenticator seam
 // ---------------------------------------------------------------------------
@@ -557,38 +605,10 @@ where
 
             let failed = || OAuth2Error::InvalidClient(ASSERTION_AUTH_FAILED.into());
 
-            let keys: JwkSet = match key_source_of(client) {
-                ClientKeySource::Inline(set) => *set,
-                ClientKeySource::Remote(uri) => {
-                    // The cache is keyed by `(tenant_id, client.id)`, which is
-                    // the natural unit here: two clients that happen to publish
-                    // the same URI still get independent entries, so one
-                    // client's rotation cannot serve another client a stale
-                    // key set.
-                    match self
-                        .jwks
-                        .get_or_fetch(&self.http, (tenant_id, client.id), &uri)
-                        .await
-                    {
-                        Ok(set) => set,
-                        Err(e) => {
-                            tracing::warn!(
-                                client_id = %client.client_id,
-                                error = %e,
-                                "could not obtain the client's jwks_uri key set; refusing the \
-                                 assertion rather than authenticating without checking it"
-                            );
-                            return Err(failed());
-                        }
-                    }
-                }
-                ClientKeySource::None => {
-                    tracing::warn!(
-                        client_id = %client.client_id,
-                        "client is registered for private_key_jwt but has no usable key source"
-                    );
-                    return Err(failed());
-                }
+            let Some(keys) =
+                resolve_registered_keys(&self.jwks, &self.http, tenant_id, client).await
+            else {
+                return Err(failed());
             };
 
             // FAPI 2.0 §5.3.2.1 narrows RFC 7523's audience rule to the issuer
@@ -1127,6 +1147,7 @@ mod tests {
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             last_authorized_at: None,
+            ciba: Default::default(),
         }
     }
 

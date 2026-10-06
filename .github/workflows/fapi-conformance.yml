@@ -26,9 +26,30 @@ name: FAPI 2.0 conformance
 # which was used, so the two can never be confused after the fact.
 #
 # Read `claude_dev/fapi-conformance-runbook.md` before interpreting any output,
-# and its "Known gaps" section before treating green as submission-ready:
-# `private_key_jwt` is not implemented, so the two variants here cover both
-# RFC 8705 mTLS methods rather than both FAPI client-authentication families.
+# and its "Known gaps" section before treating green as submission-ready.
+# `conformance-run` drives three plans: `tls_client_auth` and
+# `self_signed_tls_client_auth` (the two RFC 8705 mTLS methods) and
+# `private_key_jwt` + DPoP (the other FAPI client-authentication family).
+#
+# ## What the interactive modules do here
+#
+# This workflow drives no browser, so a module that needs one waits
+# `module_timeout` seconds and is recorded as not finished; the report says so.
+# That is by design (see above) and the reason a green run is not "every module
+# PASSED". Plan the wall-clock time accordingly: every interactive module costs
+# the full timeout, so dispatch with a small `module_timeout` (and mind
+# `timeout-minutes` below) unless you want the long run.
+#
+# ## The topology, because it is not obvious from the steps
+#
+# AXIAM is brought up by the benchmark harness (`p3-mtls`), but it is the
+# CONFORMANCE rig's system under test, so it sits where
+# `conformance/nginx-axiam.conf` expects it: the suite's front door (nginx) owns
+# the issuer origin and proxies to AXIAM's own rustls listener on
+# AXIAM_MTLS_PORT, where client certificates are verified in the handshake.
+# `benchmarks/targets/axiam/docker-compose.conformance.yml` is the overlay that
+# makes the benchmark listener that target; every port and URL comes from
+# `conformance/suite.env`.
 
 on:
   workflow_dispatch:
@@ -56,14 +77,24 @@ permissions:
 
 jobs:
   conformance:
-    name: FAPI 2.0 Security Profile (Final) — both mTLS client-auth variants
+    name: FAPI 2.0 Security Profile (Final) — mTLS, self-signed mTLS and private_key_jwt
     runs-on: ubuntu-latest
     # Generous, because the suite is slow and a hung module should surface as a
     # timeout in the report rather than as a killed job with no artifacts.
-    timeout-minutes: 90
+    #
+    # 150, not 90: run 37276852665 spent 18 minutes in the image build and
+    # bring-up alone, and the suite then runs three plans back to back, each
+    # module costing up to `module_timeout` seconds when it cannot complete. At
+    # the dispatch default (180 s) a worst case is hours; at 30 s it is still
+    # an hour-plus on top of the build. A killed job loses the report.
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "22"
 
       - name: Install harness prerequisites
         run: |
@@ -75,13 +106,103 @@ jobs:
           # harness that breaks silently for everyone else.
           curl -fsSL https://just.systems/install.sh \
             | sudo bash -s -- --to /usr/local/bin
+          # The suite serves itself under localhost.emobix.co.uk, which public
+          # DNS maps to 127.0.0.1. Pinning it here removes the one outbound DNS
+          # dependency a run has, and the failure it would cause (the harness's
+          # own calls to the suite) names no resolver.
+          echo "127.0.0.1 localhost.emobix.co.uk" | sudo tee -a /etc/hosts >/dev/null
 
       - name: Generate throwaway client certificates
         run: just conformance-certs
 
-      - name: Bring up AXIAM with an mTLS listener
+      # `/oauth2/authorize` redirects an unauthenticated browser to a same-origin
+      # `/login`, which only the admin SPA serves; the front door that
+      # `conformance-up` starts serves frontend/dist. Without it `conformance-up`
+      # refuses to start ("no built SPA"). Built before the AXIAM image so a
+      # missing dependency fails in a minute rather than after the image build.
+      - name: Build the SPA the front door serves
+        run: just conformance-frontend
+
+      - name: Stage the conformance target's TLS material and environment
+        run: |
+          set -euo pipefail
+          # The benchmark harness is only the vehicle. Everything about the
+          # conformance rig's topology comes from suite.env, read here ONCE and
+          # handed to the later steps, so the ports and hostnames have a single
+          # definition. The topology (conformance/nginx-axiam.conf):
+          #
+          #   suite container --https--> host.docker.internal:8444  front door (nginx):
+          #                                                         SPA + /api + /oauth2/ + discovery
+          #   front door     --https--> host.docker.internal:8445  AXIAM's own rustls listener
+          #   suite container --mTLS---> host.docker.internal:8445  the RFC 8705 §5 back channel
+          #
+          # so AXIAM's published port is the back channel's (AXIAM_MTLS_PORT),
+          # NOT the benchmark's default 8443, and its issuer is the FRONT door's
+          # origin (AXIAM_ISSUER). Getting either wrong reads as every module
+          # failing at discovery.
+          set -a
+          . conformance/suite.env
+          set +a
+          : "${AXIAM_MTLS_PORT:?}" "${AXIAM_ISSUER:?}" "${AXIAM_MTLS_BASE_URL:?}"
+
+          # Make sure the benchmark CA, server and client certificates exist
+          # (bench-up would mint them, but the trust bundle below needs the CA
+          # first). Idempotent.
+          bash benchmarks/runner/gen-certs.sh
+
+          tls_dir="${RUNNER_TEMP}/axiam-conformance-tls"
+          mkdir -p "${tls_dir}"
+          # AXIAM's listener identity is the conformance server certificate: its
+          # SAN carries host.docker.internal, which both the suite and the front
+          # door's `proxy_ssl_verify on` check. 0644 on the key is deliberate and
+          # scoped to this throwaway runner directory: the server image runs as
+          # UID 65532 and cannot read a 0600 key owned by the runner user (the
+          # benchmark's own gen-certs.sh does the same for the same reason).
+          install -m 0644 conformance/certs/server.crt "${tls_dir}/server.crt"
+          install -m 0644 conformance/certs/server.key "${tls_dir}/server.key"
+          # The client-CA bundle trusts the conformance CA (the tls_client_auth
+          # client's issuer) AND the benchmark CA, because bench-up's readiness
+          # probe and bench-seed present the benchmark's client certificate; a
+          # bundle holding only the conformance CA would turn the probe red.
+          cat conformance/certs/ca.crt benchmarks/profiles/certs/ca.crt \
+            > "${tls_dir}/client-ca.pem"
+          chmod 0644 "${tls_dir}/client-ca.pem"
+
+          {
+            echo "CONFORMANCE_TLS_DIR=${tls_dir}"
+            echo "CONFORMANCE_MTLS_BASE_URL=${AXIAM_MTLS_BASE_URL}"
+            echo "BENCH_COMPOSE_OVERLAYS=targets/axiam/docker-compose.conformance.yml"
+            echo "BENCH_TLS_PORT=${AXIAM_MTLS_PORT}"
+            # bench-up forwards this into the container as the OIDC issuer.
+            echo "AXIAM__AUTH__OAUTH2_ISSUER_URL=${AXIAM_ISSUER}"
+            # The conformance suite's admin-API calls go through the front door.
+            # The seeder's bootstrap administrator is what the registrar signs in
+            # as; org slug and e-mail are the seeder's fixed ones
+            # (benchmarks/runner/seed.sh).
+            echo "AXIAM_ADMIN_ORG_SLUG=bench-org"
+            echo "AXIAM_ADMIN_USER=${BENCH_ADMIN_EMAIL:-admin@bench.dev}"
+            # A diagnostic level, because the specific reason for an
+            # `invalid_client` (SEC-086: the wire answer is identical for every
+            # cause) exists only in this log. Matches conformance/scripts/serve-axiam.sh.
+            echo "RUST_LOG=axiam=debug,info"
+          } >> "$GITHUB_ENV"
+
+      - name: Select the AXIAM image
         env:
           AXIAM_IMAGE: ${{ inputs.axiam_image }}
+        run: |
+          set -euo pipefail
+          if [ -n "${AXIAM_IMAGE}" ]; then
+            echo "::notice::testing digest-pinned image ${AXIAM_IMAGE}"
+            echo "BENCH_AXIAM_IMAGE=${AXIAM_IMAGE}" >> "$GITHUB_ENV"
+            echo "BUILD_FROM_SOURCE=0" >> "$GITHUB_ENV"
+          else
+            echo "::warning::no axiam_image supplied — building from this checkout. \
+          This run is a smoke test and is NOT valid submission evidence (see §X5.3)."
+            echo "BUILD_FROM_SOURCE=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Bring up AXIAM with an mTLS listener
         run: |
           set -euo pipefail
           # FAPI 2.0 requires mutual-TLS client authentication and
@@ -89,39 +210,87 @@ jobs:
           # plan — it fails at client authentication in EVERY module, which
           # reads like forty failures and is one configuration problem. The
           # benchmark harness's p3-mtls profile is the shortest path to a
-          # correctly-configured listener.
+          # correctly-configured listener, and
+          # benchmarks/targets/axiam/docker-compose.conformance.yml (layered on
+          # by BENCH_COMPOSE_OVERLAYS) is what makes it the conformance target:
+          # it trusts the conformance CA, presents the conformance server
+          # certificate, accepts self-signed clients, and publishes the
+          # RFC 8705 §5 aliases. Exporting AXIAM__SERVER__TLS__CLIENT_CA_PATH
+          # from here, as this step once did, reached nothing: compose forwards
+          # only the names its files list, and the overlay pinned the benchmark CA.
+          # A per-run administrator password, masked in the log and handed to
+          # the seeder and the registrar through GITHUB_ENV, so no password
+          # literal lives in this workflow.
+          BENCH_ADMIN_PASSWORD="Cf-$(openssl rand -hex 16)-Aa1!"
+          echo "::add-mask::${BENCH_ADMIN_PASSWORD}"
+          echo "BENCH_ADMIN_PASSWORD=${BENCH_ADMIN_PASSWORD}" >> "$GITHUB_ENV"
+          export BENCH_ADMIN_PASSWORD
           cd benchmarks
-          if [ -n "${AXIAM_IMAGE}" ]; then
-            echo "::notice::testing digest-pinned image ${AXIAM_IMAGE}"
-            export BENCH_AXIAM_IMAGE="${AXIAM_IMAGE}"
-          else
-            echo "::warning::no axiam_image supplied — building from this checkout. \
-          This run is a smoke test and is NOT valid submission evidence (see §X5.3)."
-            export BUILD_FROM_SOURCE=1
-          fi
-          # The listener must trust the conformance CA, or the tls_client_auth
-          # client's certificate is rejected during the handshake — before AXIAM
-          # sees a request, so AXIAM's own logs show nothing at all.
-          export AXIAM__SERVER__TLS__CLIENT_CA_PATH="${GITHUB_WORKSPACE}/conformance/certs/ca.crt"
           just target=axiam profile=p3-mtls build="${BUILD_FROM_SOURCE:-0}" bench-up
-          just target=axiam bench-seed
+          # Bootstraps the organization and the administrator the registrar
+          # signs in as (the seeder is the only bootstrap path this rig has).
+          just target=axiam profile=p3-mtls bench-seed
 
       - name: Start the pinned conformance suite
         run: just conformance-up
 
-      - name: Register the two fapi2 clients
+      - name: Register the fapi2 clients
         env:
-          AXIAM_ADMIN_TOKEN: ${{ secrets.AXIAM_CONFORMANCE_ADMIN_TOKEN }}
+          # The seeder's administrator. A bearer token cannot be provisioned in
+          # advance for a deployment that did not exist until this job started,
+          # so the registrar signs in with a session instead (lib-admin.sh); the
+          # password is the per-run one the bring-up step generated and the
+          # seeder used to create the account.
+          AXIAM_ADMIN_PASSWORD: ${{ env.BENCH_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
-          # Both clients are created with profile: "fapi2" and nothing else —
-          # the server refuses the registration unless it also carries PAR, an
-          # mTLS auth method and certificate binding, so a successful
-          # registration is FAPI-shaped by construction rather than by this
-          # workflow remembering to set four fields.
+          # All five clients are created with profile: "fapi2" and nothing else
+          # that matters — the server refuses the registration unless it also
+          # carries PAR, a strong client-authentication method and sender
+          # constraining, so a successful registration is FAPI-shaped by
+          # construction rather than by this workflow remembering four fields.
           just conformance-register
 
-      - name: Run both test plans
+      - name: Publish the registered tenant in AXIAM's discovery document
+        run: |
+          set -euo pipefail
+          # The tenant a conformance client lives in is DISCOVERED by the
+          # registrar (it is the administrator's own tenant, known only once the
+          # deployment exists), and the server can publish it in discovery only
+          # through its environment — so AXIAM is restarted once, exactly as the
+          # runbook says to restart `conformance-serve` after a first
+          # registration. Without it the bare discovery document carries
+          # endpoint URLs with no tenant and every authorization is refused.
+          tenant="$(sed -n "s/^AXIAM_TENANT_ID='\(.*\)'$/\1/p" conformance/suite.local.env | tail -1)"
+          if [ -z "${tenant}" ]; then
+            echo "::error::the registrar did not record AXIAM_TENANT_ID in conformance/suite.local.env"
+            exit 1
+          fi
+          echo "tenant: ${tenant}"
+          (
+            cd benchmarks
+            export CONFORMANCE_TENANT_ID="${tenant}"
+            just target=axiam profile=p3-mtls build="${BUILD_FROM_SOURCE:-0}" bench-up
+          )
+          set -a; . conformance/suite.env; set +a
+          # Through the FRONT DOOR, verifying against the conformance CA: this is
+          # the document the suite will fetch, from the origin it will fetch it.
+          doc="$(curl -fsS --cacert conformance/certs/ca.crt \
+            "${AXIAM_ADMIN_BASE_URL}/.well-known/openid-configuration")"
+          issuer="$(jq -r '.issuer' <<<"${doc}")"
+          if [ "${issuer}" != "${AXIAM_ISSUER}" ]; then
+            echo "::error::discovery issuer is '${issuer}', expected '${AXIAM_ISSUER}' — the suite checks the two agree and fails every module otherwise"
+            exit 1
+          fi
+          # Advisory only: these say whether the two settings above took, and a
+          # wrong assumption about the document's shape must not block a run.
+          grep -q "${tenant}" <<<"${doc}" \
+            || echo "::warning::the discovery document does not mention tenant ${tenant}"
+          jq -e --arg b "${AXIAM_MTLS_BASE_URL}" \
+            '(.mtls_endpoint_aliases.token_endpoint // "") | startswith($b)' <<<"${doc}" >/dev/null \
+            || echo "::warning::mtls_endpoint_aliases.token_endpoint does not point at ${AXIAM_MTLS_BASE_URL}"
+
+      - name: Run the three test plans
         id: run
         continue-on-error: true
         env:
@@ -138,7 +307,9 @@ jobs:
           set -uo pipefail
           # Deliberately not `set -e`: the reporter exits non-zero on a red
           # plan, which is information, not a reason to skip the upload.
-          CONFORMANCE_DATE="$(date -u +%Y-%m-%d)" just conformance-report || true
+          CONFORMANCE_DATE="$(date -u +%Y-%m-%d)"
+          export CONFORMANCE_DATE
+          just conformance-report || true
           {
             echo "## FAPI 2.0 conformance"
             echo
@@ -148,13 +319,40 @@ jobs:
               echo "Target: **built from this checkout — smoke test, NOT submission evidence**"
             fi
             echo
-            for f in docs/conformance/*.md; do
+            # This run's reports only. docs/conformance/ also holds every earlier
+            # dated report, which a glob over *.md would paste in as well.
+            for f in docs/conformance/"${CONFORMANCE_DATE}"-*.md; do
               [ -e "$f" ] || continue
-              [ "$(basename "$f")" = "README.md" ] && continue
               cat "$f"
               echo
             done
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Before the upload so the logs travel with the artifact. AXIAM answers
+      # `invalid_client` for EVERY mTLS authentication failure by design
+      # (SEC-086), so the wire response cannot say which one — the specific
+      # reason is only ever in the server log. The front door's and the suite's
+      # logs say whether a request reached AXIAM at all.
+      - name: Collect server and rig logs on failure
+        if: failure() || steps.run.outcome == 'failure'
+        run: |
+          set +e
+          # `bench-logs` resolves the compose file's required variables itself;
+          # a bare `docker compose logs` fails on them and wrote an empty file.
+          (cd benchmarks && just target=axiam bench-logs 500 axiam-server) \
+            > "${GITHUB_WORKSPACE}/axiam-server.log" 2>&1
+          (
+            set -a; . conformance/suite.env; set +a
+            docker compose -f conformance/docker-compose.yml logs --no-color --tail 300 \
+              axiam-frontend suite
+          ) > "${GITHUB_WORKSPACE}/conformance-rig.log" 2>&1
+          echo "::group::axiam-server (last 200 lines)"
+          tail -200 "${GITHUB_WORKSPACE}/axiam-server.log"
+          echo "::endgroup::"
+          echo "::group::front door and suite (last 100 lines)"
+          tail -100 "${GITHUB_WORKSPACE}/conformance-rig.log"
+          echo "::endgroup::"
+          exit 0
 
       - name: Upload conformance artifacts
         if: always()
@@ -163,25 +361,15 @@ jobs:
           name: fapi-conformance-${{ github.run_id }}
           # The rendered reports AND the raw per-module results, because a
           # submission is built from the suite's own artifacts and a reader
-          # months later needs to be able to re-render them.
+          # months later needs to be able to re-render them. The logs are there
+          # only on a failed run.
           path: |
             docs/conformance/
             conformance/.run/results/
+            axiam-server.log
+            conformance-rig.log
           if-no-files-found: warn
           retention-days: 90
-
-      - name: Collect server logs on failure
-        if: failure() || steps.run.outcome == 'failure'
-        run: |
-          cd benchmarks
-          docker compose -f targets/axiam/docker-compose.yml logs --no-color --tail 500 \
-            > "${GITHUB_WORKSPACE}/axiam-server.log" 2>&1 || true
-          echo "::group::axiam-server (last 500 lines)"
-          tail -200 "${GITHUB_WORKSPACE}/axiam-server.log" || true
-          echo "::endgroup::"
-          # AXIAM answers `invalid_client` for EVERY mTLS authentication failure
-          # by design (SEC-086), so the wire response cannot say which one — the
-          # specific reason is only ever in this log.
 
       - name: Tear down
         if: always()
@@ -197,4 +385,4 @@ jobs:
           failures are listed first"
             exit 1
           fi
-          echo "Both plans passed every applicable module."
+          echo "All three plans passed every applicable module."

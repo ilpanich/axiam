@@ -98,7 +98,7 @@ fn build_client_aware_governor(
 /// Generic over `C` (QUAL-01) since `/ready` now extracts
 /// `web::Data<AppState<C>>` for its `HealthChecker`.
 pub fn health_routes<C: surrealdb::Connection + Clone>(cfg: &mut web::ServiceConfig) {
-    cfg.route("/health", web::get().to(crate::health::health))
+    cfg.route("/health", web::get().to(crate::health::health::<C>))
         .route("/ready", web::get().to(crate::health::ready::<C>))
         // T-129. Unauthenticated like the other two probes: it reports
         // whether background sweeps are running and when they last
@@ -795,6 +795,40 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                         rate_limit_cfg.device_verify_per_min,
                     ))
                     .route(web::post().to(handlers::device::decide::<C>)),
+            )
+            // G-7 / T23.7.2 — the signed-in user's half of a CIBA request, the
+            // device routes' neighbours with the same two properties of the
+            // /api/v1 placement (a human session, a CSRF token). One bucket
+            // per route under `ciba_approval_per_min`, so a flood of reads
+            // cannot spend the allowance a decision needs; a request id is a
+            // handle, not a secret (D-68), and every id that is not the
+            // caller's own answers 404.
+            .service(
+                web::resource("/ciba/requests/{request_id}")
+                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ciba_approval_get",
+                        rate_limit_cfg.ciba_approval_per_min,
+                    ))
+                    .route(web::get().to(handlers::ciba_approval::get_request::<C>)),
+            )
+            .service(
+                web::resource("/ciba/requests/{request_id}/approve")
+                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ciba_approval_approve",
+                        rate_limit_cfg.ciba_approval_per_min,
+                    ))
+                    .route(web::post().to(handlers::ciba_approval::approve::<C>)),
+            )
+            .service(
+                web::resource("/ciba/requests/{request_id}/deny")
+                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ciba_approval_deny",
+                        rate_limit_cfg.ciba_approval_per_min,
+                    ))
+                    .route(web::post().to(handlers::ciba_approval::deny::<C>)),
             )
             .service(
                 web::resource("/organizations")
@@ -1560,6 +1594,60 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                             )),
                     ),
             )
+            // --- Outbound SCIM target registry (G-6, T23.6.4, CONTRACT §31).
+            // The tenant is the token's, as for webhooks. Reads are unlimited;
+            // each of the four writes (create, update, delete, reconcile now)
+            // has a bucket of its own under `scim_target_admin_per_min`.
+            // `.to()` first, then `.wrap()`.
+            .service(
+                web::resource("/scim-targets")
+                    .app_data(handlers::scim_targets::json_config())
+                    .route(web::get().to(handlers::scim_targets::list_targets::<C>))
+                    .route(
+                        web::post()
+                            .to(handlers::scim_targets::create_target::<C>)
+                            .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "scim_target_create",
+                                rate_limit_cfg.scim_target_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/scim-targets/{id}")
+                    .app_data(handlers::scim_targets::json_config())
+                    .route(web::get().to(handlers::scim_targets::get_target::<C>))
+                    .route(
+                        web::put()
+                            .to(handlers::scim_targets::update_target::<C>)
+                            .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "scim_target_update",
+                                rate_limit_cfg.scim_target_admin_per_min,
+                            )),
+                    )
+                    .route(
+                        web::delete()
+                            .to(handlers::scim_targets::delete_target::<C>)
+                            .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "scim_target_delete",
+                                rate_limit_cfg.scim_target_admin_per_min,
+                            )),
+                    ),
+            )
+            .service(
+                web::resource("/scim-targets/{id}/reconcile")
+                    .route(
+                        web::post()
+                            .to(handlers::scim_targets::reconcile_target::<C>)
+                            .wrap(build_governor(rate_limit_cfg.scim_target_admin_per_min))
+                            .wrap(RateLimitShared::<C>::new(
+                                "scim_target_reconcile",
+                                rate_limit_cfg.scim_target_admin_per_min,
+                            )),
+                    ),
+            )
             // --- Tenant security overrides (explicit {tenant_id} path segment,
             // same convention as the email-config trio above) ---
             .service(
@@ -1920,6 +2008,36 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
                         rate_limit_cfg.device_authorization_per_min,
                     ))
                     .route(web::post().to(handlers::oauth2::device_authorization::<C>)),
+            )
+            // G-7 / CIBA Core §7 — the backchannel authentication endpoint.
+            //
+            // Its own bucket and preset (`bc_authorize_per_min`), never the
+            // token endpoint's: every accepted request allocates a pending
+            // request and may push a sign-in prompt at a person, so a flood
+            // here costs storage and attention, and sharing `/token`'s bucket
+            // would let ordinary token traffic pay for it or mask it. Keyed
+            // like `/token` (it carries a `client_id` in the form or the Basic
+            // header, so `AXIAM__RATE_LIMIT__KEY` applies), with a per-client
+            // bucket inside the handler after authentication, as PAR has. Plan
+            // §7 rule 6: the limiter that forgets this route is the Keycloak
+            // 26.7 lesson, which `ciba_test` pins with a 429.
+            .service(
+                web::resource("/bc-authorize")
+                    .wrap(build_client_aware_governor(
+                        rate_limit_cfg.bc_authorize_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    .wrap(RateLimitShared::<C>::new_client_identity_aware(
+                        "oauth2_bc_authorize",
+                        rate_limit_cfg.bc_authorize_per_min,
+                        rate_limit_cfg.key,
+                    ))
+                    // A body `web::Form` cannot read is answered as the token
+                    // endpoint's errors are: a JSON object (CIBA Core §13).
+                    .app_data(web::FormConfig::default().error_handler(
+                        handlers::oauth2::par_form_error,
+                    ))
+                    .route(web::post().to(handlers::ciba::bc_authorize::<C>)),
             )
             // B5 / RFC 9126. Its own bucket, and unlike
             // `/device_authorization` this one is client-keyed: PAR always

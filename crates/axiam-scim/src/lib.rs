@@ -21,6 +21,7 @@ pub mod auth;
 pub mod error;
 pub mod filter;
 pub mod groups;
+pub mod outbound;
 pub mod patch;
 pub mod routes;
 pub mod schema;

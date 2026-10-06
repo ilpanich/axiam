@@ -149,6 +149,7 @@ async fn setup() -> Fixture {
             browser_sso: false,
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+            ciba: Default::default(),
         })
         .await
         .unwrap();
@@ -178,6 +179,7 @@ async fn setup() -> Fixture {
             browser_sso: false,
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+            ciba: Default::default(),
         })
         .await
         .unwrap();

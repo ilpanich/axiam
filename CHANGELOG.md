@@ -9,6 +9,306 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`docker/docker-compose.minimal.yml` and the minimal-profile guide (G-8,
+  T23.8.3).** SurrealDB plus `axiam-server` with `AXIAM__AMQP__ENABLED=false`
+  and nothing else — no RabbitMQ, no Vault, no AMQP keys — in its own Compose
+  project (`axiam-minimal`), on **one replica by design** (no `deploy.replicas`,
+  a fixed container name that refuses `--scale`, the reason in a comment),
+  with healthchecks, a **30 s stop grace period**, and the **GDPR audit
+  dead-letter file on a named volume** (`AXIAM__GDPR_AUDIT_DLQ_FILE`; a
+  one-shot `volume-init` hands both volumes to uid 65532). `just minimal-up`,
+  `minimal-down` and `minimal-clean` mirror `dev-up`; `minimal-up` mints the
+  secrets the profile needs under `docker/.secrets/` (database credentials, JWT
+  keypair, pepper, email, GDPR, MFA, federation, PKI and OPAQUE keys).
+  `docs/deployment/README.md` gains the minimal profile's operating guide: how
+  to run it, what a restart loses in audit terms (deliveries without a terminal
+  row, a lost `ExportReady` mail, SSF events), the orderly stop and its grace
+  period, the dead-letter file and how to replay it into the trail, external
+  audit producers to stop before switching, when to choose it, and the steps to
+  move to and from the full profile. The website's Operate → Deploy page carves
+  the minimal profile out of its "stateless, scale horizontally" passage and
+  gains a "Minimal profile (no broker)" section;
+  `AXIAM__GDPR_AUDIT_DLQ_FILE` leaves the configuration-coverage exemption
+  table now that it is documented.
+- **Resting footprint, measured and published (G-8, T23.8.3).** At rest, not
+  under load, on a freshly migrated empty datastore, as the median resident set:
+  **207.3 MiB** for the minimal stack (server 120.7 + SurrealDB 86.6) against
+  **330.9 MiB** for the full one (server 130.3 + SurrealDB 86.0 + RabbitMQ
+  114.6) — about 124 MiB, 37 %, for the broker. The server ran as the native
+  release binary, not as an image; method, raw samples and the script are in
+  `benchmarks/resting-footprint/`, and `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5
+  gains the row with its caveats (not comparable with the under-load figures).
+  The Zitadel comparison's whole-stack cell and change log carry a dated note.
+
+- **Minimal profile — AXIAM without a broker (G-8, T23.8.1, D-59).**
+  `AXIAM__AMQP__ENABLED=false` (default `true`) runs AXIAM with SurrealDB only:
+  no RabbitMQ connection and no topology, and neither `AXIAM__AMQP__URL` nor the
+  AMQP signing key is required (the refusal of a missing key stands unchanged
+  for `true`). **Single-instance by definition**, enforced at boot by a
+  **singleton lease** in the datastore (schema **v83**, `minimal_profile_lease`:
+  TTL 30 s, renewed every 10 s; a boot that finds another instance's live lease
+  waits up to 45 s and then refuses; an instance whose renewal finds the lease
+  taken stops in order and exits non-zero; an orderly stop releases it). Two more boot refusals,
+  each naming the switch and the fix: the decision-cache broadcast
+  (`AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true`) and **any enabled
+  reactor registration in the datastore, in any tenant** (a `fail_closed` reactor
+  with no transport would deny logins). Not started: the asynchronous
+  authorization consumer, the external audit-ingestion consumer, the reactor
+  transport, the cross-replica cache invalidation. Webhooks, SSF push, outbound
+  SCIM, CIBA ping and transactional mail run on **in-process bounded queues**
+  (1 024 per kind) with the same deliverers, the same retry policy
+  (`AXIAM__<KIND>__MAX_ATTEMPTS` and the backoff variables), the same outcome
+  table and the same audit rows as the AMQP path — a dead letter is the audit
+  row only, and **queued messages and mail are lost on restart**. At runtime,
+  enabling a reactor registration answers **`409`** naming the profile (the
+  build that composes no transport keeps `503`), the gRPC reactor administration
+  answers `FAILED_PRECONDITION`, and `GET /health` gains `profile`
+  (`"full"` | `"minimal"`) and, in `minimal`, `unavailable`
+  (`reactors`, `amqp_authz`, `amqp_audit_ingestion`,
+  `decision_cache_broadcast`) — additive; `sdks/openapi.json` regenerated. The
+  composition root is now `axiam_server::boot::serve`, generic over the
+  datastore connection, so a test boots the whole server with no broker over the
+  embedded engine and runs a login, a webhook delivery and an SSF push through
+  it. See *Minimal profile (no broker)* in `docs/deployment/README.md`.
+- **CIBA — client-initiated backchannel authentication, complete (G-7, T23.7.1 –
+  T23.7.3; contract 1.58).** AXIAM is an OpenID Connect CIBA Core 1.0
+  authorization server in poll and ping modes (no push), with signed
+  authentication requests and the FAPI-CIBA client: `POST /oauth2/bc-authorize`,
+  the CIBA grant at the token endpoint, the user's approval on the console after
+  a full sign-in (with step-up) and an approval e-mail, the ping on the shared
+  outbound dispatcher, rate-limit and lockout coverage of the grant. The three
+  entries below are the server work; this one is the rest. **Contract §33** (CIBA,
+  the client's half: `ciba_initiate`, `ciba_poll`, `ciba_await` and
+  `ciba_handle_ping`, the server rules an SDK can observe, error mapping,
+  `Sensitive<T>` for `auth_req_id`, `client_notification_token` and the signed
+  request's key material, `ciba_initiate` never retried, sixteen required tests
+  per SDK) is **contract 1.58**: additive, SHOULD in the seven full-surface SDKs
+  and MAY in the other four, with no operation added to the management registry
+  (190 across 28). **§21.3.1 vector A is amended in place**: the discovery
+  document's `mtls_endpoint_aliases` has a seventh member,
+  `backchannel_authentication_endpoint`, so an SDK whose test pinned the six keys
+  must re-vendor `CONTRACT.md` and update the pin (the post-merge SDK fan-out, D-35,
+  carries both). **Website:** the *Integrate* page "CIBA (backchannel
+  authentication)" (registering a client, the request, approval and step-up,
+  polling and `slow_down`, ping, tokens, limits and lockout, what is not
+  supported), linked from the OAuth2 and FAPI pages, and the contract anchors
+  at 1.58. **Tests:** `frontend/e2e/ciba.spec.ts` drives poll mode end to end
+  through the real approval page (tokens carrying the approval's evidence,
+  denial, a second redemption refused, expiry, `slow_down` growth, a request for
+  nobody, a multi-factor request a password session cannot approve, refused
+  parameters, and the limiter counting failed client authentications at
+  `bc-authorize` — the Keycloak 26.7.x class); the e2e stack lowers
+  `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` to 20 so the limiter can be
+  exhausted quickly (the shipped default stays 60). Ping mode end to end is the
+  Rust test `ciba_ping_flow_test` (the approval route, the production deliverer
+  through its test seam, a loopback receiver, then the client's redemption):
+  a compose receiver cannot satisfy the outbound guard (`https`, a publicly
+  routable address, a certificate from the Mozilla roots) without weakening it.
+
+- **CIBA — user approval, e-mail notification and ping mode (G-7, T23.7.2).**
+  The user's half of a backchannel authentication request, and the client's
+  notification that it was decided. **Approval API** (the device grant's user
+  routes' neighbours: a signed-in human session and the CSRF check):
+  `GET /api/v1/ciba/requests/{request_id}` returns what the page shows (client
+  name, scopes, `binding_message`, the requested authentication classes, expiry
+  and the `version` to send back — never the `auth_req_id`), and
+  `POST …/approve` / `POST …/deny` decide, conditional on that version. A request
+  that is unknown, another user's, expired, already decided or changed since it
+  was read is one `404`; a request that asks for a class the session has not
+  achieved answers `403 step_up_required` naming it (the page sends the user
+  through the existing login hop and back). Each route has its own rate-limit
+  bucket under the new `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` (default 30,
+  never moved by a profile). Both decisions are audited (`ciba.approved`,
+  `ciba.denied`: user, request, client, mode and the `acr` achieved — never the
+  `binding_message`). **Console page** `/ciba/approve?request_id=…`: shows the
+  client, scopes and binding message (as text), approves or refuses, offers the
+  step-up, and says one thing for every request that cannot be decided; a
+  signed-out visitor following the mail link is brought back to it after signing
+  in. **E-mail notification:** a stored request for a user who may sign in sends
+  one `ciba_approval` mail (built-in template, customisable per organization or
+  tenant — schema **v82** admits the kind) with the client's name, the binding
+  message and a link to the page by record id — never the `auth_req_id` or any
+  token; at most three a minute per user whatever the clients asking, so a flood
+  of `bc-authorize` requests cannot become a flood of prompts. **Ping mode:** an
+  approval or a refusal of a ping-mode request queues one message on the new
+  `ciba_ping` kind of the shared outbound dispatcher (`axiam.ciba_ping`,
+  `.retry`, `.dlq` with the seven-day TTL; retry variables
+  `AXIAM__CIBA_PING__MAX_ATTEMPTS`, `…__BACKOFF_BASE_MS`, `…__BACKOFF_CEILING_MS`,
+  defaults 5, 5000, 3600000) holding only the request's record id and tenant; the
+  deliverer re-reads the request and the client, opens the sealed credentials and
+  sends `POST {"auth_req_id": …}` with `Authorization: Bearer
+  <client_notification_token>` to the client's notification endpoint through
+  `guarded_fetch_no_redirect` (`https`, no internal address, a redirect is never
+  followed): `2xx` delivered, a redirect, 408, 429, 5xx or no answer retried,
+  any other `4xx` dead-lettered. `axiam.ciba_ping` is in AsyncAPI.
+
+- **CIBA — Client-Initiated Backchannel Authentication, core (G-7, T23.7.1).**
+  OpenID Connect CIBA Core 1.0, poll and ping modes (push is not offered). A
+  client that already knows whom it wants to authenticate calls the new
+  **`POST /oauth2/bc-authorize`** (also under `/t/{tenant_id}`), authenticating
+  exactly as at the token endpoint (the registered method decides; D-17 applies
+  to `fapi2` rows), with `scope` (must include `openid`), exactly one of
+  `login_hint` (username or e-mail) or `id_token_hint` (an ID token this
+  server issued to this client), an optional `binding_message` (at most 64
+  printable characters), `requested_expiry` (30–600 s, default 300),
+  `acr_values` and RFC 8707 `resource`; a ping-mode client also sends
+  `client_notification_token`. The answer is `auth_req_id` (256 bits, stored
+  only as its SHA-256), `expires_in` and `interval` (5 s). `login_hint_token`,
+  `user_code` and `request_uri` are refused `invalid_request`; CIBA Core §13's
+  `invalid_binding_message` is new. **A hint
+  naming nobody, a user who may not sign in or a user under brute-force lockout
+  is answered exactly like a real one** and the request simply expires —
+  `unknown_user_id` is never sent, so the endpoint is not a user oracle. The
+  token endpoint accepts `grant_type=urn:openid:params:grant-type:ciba` with
+  `auth_req_id`: `authorization_pending`, `slow_down` (the interval grows by 5 s
+  per early poll, to 60 s, as for the device grant), `access_denied`,
+  `expired_token`, and `invalid_grant` for another client's or tenant's,
+  unknown or already-redeemed `auth_req_id`; redemption is single-use on the X6
+  two-layer arbiter, and the account is re-read after it (status and lockout).
+  Tokens carry the approval's evidence: the ID token's `auth_time`, `acr` and
+  `amr`, the access token's `sid` naming the approving session, and a refresh
+  token (for a client holding `refresh_token`) with the same snapshot. New
+  pending-request store (schema **v80**, `ciba_request`; a ping-mode request's
+  `auth_req_id` and notification token sealed under `pki_encryption_key`, so
+  ping needs that key), swept by the new `ciba_request` job on `/health/jobs`
+  and removed with its user (erasure) and tenant. The approval service API the
+  identity pages will call (T23.7.2) is in `axiam_oauth2::ciba::CibaService`
+  (`lookup_for_approval`, `approve`, `deny`), every transition conditional on the
+  version read and on the request's own user; the user-notification port is
+  `CibaUserNotifier` (no notifier is wired yet). **Client metadata:**
+  `backchannel_token_delivery_mode` (`poll`/`ping`) and
+  `backchannel_client_notification_endpoint` (ping only, under the webhook
+  outbound URL policy) on `POST`/`PUT /api/v1/oauth2-clients` and RFC 7591/7592
+  registration (the CIBA grant only with an initial access token, never
+  anonymously; a CIBA-only registration needs no redirect URI);
+  `backchannel_user_code_parameter: true` is refused; a CIBA client must be
+  confidential. Discovery, in both issuer forms, gains
+  `backchannel_authentication_endpoint`,
+  `backchannel_token_delivery_modes_supported` (`poll`, `ping`),
+  `backchannel_user_code_parameter_supported: false`,
+  `backchannel_authentication_request_signing_alg_values_supported` (`PS256`,
+  `ES256`, `EdDSA`) and the grant type, and `mtls_endpoint_aliases` gains a
+  seventh member, `backchannel_authentication_endpoint` (a `tls_client_auth`
+  client authenticates there). **Signed authentication requests and the
+  FAPI-CIBA client (D-61).** `backchannel_authentication_request_signing_alg`
+  (`PS256`, `ES256` or `EdDSA`) is accepted at the admin API and RFC 7591/7592
+  registration with exactly one of `jwks`/`jwks_uri` (an inline `jwks` must
+  hold a key of that algorithm), stored (schema **v81**) and echoed. A client
+  that registered it must send **every** request as a signed `request` JWT
+  (CIBA Core §7.1.1) under exactly that algorithm, verified against its
+  registered keys; one that did not cannot send one. The JWT must carry `iss`
+  (the client id), `aud` (the issuer, deployment or tenant-path form, string or
+  array), `exp`, `nbf`, `iat` and `jti`; `exp - nbf` is at most 60 minutes and
+  `nbf` at most 60 minutes old (FAPI-CIBA), and the `jti` is single-use (the
+  proof-replay table, kind `ciba_request_object`). The request's parameters come
+  from the JWT only — any authentication-request parameter beside `request` is
+  refused — and every failure is `invalid_request` describing it. A `fapi2`
+  client may hold the CIBA grant only with signed requests (and, as for every
+  grant, `tls_client_auth`/`self_signed_tls_client_auth`/`private_key_jwt` and
+  sender-constrained tokens), must send a `binding_message`, and in ping mode a
+  `client_notification_token` of at least 22 characters. **Rate
+  limits:** the new `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` (default 60;
+  `gateway` 600, `mesh` 6000) is the endpoint's own bucket, keyed like
+  `/oauth2/token`, plus a per-client bucket after authentication and a fixed
+  three notifications per user per minute; the CIBA grant is counted by
+  `TOKEN_PER_MIN` like every grant, and client-authentication failures at
+  either endpoint are audited as `oauth2.client_auth_failed`. Every stored
+  request is audited as `oauth2.ciba_initiated`. `sdks/openapi.json` is
+  regenerated; the contract section (§33), the SDK helper and the website page
+  follow in T23.7.3.
+
+- **Outbound SCIM provisioning (G-6, T23.6.1 – T23.6.4, contract 1.57).** A
+  tenant administrator can register downstream SCIM 2.0 service providers
+  (**targets**) and AXIAM pushes the tenant's user and group lifecycle to them,
+  with reconciliation. T23.6.1 added the model (schema v79: `scim_target`,
+  `scim_target_link` and `scim_target_state`; the credential, a bearer token or
+  an OAuth 2.0 client secret, sealed with AES-256-GCM under
+  `pki_encryption_key`, write-only); T23.6.2 the lifecycle-to-SCIM translation
+  and delivery on the shared dispatcher; T23.6.3 the nightly and on-demand
+  reconciliation, the dead-letter notification (`scim_delivery_failed`) and
+  erasure propagation. **T23.6.4 adds the management surface:**
+  `GET`/`POST /api/v1/scim-targets`, `GET`/`PUT`/`DELETE
+  /api/v1/scim-targets/{id}` and `POST /api/v1/scim-targets/{id}/reconcile`
+  (`202` when the run was claimed, `409` while one holds the claim or the
+  target is disabled), for human administrators only (a service-account token
+  is `401`) under the new permissions `scim_targets:read` and
+  `scim_targets:write`. `GET` returns the target with its delivery state (last
+  success and failure, a fixed-vocabulary reason, consecutive failures,
+  dead-lettered total, last reconciliation) and **never the credential**. Every
+  write is validated: `base_url` and `token_url` under the webhook outbound
+  address policy (https, no private or local address), a group scope of 1 to
+  100 groups of the tenant, bounded name, client id and credential. **The
+  credential is bound to its URL:** moving it (`base_url` of a bearer target,
+  `token_url` or `base_url` of a client-credentials one — the access tokens the
+  secret yields go to `base_url`) or switching the authentication kind
+  without supplying it is `400` naming the field; an update is conditional on
+  the version it read (`409` when overtaken); a credential without
+  `pki_encryption_key` is `503`. Creating a target enabled, or enabling one,
+  starts a reconciliation. Deleting a target removes its links and state and
+  **does not deprovision anything downstream.** New setting
+  `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` (default 30, one bucket per
+  write route, never moved by a profile), documented in
+  `docs/deployment/rate-limit-sizing.md` and the deployment guide. The admin
+  console gains **Identity → SCIM Targets** (list with delivery state, create
+  and edit with the auth-kind switch, a write-only credential field that is
+  required when the URL or kind changes, a group scope picker, the deprovision
+  policy, delete with the downstream warning, *Reconcile now*). `CONTRACT.md`
+  gains **§31 Outbound SCIM targets** (contract **1.57**, non-breaking: SHOULD
+  as part of §27, in all eleven SDKs; `ScimTargetInput.credential` is
+  `Sensitive<T>`); `sdks/openapi.json` and `sdks/management-registry.json` are
+  regenerated (190 operations across 28 namespaces, the new `scim_targets`
+  namespace). The website's *Integrate* section gains **Outbound SCIM
+  provisioning**, and the three competitor comparisons now record the feature.
+  **The SDKs must re-sync `CONTRACT.md`, `openapi.json` and
+  `management-registry.json` from the merged commit.**
+
+- **Outbound SCIM provisioning: reconciliation, dead-letter notification and
+  erasure propagation (T23.6.3, G-6, D-58).** A `scim_reconcile` job in the
+  cleanup loop (listed in `/health/jobs`) reconciles each enabled target once a
+  day, claimed in the datastore so replicas do not double-run it: it re-queues a
+  reference for every in-scope user and group and every linked resource, pages
+  the downstream `GET /Users` and `/Groups` (100 per page, at most 100 pages and
+  five minutes per run, through the same no-redirect SSRF guard and credential
+  path as delivery), clears the digest of a resource whose downstream copy
+  differs, drops the link of one that is gone (it is created again), and
+  deprovisions a downstream account whose `externalId` is an out-of-scope,
+  disabled or erased user **of this tenant**. A downstream account with no
+  `externalId`, a foreign one, or another tenant's user is never touched. A
+  new `scim_delivery_failed` notification event (the console's rule editor lists
+  it) mails a tenant's rule recipients when a delivery is dead-lettered. GDPR
+  erasure reaches the downstream as `DELETE`: the link row (ids and a digest
+  only) survives the erasure cascade until that `DELETE` succeeds, a refused one
+  leaves it `deprovisioned` with `erase_pending`, and reconciliation retries it.
+  `NotificationEventType` gains `scim_delivery_failed`, so `sdks/openapi.json`'s
+  enum does too. Documented in the erasure section of
+  `docs/compliance/gdpr-compliance.md`.
+
+- **Outbound SCIM provisioning: the source, the client and the deliverer
+  (T23.6.2, G-6, D-57).** AXIAM can now push user and group changes to a
+  downstream SCIM 2.0 service provider. Management routes, the console and the
+  contract section follow in T23.6.4, so nothing registers a target yet.
+  `ProvisioningSink` is a new core port the SurrealDB user and group repositories
+  call after every committed write of a provisioned field (user create, update of
+  username, email, status or name metadata, delete, erasure, the directory-account
+  methods and the deletion-request status write; group create, rename, delete and
+  every membership change), so the REST API, SCIM inbound, directory sign-in and
+  sync, federation just-in-time provisioning and GDPR erasure are all covered
+  without touching their call sites; login bookkeeping reports nothing. A
+  `ScimProvisioner` turns each report into one **reference**
+  (`{resource_type, axiam_id}`, no attribute of a person) per enabled target on a
+  new `scim_push` kind of the shared outbound dispatcher (`axiam.scim_push`,
+  `.retry`, `.dlq`; the dead-letter queue discards after seven days). The
+  `ScimPushDeliverer` re-reads the target, the resource and its link at every
+  attempt and sends `POST /Users`, `PATCH` (replace on the mapped attributes
+  only, skipped when the digest of the representation is unchanged) or `DELETE`
+  (always for an erased user; for a deprovisioned one when the target's policy
+  says so, else `active=false`); groups carry `displayName`, `externalId` and the
+  linked members. Every request, the OAuth2 token request included, goes through
+  the no-redirect SSRF guard; a redirect is never followed. New environment
+  variables `AXIAM__SCIM_PUSH__MAX_ATTEMPTS`, `AXIAM__SCIM_PUSH__BACKOFF_BASE_MS`
+  and `AXIAM__SCIM_PUSH__BACKOFF_CEILING_MS` (defaults 5, 5000, 3600000),
+  documented on the Integrate page; `axiam.scim_push` is in `docs/api/asyncapi.yml`.
+
 - **SAML 2.0 IdP end-to-end tests: a `samael` reference SP and a real Keycloak
   (T23.2.7, G-2).** Tests only; no server, contract or OpenAPI change.
   `saml_idp_e2e_test` drives the production route table with a service provider
@@ -842,6 +1142,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The W5 F4 security review (Phase 23, threat model 2.35.0,
+  [`security-review-phase23-w5-2026-10-05.md`](claude_dev/security-review-phase23-w5-2026-10-05.md)).**
+  Behaviour changes, all to surfaces new in this unreleased wave:
+  - **Outbound SCIM: a client-credentials target's secret is bound to
+    `base_url` too** (T-409). Every access token the secret yields is sent to
+    `base_url`, so an update that moves `base_url` of a client-credentials
+    target without `credential` in the same write is now `400` naming
+    `base_url`, exactly like a moved `auth.token_url`; the console asks for the
+    secret when either URL is edited. Contract 1.57 §31.3 rule 2 amended in
+    place.
+  - **Outbound SCIM: one `scim_delivery_failed` notification per target per
+    hour** (T-418, D-73). Every dead letter still writes its
+    `scim_push.delivery_failed` audit row and its count on the target's
+    `state`; only the mail to a rule's recipients is coalesced, claimed in the
+    datastore so replicas agree. Schema **v84** adds
+    `scim_target_state.failure_notified_at`.
+  - **CIBA: only a console sign-in decides a request** (T-447). The approval
+    routes (`GET /api/v1/ciba/requests/{id}`, `…/approve`, `…/deny`) answer
+    `403` to an access token AXIAM minted for an OAuth2 client (code, refresh
+    or CIBA grant), which names the user and a session but is not the user at
+    the console. Contract 1.58 §33 amended in place; OpenAPI describes the
+    `403`.
+  - **CIBA: the approval mail goes only to an address something vouches for**
+    (D-74, D-25's rule): `email_verified_at` set, or the account `Active`. A
+    request for an account whose address is unproven is stored and answered as
+    before and waits on the approval page unmailed. A federated account, which
+    stays `PendingVerification`, therefore gets no approval mail unless its
+    address was verified.
+  - **CIBA: `ciba.approved` and `ciba.denied` audit rows carry the deciding
+    `session_id`** (T-435).
+
 - **The SAML assertion's `SessionIndex` is a per-SP random token, not the AXIAM
   session id (T23.2.4, D-37, closes T-312).** SPs that compared notes could
   correlate one person's sessions through a `SessionIndex` that was the same at
@@ -893,6 +1224,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document is unchanged.
 
 ### Fixed
+
+- **Audit rows survive an orderly stop, and a lost minimal-profile lease is one
+  (T23.8.2, P23W5-A1/A2).** An instance of the minimal profile whose singleton
+  lease another instance took over called `std::process::exit(1)` from the
+  renewal task, losing every audit row the audit middleware still had queued —
+  and a lease is lost exactly when the datastore was unreachable, which is when
+  that queue fills — together with any request between its write and its audit
+  row and a GDPR purge between the erasure and `gdpr.user_pseudonymized`. It now
+  stops through the `SIGTERM` path (no new connections, in-flight requests
+  finished, the cleanup task's tick finished, the audit queue written) and exits
+  non-zero within 15 s, a backstop ending it after that. Every orderly stop, in
+  both profiles, now waits up to 5 s for the audit middleware's queue
+  (`AuditMiddleware::drain`); before, the runtime's end dropped the queue even on
+  a clean `SIGTERM`. The review, path by path, is
+  `claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`; threat model
+  2.34.0 (T-444, T-445; T-405 amended; T-108 reopened).
+- **CI/harness: `fapi-conformance.yml` gets past its bring-up (D-60).** Its first run
+  (37268155503) died in the bring-up and every later step would have failed too.
+  `bench-up` no longer passes `docker compose up --wait` for the native-TLS
+  overlay (`p2-tls13`, `p3-mtls`), whose `healthcheck: NONE` compose refuses; it
+  gates on its host-side `/health` probe and still fails fast, with the usual
+  ps+logs dump, when a container exits non-zero (`p0`/`p1` unchanged). A new
+  `benchmarks/targets/axiam/docker-compose.conformance.yml` (layered on by the new
+  `BENCH_COMPOSE_OVERLAYS` hook) makes the `p3-mtls` listener the conformance
+  target: it trusts the conformance and benchmark CAs, presents the conformance
+  server certificate, runs `optional_self_signed`, and forwards the mTLS-alias base
+  URL and default tenant that compose dropped. The workflow now builds the SPA,
+  publishes AXIAM on the port the front door proxies to with the front door's
+  issuer, seeds with `profile=p3-mtls` (it seeded the plaintext port), registers
+  the clients as the seeder's administrator instead of a bearer secret that cannot
+  exist for a deployment the job creates, restarts AXIAM once so discovery carries
+  the registered tenant, summarises only that run's reports, and uploads the
+  server and front-door logs. New `just bench-logs` prints compose logs without the
+  stack's secrets in the environment. Workflow, justfile, compose overlay and
+  runbook only; no server code.
 
 - **OpenAPI: `AcsEndpoint.index` is published with `maximum: 65535` (F4 W4
   P23W4-05).** The model and contract §29.2 say an unsigned 16-bit integer; the

@@ -154,10 +154,11 @@ EXEMPT: dict[str, str] = {
         "opt-in override for a guard that cannot fire yet — SurrealDB publishes no "
         "datastore identity, so the check logs a WARN and never refuses"
     ),
-    "AXIAM__GDPR_AUDIT_DLQ_FILE": (
-        "optional file sink for audit writes that failed; the structured-log sink "
-        "fires unconditionally either way"
-    ),
+    # `AXIAM__GDPR_AUDIT_DLQ_FILE` was exempt here ("optional file sink ... the
+    # structured-log sink fires either way"). T23.8.3 documents it, on the Deploy
+    # page's minimal-profile section and in docs/deployment: the compose file
+    # that ships with that profile is the first deployment to set it, and the
+    # audit-durability review (A7) asked for the exemption to go.
     "AXIAM__PKI__SSRF_ALLOWED_HOSTS": "egress allow-list for metadata fetches",
     # `AXIAM__GRPC__STRICT_REVOCATION` was exempt here as an opt-in the
     # read-path guide covered. Since 1.0.0-beta11 the gRPC listener may be

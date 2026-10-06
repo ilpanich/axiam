@@ -317,6 +317,11 @@ async fn discovery_publishes_mtls_aliases_when_a_host_is_configured() {
         aliases["pushed_authorization_request_endpoint"],
         "https://mtls.localhost/oauth2/par"
     );
+    // D-61: a `tls_client_auth` CIBA client authenticates at bc-authorize.
+    assert_eq!(
+        aliases["backchannel_authentication_endpoint"],
+        "https://mtls.localhost/oauth2/bc-authorize"
+    );
 
     // RFC 8705 §5 aliases the endpoints; it does not move the issuer, and OIDC
     // Core §2 needs the issuer to keep matching every token's `iss`.

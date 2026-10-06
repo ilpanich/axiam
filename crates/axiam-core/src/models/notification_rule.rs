@@ -36,6 +36,11 @@ pub enum NotificationEventType {
     UserUpdated,
     ServiceAccountCreated,
     ServiceAccountDeleted,
+    // Provisioning events
+    /// An outbound SCIM delivery was dead-lettered (G-6, D-58): a downstream
+    /// refused it for good, or it ran out of attempts. Mapped from the
+    /// dispatcher's `scim_push.delivery_failed` audit row.
+    ScimDeliveryFailed,
 }
 
 impl NotificationEventType {
@@ -58,7 +63,16 @@ impl NotificationEventType {
         Self::UserUpdated,
         Self::ServiceAccountCreated,
         Self::ServiceAccountDeleted,
+        Self::ScimDeliveryFailed,
     ];
+
+    /// Whether this event is raised by an AXIAM background process rather than
+    /// by a caller: its audit row names no actor, and the notification mail
+    /// must not describe the absence of one as "an unauthenticated caller".
+    #[must_use]
+    pub const fn is_system_event(self) -> bool {
+        matches!(self, Self::ScimDeliveryFailed)
+    }
 
     /// String representation suitable for SurrealDB storage.
     pub fn to_db_string(self) -> String {
@@ -151,6 +165,11 @@ impl NotificationEventType {
             ("DELETE /api/v1/service-accounts/{id}", "Success") => {
                 vec![Self::ServiceAccountDeleted]
             }
+            // Provisioning events. This action is not an HTTP request: it is the
+            // row the outbound dispatcher's consumer writes when a delivery is
+            // dead-lettered (`<kind slug>.delivery_failed`, outcome `Failure`),
+            // so it has no method or path to normalise.
+            ("scim_push.delivery_failed", "Failure") => vec![Self::ScimDeliveryFailed],
             _ => vec![],
         }
     }
@@ -235,6 +254,7 @@ impl std::fmt::Display for NotificationEventType {
             Self::ServiceAccountDeleted => {
                 write!(f, "service_account_deleted")
             }
+            Self::ScimDeliveryFailed => write!(f, "scim_delivery_failed"),
         }
     }
 }
@@ -261,6 +281,7 @@ impl std::str::FromStr for NotificationEventType {
             "user_updated" => Ok(Self::UserUpdated),
             "service_account_created" => Ok(Self::ServiceAccountCreated),
             "service_account_deleted" => Ok(Self::ServiceAccountDeleted),
+            "scim_delivery_failed" => Ok(Self::ScimDeliveryFailed),
             other => Err(format!("invalid notification event type: {other}")),
         }
     }
@@ -323,8 +344,44 @@ mod tests {
 
     #[test]
     fn all_constant_complete() {
-        // 17 variants total
-        assert_eq!(NotificationEventType::ALL.len(), 17);
+        // 18 variants total
+        assert_eq!(NotificationEventType::ALL.len(), 18);
+    }
+
+    #[test]
+    fn a_scim_dead_letter_maps_from_the_dispatchers_audit_action() {
+        // The consumer writes `<slug>.delivery_failed` with outcome `Failure`
+        // (the `Debug` form of `AuditOutcome`, which is what the sink passes).
+        assert_eq!(
+            NotificationEventType::from_audit_action("scim_push.delivery_failed", "Failure"),
+            vec![NotificationEventType::ScimDeliveryFailed]
+        );
+        assert_eq!(
+            NotificationEventType::ScimDeliveryFailed.to_db_string(),
+            "scim_delivery_failed"
+        );
+        assert!(NotificationEventType::ScimDeliveryFailed.is_system_event());
+        // Nothing else of the dispatcher's vocabulary is an event: a retry in
+        // progress, a success, another kind's dead letter.
+        for (action, outcome) in [
+            ("scim_push.delivery_attempt", "Failure"),
+            ("scim_push.delivery_succeeded", "Success"),
+            ("scim_push.delivery_failed", "Success"),
+            ("webhook.delivery_failed", "Failure"),
+            ("ssf_push.delivery_failed", "Failure"),
+        ] {
+            assert!(
+                NotificationEventType::from_audit_action(action, outcome).is_empty(),
+                "{action} ({outcome})"
+            );
+        }
+        assert!(
+            NotificationEventType::ALL
+                .iter()
+                .filter(|e| e.is_system_event())
+                .count()
+                == 1
+        );
     }
 
     #[test]

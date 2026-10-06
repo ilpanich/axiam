@@ -1,0 +1,251 @@
+{"timestamp":"2026-10-05T21:32:06.061999Z","level":"INFO","fields":{"message":"Starting AXIAM server..."},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062180Z","level":"INFO","fields":{"message":"Global allocator: jemalloc","allocator":"jemalloc"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062469Z","level":"WARN","fields":{"message":"AXIAM__AUTH__OAUTH2_ISSUER_URL not set — OIDC discovery will use jwt_issuer as a non-URL issuer identifier; set oauth2_issuer_url for compliant discovery documents"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062662Z","level":"INFO","fields":{"message":"secret provider ready","provider":"env"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062727Z","level":"INFO","fields":{"message":"MFA encryption key loaded"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062733Z","level":"INFO","fields":{"message":"Federation encryption key loaded"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062739Z","level":"INFO","fields":{"message":"OPAQUE keys loaded","provider":"env"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062743Z","level":"INFO","fields":{"message":"Email encryption key loaded"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062746Z","level":"INFO","fields":{"message":"directory encryption key not configured: the LDAP / Active Directory identity source is unavailable (set AXIAM__AUTH__DIRECTORY_ENCRYPTION_KEY to enable it)","provider":"env"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062750Z","level":"INFO","fields":{"message":"SAML pairwise-identifier key not configured: SAML sign-on to a service provider using persistent NameIDs is refused (set AXIAM__AUTH__SAML_PAIRWISE_KEY to enable it; it must never change once set)","provider":"env"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062757Z","level":"INFO","fields":{"message":"GDPR pseudonym pepper loaded"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062774Z","level":"INFO","fields":{"message":"datastore/broker credential loaded from the secret provider","provider":"env","credential":"datastore username"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062780Z","level":"INFO","fields":{"message":"datastore/broker credential loaded from the secret provider","provider":"env","credential":"datastore password"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062785Z","level":"INFO","fields":{"message":"datastore/broker credential loaded from the secret provider","provider":"env","credential":"broker URL"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062834Z","level":"INFO","fields":{"message":"JWT Ed25519 keys parsed and cached (CQ-B14)"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062849Z","level":"INFO","fields":{"message":"AXIAM__AUTH__PEPPER not set — password hashing will proceed without a pepper; client-secret hashing is mandatory-keyed and will fail closed in a release build (OBS-1)"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062902Z","level":"INFO","fields":{"message":"Client-secret hasher installed (OBS-1)"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062914Z","level":"INFO","fields":{"message":"audit collection minimisation is OFF (AXIAM__AUDIT__MINIMISE) — full client addresses are recorded; set it when your lawful basis does not support holding them for the retention window"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.062936Z","level":"INFO","fields":{"message":"Building SurrealDB connection pool","pool_size":1,"pool_max_in_flight":0},"target":"axiam_db::pool"}
+{"timestamp":"2026-10-05T21:32:06.148870Z","level":"INFO","fields":{"message":"Extended SurrealDB root token duration","duration_secs":2419200},"target":"axiam_db::connection"}
+{"timestamp":"2026-10-05T21:32:06.185952Z","level":"INFO","fields":{"message":"SurrealDB connection pool ready","pool_size":1},"target":"axiam_db::pool"}
+{"timestamp":"2026-10-05T21:32:06.187254Z","level":"WARN","fields":{"message":"Storage engine could NOT be attested — SurrealDB exposes no datastore identity over the wire, so this server cannot verify it is running a persistent engine. Single-use redemption of permission tickets, device grants and PAR request_uris is guaranteed ONLY on a persistent engine (ilpanich/axiam#302); operators MUST run `surrealkv:` or `rocksdb:` and MUST NOT run `memory`. See docs/deployment/README.md","reason":"the datastore reports no engine name (SurrealDB 3.2.4 and earlier)"},"target":"axiam_db::engine_attestation"}
+{"timestamp":"2026-10-05T21:32:06.198343Z","level":"INFO","fields":{"message":"Applying migration","version":1,"name":"initial_schema"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.291676Z","level":"INFO","fields":{"message":"Migration applied successfully","version":1},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.291718Z","level":"INFO","fields":{"message":"Applying migration","version":2,"name":"cert_binding"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.301439Z","level":"INFO","fields":{"message":"Migration applied successfully","version":2},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.301470Z","level":"INFO","fields":{"message":"Applying migration","version":3,"name":"pgp_keys"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.311115Z","level":"INFO","fields":{"message":"Migration applied successfully","version":3},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.311142Z","level":"INFO","fields":{"message":"Applying migration","version":4,"name":"oauth2_auth_codes"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.316990Z","level":"INFO","fields":{"message":"Migration applied successfully","version":4},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.317013Z","level":"INFO","fields":{"message":"Applying migration","version":5,"name":"oauth2_refresh_tokens"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.326028Z","level":"INFO","fields":{"message":"Migration applied successfully","version":5},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.326054Z","level":"INFO","fields":{"message":"Applying migration","version":6,"name":"oauth2_auth_code_nonce"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.327419Z","level":"INFO","fields":{"message":"Migration applied successfully","version":6},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.327446Z","level":"INFO","fields":{"message":"Applying migration","version":7,"name":"federation_links"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.338662Z","level":"INFO","fields":{"message":"Migration applied successfully","version":7},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.338693Z","level":"INFO","fields":{"message":"Applying migration","version":8,"name":"security_settings"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.345735Z","level":"INFO","fields":{"message":"Migration applied successfully","version":8},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.345764Z","level":"INFO","fields":{"message":"Applying migration","version":9,"name":"password_history"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.351497Z","level":"INFO","fields":{"message":"Migration applied successfully","version":9},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.351528Z","level":"INFO","fields":{"message":"Applying migration","version":10,"name":"email_templates"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.357184Z","level":"INFO","fields":{"message":"Migration applied successfully","version":10},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.357206Z","level":"INFO","fields":{"message":"Applying migration","version":11,"name":"email_verification_tokens"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.367615Z","level":"INFO","fields":{"message":"Migration applied successfully","version":11},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.367645Z","level":"INFO","fields":{"message":"Applying migration","version":12,"name":"password_reset_tokens"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.377551Z","level":"INFO","fields":{"message":"Migration applied successfully","version":12},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.377577Z","level":"INFO","fields":{"message":"Applying migration","version":13,"name":"notification_rules"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.384280Z","level":"INFO","fields":{"message":"Migration applied successfully","version":13},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.384308Z","level":"INFO","fields":{"message":"Applying migration","version":14,"name":"webauthn_credentials"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.393403Z","level":"INFO","fields":{"message":"Migration applied successfully","version":14},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.393431Z","level":"INFO","fields":{"message":"Applying migration","version":15,"name":"phase5_email_gdpr"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.430873Z","level":"INFO","fields":{"message":"Migration applied successfully","version":15},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.430919Z","level":"INFO","fields":{"message":"Applying migration","version":16,"name":"sparse_tenant_settings"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.433069Z","level":"INFO","fields":{"message":"Migration applied successfully","version":16},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.433105Z","level":"INFO","fields":{"message":"Applying migration","version":17,"name":"totp_replay_prevention"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.434805Z","level":"INFO","fields":{"message":"Migration applied successfully","version":17},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.434830Z","level":"INFO","fields":{"message":"Applying migration","version":18,"name":"federation_login_state_request_id"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.436284Z","level":"INFO","fields":{"message":"Migration applied successfully","version":18},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.436317Z","level":"INFO","fields":{"message":"Applying migration","version":19,"name":"edge_unique_indexes"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.463991Z","level":"INFO","fields":{"message":"Migration applied successfully","version":19},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.464020Z","level":"INFO","fields":{"message":"Applying migration","version":20,"name":"seeder_state"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.465819Z","level":"INFO","fields":{"message":"Migration applied successfully","version":20},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.465856Z","level":"INFO","fields":{"message":"Applying migration","version":21,"name":"rate_limit_bucket"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.467735Z","level":"INFO","fields":{"message":"Migration applied successfully","version":21},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.467762Z","level":"INFO","fields":{"message":"Applying migration","version":22,"name":"bootstrap_atomicity_gate"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.470610Z","level":"INFO","fields":{"message":"Migration applied successfully","version":22},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.470643Z","level":"INFO","fields":{"message":"Applying migration","version":23,"name":"email_config_provider_kind_optional"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.472125Z","level":"INFO","fields":{"message":"Migration applied successfully","version":23},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.472149Z","level":"INFO","fields":{"message":"Applying migration","version":24,"name":"tenant_status_and_sa_description"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.473939Z","level":"INFO","fields":{"message":"Migration applied successfully","version":24},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.473977Z","level":"INFO","fields":{"message":"Applying migration","version":25,"name":"grant_effect_deny_override"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.475220Z","level":"INFO","fields":{"message":"Migration applied successfully","version":25},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.475238Z","level":"INFO","fields":{"message":"Applying migration","version":26,"name":"device_grant_rfc8628"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.486249Z","level":"INFO","fields":{"message":"Migration applied successfully","version":26},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.486275Z","level":"INFO","fields":{"message":"Applying migration","version":27,"name":"oidc_logout_and_par"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.492428Z","level":"INFO","fields":{"message":"Migration applied successfully","version":27},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.492453Z","level":"INFO","fields":{"message":"Applying migration","version":28,"name":"session_client_participation"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.499188Z","level":"INFO","fields":{"message":"Migration applied successfully","version":28},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.499215Z","level":"INFO","fields":{"message":"Applying migration","version":29,"name":"reactor_registrations"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.508942Z","level":"INFO","fields":{"message":"Migration applied successfully","version":29},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.508971Z","level":"INFO","fields":{"message":"Applying migration","version":30,"name":"uma_permission_tickets"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.518932Z","level":"INFO","fields":{"message":"Migration applied successfully","version":30},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.518956Z","level":"INFO","fields":{"message":"Applying migration","version":31,"name":"uma_permission_ticket_redemption_nonce"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.520371Z","level":"INFO","fields":{"message":"Migration applied successfully","version":31},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.520387Z","level":"INFO","fields":{"message":"Applying migration","version":32,"name":"single_use_redemption_nonce_device_grant_and_par"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.521914Z","level":"INFO","fields":{"message":"Migration applied successfully","version":32},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.521933Z","level":"INFO","fields":{"message":"Applying migration","version":33,"name":"uma_resource_registration_provenance"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.523283Z","level":"INFO","fields":{"message":"Migration applied successfully","version":33},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.523298Z","level":"INFO","fields":{"message":"Applying migration","version":34,"name":"resource_child_epoch_delete_race"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.524584Z","level":"INFO","fields":{"message":"Migration applied successfully","version":34},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.524600Z","level":"INFO","fields":{"message":"Applying migration","version":35,"name":"webauthn_attestation_policy_and_mds"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.536254Z","level":"INFO","fields":{"message":"Migration applied successfully","version":35},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.536279Z","level":"INFO","fields":{"message":"Applying migration","version":36,"name":"federation_external_token_exchange_trust"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.541850Z","level":"INFO","fields":{"message":"Migration applied successfully","version":36},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.541878Z","level":"INFO","fields":{"message":"Applying migration","version":37,"name":"authorization_code_redemption_nonce"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.543339Z","level":"INFO","fields":{"message":"Migration applied successfully","version":37},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.543367Z","level":"INFO","fields":{"message":"Applying migration","version":38,"name":"fapi2_client_profile_and_mtls_client_auth"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.545779Z","level":"INFO","fields":{"message":"Migration applied successfully","version":38},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.545803Z","level":"INFO","fields":{"message":"Applying migration","version":39,"name":"private_key_jwt_dpop_and_proof_replay"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.555917Z","level":"INFO","fields":{"message":"Migration applied successfully","version":39},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.555939Z","level":"INFO","fields":{"message":"Applying migration","version":40,"name":"scim_provisioning_tokens"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.572195Z","level":"INFO","fields":{"message":"Migration applied successfully","version":40},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.572224Z","level":"INFO","fields":{"message":"Applying migration","version":41,"name":"srp_credentials_and_policy"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.579416Z","level":"INFO","fields":{"message":"Migration applied successfully","version":41},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.579448Z","level":"INFO","fields":{"message":"Applying migration","version":42,"name":"opaque_replaces_srp"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.593609Z","level":"INFO","fields":{"message":"Migration applied successfully","version":42},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.593633Z","level":"INFO","fields":{"message":"Applying migration","version":43,"name":"email_config_tenant_override_tristate"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.595613Z","level":"INFO","fields":{"message":"Migration applied successfully","version":43},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.595633Z","level":"INFO","fields":{"message":"Applying migration","version":44,"name":"configurable_deletion_grace_period"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.597338Z","level":"INFO","fields":{"message":"Migration applied successfully","version":44},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.597362Z","level":"INFO","fields":{"message":"Applying migration","version":45,"name":"ca_key_custody"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.599649Z","level":"INFO","fields":{"message":"Migration applied successfully","version":45},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.599667Z","level":"INFO","fields":{"message":"Applying migration","version":46,"name":"ca_key_custody_vault_pki"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.601164Z","level":"INFO","fields":{"message":"Migration applied successfully","version":46},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.601183Z","level":"INFO","fields":{"message":"Applying migration","version":47,"name":"tenant_signing_cas"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.605877Z","level":"INFO","fields":{"message":"Migration applied successfully","version":47},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.605895Z","level":"INFO","fields":{"message":"Applying migration","version":48,"name":"user_status_deleted"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.607235Z","level":"INFO","fields":{"message":"Migration applied successfully","version":48},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.607262Z","level":"INFO","fields":{"message":"Applying migration","version":49,"name":"ca_mtls_trust_anchor"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.611867Z","level":"INFO","fields":{"message":"Migration applied successfully","version":49},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.611891Z","level":"INFO","fields":{"message":"Applying migration","version":50,"name":"tenant_kind_organization_scope"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.616910Z","level":"INFO","fields":{"message":"Migration applied successfully","version":50},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.616934Z","level":"INFO","fields":{"message":"Applying migration","version":51,"name":"role_assignment_tenant_scope"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.618342Z","level":"INFO","fields":{"message":"Migration applied successfully","version":51},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.618359Z","level":"INFO","fields":{"message":"Applying migration","version":52,"name":"federation_login_providers"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.633061Z","level":"INFO","fields":{"message":"Migration applied successfully","version":52},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.633093Z","level":"INFO","fields":{"message":"Applying migration","version":53,"name":"webauthn_user_verification_policy"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.634840Z","level":"INFO","fields":{"message":"Migration applied successfully","version":53},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.634866Z","level":"INFO","fields":{"message":"Applying migration","version":54,"name":"oidc_authn_request_params_and_browser_sso"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.636397Z","level":"INFO","fields":{"message":"Migration applied successfully","version":54},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.636417Z","level":"INFO","fields":{"message":"Applying migration","version":55,"name":"session_authentication_evidence"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.638397Z","level":"INFO","fields":{"message":"Migration applied successfully","version":55},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.638424Z","level":"INFO","fields":{"message":"Applying migration","version":56,"name":"op_browser_session_lookup"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.642733Z","level":"INFO","fields":{"message":"Migration applied successfully","version":56},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.642751Z","level":"INFO","fields":{"message":"Applying migration","version":57,"name":"oidc_sensitive_scopes_and_tenant_locale"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.645312Z","level":"INFO","fields":{"message":"Migration applied successfully","version":57},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.645335Z","level":"INFO","fields":{"message":"Applying migration","version":58,"name":"dpop_authorization_code_key_binding"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.646713Z","level":"INFO","fields":{"message":"Migration applied successfully","version":58},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.646730Z","level":"INFO","fields":{"message":"Applying migration","version":59,"name":"oidc_requested_userinfo_claims"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.648091Z","level":"INFO","fields":{"message":"Migration applied successfully","version":59},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.648111Z","level":"INFO","fields":{"message":"Applying migration","version":60,"name":"refresh_rotation_replay_marker"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.649754Z","level":"INFO","fields":{"message":"Migration applied successfully","version":60},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.649781Z","level":"INFO","fields":{"message":"Applying migration","version":61,"name":"oidc_requested_claims_on_refresh"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.651272Z","level":"INFO","fields":{"message":"Migration applied successfully","version":61},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.651291Z","level":"INFO","fields":{"message":"Applying migration","version":62,"name":"session_revocation_feed"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.659876Z","level":"INFO","fields":{"message":"Migration applied successfully","version":62},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.659899Z","level":"INFO","fields":{"message":"Applying migration","version":63,"name":"rfc8707_resource_indicators"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.661673Z","level":"INFO","fields":{"message":"Migration applied successfully","version":63},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.661700Z","level":"INFO","fields":{"message":"Applying migration","version":64,"name":"dynamic_client_registration"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.673016Z","level":"INFO","fields":{"message":"Migration applied successfully","version":64},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.673044Z","level":"INFO","fields":{"message":"Applying migration","version":65,"name":"client_id_metadata_documents"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.674589Z","level":"INFO","fields":{"message":"Migration applied successfully","version":65},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.674614Z","level":"INFO","fields":{"message":"Applying migration","version":66,"name":"role_assignment_inherit"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.675849Z","level":"INFO","fields":{"message":"Migration applied successfully","version":66},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.675869Z","level":"INFO","fields":{"message":"Applying migration","version":67,"name":"server_certificates"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.677390Z","level":"INFO","fields":{"message":"Migration applied successfully","version":67},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.677413Z","level":"INFO","fields":{"message":"Applying migration","version":68,"name":"refresh_token_authentication_evidence"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.678868Z","level":"INFO","fields":{"message":"Migration applied successfully","version":68},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.678887Z","level":"INFO","fields":{"message":"Applying migration","version":69,"name":"oauth2_client_registration_access_token"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.680317Z","level":"INFO","fields":{"message":"Migration applied successfully","version":69},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.680343Z","level":"INFO","fields":{"message":"Applying migration","version":70,"name":"directory_config"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.687132Z","level":"INFO","fields":{"message":"Migration applied successfully","version":70},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.687161Z","level":"INFO","fields":{"message":"Applying migration","version":71,"name":"user_directory_external_id"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.692102Z","level":"INFO","fields":{"message":"Migration applied successfully","version":71},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.692131Z","level":"INFO","fields":{"message":"Applying migration","version":72,"name":"saml_identity_provider"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.707720Z","level":"INFO","fields":{"message":"Migration applied successfully","version":72},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.707748Z","level":"INFO","fields":{"message":"Applying migration","version":73,"name":"saml_pending_authn_request"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.720141Z","level":"INFO","fields":{"message":"Migration applied successfully","version":73},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.720178Z","level":"INFO","fields":{"message":"Applying migration","version":74,"name":"directory_group_mapping"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.722053Z","level":"INFO","fields":{"message":"Migration applied successfully","version":74},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.722072Z","level":"INFO","fields":{"message":"Applying migration","version":75,"name":"directory_sync_state"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.728078Z","level":"INFO","fields":{"message":"Migration applied successfully","version":75},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.728100Z","level":"INFO","fields":{"message":"Applying migration","version":76,"name":"saml_single_logout"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.757612Z","level":"INFO","fields":{"message":"Migration applied successfully","version":76},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.757640Z","level":"INFO","fields":{"message":"Applying migration","version":77,"name":"ssf_transmitter"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.778060Z","level":"INFO","fields":{"message":"Migration applied successfully","version":77},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.778092Z","level":"INFO","fields":{"message":"Applying migration","version":78,"name":"ssf_step_up"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.785639Z","level":"INFO","fields":{"message":"Migration applied successfully","version":78},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.785668Z","level":"INFO","fields":{"message":"Applying migration","version":79,"name":"scim_target"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.811490Z","level":"INFO","fields":{"message":"Migration applied successfully","version":79},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.811520Z","level":"INFO","fields":{"message":"Applying migration","version":80,"name":"ciba_backchannel_authentication"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.825650Z","level":"INFO","fields":{"message":"Migration applied successfully","version":80},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.825677Z","level":"INFO","fields":{"message":"Applying migration","version":81,"name":"ciba_signed_authentication_requests"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.827302Z","level":"INFO","fields":{"message":"Migration applied successfully","version":81},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.827319Z","level":"INFO","fields":{"message":"Applying migration","version":82,"name":"ciba_approval_email_template"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.828724Z","level":"INFO","fields":{"message":"Migration applied successfully","version":82},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.828752Z","level":"INFO","fields":{"message":"Applying migration","version":83,"name":"minimal_profile_lease"},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.830609Z","level":"INFO","fields":{"message":"Migration applied successfully","version":83},"target":"axiam_db::schema"}
+{"timestamp":"2026-10-05T21:32:06.835886Z","level":"INFO","fields":{"message":"Database connected and migrations applied"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.839228Z","level":"INFO","fields":{"message":"AXIAM first-run bootstrap setup token minted. Use this token ONCE to complete first-admin bootstrap (POST /api/v1/admin/bootstrap, `setup_token` field) if AXIAM_BOOTSTRAP_ADMIN_EMAIL is not set. This token will not be shown again.","setup_token":"EAROVT3tfpFSvu0VUvETdWYpUJcksmFKei9SBWFpuZE"},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.840429Z","level":"INFO","fields":{"message":"federation secrets backfill complete","migrated":0},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.841552Z","level":"INFO","fields":{"message":"email config secrets backfill complete","migrated":0},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.843305Z","level":"INFO","fields":{"message":"Seeded permissions for 0 tenants","tenants":0},"target":"axiam_server"}
+{"timestamp":"2026-10-05T21:32:06.843419Z","level":"INFO","fields":{"message":"Connecting to RabbitMQ","tls":true},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.021989Z","level":"INFO","fields":{"message":"Successfully connected to RabbitMQ"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.025981Z","level":"INFO","fields":{"message":"Declared queue","queue":"axiam.authz.response"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.028507Z","level":"INFO","fields":{"message":"Declared queue","queue":"axiam.notifications"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.030813Z","level":"INFO","fields":{"message":"Declared queue","queue":"axiam.audit.events.dlq"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.033052Z","level":"INFO","fields":{"message":"Declared queue","queue":"axiam.authz.request.dlq"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.035584Z","level":"INFO","fields":{"message":"Declared queue","queue":"axiam.mail.outbound.dlq"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.037773Z","level":"INFO","fields":{"message":"Declared queue (with dead-letter routing)","queue":"axiam.audit.events"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.040089Z","level":"INFO","fields":{"message":"Declared queue (with dead-letter routing)","queue":"axiam.authz.request"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.042339Z","level":"INFO","fields":{"message":"Declared queue (with dead-letter routing)","queue":"axiam.mail.outbound"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.044568Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"webhook","queue":"axiam.webhook.dlq","dead_letter_routing_key":"-"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.046975Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"webhook","queue":"axiam.webhook","dead_letter_routing_key":"axiam.webhook.dlq"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.049282Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"webhook","queue":"axiam.webhook.retry","dead_letter_routing_key":"axiam.webhook"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.051965Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"ssf_push","queue":"axiam.ssf_push.dlq","dead_letter_routing_key":"-"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.053972Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"ssf_push","queue":"axiam.ssf_push","dead_letter_routing_key":"axiam.ssf_push.dlq"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.055764Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"ssf_push","queue":"axiam.ssf_push.retry","dead_letter_routing_key":"axiam.ssf_push"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.057854Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"scim_push","queue":"axiam.scim_push.dlq","dead_letter_routing_key":"-"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.060258Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"scim_push","queue":"axiam.scim_push","dead_letter_routing_key":"axiam.scim_push.dlq"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.062350Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"scim_push","queue":"axiam.scim_push.retry","dead_letter_routing_key":"axiam.scim_push"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.064579Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"ciba_ping","queue":"axiam.ciba_ping.dlq","dead_letter_routing_key":"-"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.066534Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"ciba_ping","queue":"axiam.ciba_ping","dead_letter_routing_key":"axiam.ciba_ping.dlq"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.068420Z","level":"INFO","fields":{"message":"Declared outbound queue","kind":"ciba_ping","queue":"axiam.ciba_ping.retry","dead_letter_routing_key":"axiam.ciba_ping"},"target":"axiam_amqp::connection"}
+{"timestamp":"2026-10-05T21:32:07.068447Z","level":"INFO","fields":{"message":"RabbitMQ connected and queues declared"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070153Z","level":"INFO","fields":{"message":"session revocation feed is OFF (AXIAM__AUTH__REVOCATION_FEED_ENABLED) — GET /oauth2/revocations is not served and no revocation row is written; a revoked session's access token stays verifiable locally until it expires"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070192Z","level":"INFO","fields":{"message":"session-validation cache disabled (every authenticated request re-reads its session row); enable with AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070267Z","level":"INFO","fields":{"message":"crypto hash gate configured (B1)","permits":4,"acquire_timeout_secs":5},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070291Z","level":"INFO","fields":{"message":"AMQP signing key resolved (SEC-022/SECHRD-08)"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070318Z","level":"INFO","fields":{"message":"X1 reactors: the dispatch gate is wired into all five interceptor events over the lapin AMQP transport. A tenant with NO registered reactor is unaffected and never touches the broker. While the broker is unreachable a REGISTERED reactor's failure_policy applies to every dispatch — a fail_closed registration (the default for login.post_auth, user.pre_create, user.pre_update and grant.pre_assign) will DENY those operations, and every one of those denials is audited as 'reactor.dispatch_failed'."},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070331Z","level":"INFO","fields":{"message":"directory address guard: no private network admitted (AXIAM__DIRECTORY__ALLOWED_PRIVATE_NETWORKS unset) — a tenant's directory must resolve to a globally routable address"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070346Z","level":"INFO","fields":{"message":"directory frame guard: LDAP messages from a directory above this size end the connection","max_message_bytes":2097152},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070390Z","level":"INFO","fields":{"message":"SSRF guard: no host exceptions configured (AXIAM__PKI__SSRF_ALLOWED_HOSTS unset) — every outbound fetch to an admin-supplied URL must resolve to a globally routable address"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070406Z","level":"INFO","fields":{"message":"FIDO MDS3 ingestion config resolved (D10)","mds_enabled":false,"mds_refresh_interval_secs":604800,"mds_blob_source":"network"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.070422Z","level":"INFO","fields":{"message":"CA signing key custody resolved","custody":"database","vault_inherited":true},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.072939Z","level":"INFO","fields":{"message":"Rate-limit posture active","profile":"internet","preset_applied":false,"key_mode":"ip","login_per_min":10,"register_per_min":5,"password_reset_per_min":3,"mfa_per_min":5,"token_per_min":120,"introspect_per_min":600,"revoke_per_min":60,"authz_check_per_min":1800,"grpc_authz_per_sec":100,"operator_overrides":"none"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.072979Z","level":"INFO","fields":{"message":"Rate-limit client-IP derivation: X-Forwarded-For is trusted for 0 appended hop(s), i.e. this server expects 1 proxy/proxies in front of it. Both listeners read the same value. If that count is wrong the header is discarded and every client keys on the peer — watch axiam_rate_limit_xff_discarded_total.","trusted_hops":0,"rule":"trusted_hops = proxies - 1","implies_proxies":1,"metric":"axiam_rate_limit_xff_discarded_total"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.074384Z","level":"INFO","fields":{"message":"Starting REST API server","bind":"127.0.0.1:8090"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.076315Z","level":"INFO","fields":{"message":"Starting authorization AMQP consumer"},"target":"axiam_amqp::authz_consumer"}
+{"timestamp":"2026-10-05T21:32:07.077217Z","level":"INFO","fields":{"message":"X1 reactor transport connected","reply_queue":"amq.gen-eQJ93T53HATf8j55itZ0_A"},"target":"axiam::reactor"}
+{"timestamp":"2026-10-05T21:32:07.079051Z","level":"INFO","fields":{"message":"Starting audit event AMQP consumer"},"target":"axiam_amqp::audit_consumer"}
+{"timestamp":"2026-10-05T21:32:07.081700Z","level":"INFO","fields":{"message":"Webhook consumer spawned"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.082726Z","level":"INFO","fields":{"message":"Starting outbound AMQP consumer","kind":"webhook","queue":"axiam.webhook"},"target":"axiam_amqp::outbound::consumer"}
+{"timestamp":"2026-10-05T21:32:07.083109Z","level":"INFO","fields":{"message":"SSF push consumer spawned"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.084627Z","level":"INFO","fields":{"message":"Starting outbound AMQP consumer","kind":"ssf_push","queue":"axiam.ssf_push"},"target":"axiam_amqp::outbound::consumer"}
+{"timestamp":"2026-10-05T21:32:07.085105Z","level":"INFO","fields":{"message":"SCIM push consumer spawned"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.085142Z","level":"INFO","fields":{"message":"CIBA ping consumer spawned"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.086451Z","level":"INFO","fields":{"message":"Starting outbound AMQP consumer","kind":"scim_push","queue":"axiam.scim_push"},"target":"axiam_amqp::outbound::consumer"}
+{"timestamp":"2026-10-05T21:32:07.086509Z","level":"INFO","fields":{"message":"Mail consumer spawned"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.086518Z","level":"INFO","fields":{"message":"FIDO MDS3 background refresh job NOT spawned (disabled, or refresh interval is 0) — zero outbound MDS calls","mds_enabled":false,"refresh_interval_secs":604800},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.086545Z","level":"INFO","fields":{"message":"audit retention active — entries older than this are pruned by the cleanup sweep","retention_days":730},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.086571Z","level":"INFO","fields":{"message":"Starting mail AMQP consumer"},"target":"axiam_amqp::mail_consumer"}
+{"timestamp":"2026-10-05T21:32:07.086596Z","level":"INFO","fields":{"message":"Starting gRPC server","bind":"127.0.0.1:50051","grpc_authz_per_sec":100,"grpc_identity_per_sec":500,"grpc_admin_per_sec":10},"target":"axiam_api_grpc::server"}
+{"timestamp":"2026-10-05T21:32:07.086626Z","level":"INFO","fields":{"message":"shared rate-limit counter ACTIVE (write-behind); one datastore write per bucket per sync interval instead of one per request","sync_interval_ms":1000,"shards":16},"target":"axiam_db::rate_limit_counter"}
+{"timestamp":"2026-10-05T21:32:07.086738Z","level":"INFO","fields":{"message":"Starting outbound AMQP consumer","kind":"ciba_ping","queue":"axiam.ciba_ping"},"target":"axiam_amqp::outbound::consumer"}
+{"timestamp":"2026-10-05T21:32:07.087521Z","level":"WARN","fields":{"message":"gRPC TLS is DISABLED — set AXIAM__GRPC_TLS_CERT_PATH + AXIAM__GRPC_TLS_KEY_PATH to enable (acceptable for in-mesh deployments)"},"target":"axiam_api_grpc::server"}
+{"timestamp":"2026-10-05T21:32:07.088163Z","level":"INFO","fields":{"message":"shared rate-limit counter ACTIVE (write-behind); one datastore write per bucket per sync interval instead of one per request","sync_interval_ms":1000,"shards":16},"target":"axiam_db::rate_limit_counter"}
+{"timestamp":"2026-10-05T21:32:07.088227Z","level":"INFO","fields":{"message":"X4: external-IdP token exchange is available (per-provider trust still decides whether any issuer is accepted)"},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:32:07.088459Z","level":"INFO","fields":{"message":"TCP_NODELAY configured on the REST listener (I5)","tcp_nodelay":true},"target":"axiam_server::boot"}
+{"timestamp":"2026-10-05T21:35:09.982661Z","level":"INFO","fields":{"message":"cleanup task received shutdown signal"},"target":"axiam_server::cleanup"}

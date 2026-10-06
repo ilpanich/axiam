@@ -78,6 +78,8 @@ category, and the presets leave both alone in every profile:
 | `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` | 30 | The seven writes of the SAML identity provider's registry API (contract §29.3 rule 10): create, update and delete a service provider, `parse-sp-metadata`, and issue, promote and retire the IdP signing credential. Issuing **generates an RSA-4096 key** (seconds of CPU), parsing metadata **makes an outbound request** per call, and the rest rewrite where a tenant's signed assertions go, so a stolen administrator token could otherwise burn CPU, hammer an external host or rewrite the registry in a loop. Thirty a minute is far more than a person administering a registry produces. One bucket per route; reads are not limited. Per-IP; never moved by a profile. |
 | `AXIAM__RATE_LIMIT__SSF_PER_MIN` | 60 | Each route of the Shared Signals Framework receiver surface (contract §32): the stream management API (`/ssf/v1/stream`, `/ssf/v1/status`, `/ssf/v1/verify`, `/ssf/v1/poll/{stream_id}`) and both `/.well-known/ssf-configuration` forms — the inbound SSF surface plan §7 rule 6 requires a limiter on. A receiver reconfigures a stream at deploy time and asks for a verification event rarely (each stream also enforces its own 60-second `min_verification_interval`), so sixty a minute is generous for honest use and small for a loop. One bucket per route; per-IP, checked before the receiver's token; never moved by a profile. |
 | `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` | 30 | The three writes of the SSF stream registry's management API (contract §32): create, update and delete a stream under `/api/v1/tenants/{tenant_id}/ssf/streams`. Each write can repoint where a tenant's security events are pushed and the credential sent there. One bucket per route; reads are not limited. Per-IP; never moved by a profile. |
+| `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` | 30 | The four writes of the outbound SCIM target registry's management API (contract §31): create, update, delete and *reconcile now* on `/api/v1/scim-targets`. Each write can repoint where a tenant's user directory is pushed and the credential sent there; *reconcile now* queues a reference for every user in scope and reads the downstream. One bucket per route; reads are not limited. Per-IP; never moved by a profile. |
+| `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` | 30 | The three routes of the CIBA approval API — the signed-in user's half of a backchannel authentication request: `GET /api/v1/ciba/requests/{id}`, `POST …/approve` and `POST …/deny`. Human-driven (a person opens a handful of requests a minute at most), behind a session and a CSRF token, and keyed per route so a flood of reads cannot starve decisions. A request id is a handle, not a secret (D-68); every id that is not the caller's own answers `404`, so the bound is on an account probing ids. Per-IP; never moved by a profile. |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | The brute-force bound on user codes. `RateLimitConfig::validate` **asserts** the OWASP condition (`charset^len / (rate × lifetime) > 10⁶`) against the shipped 10-minute grant lifetime, so raising this past the point where an 8-character typed code becomes guessable fails at startup rather than in an incident review. |
 
 The posture did not change: still strict, still per-IP, still opt-in to
@@ -140,6 +142,7 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__REVOKE_PER_MIN` | 60 | 600 | 6000 |
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | 1800 | 6000 | 60000 |
 | `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` | 60 | 300 | 3000 |
+| `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` | 60 | 600 | 6000 |
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | 12 | 12 | 12 |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | 10 | 10 | 10 |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | 5 | 5 | 5 |
@@ -147,6 +150,8 @@ yourself, the profile leaves it alone (and the startup log names it in
 | `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` | 30 | 30 | 30 |
 | `AXIAM__RATE_LIMIT__SSF_PER_MIN` | 60 | 60 | 60 |
 | `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` | 30 | 30 | 30 |
+| `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` | 30 | 30 | 30 |
+| `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` | 30 | 30 | 30 |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | 600 | 600 | 600 |
 | `AXIAM__GRPC__GRPC_AUTHZ_PER_SEC` | 100 | 1000 | 5000 |
 | `AXIAM__GRPC__GRPC_IDENTITY_PER_SEC` | 500 | 5000 | 25000 |
@@ -156,7 +161,20 @@ yourself, the profile leaves it alone (and the startup log names it in
 Per-minute values are **per bucket**, and the bucket is whatever
 `AXIAM__RATE_LIMIT__KEY` selects — per IP under `internet`, per OAuth2
 `client_id` under both presets (on `/oauth2/token`, `/oauth2/revoke`,
-`/oauth2/introspect` only; everything else is always per-IP).
+`/oauth2/introspect` and `/oauth2/bc-authorize` only; everything else is always
+per-IP).
+
+`BC_AUTHORIZE_PER_MIN` (G-7, CIBA) is the backchannel authentication endpoint's
+own bucket — never the token endpoint's, because every accepted request stores
+a pending request and may push a sign-in prompt at a person. It is counted on
+the route (per key, as above) and again per authenticated client inside the
+handler, and a profile preset scales it like the other machine endpoints. Two
+things no preset moves sit beside it: each user is sent at most **three** CIBA
+notifications a minute whatever the clients asking (the request is still
+stored and answered, so the response reveals nothing about the user), and each
+`auth_req_id` carries its own polling interval at the token endpoint, raised by
+`slow_down`. The CIBA grant's token requests are counted by `TOKEN_PER_MIN`
+like every other grant.
 
 The three `AXIAM__GRPC__*_PER_SEC` values are per **second** per IP, one
 bucket per gRPC **method family** (see §3.1). Leave `GRPC_IDENTITY_PER_SEC`

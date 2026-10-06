@@ -1,0 +1,4 @@
+mode: minimal   samples: 20
+axiam-server  RSS median    120.7 MiB  min    120.6  max    120.8  (anonymous     89.0)
+surrealdb     RSS median     86.6 MiB  min     86.4  max     87.3  (anonymous     24.6)   | cgroup working set median     26.6 MiB
+TOTAL         RSS median    207.3 MiB  min    207.0  max    208.1  (anonymous    113.5)

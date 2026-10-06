@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta17",
-    "x-axiam-spec-digest": "sha256:672f10090fc04f2ef68f9bfc46df29f9447703dfced39eaaa2b58359fb7e1ea6"
+    "x-axiam-spec-digest": "sha256:0647f9c8897988e2ffcc850bde1fba0e2e50ccbc222f5b5a388e6beb2df8b36c"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2573,6 +2573,174 @@
         ]
       }
     },
+    "/api/v1/ciba/requests/{request_id}": {
+      "get": {
+        "tags": [
+          "ciba"
+        ],
+        "summary": "Read a pending CIBA sign-in request addressed to the signed-in user.",
+        "operationId": "ciba_approval_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "description": "The request's record id, from the notification link",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pending request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaApprovalPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The token is not a console sign-in's: no session row behind it, or AXIAM minted it for an OAuth2 client"
+          },
+          "404": {
+            "description": "Unknown, another user's, expired or already decided — one answer"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ciba/requests/{request_id}/approve": {
+      "post": {
+        "tags": [
+          "ciba"
+        ],
+        "summary": "Approve a pending CIBA sign-in request, conditional on the version read.",
+        "operationId": "ciba_approval_approve",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "description": "The request's record id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CibaDecisionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaDecisionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The request asked for an authentication class this session has not achieved (`step_up_required`, body below); or the token is not a console sign-in's (`authorization_denied`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaStepUpRequired"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown, another user's, expired, already decided, or changed since read"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ciba/requests/{request_id}/deny": {
+      "post": {
+        "tags": [
+          "ciba"
+        ],
+        "summary": "Refuse a pending CIBA sign-in request, conditional on the version read.",
+        "operationId": "ciba_approval_deny",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "description": "The request's record id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CibaDecisionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaDecisionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The token is not a console sign-in's: no session row behind it, or AXIAM minted it for an OAuth2 client"
+          },
+          "404": {
+            "description": "Unknown, another user's, expired, already decided, or changed since read"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/device/decide": {
       "post": {
         "tags": [
@@ -4484,6 +4652,35 @@
                           "authn_request_params": {
                             "$ref": "#/components/schemas/AuthnRequestParamsMode",
                             "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
+                          },
+                          "backchannel_authentication_request_signing_alg": {
+                            "oneOf": [
+                              {
+                                "$ref": "#/components/schemas/CibaRequestSigningAlg",
+                                "description": "G-7 / D-61 — the algorithm this client signs its authentication\nrequests with; absent for a client sending plain requests."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "backchannel_client_notification_endpoint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "G-7 — the ping-mode notification endpoint."
+                          },
+                          "backchannel_token_delivery_mode": {
+                            "oneOf": [
+                              {
+                                "$ref": "#/components/schemas/CibaDeliveryMode",
+                                "description": "G-7 — the CIBA delivery mode; absent for a client without the grant."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           },
                           "browser_sso": {
                             "type": "boolean",
@@ -7425,6 +7622,12 @@
           },
           "400": {
             "description": "Unknown event, non-interceptable event, or out-of-range timeout"
+          },
+          "409": {
+            "description": "The registration would be enabled in the minimal profile (AXIAM__AMQP__ENABLED=false), which has no reactor transport; register it with enabled: false"
+          },
+          "503": {
+            "description": "This build composes no reactor transport, so an enabled registration is refused"
           }
         },
         "security": [
@@ -7542,6 +7745,12 @@
           },
           "400": {
             "description": "The merged registration is invalid"
+          },
+          "409": {
+            "description": "The merged registration would be enabled in the minimal profile (AXIAM__AMQP__ENABLED=false), which has no reactor transport"
+          },
+          "503": {
+            "description": "This build composes no reactor transport, so an enabled registration is refused"
           }
         },
         "security": [
@@ -9091,6 +9300,409 @@
           },
           {
             "service_account": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scim-targets": {
+      "get": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`GET /api/v1/scim-targets`",
+        "operationId": "list_targets",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Free-text filter applied before paging.\n\nMatched case-insensitively against the identifying fields of whatever is\nbeing listed — a name or username, plus the record id, so an operator\nwho has a UUID from a log line can paste it into the same box.\nWhich fields exactly is each repository's business; the shape is shared\nso every list endpoint spells it the same way.\n\n**Applied before `offset`/`limit`, and `total` counts matches, not\nrows.** Any other order gives a pager whose page count belongs to a\ndifferent result set than the page it is showing.\n\n`None` means no filter. Blank and whitespace-only values deserialize to\n`None` — see [`normalize_search`].",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the tenant's outbound SCIM targets, oldest first, each with its delivery state; `search` matches name, base URL and id, before paging",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A paginated result set.",
+                  "required": [
+                    "items",
+                    "total",
+                    "offset",
+                    "limit"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "A registered SCIM target, as the management API returns it. **The\ncredential is never returned**, and there is no member that says anything\nabout it.",
+                        "required": [
+                          "id",
+                          "tenant_id",
+                          "name",
+                          "base_url",
+                          "enabled",
+                          "auth",
+                          "scope",
+                          "push_groups",
+                          "user_name_from",
+                          "deprovision",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "properties": {
+                          "auth": {
+                            "$ref": "#/components/schemas/ScimTargetAuth",
+                            "description": "How AXIAM authenticates to it (no credential)."
+                          },
+                          "base_url": {
+                            "type": "string",
+                            "description": "The downstream's SCIM service root."
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When the target was registered."
+                          },
+                          "deprovision": {
+                            "$ref": "#/components/schemas/DeprovisionPolicy",
+                            "description": "What happens downstream to a user who leaves scope or is no longer\nactive (erasure always deletes)."
+                          },
+                          "enabled": {
+                            "type": "boolean",
+                            "description": "Whether AXIAM pushes to it."
+                          },
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The target id."
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "The name."
+                          },
+                          "push_groups": {
+                            "type": "boolean",
+                            "description": "Whether groups are pushed too."
+                          },
+                          "scope": {
+                            "$ref": "#/components/schemas/ScimTargetScope",
+                            "description": "Which users it provisions."
+                          },
+                          "state": {
+                            "oneOf": [
+                              {
+                                "$ref": "#/components/schemas/ScimTargetDeliveryState",
+                                "description": "Delivery state: last success and failure, consecutive failures,\ndead-lettered total, last reconciliation."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "tenant_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "description": "The owning tenant."
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When it was last written: the version an update is conditional on."
+                          },
+                          "user_name_from": {
+                            "$ref": "#/components/schemas/UserNameSource",
+                            "description": "Which attribute becomes `userName`."
+                          }
+                        }
+                      }
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`POST /api/v1/scim-targets`",
+        "operationId": "create_target",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScimTargetInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The target was registered. When it is enabled, a reconciliation is started: the initial synchronisation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimTargetResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value rule — the message names the rule or the field"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "The credential cannot be sealed: pki_encryption_key is not configured"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scim-targets/{id}": {
+      "get": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`GET /api/v1/scim-targets/{id}`",
+        "operationId": "get_target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Target ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The target and its delivery state (last success and failure, a fixed-vocabulary failure reason, consecutive failures, dead-lettered total, last reconciliation). The credential is never returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimTargetResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such target in this tenant"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`PUT /api/v1/scim-targets/{id}`",
+        "description": "A **replacement**: an omitted optional member takes its default, except the\ncredential, which absent keeps.",
+        "operationId": "update_target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Target ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScimTargetInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The target's new configuration. Enabling a disabled target starts a reconciliation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimTargetResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value rule, or a move of the credential to another URL (`base_url` of a bearer target, `auth.token_url` or `base_url` of a client-credentials one) or a switch of `auth.type` without the credential — the message names the field"
+          },
+          "404": {
+            "description": "No such target in this tenant"
+          },
+          "409": {
+            "description": "The target changed since it was read (reload it and retry)"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "A credential was given and the deployment cannot seal it"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`DELETE /api/v1/scim-targets/{id}`",
+        "description": "The target, its link rows and its delivery state. **Nothing is\ndeprovisioned downstream**: the users and groups AXIAM created there stay.",
+        "operationId": "delete_target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Target ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The target, its link rows and its delivery state were deleted. Nothing is deprovisioned downstream: the users and groups AXIAM created in the service provider remain there, and AXIAM no longer knows them"
+          },
+          "404": {
+            "description": "No such target in this tenant"
+          },
+          "429": {
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scim-targets/{id}/reconcile": {
+      "post": {
+        "tags": [
+          "scim-targets"
+        ],
+        "summary": "`POST /api/v1/scim-targets/{id}/reconcile`",
+        "description": "Start a reconciliation now.",
+        "operationId": "reconcile_target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Target ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The reconciliation was claimed and runs in the background: it queues a reference for every user and group in scope and for every linked resource, reads the downstream and repairs drift. Its outcome is on the target's delivery state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimReconcileAccepted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such target in this tenant"
+          },
+          "409": {
+            "description": "A reconciliation holds the claim (or ran within the last five minutes), or the target is disabled"
+          },
+          "429": {
+            "description": "Rate limit"
+          },
+          "503": {
+            "description": "Delivery is not wired in this deployment"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
           }
         ]
       }
@@ -12647,6 +13259,7 @@
           "health"
         ],
         "summary": "`GET /health` — liveness probe. Always returns 200.",
+        "description": "Also states the deployment profile (`full` | `minimal`) and, in `minimal`,\nwhat that profile does not provide. The state is optional so the route\nstays a liveness probe that answers even when mounted without it (`full`).",
         "operationId": "health",
         "responses": {
           "200": {
@@ -13070,6 +13683,78 @@
           },
           "400": {
             "description": "No tenant could be determined"
+          }
+        }
+      }
+    },
+    "/oauth2/bc-authorize": {
+      "post": {
+        "tags": [
+          "oauth2"
+        ],
+        "summary": "`POST /oauth2/bc-authorize` — CIBA Core §7.",
+        "operationId": "bc_authorize",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/BackchannelAuthenticationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Request stored; poll or await the ping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackchannelAuthenticationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "CIBA Core section 13 error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Client authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -14951,6 +15636,151 @@
           "honour"
         ]
       },
+      "BackchannelAuthenticationRequest": {
+        "type": "object",
+        "description": "`POST /oauth2/bc-authorize` (CIBA Core §7.1), form-encoded.",
+        "properties": {
+          "acr_values": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Requested authentication context classes, space-delimited."
+          },
+          "binding_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Shown to the user on both devices."
+          },
+          "client_assertion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`private_key_jwt` credential."
+          },
+          "client_assertion_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Must be `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`."
+          },
+          "client_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client, unless it authenticates with HTTP Basic or an assertion\nthat names it."
+          },
+          "client_notification_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Bearer token for the ping notification. Required in ping mode."
+          },
+          "client_secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`client_secret_post` credential."
+          },
+          "id_token_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An ID token AXIAM issued to this client."
+          },
+          "login_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A username or e-mail address in the tenant."
+          },
+          "login_hint_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Not supported; refused."
+          },
+          "request": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A signed authentication request (CIBA Core §7.1.1): a JWT whose claims\nare this request's parameters, signed with the client's registered\n`backchannel_authentication_request_signing_alg`. Required from a\nclient that registered one, refused from a client that did not; sent\nalone, with no authentication-request parameter beside it."
+          },
+          "request_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Not part of CIBA; refused."
+          },
+          "requested_expiry": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Requested lifetime in seconds."
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 8707 target service."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Space-delimited; must include `openid`."
+          },
+          "user_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Not supported; refused."
+          }
+        }
+      },
+      "BackchannelAuthenticationResponse": {
+        "type": "object",
+        "description": "`POST /oauth2/bc-authorize` success body (CIBA Core §7.3).",
+        "required": [
+          "auth_req_id",
+          "expires_in",
+          "interval"
+        ],
+        "properties": {
+          "auth_req_id": {
+            "type": "string",
+            "description": "The identifier the client redeems at the token endpoint. Returned once."
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the request expires.",
+            "minimum": 0
+          },
+          "interval": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minimum seconds between token requests.",
+            "minimum": 0
+          }
+        }
+      },
       "BatchCheckAccessBody": {
         "type": "object",
         "description": "Body for a batch authorization check.",
@@ -15446,6 +16276,159 @@
           "reason_code": {
             "type": "string",
             "description": "B1: machine-readable decision reason — `allowed`, `no_grant`, or\n`denied_by_rule` (SDK contract §11).\n\nBoth refusals still return `allowed: false` and still map to 403, so a\nclient that reads only `allowed` is unaffected. The distinction matters\nto the person on the other end: `no_grant` means \"ask an admin for\naccess\", `denied_by_rule` means \"an admin has already decided\" — and a\nUI that cannot tell them apart sends users to raise tickets that will\nbe refused.\n\nT-15-02 still holds: this is a fixed, closed vocabulary of three\nvalues. It says which *kind* of decision was made, never which rule\nmade it or where in the resource tree it sits."
+          }
+        }
+      },
+      "CibaApprovalPage": {
+        "type": "object",
+        "description": "What the approval page shows. Never the `auth_req_id`, a token, or the\nclient's notification endpoint.",
+        "required": [
+          "request_id",
+          "version",
+          "client_id",
+          "client_name",
+          "scopes",
+          "requested_acr",
+          "expires_at"
+        ],
+        "properties": {
+          "binding_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client's `binding_message`, to compare with what the client's own\ndevice shows. Render it as **text**."
+          },
+          "client_id": {
+            "type": "string",
+            "description": "The client that asked, by `client_id`."
+          },
+          "client_name": {
+            "type": "string",
+            "description": "The client's display name (its `client_id` if the client was deleted)."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the request expires."
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The request's record id (the one in the URL)."
+          },
+          "requested_acr": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The authentication classes the request asked for that AXIAM implements\n(`urn:axiam:acr:1fa`, `urn:axiam:acr:mfa`). Empty when it asked for none."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The scopes requested, `openid` included."
+          },
+          "step_up_required": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when this session has not achieved a requested class: the class to\nstep up to before approving. `None` when approval can go ahead."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Send this back with the decision: approval and refusal are conditional on\nit (D-68), so a request changed since the page read it is not decided.",
+            "minimum": 0
+          }
+        }
+      },
+      "CibaDecisionBody": {
+        "type": "object",
+        "description": "The decision's body: the version the page read.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "[`CibaApprovalPage::version`].",
+            "minimum": 0
+          }
+        }
+      },
+      "CibaDecisionResponse": {
+        "type": "object",
+        "description": "A recorded decision.",
+        "required": [
+          "ok",
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "description": "`approved` or `denied`."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Always `true`: every other answer is an error status."
+          }
+        }
+      },
+      "CibaDeliveryMode": {
+        "type": "string",
+        "description": "How a CIBA client learns that a request has been decided (CIBA Core §5).\n\n`push` is deliberately absent: AXIAM does not offer it, and the FAPI-CIBA\nprofile forbids it — push delivers the tokens themselves to a client\nendpoint, which makes the notification endpoint a token sink.",
+        "enum": [
+          "poll",
+          "ping"
+        ]
+      },
+      "CibaPingNotification": {
+        "type": "object",
+        "description": "The ping-mode notification body (CIBA Core §10.2) — the contract T23.7.2's\ndeliverer sends, as `POST` to the client's\n`backchannel_client_notification_endpoint` with\n`Authorization: Bearer <client_notification_token>` and\n`Content-Type: application/json`.\n\nNothing else is in it: the notification says *that* a request was decided,\nnever how; the client learns the outcome from the token endpoint, where it\nauthenticates.",
+        "required": [
+          "auth_req_id"
+        ],
+        "properties": {
+          "auth_req_id": {
+            "type": "string",
+            "description": "The `auth_req_id` the client was given at `bc-authorize`."
+          }
+        }
+      },
+      "CibaRequestSigningAlg": {
+        "type": "string",
+        "description": "The JWS algorithm a CIBA client signs its authentication requests with\n(CIBA Core §4 `backchannel_authentication_request_signing_alg`, §7.1.1).\n\nExactly the three algorithms AXIAM verifies on any client-signed JWT\n(`axiam_oauth2::jose::PERMITTED_ALGORITHMS`): FAPI 2.0 §5.3.1.1's list. A\nregistration naming anything else — `RS256`, `HS256`, `none` — is refused\nrather than stored, so no row can hold an algorithm the verifier would not\nhonour (D-61).",
+        "enum": [
+          "PS256",
+          "ES256",
+          "EdDSA"
+        ]
+      },
+      "CibaStepUpRequired": {
+        "type": "object",
+        "description": "The `403` that asks the page to step up.",
+        "required": [
+          "error",
+          "message",
+          "required_acr"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "`step_up_required`."
+          },
+          "message": {
+            "type": "string",
+            "description": "A sentence for a person."
+          },
+          "required_acr": {
+            "type": "string",
+            "description": "The class the sign-in has to achieve."
           }
         }
       },
@@ -16147,12 +17130,40 @@
             "$ref": "#/components/schemas/AuthnRequestParamsMode",
             "description": "X7.1 — whether this client's authorization requests may carry the\nOpenID Connect authentication-request parameters (`prompt`, `max_age`,\n`acr_values`, `claims`, `id_token_hint`, `login_hint`, `display`,\n`ui_locales`, `claims_locales`).\n\n`\"ignore\"` (the default) is what every AXIAM client has always done:\nthey are dropped and reach no decision. `\"honour\"` opts in, and is\n**refused on a `fapi2` client** at both this gate and the authorization\nendpoint — the two are different answers to the same question about\nwhat a request from this client means."
           },
+          "backchannel_authentication_request_signing_alg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — CIBA Core §4: `PS256`, `ES256` or `EdDSA`. When set, every\nbackchannel authentication request must be a signed `request` JWT under\nthis algorithm, verified against `jwks` or `jwks_uri` (exactly one is\nrequired; an inline `jwks` must hold a key of the algorithm). Required\nfor a `fapi2` client holding the CIBA grant."
+          },
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — CIBA Core §4: where a ping-mode client is notified. Required in\nping mode and refused in poll mode; an absolute `https` URL held to the\nwebhook address policy (no credentials, no fragment, no private,\nloopback or internal host)."
+          },
           "backchannel_logout_uri": {
             "type": [
               "string",
               "null"
             ],
             "description": "B5 — where OIDC back-channel logout tokens are delivered. Omit for a\nclient that does not participate."
+          },
+          "backchannel_token_delivery_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — CIBA Core §4 `backchannel_token_delivery_mode`: `poll` or\n`ping`. Required when `grant_types` holds\n`urn:openid:params:grant-type:ciba`, refused otherwise; `push` is not\noffered. A CIBA client must be confidential; a `fapi2` one must also\nregister `backchannel_authentication_request_signing_alg`."
+          },
+          "backchannel_user_code_parameter": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "G-7 — CIBA Core §4. `true` is **refused**: this server holds no user\ncode to verify."
           },
           "browser_sso": {
             "type": "boolean",
@@ -16905,6 +17916,14 @@
             "description": "`false` for unknown, expired, or already-decided codes alike."
           }
         }
+      },
+      "DeprovisionPolicy": {
+        "type": "string",
+        "description": "What happens downstream to a user who falls out of scope or is no longer\nactive. Erasure always deletes, whatever this says.",
+        "enum": [
+          "deactivate",
+          "delete"
+        ]
       },
       "DeviceAuthResponse": {
         "type": "object",
@@ -17855,12 +18874,29 @@
       },
       "HealthResponse": {
         "type": "object",
+        "description": "Response body for `GET /health`.\n\n`profile` and `unavailable` are additive (G-8, D-59): a client that reads\nonly `status` is unaffected.",
         "required": [
-          "status"
+          "status",
+          "profile"
         ],
         "properties": {
+          "profile": {
+            "type": "string",
+            "description": "The messaging profile this process runs: `full` (RabbitMQ is used) or\n`minimal` (`AXIAM__AMQP__ENABLED=false`, no broker).",
+            "example": "full"
+          },
           "status": {
             "type": "string"
+          },
+          "unavailable": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Present only in the `minimal` profile: the capabilities it does not\nprovide — `reactors`, `amqp_authz`, `amqp_audit_ingestion` and\n`decision_cache_broadcast`. Absent in `full`."
           }
         }
       },
@@ -18748,9 +19784,14 @@
           "revocation_endpoint",
           "introspection_endpoint",
           "device_authorization_endpoint",
-          "pushed_authorization_request_endpoint"
+          "pushed_authorization_request_endpoint",
+          "backchannel_authentication_endpoint"
         ],
         "properties": {
+          "backchannel_authentication_endpoint": {
+            "type": "string",
+            "description": "CIBA Core §7.1 — authenticates the client."
+          },
           "device_authorization_endpoint": {
             "type": "string",
             "description": "RFC 8628 §3.1 — authenticates the client."
@@ -18842,7 +19883,8 @@
           "user_deleted",
           "user_updated",
           "service_account_created",
-          "service_account_deleted"
+          "service_account_deleted",
+          "scim_delivery_failed"
         ]
       },
       "NotificationPolicy": {
@@ -19083,6 +20125,35 @@
           "authn_request_params": {
             "$ref": "#/components/schemas/AuthnRequestParamsMode",
             "description": "X7.1 — echoed so an operator can audit which clients act on the OIDC\nauthentication-request parameters, from this endpoint rather than from\nthe database."
+          },
+          "backchannel_authentication_request_signing_alg": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CibaRequestSigningAlg",
+                "description": "G-7 / D-61 — the algorithm this client signs its authentication\nrequests with; absent for a client sending plain requests."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — the ping-mode notification endpoint."
+          },
+          "backchannel_token_delivery_mode": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CibaDeliveryMode",
+                "description": "G-7 — the CIBA delivery mode; absent for a client without the grant."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "browser_sso": {
             "type": "boolean",
@@ -19395,6 +20466,10 @@
           "device_authorization_endpoint",
           "pushed_authorization_request_endpoint",
           "require_pushed_authorization_requests",
+          "backchannel_authentication_endpoint",
+          "backchannel_token_delivery_modes_supported",
+          "backchannel_user_code_parameter_supported",
+          "backchannel_authentication_request_signing_alg_values_supported",
           "end_session_endpoint",
           "backchannel_logout_supported",
           "backchannel_logout_session_supported",
@@ -19429,6 +20504,17 @@
             "type": "boolean",
             "description": "RFC 9207 §3 — X5.1. AXIAM emits `iss` on **every** authorization\nresponse, success and error alike, for every client, so this is\nunconditionally true. See `handlers::oauth2::append_issuer` for why it\nis not made conditional."
           },
+          "backchannel_authentication_endpoint": {
+            "type": "string",
+            "description": "CIBA Core §4 — G-7. Advertised unconditionally because the endpoint\nis always mounted; whether a client may use it is its registration."
+          },
+          "backchannel_authentication_request_signing_alg_values_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CIBA Core §4 — the algorithms a signed authentication request\n(§7.1.1) may use: `PS256`, `ES256`, `EdDSA`. Never `none`."
+          },
           "backchannel_logout_session_supported": {
             "type": "boolean",
             "description": "The claim that AXIAM puts `sid` in its logout tokens — which it does,\nunconditionally. An RP reads this to know it can match a logout token\nto one session rather than having to end every session for the subject."
@@ -19436,6 +20522,17 @@
           "backchannel_logout_supported": {
             "type": "boolean",
             "description": "Back-Channel Logout 1.0 §3."
+          },
+          "backchannel_token_delivery_modes_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CIBA Core §4 — `poll` and `ping`. `push` is not offered."
+          },
+          "backchannel_user_code_parameter_supported": {
+            "type": "boolean",
+            "description": "CIBA Core §4 — `false`: AXIAM accepts no `user_code`."
           },
           "claims_parameter_supported": {
             "type": "boolean",
@@ -21016,6 +22113,34 @@
         "type": "object",
         "description": "An RFC 7591 §2 client metadata document, as a registration request.\n\nOnly the members AXIAM can act on are fields. RFC 7591 §2 says a server\n\"MUST ignore any metadata parameters it does not understand\", which is what\n`serde` does with the rest — `client_uri`, `logo_uri`, `contacts`,\n`tos_uri`, `policy_uri` and the localised `client_name#xx` forms all arrive\nfrom MCP Inspector and are dropped. `software_statement` is the one\nunimplemented member that is **not** ignored: see\n[`DcrError::UnsupportedSoftwareStatement`].",
         "properties": {
+          "backchannel_authentication_request_signing_alg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4 — `PS256`, `ES256` or `EdDSA`, with `jwks` or `jwks_uri`\nholding a key of that algorithm. When registered, every backchannel\nauthentication request must be a signed `request` JWT (D-61)."
+          },
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4 `backchannel_client_notification_endpoint` — ping only,\nunder the webhook URL policy."
+          },
+          "backchannel_token_delivery_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4 `backchannel_token_delivery_mode` (G-7). Accepted only\nwith the CIBA grant, which only an initial-access-token registration\nmay name (D-62)."
+          },
+          "backchannel_user_code_parameter": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "CIBA Core §4 — `true` is refused: there is no user code to check."
+          },
           "client_name": {
             "type": [
               "string",
@@ -21098,6 +22223,27 @@
           "registration_client_uri"
         ],
         "properties": {
+          "backchannel_authentication_request_signing_alg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4, as stored. Present only for a client that signs its\nauthentication requests."
+          },
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4, as stored. Present only for a ping-mode client."
+          },
+          "backchannel_token_delivery_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CIBA Core §4, as stored (G-7). Present only for a CIBA client."
+          },
           "client_id": {
             "type": "string",
             "description": "The issued `client_id`."
@@ -22212,6 +23358,308 @@
             "description": "What to know before submitting it. Human text; do not parse it."
           }
         }
+      },
+      "ScimReconcileAccepted": {
+        "type": "object",
+        "description": "The body of a started reconciliation's `202`.",
+        "required": [
+          "target_id",
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Always `started`."
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The target being reconciled."
+          }
+        }
+      },
+      "ScimTargetAuth": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A static bearer token, sent as `Authorization: Bearer <token>` to\n`base_url`.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "bearer"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "OAuth2 client credentials: AXIAM obtains an access token from\n`token_url` with its client id and a stored client secret.",
+            "required": [
+              "token_url",
+              "client_id",
+              "type"
+            ],
+            "properties": {
+              "client_id": {
+                "type": "string",
+                "description": "The OAuth2 client id."
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The scope requested, if any."
+              },
+              "token_url": {
+                "type": "string",
+                "description": "The token endpoint the client secret is sent to."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "oauth2_client_credentials"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How AXIAM authenticates to the downstream service provider, without the\ncredential itself."
+      },
+      "ScimTargetDeliveryState": {
+        "type": "object",
+        "description": "A target's delivery state, as `GET` projects it. Fixed vocabulary only: the\nfailure reason is one of the deliverer's phrases, never a URL, a response\nbody or a value.",
+        "required": [
+          "consecutive_failures",
+          "dead_lettered_total"
+        ],
+        "properties": {
+          "consecutive_failures": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Failed attempts since the last success.",
+            "minimum": 0
+          },
+          "dead_lettered_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Deliveries dead-lettered over the target's lifetime.",
+            "minimum": 0
+          },
+          "last_failure_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When a delivery attempt last failed or was dead-lettered."
+          },
+          "last_failure_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, in the deliverer's fixed vocabulary."
+          },
+          "last_reconciled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When reconciliation last ran."
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When a delivery last succeeded."
+          }
+        }
+      },
+      "ScimTargetInput": {
+        "type": "object",
+        "description": "`create` and `update` (a **replacement**) body.",
+        "required": [
+          "name",
+          "base_url",
+          "auth",
+          "scope"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/ScimTargetAuth",
+            "description": "`bearer`, or `oauth2_client_credentials` with `token_url` (the same URL\npolicy), `client_id` (1–256 bytes) and an optional `scope`."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "The downstream's SCIM service root: an `https` URL under the outbound\naddress policy (no credentials or fragment, at most 2 048 bytes, no\nnon-public address, no local name)."
+          },
+          "credential": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "**Write-only.** The bearer token or the OAuth2 client secret, 1–4 096\nbytes. Required on create. On update, absent keeps the stored one —\nexcept that moving it to another URL (`base_url` of a bearer target,\n`token_url` or `base_url` of a client-credentials one) or switching\n`auth.type` requires it again."
+          },
+          "deprovision": {
+            "$ref": "#/components/schemas/DeprovisionPolicy",
+            "description": "`deactivate` (default: `PATCH active=false`) or `delete`."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "`true` by default. A disabled target receives nothing."
+          },
+          "name": {
+            "type": "string",
+            "description": "1–128 bytes."
+          },
+          "push_groups": {
+            "type": "boolean",
+            "description": "Push groups too (every group for `all_users`, the listed ones for\n`groups`). `false` by default."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScimTargetScope",
+            "description": "`all_users`, or `groups` with 1–100 `group_ids` of this tenant: users\nwho are direct members of any listed group."
+          },
+          "user_name_from": {
+            "$ref": "#/components/schemas/UserNameSource",
+            "description": "`username` (default) or `email`."
+          }
+        }
+      },
+      "ScimTargetResponse": {
+        "type": "object",
+        "description": "A registered SCIM target, as the management API returns it. **The\ncredential is never returned**, and there is no member that says anything\nabout it.",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "base_url",
+          "enabled",
+          "auth",
+          "scope",
+          "push_groups",
+          "user_name_from",
+          "deprovision",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/ScimTargetAuth",
+            "description": "How AXIAM authenticates to it (no credential)."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "The downstream's SCIM service root."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the target was registered."
+          },
+          "deprovision": {
+            "$ref": "#/components/schemas/DeprovisionPolicy",
+            "description": "What happens downstream to a user who leaves scope or is no longer\nactive (erasure always deletes)."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether AXIAM pushes to it."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The target id."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name."
+          },
+          "push_groups": {
+            "type": "boolean",
+            "description": "Whether groups are pushed too."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScimTargetScope",
+            "description": "Which users it provisions."
+          },
+          "state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ScimTargetDeliveryState",
+                "description": "Delivery state: last success and failure, consecutive failures,\ndead-lettered total, last reconciliation."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The owning tenant."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was last written: the version an update is conditional on."
+          },
+          "user_name_from": {
+            "$ref": "#/components/schemas/UserNameSource",
+            "description": "Which attribute becomes `userName`."
+          }
+        }
+      },
+      "ScimTargetScope": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Every user of the tenant.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "all_users"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Users who are direct members of any listed group.",
+            "required": [
+              "group_ids",
+              "type"
+            ],
+            "properties": {
+              "group_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "description": "Users who are direct members of any listed group."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "groups"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Which users a target provisions."
       },
       "ScimTokenResponse": {
         "type": "object",
@@ -24569,6 +26017,13 @@
               "null"
             ]
           },
+          "auth_req_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `auth_req_id` a CIBA client received from `/oauth2/bc-authorize`,\nfor `grant_type=urn:openid:params:grant-type:ciba`. The REST layer\nroutes that grant to `TokenService::exchange_ciba`."
+          },
           "claim_token": {
             "type": [
               "string",
@@ -25162,12 +26617,40 @@
               }
             ]
           },
+          "backchannel_authentication_request_signing_alg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — see the create DTO. `\"\"` clears."
+          },
+          "backchannel_client_notification_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — see the create DTO. `\"\"` clears."
+          },
           "backchannel_logout_uri": {
             "type": [
               "string",
               "null"
             ],
             "description": "Pass an empty string to clear a previously registered URI — the one\nedit an operator makes when an RP is decommissioned."
+          },
+          "backchannel_token_delivery_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-7 — see the create DTO. `\"\"` clears."
+          },
+          "backchannel_user_code_parameter": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "G-7 — `true` refused, as on create."
           },
           "browser_sso": {
             "type": [
@@ -26123,6 +27606,14 @@
           }
         }
       },
+      "UserNameSource": {
+        "type": "string",
+        "description": "Which AXIAM attribute becomes the downstream `userName`. The mapping is a\nfixed attribute set, not a mapping language (D-57).",
+        "enum": [
+          "username",
+          "email"
+        ]
+      },
       "UserResponse": {
         "type": "object",
         "description": "Public-safe user representation (no password_hash, no mfa_secret).",
@@ -26523,6 +28014,10 @@
     {
       "name": "ssf",
       "description": "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"
+    },
+    {
+      "name": "scim-targets",
+      "description": "Outbound SCIM provisioning — the registry of downstream SCIM 2.0 service providers a tenant administrator manages, with each target's delivery state (CONTRACT §31)"
     },
     {
       "name": "ssf-receiver",

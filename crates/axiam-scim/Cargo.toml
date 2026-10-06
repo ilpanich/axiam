@@ -13,6 +13,21 @@ rust-version.workspace = true
 # guard, and AuthzMiddleware — no parallel storage or authorization stack.
 axiam-core = { workspace = true }
 axiam-api-rest = { workspace = true }
+# G-6 (T23.6.2, D-57): the outbound SCIM client sends every request through the
+# shared SSRF guard (`axiam_federation::ssrf`, which re-exports axiam-pki's), so
+# no second HTTP client exists beside it. Already a dependency of
+# axiam-api-rest, so nothing enters the graph.
+axiam-federation = { workspace = true }
+# The outbound client's wire: request building (reqwest), the base-URL join and
+# the filter's query encoding (url), the token request's Basic client
+# authentication (base64), the SHA-256 digest of a representation (sha2, hex)
+# and the zeroising buffers the credential and the cached access token live in.
+reqwest = { workspace = true }
+url = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+zeroize = { workspace = true }
 # Argon2id-hashes a SCIM-supplied `password` PATCH value / generates the
 # random initial password for SCIM-provisioned users — the same function
 # `axiam-db`'s user repository already uses internally (Security Standards:
@@ -26,6 +41,10 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 surrealdb = { workspace = true }
+# T23.6.4: `start_reconcile_now` runs an on-demand reconciliation on a spawned
+# task, so that the management API can answer `202` when the claim is taken.
+# Already in the graph through actix-web and axiam-api-rest.
+tokio = { workspace = true }
 
 [dev-dependencies]
 axiam-db = { workspace = true }

@@ -1,0 +1,1 @@
+{"status":"ok","profile":"minimal","unavailable":["reactors","amqp_authz","amqp_audit_ingestion","decision_cache_broadcast"]}

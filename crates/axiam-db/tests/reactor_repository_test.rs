@@ -434,3 +434,56 @@ async fn list_paginates_within_the_tenant() {
     assert_eq!(page.items[0].name, "r0");
     assert_eq!(page.items[1].name, "r1");
 }
+
+/// G-8 / D-59: the minimal profile's boot refusal asks one deployment-wide
+/// question — how many registrations are ENABLED, in any tenant.
+#[tokio::test]
+async fn count_enabled_counts_enabled_registrations_across_all_tenants() {
+    let (repo, tenant_a) = setup().await;
+    let tenant_b = Uuid::new_v4();
+    assert_eq!(repo.count_enabled().await.unwrap(), 0, "an empty store");
+
+    let a = repo
+        .create(create(
+            tenant_a,
+            "a-enabled",
+            &["token.pre_issue"],
+            ReactorMode::Intercept,
+        ))
+        .await
+        .unwrap();
+    repo.create(create(
+        tenant_b,
+        "b-enabled",
+        &["login.post_auth"],
+        ReactorMode::Intercept,
+    ))
+    .await
+    .unwrap();
+    let mut disabled = create(
+        tenant_b,
+        "b-disabled",
+        &["token.pre_issue"],
+        ReactorMode::Intercept,
+    );
+    disabled.enabled = false;
+    repo.create(disabled).await.unwrap();
+
+    assert_eq!(
+        repo.count_enabled().await.unwrap(),
+        2,
+        "two tenants' enabled registrations count; the disabled one does not"
+    );
+
+    repo.update(
+        tenant_a,
+        a.id,
+        UpdateReactor {
+            enabled: Some(false),
+            ..UpdateReactor::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(repo.count_enabled().await.unwrap(), 1);
+}

@@ -33,6 +33,8 @@ export const NOTIFICATION_EVENTS: ReadonlyArray<{ value: string; label: string }
   { value: "user_updated", label: "User updated" },
   { value: "service_account_created", label: "Service account created" },
   { value: "service_account_deleted", label: "Service account deleted" },
+  // Provisioning events
+  { value: "scim_delivery_failed", label: "SCIM delivery failed" },
 ];
 
 /** Map an event id to its human-readable label (falls back to the id). */

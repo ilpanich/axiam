@@ -660,6 +660,15 @@ fn publisher_site(mail_type: &MailType) -> PublisherSite {
             file: "crates/axiam-server/src/cleanup.rs",
             keys: &["action_url", "expiry_time"],
         },
+        MailType::CibaApproval => PublisherSite {
+            file: "crates/axiam-oauth2/src/ciba_notifier.rs",
+            keys: &[
+                "client_name",
+                "binding_message",
+                "action_url",
+                "expiry_time",
+            ],
+        },
     }
 }
 

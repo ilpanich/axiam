@@ -1,0 +1,19 @@
+Resting-footprint measurement, 2026-10-05 (T23.8.3, G-8)
+=========================================================
+script        : benchmarks/resting-footprint/measure.sh  (run as: measure.sh minimal|full target/release/axiam-server <this directory>)
+server        : native release binary, `cargo build --release -p axiam-server --features jemalloc`
+                built from source commit 21f1521 (no Rust file differs at the commit that carries these samples)
+                global allocator logged at start-up: jemalloc
+SurrealDB     : surrealdb/surrealdb:v3, 3.2.5+20261005.fd32fc9, sha256:eb6dddd6b5db7bb2b56b79ff4f1e0522e3066f84f5b988842d45e6b4497c0d67
+                container cap: 2 CPU / 1 GiB, surrealkv on a fresh bind-mounted directory
+RabbitMQ      : rabbitmq:4-management-alpine, sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
+                container cap: 1 CPU / 512 MiB, AMQPS only (docker/rabbitmq-tls.conf), full mode only
+host          : 4 vCPU Intel Xeon @ 2.10 GHz, ~15 GiB RAM, Linux 6.18.44, Docker 29.6.2, cgroup v1
+state         : freshly migrated, empty datastore (no tenant, user or traffic); server and datastore namespace/database "axiam"
+secrets       : generated per run (JWT pair, pepper, email/GDPR/MFA/federation/PKI/OPAQUE keys); never written here
+settle/sample : /ready == 200, settle 60 s, sample for 120 s every 5 s (15-20 samples: reading a container's processes takes time)
+columns       : rss_kib = sum of VmRSS of every process of the component; rss_anon_kib = sum of RssAnon;
+                cgroup_working_set_kib = `docker stats` memory (containers only; depends on page cache, secondary)
+repeats       : four minimal runs while the script was being finished (two with an earlier column set) gave totals
+                206.6, 206.2, 205.5 and 207.3 MiB; only the last, produced by the committed script, has its raw samples here
+NOT measured  : the server as a container image; any Keycloak or Zitadel stack at rest; behaviour under load

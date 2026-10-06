@@ -773,6 +773,7 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
         allowed_resources: Vec::new(),
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         last_authorized_at: None,
+        ciba: Default::default(),
     })
 }
 
@@ -1099,6 +1100,7 @@ fn base_req(grant: &str) -> TokenRequest {
         claim_token_format: None,
         client_assertion: None,
         client_assertion_type: None,
+        auth_req_id: None,
     }
 }
 

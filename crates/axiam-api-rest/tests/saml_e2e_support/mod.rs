@@ -124,7 +124,7 @@ pub struct World {
     pub bob: Uuid,
     pub auth: AuthConfig,
     pub authz: Arc<dyn AuthzChecker>,
-    pub state: AppState<TestDb>,
+    pub state: actix_web::web::Data<AppState<TestDb>>,
     /// The administrator's access token, from a real sign-in (the app refuses a
     /// token whose session it has never seen).
     admin_access: std::sync::Mutex<Option<String>>,
@@ -211,11 +211,16 @@ async fn assign_named_role(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid,
         .unwrap();
 }
 
-/// A world: one organization with SAML on, a serving tenant, a tenant with the
-/// switch off, an administrator, and two ordinary users (`alice`, who has a
-/// profile and belongs to a group, and `bob`). The revocation feed is on: the
-/// session repository the sign-in and the logout both use publishes to it.
-pub async fn world() -> World {
+/// The in-memory database with its schema, and an organization with SAML on.
+///
+/// The embedded SurrealDB engine recurses deeply in a debug build: the settings
+/// upsert below alone reaches about 1.5 MB of the test thread's 2 MiB stack. The
+/// steps of [`world`] are therefore separate, boxed futures, so that what a step
+/// holds across an `.await` is not also on the stack of the frames above it while
+/// that query runs. That, with `World::state` being a shared handle rather than
+/// a 9 KiB `AppState` copied into every future that holds a `World`, is what
+/// keeps these tests inside the default stack with room to spare.
+async fn world_org() -> (Surreal<TestDb>, Uuid) {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
     axiam_db::run_migrations(&db).await.unwrap();
@@ -229,14 +234,18 @@ pub async fn world() -> World {
         .unwrap();
     let mut settings = system_defaults();
     settings.saml_idp_enabled = true;
-    let settings_repo = SurrealSettingsRepository::new(db.clone());
-    settings_repo
+    SurrealSettingsRepository::new(db.clone())
         .set_org_settings(org.id, settings)
         .await
         .unwrap();
-    let tenant_id = tenant_in(&db, org.id, "saml-e2e").await;
-    let off_tenant_id = tenant_in(&db, org.id, "saml-e2e-off").await;
-    settings_repo
+    (db, org.id)
+}
+
+/// The serving tenant and the one whose switch is off.
+async fn world_tenants(db: &Surreal<TestDb>, org_id: Uuid) -> (Uuid, Uuid) {
+    let tenant_id = tenant_in(db, org_id, "saml-e2e").await;
+    let off_tenant_id = tenant_in(db, org_id, "saml-e2e-off").await;
+    SurrealSettingsRepository::new(db.clone())
         .set_tenant_override(
             off_tenant_id,
             SetTenantOverride {
@@ -246,11 +255,15 @@ pub async fn world() -> World {
         )
         .await
         .unwrap();
+    (tenant_id, off_tenant_id)
+}
 
-    let admin = active_user(&db, tenant_id, "admin", None).await;
-    assign_named_role(&db, tenant_id, admin, "admin").await;
+/// The administrator, `alice` (a profile, a group) and `bob`.
+async fn world_users(db: &Surreal<TestDb>, tenant_id: Uuid) -> (Uuid, Uuid, Uuid) {
+    let admin = active_user(db, tenant_id, "admin", None).await;
+    assign_named_role(db, tenant_id, admin, "admin").await;
     let alice = active_user(
-        &db,
+        db,
         tenant_id,
         "alice",
         Some(serde_json::json!({
@@ -258,7 +271,7 @@ pub async fn world() -> World {
         })),
     )
     .await;
-    let bob = active_user(&db, tenant_id, "bob", None).await;
+    let bob = active_user(db, tenant_id, "bob", None).await;
     let groups = SurrealGroupRepository::new(db.clone());
     let group = groups
         .create(CreateGroup {
@@ -270,7 +283,17 @@ pub async fn world() -> World {
         .await
         .unwrap();
     groups.add_member(tenant_id, alice, group.id).await.unwrap();
+    (admin, alice, bob)
+}
 
+/// A world: one organization with SAML on, a serving tenant, a tenant with the
+/// switch off, an administrator, and two ordinary users (`alice`, who has a
+/// profile and belongs to a group, and `bob`). The revocation feed is on: the
+/// session repository the sign-in and the logout both use publishes to it.
+pub async fn world() -> World {
+    let (db, org_id) = Box::pin(world_org()).await;
+    let (tenant_id, off_tenant_id) = Box::pin(world_tenants(&db, org_id)).await;
+    let (admin, alice, bob) = Box::pin(world_users(&db, tenant_id)).await;
     let auth = auth_config();
     let authz: Arc<dyn AuthzChecker> = Arc::new(AuthorizationEngine::new(
         SurrealRoleRepository::new(db.clone()),
@@ -282,7 +305,7 @@ pub async fn world() -> World {
     let (state, custodians) = build_state(&db, &auth);
     World {
         db,
-        org_id: org.id,
+        org_id,
         tenant_id,
         off_tenant_id,
         admin,
@@ -302,7 +325,10 @@ pub async fn world() -> World {
 fn build_state(
     db: &Surreal<TestDb>,
     auth: &AuthConfig,
-) -> (AppState<TestDb>, Arc<axiam_pki::CaKeyCustodians>) {
+) -> (
+    actix_web::web::Data<AppState<TestDb>>,
+    Arc<axiam_pki::CaKeyCustodians>,
+) {
     let mut state = AppState::for_test(db.clone(), auth.clone());
     let custodians = Arc::new(
         axiam_pki::ca_key_store::custodians_from(Some(runtime_bytes()), &|_| None).unwrap(),
@@ -340,7 +366,7 @@ fn build_state(
         Arc::clone(&state.crypto_semaphore),
     );
     state.session_repo = session_repo;
-    (state, custodians)
+    (actix_web::web::Data::new(state), custodians)
 }
 
 /// The limits every test here runs under. The shared rate-limit counter
@@ -367,7 +393,7 @@ macro_rules! e2e_app {
                 .wrap(axiam_api_rest::middleware::security_headers::SecurityHeadersMiddleware)
                 .app_data(actix_web::web::Data::new(auth))
                 .app_data(actix_web::web::Data::new($w.authz.clone()))
-                .app_data(actix_web::web::Data::new($w.state.clone()))
+                .app_data($w.state.clone())
                 .app_data(actix_web::web::Data::new(std::sync::Arc::new(
                     axiam_db::repository::SurrealTenantRepository::new($w.db.clone()),
                 )

@@ -1,0 +1,60 @@
+# Overlay that turns the p3-mtls AXIAM into the FAPI conformance target — used
+# ONLY by .github/workflows/fapi-conformance.yml, which layers it on after the
+# profile's own overlays:
+#
+#   BENCH_COMPOSE_OVERLAYS=targets/axiam/docker-compose.conformance.yml \
+#     just target=axiam profile=p3-mtls bench-up
+#
+# It changes nothing for a benchmark run: bench-up adds it only when
+# BENCH_COMPOSE_OVERLAYS names it, and the native-tls / native-mtls overlays it
+# builds on are untouched. Later files win per environment key, so each entry
+# below replaces the benchmark value of the same name.
+#
+# WHY THE BENCHMARK'S OWN MATERIAL IS NOT ENOUGH
+#
+# The conformance rig (conformance/docker-compose.yml, nginx-axiam.conf) has an
+# arrangement of its own, and the p3-mtls profile disagrees with it in four
+# places — each of which stops a run before the suite produces a result:
+#
+#   1. Trust. The listener trusted only the benchmark CA (/certs/ca.crt), so the
+#      conformance clients' certificates (conformance/scripts/gen-certs.sh) were
+#      refused in the TLS handshake — before AXIAM saw a request, so its own log
+#      shows nothing. The trust bundle below holds BOTH CAs, so the bench's own
+#      readiness probe and seeder (they present the bench client certificate)
+#      keep working.
+#   2. Server identity. The suite verifies AXIAM's certificate like any HTTPS
+#      client, and the front door (conformance/nginx-axiam.conf) verifies it with
+#      `proxy_ssl_verify on` against the name host.docker.internal. The bench
+#      server certificate is CN=localhost, signed by the bench CA, which neither
+#      trusts. The listener presents conformance/certs/server.crt instead.
+#   3. Client-auth policy. `required` (the benchmark's) refuses every client that
+#      has no certificate — the front door's nginx among them, which proxies the
+#      admin API and /oauth2/ to this listener and never presents one — and it
+#      cannot admit the self_signed_tls_client_auth client, whose certificate
+#      chains to nothing by design (RFC 8705 §2.2). `optional_self_signed` is the
+#      policy conformance/scripts/serve-axiam.sh runs, for the same reasons; see
+#      its comment before changing this.
+#   4. Discovery. The base compose forwards a fixed list of names, so
+#      AXIAM__AUTH__OAUTH2_MTLS_BASE_URL (RFC 8705 §5 mtls_endpoint_aliases — how
+#      an mTLS client learns the back-channel host) and
+#      AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID (how the bare discovery document
+#      names a tenant) never reached the container.
+#
+# Everything arrives as an environment variable the workflow derives from
+# conformance/suite.env, so the ports and hostnames stay defined in one place.
+services:
+  axiam-server:
+    environment:
+      AXIAM__SERVER__TLS__CERT_PATH: /conformance-tls/server.crt
+      AXIAM__SERVER__TLS__KEY_PATH: /conformance-tls/server.key
+      AXIAM__SERVER__TLS__CLIENT_AUTH: "${CONFORMANCE_CLIENT_AUTH:-optional_self_signed}"
+      AXIAM__SERVER__TLS__CLIENT_CA_PATH: /conformance-tls/client-ca.pem
+      AXIAM__AUTH__OAUTH2_MTLS_BASE_URL: "${CONFORMANCE_MTLS_BASE_URL:?set by fapi-conformance.yml from suite.env AXIAM_MTLS_BASE_URL}"
+      # Empty on the first bring-up (the tenant does not exist until the seeder
+      # has bootstrapped the deployment) and set on the restart that follows the
+      # client registration; the server reads an empty value as unset.
+      AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID: "${CONFORMANCE_TENANT_ID:-}"
+    volumes:
+      # server.crt, server.key (readable by the image's non-root user) and
+      # client-ca.pem (conformance CA + benchmark CA), staged by the workflow.
+      - ${CONFORMANCE_TLS_DIR:?set by fapi-conformance.yml}:/conformance-tls:ro

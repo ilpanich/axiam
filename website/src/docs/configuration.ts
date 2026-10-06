@@ -53,6 +53,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ["AXIAM__DB__NAMESPACE", "SurrealDB namespace.", "axiam"],
           ["AXIAM__DB__DATABASE", "SurrealDB database.", "axiam"],
           [
+            "AXIAM__AMQP__ENABLED",
+            "Whether the broker is used at all (default `true`). `false` selects the minimal, broker-less profile: nothing connects to RabbitMQ, neither `AXIAM__AMQP__URL` nor the AMQP signing key is required, webhooks, SSF push, outbound SCIM, CIBA ping and transactional mail run on in-process queues (lost on restart), and Reactors, asynchronous authorization over AMQP, external audit ingestion and cross-replica cache invalidation are unavailable. The profile is single-instance by definition: the server refuses to boot beside another live instance, with the decision-cache broadcast switched on, or with an enabled Reactor registration in the datastore.",
+            "false",
+          ],
+          [
             "AXIAM__AMQP__URL",
             "RabbitMQ connection string, assembled from the broker credentials at the deployment layer. Must be amqps:// — AMQP is TLS-only and every other scheme is refused at startup. It embeds the broker password inline, which is why `AmqpConfig`'s `Debug` prints the host and never the userinfo. Also resolvable through the secret provider as `amqp_url`; this variable stays as a permanent fallback, and a non-`env` deployment that still supplies it here gets one `WARN` at boot.",
             "amqps://user:pass@rabbitmq:5671",
@@ -290,7 +295,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__OAUTH2_MTLS_BASE_URL",
-            "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations. Six aliases are published and the front channel is never among them. A value that cannot be parsed **fails discovery with a** `500` — deliberately unlike the default-tenant row below: an unusable alias would send a client's certificate to a host that authenticates nothing, so the document is refused rather than served without it.",
+            "Base URL of the listener that performs the mutual-TLS handshake, when that is a different host from the issuer. Publishes RFC 8705 §5 `mtls_endpoint_aliases` in the discovery document. Leave unset on a single-listener deployment — including one running `client_auth = optional`, where the conventional endpoints already serve both populations. Seven aliases are published — the six back-channel endpoints and CIBA's `bc-authorize` — and the front channel is never among them. A value that cannot be parsed **fails discovery with a** `500` — deliberately unlike the default-tenant row below: an unusable alias would send a client's certificate to a host that authenticates nothing, so the document is refused rather than served without it.",
             "https://mtls.iam.acme.dev",
           ],
           [
@@ -408,6 +413,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           ["AXIAM__RATE_LIMIT__PAR_PER_MIN", "Max /oauth2/par per minute.", "120"],
           [
+            "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN",
+            "Max CIBA backchannel authentication requests (POST /oauth2/bc-authorize) per minute, in its own bucket \u2014 never the token endpoint's, because each accepted request stores a pending request and may send a person a sign-in prompt. Keyed like /oauth2/token (AXIAM__RATE_LIMIT__KEY applies), with a second per-client bucket of the same size after authentication. In the machine family, so a profile preset scales it (gateway 600, mesh 6000). The CIBA grant's token requests are counted by AXIAM__RATE_LIMIT__TOKEN_PER_MIN and by each request's own polling interval, and a user is sent at most three notifications a minute whatever the clients asking.",
+            "60",
+          ],
+          [
             "AXIAM__RATE_LIMIT__DCR_PER_MIN",
             "Max RFC 7591 dynamic client registrations per minute, per IP. The smallest limit here, because it is the only unauthenticated write endpoint: every accepted request allocates a client row against the tenant's dcr_max_clients. Sized for one person registering one MCP client once, with room for a retry \u2014 not for throughput. Never client-keyed, since obtaining a client identity is what the call is for.",
             "5",
@@ -430,6 +440,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           [
             "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN",
             "Max writes per minute, per IP, to the SSF stream registry API under /api/v1/tenants/{tenant_id}/ssf/streams: create, update and delete a stream. Each write can repoint where a tenant's security events, and the push credential, are sent. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN",
+            "Max writes per minute, per IP, to the outbound SCIM target registry API under /api/v1/scim-targets: create, update, delete and reconcile now. Each write can repoint where a tenant's user directory, and the target's credential, are sent. One bucket per route; reads are not limited. Never moved by a profile preset.",
+            "30",
+          ],
+          [
+            "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN",
+            "Max requests per minute, per IP, to each CIBA approval route under /api/v1/ciba/requests: read a pending request, approve it, refuse it. One bucket per route, so reads cannot starve decisions. Human-driven, behind a session and a CSRF token; a request id that is not the caller's own answers 404. Never moved by a profile preset.",
             "30",
           ],
           [

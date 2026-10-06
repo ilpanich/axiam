@@ -1,6 +1,9 @@
 //! OAuth2 client management endpoints (tenant-scoped via JWT).
 
 use actix_web::{HttpResponse, web};
+use axiam_core::models::ciba::{
+    CIBA_GRANT_TYPE, CibaClientMetadata, CibaDeliveryMode, CibaRequestSigningAlg,
+};
 use axiam_core::models::oauth2_client::{
     AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, CreateOAuth2Client, ManagedBy,
     OAuth2Client, UpdateOAuth2Client,
@@ -149,6 +152,30 @@ pub struct CreateOAuth2ClientRequest {
     /// exchange consults for its `audience`/`resource` target.
     #[serde(default)]
     pub allowed_resources: Vec<String>,
+    /// G-7 — CIBA Core §4 `backchannel_token_delivery_mode`: `poll` or
+    /// `ping`. Required when `grant_types` holds
+    /// `urn:openid:params:grant-type:ciba`, refused otherwise; `push` is not
+    /// offered. A CIBA client must be confidential; a `fapi2` one must also
+    /// register `backchannel_authentication_request_signing_alg`.
+    #[serde(default)]
+    pub backchannel_token_delivery_mode: Option<String>,
+    /// G-7 — CIBA Core §4: where a ping-mode client is notified. Required in
+    /// ping mode and refused in poll mode; an absolute `https` URL held to the
+    /// webhook address policy (no credentials, no fragment, no private,
+    /// loopback or internal host).
+    #[serde(default)]
+    pub backchannel_client_notification_endpoint: Option<String>,
+    /// G-7 — CIBA Core §4: `PS256`, `ES256` or `EdDSA`. When set, every
+    /// backchannel authentication request must be a signed `request` JWT under
+    /// this algorithm, verified against `jwks` or `jwks_uri` (exactly one is
+    /// required; an inline `jwks` must hold a key of the algorithm). Required
+    /// for a `fapi2` client holding the CIBA grant.
+    #[serde(default)]
+    pub backchannel_authentication_request_signing_alg: Option<String>,
+    /// G-7 — CIBA Core §4. `true` is **refused**: this server holds no user
+    /// code to verify.
+    #[serde(default)]
+    pub backchannel_user_code_parameter: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -185,6 +212,14 @@ pub struct UpdateOAuth2ClientRequest {
     /// T21.3 — see [`CreateOAuth2ClientRequest::allowed_resources`]. A
     /// whole-list replacement; `[]` withdraws every target.
     pub allowed_resources: Option<Vec<String>>,
+    /// G-7 — see the create DTO. `""` clears.
+    pub backchannel_token_delivery_mode: Option<String>,
+    /// G-7 — see the create DTO. `""` clears.
+    pub backchannel_client_notification_endpoint: Option<String>,
+    /// G-7 — see the create DTO. `""` clears.
+    pub backchannel_authentication_request_signing_alg: Option<String>,
+    /// G-7 — `true` refused, as on create.
+    pub backchannel_user_code_parameter: Option<bool>,
 }
 
 /// OAuth2 client response -- omits client_secret_hash.
@@ -253,6 +288,16 @@ pub struct OAuth2ClientResponse {
     /// instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_authorized_at: Option<DateTime<Utc>>,
+    /// G-7 — the CIBA delivery mode; absent for a client without the grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backchannel_token_delivery_mode: Option<CibaDeliveryMode>,
+    /// G-7 — the ping-mode notification endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backchannel_client_notification_endpoint: Option<String>,
+    /// G-7 / D-61 — the algorithm this client signs its authentication
+    /// requests with; absent for a client sending plain requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backchannel_authentication_request_signing_alg: Option<CibaRequestSigningAlg>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -284,6 +329,13 @@ impl From<OAuth2Client> for OAuth2ClientResponse {
             allowed_resources: c.allowed_resources,
             managed_by: c.managed_by,
             last_authorized_at: c.last_authorized_at,
+            backchannel_token_delivery_mode: c.ciba.backchannel_token_delivery_mode,
+            backchannel_client_notification_endpoint: c
+                .ciba
+                .backchannel_client_notification_endpoint,
+            backchannel_authentication_request_signing_alg: c
+                .ciba
+                .backchannel_authentication_request_signing_alg,
             require_par: c.require_par,
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -373,7 +425,19 @@ const KNOWN_GRANT_TYPES: &[&str] = &[
     axiam_oauth2::device_service::DEVICE_CODE_GRANT_TYPE,
     "device_code",
     axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE,
+    // G-7 — CIBA; its metadata is validated by `validate_ciba`.
+    CIBA_GRANT_TYPE,
 ];
+
+/// G-7 — validate a registration's CIBA metadata (the rules are
+/// `axiam_oauth2::ciba::validate_client_registration`'s, shared with
+/// `POST /oauth2/register`) and return what to store.
+fn validate_ciba(
+    view: axiam_oauth2::ciba::CibaRegistrationView<'_>,
+) -> Result<CibaClientMetadata, AxiamApiError> {
+    axiam_oauth2::ciba::validate_client_registration(view)
+        .map_err(|e| validation_err(e.to_string()))
+}
 
 fn validation_err(msg: impl Into<String>) -> AxiamApiError {
     axiam_core::error::AxiamError::Validation {
@@ -503,6 +567,8 @@ async fn reject_sensitive_scopes_when_disabled<C: Connection + Clone>(
 const GRANTS_FORBIDDEN_TO_PUBLIC_CLIENTS: &[&str] = &[
     "client_credentials",
     axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE,
+    // G-7 — CIBA Core §7.1: the client authenticates at `bc-authorize`.
+    CIBA_GRANT_TYPE,
 ];
 
 /// Refuse a registration that says `none` and something else at the same time
@@ -573,6 +639,19 @@ pub async fn create<C: Connection + Clone>(
     if needs_redirects {
         validate_redirect_uris(&req.redirect_uris)?;
     }
+    let ciba = validate_ciba(axiam_oauth2::ciba::CibaRegistrationView {
+        grant_types: &req.grant_types,
+        token_endpoint_auth_method: req.token_endpoint_auth_method,
+        profile: req.profile,
+        delivery_mode: req.backchannel_token_delivery_mode.as_deref(),
+        notification_endpoint: req.backchannel_client_notification_endpoint.as_deref(),
+        signing_alg: req
+            .backchannel_authentication_request_signing_alg
+            .as_deref(),
+        user_code_parameter: req.backchannel_user_code_parameter,
+        jwks: req.jwks.as_deref(),
+        jwks_uri: req.jwks_uri.as_deref(),
+    })?;
 
     let create = CreateOAuth2Client {
         tenant_id: user.tenant_id,
@@ -602,6 +681,7 @@ pub async fn create<C: Connection + Clone>(
         // has no such member, so an API caller cannot claim a provenance, and
         // this is the one handler entitled to assert `admin`.
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+        ciba,
     };
 
     // X5.1 — refuse a registration that could not satisfy the profile it
@@ -815,6 +895,74 @@ pub async fn update<C: Connection + Clone>(
         validate_redirect_uris(&existing.redirect_uris)?;
     }
 
+    // G-7 — the CIBA metadata is validated against the row the patch will
+    // produce whenever the patch touches anything the rules read: the grants,
+    // the method, the profile or the metadata itself. Untouched metadata is
+    // carried only while the merged grants still hold CIBA; a patch that
+    // removes the grant drops it rather than leaving it unread on the row.
+    let ciba_touched = req.backchannel_token_delivery_mode.is_some()
+        || req.backchannel_client_notification_endpoint.is_some()
+        || req.backchannel_authentication_request_signing_alg.is_some()
+        || req.backchannel_user_code_parameter.is_some();
+    // D-61: the key source is read too — removing the keys a signing
+    // algorithm is verified against must not leave the algorithm stranded.
+    let ciba = if ciba_touched
+        || req.grant_types.is_some()
+        || req.profile.is_some()
+        || req.token_endpoint_auth_method.is_some()
+        || req.jwks.is_some()
+        || req.jwks_uri.is_some()
+    {
+        let stored = state
+            .oauth2_client_repo
+            .get_by_id(user.tenant_id, id)
+            .await?;
+        let grants = req.grant_types.as_deref().unwrap_or(&stored.grant_types);
+        let keep_stored = axiam_oauth2::ciba::holds_ciba_grant(grants);
+        let stored_mode = stored
+            .ciba
+            .backchannel_token_delivery_mode
+            .filter(|_| keep_stored)
+            .map(|m| m.as_str().to_owned());
+        let stored_endpoint = stored
+            .ciba
+            .backchannel_client_notification_endpoint
+            .clone()
+            .filter(|_| keep_stored);
+        let stored_signing_alg = stored
+            .ciba
+            .backchannel_authentication_request_signing_alg
+            .filter(|_| keep_stored)
+            .map(|a| a.as_str().to_owned());
+        let mode = req.backchannel_token_delivery_mode.clone().or(stored_mode);
+        let endpoint = req
+            .backchannel_client_notification_endpoint
+            .clone()
+            .or(stored_endpoint);
+        let signing_alg = req
+            .backchannel_authentication_request_signing_alg
+            .clone()
+            .or(stored_signing_alg);
+        // `Some("")` clears, as the repository will store it.
+        let jwks = req.jwks.clone().or(stored.jwks.clone());
+        let jwks_uri = req.jwks_uri.clone().or(stored.jwks_uri.clone());
+        Some(validate_ciba(axiam_oauth2::ciba::CibaRegistrationView {
+            grant_types: grants,
+            token_endpoint_auth_method: req
+                .token_endpoint_auth_method
+                .unwrap_or(stored.token_endpoint_auth_method),
+            profile: req.profile.unwrap_or(stored.profile),
+            delivery_mode: mode.as_deref(),
+            notification_endpoint: endpoint.as_deref(),
+            signing_alg: signing_alg.as_deref(),
+            user_code_parameter: req.backchannel_user_code_parameter,
+            jwks: jwks.as_deref(),
+            jwks_uri: jwks_uri.as_deref(),
+        })?)
+    } else {
+        None
+    };
+
     let update = UpdateOAuth2Client {
         name: req.name,
         redirect_uris: req.redirect_uris,
@@ -837,6 +985,7 @@ pub async fn update<C: Connection + Clone>(
         authn_request_params: req.authn_request_params,
         browser_sso: req.browser_sso,
         allowed_resources,
+        ciba,
     };
 
     // X5.1 — validate the MERGED result, not the patch. Flipping `profile` to

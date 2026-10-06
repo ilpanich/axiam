@@ -23,11 +23,11 @@ export const OPERATE_PAGES: DocPage[] = [
       { type: "h", id: "docker", text: "Docker" },
       {
         type: "p",
-        text: "`docker/` holds the Dockerfiles and the compose configurations. `docker-compose.dev.yml` runs only SurrealDB and RabbitMQ, for developing against a natively-run server. `docker-compose.prod.yml` runs the whole stack — server, admin console, database, broker and Vault — and is documented in the file itself as **not** intended for real production use.",
+        text: "`docker/` holds the Dockerfiles and the compose configurations. `docker-compose.dev.yml` runs only SurrealDB and RabbitMQ, for developing against a natively-run server. `docker-compose.prod.yml` runs the whole stack — server, admin console, database, broker and Vault — and is documented in the file itself as **not** intended for real production use. `docker-compose.minimal.yml` runs SurrealDB and the server alone, with no broker — a deliberately narrower deployment with real limits, described under [Minimal profile (no broker)](#/docs/deploy#minimal).",
       },
       {
         type: "code",
-        code: "just dev-up      # SurrealDB + RabbitMQ only\njust prod-up     # the whole stack, including the Vault ceremony\njust prod-down   # stop, keep volumes\njust prod-clean  # stop and remove volumes",
+        code: "just dev-up        # SurrealDB + RabbitMQ only\njust prod-up       # the whole stack, including the Vault ceremony\njust prod-down     # stop, keep volumes\njust prod-clean    # stop and remove volumes\njust minimal-up    # SurrealDB + server, no broker (single instance)\njust minimal-down  # stop, keep volumes",
       },
       {
         type: "p",
@@ -68,7 +68,11 @@ export const OPERATE_PAGES: DocPage[] = [
       { type: "h", id: "scaling", text: "Scaling" },
       {
         type: "p",
-        text: "`axiam-server` is stateless — every piece of durable state is in SurrealDB — so replicas scale horizontally behind an ordinary load balancer with no session affinity required.",
+        text: "In the full profile `axiam-server` is stateless — every piece of durable state is in SurrealDB — so replicas scale horizontally behind an ordinary load balancer with no session affinity required.",
+      },
+      {
+        type: "warn",
+        text: "**This does not hold in the minimal profile.** With `AXIAM__AMQP__ENABLED=false` there is no broker to carry a decision-cache invalidation from one replica to another, so a second instance would serve stale authorization decisions. The minimal profile is **single-instance by definition** and refuses to run beside another one — see [Minimal profile (no broker)](#/docs/deploy#minimal). Everything in the rest of this section is about the full profile.",
       },
       {
         type: "warn",
@@ -77,6 +81,82 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "p",
         text: "**Rolling deployments are safe.** Starting a second process against the same SurrealDB used to take the first from healthy to a `401` on every query within seconds, with no recovery short of a restart — which is precisely what a rolling deployment does to every pod it has not replaced yet. Booting no longer redefines the datastore root user unless its token duration actually needs raising, so a new replica does not invalidate the tokens the running ones hold; and a replica that *is* logged out now recognises it and reconnects on its own rather than serving errors until somebody restarts it.",
+      },
+      { type: "h", id: "minimal", text: "Minimal profile (no broker)" },
+      {
+        type: "p",
+        text: "`AXIAM__AMQP__ENABLED=false` (default `true`) runs AXIAM with **SurrealDB only**: no RabbitMQ, no `AXIAM__AMQP__URL`, no AMQP signing key. It is for a single node, an edge site or a small deployment where a broker is more infrastructure than the workload justifies. Webhooks, SSF push, outbound SCIM, CIBA ping and transactional mail keep working, on in-process queues.",
+      },
+      {
+        type: "warn",
+        text: "**Run exactly one instance.** AXIAM does not trust a replica count to say so: the profile holds a singleton lease row in SurrealDB (30 s TTL, renewed every 10 s), a boot that finds another live instance waits up to 45 s and then refuses, and an instance that loses its lease stops in order and exits non-zero. On Kubernetes that is `replicas: 1` with `strategy: Recreate`.",
+      },
+      {
+        type: "code",
+        caption: "run it",
+        code: "just minimal-up                       # SurrealDB + axiam-server\ncurl -s http://localhost:8090/health  # {\"status\":\"ok\",\"profile\":\"minimal\",\"unavailable\":[...]}",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Not available", "What happens instead"],
+        rows: [
+          ["Reactors", "Enabling a registration answers `409` naming the profile (gRPC: `FAILED_PRECONDITION`); boot refuses a datastore that already has an enabled one."],
+          ["Asynchronous authorization over AMQP", "The consumer is not started. REST and gRPC checks are unaffected."],
+          ["External audit ingestion over AMQP", "Not started. AXIAM's own audit events never rode AMQP and are unchanged."],
+          ["Cross-replica decision-cache invalidation", "There is no second replica to tell; boot refuses the decision-cache broadcast being switched on."],
+        ],
+      },
+      { type: "h", id: "minimal-restart", text: "What a restart costs" },
+      {
+        type: "p",
+        text: "There is no durable queue and no dead-letter queue. A webhook, SSF, outbound SCIM or CIBA-ping delivery that is queued or sleeping for a retry when the process stops is **lost**, and leaves at most a `<kind>.delivery_attempt` audit row — never a terminal one; a delivery that exhausts its attempts leaves a `<kind>.delivery_failed` row, which is the whole record, so alert on it. A queued GDPR export notice cannot be re-sent (the download token exists only in that mail), so the subject requests a new export. If a lost webhook is not acceptable, run the full profile.",
+      },
+      {
+        type: "list",
+        items: [
+          "**Stopping.** An orderly stop (`SIGTERM`, or a lost lease) writes the audit rows still queued, for up to 5 s, before the process exits; `SIGKILL` and an out-of-memory kill do not. Give the container a termination grace period above 20 s — the compose file sets 30 s, Kubernetes' default is enough.",
+          "**GDPR dead-letter file.** A failed write of `gdpr.user_pseudonymized` or `tenants.deleted` is appended, one JSON line each, to `AXIAM__GDPR_AUDIT_DLQ_FILE`, which `docker-compose.minimal.yml` puts on a **named volume**; the `axiam.audit.dlq` log event is the second sink. An operator replays the file into the trail by hand.",
+          "**External audit producers.** Stop or re-point every service that publishes to `axiam.audit.events` before switching: nothing consumes it and a broker left running confirms the publish anyway.",
+        ],
+      },
+      { type: "h", id: "minimal-choose", text: "Choosing it, and moving to the full profile" },
+      {
+        type: "p",
+        text: "Choose the minimal profile for one node that can tolerate losing queued deliveries on a restart and needs none of Reactors, AMQP authorization or AMQP audit ingestion. Choose the full profile for more than one instance, for Reactors, or when a webhook must survive a restart. Moving up means starting a broker, setting `AXIAM__AMQP__ENABLED=true` with the broker URL, CA and signing key, and only then adding replicas; the deployment guide has the order and the checks for moving either way.",
+      },
+      { type: "h", id: "minimal-footprint", text: "What it saves: the resting footprint" },
+      {
+        type: "p",
+        text: "Measured on 2026-10-05 and published with its method. **At rest, not under load**, on a freshly migrated empty datastore, as the median resident set over a 120 s window that starts a minute after `/ready` first answers `200`:",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["Stack", "axiam-server", "SurrealDB", "RabbitMQ", "Whole stack"],
+        rows: [
+          ["**Minimal** (no broker)", "120.7 MiB", "86.6 MiB", "—", "**207.3 MiB**"],
+          ["Full (with RabbitMQ)", "130.3 MiB", "86.0 MiB", "114.6 MiB", "**330.9 MiB**"],
+        ],
+      },
+      {
+        type: "note",
+        text: "Dropping the broker saves about 124 MiB (37 %). Read the figures with their method: the server ran as the **native release binary** (jemalloc, as the image is built), not as a container, next to SurrealDB (2 CPU / 1 GiB) and RabbitMQ (1 CPU / 512 MiB) containers; the figure is resident-set size, which counts file-backed pages that a container's cgroup accounting largely does not (the anonymous part is 113.5 MiB for the minimal stack and 185.0 MiB for the full one), so it is **not** comparable cell for cell with the under-load, container-averaged whole-stack figures in the benchmark analysis. SurrealDB's share depends on the size of the datastore. Raw samples and the script are in `benchmarks/resting-footprint/`.",
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Deployment guide — Minimal profile (no broker)",
+            href: `${GH_BLOB}/docs/deployment/README.md#minimal-profile-no-broker`,
+            note: "The boot refusals, the `/health` fields, the dead-letter file, the tests skipped by profile and the migration steps.",
+          },
+          {
+            label: "docker-compose.minimal.yml",
+            href: `${GH_BLOB}/docker/docker-compose.minimal.yml`,
+            note: "One SurrealDB, one server, the dead-letter file on a named volume.",
+          },
+        ],
       },
       { type: "h", id: "tls", text: "TLS" },
       {

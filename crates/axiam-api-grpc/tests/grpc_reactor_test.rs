@@ -39,6 +39,7 @@ use axiam_api_grpc::proto::{
     ListReactorsRequest, UpdateReactorRequest,
 };
 use axiam_api_grpc::services::ReactorAdminServiceImpl;
+use axiam_core::models::deployment::DeploymentProfile;
 use axiam_core::models::role::AssignmentScope;
 
 type TestDb = surrealdb::engine::local::Db;
@@ -184,6 +185,19 @@ async fn start_test_server(
     engine: TestEngine,
     auth_config: AuthConfig,
 ) -> (String, tokio::sync::oneshot::Sender<()>) {
+    // SEC-101: this harness stands in for a working transport.
+    start_test_server_with(db, engine, auth_config, true, DeploymentProfile::Full).await
+}
+
+/// As [`start_test_server`], with the transport's availability and the
+/// messaging profile (G-8, D-59) chosen by the test.
+async fn start_test_server_with(
+    db: &Surreal<TestDb>,
+    engine: TestEngine,
+    auth_config: AuthConfig,
+    dispatch_available: bool,
+    profile: DeploymentProfile,
+) -> (String, tokio::sync::oneshot::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let incoming = TcpListenerStream::new(listener);
@@ -195,8 +209,14 @@ async fn start_test_server(
         std::sync::Arc::new(|_tenant_id| {});
 
     let reactor_svc = ReactorAdminServiceServer::with_interceptor(
-        // SEC-101: this harness stands in for a working transport.
-        ReactorAdminServiceImpl::new(reactor_repo, engine, audit_repo, routing_invalidator, true),
+        ReactorAdminServiceImpl::new(
+            reactor_repo,
+            engine,
+            audit_repo,
+            routing_invalidator,
+            dispatch_available,
+        )
+        .with_profile(profile),
         AuthInterceptor::new(auth_config),
     );
 
@@ -435,4 +455,99 @@ async fn update_with_events_set_true_and_an_empty_list_is_refused() {
         .expect_err("replacing events with an empty, explicitly-set list must be refused");
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
+}
+
+// ---------------------------------------------------------------------------
+// G-8 / D-59 — the minimal profile has no reactor transport
+// ---------------------------------------------------------------------------
+
+fn create_request(name: &str, enabled: bool) -> CreateReactorRequest {
+    CreateReactorRequest {
+        name: name.into(),
+        description: String::new(),
+        events: vec!["login.post_auth".into()],
+        mode: "intercept".into(),
+        priority: 0,
+        timeout_ms: None,
+        failure_policy: None,
+        enabled: Some(enabled),
+    }
+}
+
+/// In the minimal profile an ENABLED registration is `FAILED_PRECONDITION`
+/// naming the profile (the REST twin answers `409`); a disabled one — the
+/// operator's way out — is accepted, and so is deleting it.
+#[tokio::test]
+async fn minimal_profile_refuses_an_enabled_registration_with_failed_precondition() {
+    let (db, tenant_id, user_id) = setup().await;
+    grant_all_reactor_permissions(&db, tenant_id, user_id).await;
+    let auth_config = test_auth_config();
+    let token = mint_token(tenant_id, user_id, &auth_config);
+    let engine = make_engine(&db);
+    let (endpoint, _shutdown) =
+        start_test_server_with(&db, engine, auth_config, false, DeploymentProfile::Minimal).await;
+    let mut client = authed_client!(endpoint, token);
+
+    let status = client
+        .create_reactor(create_request("enabled-in-minimal", true))
+        .await
+        .expect_err("an enabled registration must be refused in the minimal profile");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        status.message().contains("minimal profile")
+            && status.message().contains("AXIAM__AMQP__ENABLED=false"),
+        "the refusal names the profile and the switch: {}",
+        status.message()
+    );
+
+    let disabled = client
+        .create_reactor(create_request("disabled-in-minimal", false))
+        .await
+        .expect("a disabled registration is accepted")
+        .into_inner()
+        .reactor
+        .unwrap();
+
+    // Enabling it through an update is refused the same way.
+    let status = client
+        .update_reactor(UpdateReactorRequest {
+            id: disabled.id.clone(),
+            name: None,
+            description: None,
+            events: vec![],
+            events_set: false,
+            mode: None,
+            priority: None,
+            timeout_ms: None,
+            failure_policy: None,
+            enabled: Some(true),
+        })
+        .await
+        .expect_err("enabling must be refused in the minimal profile");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+
+    client
+        .delete_reactor(DeleteReactorRequest { id: disabled.id })
+        .await
+        .expect("deleting is never refused");
+}
+
+/// The control: a build whose transport is merely absent (not the minimal
+/// profile) keeps `UNAVAILABLE`.
+#[tokio::test]
+async fn a_full_profile_without_a_transport_keeps_unavailable() {
+    let (db, tenant_id, user_id) = setup().await;
+    grant_all_reactor_permissions(&db, tenant_id, user_id).await;
+    let auth_config = test_auth_config();
+    let token = mint_token(tenant_id, user_id, &auth_config);
+    let engine = make_engine(&db);
+    let (endpoint, _shutdown) =
+        start_test_server_with(&db, engine, auth_config, false, DeploymentProfile::Full).await;
+    let mut client = authed_client!(endpoint, token);
+
+    let status = client
+        .create_reactor(create_request("enabled-without-transport", true))
+        .await
+        .expect_err("refused");
+    assert_eq!(status.code(), tonic::Code::Unavailable);
 }

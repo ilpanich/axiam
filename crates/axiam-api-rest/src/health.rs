@@ -26,7 +26,7 @@ impl HealthChecker for axiam_db::DbManager {
     }
 }
 
-impl HealthChecker for axiam_db::DbPool {
+impl<C: Connection> HealthChecker for axiam_db::DbPool<C> {
     fn check(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async {
             // Probes every pooled handle so readiness reflects the whole pool
@@ -138,9 +138,22 @@ pub async fn jobs<C: Connection + Clone>(state: web::Data<AppState<C>>) -> HttpR
     HttpResponse::Ok().json(JobsHealthResponse { status, jobs })
 }
 
+/// Response body for `GET /health`.
+///
+/// `profile` and `unavailable` are additive (G-8, D-59): a client that reads
+/// only `status` is unaffected.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct HealthResponse {
     pub status: &'static str,
+    /// The messaging profile this process runs: `full` (RabbitMQ is used) or
+    /// `minimal` (`AXIAM__AMQP__ENABLED=false`, no broker).
+    #[schema(example = "full")]
+    pub profile: &'static str,
+    /// Present only in the `minimal` profile: the capabilities it does not
+    /// provide — `reactors`, `amqp_authz`, `amqp_audit_ingestion` and
+    /// `decision_cache_broadcast`. Absent in `full`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<Vec<&'static str>>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -150,6 +163,10 @@ pub struct ReadyResponse {
 }
 
 /// `GET /health` — liveness probe. Always returns 200.
+///
+/// Also states the deployment profile (`full` | `minimal`) and, in `minimal`,
+/// what that profile does not provide. The state is optional so the route
+/// stays a liveness probe that answers even when mounted without it (`full`).
 #[utoipa::path(
     get,
     path = "/health",
@@ -158,8 +175,13 @@ pub struct ReadyResponse {
         (status = 200, description = "Service is alive", body = HealthResponse),
     )
 )]
-pub async fn health() -> HttpResponse {
-    HttpResponse::Ok().json(HealthResponse { status: "ok" })
+pub async fn health<C: Connection + Clone>(state: Option<web::Data<AppState<C>>>) -> HttpResponse {
+    let profile = state.map(|s| s.deployment_profile).unwrap_or_default();
+    HttpResponse::Ok().json(HealthResponse {
+        status: "ok",
+        profile: profile.as_str(),
+        unavailable: profile.is_minimal().then(|| profile.unavailable().to_vec()),
+    })
 }
 
 /// `GET /ready` — readiness probe. Checks DB connectivity.

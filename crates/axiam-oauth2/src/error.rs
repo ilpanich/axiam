@@ -202,6 +202,10 @@ pub enum OAuth2Error {
              this server does not fetch request objects by reference"
     )]
     RequestUriNotSupported,
+    /// CIBA Core §13 — the `binding_message` is unusable (too long, or carries
+    /// characters that cannot be shown on both devices).
+    #[error("invalid_binding_message: {0}")]
+    InvalidBindingMessage(String),
 }
 
 impl OAuth2Error {
@@ -232,6 +236,7 @@ impl OAuth2Error {
             Self::InvalidRequestUri(_) => "invalid_request_uri",
             Self::RequestNotSupported => "request_not_supported",
             Self::RequestUriNotSupported => "request_uri_not_supported",
+            Self::InvalidBindingMessage(_) => "invalid_binding_message",
         }
     }
 

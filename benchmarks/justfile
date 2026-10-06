@@ -372,12 +372,53 @@ bench-up:
     # ledger promised "see the compose ps+logs dumped above". Diagnosing the
     # alpha25 device-flow cell meant re-running bench-up by hand and reaching
     # for `docker logs` to find the panic that had already happened twice.
-    if ! docker compose -f "$COMPOSE" $OVERRIDE_ARG $PROFILE_ARG up -d --wait $BUILD_ARG; then
+    #
+    # `--wait` is dropped for exactly one case: the native-TLS overlay (p2-tls13
+    # and p3-mtls). That overlay sets `healthcheck: test: ["NONE"]` on
+    # axiam-server, because the server's own self-probe verifies certificates
+    # and would reject the throwaway one — and `docker compose up --wait` REFUSES
+    # a container with no healthcheck ("container bench-axiam-server has no
+    # healthcheck configured"), failing the bring-up of a server that is running
+    # fine. The first conformance run died here, behind a perfectly healthy
+    # process. For that case the host-side readiness gate below is the readiness
+    # check (it was always the one that mattered for TLS), and a container that
+    # exits non-zero during startup is still caught — by `startup_failures`,
+    # polled inside that gate — so a rejected config still fails in seconds with
+    # the same ps+logs dump rather than after the 180 s timeout. p0/p1 keep
+    # `--wait` exactly as before.
+    UP_WAIT="--wait"
+    NO_WAIT=0
+    case "$OVERRIDE_ARG" in
+      *docker-compose.native-tls.yml*) UP_WAIT=""; NO_WAIT=1 ;;
+    esac
+    # BENCH_COMPOSE_OVERLAYS: extra compose files (space-separated, relative to
+    # benchmarks/) layered AFTER the profile's own, axiam target only. Added here
+    # rather than into OVERRIDE_ARG so the native-TLS detection above and the
+    # port pre-flight keep keying on the profile's overlays alone. The FAPI
+    # conformance workflow uses it for targets/axiam/docker-compose.conformance.yml.
+    EXTRA_ARG=""
+    if [ "{{target}}" = "axiam" ] && [ -n "${BENCH_COMPOSE_OVERLAYS:-}" ]; then
+      for f in $BENCH_COMPOSE_OVERLAYS; do EXTRA_ARG="$EXTRA_ARG -f $f"; done
+    fi
+    if ! docker compose -f "$COMPOSE" $OVERRIDE_ARG $EXTRA_ARG $PROFILE_ARG up -d $UP_WAIT $BUILD_ARG; then
       echo "[bench-up] FAILED: a container did not start (see its last lines below)" >&2
       docker compose -f "$COMPOSE" $PROFILE_ARG ps -a >&2 || true
       docker compose -f "$COMPOSE" $PROFILE_ARG logs --tail 40 >&2 || true
       exit 1
     fi
+    # Containers of this stack that exited non-zero (or died). A one-shot that
+    # finished cleanly (surrealdb-init exits 0 by design) is NOT a failure.
+    # Prints "<name> (exit N)" per offender; the status is grep's, so it is true
+    # exactly when there is at least one.
+    startup_failures() {
+      local ids
+      ids="$(docker compose -f "$COMPOSE" $PROFILE_ARG ps -a -q 2>/dev/null)" || return 1
+      [ -n "$ids" ] || return 1
+      # shellcheck disable=SC2086
+      docker inspect $ids 2>/dev/null | jq -r '.[]
+        | select((.State.Status == "exited" and .State.ExitCode != 0) or .State.Status == "dead")
+        | "\(.Name | ltrimstr("/")) (exit \(.State.ExitCode))"' 2>/dev/null | grep .
+    }
 
     # --- Readiness gate --------------------------------------------------------
     # `up -d --wait` only blocks until each container is *running* (or, if it has
@@ -420,6 +461,12 @@ bench-up:
     fi
     # -k: the TLS profiles front a throwaway private CA k6 also can't verify.
     until curl -skf $READY_MTLS -o /dev/null "$READY_URL"; do
+      if [ "$NO_WAIT" = 1 ] && failed="$(startup_failures)"; then
+        echo "[bench-up] FAILED: a container exited during startup: $(echo "$failed" | tr '\n' ' ')" >&2
+        docker compose -f "$COMPOSE" $PROFILE_ARG ps -a >&2 || true
+        docker compose -f "$COMPOSE" $PROFILE_ARG logs --tail 40 >&2 || true
+        exit 1
+      fi
       if [ "$(date +%s)" -ge "$ready_deadline" ]; then
         echo "[bench-up] TIMEOUT: {{target}} did not become ready at $READY_URL" >&2
         docker compose -f "$COMPOSE" $PROFILE_ARG ps >&2 || true
@@ -520,6 +567,31 @@ bench-down:
              | sed 's/^\${//; s/:?$//' | sort -u)
     docker compose -f "$COMPOSE" --profile tls down -v || \
       docker compose -f "$COMPOSE" down -v
+
+# Dump a target's compose logs: every service, or only the ones named.
+#
+#   just target=axiam bench-logs                      # last 500 lines, all services
+#   just target=axiam bench-logs 200 axiam-server     # last 200 lines of one
+#
+# `docker compose logs` interpolates the WHOLE compose file, so every required
+# (`${VAR:?…}`) secret has to resolve even though reading a log needs none of
+# them — a bare `docker compose logs` in CI failed with "required variable
+# AXIAM__DB__USERNAME is missing a value" and the failure artifact held an empty
+# server log. Same remedy as `bench-down`: derive the required names FROM the
+# compose file and fill any that are unset with the placeholder `x`. A real
+# value already in the environment wins, and nothing here reads, sources or
+# prints a real secret; the output is exactly what the containers logged.
+#
+# Dump a target's compose logs (all services, or the ones named).
+bench-logs tail="500" *services:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    COMPOSE="targets/{{target}}/docker-compose.yml"
+    while read -r v; do
+      if [ -n "${v:-}" ]; then export "$v=${!v:-x}"; fi
+    done < <(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:\?' "$COMPOSE" \
+             | sed 's/^\${//; s/:?$//' | sort -u)
+    docker compose -f "$COMPOSE" --profile tls logs --no-color --tail "{{tail}}" {{services}}
 
 # Aggregate everything under results/ into results/report.md.
 bench-report:

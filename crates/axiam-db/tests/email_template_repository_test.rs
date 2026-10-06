@@ -206,3 +206,31 @@ async fn list_templates_orders_by_kind_and_covers_multiple_kinds() {
     assert!(kinds.contains(&TemplateKind::DeletionScheduled));
     assert!(kinds.contains(&TemplateKind::ExportReady));
 }
+
+/// T23.7.2 — a customised CIBA approval mail can be stored at both scopes: the
+/// `email_template.kind` assertion (v82) admits `ciba_approval`.
+#[tokio::test]
+async fn the_ciba_approval_kind_can_be_stored_at_both_scopes() {
+    let (db, org_id, tenant_id) = setup().await;
+    let repo = SurrealEmailTemplateRepository::new(db);
+
+    repo.set_org_template(org_id, input(TemplateKind::CibaApproval))
+        .await
+        .unwrap();
+    repo.set_tenant_template(tenant_id, input(TemplateKind::CibaApproval))
+        .await
+        .unwrap();
+
+    assert!(
+        repo.get_org_template(org_id, TemplateKind::CibaApproval)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.get_tenant_template(tenant_id, TemplateKind::CibaApproval)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

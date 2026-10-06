@@ -55,8 +55,8 @@ use axiam_db::repository::{
     SurrealUserRepository,
 };
 use axiam_db::{
-    SurrealCaCertificateRepository, SurrealCertificateRepository, seed_default_roles,
-    seed_permissions,
+    SharedRateLimitConfig, SharedRateLimitCounter, SurrealCaCertificateRepository,
+    SurrealCertificateRepository, seed_default_roles, seed_permissions,
 };
 use axiam_pki::{CaService, CertService, PkiConfig};
 use surrealdb::Surreal;
@@ -282,16 +282,29 @@ macro_rules! app {
                     Arc::new(SurrealRoleRepository::new($db.clone()))
                         as Arc<dyn PrincipalReachResolver>,
                 ))
-                .app_data(web::Data::new(AppState::for_test(
-                    $db.clone(),
-                    $auth.clone(),
-                )))
+                .app_data(web::Data::new(sweep_state(&$db, &$auth)))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
         )
         .await
     };
+}
+
+/// The application state the sweep runs against, with the cross-replica rate
+/// limiter switched off; each route's in-memory governor still applies.
+///
+/// The shared counter seeds a key it first sees partway through a wall-clock
+/// minute with up to 90% of the bucket's limit (`COLD_ENTRY_BURST_FRACTION`,
+/// for limits of 20 and above). The sweep sends two requests to every route,
+/// so a shared bucket's third route reached in the last seconds of a minute
+/// answered 429 (`DELETE /tenants/{tenant_id}/directory`, the
+/// `directory_config` bucket at 30): a flake by time of day, in a file that
+/// tests the audience refusal and RBAC, not the limiter.
+fn sweep_state(db: &Surreal<TestDb>, auth: &AuthConfig) -> AppState<TestDb> {
+    let mut state = AppState::for_test(db.clone(), auth.clone());
+    state.shared_rate_limit = SharedRateLimitCounter::disabled(SharedRateLimitConfig::default());
+    state
 }
 
 /// A bearer-only request: no cookie, so no CSRF token is needed (T-200).
@@ -483,6 +496,49 @@ async fn the_route_map_admits_a_service_account_exactly_on_the_d5_families() {
         guarded >= bodyless,
         "only {guarded} admitted routes reached the RBAC guard; {bodyless} have no body"
     );
+}
+
+/// G-6 / T23.6.4: the outbound SCIM target registry holds a credential to an
+/// outbound endpoint and decides where a tenant's people are sent, so its family
+/// is human-only and each of its six routes refuses a service account — whatever
+/// role it holds — with the audience refusal, before RBAC is asked. The sweep
+/// above covers the routes by derivation; this pins the decision by name.
+#[actix_rt::test]
+async fn the_scim_target_registry_is_human_only_and_refuses_every_service_account() {
+    assert!(HUMAN_ONLY_FAMILIES.contains(&"scim_targets"));
+    assert!(!M2M_MANAGEMENT_FAMILIES.contains(&"scim_targets"));
+    let w = world().await;
+    let auth = test_auth_config();
+    let authz = engine(&w.db);
+    let admin = service_account(&w.db, w.tenant_id, Some("super-admin")).await;
+    let token = service_account_token(&auth, admin, w.tenant_id, w.org_id);
+    let app = app!(w.db, auth, authz);
+    let id = Uuid::new_v4();
+    for (method, uri) in [
+        (Method::GET, "/api/v1/scim-targets".to_owned()),
+        (Method::POST, "/api/v1/scim-targets".to_owned()),
+        (Method::GET, format!("/api/v1/scim-targets/{id}")),
+        (Method::PUT, format!("/api/v1/scim-targets/{id}")),
+        (Method::DELETE, format!("/api/v1/scim-targets/{id}")),
+        (Method::POST, format!("/api/v1/scim-targets/{id}/reconcile")),
+    ] {
+        let (status, body) = call(&app, bearer(&method, &uri, &token)).await;
+        assert_eq!(status, 401, "{method} {uri}: {body}");
+        assert_eq!(body["message"], AUDIENCE_REFUSAL, "{method} {uri}");
+    }
+    // And the spec lists no service-account scheme on them.
+    let spec = serde_json::to_value(axiam_api_rest::openapi::api_doc()).unwrap();
+    for (path, item) in spec["paths"].as_object().unwrap() {
+        if !path.starts_with("/api/v1/scim-targets") {
+            continue;
+        }
+        for (method, op) in item.as_object().unwrap() {
+            assert!(
+                !security_schemes(op).contains("service_account"),
+                "{method} {path} advertises the service-account scheme"
+            );
+        }
+    }
 }
 
 /// The out-of-scope direction for the routes the permission map cannot see:

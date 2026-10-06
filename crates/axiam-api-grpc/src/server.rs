@@ -50,6 +50,7 @@ use std::time::Duration;
 
 use axiam_auth::config::AuthConfig;
 use axiam_authz::AuthorizationEngine;
+use axiam_core::models::deployment::DeploymentProfile;
 use axiam_core::repository::{
     AuditLogRepository, GroupRepository, PermissionRepository, ReactorRepository,
     ResourceRepository, RoleRepository, ScopeRepository, UserRepository,
@@ -254,6 +255,10 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     // composition root. See [`GrpcTls`] for why it is a value and not an env
     // read, and the module docs for what changed.
     tls: GrpcTls,
+    // G-8 / D-59 — the messaging profile. Only the reactor-administration
+    // service reads it: in the minimal profile (no broker) enabling a
+    // registration is `FAILED_PRECONDITION` naming the profile.
+    profile: DeploymentProfile,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     R: RoleRepository + 'static,
@@ -349,7 +354,8 @@ where
             reactor_audit_repo,
             reactor_routing_invalidator,
             reactor_dispatch_available,
-        ),
+        )
+        .with_profile(profile),
         AuthInterceptor::new(auth_config),
     );
 

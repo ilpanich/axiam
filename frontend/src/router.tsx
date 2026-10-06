@@ -30,6 +30,7 @@ import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { AttestationPolicyPage } from "@/pages/settings/AttestationPolicyPage";
 import { DirectoryPage } from "@/pages/directory/DirectoryPage";
 import { SamlPage } from "@/pages/saml/SamlPage";
+import { ScimTargetsPage } from "@/pages/scim-targets/ScimTargetsPage";
 import { ProfilePage } from "@/pages/profile/ProfilePage";
 import { ChangePasswordPage } from "@/pages/profile/ChangePasswordPage";
 import { MfaManagementPage } from "@/pages/profile/MfaManagementPage";
@@ -39,6 +40,7 @@ import { VerifyEmailPage } from "@/pages/auth/VerifyEmailPage";
 import { MfaSetupPage } from "@/pages/auth/MfaSetupPage";
 import { SsoCallbackPage } from "@/pages/auth/SsoCallbackPage";
 import { DevicePage } from "@/pages/device/DevicePage";
+import { CibaApprovalPage } from "@/pages/ciba/CibaApprovalPage";
 import { ConsentPage } from "@/pages/ConsentPage";
 import { PrivacyPage } from "@/pages/privacy/PrivacyPage";
 
@@ -317,6 +319,16 @@ export const router = createBrowserRouter([
         ],
       },
       {
+        element: <ProtectedRoute permission="scim_targets:read" />,
+        children: [
+          {
+            path: "scim-targets",
+            element: <ScimTargetsPage />,
+            handle: { crumb: "SCIM Targets" },
+          },
+        ],
+      },
+      {
         element: <ProtectedRoute permission="webauthn_policy:read" />,
         children: [
           {
@@ -349,6 +361,17 @@ export const router = createBrowserRouter([
         path: "device",
         element: <DevicePage />,
         handle: { crumb: "Connect a Device" },
+      },
+      {
+        // G-7 / T23.7.2 -- the user's half of a CIBA request, reached from the
+        // link in the notification mail. No permission gate: deciding a request
+        // addressed to oneself needs only an authenticated session, the same
+        // self-service class as /device. A visitor who is not signed in is sent
+        // to /login by AppLayout and brought back here (the `return_to` it
+        // builds is validated by `sanitizeReturnTo`).
+        path: "ciba/approve",
+        element: <CibaApprovalPage />,
+        handle: { crumb: "Approve a sign-in" },
       },
       {
         // W7 / X7 G8 -- the OpenID Connect consent screen. Inside AppLayout

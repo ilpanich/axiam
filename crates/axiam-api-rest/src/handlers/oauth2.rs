@@ -2,6 +2,7 @@
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_auth::config::AuthConfig;
+use axiam_core::models::ciba::CIBA_GRANT_TYPE;
 use axiam_core::models::uma::{UMA_CLAIM_TOKEN_FORMAT, UMA_TICKET_GRANT_TYPE};
 use axiam_core::repository::{
     OAuth2ClientRepository, SessionClientRepository, SessionRepository, UserRepository,
@@ -2268,12 +2269,27 @@ async fn token_inner<C: Connection + Clone>(
         return handle_uma_ticket(tenant_id, form, &state, &authz, &ctx).await;
     }
 
-    match state
-        .oauth2
-        .token_service
-        .exchange(tenant_id, form, &ctx)
-        .await
-    {
+    // G-7 / CIBA Core §10.1. Dispatched here, after the shared context, the
+    // DPoP verification and the public-client bucket, so the CIBA grant is
+    // counted by every limiter this endpoint has (the route's governor and
+    // shared counter included) and its client-authentication failures reach
+    // the same `oauth2.client_auth_failed` audit below — the Keycloak 26.7.x
+    // lesson is a limiter or a lockout that forgets one grant. It shares the
+    // rest of this arm with the three grants `exchange` serves.
+    let result = if grant_type == CIBA_GRANT_TYPE {
+        state
+            .oauth2
+            .token_service
+            .exchange_ciba(tenant_id, form, &ctx, state.oauth2.ciba_service.requests())
+            .await
+    } else {
+        state
+            .oauth2
+            .token_service
+            .exchange(tenant_id, form, &ctx)
+            .await
+    };
+    match result {
         Ok(resp) => {
             let exchange_us = started.elapsed().as_micros() as u64;
 
@@ -2365,7 +2381,9 @@ async fn token_inner<C: Connection + Clone>(
 /// deferred to `PresentedCertificate::identity`, which only the
 /// `tls_client_auth` branch calls, so a deployment running mTLS with ordinary
 /// secret-authenticating clients does not pay for a DN nobody reads.
-fn token_request_context(req: &HttpRequest) -> Result<TokenRequestContext, Box<HttpResponse>> {
+pub(crate) fn token_request_context(
+    req: &HttpRequest,
+) -> Result<TokenRequestContext, Box<HttpResponse>> {
     // W8 — RFC 6749 §2.3.1. The header is read here and decoded by
     // `axiam_oauth2::client_secret_basic`, so this crate owns "where the bytes
     // came from" and that crate owns "what they mean". A malformed header is
@@ -2478,7 +2496,7 @@ fn basic_credentials_from_request(
 /// which is also why it survives every early return inside one.
 /// `None` means "the client did not authenticate through the `Authorization`
 /// header", and the endpoint's existing `Bearer realm="axiam"` stands.
-fn client_auth_challenge(req: &HttpRequest) -> Option<&'static str> {
+pub(crate) fn client_auth_challenge(req: &HttpRequest) -> Option<&'static str> {
     use actix_web::http::header::AUTHORIZATION;
     let raw = req.headers().get(AUTHORIZATION)?.to_str().ok()?;
     // Deliberately keyed on the *scheme*, not on whether the credentials
@@ -2499,7 +2517,7 @@ fn client_auth_challenge(req: &HttpRequest) -> Option<&'static str> {
 /// Nothing else about the response is touched, and a non-401 is returned
 /// unchanged — a challenge on a 200 or a 400 would be a protocol error of its
 /// own.
-fn with_client_auth_challenge(
+pub(crate) fn with_client_auth_challenge(
     mut resp: HttpResponse,
     challenge: Option<&'static str>,
 ) -> HttpResponse {
@@ -2792,7 +2810,7 @@ fn dpop_error_response(error: &str, description: &str, nonce: Option<String>) ->
 ///    forwarded value is the useful one, but here anyone can assert it, and an
 ///    operator who blocks a forged IP has been made to act against the wrong
 ///    host.
-async fn append_client_auth_failure_audit<C: Connection + Clone>(
+pub(crate) async fn append_client_auth_failure_audit<C: Connection + Clone>(
     tenant_repo: &SurrealTenantRepository<C>,
     audit_repo: &SurrealAuditLogRepository<C>,
     tenant_id: Uuid,
@@ -4843,7 +4861,7 @@ fn authorize_error_response(req: &HttpRequest, e: &OAuth2Error) -> HttpResponse 
         ))
 }
 
-fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
+pub(crate) fn build_oauth2_error_response(e: &OAuth2Error) -> HttpResponse {
     let status = match e {
         OAuth2Error::InvalidClient(_) => actix_web::http::StatusCode::UNAUTHORIZED,
         OAuth2Error::ServerError(_) => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,

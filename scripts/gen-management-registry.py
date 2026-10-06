@@ -72,6 +72,8 @@ EXCLUDED_TAGS: dict[str, str] = {
                     "stream management API a relying party's receiver calls with its own "
                     "client-credentials token (ssf.manage), not administration",
     "device": "§14 device-grant user-interaction endpoints",
+    "ciba": "\u00a733.9 CIBA user-approval endpoints -- the signed-in user's own page over their own "
+            "pending request, which an SDK never drives, never administration",
 }
 
 # Individual routes excluded from an otherwise-included tag.
@@ -459,6 +461,21 @@ NAMESPACES: dict[str, dict[str, Any]] = {
             ("delete_stream", "DELETE", "/api/v1/tenants/{tenant_id}/ssf/streams/{stream_id}"),
         ],
     },
+    "scim_targets": {
+        "doc": "A tenant's outbound SCIM targets (CONTRACT §31): the downstream "
+               "SCIM 2.0 service providers AXIAM pushes the tenant's users and "
+               "groups to, each with its delivery state. The credential AXIAM "
+               "pushes with is write-only. Deleting a target does not deprovision "
+               "anything downstream.",
+        "operations": [
+            ("list", "GET", "/api/v1/scim-targets"),
+            ("create", "POST", "/api/v1/scim-targets"),
+            ("get", "GET", "/api/v1/scim-targets/{id}"),
+            ("update", "PUT", "/api/v1/scim-targets/{id}"),
+            ("delete", "DELETE", "/api/v1/scim-targets/{id}"),
+            ("reconcile", "POST", "/api/v1/scim-targets/{id}/reconcile"),
+        ],
+    },
     "settings": {
         "doc": "Effective settings, and the organization/tenant layers they "
                "resolve from.",
@@ -587,6 +604,12 @@ SENSITIVE_FIELDS: frozenset[tuple[str, str]] = frozenset({
     # at rest (D-49) and on no response. `SsfStreamInput` is the body of both
     # `ssf.create_stream` and `ssf.update_stream`.
     ("SsfStreamInput", "authorization_header"),
+    # T23.6.4 / CONTRACT §31.5. The bearer token or OAuth2 client secret AXIAM
+    # presents to a downstream SCIM service provider: a credential to a third
+    # party, write-only, sealed at rest (D-57) and on no response.
+    # `ScimTargetInput` is the body of both `scim_targets.create` and
+    # `scim_targets.update`.
+    ("ScimTargetInput", "credential"),
 })
 
 

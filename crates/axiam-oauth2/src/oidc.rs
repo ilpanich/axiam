@@ -36,6 +36,7 @@ use uuid::Uuid;
 // | `introspection_endpoint` | client authentication (RFC 7662 §2.1) |
 // | `device_authorization_endpoint` | client authentication (RFC 8628 §3.1) |
 // | `pushed_authorization_request_endpoint` | client authentication (RFC 9126 §2) |
+// | `backchannel_authentication_endpoint` | client authentication (CIBA Core §7.1) — a `tls_client_auth` CIBA client, the FAPI-CIBA shape, has no other way to present its certificate (D-61; contract §21.3.1 vector A amended to seven) |
 // | `userinfo_endpoint` | a `cnf`-bound access token is refused unless presented on the connection it is bound to |
 //
 // Three endpoints AXIAM publishes are absent, and their absence is the design
@@ -68,6 +69,8 @@ pub struct MtlsEndpointAliases {
     pub device_authorization_endpoint: String,
     /// RFC 9126 §2 — authenticates the client.
     pub pushed_authorization_request_endpoint: String,
+    /// CIBA Core §7.1 — authenticates the client.
+    pub backchannel_authentication_endpoint: String,
 }
 
 /// The authentication context class reference for a single-factor login
@@ -107,6 +110,16 @@ pub struct OidcDiscoveryDocument {
     /// per-client answer here would leak one client's posture to every other
     /// reader of the document.
     pub require_pushed_authorization_requests: bool,
+    /// CIBA Core §4 — G-7. Advertised unconditionally because the endpoint
+    /// is always mounted; whether a client may use it is its registration.
+    pub backchannel_authentication_endpoint: String,
+    /// CIBA Core §4 — `poll` and `ping`. `push` is not offered.
+    pub backchannel_token_delivery_modes_supported: Vec<String>,
+    /// CIBA Core §4 — `false`: AXIAM accepts no `user_code`.
+    pub backchannel_user_code_parameter_supported: bool,
+    /// CIBA Core §4 — the algorithms a signed authentication request
+    /// (§7.1.1) may use: `PS256`, `ES256`, `EdDSA`. Never `none`.
+    pub backchannel_authentication_request_signing_alg_values_supported: Vec<String>,
     /// OIDC RP-Initiated Logout 1.0 §3 — B5.
     pub end_session_endpoint: String,
     /// Back-Channel Logout 1.0 §3.
@@ -353,6 +366,10 @@ fn build_mtls_aliases(
             endpoint!(base, "/oauth2/par"),
             tenant_id,
         ),
+        backchannel_authentication_endpoint: tenant_scoped(
+            endpoint!(base, "/oauth2/bc-authorize"),
+            tenant_id,
+        ),
     }))
 }
 
@@ -452,6 +469,15 @@ pub fn build_discovery_document_for(
             tenant_id,
         ),
         require_pushed_authorization_requests: false,
+        // G-7 — CIBA Core §4.
+        backchannel_authentication_endpoint: tenant_scoped(
+            endpoint!(issuer, "/oauth2/bc-authorize"),
+            tenant_id,
+        ),
+        backchannel_token_delivery_modes_supported: vec!["poll".into(), "ping".into()],
+        backchannel_user_code_parameter_supported: false,
+        backchannel_authentication_request_signing_alg_values_supported:
+            crate::ciba_signed_request::supported_algorithm_names(),
         end_session_endpoint: tenant_scoped(format!("{issuer}/oauth2/end_session"), tenant_id),
         backchannel_logout_supported: true,
         backchannel_logout_session_supported: true,
@@ -574,6 +600,9 @@ pub fn build_discovery_document_for(
             // of band; whether a given client MAY exchange is still its own
             // registration's business.
             "urn:ietf:params:oauth:grant-type:token-exchange".into(),
+            // G-7 / CIBA Core §10.1; asserted against
+            // `axiam_core::models::ciba::CIBA_GRANT_TYPE` in the tests.
+            "urn:openid:params:grant-type:ciba".into(),
         ],
         authorization_response_iss_parameter_supported: true,
         request_parameter_supported: false,
@@ -853,6 +882,45 @@ mod tests {
             .expect("valid inputs build a document")
     }
 
+    /// G-7 — discovery lists exactly what CIBA implements: the endpoint (with
+    /// the tenant, like every client-authenticating endpoint), poll and ping,
+    /// no user code, the grant type, the three signing algorithms a signed
+    /// authentication request may use (D-61) — and the endpoint as an mTLS
+    /// alias, since a `tls_client_auth` CIBA client authenticates there.
+    #[test]
+    fn discovery_lists_exactly_the_ciba_that_is_implemented() {
+        let tenant_doc = doc_for_tenant(Some(MTLS));
+        let doc = &tenant_doc;
+        assert_eq!(
+            doc.backchannel_authentication_endpoint,
+            format!("{ISSUER}/oauth2/bc-authorize?tenant_id={TENANT}")
+        );
+        assert_eq!(
+            doc.backchannel_token_delivery_modes_supported,
+            ["poll", "ping"]
+        );
+        assert!(!doc.backchannel_user_code_parameter_supported);
+        assert!(
+            doc.grant_types_supported
+                .iter()
+                .any(|g| g == axiam_core::models::ciba::CIBA_GRANT_TYPE)
+        );
+        let json = serde_json::to_value(doc).unwrap();
+        assert_eq!(
+            json["backchannel_authentication_request_signing_alg_values_supported"],
+            serde_json::json!(["PS256", "ES256", "EdDSA"])
+        );
+        assert_eq!(
+            json["mtls_endpoint_aliases"]["backchannel_authentication_endpoint"],
+            format!("{MTLS}/oauth2/bc-authorize?tenant_id={TENANT}")
+        );
+        // The root form carries no tenant.
+        assert_eq!(
+            super::tests::doc(None).backchannel_authentication_endpoint,
+            format!("{ISSUER}/oauth2/bc-authorize")
+        );
+    }
+
     /// The endpoints that authenticate a **client** all take a required
     /// `tenant_id`, and `/oauth2/authorize` needs one for a request with no
     /// principal — which is every browser arriving from a relying party.
@@ -876,6 +944,10 @@ mod tests {
             (
                 "pushed_authorization_request_endpoint",
                 &doc.pushed_authorization_request_endpoint,
+            ),
+            (
+                "backchannel_authentication_endpoint",
+                &doc.backchannel_authentication_endpoint,
             ),
             ("end_session_endpoint", &doc.end_session_endpoint),
         ] {
@@ -914,16 +986,18 @@ mod tests {
     }
 
     /// Contract §21.3.1 vector A pins a member set, and an SDK that pins it
-    /// fails against a server that grows a seventh. The six here are the
+    /// fails against a server that grows an eighth. The seven here are the
     /// endpoints where reaching the mTLS host is meaningful — the server
     /// authenticates the client there (§2), or a certificate-bound token is
     /// presented there (§3.2) — and the three absent ones are absent by
-    /// design, not by omission.
+    /// design, not by omission. The seventh, CIBA's
+    /// `backchannel_authentication_endpoint`, joined with D-61 (contract 1.58,
+    /// vector A amended in place).
     ///
     /// This asserts the **serialised** object rather than the struct, because
     /// what an SDK pins is the JSON.
     #[test]
-    fn the_alias_object_has_exactly_the_six_members_the_contract_names() {
+    fn the_alias_object_has_exactly_the_seven_members_the_contract_names() {
         let doc = doc_for_tenant(Some(MTLS));
         let json = serde_json::to_value(&doc).expect("document serialises");
         let mut members: Vec<&str> = json["mtls_endpoint_aliases"]
@@ -936,6 +1010,7 @@ mod tests {
         assert_eq!(
             members,
             vec![
+                "backchannel_authentication_endpoint",
                 "device_authorization_endpoint",
                 "introspection_endpoint",
                 "pushed_authorization_request_endpoint",
@@ -943,7 +1018,7 @@ mod tests {
                 "token_endpoint",
                 "userinfo_endpoint",
             ],
-            "contract §21.3.1 vector A pins this set; a seventh member breaks \
+            "contract §21.3.1 vector A pins this set; an eighth member breaks \
              every SDK that pinned it, and the three front-channel endpoints \
              must never appear"
         );
@@ -1010,6 +1085,7 @@ mod tests {
                 &aliases.device_authorization_endpoint,
             ),
             ("par", &aliases.pushed_authorization_request_endpoint),
+            ("bc-authorize", &aliases.backchannel_authentication_endpoint),
         ] {
             assert!(
                 url.starts_with(MTLS) && url.ends_with(&expected),
@@ -1231,6 +1307,10 @@ mod tests {
             aliases.pushed_authorization_request_endpoint,
             "https://mtls.auth.example.com/oauth2/par"
         );
+        assert_eq!(
+            aliases.backchannel_authentication_endpoint,
+            "https://mtls.auth.example.com/oauth2/bc-authorize"
+        );
     }
 
     /// The front-channel and public endpoints are absent by construction — the
@@ -1238,7 +1318,7 @@ mod tests {
     /// what a client actually reads, so adding a field later is a deliberate
     /// act rather than a silent one.
     #[test]
-    fn aliases_carry_exactly_the_six_intended_keys() {
+    fn aliases_carry_exactly_the_seven_intended_keys() {
         let doc = doc(Some(MTLS));
         let json = serde_json::to_value(&doc).expect("document serialises");
         let aliases = json["mtls_endpoint_aliases"]
@@ -1250,6 +1330,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "backchannel_authentication_endpoint",
                 "device_authorization_endpoint",
                 "introspection_endpoint",
                 "pushed_authorization_request_endpoint",
@@ -1292,6 +1373,10 @@ mod tests {
             (
                 &doc.pushed_authorization_request_endpoint,
                 &aliases.pushed_authorization_request_endpoint,
+            ),
+            (
+                &doc.backchannel_authentication_endpoint,
+                &aliases.backchannel_authentication_endpoint,
             ),
         ] {
             let top_path = top

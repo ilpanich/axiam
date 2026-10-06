@@ -840,6 +840,7 @@ async fn seed_client(
             browser_sso: false,
             allowed_resources: Vec::new(),
             managed_by,
+            ciba: Default::default(),
         })
         .await
         .expect("seed client");
@@ -1310,6 +1311,7 @@ fn the_sweep_decision_reads_last_authorized_then_created() {
         last_authorized_at: authorized_days.map(|d| now - chrono::Duration::days(d)),
         created_at: now - chrono::Duration::days(created_days),
         updated_at: now,
+        ciba: Default::default(),
     };
 
     let window = |days| DcrSweepWindow {
@@ -1395,6 +1397,7 @@ fn the_second_clock_reads_never_authorized_in_anonymous_mode_only() {
         last_authorized_at: authorized_days.map(|d| now - chrono::Duration::days(d)),
         created_at: now - chrono::Duration::seconds(age_secs),
         updated_at: now,
+        ciba: Default::default(),
     };
     let hour = i64::from(DCR_UNAUTHORIZED_CLIENT_TTL_SECS);
     let window = |mode| DcrSweepWindow { days: 30, mode };

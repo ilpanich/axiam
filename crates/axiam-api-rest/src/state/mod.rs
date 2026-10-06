@@ -203,6 +203,14 @@ pub type DeviceAuthorizationServiceT<C> = DeviceAuthorizationService<
     SurrealUserRepository<C>,
 >;
 
+/// G-7 — the CIBA service: `bc-authorize` and the approval API T23.7.2's
+/// identity pages call. The token endpoint redeems through
+/// `TokenService::exchange_ciba`, handed this service's request store.
+pub type CibaServiceT<C> = axiam_oauth2::ciba::CibaService<
+    axiam_db::SurrealCibaRequestRepository<C>,
+    SurrealUserRepository<C>,
+>;
+
 /// B3 — RFC 8693 token exchange. Needs only the tenant repository: the
 /// exchanging client is authenticated by `TokenService::authenticate_client`
 /// and handed in, so there is exactly one secret-verification path in the
@@ -294,6 +302,11 @@ pub struct AppState<C: Connection + Clone> {
     /// `GET /health/jobs` so a job that silently stopped running is
     /// alertable rather than merely logged.
     pub job_health: Arc<dyn crate::health::JobHealthReporter>,
+    /// G-8 / D-59: whether this process runs with a broker (`full`) or without
+    /// one (`minimal`, `AXIAM__AMQP__ENABLED=false`). Read by `GET /health`
+    /// (`profile`, `unavailable`) and by the reactor-administration routes,
+    /// which answer `409` rather than `503` in the minimal profile.
+    pub deployment_profile: axiam_core::models::deployment::DeploymentProfile,
     pub audit_repo: SurrealAuditLogRepository<C>,
     pub org_repo: SurrealOrganizationRepository<C>,
     pub tenant_repo: SurrealTenantRepository<C>,
@@ -422,6 +435,10 @@ pub struct AppState<C: Connection + Clone> {
     ///
     /// See [`bundles::SsfState`].
     pub ssf: bundles::SsfState<C>,
+    /// The outbound SCIM target registry (G-6, T23.6.4).
+    ///
+    /// See [`bundles::ScimTargetsState`].
+    pub scim_targets: bundles::ScimTargetsState<C>,
 }
 
 /// Assemble the OPAQUE server keys, requiring **both** or neither.
@@ -517,10 +534,12 @@ impl<C: Connection + Clone> AppState<C> {
     }
 
     /// Dispatch a domain event to any webhooks subscribed to `event_type` in
-    /// `tenant_id` (CQ-B22). Best-effort: if no AMQP publisher is wired
-    /// (`webhook_publisher` is `None`, e.g. tests or AMQP disabled) this is a
-    /// no-op, and publish failures inside `emit` are logged, never propagated —
-    /// a webhook side effect must not fail the originating API request.
+    /// `tenant_id` (CQ-B22). Best-effort: if no publisher is wired
+    /// (`webhook_publisher` is `None`, e.g. tests) this is a no-op, and
+    /// publish failures inside `emit` are logged, never propagated — a webhook
+    /// side effect must not fail the originating API request. The publisher is
+    /// the `OutboundPublisher` port: the AMQP one in the full profile, the
+    /// in-process dispatcher in the minimal one (G-8).
     pub async fn emit_webhook(
         &self,
         tenant_id: uuid::Uuid,
@@ -713,6 +732,26 @@ impl<C: Connection + Clone> AppState<C> {
             oauth2_client_repo.clone(),
             SurrealPushedAuthRequestRepository::new(db.clone()),
         );
+        // G-7: no sealing key in a test harness, so a ping-mode request is
+        // refused as on a deployment without one; a test that needs ping
+        // replaces this field.
+        // D-61: signed authentication requests are verified against the
+        // client's registered keys through the same JWKS cache the app's
+        // federation and client-assertion paths use, and their `jti` spent in
+        // the proof-replay table.
+        let jwks_cache = Arc::new(JwksCache::new());
+        let ciba_service = axiam_oauth2::ciba::CibaService::new(
+            axiam_db::SurrealCibaRequestRepository::new(db.clone(), None),
+            user_repo.clone(),
+            auth_config.jwt_public_key_pem.clone(),
+        )
+        .with_signed_request_verifier(Arc::new(
+            axiam_oauth2::ciba_signed_request::JwksSignedRequestVerifier::new(
+                (*jwks_cache).clone(),
+                reqwest::Client::new(),
+                proof_replay_repo.clone(),
+            ),
+        ));
         let device_authorization_service = DeviceAuthorizationService::new(
             device_grant_repo.clone(),
             oauth2_client_repo.clone(),
@@ -755,6 +794,7 @@ impl<C: Connection + Clone> AppState<C> {
             db: db.clone(),
             health_checker: Arc::new(crate::health::AlwaysHealthy),
             job_health: Arc::new(crate::health::NoJobs),
+            deployment_profile: axiam_core::models::deployment::DeploymentProfile::Full,
             audit_repo: SurrealAuditLogRepository::new(db.clone()),
             org_repo: SurrealOrganizationRepository::new(db.clone()),
             tenant_repo,
@@ -783,7 +823,7 @@ impl<C: Connection + Clone> AppState<C> {
             opaque_setup_repo: SurrealOpaqueServerSetupRepository::new(db.clone()),
             opaque_server: opaque_keys.map(OpaqueServer::new),
             http_client: reqwest::Client::new(),
-            jwks_cache: Arc::new(JwksCache::new()),
+            jwks_cache,
             crypto_semaphore,
             // Tests get a real, env-configured counter over the same
             // in-memory DB, so the shared-store layer behaves in tests
@@ -847,6 +887,8 @@ impl<C: Connection + Clone> AppState<C> {
                 authorize_service,
                 token_service,
                 device_authorization_service,
+                ciba_service,
+                ciba_notifier: Arc::new(axiam_core::models::ciba::NoopCibaUserNotifier),
                 token_exchange_service,
                 par_service,
                 permission_ticket_repo: SurrealPermissionTicketRepository::new(db.clone()),
@@ -928,6 +970,14 @@ impl<C: Connection + Clone> AppState<C> {
                     poll_waiters: Arc::default(),
                     gate,
                 }
+            },
+            // No sealing key and no reconciliation trigger: a target cannot be
+            // stored and *reconcile now* answers 503, as on a deployment
+            // without either; a test that needs them replaces this field.
+            scim_targets: bundles::ScimTargetsState {
+                target_repo: axiam_db::SurrealScimTargetRepository::new(db.clone(), None),
+                state_repo: axiam_db::SurrealScimTargetStateRepository::new(db.clone()),
+                reconcile: None,
             },
         }
     }

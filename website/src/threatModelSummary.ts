@@ -53,11 +53,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.31.0",
+ "version": "2.35.0",
  "diagramCount": 9,
- "total": 406,
- "open": 17,
- "mitigated": 389,
+ "total": 447,
+ "open": 21,
+ "mitigated": 426,
  "areas": [
   {
    "id": 0,
@@ -74,8 +74,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 60,
-   "open": 0
+   "total": 85,
+   "open": 1
   },
   {
    "id": 3,
@@ -98,14 +98,14 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "total": 40,
-   "open": 3
+   "total": 55,
+   "open": 5
   },
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 28,
-   "open": 5
+   "total": 29,
+   "open": 6
   },
   {
    "id": 8,
@@ -117,33 +117,33 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 92,
+   "total": 98,
    "open": 4
   },
   {
    "name": "Tampering",
-   "total": 81,
+   "total": 88,
    "open": 2
   },
   {
    "name": "Repudiation",
-   "total": 11,
-   "open": 0
+   "total": 15,
+   "open": 2
   },
   {
    "name": "Information disclosure",
-   "total": 93,
+   "total": 105,
    "open": 6
   },
   {
    "name": "Denial of service",
-   "total": 48,
-   "open": 3
+   "total": 55,
+   "open": 4
   },
   {
    "name": "Elevation of privilege",
-   "total": 81,
-   "open": 2
+   "total": 86,
+   "open": 3
   }
  ],
  "severities": [
@@ -154,17 +154,17 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 174,
-   "open": 8
+   "total": 187,
+   "open": 9
   },
   {
    "name": "Medium",
-   "total": 162,
-   "open": 6
+   "total": 185,
+   "open": 9
   },
   {
    "name": "Low",
-   "total": 29,
+   "total": 34,
    "open": 1
   }
  ],
@@ -208,6 +208,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "PKI, certificates & IoT device identity",
    "element": "IoT device",
    "residualRisk": "Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM limits the blast radius with per-device certificates, a maximum validity policy and immediate revocation."
+  },
+  {
+   "number": 108,
+   "title": "Action succeeds while its audit write fails",
+   "category": "Repudiation",
+   "severity": "High",
+   "diagramId": 6,
+   "area": "Audit, webhooks, email & notifications",
+   "element": "Audit middleware & service",
+   "residualRisk": "Carried to the W5 F4 review (T23.8.2, review P23W5-A10). Until model 2.34.0 this entry read “audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed”; no code does either. What is built: AXIAM's own request rows are written by the audit middleware off the request path — a bounded queue of 4 096 entries and one worker — so a full queue drops the entry with an `ERROR` line and a failed append is a `WARN` line while the action stands; the GDPR erasure and tenant-deletion records dead-letter a failed write to an append-only file and a structured `axiam.audit.dlq` event (T19.27, `write_erasure_audit_with_dlq`); every orderly stop drains the queue (T-444). What is not: a fallback for any other row, the GDPR request records included (P23W5-A8), and any counter or notification when a row is dropped or fails (P23W5-A10). An attacker who can exhaust the datastore can act while the rows recording it are dropped, and only the server log says so."
   },
   {
    "number": 124,
@@ -280,6 +290,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "residualRisk": "Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is a deployment responsibility and is not shipped with AXIAM."
   },
   {
+   "number": 117,
+   "title": "Alert flooding buries a real incident",
+   "category": "Denial of service",
+   "severity": "Medium",
+   "diagramId": 6,
+   "area": "Audit, webhooks, email & notifications",
+   "element": "Notification rules (admin alerts)",
+   "residualRisk": "Reopened at model 2.35.0 by the W5 F4 review (P23W5-13). Until then this entry read “notifications are delivered in configurable batches through the mail queue, and rules are per-category so a noisy category can be tuned without disabling the rest”; nothing batches them. What is built: rules are per event, so a noisy event can be taken out of a rule without disabling the rest; a mail is fixed text; the events a caller can provoke ride rate-limited routes (sign-in per address and per account, with brute-force lockout, T-27); and the one event a background process raises, `scim_delivery_failed`, is coalesced to one notification per target per hour (T-418, D-73). What is not: `NotificationDispatcher::dispatch` enqueues one mail per matched recipient per audit row, so a request-path event an attacker can produce in volume — failed sign-ins spread over addresses and accounts — mails each recipient of a rule for it once per event, with no coalescing, cool-down or digest. Open until per-rule coalescing exists (issue body in the W5 F4 review, §14)."
+  },
+  {
    "number": 123,
    "title": "Final mail hop is not confidential",
    "category": "Information disclosure",
@@ -327,7 +347,27 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 6,
    "area": "Audit, webhooks, email & notifications",
    "element": "SET push / poll response",
-   "residualRisk": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation."
+   "residualRisk": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost, in the full profile: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation. In the minimal profile (`AXIAM__AMQP__ENABLED=false`, D-59) a queued push waits in an in-process queue and is lost on restart, and a dead letter is its audit row alone (T-445)."
+  },
+  {
+   "number": 445,
+   "title": "The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart",
+   "category": "Repudiation",
+   "severity": "Medium",
+   "diagramId": 7,
+   "area": "Deployment & platform (Kubernetes)",
+   "element": "AXIAM deployment (N replicas, HPA)",
+   "residualRisk": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
+  },
+  {
+   "number": 447,
+   "title": "A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name",
+   "category": "Elevation of privilege",
+   "severity": "Medium",
+   "diagramId": 2,
+   "area": "OAuth2 / OIDC authorization server",
+   "element": "/oauth2/authorize (+ consent)",
+   "residualRisk": "Narrowed by the W5 F4 review (P23W5-04 closed it for CIBA; P23W5-06 reports the device grant, where it is pre-existing since B2). CIBA: the approval routes refuse a token that carries a `client_id` — only a console sign-in decides (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `/api/v1/device/verify` and `/decide` still admit it; bounded by the token itself (a live session of a user of the tenant) and by the device client's registered scopes. Closes when `/api/v1/device/*` applies the same rule (issue body in the W5 F4 review, §14)."
   },
   {
    "number": 161,

@@ -22,6 +22,12 @@ on a workstation.
 just prod-up
 ```
 
+For a single node that does not need a message broker there is a smaller
+stack, [`docker/docker-compose.minimal.yml`](../../docker/docker-compose.minimal.yml)
+(`just minimal-up`): SurrealDB and `axiam-server` only, with
+`AXIAM__AMQP__ENABLED=false`. It has real limits — read
+[Minimal profile (no broker)](#minimal-profile-no-broker) before choosing it.
+
 `just prod-up` (see [`justfile`](../../justfile)):
 
 1. Mints the SurrealDB and RabbitMQ credentials on first run into
@@ -829,12 +835,15 @@ unlimited, matching its siblings `GET /roles` and `GET /resources`.
 | `AXIAM__RATE_LIMIT__AUTHZ_CHECK_PER_MIN` | Max authz-check requests per minute per key (default `1800`). |
 | `AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_MIN` | Max `POST /api/v1/auth/device` (device mTLS login) requests per minute per IP (default `60`). The route carried no limiter at all before 1.0.0-beta17, although a TLS handshake bearing a client certificate is the most expensive thing an unauthenticated caller can ask of the server. Sized from the honest traffic rather than from capacity: a device re-authenticates once per access-token lifetime (900 s by default), so 60/min holds a fleet of nine hundred devices on one address. Part of the machine family, so `AXIAM__RATE_LIMIT__PROFILE` scales it — which is what a fleet behind a single NAT should reach for. |
 | `AXIAM__RATE_LIMIT__DEVICE_AUTHORIZATION_PER_MIN` | Max `/oauth2/device_authorization` requests per minute per IP (default `12`). |
+| `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` | Max CIBA backchannel authentication requests (`POST /oauth2/bc-authorize`) per minute (default `60`), in a bucket of its own keyed like `/oauth2/token` (`AXIAM__RATE_LIMIT__KEY` applies), plus a per-client bucket of the same size after authentication. Scaled by `AXIAM__RATE_LIMIT__PROFILE` (`gateway` 600, `mesh` 6000). Each user is sent at most three CIBA notifications a minute whatever this is set to. |
 | `AXIAM__RATE_LIMIT__DEVICE_VERIFY_PER_MIN` | Max `/api/v1/device/verify` + `/device/decide` requests per minute per IP (default `10`). Bounded by the user-code brute-force assertion in `RateLimitConfig::validate`. |
 | `AXIAM__RATE_LIMIT__DCR_PER_MIN` | Max `POST /oauth2/register` (RFC 7591 dynamic client registration) requests per minute per IP (default `5` — the smallest limit in AXIAM). It is the only endpoint that **writes** for a caller holding no credential, and every accepted request allocates a client row that counts against the tenant's `dcr_max_clients`, so the thing being limited is an anonymous party's ability to fill a tenant's client table — not throughput. The honest traffic is one person registering one MCP client once. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [`docs/admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md). |
 | `AXIAM__RATE_LIMIT__DIRECTORY_ADMIN_PER_MIN` | Max writes per minute per IP to the tenant directory management API — `PUT`, `PATCH`, `DELETE` on `/api/v1/tenants/{tenant_id}/directory` and `POST …/directory/links` (default `30`). Each write resolves a tenant-chosen host name (the address guard), and linking opens directory connections, so the limit bounds how fast an administrator, or a stolen administrator token, can use the routes as a resolver. One bucket per route: the configuration resource's three methods share one, the link route has its own. Reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. See [Managing a tenant's directory](#managing-a-tenants-directory). |
 | `AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN` | Max writes per minute per IP to the SAML service-provider registry API — create, update and delete a service provider, `POST …/saml/parse-sp-metadata`, and issue, promote and retire the IdP signing credential under `/api/v1/tenants/{tenant_id}/saml` (default `30`). Issuing generates an RSA-4096 key and parsing metadata makes an outbound request, so the limit bounds how fast an administrator, or a stolen administrator token, can burn CPU, use the server to reach an external host, or rewrite where assertions go. One bucket per route; reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__SSF_PER_MIN` | Max requests per minute per IP to each route of the Shared Signals Framework receiver surface — `/ssf/v1/stream`, `/ssf/v1/status`, `/ssf/v1/verify`, `/ssf/v1/poll/{stream_id}` (RFC 8936, whose long poll holds a request for up to 30 s) and both `/.well-known/ssf-configuration` forms (default `60`). One bucket per route, checked before the receiver's token. Each stream also enforces a 60-second `min_verification_interval` of its own (`429`). Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` | Max writes per minute per IP to the SSF stream registry's management API — create, update and delete under `/api/v1/tenants/{tenant_id}/ssf/streams` (default `30`). Each write can repoint where a tenant's security events and the push credential go. One bucket per route; reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
+| `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` | Max writes per minute per IP to the outbound SCIM target registry's management API — create, update, delete and reconcile now under `/api/v1/scim-targets` (default `30`). Each write can repoint where a tenant's user directory and the target's credential go. One bucket per route; reads are not limited. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
+| `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` | Max requests per minute per IP to each CIBA approval route — `GET /api/v1/ciba/requests/{id}`, `POST …/approve`, `POST …/deny` (default `30`). One bucket per route, so reads cannot starve decisions. Human-driven and behind a session and CSRF token; every request id that is not the caller's own answers `404`. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__SCIM_PER_MIN` | Max `/scim/v2/*` requests per minute per IP (default `600`). One bucket spans the whole SCIM surface — Users, Groups and the discovery endpoints, reads and writes alike. Sized as the REST twin of `AXIAM__GRPC__GRPC_ADMIN_PER_SEC` (also 600/min): a privileged M2M provisioning client whose real cost is Argon2id. Never moved by `AXIAM__RATE_LIMIT__PROFILE`. |
 | `AXIAM__RATE_LIMIT__TRUSTED_HOPS` | Number of trusted reverse-proxy **entries** to skip from the right of `X-Forwarded-For` when deriving the client IP (default `0`). It is **the number of proxies in front of the server minus one** — see [Deriving `TRUSTED_HOPS`](#deriving-trusted_hops) before setting it. Both shipped topologies have exactly one proxy, so `0` is correct for them. |
 | `AXIAM__RATE_LIMIT__KEY` | Bucket-key derivation mode: `ip` (default) \| `client_id` \| `ip_client_id`. See below. |
@@ -1591,11 +1600,341 @@ configure and it is not covered here.
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `AXIAM__AMQP__ENABLED` | `true` | `false` selects the [minimal profile (no broker)](#minimal-profile-no-broker): no connection, no topology, no URL or signing key needed, single instance only. |
 | `AXIAM__AMQP__URL` | `amqps://localhost:5671` | **Must** be `amqps://`. Every other scheme is refused before a socket is opened. |
 | `AXIAM__AMQP__TLS__CA_CERT_PATH` | *(unset)* | PEM bundle for the broker's issuing CA, **added to** the platform roots (not substituted — see above). Unset = platform roots only. |
 | `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` | *(unset)* | PEM client certificate, for mutual TLS. Requires the key. |
 | `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
 | `AXIAM__AMQP__CONNECT_TIMEOUT_MS` | `30000` | Budget for one connection attempt. lapin has none of its own, so without this a broker whose port is published but whose TLS listener never answers leaves the connect pending forever — no error, no retry, no log line. Raise it for a broker behind a slow link; do not disable it. |
+
+## Minimal profile (no broker)
+
+`AXIAM__AMQP__ENABLED=false` runs AXIAM with **SurrealDB only**: no RabbitMQ, no
+`AXIAM__AMQP__URL`, no AMQP signing key. It is meant for a single node, an edge
+site or a small deployment where a broker is more infrastructure than the
+workload justifies. The default is `true`, and with it nothing on this page
+applies.
+
+### It is single-instance, by definition
+
+**Run exactly one instance.** Without a broker nothing tells a second replica
+about the first one's mutations — a revoked role, a changed permission — so a
+second instance would serve stale authorization decisions and no setting makes
+it correct. AXIAM does not trust a replica count to say so (it is the
+orchestrator's knowledge, not the process's): the minimal profile holds a
+**singleton lease** in SurrealDB and refuses to run beside another instance.
+
+* the lease is the row `minimal_profile_lease:instance` (schema v83), claimed
+  with a conditional write at start-up, valid for **30 s** and renewed every
+  **10 s**;
+* a boot that finds another instance's live lease **waits up to 45 s** for it
+  to expire — a rolling update's old pod stops renewing when it stops — and then
+  refuses to start;
+* an orderly stop releases the lease, so a successor does not wait at all;
+* an instance whose renewal finds the lease **taken by another instance logs
+  once at `ERROR` and exits non-zero**, rather than keep running beside it. It
+  exits through the orderly stop a `SIGTERM` takes — no new connections,
+  in-flight requests finished, queued audit rows written — within **15 s**,
+  after which a backstop ends the process regardless.
+
+On Kubernetes that means `replicas: 1` and, for the rolling-update case,
+`strategy: Recreate` (or `maxSurge: 0`); the 45 s wait covers a surge pod that
+starts before the old one is gone, and a crash-looping pod simply tries again.
+The clocks of two instances sharing a datastore must agree to well within the
+30 s TTL, which any NTP-disciplined host does.
+
+### Run it
+
+```bash
+just minimal-up      # SurrealDB + axiam-server, no broker
+curl -s http://localhost:8090/health
+just minimal-down    # stop; the data volumes are kept
+just minimal-clean   # stop and DELETE the datastore and the GDPR dead-letter file
+```
+
+[`docker/docker-compose.minimal.yml`](../../docker/docker-compose.minimal.yml)
+runs **one** `axiam-server` (there is no `deploy.replicas` in it, and the
+fixed `container_name` makes Compose refuse `--scale`) and one SurrealDB — no
+RabbitMQ, no broker TLS material, no Vault. It pulls the released server image
+like `docker-compose.prod.yml` does, so `AXIAM_IMAGE_TAG` must name a release
+that contains `AXIAM__AMQP__ENABLED` (an older image ignores the variable and
+then refuses to boot for want of a broker); `just minimal-up` defaults it to the
+workspace version. To build from the working tree instead, uncomment the
+`build:` block on `axiam-server`.
+
+On first run `just minimal-up` mints what the server needs into
+`docker/.secrets/` (gitignored): the SurrealDB credentials, an Ed25519 JWT
+keypair, `AXIAM__AUTH__PEPPER` (mandatory in a release build) and the
+encryption keys the production stack seeds into Vault — email (without it no
+mail is sent), GDPR pseudonym pepper (without it the erasure sweep is skipped),
+MFA, federation, PKI and OPAQUE; only the AMQP signing key is left out. They
+come from the environment (`AXIAM__AUTH__SECRET_PROVIDER=env`); the Vault path
+of [`vault.md`](vault.md) works unchanged if you want it. The peppers and keys
+are what stored hashes and sealed secrets were made with — back them up with the
+datastore. The stack has its own Compose project name (`axiam-minimal`), so
+its volumes can never be the dev or prod stack's.
+
+Both ports are published on the loopback interface only: put a TLS-terminating
+proxy in front of the REST port. The compose file also gives the server a
+**30 s stop grace period** and a named volume for the GDPR dead-letter file
+(below).
+
+**On Kubernetes** the same profile is: `AXIAM__AMQP__ENABLED=false`, no
+`AXIAM__AMQP__*` URL, TLS or signing-key settings, no RabbitMQ, **`replicas: 1`**
+with `strategy: Recreate`, a `terminationGracePeriodSeconds` of at least 30 (the
+default), and a small volume for `AXIAM__GDPR_AUDIT_DLQ_FILE` — the server's
+manifest runs with `readOnlyRootFilesystem: true`, so without a mounted path the
+file sink cannot be written.
+
+### What it does not provide
+
+`GET /health` says so, in `unavailable` (see below):
+
+| Not available | What happens instead |
+|---|---|
+| **Reactors** (`reactors`) | Enabling a registration through `POST`/`PUT /api/v1/reactors` answers **`409`** naming the profile, and the gRPC `ReactorAdminService` answers `FAILED_PRECONDITION`. A registration created with `enabled: false` is accepted, and so are disabling and deleting one. |
+| **Asynchronous authorization over AMQP** (`amqp_authz`) | The authorization request consumer is not started. REST and gRPC authorization checks are unaffected. |
+| **External audit ingestion over AMQP** (`amqp_audit_ingestion`) | The consumer that ingests audit events *published by other services* is not started. AXIAM's **own** audit events never touched AMQP — the audit middleware writes SurrealDB directly — and are unchanged. |
+| **Cross-replica decision-cache invalidation** (`decision_cache_broadcast`) | There is no second replica to tell. The decision cache itself (`AXIAM__AUTHZ__DECISION_CACHE_ENABLED`) works, process-locally and exactly. |
+
+Everything that rode a broker queue still works, on **in-process queues**:
+
+* **webhooks, SSF push, outbound SCIM and CIBA ping** run on one in-process
+  dispatcher with the *same* deliverers, the *same* retry policy
+  (`AXIAM__WEBHOOK__*`, `AXIAM__SSF_PUSH__*`, `AXIAM__SCIM_PUSH__*`,
+  `AXIAM__CIBA_PING__*`: attempts, base and ceiling of the exponential
+  backoff) and the *same* audit rows (`<kind>.delivery_attempt`,
+  `.delivery_succeeded`, `.delivery_failed`) as the AMQP path;
+* **transactional mail** (verification, password reset, notification rules, GDPR
+  export notices, CIBA approval) is sent by an in-process worker with the same
+  retry count and the same PII-minimal `email.delivery_failed` audit row, and
+  needs `AXIAM__AUTH__EMAIL_ENCRYPTION_KEY` exactly as before.
+
+### What is lost on restart
+
+**Queued outbound messages and queued mail do not survive a restart.** There is
+no durable queue: a delivery that is waiting for its turn or sleeping for a
+retry when the process stops is gone, and there is **no dead-letter queue** —
+for a delivery that exhausts its attempts the `<kind>.delivery_failed` audit row
+is the whole record, so alert on it. A producer whose queue is full (1 024
+messages per kind, 1 024 for mail) gets an enqueue error, which every producer
+already logs and swallows; a retry that finds no free retry slot (1 024 may be
+sleeping at once) is dead-lettered with the reason `in-process retry capacity
+exhausted`. If a lost webhook is not acceptable, run the full profile.
+
+In audit terms, a restart loses the following, and nothing else:
+
+* **A webhook, SSF, outbound SCIM or CIBA-ping delivery that was queued or
+  waiting for a retry** leaves at most a `<kind>.delivery_attempt` row and never
+  a terminal one (`.delivery_succeeded` or `.delivery_failed`). A delivery that
+  was refused because its queue was full leaves only a log line. Outbound SCIM
+  is repaired by the next reconciliation; webhooks, SSF events and CIBA pings
+  are not redelivered.
+* **A Security Event Token** that the SSF outbox had released to the push queue
+  is lost with it. Receivers must already treat SSF signals as hints (the
+  threat model's T-405); in the full profile a queued push is at-least-once, in
+  the minimal one it is not.
+* **A GDPR export notice (`ExportReady` mail)** that was still queued cannot be
+  re-sent: the download token exists only hashed in the datastore and its raw
+  value travels only in that mail. The export is marked ready but the subject
+  cannot download it, and no row says the notice was not sent. **The subject
+  requests a new export.**
+
+### Stopping, and the grace period
+
+An orderly stop — `SIGTERM`, or a lost lease — stops accepting connections,
+finishes the requests in flight, finishes the cleanup tick it is in (so a GDPR
+erasure and its audit row stay together) and then **writes the audit rows the
+audit middleware still holds, waiting up to 5 s for it**, before the process
+exits. A `SIGKILL` or an out-of-memory kill does none of that and loses what is
+queued.
+
+**Give the container a termination grace period above 20 s.** Compose's default
+is 10 s, which is why `docker-compose.minimal.yml` sets `stop_grace_period: 30s`;
+Kubernetes' default of 30 s is enough. An instance that loses its lease stops
+accepting at once, finishes in-flight requests and exits non-zero within 15 s
+(a backstop then ends the process regardless).
+
+### Audit durability
+
+AXIAM's own audit rows are written straight to SurrealDB in both profiles; the
+broker never carried them. What the profile changes for audit — the terminal
+rows of deliveries lost on restart, external audit ingestion — is reviewed path
+by path in
+[`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`](../../claude_dev/audit-durability-review-minimal-profile-2026-10-05.md).
+
+#### The GDPR dead-letter file
+
+A failed datastore write of the two legally significant GDPR records —
+`gdpr.user_pseudonymized` (the erasure) and `tenants.deleted` — is never lost to
+a log line alone (T19.27). It goes to two sinks:
+
+1. **An append-only file**, named by `AXIAM__GDPR_AUDIT_DLQ_FILE`. One JSON line
+   per record, the fields of an audit entry (`tenant_id`, `actor_id`,
+   `actor_type`, `action`, `resource_id`, `outcome`, `ip_address`, `metadata`);
+   the server opens it for append and never rewrites or truncates it.
+   `docker-compose.minimal.yml` sets it to
+   `/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl` on the **named volume**
+   `gdpr-audit-dlq`, so it outlives the container; back the volume up with the
+   datastore. The path must be writable by the server's user (65532 in the
+   shipped image) — the compose file's `volume-init` service sees to that.
+2. **A structured log event** on the target `axiam.audit.dlq`. It is the only
+   sink when the file variable is unset, so collect the container log as well.
+
+The server does not read the file back. An operator **replays it into the trail
+by hand**, once the datastore is healthy, and then keeps or archives the file.
+Each line maps one-to-one onto a `CREATE audit_log SET …` statement; a JSON
+`null` has to become `NONE` (SurrealDB refuses `NULL` for an optional field).
+With `jq` and the SurrealDB shell (the namespace and database are
+`AXIAM__DB__NAMESPACE` / `AXIAM__DB__DATABASE`, both `axiam` in the compose
+file):
+
+```bash
+source docker/.secrets/minimal-credentials.env   # the datastore credentials
+# a distroless image has no shell, so read the volume rather than the container:
+docker run --rm -v axiam-minimal_gdpr-audit-dlq:/d busybox cat /d/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl
+
+jq -r '"CREATE audit_log SET tenant_id = \(.tenant_id|@json), actor_id = \(.actor_id|@json), actor_type = \(.actor_type|@json), action = \(.action|@json), resource_id = \(.resource_id // null | if . == null then "NONE" else @json end), outcome = \(.outcome|@json), ip_address = \(.ip_address // null | if . == null then "NONE" else @json end), metadata = \(.metadata // {} | tojson);"' \
+    gdpr-audit-dlq.jsonl \
+  | docker exec -i axiam-minimal-surrealdb /surreal sql --endpoint ws://127.0.0.1:8000 \
+      --user "$AXIAM__DB__USERNAME" --pass "$AXIAM__DB__PASSWORD" --ns axiam --db axiam --hide-welcome
+```
+
+The statement was exercised against a SurrealDB 3.2 datastore migrated by the
+server. The replayed row's `timestamp` is the moment of replay — when the
+original write failed is in the `axiam.audit.dlq` log event, so keep the log
+with the file — and, like every audit row, it can neither be
+updated nor deleted afterwards, so replay each line once. An empty or missing
+file means no record has been dead-lettered. (The two *request* records,
+`gdpr.data_export_requested` and `gdpr.erasure_requested`, are not covered by
+this fallback.)
+
+#### External audit producers
+
+Before switching a deployment to the minimal profile, **stop or re-point every
+service that publishes to `axiam.audit.events`.** Nothing consumes that queue:
+there is no REST or gRPC route for an external audit event, so there is no other
+ingestion path. A broker left running confirms the publish anyway, so the
+producer is not told; and returning to the full profile later dead-letters
+everything older than `AXIAM__AMQP__REPLAY_SKEW_SECS` (300 s by default) to
+`axiam.audit.events.dlq`. AXIAM's **own** audit events are unaffected.
+
+### Boot refusals
+
+Each is an error that names `AXIAM__AMQP__ENABLED=false` and the fix; the
+process does not start.
+
+| Refused | Why | Fix |
+|---|---|---|
+| `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` | the broadcast has no transport | unset it |
+| **any enabled reactor registration** in the datastore, in any tenant | a `fail_closed` reactor with no transport would deny `login.post_auth`, `user.pre_create`, `user.pre_update` and `grant.pre_assign` in every tenant that registered one | `PUT /api/v1/reactors/{id}` with `enabled: false` (or delete it), or run the full profile |
+| **a second live instance** | see above | stop the other instance |
+
+### `/health`
+
+`GET /health` always answers `200` and now states the profile (additive — a
+client that reads only `status` is unaffected):
+
+```json
+{ "status": "ok", "profile": "minimal",
+  "unavailable": ["reactors", "amqp_authz", "amqp_audit_ingestion", "decision_cache_broadcast"] }
+```
+
+`profile` is `"full"` or `"minimal"`; `unavailable` is present only in
+`minimal`.
+
+### When to choose it, and how to move between profiles
+
+| Choose the **minimal** profile when | Choose the **full** profile when |
+|---|---|
+| one instance is enough, now and for the foreseeable future | you need more than one instance (availability, rolling updates without a wait, load) |
+| a webhook, SSF event or mail queued at the moment of a restart may be lost | a queued delivery must survive a restart — the broker holds it and the next run writes its audit row |
+| you use none of Reactors, asynchronous authorization over AMQP, external audit ingestion over AMQP | you use any of them |
+| a broker is more infrastructure than the workload justifies (a single node, an edge site, an evaluation) | you already run RabbitMQ, or need the cross-replica decision-cache invalidation |
+
+**Minimal → full.** In this order:
+
+1. Stop the minimal instance (an orderly stop releases the lease, and a
+   delivery still queued in process is lost with it — stop the traffic that
+   produces deliveries first and give the queue a minute to drain).
+2. Provision RabbitMQ (TLS-only, see the sections above) and an AMQP signing key.
+3. Start **one** instance with `AXIAM__AMQP__ENABLED=true` (or the variable
+   removed), `AXIAM__AMQP__URL`, `AXIAM__AMQP__TLS__CA_CERT_PATH` and
+   `AXIAM__AMQP__SIGNING_KEY`. `GET /health` now says `"profile": "full"` and has
+   no `unavailable` list.
+4. Only then add replicas, enable Reactors and point external audit producers
+   back at `axiam.audit.events`. The `minimal_profile_lease` row stays in the
+   datastore, unread by the full profile.
+
+**Full → minimal.** The boot refusals above are the checklist, plus what no
+refusal can see:
+
+1. Run exactly one instance before the switch.
+2. Disable (`PUT /api/v1/reactors/{id}` with `enabled: false`) or delete every
+   Reactor registration in every tenant.
+3. Unset `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED`.
+4. Stop or re-point every service that publishes to `axiam.audit.events`, and
+   move any caller of asynchronous authorization over AMQP to REST or gRPC.
+5. While the full profile is still running, let the broker's AXIAM queues
+   (`axiam.webhook` and the queues of the other outbound kinds) drain: the minimal profile does not read
+   them, so what is left there is neither delivered nor audited.
+6. Set `AXIAM__AMQP__ENABLED=false`; the broker URL, TLS and signing-key
+   settings are no longer needed. Check `GET /health` for `"profile": "minimal"`.
+
+### Resting footprint
+
+The whole-stack **resting** footprint, measured on 2026-10-05 — idle, **not under
+load**, on a freshly migrated empty datastore (no tenant, no user, no traffic):
+
+| | `axiam-server` | SurrealDB | RabbitMQ | **Whole stack** |
+|---|---|---|---|---|
+| **Minimal** (no broker) | 120.7 MiB | 86.6 MiB | — | **207.3 MiB** |
+| Full (with RabbitMQ) | 130.3 MiB | 86.0 MiB | 114.6 MiB | **330.9 MiB** |
+
+Median resident set (`VmRSS`) over the sampling window; the anonymous part
+(heap and stacks, no mapped file pages) is 113.5 MiB for the minimal stack and
+185.0 MiB for the full one. Dropping the broker saves about 124 MiB (37 %), of
+which 10 MiB is the server's own AMQP machinery and the rest RabbitMQ. Repeat
+runs of the minimal stack agreed to within 2 MiB (205.5–207.3 MiB).
+
+How it was measured, so the number can be reproduced and not over-read:
+
+* **Method.** `benchmarks/resting-footprint/measure.sh`: start SurrealDB (and
+  RabbitMQ for the full stack) as containers, start the server, wait for
+  `GET /ready` to answer `200`, settle for 60 s, then sample the resident set of
+  every component every 5 s for 120 s (the run took 15–20 samples, because
+  reading a container's processes is not instantaneous). Raw samples, summaries,
+  server logs and the environment (versions, digests, host) are in
+  `benchmarks/resting-footprint/2026-10-05/`.
+* **Envelope.** SurrealDB 2 CPU / 1 GiB and RabbitMQ 1 CPU / 512 MiB, the caps
+  the benchmark harness uses; **the server ran as the native release binary**
+  (`--features jemalloc`, as the shipped image is built, built from commit `21f1521`),
+  uncapped, next to the containers — not as a container. A measurement of the
+  server *image* has not been taken.
+* **Versions.** SurrealDB 3.2.5 (`surrealdb/surrealdb:v3`, digest
+  `sha256:eb6dddd6…`), RabbitMQ `4-management-alpine` (digest `sha256:3ef7f7e8…`),
+  on a 4-vCPU Linux 6.18 host.
+* **What the RSS figure includes.** File-backed pages count (the server's own
+  binary, ~32 MiB of its 121 MiB; SurrealDB's mapped datastore, ~62 MiB of its
+  87 MiB), which a container's cgroup accounting largely does not — which is why
+  these figures are not comparable cell for cell with the *under load*,
+  container-averaged figures in the benchmark analysis (§5).
+* **At rest means at rest.** Memory under load grows with the working set and the
+  load; this is the floor, not the ceiling. SurrealDB's figure depends on the
+  size of the datastore.
+
+### Tests, by profile
+
+The full REST and gRPC suites run without a broker (they build their state with
+`AppState::for_test`), and `crates/axiam-server/tests/minimal_profile_boot.rs`
+boots the real composition root with the flag off — no broker, no datastore
+server — signs in, and watches a webhook and an SSF Security Event Token arrive
+through the in-process dispatcher. The tests that need a live RabbitMQ (they are `#[ignore]`d and run against
+`just dev-up`) are specific to the full profile and are skipped for the minimal
+one: `amqp_recovery_test` and `reactor_containerized_test` in `axiam-amqp`, and
+`webhook_consumer_test` in `axiam-api-rest`. Everything else — including the
+reactor administration tests, which run both ways: `409` in the minimal profile,
+`503` for a build that composes no transport — needs no broker.
 
 ## Outbound SSRF guard — same-network IdPs (`AXIAM__PKI__SSRF_ALLOWED_HOSTS`)
 

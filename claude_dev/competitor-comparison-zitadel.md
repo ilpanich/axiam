@@ -56,12 +56,12 @@ ahead on the polish of a mature hosted product.
 | RP-initiated / back-channel logout | Yes | Yes | [Z7][Z13] |
 | SAML 2.0 | **IdP** (G-2, Phase 23) and SP | **IdP** (and SAML external IdPs) | [Z14][Z15] |
 | External IdPs | OIDC, OAuth2, SAML, **LDAP / Active Directory** (G-3), Google, GitHub, Microsoft, Apple | OIDC, OAuth2, JWT, SAML, **LDAP**, Azure AD, GitHub, GitLab, Google, Apple, Zitadel | [Z15] |
-| SCIM 2.0 server | Yes (users and groups) | **Preview**; users documented | [Z16] |
+| SCIM 2.0 server | Yes (users and groups); and, since G-6 (Phase 23, W5), an outbound SCIM client for downstream applications | **Preview**; users documented | [Z16] |
 | Extension model | Reactors (external AMQP actors, any SDK language), HMAC-signed webhooks | Actions v2: signed webhook/call targets on request, response, function and event | [Z17] |
 | APIs | REST, gRPC, AMQP | gRPC, connectRPC and REST for every resource (management-oriented) | [Z1] |
 | Rate limiting | **On by default**, posture presets | No built-in limiter; lockout off by default (`MaxPasswordAttempts: 0`) | [Z18] |
 | Server RSS (run 5, v4.16.2) | 88–119 MiB | 138–154 MiB | `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5 |
-| Whole-stack RSS (run 5) | 375–533 MiB (server + SurrealDB + RabbitMQ) | 281–457 MiB (server + PostgreSQL) | idem |
+| Whole-stack RSS (run 5, under load) | 375–533 MiB (server + SurrealDB + RabbitMQ). *At rest, measured 2026-10-05 (G-8): **207 MiB** minimal (server + SurrealDB, no broker), 331 MiB full — a different metric, see the note in §5* | 281–457 MiB (server + PostgreSQL) | idem |
 | Licence | Apache-2.0 | AGPL-3.0 (since v3) | [Z4] |
 
 ## 3. AXIAM gaps, by priority
@@ -84,7 +84,12 @@ ahead on the polish of a mature hosted product.
    its whole stack (SurrealDB and RabbitMQ) idles above Zitadel's server plus
    PostgreSQL (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5, §10). A documented
    "AMQP-less" profile, or a smaller broker footprint, would remove the one
-   efficiency cell Zitadel wins.
+   efficiency cell Zitadel wins. *Partly closed by G-8 (Phase 23, W5,
+   2026-10-05): the minimal profile runs without RabbitMQ and its resting
+   footprint is measured and published (207 MiB at rest against 331 MiB for the
+   full stack). Whether the cell flips is not claimed: Zitadel's 281–457 MiB is
+   an under-load, container-averaged figure and no Zitadel stack was measured at
+   rest by the same method.*
 4. **RFC 7592 client management** — **closed (2026-10-03, G-4).** Zitadel
    added it next to RFC 7591 in v4.17.0 [Z9]. AXIAM now serves `GET`/`PUT`/`DELETE
    /oauth2/register/{client_id}` behind a per-client registration access
@@ -140,6 +145,8 @@ ahead on the polish of a mature hosted product.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-05 | G-8 (AMQP-less minimal profile and whole-stack footprint) complete on the Phase 23 W5 branch: `AXIAM__AMQP__ENABLED=false` runs AXIAM on SurrealDB alone (`docker-compose.minimal.yml`, single instance by definition), and the resting footprint is measured with one method for both stacks — **207.3 MiB** minimal (server + SurrealDB) against **330.9 MiB** full (+ RabbitMQ), at rest, server as a native release binary (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5). The whole-stack cell above gains a dated note rather than a changed Zitadel figure: that figure was taken under load and no Zitadel stack was measured at rest, so P2 item 3 is partly closed, not flipped. | — |
+| 2026-10-05 | G-6 (outbound SCIM provisioning) complete on the Phase 23 W5 branch: AXIAM can push a tenant's users and groups to downstream SCIM 2.0 service providers (contract §31). The compared Zitadel surface is the SCIM *server*, so the row's Zitadel cell is unchanged; AXIAM's cell now also names the outbound client. | — |
 | 2026-10-04 | G-2 (SAML 2.0 identity provider) complete on the Phase 23 W4 branch: per-tenant IdP with SP- and IdP-initiated Web Browser SSO over HTTP-Redirect and HTTP-POST, always-signed assertions under a tenant credential issued by the tenant's own CA (issue / promote / retire), a pairwise persistent `NameID` by default, per-SP `SessionIndex` and single logout tied to session revocation and the revocation feed, IdP metadata, SP metadata import as a reviewed draft, the SP registry API (contract §29) and console page; round-tripped with samael as a reference SP and with a real Keycloak 26.7.0 brokering to AXIAM. Assertion encryption and the artifact binding stay out (D-2). | — |
 | 2026-10-04 | G-3 (LDAP / Active Directory identity source) complete on the Phase 23 W3 branch: bind-as-user over mandatory TLS, JIT provisioning, explicit group mapping with nesting, incremental and nightly sync with soft-delete, the address guard, the management API (contract §30) and the console page; tested against a real OpenLDAP and a real Samba AD DC. The external-IdP row now lists LDAP / Active Directory and P1 item 2 is closed. | — |
 | 2026-10-02 | Baseline written. Since the run-5 baseline (v4.16.2): v4.17.0 added RFC 7591/7592 dynamic client registration, "Sign in with Zitadel" and native app links for passkeys. v4.17.2 fixed token-exchange downscoping. v4.18.0 was withdrawn ("skip this release"). v4.19.2 made session-cookie signing mandatory (breaking change). Several critical and high advisories were fixed. The CIMD pull request is still open. `zitadel/nextgen` appeared as the preview of the next major version. | [Z9][Z10][Z19][Z20] |

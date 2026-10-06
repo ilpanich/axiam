@@ -230,6 +230,7 @@ use crate::handlers;
         // `grant_type` — so only the two extra paths appear here.
         handlers::oauth2::device_authorization,
         handlers::oauth2::pushed_authorization_request,
+        handlers::ciba::bc_authorize,
         // T21.4 / RFC 7591 §3.1 — dynamic client registration. Unauthenticated,
         // so I9 applies twice over: the path is in `PUBLIC_PATHS` and here, in
         // the same commit.
@@ -241,6 +242,9 @@ use crate::handlers;
         handlers::oauth2::end_session_at_cookie_path,
         handlers::device::verify,
         handlers::device::decide,
+        handlers::ciba_approval::get_request,
+        handlers::ciba_approval::approve,
+        handlers::ciba_approval::deny,
         // OIDC. `add_oauth_authorization_server_alias` (below) documents the
         // RFC 8414 `/.well-known/oauth-authorization-server` alias of this
         // same handler as its own path entry — it needs no listing here.
@@ -321,6 +325,13 @@ use crate::handlers;
         handlers::ssf_admin::get_stream,
         handlers::ssf_admin::update_stream,
         handlers::ssf_admin::delete_stream,
+        // Outbound SCIM target registry (G-6, T23.6.4, CONTRACT §31).
+        handlers::scim_targets::list_targets,
+        handlers::scim_targets::create_target,
+        handlers::scim_targets::get_target,
+        handlers::scim_targets::update_target,
+        handlers::scim_targets::delete_target,
+        handlers::scim_targets::reconcile_target,
         // SSF 1.0 transmitter metadata and stream management API — the
         // receiver's protocol surface (G-5, T23.5.2, CONTRACT §32.6).
         handlers::ssf::ssf_configuration,
@@ -593,12 +604,20 @@ use crate::handlers;
         axiam_oauth2::token::TokenRequest,
         // Device Authorization Grant (RFC 8628, B2)
         axiam_oauth2::device_service::DeviceAuthorizationRequest,
+        axiam_oauth2::ciba::BackchannelAuthenticationRequest,
+        axiam_oauth2::ciba::BackchannelAuthenticationResponse,
+        axiam_core::models::ciba::CibaDeliveryMode,
+        axiam_core::models::ciba::CibaPingNotification,
         axiam_oauth2::device_service::DeviceAuthorizationResponse,
         handlers::oauth2::PushedAuthorizationRequest,
         handlers::oauth2::PushedAuthorizationResponse,
         handlers::device::VerifyResponse,
         handlers::device::DecideRequest,
         handlers::device::DecideResponse,
+        handlers::ciba_approval::CibaApprovalPage,
+        handlers::ciba_approval::CibaDecisionBody,
+        handlers::ciba_approval::CibaDecisionResponse,
+        handlers::ciba_approval::CibaStepUpRequired,
         // Token Exchange (RFC 8693, B3). The request rides on `TokenRequest`
         // at `POST /oauth2/token`; these are the projected shape and the
         // distinct response body, both of which an SDK generator needs.
@@ -677,6 +696,14 @@ use crate::handlers;
         // pins.
         handlers::ssf_admin::SsfStream,
         handlers::ssf_admin::SsfStreamInput,
+        handlers::scim_targets::ScimTargetResponse,
+        handlers::scim_targets::ScimTargetInput,
+        handlers::scim_targets::ScimTargetDeliveryState,
+        handlers::scim_targets::ScimReconcileAccepted,
+        axiam_core::models::scim_target::ScimTargetAuth,
+        axiam_core::models::scim_target::ScimTargetScope,
+        axiam_core::models::scim_target::UserNameSource,
+        axiam_core::models::scim_target::DeprovisionPolicy,
         axiam_core::models::ssf::SsfEventType,
         axiam_core::models::ssf::SsfDeliveryMethod,
         axiam_core::models::ssf::SsfStreamStatus,
@@ -764,6 +791,7 @@ use crate::handlers;
         (name = "email-config", description = "Organization and tenant email provider configuration"),
         (name = "saml", description = "SAML 2.0 identity provider — service-provider registry, SP metadata import and the IdP signing credential (CONTRACT §29)"),
         (name = "ssf", description = "Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"),
+        (name = "scim-targets", description = "Outbound SCIM provisioning — the registry of downstream SCIM 2.0 service providers a tenant administrator manages, with each target's delivery state (CONTRACT §31)"),
         (name = "ssf-receiver", description = "Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §32.6)"),
         (name = "directory", description = "Tenant LDAP / Active Directory identity source — configuration, account linking and sync status (CONTRACT §30)"),
         (name = "federation", description = "OIDC and SAML federation with external IdPs"),

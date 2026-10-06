@@ -30,6 +30,11 @@ use crate::error::OAuth2Error;
 use crate::mtls::PresentedCertificate;
 use crate::pkce;
 
+/// G-7 — the CIBA grant. A child module so that it issues through this
+/// module's private machinery rather than a copy of it.
+#[path = "token_ciba.rs"]
+mod ciba_grant;
+
 /// The single `error_description` every token-endpoint client-authentication
 /// failure returns, whatever actually went wrong (SEC-086).
 ///
@@ -149,6 +154,12 @@ pub struct TokenRequest {
     pub client_assertion: Option<String>,
     /// Must be `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`.
     pub client_assertion_type: Option<String>,
+
+    // --- G-7 / CIBA Core §10.1 -------------------------------------------
+    /// The `auth_req_id` a CIBA client received from `/oauth2/bc-authorize`,
+    /// for `grant_type=urn:openid:params:grant-type:ciba`. The REST layer
+    /// routes that grant to `TokenService::exchange_ciba`.
+    pub auth_req_id: Option<String>,
 }
 
 impl TokenRequest {
@@ -386,7 +397,7 @@ pub struct TokenRequestContext {
 /// bearing: the question "do these two strings differ" is answered from the
 /// request alone, so it creates no client-existence oracle and SEC-086's
 /// ordering property is untouched.
-fn resolve_client_id<'a>(
+pub fn resolve_client_id<'a>(
     from_body: Option<&'a str>,
     ctx: &'a TokenRequestContext,
 ) -> Result<&'a str, OAuth2Error> {

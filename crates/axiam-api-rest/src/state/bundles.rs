@@ -174,11 +174,13 @@ pub struct EventsState<C: Connection + Clone> {
     pub reactor_routing_invalidator: Option<Arc<dyn Fn(uuid::Uuid) + Send + Sync>>,
     pub webhook_repo: SurrealWebhookRepository<C>,
     pub webhook_delivery: WebhookDeliveryServiceT<C>,
-    /// AMQP publisher used by [`AppState::emit_webhook`] to dispatch domain
-    /// events onto the durable webhook queue (CQ-B22). `None` in tests and when
-    /// AMQP is unavailable — `emit_webhook` becomes a no-op rather than failing
-    /// the originating request (webhook delivery is a best-effort side effect).
-    pub webhook_publisher: Option<Arc<axiam_amqp::WebhookPublisher>>,
+    /// The publisher [`AppState::emit_webhook`] dispatches domain events
+    /// through (CQ-B22): the core `OutboundPublisher` port, so the durable AMQP
+    /// queue in the full profile and the in-process dispatcher in the minimal
+    /// one (G-8, D-59) are interchangeable here. `None` in tests —
+    /// `emit_webhook` becomes a no-op rather than failing the originating
+    /// request (webhook delivery is a best-effort side effect).
+    pub webhook_publisher: Option<Arc<dyn axiam_core::outbound::OutboundPublisher>>,
     pub notification_rule_repo: SurrealNotificationRuleRepository<C>,
 }
 
@@ -194,6 +196,13 @@ pub struct OAuth2State<C: Connection + Clone> {
     pub token_service: TokenServiceT<C>,
     /// B2 — device authorization grant (RFC 8628).
     pub device_authorization_service: DeviceAuthorizationServiceT<C>,
+    /// G-7 — CIBA: `bc-authorize`, the pending-request store and the approval
+    /// API.
+    pub ciba_service: CibaServiceT<C>,
+    /// G-7 — where a stored CIBA request reaches its user (T23.7.2 wires
+    /// e-mail; until then, nobody is notified and the request waits on the
+    /// identity pages). Called detached, after the request is stored.
+    pub ciba_notifier: Arc<dyn axiam_core::models::ciba::CibaUserNotifier>,
     /// B3 — token exchange (RFC 8693).
     pub token_exchange_service: TokenExchangeServiceT<C>,
     /// B5 — pushed authorization requests (RFC 9126).
@@ -445,4 +454,61 @@ mod poll_waiter_tests {
         assert!(waiters.try_enter(a).is_some(), "released on drop");
         assert_eq!(waiters.waiting(), 0);
     }
+}
+
+/// What starting an on-demand SCIM reconciliation came to (G-6, T23.6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScimReconcileStart {
+    /// The caller took the claim and the run is under way (`202`).
+    Started,
+    /// A run holds the claim, or ran within the on-demand window (`409`).
+    AlreadyClaimed,
+    /// The target is disabled: it receives nothing, so there is nothing to
+    /// reconcile and no claim was taken (`409`).
+    TargetDisabled,
+}
+
+/// The management API's way to start a reconciliation. A port, because the
+/// deliverer that makes the run lives in `axiam-scim`, which sits **above**
+/// this crate (layer 7) and so cannot be named here; `axiam-scim` implements
+/// it (`ReconcileLauncher`) and the composition root binds it.
+pub trait ScimReconcileTrigger: Send + Sync {
+    /// Take the target's reconciliation claim and, when it is taken, make the
+    /// run in the background. Answers as soon as the claim is decided.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when the target does not exist in the tenant; any other
+    /// failure of the datastore while claiming.
+    fn start<'a>(
+        &'a self,
+        tenant_id: uuid::Uuid,
+        target_id: uuid::Uuid,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<ScimReconcileStart, axiam_core::error::AxiamError>,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// The outbound SCIM target registry (G-6, T23.6.4): the repository the
+/// management routes write — which seals the credential under
+/// `pki_encryption_key` — the delivery state they project, and the
+/// reconciliation trigger.
+///
+/// In every build; it reads nothing behind a feature.
+#[derive(Clone)]
+pub struct ScimTargetsState<C: Connection + Clone> {
+    /// The tenant's registered targets; seals the credential.
+    pub target_repo: axiam_db::SurrealScimTargetRepository<C>,
+    /// Per-target delivery state, projected by `GET`.
+    pub state_repo: axiam_db::SurrealScimTargetStateRepository<C>,
+    /// Starts an on-demand reconciliation, and the one a newly enabled target
+    /// begins with. `None` when delivery is not wired (a harness that does not
+    /// test it): *reconcile now* then answers `503`, and enabling a target
+    /// starts nothing.
+    pub reconcile: Option<Arc<dyn ScimReconcileTrigger>>,
 }

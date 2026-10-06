@@ -432,6 +432,36 @@ static MIGRATIONS: &[Migration] = &[
         name: "ssf_step_up",
         sql: SCHEMA_V78,
     },
+    Migration {
+        version: 79,
+        name: "scim_target",
+        sql: SCHEMA_V79,
+    },
+    Migration {
+        version: 80,
+        name: "ciba_backchannel_authentication",
+        sql: SCHEMA_V80,
+    },
+    Migration {
+        version: 81,
+        name: "ciba_signed_authentication_requests",
+        sql: SCHEMA_V81,
+    },
+    Migration {
+        version: 82,
+        name: "ciba_approval_email_template",
+        sql: SCHEMA_V82,
+    },
+    Migration {
+        version: 83,
+        name: "minimal_profile_lease",
+        sql: SCHEMA_V83,
+    },
+    Migration {
+        version: 84,
+        name: "scim_failure_notification_claim",
+        sql: SCHEMA_V84,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4271,9 +4301,473 @@ DEFINE INDEX IF NOT EXISTS idx_ssf_step_up_expires ON TABLE ssf_step_up
     COLUMNS expires_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v79 — T23.6.1 / G-6 / D-57, D-58: outbound SCIM targets
+// -----------------------------------------------------------------------
+//
+// Additive DDL only, nothing backfilled: no tenant pushes until an
+// administrator registers a target.
+//
+// **`scim_target`** is the registry of downstream SCIM service providers, one
+// SCHEMAFULL row each, tenant-scoped, written by administrators only (its
+// update is conditional on `updated_at`). The bearer token or OAuth2 client
+// secret is AES-256-GCM ciphertext under `pki_encryption_key` (the key webhook
+// secrets and SSF push headers use) with its nonce in its own column and a key
+// version; no read of the table projects either (the repository's
+// `PUBLIC_COLUMNS`). `auth_kind` selects the credential's use: `bearer` (the
+// credential goes to `base_url`) or `oauth2_client_credentials` (the client
+// secret goes to `token_url`, with `client_id` and an optional scope).
+// `scope_kind` is `all_users` or `groups`, the latter with `scope_group_ids`.
+//
+// **`scim_target_link`** maps an AXIAM user or group to the downstream
+// resource, one row each: ids, the SHA-256 digest of the last representation
+// sent and a state, never an attribute of a person. UNIQUE on
+// `(target_id, resource_type, axiam_id)` and on
+// `(target_id, resource_type, downstream_id)`, so a resource is linked once per
+// target and a downstream id belongs to one resource. `erase_pending` marks an
+// erasure `DELETE` reconciliation must retry.
+//
+// **`scim_target_state`** is the delivery state, one row per target, its record
+// id the target id. It is written only with atomic increments and plain sets
+// (D-57), by the deliverer and the reconciliation claim (D-58), never through
+// the target row. The failure reason is a fixed-vocabulary string, at most 256
+// characters.
+//
+// Rows go with their target (the repository's delete transaction) and with
+// their tenant (the tenant-delete transaction).
+const SCHEMA_V79: &str = "\
+DEFINE TABLE IF NOT EXISTS scim_target SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE scim_target TYPE string;
+DEFINE FIELD IF NOT EXISTS name ON TABLE scim_target TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 256;
+DEFINE FIELD IF NOT EXISTS base_url ON TABLE scim_target TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 2048;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE scim_target TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS auth_kind ON TABLE scim_target TYPE string
+    ASSERT $value IN ['bearer', 'oauth2_client_credentials'];
+DEFINE FIELD IF NOT EXISTS token_url ON TABLE scim_target TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) <= 2048;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE scim_target TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS oauth_scope ON TABLE scim_target TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS cred_ciphertext ON TABLE scim_target TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS cred_nonce ON TABLE scim_target TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS secret_key_version ON TABLE scim_target TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS scope_kind ON TABLE scim_target TYPE string
+    ASSERT $value IN ['all_users', 'groups'];
+DEFINE FIELD IF NOT EXISTS scope_group_ids ON TABLE scim_target TYPE array<string>
+    DEFAULT [];
+DEFINE FIELD IF NOT EXISTS scope_group_ids.* ON TABLE scim_target TYPE string;
+DEFINE FIELD IF NOT EXISTS push_groups ON TABLE scim_target TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS user_name_from ON TABLE scim_target TYPE string
+    ASSERT $value IN ['username', 'email'];
+DEFINE FIELD IF NOT EXISTS deprovision ON TABLE scim_target TYPE string
+    ASSERT $value IN ['deactivate', 'delete'];
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE scim_target TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE scim_target TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_tenant ON TABLE scim_target
+    COLUMNS tenant_id;
+DEFINE TABLE IF NOT EXISTS scim_target_link SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE scim_target_link TYPE string;
+DEFINE FIELD IF NOT EXISTS target_id ON TABLE scim_target_link TYPE string;
+DEFINE FIELD IF NOT EXISTS resource_type ON TABLE scim_target_link TYPE string
+    ASSERT $value IN ['user', 'group'];
+DEFINE FIELD IF NOT EXISTS axiam_id ON TABLE scim_target_link TYPE string;
+DEFINE FIELD IF NOT EXISTS downstream_id ON TABLE scim_target_link TYPE string
+    ASSERT string::len($value) > 0 AND string::len($value) <= 512;
+DEFINE FIELD IF NOT EXISTS synced_digest ON TABLE scim_target_link TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS state ON TABLE scim_target_link TYPE string
+    ASSERT $value IN ['active', 'deprovisioned'];
+DEFINE FIELD IF NOT EXISTS erase_pending ON TABLE scim_target_link TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE scim_target_link TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE scim_target_link TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_link_resource ON TABLE scim_target_link
+    COLUMNS target_id, resource_type, axiam_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_link_downstream ON TABLE scim_target_link
+    COLUMNS target_id, resource_type, downstream_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_link_tenant ON TABLE scim_target_link
+    COLUMNS tenant_id, target_id;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_link_axiam ON TABLE scim_target_link
+    COLUMNS tenant_id, resource_type, axiam_id;
+DEFINE TABLE IF NOT EXISTS scim_target_state SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE scim_target_state TYPE string;
+DEFINE FIELD IF NOT EXISTS target_id ON TABLE scim_target_state TYPE string;
+DEFINE FIELD IF NOT EXISTS last_success_at ON TABLE scim_target_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_failure_at ON TABLE scim_target_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_failure_reason ON TABLE scim_target_state TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) <= 256;
+DEFINE FIELD IF NOT EXISTS consecutive_failures ON TABLE scim_target_state TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS dead_lettered_total ON TABLE scim_target_state TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS last_reconciled_at ON TABLE scim_target_state
+    TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS reconcile_claimed_at ON TABLE scim_target_state
+    TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_scim_target_state_tenant ON TABLE scim_target_state
+    COLUMNS tenant_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v80 — T23.7.1 / G-7: CIBA backchannel authentication
+// -----------------------------------------------------------------------
+//
+// Additive DDL only, nothing backfilled: no client holds the CIBA grant until
+// an administrator (or an initial-access-token registration) gives it one.
+//
+// **`oauth2_client`** gains the two CIBA Core §4 members AXIAM stores:
+// `backchannel_token_delivery_mode` (`poll` or `ping`; absent for a client
+// without the grant) and `backchannel_client_notification_endpoint` (ping
+// only). Both read back as absent on every older row, which is exactly what
+// such a client registered.
+//
+// **`ciba_request`** is the pending-request store, one SCHEMAFULL row per
+// `bc-authorize`. The `auth_req_id` is never stored, only its SHA-256 —
+// UNIQUE, so a collision cannot make two requests answer one identifier. A
+// ping-mode request also holds `ping_ciphertext`/`ping_nonce`: the
+// `auth_req_id` and the client's `client_notification_token`, sealed with
+// AES-256-GCM under `pki_encryption_key` (the key webhook secrets, SSF push
+// headers and SCIM target credentials use) because the notification needs
+// both in clear. `user_id` is absent for a request whose hint named nobody who
+// may sign in (it can only expire); present, it is what erasure deletes by.
+// `version` is bumped by every status transition and is what approval and
+// denial are conditional on; `redemption_id` is the X6 arbiter's per-attempt
+// nonce. `status` is one of five values. Rows are marked `expired` and then
+// deleted by the cleanup scheduler (job `ciba_request`), and go with their
+// tenant and their user.
+const SCHEMA_V80: &str = "\
+DEFINE FIELD IF NOT EXISTS backchannel_token_delivery_mode ON TABLE oauth2_client
+    TYPE option<string> ASSERT $value = NONE OR $value IN ['poll', 'ping'];
+DEFINE FIELD IF NOT EXISTS backchannel_client_notification_endpoint ON TABLE oauth2_client
+    TYPE option<string> ASSERT $value = NONE OR string::len($value) <= 2048;
+DEFINE TABLE IF NOT EXISTS ciba_request SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS client_id ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS auth_req_id_hash ON TABLE ciba_request TYPE string
+    ASSERT string::len($value) = 64;
+DEFINE FIELD IF NOT EXISTS user_id ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS scopes ON TABLE ciba_request TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS scopes.* ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS binding_message ON TABLE ciba_request TYPE option<string>
+    ASSERT $value = NONE OR string::len($value) <= 256;
+DEFINE FIELD IF NOT EXISTS acr_values ON TABLE ciba_request TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS acr_values.* ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS resource ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS delivery_mode ON TABLE ciba_request TYPE string
+    ASSERT $value IN ['poll', 'ping'];
+DEFINE FIELD IF NOT EXISTS ping_ciphertext ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS ping_nonce ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE ciba_request TYPE string
+    ASSERT $value IN ['pending', 'approved', 'denied', 'expired', 'redeemed'];
+DEFINE FIELD IF NOT EXISTS version ON TABLE ciba_request TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS interval_secs ON TABLE ciba_request TYPE int DEFAULT 5;
+DEFINE FIELD IF NOT EXISTS last_polled_at ON TABLE ciba_request TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE ciba_request TYPE datetime;
+DEFINE FIELD IF NOT EXISTS approval_session_id ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS auth_time ON TABLE ciba_request TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS acr ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS amr ON TABLE ciba_request TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS amr.* ON TABLE ciba_request TYPE string;
+DEFINE FIELD IF NOT EXISTS decided_at ON TABLE ciba_request TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS redemption_id ON TABLE ciba_request TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE ciba_request TYPE datetime;
+DEFINE INDEX IF NOT EXISTS idx_ciba_request_hash ON TABLE ciba_request
+    COLUMNS auth_req_id_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_ciba_request_tenant_user ON TABLE ciba_request
+    COLUMNS tenant_id, user_id;
+DEFINE INDEX IF NOT EXISTS idx_ciba_request_expires ON TABLE ciba_request
+    COLUMNS expires_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v81 — T23.7.1 (continued) / G-7, D-61: signed CIBA authentication
+// requests (CIBA Core §7.1.1, FAPI-CIBA)
+// -----------------------------------------------------------------------
+//
+// **`oauth2_client`** gains the third CIBA Core §4 member AXIAM stores,
+// `backchannel_authentication_request_signing_alg`: one of the three JWS
+// algorithms AXIAM verifies on any client-signed JWT. Absent on every older
+// row, which is what such a client registered — it sends plain requests.
+//
+// **`oauth2_proof_replay.kind`** is re-defined to admit
+// `ciba_request_object`: a signed authentication request's `jti` is recorded
+// in the same table, under the same UNIQUE `(tenant_id, kind, scope, jti)`
+// index, as a client assertion's — first sighting by `CREATE`, replay by index
+// violation, no read in the path. The re-definition only widens the ASSERT;
+// every stored row satisfies the new one.
+const SCHEMA_V81: &str = "\
+DEFINE FIELD IF NOT EXISTS backchannel_authentication_request_signing_alg ON TABLE oauth2_client
+    TYPE option<string> ASSERT $value = NONE OR $value IN ['PS256', 'ES256', 'EdDSA'];
+DEFINE FIELD OVERWRITE kind ON TABLE oauth2_proof_replay TYPE string
+    ASSERT $value IN ['client_assertion', 'dpop_proof', 'ciba_request_object'];
+";
+
+// -----------------------------------------------------------------------
+// Schema v82 — T23.7.2 / G-7: the CIBA approval e-mail's template kind
+// -----------------------------------------------------------------------
+//
+// `email_template.kind` is re-defined to admit `ciba_approval`, the built-in
+// template of the mail that tells a user a CIBA request is waiting. The
+// re-definition only widens the ASSERT (the v14 list plus one value): every
+// stored row satisfies the new one, and a tenant or organization that stores a
+// customised version of the mail can now do so.
+const SCHEMA_V82: &str = "\
+DEFINE FIELD OVERWRITE kind ON TABLE email_template TYPE string
+    ASSERT $value IN ['activation', 'password_reset', 'mfa_setup_reminder',
+                      'admin_notification', 'deletion_scheduled', 'export_ready',
+                      'ciba_approval'];
+";
+
+// -----------------------------------------------------------------------
+// Schema v83 — T23.8.1 / G-8, D-59: the minimal profile's singleton lease
+// -----------------------------------------------------------------------
+//
+// With `AXIAM__AMQP__ENABLED=false` there is no broker to carry a cache
+// invalidation to another replica, so the profile is single-instance by
+// definition — and no configuration can *prove* it is (a replica count is the
+// orchestrator's, not the process's). A lease can: one row, record id
+// `minimal_profile_lease:instance`, claimed with a conditional write, renewed
+// by its holder and taken over by a successor once it has expired.
+//
+// Deployment-wide, not tenant-scoped, like `rate_limit_bucket`: it names a
+// running process, not data. `holder` is the per-process instance id. No
+// authoritative data is kept here and none is read by any request.
+const SCHEMA_V83: &str = "\
+DEFINE TABLE IF NOT EXISTS minimal_profile_lease SCHEMAFULL TYPE NORMAL;
+DEFINE FIELD IF NOT EXISTS holder ON TABLE minimal_profile_lease TYPE string;
+DEFINE FIELD IF NOT EXISTS acquired_at ON TABLE minimal_profile_lease TYPE datetime;
+DEFINE FIELD IF NOT EXISTS renewed_at ON TABLE minimal_profile_lease TYPE datetime;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE minimal_profile_lease TYPE datetime;
+";
+
+// -----------------------------------------------------------------------
+// Schema v84 — W5 F4 review, T-418 (D-73): one SCIM failure mail per target
+// per hour
+// -----------------------------------------------------------------------
+//
+// Every dead-lettered outbound SCIM delivery writes its audit row, and a
+// tenant's `scim_delivery_failed` rule mailed each recipient once per row — a
+// downstream that is down, or that refuses AXIAM's credential, dead-letters
+// every reference, so a whole tenant's worth of mail at the next
+// reconciliation. The notification is now claimed per target with a
+// conditional write on this column (`claim_failure_notification`, the
+// `claim_reconciliation` pattern), so of one target's dead letters one per
+// hour reaches the rules, on any replica. The audit row per dead letter and
+// `dead_lettered_total` are unchanged. Additive: one optional column.
+const SCHEMA_V84: &str = "\
+DEFINE FIELD IF NOT EXISTS failure_notified_at ON TABLE scim_target_state
+    TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W5 F4 review, T-418 — v84 is one optional column on the SCIM delivery
+    /// state and nothing else.
+    #[test]
+    fn v84_adds_only_the_failure_notification_claim() {
+        for statement in SCHEMA_V84.lines().filter(|l| l.starts_with("DEFINE")) {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v84 statements must be idempotent definitions: {statement}"
+            );
+            assert!(
+                statement.contains("failure_notified_at"),
+                "v84 defined something outside its scope: {statement}"
+            );
+        }
+        assert!(SCHEMA_V84.contains("ON TABLE scim_target_state"));
+        assert!(SCHEMA_V84.contains("TYPE option<datetime>"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V84.contains(forbidden),
+                "v84 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// T23.8.1 / G-8 — v83 is the additive lease table and nothing else.
+    #[test]
+    fn v83_defines_only_the_minimal_profile_lease() {
+        for statement in SCHEMA_V83.lines().filter(|l| l.starts_with("DEFINE")) {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v83 statements must be idempotent definitions: {statement}"
+            );
+            assert!(
+                statement.contains("minimal_profile_lease"),
+                "v83 defined something outside its scope: {statement}"
+            );
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V83.contains(forbidden),
+                "v83 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// T23.7.2 / G-7 — v82 widens the template-kind ASSERT by exactly the CIBA
+    /// approval mail, keeping every earlier kind.
+    #[test]
+    fn v82_admits_the_ciba_approval_template_kind_and_keeps_the_others() {
+        for kind in [
+            "activation",
+            "password_reset",
+            "mfa_setup_reminder",
+            "admin_notification",
+            "deletion_scheduled",
+            "export_ready",
+            "ciba_approval",
+        ] {
+            assert!(SCHEMA_V82.contains(&format!("'{kind}'")), "{kind}");
+        }
+        assert!(SCHEMA_V82.contains("DEFINE FIELD OVERWRITE kind ON TABLE email_template"));
+    }
+
+    /// T23.7.1 / G-7 — v80 adds the CIBA client metadata columns and the
+    /// pending-request store additively, with the unique hash index, the
+    /// erasure index and the expiry index the sweep reads, and stores no
+    /// `auth_req_id` in clear.
+    #[test]
+    fn v80_defines_the_ciba_request_store_additively() {
+        assert!(SCHEMA_V80.contains("DEFINE TABLE IF NOT EXISTS ciba_request SCHEMAFULL"));
+        assert!(SCHEMA_V80.contains(
+            "idx_ciba_request_hash ON TABLE ciba_request\n    COLUMNS auth_req_id_hash UNIQUE"
+        ));
+        assert!(SCHEMA_V80.contains(
+            "idx_ciba_request_tenant_user ON TABLE ciba_request\n    COLUMNS tenant_id, user_id"
+        ));
+        assert!(
+            SCHEMA_V80
+                .contains("idx_ciba_request_expires ON TABLE ciba_request\n    COLUMNS expires_at")
+        );
+        assert!(
+            SCHEMA_V80
+                .contains("$value IN ['pending', 'approved', 'denied', 'expired', 'redeemed']")
+        );
+        assert!(SCHEMA_V80.contains("$value = NONE OR $value IN ['poll', 'ping']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V80.contains(forbidden),
+                "v80 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V80
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v80 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("ciba_request") || statement.contains("backchannel_"),
+                "v80 defined something outside its scope: {statement}"
+            );
+        }
+        // The identifier is stored only as a digest.
+        assert!(!SCHEMA_V80.contains("FIELD IF NOT EXISTS auth_req_id ON"));
+        assert!(!SCHEMA_V80.contains("client_notification_token"));
+    }
+
+    /// v80 takes the next number and keeps v79 as it was.
+    #[test]
+    fn v80_follows_v79_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| (79..=80).contains(&m.version))
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![(79, "scim_target"), (80, "ciba_backchannel_authentication")]
+        );
+    }
+
+    /// T23.6.1 / D-57, D-58 — v79 adds the target registry, the link rows and
+    /// the delivery state, additively, with the two unique indexes the link is
+    /// defined by and a tenant index on each table.
+    #[test]
+    fn v79_defines_the_scim_target_tables_additively() {
+        for table in ["scim_target", "scim_target_link", "scim_target_state"] {
+            assert!(
+                SCHEMA_V79.contains(&format!("DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL")),
+                "{table}"
+            );
+            assert!(
+                SCHEMA_V79.contains(&format!("idx_{table}_tenant ON TABLE {table}")),
+                "{table} has a tenant index"
+            );
+        }
+        // D-57: a resource is linked once per target, and a downstream id
+        // belongs to one resource.
+        assert!(SCHEMA_V79.contains(
+            "idx_scim_target_link_resource ON TABLE scim_target_link\n    COLUMNS target_id, resource_type, axiam_id UNIQUE"
+        ));
+        assert!(SCHEMA_V79.contains(
+            "idx_scim_target_link_downstream ON TABLE scim_target_link\n    COLUMNS target_id, resource_type, downstream_id UNIQUE"
+        ));
+        assert!(SCHEMA_V79.contains("$value IN ['bearer', 'oauth2_client_credentials']"));
+        assert!(SCHEMA_V79.contains("$value IN ['all_users', 'groups']"));
+        assert!(SCHEMA_V79.contains("$value IN ['username', 'email']"));
+        assert!(SCHEMA_V79.contains("$value IN ['deactivate', 'delete']"));
+        assert!(SCHEMA_V79.contains("$value IN ['user', 'group']"));
+        assert!(SCHEMA_V79.contains("$value IN ['active', 'deprovisioned']"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "CREATE"] {
+            assert!(
+                !SCHEMA_V79.contains(forbidden),
+                "v79 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+        for statement in SCHEMA_V79
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert!(
+                statement.starts_with("DEFINE TABLE IF NOT EXISTS")
+                    || statement.starts_with("DEFINE FIELD IF NOT EXISTS")
+                    || statement.starts_with("DEFINE INDEX IF NOT EXISTS"),
+                "v79 statements must be idempotent definitions"
+            );
+            assert!(
+                statement.contains("scim_target"),
+                "v79 defined something outside its tables: {statement}"
+            );
+        }
+    }
+
+    /// D-57: the credential is stored only as ciphertext and nonce; the link
+    /// rows hold ids and a digest, no attribute of a person.
+    #[test]
+    fn v79_stores_the_credential_sealed_and_no_attribute_of_a_person() {
+        assert!(SCHEMA_V79.contains("cred_ciphertext ON TABLE scim_target"));
+        assert!(SCHEMA_V79.contains("cred_nonce ON TABLE scim_target"));
+        for forbidden in [
+            "password",
+            "bearer_token",
+            "client_secret",
+            "display_name",
+            "given_name",
+            "family_name",
+            "phone",
+        ] {
+            assert!(!SCHEMA_V79.contains(forbidden), "{forbidden}");
+        }
+    }
+
+    /// v79 takes the next number and keeps v78 as it was.
+    #[test]
+    fn v79_follows_v78_in_the_registry() {
+        let names: Vec<(u32, &str)> = MIGRATIONS
+            .iter()
+            .filter(|m| (78..=79).contains(&m.version))
+            .map(|m| (m.version, m.name))
+            .collect();
+        assert_eq!(names, vec![(78, "ssf_step_up"), (79, "scim_target")]);
+    }
 
     /// T23.5.3 / D-53 (1) — v78 adds the step-up record additively, one row per
     /// `(tenant, user)`, with the expiry index the sweep reads.
@@ -5344,8 +5838,17 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&78),
-            "v78 is the newest migration (T23.5.3 — the SSF step-up record `ssf_step_up`; \
+            Some(&84),
+            "v84 is the newest migration (the W5 F4 review, T-418 / D-73 — \
+             `scim_target_state.failure_notified_at`, one SCIM failure mail per target per \
+             hour; v83 was T23.8.1 / G-8 — the minimal profile's singleton \
+             lease table `minimal_profile_lease`; v82 was T23.7.2 — the CIBA approval e-mail's template kind \
+             `ciba_approval` in the `email_template.kind` ASSERT; v81 was T23.7.1 continued, \
+             D-61 — signed CIBA authentication \
+             requests: `oauth2_client.backchannel_authentication_request_signing_alg` and the \
+             `ciba_request_object` replay kind; v80 was T23.7.1 — CIBA: the `ciba_request` store \
+             and the two backchannel metadata columns on `oauth2_client`; v79 was T23.6.1 — outbound SCIM targets: `scim_target`, \
+             `scim_target_link` and `scim_target_state`; v78 was T23.5.3 — the SSF step-up record `ssf_step_up`; \
              v77 was T23.5.2 — the SSF transmitter: `ssf_stream`, \
              `ssf_event_buffer` and `security_settings.oidc_ssf_enabled`; v76 was T23.2.4 — SAML \
              single logout: the participant record \
@@ -5567,6 +6070,33 @@ mod tests {
             assert!(
                 window[0].version < window[1].version,
                 "Migrations must be in ascending version order"
+            );
+        }
+    }
+
+    /// T23.7.1 (continued) / D-61 — v81 stores the signing algorithm, admits
+    /// only the three AXIAM verifies, and widens the replay table's `kind` to
+    /// the signed request without narrowing it for the two existing kinds.
+    #[test]
+    fn v81_admits_the_signing_alg_and_the_request_object_replay_kind() {
+        assert!(SCHEMA_V81.contains(
+            "backchannel_authentication_request_signing_alg ON TABLE oauth2_client\n    TYPE \
+             option<string> ASSERT $value = NONE OR $value IN ['PS256', 'ES256', 'EdDSA']"
+        ));
+        assert!(SCHEMA_V81.contains(
+            "ASSERT $value IN ['client_assertion', 'dpop_proof', 'ciba_request_object']"
+        ));
+        for kind in [
+            axiam_core::repository::ProofKind::ClientAssertion,
+            axiam_core::repository::ProofKind::DpopProof,
+            axiam_core::repository::ProofKind::CibaRequestObject,
+        ] {
+            assert!(SCHEMA_V81.contains(&format!("'{}'", kind.as_str())));
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "CREATE"] {
+            assert!(
+                !SCHEMA_V81.contains(forbidden),
+                "v81 must not contain {forbidden}"
             );
         }
     }

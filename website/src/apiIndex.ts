@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta17";
-export const API_OPERATION_COUNT = 266;
-export const API_PATH_COUNT = 182;
+export const API_OPERATION_COUNT = 276;
+export const API_PATH_COUNT = 189;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -189,6 +189,21 @@ export const API_INDEX: ApiGroup[] = [
     "public": true
    },
    {
+    "method": "GET",
+    "path": "/api/v1/ciba/requests/{request_id}",
+    "summary": "Read a pending CIBA sign-in request addressed to the signed-in user."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/ciba/requests/{request_id}/approve",
+    "summary": "Approve a pending CIBA sign-in request, conditional on the version read."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/ciba/requests/{request_id}/deny",
+    "summary": "Refuse a pending CIBA sign-in request, conditional on the version read."
+   },
+   {
     "method": "POST",
     "path": "/api/v1/device/decide",
     "summary": "Record the user's approval or refusal."
@@ -298,6 +313,12 @@ export const API_INDEX: ApiGroup[] = [
     "method": "GET",
     "path": "/oauth2/authorize/logout",
     "summary": "Reached by `end_session`'s `302` when no `id_token_hint` named a session.",
+    "public": true
+   },
+   {
+    "method": "POST",
+    "path": "/oauth2/bc-authorize",
+    "summary": "",
     "public": true
    },
    {
@@ -1349,8 +1370,38 @@ export const API_INDEX: ApiGroup[] = [
  {
   "id": "api-provisioning",
   "label": "Provisioning",
-  "blurb": "SCIM provisioning tokens. The SCIM 2.0 endpoints themselves are served under `/scim/v2`.",
+  "blurb": "SCIM provisioning tokens, and the outbound SCIM targets AXIAM pushes users and groups to. The SCIM 2.0 endpoints themselves are served under `/scim/v2`.",
   "operations": [
+   {
+    "method": "GET",
+    "path": "/api/v1/scim-targets",
+    "summary": ""
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/scim-targets",
+    "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/scim-targets/{id}",
+    "summary": ""
+   },
+   {
+    "method": "PUT",
+    "path": "/api/v1/scim-targets/{id}",
+    "summary": "A **replacement**: an omitted optional member takes its default, except the credential, which absent keeps."
+   },
+   {
+    "method": "DELETE",
+    "path": "/api/v1/scim-targets/{id}",
+    "summary": "The target, its link rows and its delivery state."
+   },
+   {
+    "method": "POST",
+    "path": "/api/v1/scim-targets/{id}/reconcile",
+    "summary": "Start a reconciliation now."
+   },
    {
     "method": "GET",
     "path": "/api/v1/scim-tokens",
@@ -1475,7 +1526,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "GET",
     "path": "/health",
-    "summary": "",
+    "summary": "Also states the deployment profile (`full` | `minimal`) and, in `minimal`, what that profile does not provide.",
     "public": true
    },
    {

@@ -615,6 +615,7 @@ pub fn validate(
             // D5 — forced. A document cannot claim to be an administrator's
             // client, because this value is built here rather than echoed.
             managed_by: ManagedBy::Cimd,
+            ciba: Default::default(),
         },
     })
 }

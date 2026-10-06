@@ -330,7 +330,7 @@ export const REFERENCE_PAGES: DocPage[] = [
         rows: [
           [
             "1.40",
-            `[§21.3 rule 2](${contractLink("21.3")}) — an SDK making a call **over mTLS** must prefer the discovery document's RFC 8705 §5 alias for that endpoint. An **absent** member means *no separate host*, not *unsupported*; only the six back-channel endpoints are ever aliased and an SDK must not synthesise one for the front channel; and \`issuer\` is never aliased, so \`iss\` is still compared against the document's own value and not against the host that was called.`,
+            `[§21.3 rule 2](${contractLink("21.3")}) — an SDK making a call **over mTLS** must prefer the discovery document's RFC 8705 §5 alias for that endpoint. An **absent** member means *no separate host*, not *unsupported*; only the seven back-channel endpoints (the six of contract 1.43 and, since 1.58, CIBA's \`bc-authorize\`) are ever aliased and an SDK must not synthesise one for the front channel; and \`issuer\` is never aliased, so \`iss\` is still compared against the document's own value and not against the host that was called.`,
             "no, at 1.40",
           ],
           [

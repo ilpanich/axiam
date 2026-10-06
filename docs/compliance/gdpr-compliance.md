@@ -168,6 +168,25 @@ invoked as a deliberate additional step rather than an always-on default.
   written durably, backed by a **`UNIQUE` index on `erasure_proof.user_id`**
   for idempotent-retry safety (Phase 25).
 
+**What the erasure keeps, until the downstream confirms (G-6, D-58).** When a
+tenant provisions into a downstream SCIM service provider (outbound SCIM,
+`axiam-scim`), an erasure is also sent downstream as `DELETE /Users/{id}`. The
+**`scim_target_link`** row that records which downstream account belongs to the
+erased user — **ids and a digest only, no attribute of the person** — is the one
+thing the erasure cascade deliberately does not remove: it is what lets the
+`DELETE` be addressed. It is removed by the delivery of that `DELETE` (a `404`
+from a downstream that has already lost the account counts as done). If the
+downstream refuses (a revoked credential, a `4xx`) or is unreachable beyond the
+retry budget, the link stays, marked `deprovisioned` with `erase_pending`, and
+the nightly reconciliation retries it until it succeeds; an operator sees the
+refusals as `scim_push.delivery_failed` audit rows and in the target's
+`dead_lettered_total` / `last_failure_reason`, and can be mailed one by a
+notification rule for the `scim_delivery_failed` event. The queue carries only
+`{resource_type, axiam_id}` references, so no personal data waits in the broker
+or its dead-letter queue. Deleting a *target* removes its links and delivery
+state and does **not** deprovision the downstream. Proved end to end by
+[`crates/axiam-server/tests/scim_erasure_propagation_test.rs`](../../crates/axiam-server/tests/scim_erasure_propagation_test.rs).
+
 **Executable proof:** `deletion_pseudonymization` — seeds a user with audit
 entries, runs the full purge pipeline (pseudonymize → anonymize → pseudonymize
 audit → write erasure proof), then asserts: pseudonym format, `Anonymized`

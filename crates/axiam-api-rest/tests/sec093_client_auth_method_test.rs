@@ -165,6 +165,7 @@ async fn setup(strong_method: ClientAuthMethod) -> Fixture {
         browser_sso: false,
         allowed_resources: Vec::new(),
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+        ciba: Default::default(),
     };
 
     let (weak, weak_secret) = client_repo.create(new_client("weak-rp")).await.unwrap();

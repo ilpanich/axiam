@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.31.0",
+ "version": "2.35.0",
  "diagramCount": 9,
- "total": 406,
- "open": 17,
- "mitigated": 389,
+ "total": 447,
+ "open": 21,
+ "mitigated": 426,
  "diagrams": [
   {
    "id": 0,
@@ -1897,7 +1897,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "description": "Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores. Since 1.0.0-beta13 this also covers the OpenID Connect Basic OP surface the W1–W9 waves added — the per-client browser login hop and its OP session cookie, the honour lane for the authentication-request parameters, the consent-gated address and phone scopes, client_secret_basic, POST /oauth2/userinfo and tenant-scoped discovery — and the resource-endpoint token validation the OpenID Foundation conformance runs found wanting (T-237…T-259).",
+   "description": "Authorization Code with PKCE, client credentials and refresh grants; consent, introspection, revocation, userinfo, JWKS and discovery; client registration and the code and token stores. Since 1.0.0-beta13 this also covers the OpenID Connect Basic OP surface the W1–W9 waves added — the per-client browser login hop and its OP session cookie, the honour lane for the authentication-request parameters, the consent-gated address and phone scopes, client_secret_basic, POST /oauth2/userinfo and tenant-scoped discovery — and the resource-endpoint token validation the OpenID Foundation conformance runs found wanting (T-237…T-259). Since Phase 23 (G-7, T23.7.1, model 2.33.0) it also covers CIBA — Client-Initiated Backchannel Authentication: the backchannel authentication endpoint and the approval service the identity pages call, the pending-request store, and the CIBA client in a boundary of its own, the consumption device (T-421…T-439). At model 2.33.1 (D-61 amended, T23.7.1 continued) the endpoint verifies signed authentication requests (CIBA Core 7.1.1) and serves the fapi2 CIBA client as FAPI-CIBA requires (T-440 ... T-443; T-421 and T-434 amended).",
    "width": 1438,
    "height": 1028,
    "boundaries": [
@@ -1924,6 +1924,14 @@ export const THREAT_MODEL: ThreatModel = {
      "w": 380,
      "h": 940,
      "label": "Data tier"
+    },
+    {
+     "id": "349c0354-dfae-5c05-ab28-e1c8cfb006cd",
+     "x": 24,
+     "y": 784,
+     "w": 260,
+     "h": 200,
+     "label": "CIBA consumption device"
     }
    ],
    "nodes": [
@@ -2140,9 +2148,18 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The OP-session cookie is scoped to the authorization endpoint — `Path=/oauth2/authorize`, and since D-11 its per-tenant twin `Path=/t/{tenant_id}/oauth2/authorize` — so it never reaches `/oauth2/end_session`. An RP-initiated logout without an `id_token_hint` `sid` could therefore clear the cookie but not end the session row it named (F4 residual P23W1-10): the row stayed live for the rest of its lifetime, and a copy of the value taken before the logout — malware in the profile, a synced or exported cookie jar, a shared machine — kept buying authorization codes at every `browser_sso` relying party. Ending that row needs a route the cookie reaches, and such a route is a surface of its own: unauthenticated, reachable by any site's top-level navigation, it reads a credential, ends a session and then redirects.",
        "mitigation": "Mitigated in T23.1.8. **The hop.** `end_session` answers a request with no verified hint `sid` with a `302` to the `/logout` sub-path of the authorization endpoint it came through — `/oauth2/authorize/logout?tenant_id=…` on the deployment-wide path, `/t/{tenant_id}/oauth2/authorize/logout` on a per-tenant one — which RFC 6265 §5.1.4 path-match sends the copy scoped there, and which is the only place a logout is handled that the cookie reaches. The bounce sets no cookie, because a removal on it would be applied before the browser follows it. `end_session_at_cookie_path` looks the digest up **in the tenant the request names** (a tenant-A copy at B's hop names no session), revokes that one row, clears every OP copy for the tenant and the three API cookies, and continues exactly as `end_session`. A cross-site form `POST` to `end_session` is covered too: the `302` turns it into a top-level `GET`, on which a `Lax` cookie travels. **The continuation.** Only what `end_session` would itself have used — `post_logout_redirect_uri`, `state`, the effective `client_id` and, on the deployment-wide path, `tenant_id` — and never the hint. It is validated as there: the redirect only by exact match on the identified client's `post_logout_redirect_uris`, a client from another tenant naming no allow-list, `state` echoed only on a redirect that happens, nothing reflected into AXIAM's page; and a `tenant_id` parameter on the tenant hop is refused by the scope, as on every tenant path. **Safe defaults.** `GET` only; public in `PUBLIC_PATHS` on the ground `end_session` is (a logout must work for a session that is already gone); rate-limited with the `end_session` preset under its own `oauth2_end_session_cookie` bucket, shared by both mounts so alternating paths buys nothing; in OpenAPI. **Logout CSRF, unchanged.** AXIAM shows no confirmation prompt (RP-Initiated Logout §2 permits one; the B5 decision stands). A forged navigation to `end_session` already cleared every cookie the browser holds; the hop adds only the revocation of the row those cookies named, which nobody but that browser can observe — OAuth2 refresh grants do not depend on the row since schema v68. It therefore does **not** fan out back-channel logout: telling every relying party stays reserved for a request that names its session with a signed hint. **Residual.** A hinted logout ends the hinted session; if the browser's cookie names a different session (a second sign-in in the same browser), that row keeps its pre-T23.1.8 shape — cookies cleared, row orphaned and reachable only by a copy taken earlier. Tests: `oauth2_tenant_path_sso_test.rs::p23w1_10_end_session_without_a_hint_revokes_the_session_the_op_cookie_names` (bare and tenant), `::p23w1_10_the_cookie_hop_never_ends_another_tenants_session`, `::p23w1_10_the_cookie_hop_validates_its_continuation_as_end_session_does`, `::p23w1_10_the_cookie_hop_is_get_only_public_and_rate_limited`; `end_session_test.rs` follows the bounce in every no-hint case."
+      },
+      {
+       "number": 447,
+       "title": "A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "The routes on which a person approves a pending grant — the device grant's `POST /api/v1/device/decide` and CIBA's `POST /api/v1/ciba/requests/{id}/approve` and `/deny` — authenticate an `AuthenticatedUser`, which admits any `axiam:user` access token whose session is live: a console sign-in's, and equally one AXIAM minted for any OAuth2 client of the tenant through the code, refresh or CIBA grant. CSRF does not apply to a bearer token. A relying party holding such a token — even one granted only `openid` — can therefore approve on its user's behalf: a device authorization it started itself, since it chose the `user_code`, which mints for its device client that client's registered scopes and a refresh token without the user; and a CIBA request whose record id it knows.",
+       "mitigation": "Narrowed by the W5 F4 review (P23W5-04 closed it for CIBA; P23W5-06 reports the device grant, where it is pre-existing since B2). CIBA: the approval routes refuse a token that carries a `client_id` — only a console sign-in decides (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `/api/v1/device/verify` and `/decide` still admit it; bounded by the token itself (a live session of a user of the tenant) and by the device client's registered scopes. Closes when `/api/v1/device/*` applies the same rule (issue body in the W5 F4 review, §14)."
       }
      ],
-     "open": 0
+     "open": 1
     },
     {
      "id": "85a0d330-603a-516c-b60a-8e989081343d",
@@ -2807,6 +2824,207 @@ export const THREAT_MODEL: ThreatModel = {
       }
      ],
      "open": 0
+    },
+    {
+     "id": "85b33ce6-dea8-545c-8ee5-840c358057ab",
+     "kind": "actor",
+     "x": 49,
+     "y": 854,
+     "w": 150,
+     "h": 80,
+     "name": "CIBA client (consumption device)",
+     "lines": [
+      "CIBA client",
+      "(consumption device)"
+     ],
+     "description": "A confidential client registered for urn:openid:params:grant-type:ciba (poll or ping): a call centre, a point of sale, a back office acting for a customer. It knows whom it wants authenticated and holds none of their credentials (G-7).",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 434,
+       "title": "A `fapi2` client is served CIBA weaker than the FAPI-CIBA profile requires",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The FAPI-CIBA profile requires signed authentication requests, strong client authentication (`tls_client_auth`, `self_signed_tls_client_auth` or `private_key_jwt`), sender-constrained tokens, a unique authorization context or binding message, and no push mode. A `fapi2` client served the CIBA grant without any one of them would be a client registered under a profile that promises FAPI running a flow that does not meet it, while its operator believes it does — and a client that registered a signing algorithm but whose unsigned requests were accepted anyway would hold a security switch that does nothing (the SEC-097 shape).",
+       "mitigation": "Built (T23.7.1, D-61). A `fapi2` client may hold the CIBA grant only with `backchannel_authentication_request_signing_alg` registered (refused otherwise at the admin API; a self-registered client is never `fapi2`, I5), and the `fapi2` profile's own rules — strong client authentication and sender-constrained tokens — run on the same registration through `fapi::validate_registration`. At `bc-authorize`, every request from a client that registered an algorithm must be a signed `request` JWT under exactly it (T-440 … T-442), and a `fapi2` row edited to drop the algorithm is `unauthorized_client`; D-17 refuses one edited to a shared secret. A `fapi2` request must carry a `binding_message` (`invalid_request` otherwise), and a `fapi2` ping client's `client_notification_token` must be at least 22 characters (128 bits in base64url — the floor an authorization server can enforce on entropy it cannot measure). Push is not offered to anyone. The token endpoint applies `fapi::enforce_token_request` to the CIBA grant as to every other: no certificate or DPoP proof the registration requires, no token. Tests: `crates/axiam-oauth2/src/ciba.rs` `a_fapi2_client_holds_the_grant_only_with_signed_requests`; `crates/axiam-api-rest/tests/ciba_test.rs` `admin_registration_validates_signed_requests_and_the_fapi2_ciba_client` (no signing algorithm, a shared secret, no sender-constraining — each `400`; the complete client `201`), `a_fapi2_ciba_client_signs_authenticates_strongly_and_is_sender_constrained` (signed and `private_key_jwt`-authenticated: `200`; unsigned or without a binding message: `invalid_request`; redeemed without the DPoP proof: `invalid_dpop_proof`; a row edited to drop the algorithm: `unauthorized_client`), `a_fapi2_ping_client_needs_a_notification_token_of_128_bits`, `a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize`. Residual: FAPI-CIBA certification itself is a run of the OpenID Foundation suite, not a property a unit test can show."
+      },
+      {
+       "number": 438,
+       "title": "A self-registered client obtains the CIBA grant and targets the tenant's users",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Dynamic registration lets a stranger create a client (T-273). The CIBA grant lets a client send sign-in requests to any user of the tenant by naming them. A stranger who could register a CIBA client would gain exactly that — a notification channel to every user, and the T-424 attack, from a client nobody vetted.",
+       "mitigation": "Built (T23.7.1, D-62). RFC 7591 accepts the CIBA grant **only in `initial_access_token` mode** — the registration an administrator authorised by minting a single-use token — and refuses it in `anonymous` mode with `invalid_client_metadata`; the CIBA metadata is validated by the same rules as the admin API's, and a CIBA-only registration needs no redirect URI. Tests: `crates/axiam-oauth2/src/dcr.rs` `an_anonymous_registration_cannot_name_the_ciba_grant`, `an_initial_access_token_registration_may_name_it_without_redirect_uris`, `the_ciba_metadata_rules_apply_to_a_registration`; `crates/axiam-api-rest/tests/ciba_test.rs` `an_anonymous_registration_cannot_obtain_the_ciba_grant`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "3c33fdd2-685b-5587-8571-836183810548",
+     "kind": "process",
+     "x": 624,
+     "y": 644,
+     "w": 140,
+     "h": 140,
+     "name": "CIBA: /oauth2/bc-authorize + approval service",
+     "lines": [
+      "CIBA:",
+      "/oauth2/bc-authorize",
+      "+ approval",
+      "service"
+     ],
+     "description": "POST /oauth2/bc-authorize (and under /t/{tenant_id}) and axiam_oauth2::ciba::CibaService (T23.7.1; D-61, D-62, D-63): client authentication as at the token endpoint, verification of a signed authentication request (CIBA Core 7.1.1, D-61: the registered algorithm and keys, aud/iss/exp/nbf/iat, a single-use jti in oauth2_proof_replay), hint resolution, validation and storage of the request, the user-notification port, and the approval service API (lookup_for_approval, approve, deny) the identity pages call (T23.7.2). The CIBA grant itself is redeemed at /oauth2/token.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 421,
+       "title": "A caller starts a backchannel authentication without authenticating as the client its registration names",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "`POST /oauth2/bc-authorize` asks AXIAM to push a sign-in request at a user on another device. If a caller could reach it unauthenticated, as a public client, with a credential the registration does not name (SEC-093's shape), or — for a `fapi2` row edited in the datastore — with a shared secret, anybody who learned a client id could send the tenant's users sign-in prompts in that client's name, and the request would be attributed to a client that never made it.",
+       "mitigation": "Built (T23.7.1). The endpoint authenticates exactly as the token endpoint does: the same request context (the `Authorization: Basic` header, the client certificate rustls verified, a client assertion) and the same `TokenService::authenticate_client`, so the **registration** decides the method; the D-17 request-time rule (`fapi::enforce_client_authentication`) runs next. A CIBA client must be confidential — the grant is refused at registration (admin API and RFC 7591) and at request time to a `none` client — and must hold the grant (`unauthorized_client` otherwise). A failure is the uniform `401 invalid_client` and is recorded as the token endpoint's `oauth2.client_auth_failed` audit row, detached from the response and attributed by the SEC-087 rules. A `tls_client_auth` client — the FAPI-CIBA shape — reaches the endpoint on the mTLS host: since D-61 `backchannel_authentication_endpoint` is one of the RFC 8705 §5 `mtls_endpoint_aliases`, so a two-listener deployment does not leave it with no way to present its certificate. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_refuses_each_malformed_request_with_its_section_13_code` (a wrong secret is `401`, a client without the grant `unauthorized_client`, nothing stored), `ciba_client_authentication_failures_meet_the_same_lockout` (the audit rows name the CIBA grant and the client), `admin_registration_accepts_and_validates_the_ciba_metadata` (a public client is refused the grant), `a_row_edited_to_public_or_fapi2_is_refused_at_bc_authorize` (a row edited in the datastore to `none` is `invalid_client`, one edited to `fapi2` on a shared secret is refused by D-17), `a_fapi2_ciba_client_signs_authenticates_strongly_and_is_sender_constrained` (`private_key_jwt` at the endpoint); `crates/axiam-oauth2/src/ciba.rs` `stray_metadata_public_clients_and_unimplemented_members_are_refused`; `crates/axiam-oauth2/src/oidc.rs` `the_alias_object_has_exactly_the_seven_members_the_contract_names`; `crates/axiam-api-rest/tests/oidc_conformance.rs` `discovery_publishes_mtls_aliases_when_a_host_is_configured`."
+      },
+      {
+       "number": 422,
+       "title": "`bc-authorize` becomes a user-enumeration oracle",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A CIBA request names its user by a hint — a username, an e-mail address or an ID token. CIBA Core §13 defines `unknown_user_id` for a hint that names nobody; answering it, or answering a locked or inactive account differently, or taking measurably longer for a real user (to send them a notification), would let every registered CIBA client test the tenant's usernames and addresses at the endpoint's rate limit.",
+       "mitigation": "Built (T23.7.1, D-63). A hint naming nobody, a user who may not sign in, or a user under brute-force lockout is **answered exactly like a real one**: the request is stored with no subject and the response carries the same members and values (`auth_req_id`, `expires_in`, `interval`); nothing can approve it, the client polls `authorization_pending` and then `expired_token`. `unknown_user_id` is never sent. The hint is resolved only after every other parameter has been validated, so a malformed request is refused identically whoever it names, and the user notification is handed to the port **detached** from the response, so its cost is not on the response path. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_is_not_a_user_oracle` (a real and an unknown hint get the same shape, the unknown one has no subject and answers `authorization_pending`, a locked user is nobody, only the real unlocked user is notified)."
+      },
+      {
+       "number": 423,
+       "title": "An `id_token_hint` names a user of another tenant or another client's relying party",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The key that signs ID tokens is the deployment's, shared by every tenant and every issuer form (T-279). An `id_token_hint` that were only signature-checked could carry a subject from another tenant, or an ID token issued to a different relying party, and make AXIAM push a sign-in request to a user the requesting client never authenticated — the CIBA form of token confusion.",
+       "mitigation": "Built (T23.7.1). The hint must verify under the deployment's EdDSA key **and** carry `aud` equal to the authenticated client **and** an `iss` this request may name (the deployment's root issuer or this tenant's path issuer); anything else is `invalid_request`, with one message whatever failed. The subject is then looked up in the request's tenant only (and the row's tenant re-checked), so a subject from another tenant resolves to nobody (T-422). Expiry is not required: the hint authenticates nothing, it only names the user to ask. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `an_id_token_hint_must_be_one_this_server_issued_to_this_client` (issued to this client: resolved; to another client: refused; signed by another key: refused); `bc_authorize_refuses_each_malformed_request_with_its_section_13_code` (an ID token this server never issued)."
+      },
+      {
+       "number": 429,
+       "title": "Brute-force lockout does not apply to CIBA (the Keycloak 26.7.x class)",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A user's brute-force lockout (`locked_until`) is read on the password path, and `account_may_act` — what the other grants check — reads the account's status but not that lockout. A backchannel grant that skipped it would mint tokens for an account the lockout was protecting; and client-authentication failures at a new endpoint that skipped the token endpoint's machinery would be a second, unaudited guessing surface.",
+       "mitigation": "Built (T23.7.1). A user may be the subject of a CIBA grant only while the account may act **and** is not under lockout (`ciba::user_may_be_subject`), checked three times: at `bc-authorize` (a locked user resolves to nobody and is not notified, T-422), at approval, and at redemption — after the approval is spent, so a lockout between approval and redemption burns it (`invalid_grant`). Client-authentication failures at `bc-authorize` and for the CIBA grant meet the token endpoint's machinery: the uniform `invalid_client`, the `oauth2.client_auth_failed` audit row, and buckets that end in `429` whatever the credential. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_is_not_a_user_oracle` (the locked user), `a_lockout_after_approval_refuses_the_redemption`, `ciba_client_authentication_failures_meet_the_same_lockout`."
+      },
+      {
+       "number": 430,
+       "title": "A request is approved by someone other than its user, with weaker authentication than it asked for, or after it was decided or expired — and the tokens claim the approval",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The approval is the only act of the person in the whole flow. An approval API that accepted any signed-in user, a version or status it did not check, an expired request, or an `acr` stated by its caller would let one user approve another's request, an MFA request be satisfied by a password, or tokens carry `auth_time`, `acr` and `amr` that no authentication produced.",
+       "mitigation": "Built (T23.7.1) in the service API the identity pages call (`CibaService::lookup_for_approval`, `approve`, `deny`). A request is shown and decidable only for **its own user**, while pending and unexpired, and the decision is conditional on the version the page read (T-427); the account must still be allowed to act and not be locked out. The `acr` recorded is **derived from the approving session's `amr`** (`acr_for`), never taken from the caller; a request whose `acr_values` named a class the session did not achieve is not approved — the page is told which class to step up to. The minted ID token carries the approval's `auth_time`, the reported `acr` and the `amr`, the access token names the approving session in `sid` (ending it ends them), and the refresh token keeps the same snapshot (D-9). Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `pending_then_slow_down_then_tokens_with_the_approvals_evidence` (a password-only session cannot approve an MFA request; the tokens carry the approval's evidence and session), `denied_is_access_denied_and_expired_is_expired_token` (another user cannot deny; an expired request cannot be approved); `crates/axiam-db/tests/ciba_request_repository_test.rs` `approval_is_conditional_on_version_user_status_and_expiry`."
+      },
+      {
+       "number": 435,
+       "title": "CIBA requests and decisions are not attributable",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "A sign-in request pushed at a user, and that user's approval or refusal, are security decisions. Without a record, a stream of prompts a user reports, or an approval they dispute, could not be traced to the client that asked or to the session that decided.",
+       "mitigation": "Built (T23.7.1, T23.7.2; completed by the W5 F4 review). Every stored request is `oauth2.ciba_initiated` (the client, the request, the delivery mode and the expiry — never the hint or the binding message) and every client-authentication failure `oauth2.client_auth_failed`; each approval and refusal is `ciba.approved` / `ciba.denied`, the user as actor and the request as resource, with the client, the delivery mode, the `acr` of an approval and — since the W5 F4 review — the **session that decided**, which the request row cannot keep (it is swept ten minutes after expiry, and a refusal stores no session on it). Never the binding message. Tests: `crates/axiam-api-rest/tests/ciba_approval_test.rs` `both_decisions_are_audited_without_the_binding_message` (its session assertion failed before the review's change); `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_validates_stores_and_notifies`, `ciba_client_authentication_failures_meet_the_same_lockout`."
+      },
+      {
+       "number": 440,
+       "title": "A signed authentication request is forged, altered, or verified under an algorithm or key the client did not register",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A signed CIBA request (§7.1.1) is only worth its signature if the signature binds it to the client's own key under the algorithm the client registered. A verifier that took the algorithm from the JWS header (`alg: none`, RS256-public-key-as-HMAC-secret), accepted a key the request carries, accepted any supported algorithm rather than the registered one, or checked `iss` loosely, would let anybody who learned a client id — or a man in the middle of a TLS-terminating proxy log — mint or edit a request in that client's name: a different `login_hint`, a wider `scope`, a binding message the user is meant to trust.",
+       "mitigation": "Built (T23.7.1, D-61). `crates/axiam-oauth2/src/ciba_signed_request.rs` `verify_signed_request` refuses a header `alg` other than the client's registered `backchannel_authentication_request_signing_alg`, then verifies only under keys the client **registered** (inline `jwks`, or `jwks_uri` through the SSRF-guarded federation JWKS cache via `private_key_jwt::resolve_registered_keys`, the one path every client-signed JWT's keys come through) whose own key material is of that algorithm (`jose`: the key decides, the header only confirms; a `kid` narrows, never widens). Only PS256, ES256 and EdDSA can be registered — refused otherwise at the admin API and RFC 7591 — and an inline `jwks` must hold a key of the registered algorithm. `iss` (and a `client_id` claim, if present) must equal the authenticated client. Every refusal is `invalid_request` naming what failed, to the client that already authenticated, and nothing is stored. Tests: `crates/axiam-oauth2/src/ciba_signed_request.rs` `a_signature_by_an_unregistered_key_is_refused` (a stranger's key and a tampered payload), `only_the_registered_algorithm_is_accepted` (an ES256 signature by the client's own P-256 key when EdDSA is registered, an HS256 token keyed with public bytes), `a_kid_selects_among_registered_keys_and_an_unknown_one_is_refused`, `iss_and_a_client_id_claim_must_be_this_client`, `the_advertised_registered_and_verified_sets_agree`; `crates/axiam-oauth2/src/ciba.rs` `a_signing_algorithm_is_verified_keyed_and_stored`; `crates/axiam-api-rest/tests/ciba_test.rs` `signed_request_refusals_are_invalid_request_and_store_nothing` (bad signature, wrong algorithm, another client's `iss`), `admin_registration_validates_signed_requests_and_the_fapi2_ciba_client`."
+      },
+      {
+       "number": 442,
+       "title": "Parameters outside a signed request supplement or override it, or a signing client is served an unsigned request",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "If `bc-authorize` merged form parameters with a signed request's claims, an intermediary could add what the signature does not cover — a `login_hint` the JWT omitted, a longer `requested_expiry` — and the server and the client would read one request two ways. If a client that registered a signing algorithm could still send plain requests (or `request_uri`, which would have AXIAM fetch a URL the caller chose), the signature would protect nothing, because an attacker would simply not sign.",
+       "mitigation": "Built (T23.7.1, D-61). A `request` beside **any** authentication-request parameter is refused before client authentication, naming them (§7.1.1: they \"MUST NOT be present outside of the JWT\"); only the client-authentication members may accompany it. The verified request's parameters come from its claims alone, and the parameters AXIAM does not implement (`login_hint_token`, `user_code`) are refused inside it as outside it; a nested `request` or `request_uri` claim is malformed. A client that registered an algorithm sending a plain request, and a client that registered none sending a signed one, are both `invalid_request`; a `fapi2` row edited to drop the algorithm is `unauthorized_client`. `request_uri` is not part of CIBA and is refused before authentication — AXIAM never fetches a request. Tests: `crates/axiam-oauth2/src/ciba.rs` `unsupported_parameters_are_refused_before_anything_else` (the outside parameters are named; the client-authentication members are not counted); `crates/axiam-oauth2/src/ciba_signed_request.rs` `parameters_of_the_wrong_type_or_nested_requests_are_malformed`; `crates/axiam-api-rest/tests/ciba_test.rs` `signed_request_refusals_are_invalid_request_and_store_nothing` (a parameter outside the JWT, `request_uri`, an unsigned request from a signing client, a signed request from a non-signing client, `login_hint_token` inside the JWT), `a_signed_request_is_verified_and_its_claims_are_the_request` (the stored request and the user's notification carry the JWT's scope and binding message)."
+      },
+      {
+       "number": 443,
+       "title": "Signed requests make `bc-authorize` expensive to serve",
+       "type": "Denial of service",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Verifying a signed request costs a signature verification (PS256 is the dearest of the three) and, for a client with a `jwks_uri`, possibly a key-set fetch. An authenticated client sending large or many signed requests, or one whose `jwks_uri` is slow, could make the endpoint costly for everyone.",
+       "mitigation": "Built (T23.7.1, D-61). A `request` over 16 KiB is refused before it is parsed, and a `jti` over 256 bytes before it is recorded; only candidate keys of the registered algorithm are tried, and the `jti` is recorded only after the signature verified, so garbage cannot fill the replay table. Key sets come through the shared federation JWKS cache (TTL, stale-while-revalidate, SEC-054 guard) keyed per client, so verification does not fetch per request. The route's governor, the shared `bc_authorize_per_min` counter and the per-client bucket after authentication (T-428) all count signed requests like any other. Tests: `crates/axiam-oauth2/src/ciba_signed_request.rs` `an_oversized_or_non_jws_request_is_malformed`, `a_blank_or_oversized_jti_is_unusable`; `crates/axiam-api-rest/tests/ciba_test.rs` `the_limiter_counts_bc_authorize`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "fdbd0326-30ee-5184-abdd-7ecdd22a271a",
+     "kind": "store",
+     "x": 1254,
+     "y": 754,
+     "w": 150,
+     "h": 80,
+     "name": "ciba_request (pending CIBA requests)",
+     "lines": [
+      "ciba_request",
+      "(pending CIBA",
+      "requests)"
+     ],
+     "description": "ciba_request (schema v80): one row per bc-authorize — tenant, client, SHA-256 of the auth_req_id (unique), the resolved user or none, scopes, binding message, acr_values, resource, delivery mode, status, version, interval, last poll, expiry and the approval's evidence; a ping-mode request's auth_req_id and client_notification_token sealed under pki_encryption_key. Swept by the ciba_request job; removed with its user and its tenant.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 425,
+       "title": "An `auth_req_id` is guessed, stolen from storage or redeemed by a client that did not start it",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Once a user approves, the `auth_req_id` is what turns the approval into tokens. A short or predictable identifier could be guessed; one stored in clear could be read from the datastore or a backup; and one honoured for any authenticated client would let a client that learned another's identifier — from a log, a shared proxy, its own tenant's data — collect tokens for a user who approved somebody else.",
+       "mitigation": "Built (T23.7.1). 256 bits of CSPRNG, base64url (CIBA Core asks for 128); only its SHA-256 is stored, under a unique index; the raw value is returned once and never logged. Redemption is conditional on the **client that started the request** in the datastore's own `WHERE` (and on the tenant), and the token endpoint matches the row to the authenticated client before it writes anything: another client's or tenant's identifier is `invalid_grant`, exactly like an unknown one, and leaves the row untouched. A ping-mode request's recoverable copy is sealed (T-432). Tests: `crates/axiam-oauth2/src/ciba.rs` `auth_req_ids_are_high_entropy_and_hashed`; `crates/axiam-db/tests/ciba_request_repository_test.rs` `redemption_needs_approval_the_starting_client_and_happens_once`, `the_hash_is_unique`, `a_request_round_trips_every_column`; `crates/axiam-api-rest/tests/ciba_test.rs` `another_clients_or_tenants_auth_req_id_is_invalid_grant` (no write for the foreign client; the owner still redeems), `bc_authorize_validates_stores_and_notifies` (only the digest is stored)."
+      },
+      {
+       "number": 426,
+       "title": "Two concurrent token requests redeem one approval twice",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A CIBA client polls on an interval and retries; the moment a user approves there is likely a request in flight. A read-then-write redemption would let two requests both see `approved` and both mint a token set from one approval — T-163's class, on a new credential.",
+       "mitigation": "Built (T23.7.1). Redemption is the **X6 two-layer arbiter** the device grant uses: a guarded `UPDATE … WHERE status = 'approved' AND client_id = … AND expires_at > now RETURN BEFORE` inside an explicit transaction (the engine aborts a conflicting loser), then a per-attempt nonce read back after the commit in a query of its own, so only the caller whose nonce survived mints tokens; a lost race is `invalid_grant`, never a `5xx`. Single use is conditional on an attested persistent engine, as for every X6 path. Tests: `crates/axiam-db/tests/ciba_request_repository_test.rs` `concurrent_redemptions_yield_exactly_one_winner` (50 rounds of 8 racers on `surrealkv`); `crates/axiam-api-rest/tests/ciba_test.rs` `concurrent_redemptions_yield_exactly_one_token_set` (two concurrent token requests over HTTP on `surrealkv`, six rounds: one `200`, the other refused), `pending_then_slow_down_then_tokens_with_the_approvals_evidence` (a second redemption is `invalid_grant`)."
+      },
+      {
+       "number": 427,
+       "title": "The user deciding and the client polling overwrite each other, or a request moves on a marker before it is validated",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Two parties write the same row without coordinating: the user approving or denying, and the client whose every token request records a poll. Read-modify-write between them (T-406's class) could put back a status the other changed, let a stale approval page approve a request that was denied in another tab, or let a poll stamp a request it does not own; and a transition driven by a marker rather than by a validated request (T-404's lesson) could move a request no authenticated party asked to move.",
+       "mitigation": "Built (T23.7.1). Every transition is one statement carrying its precondition: approval and denial on `status = 'pending'`, the `version` the page read, the request's own user and an unexpired request; expiry on `status IN [pending, approved]`, the version and a past expiry; redemption as T-426. A poll is a compare-and-set on the `last_polled_at` the token endpoint read, and does **not** move `version`, so a client polling every five seconds cannot make an approval page's read stale; a lost compare-and-set is answered `slow_down`. Nothing is written for a request before the client is authenticated and matched to it. Tests: `crates/axiam-db/tests/ciba_request_repository_test.rs` `approval_is_conditional_on_version_user_status_and_expiry`, `denial_is_conditional_and_final`, `polls_compare_and_set_without_moving_the_version`; `crates/axiam-api-rest/tests/ciba_test.rs` `another_clients_or_tenants_auth_req_id_is_invalid_grant` (a foreign client writes nothing), `denied_is_access_denied_and_expired_is_expired_token` (another user cannot deny)."
+      },
+      {
+       "number": 432,
+       "title": "A ping-mode request's notification credential and identifier are readable at rest",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Ping mode needs two values in clear at delivery: the `auth_req_id` (the notification's body) and the `client_notification_token` the client supplied (the bearer AXIAM presents to the client's endpoint). Stored in clear, a datastore or backup reader could forge notifications to the client and learn a live identifier.",
+       "mitigation": "Built (T23.7.1). Both are sealed together with AES-256-GCM under `pki_encryption_key` (the key webhook secrets, SSF push headers and SCIM target credentials use), nonce in its own column; no read of the table projects either column except `CibaRequestRepository::ping_credentials`, for the deliverer; the type's `Debug` redacts both. With no key configured a ping-mode request is refused, never stored in clear; a poll-mode request holds neither. Tests: `crates/axiam-db/tests/ciba_request_repository_test.rs` `ping_credentials_are_sealed_and_need_the_key` (refused without the key; neither value appears in the stored row; opens to what was stored); `crates/axiam-core/src/models/ciba.rs` `ping_credentials_never_print`."
+      },
+      {
+       "number": 436,
+       "title": "Pending requests keep a person's identity, binding message and approval after they are needed, or after erasure",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A request row names a user, carries the client's binding message (often a transaction description) and, once approved, the session and authentication methods of the approval. Kept indefinitely, or surviving the user's erasure or the tenant's deletion, it is personal data held without purpose.",
+       "mitigation": "Built (T23.7.1). A request lives at most ten minutes (`requested_expiry` 30–600 s); the cleanup loop's `ciba_request` job — listed in `/health/jobs` from boot — marks every pending or approved request past its expiry `expired`, and deletes any request ten minutes after it expired (long enough to answer a late poll `expired_token`). The row carries `user_id`, so both erasure paths delete the user's requests, and the tenant-delete transaction deletes the tenant's. Tests: `crates/axiam-db/tests/ciba_request_repository_test.rs` `expiry_is_marked_conditionally_and_the_sweep_marks_then_deletes`, `erasure_and_tenant_deletion_remove_the_requests`; `crates/axiam-server/src/job_health.rs` `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (the `ciba_request` sweep is recorded by the loop and registered); `crates/axiam-db/src/schema.rs` `v80_defines_the_ciba_request_store_additively`."
+      }
+     ],
+     "open": 0
     }
    ],
    "edges": [
@@ -3299,14 +3517,222 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "HTTPS",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "b9a496a9-5911-5bd3-864d-6ab46243807c",
+     "path": "M199,870.3 L627.2,735.1",
+     "name": "backchannel authentication request",
+     "description": "",
+     "label": "backchannel authentication request (HTTPS, client auth)",
+     "labelLines": [
+      "backchannel authentication request",
+      "(HTTPS, client auth)"
+     ],
+     "lx": 413.1,
+     "ly": 802.7,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 437,
+       "title": "A `binding_message` misleads the user: overlong, multi-line or direction-reversed text",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The binding message is the only text the client's device and the user's approval page both show, and the user compares them to know they are approving the request in front of them. Text with control characters, line breaks or bidirectional overrides could make the two screens disagree or hide what is being approved; an unbounded one could carry a payload into a notification.",
+       "mitigation": "Built (T23.7.1). At most 64 characters, not blank, no control character and no bidirectional embedding or override (`invalid_binding_message`, CIBA Core §13); stored trimmed and passed to the notification port as validated. Tests: `crates/axiam-oauth2/src/ciba.rs` `binding_messages_are_bounded_and_printable`; `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_refuses_each_malformed_request_with_its_section_13_code` (too long, a line break)."
+      },
+      {
+       "number": 441,
+       "title": "A captured signed authentication request is replayed, or reused at another authorization server",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A signed request is a bearer artefact: whoever holds a copy can present it. Replayed at `bc-authorize` it would push the same user a fresh sign-in prompt in the client's name for as long as it verifies; minted for another authorization server that trusts the same client key, it would be accepted here too.",
+       "mitigation": "Built (T23.7.1, D-61). `aud` must name this authorization server's issuer identifier — the deployment's or the tenant path's, as a string or inside an array; the endpoint URL is not an issuer. `exp`, `nbf`, `iat` and `jti` are all required (§7.1.1); `exp` must be in the future, `nbf` and `iat` not, `exp - nbf` at most sixty minutes and `nbf` no older than sixty minutes (FAPI-CIBA §5.2.2), with sixty seconds' skew, for every client. The `jti` is **single-use**: recorded after verification in `oauth2_proof_replay` (kind `ciba_request_object`, scope the client id, schema v81) by `CREATE` against the UNIQUE `(tenant_id, kind, scope, jti)` index — the arbiter client assertions and DPoP proofs already use, with no read in the path — and a guard that cannot record refuses rather than accepting. Tests: `crates/axiam-oauth2/src/ciba_signed_request.rs` `both_issuer_forms_are_an_audience_as_a_string_or_in_an_array`, `every_claim_section_7_1_1_requires_is_required`, `the_fapi_ciba_lifetime_bounds_hold`, `a_blank_or_oversized_jti_is_unusable`; `crates/axiam-api-rest/tests/ciba_test.rs` `signed_request_refusals_are_invalid_request_and_store_nothing` (missing `jti`, expired, over sixty minutes, a foreign `aud`, the endpoint as `aud`; the same request twice is `invalid_request` the second time and stores one row; another client may use the same `jti` value), `a_signed_request_is_verified_and_its_claims_are_the_request` (both issuer forms and an array); `crates/axiam-db/src/schema.rs` `v81_admits_the_signing_alg_and_the_request_object_replay_kind`."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "1e71bc5c-8cee-5772-985c-022d90f5f6ad",
+     "path": "M763.5,722.7 L1254,784.6",
+     "name": "store pending request",
+     "description": "",
+     "label": "store pending request (hashed auth_req_id)",
+     "labelLines": [
+      "store pending request (hashed",
+      "auth_req_id)"
+     ],
+     "lx": 1008.7,
+     "ly": 753.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "b852cced-d3c4-589b-b3bc-e8d06d418183",
+     "path": "M629.5,686.8 L199,505.6",
+     "name": "sign-in request notification",
+     "description": "",
+     "label": "sign-in request notification (port, T23.7.2)",
+     "labelLines": [
+      "sign-in request notification (port,",
+      "T23.7.2)"
+     ],
+     "lx": 414.2,
+     "ly": 596.2,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "e-mail / push",
+     "threats": [
+      {
+       "number": 424,
+       "title": "A flood of sign-in prompts wears a user down until one is approved by mistake",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Every CIBA request may notify its user. A client — or several — sending request after request for one person turns the notification channel into the *MFA fatigue* attack: prompts arrive until the user approves one to make them stop, or approves the wrong one. The prompt is also the only place the user can tell a legitimate request from a hostile one.",
+       "mitigation": "Built (T23.7.1, T23.7.2; verified by the W5 F4 review). A notification approves nothing: the mail carries the client's name, its binding message and a link, and approval is one deliberate act on AXIAM's own page after a full sign-in — a console session of the request's own user, stepped up to the class the request asked for — under CSRF, showing the client and the binding message to compare with the client's device (T-431). One user is sent at most **three** notifications a minute whatever the clients asking (a fixed shared bucket no preset moves); a request past it is still stored and answered as usual, so the throttle reveals nothing (T-422); every client has its own `bc-authorize` bucket after authentication besides the route's; the `binding_message` is bounded and printable (T-437); a request expires in at most ten minutes; and only an address something vouches for is mailed (T-446, D-74). Tests: `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_flood_of_requests_for_one_user_sends_at_most_three_mails_a_minute`, `a_request_for_nobody_sends_no_mail`, `a_request_for_mfa_needs_a_step_up_and_then_approves`; `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_validates_stores_and_notifies`, `the_limiter_counts_bc_authorize`; `frontend/src/pages/ciba/CibaApprovalPage.test.tsx` `renders the binding message as text, never as markup`. Residual: three a minute is still up to 180 prompts an hour to one person from any number of clients; what makes a flood ineffective is that none can be approved without signing in on AXIAM's page."
+      },
+      {
+       "number": 446,
+       "title": "The approval mail goes to an address nobody proved, making AXIAM a phishing relay",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A CIBA request mails its user. An account can carry an address its holder never proved — a self-registration inside its grace period, or one whose verification never completed — and the subject rule admits a `PendingVerification` account whatever its age (`account_may_act`). A client able to call `bc-authorize` (registered by an administrator or with an initial access token, D-62) that names such an account would have AXIAM mail the address's real owner — a stranger to the account, who cannot approve anything — up to three times a minute, from the tenant's own sender, quoting a binding message the client wrote.",
+       "mitigation": "Built (the W5 F4 review, P23W5-03, D-74). The notifier mails only an address something vouches for — D-25's rule, the one the SAML IdP applies to an email `NameID` and SSF to an email subject: `email_verified_at` is set, or the account is `Active`, a state only the verification flow, an administrator, SCIM or the directory path put an account in. Anything else is the same quiet no-op as an account that may not sign in: the request is stored and answered as usual (T-422) and waits on the approval page. Test: `crates/axiam-oauth2/tests/ciba_notifier_test.rs` `an_address_nothing_vouches_for_is_not_mailed` (it failed before the fix). Residual: a federated account stays `PendingVerification` for life (T-160) and has no vouched address unless one was verified, so it is sent no approval mail."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "5638e544-e852-5b31-92d2-a9330fce072b",
+     "path": "M199,505.6 L629.5,686.8",
+     "name": "approve / deny (identity pages)",
+     "description": "",
+     "label": "approve / deny (identity pages) (T23.7.2)",
+     "labelLines": [
+      "approve / deny (identity pages)",
+      "(T23.7.2)"
+     ],
+     "lx": 414.2,
+     "ly": 596.2,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 431,
+       "title": "The approval page approves without a full sign-in, or is driven cross-site",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "The approval is a state-changing act a user performs in a browser, on a request a third party started. A page that approved on a weak or stale session, that a hostile page could submit cross-site or frame, or that hid which client asked and what binding message it showed, would turn CIBA into a way to obtain a user's approval without their informed consent.",
+       "mitigation": "Built (T23.7.2; verified and tightened by the W5 F4 review). The page is the console's `/ciba/approve` over `GET /api/v1/ciba/requests/{id}`, `POST …/approve` and `…/deny`: only a **console sign-in** of the request's own user decides — a token with no live session row behind it is `403`, and so, since the W5 F4 review (T-447), is a token AXIAM minted for an OAuth2 client, which names the user and a session too; `/api/v1`'s CSRF double-submit guards both decisions; the console serves `frame-ancestors 'none'` and `X-Frame-Options: DENY`. The page shows the client's name, the scopes and the binding message as text and passes back the version it read, so a request decided, expired or changed since is the one indistinguishable `404` (T-430). A request asking for a class the session has not achieved is `403 step_up_required`, and the page sends the user through the login hop's re-authentication, consuming nothing on the way back (T-404's lesson). Each decision is audited with its session (T-435). Tests: `crates/axiam-api-rest/tests/ciba_approval_test.rs` `the_routes_need_a_session_and_a_csrf_token`, `a_token_minted_for_a_client_cannot_decide_a_request`, `another_users_request_is_a_404_identical_to_an_unknown_id`, `a_request_for_mfa_needs_a_step_up_and_then_approves`, `a_decision_on_a_stale_version_is_refused`, `an_expired_request_is_refused_on_the_page_and_on_both_decisions`; `frontend/src/pages/ciba/CibaApprovalPage.test.tsx` `renders the binding message as text, never as markup`, `offers the step-up up front when the session has not achieved the class`; `frontend/e2e/ciba.spec.ts` (a real browser approval; an MFA request a password session cannot approve)."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "befc0d61-587e-5c27-b0bd-76337daf35e1",
+     "path": "M146.9,854 L409.3,394.8",
+     "name": "token request with auth_req_id",
+     "description": "",
+     "label": "token request with auth_req_id (HTTPS, client auth)",
+     "labelLines": [
+      "token request with auth_req_id",
+      "(HTTPS, client auth)"
+     ],
+     "lx": 278.1,
+     "ly": 624.4,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 428,
+       "title": "A limiter forgets the CIBA endpoint or grant, so initiation and polling are unmetered",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The Keycloak 26.7 lesson: a rate limit that covers every grant but one is a rate limit an attacker routes around through that one. `bc-authorize` allocates a row per request and may notify a person; the CIBA grant is polled in a loop by design. Either left out of the limiter, or polled without a per-request interval, becomes a storage, notification and CPU sink.",
+       "mitigation": "Built (T23.7.1). `bc-authorize` has **its own bucket and preset** (`AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN`, default 60; gateway 600, mesh 6000; a docs-parity row in `docs/deployment/rate-limit-sizing.md`), counted on the route by the per-key governor and the shared counter (keyed like `/oauth2/token`) and again per authenticated client in the handler. The CIBA grant is dispatched **inside** the token endpoint after its route limiters, its public-client bucket and its DPoP check, so `TOKEN_PER_MIN` counts it like every grant; and each request carries its own interval: a token request inside it is `slow_down` and raises the interval by 5 s, to 60 s. Tests: `crates/axiam-api-rest/tests/ciba_test.rs` `the_limiter_counts_bc_authorize` (429 after the budget), `the_limiter_counts_the_ciba_grant` (429 after the budget), `pending_then_slow_down_then_tokens_with_the_approvals_evidence` (the interval grows 5 → 10 → 15); `crates/axiam-oauth2/src/ciba.rs` `polling_inside_the_interval_slows_down_and_the_interval_grows_to_a_cap`; `crates/axiam-api-rest/src/config/rate_limit.rs` `documented_defaults_match_shipped_config`, `documented_presets_match_applied_profiles`."
+      },
+      {
+       "number": 439,
+       "title": "Tokens from a CIBA grant reach beyond what the request asked for and the user approved",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The user approves a request the client made: a set of scopes, for a resource, under the client's registration. A redemption that could add scopes, name a different `resource`, or mint for a client other than the one that asked would hand out a token wider than the approval.",
+       "mitigation": "Built (T23.7.1). `scope` must include `openid` and name only scopes the client is registered for (`invalid_scope` otherwise); the RFC 8707 `resource` is validated against the client's `allowed_resources` at `bc-authorize` and **bound**: a token request may repeat it, never change it (`invalid_target`); tokens are minted for the redeeming client, which must be the starting client (T-425), with the request's scopes and the approval's evidence (T-430). Tests: `crates/axiam-oauth2/src/ciba.rs` `scope_must_carry_openid_and_stay_registered`; `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_refuses_each_malformed_request_with_its_section_13_code` (`invalid_scope`, `invalid_target`), `pending_then_slow_down_then_tokens_with_the_approvals_evidence` (the scope and client of the minted tokens)."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "568bd2f3-589f-5dfa-aac6-cd31ef264941",
+     "path": "M506.1,366.3 L1254,755",
+     "name": "redeem CIBA request",
+     "description": "",
+     "label": "redeem CIBA request (X6 arbiter)",
+     "labelLines": [
+      "redeem CIBA request (X6 arbiter)"
+     ],
+     "lx": 880.1,
+     "ly": 560.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "a052c53c-af43-5c92-bb5b-74ff87dff55c",
+     "path": "M627.2,735.1 L199,870.3",
+     "name": "ping notification",
+     "description": "",
+     "label": "ping notification (T23.7.2)",
+     "labelLines": [
+      "ping notification (T23.7.2)"
+     ],
+     "lx": 413.1,
+     "ly": 802.7,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [
+      {
+       "number": 433,
+       "title": "The ping notification endpoint is used to reach internal services",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A ping-mode client registers `backchannel_client_notification_endpoint`, and AXIAM will POST to it from inside the deployment with a bearer token attached. Pointed at a metadata service, a loopback admin port or a private address — or at a public name that resolves to one, or that redirects — the deliverer becomes a request forger (T-112 and T-392's class).",
+       "mitigation": "Built (T23.7.1 at write time, T23.7.2 at delivery; verified by the W5 F4 review). Write time: the endpoint is required in ping mode, refused in poll mode, and held to the webhook outbound address policy (`validate_push_endpoint`) at the admin API and RFC 7591/7592. Delivery: the `CibaPing` deliverer's one way out is `guarded_fetch_no_redirect` with `allow_private = false` — the name resolved fresh, every address globally routable, the validated address pinned, `https` required, a `3xx` a retry and never followed — and the client is read again after the sealed credentials are opened, the ping leaving only if it is the version whose endpoint was read (W4 F4 §15). Only the record id travels on the queue. Reasons are a fixed vocabulary, never the endpoint, a header or a body. Tests: `crates/axiam-oauth2/tests/ciba_ping_test.rs` `the_address_guard_refuses_an_internal_endpoint_at_delivery`, `a_redirect_is_not_followed`, `no_reason_carries_a_credential_or_the_endpoint`, `the_clients_current_registration_decides`, `a_decision_queues_a_message_with_nothing_secret_in_it`; `crates/axiam-oauth2/src/ciba.rs` `a_ping_registration_needs_a_public_https_endpoint`; `crates/axiam-api-rest/tests/ciba_test.rs` `admin_registration_accepts_and_validates_the_ciba_metadata`; `crates/axiam-api-rest/tests/ciba_ping_flow_test.rs` `an_approval_pings_the_client_which_then_redeems_once`."
+      }
+     ],
+     "open": 0
     }
    ],
-   "total": 60,
-   "open": 0,
+   "total": 85,
+   "open": 1,
    "bySeverity": {
-    "High": 26,
-    "Medium": 25,
-    "Low": 4,
+    "High": 35,
+    "Medium": 39,
+    "Low": 6,
     "Critical": 5
    }
   },
@@ -7545,16 +7971,16 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules. Since Phase 23 (G-5, T23.5.2, model 2.27.0) it also covers the Shared Signals Framework transmitter: the SSF stream registry and its per-stream event buffer (`ssf_stream`, `ssf_event_buffer`), SET issuance with the deployment key, the stream management API and transmitter metadata a receiver calls with its own client credentials, and the push and poll flows to the receiver, across a boundary of their own (D-44 … D-52). Since model 2.29.0 (T23.5.4) the store also holds the step-up record (`ssf_step_up`, D-53 (1)) the authorization endpoint keeps for `assurance-level-change`. Since model 2.31.0 (D-55) the transmitter is inactive for every tenant while the deployment holds more than one tenant and serves no per-tenant issuers, so tenants never share an issuer.",
+   "description": "The append-only audit trail and its OpenPGP batch signing, webhook delivery with HMAC signatures and the SSRF guard, the pluggable email service and templates, and admin notification rules. Since Phase 23 (G-5, T23.5.2, model 2.27.0) it also covers the Shared Signals Framework transmitter: the SSF stream registry and its per-stream event buffer (`ssf_stream`, `ssf_event_buffer`), SET issuance with the deployment key, the stream management API and transmitter metadata a receiver calls with its own client credentials, and the push and poll flows to the receiver, across a boundary of their own (D-44 … D-52). Since model 2.29.0 (T23.5.4) the store also holds the step-up record (`ssf_step_up`, D-53 (1)) the authorization endpoint keeps for `assurance-level-change`. Since model 2.31.0 (D-55) the transmitter is inactive for every tenant while the deployment holds more than one tenant and serves no per-tenant issuers, so tenants never share an issuer. Since model 2.32.0 (G-6, T23.6.4) it also covers outbound SCIM provisioning: the target registry and its management routes (`scim_target`, contract §31), the link rows and delivery state (`scim_target_link`, `scim_target_state`), the provisioning source every user and group repository reports to, the `ScimPush` deliverer on the shared dispatcher, reconciliation, and the dead-letter row that reaches the notification rules, with the downstream SCIM service provider across a boundary of its own (D-57, D-58). At model 2.34.0 (T23.8.2, the review of the audit-write path in the minimal profile against T19.27) an instance's stop with audit rows still queued or in flight enters as T-444, Mitigated; T-405 is amended (a queued push is at-least-once in the full profile only) and T-108 reopened (its text now describes the controls the code has).",
    "width": 1438,
-   "height": 1088,
+   "height": 1348,
    "boundaries": [
     {
      "id": "c0d71a54-aac0-5a7f-84bf-d3ac20259104",
      "x": 324,
      "y": 24,
      "w": 660,
-     "h": 1040,
+     "h": 1300,
      "label": "AXIAM eventing & audit services"
     },
     {
@@ -7570,7 +7996,7 @@ export const THREAT_MODEL: ThreatModel = {
      "x": 1034,
      "y": 84,
      "w": 380,
-     "h": 900,
+     "h": 1220,
      "label": "Data tier"
     },
     {
@@ -7580,6 +8006,14 @@ export const THREAT_MODEL: ThreatModel = {
      "w": 260,
      "h": 220,
      "label": "SSF receivers"
+    },
+    {
+     "id": "07e47d12-b530-5a19-9c32-1e4b1df891bd",
+     "x": 24,
+     "y": 1084,
+     "w": 260,
+     "h": 220,
+     "label": "SCIM downstreams"
     }
    ],
    "nodes": [
@@ -7692,9 +8126,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Action succeeds while its audit write fails",
        "type": "Repudiation",
        "severity": "High",
-       "status": "Mitigated",
+       "status": "Open",
        "description": "If audit writes are best-effort, an attacker who can make the audit path fail — by exhausting the datastore or triggering a specific error — performs actions that leave no trace.",
-       "mitigation": "Audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed."
+       "mitigation": "Carried to the W5 F4 review (T23.8.2, review P23W5-A10). Until model 2.34.0 this entry read “audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed”; no code does either. What is built: AXIAM's own request rows are written by the audit middleware off the request path — a bounded queue of 4 096 entries and one worker — so a full queue drops the entry with an `ERROR` line and a failed append is a `WARN` line while the action stands; the GDPR erasure and tenant-deletion records dead-letter a failed write to an append-only file and a structured `axiam.audit.dlq` event (T19.27, `write_erasure_audit_with_dlq`); every orderly stop drains the queue (T-444). What is not: a fallback for any other row, the GDPR request records included (P23W5-A8), and any counter or notification when a row is dropped or fails (P23W5-A10). An attacker who can exhaust the datastore can act while the rows recording it are dropped, and only the server log says so."
       },
       {
        "number": 109,
@@ -7713,9 +8147,18 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "The audit log is append-only by design, so any personal data written into it cannot later be erased — which is in direct tension with the GDPR Art. 17 erasure path AXIAM also offers.",
        "mitigation": "Both halves are now bounded. **Retention** (T-119): a default 730-day sweep through the table's only deletion path — deployment-wide, reachable from no HTTP handler, `0` to disable, both states logged at startup. **Collection** (R-7, 2026-09-12): `AXIAM__AUDIT__MINIMISE`, default `false`, applied in `SurrealAuditLogRepository::append` — the only code every audit row passes through, since the request middleware is one producer among eighteen and the rest call `append` directly. With it on, `ip_address` is truncated to its `/24` or `/48` prefix and a `user_agent` in `metadata` is reduced to a coarse family, immediately before the write because the table is append-only and there is no second chance by construction; an address that does not parse is **dropped** rather than written through, since a value that cannot be parsed cannot be shown to have been minimised. Three limits, each deliberate: the structured metadata producers write is never touched — the client and disposition on a refresh-token replay (T-254), the names of released claims (T-241), a federated subject (T-161) are accountability evidence other mitigations depend on, and dropping them would weaken three controls to narrow one; the switch is **deployment-wide and not per tenant**, because audit is a control the deployment relies on *including against a tenant administrator* and a tenant-level switch would let a tenant weaken the evidence used to investigate that tenant; and it is off by default, because reducing forensic precision is a lawful-basis judgement to make deliberately. Both states are logged at startup exactly as retention is. Erasure and export are unaffected and are asserted so rather than assumed: `pseudonymize_actor` clears `ip_address` outright so a truncated value is erased by the same statement as a whole one, and the Art. 15 export's `audit_entries` section reads `action`, `outcome`, `timestamp` and `resource_id` and never the address (`minimisation_leaves_every_field_the_art_15_export_reads`). The request-audit middleware's own metadata key set is pinned exactly — `http_status` and `authenticated`, nothing else — so \"no request metadata\" cannot regress into an append-only table with a 730-day window. Residual, accepted: the deployment still chooses, and one that leaves the switch off collects what it collects today. `docs/compliance/gdpr-compliance.md` §2a; `docs/deployment/README.md`."
+      },
+      {
+       "number": 444,
+       "title": "An instance stops while audit rows are queued or in flight, and they are lost",
+       "type": "Repudiation",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The request audit middleware writes off the request path: an entry waits in a bounded queue (4 096) for the one worker that appends it, so a response can go out before its row is written. A process that ends abruptly loses that queue, a request between its write and its audit row, and a GDPR purge between the erasure and `gdpr.user_pseudonymized`. Two stops did exactly that until T23.8.2: the minimal profile's reaction to a lost singleton lease was `std::process::exit(1)` from the renewal task — and a lease is lost after its holder could not reach the datastore, which is when the queue fills — and an orderly SIGTERM dropped the queue with the runtime too, because the teardown only set a flag (review P23W5-A1, A2).",
+       "mitigation": "Built (T23.8.2). A lost lease only raises a flag; the composition root then stops through the SIGTERM path — no new connections, in-flight requests finished, the cleanup task's current tick finished, so an erasure and its row stay together — and every orderly stop drains the audit queue with `AuditMiddleware::drain`, a FIFO barrier bounded at 5 s, before `serve` returns; after a lost lease it returns an error, the non-zero exit D-59 requires. The process exit survives only as a backstop after `LeaseTiming::lost_stop_deadline` (15 s). Tests: `crates/axiam-server/tests/minimal_profile_boot.rs` `an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_rows`; `crates/axiam-server/src/profile.rs` `a_lost_lease_starts_the_orderly_stop_at_once_and_the_backstop_only_after_the_deadline`, `an_orderly_stop_that_finishes_in_time_disarms_the_backstop`; `crates/axiam-audit/tests/service_and_middleware.rs` `drain_returns_once_every_queued_entry_is_written`, `drain_is_bounded_when_the_datastore_does_not_answer`. Residuals: a SIGKILL, an OOM kill and the backstop still lose the queue; the gRPC listener is not part of the orderly stop, and the full profile still exits mid-flight when an AMQP consumer dies (review P23W5-A11, A12)."
       }
      ],
-     "open": 0
+     "open": 1
     },
     {
      "id": "564e10a1-ee60-5981-91af-b9a8d05a75fa",
@@ -7854,12 +8297,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Alert flooding buries a real incident",
        "type": "Denial of service",
        "severity": "Medium",
-       "status": "Mitigated",
+       "status": "Open",
        "description": "An attacker triggers thousands of notifiable events so the genuine signal is lost among them, and burns the mail quota along the way.",
-       "mitigation": "Notifications are delivered in configurable batches through the mail queue, and rules are per-category so a noisy category can be tuned without disabling the rest."
+       "mitigation": "Reopened at model 2.35.0 by the W5 F4 review (P23W5-13). Until then this entry read “notifications are delivered in configurable batches through the mail queue, and rules are per-category so a noisy category can be tuned without disabling the rest”; nothing batches them. What is built: rules are per event, so a noisy event can be taken out of a rule without disabling the rest; a mail is fixed text; the events a caller can provoke ride rate-limited routes (sign-in per address and per account, with brute-force lockout, T-27); and the one event a background process raises, `scim_delivery_failed`, is coalesced to one notification per target per hour (T-418, D-73). What is not: `NotificationDispatcher::dispatch` enqueues one mail per matched recipient per audit row, so a request-path event an attacker can produce in volume — failed sign-ins spread over addresses and accounts — mails each recipient of a rule for it once per event, with no coalescing, cool-down or digest. Open until per-rule coalescing exists (issue body in the W5 F4 review, §14)."
       }
      ],
-     "open": 0
+     "open": 1
     },
     {
      "id": "54f8e397-5ae5-5288-b810-bc75e2af389d",
@@ -8122,7 +8565,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "What waits to be delivered is the unsigned pending event (D-48), and it names a person: an `iss_sub` subject, or on an `email` stream an address. It waits in three places: the poll and pause buffer in the datastore, and the push kind's queues on the broker, the last of which, `axiam.ssf_push.dlq`, receives every event that exhausted its attempts or can never be accepted, and nothing drains it. Without a lifetime, a dead-lettered event would keep its subject indefinitely, outside every sweep and every erasure path, readable by anyone with access to the broker.",
-       "mitigation": "Built (T23.5.3, 2026-10-04; D-48, D-53 (10)). Every place a pending event waits has a lifetime of at most seven days, D-48's bound for held events. **The dead-letter queue**: `axiam.ssf_push.dlq` is declared with an `x-message-ttl` of 604 800 000 ms and no other argument, so the broker drops a dead-lettered event seven days after it arrives. It is the only queue that carries a TTL: the primary and the retry queue keep the declaration every kind uses, and the webhook DLQ keeps the arguments a running broker already holds (RabbitMQ refuses a redeclaration with other arguments). **The buffer**: seven days at most, swept on `/health/jobs`, 1 000 events per stream (T-395). No queue or table holds a signed SET or the push credential (T-391, T-398), and the broker's transport and credentials are T-121's. Tests: `crates/axiam-amqp/src/outbound/topology.rs` `the_ssf_push_dlq_declaration_is_pinned` (the DLQ's arguments are exactly the 604 800 000 ms TTL; the primary and the retry queue carry only their dead-letter routing), `only_the_ssf_push_dlq_has_a_message_ttl` (no other queue of any kind carries one); `crates/axiam-db/tests/ssf_event_buffer_test.rs` `expired_events_are_not_served_and_the_sweep_removes_them`. Residuals, stated rather than hidden. **Erasure**: the Art. 17 erasure and the administrator's delete remove the person's step-up record (T-404) but not events already held in a buffer or a queue, so an erased person's subject can outlive the erasure there for up to seven days (carried from T23.5.2). The `account-purged` event does so on purpose: telling recipients of an erasure is its job. **The primary and retry queues** declare no TTL: a message there lives through its retry schedule (`AXIAM__SSF_PUSH__MAX_ATTEMPTS` attempts, each delay at most `AXIAM__SSF_PUSH__BACKOFF_CEILING_MS`), and waits in the primary queue for as long as no consumer runs."
+       "mitigation": "Built (T23.5.3, 2026-10-04; D-48, D-53 (10)). Every place a pending event waits has a lifetime of at most seven days, D-48's bound for held events. **The dead-letter queue**: `axiam.ssf_push.dlq` is declared with an `x-message-ttl` of 604 800 000 ms and no other argument, so the broker drops a dead-lettered event seven days after it arrives. Besides it, only `axiam.scim_push.dlq` carries a TTL — the same seven days, since G-6 (T23.6.1; model 2.32.0 records it), on a queue that holds only references (T-415): the primary and the retry queue of every kind keep the declaration every kind uses, and the webhook DLQ keeps the arguments a running broker already holds (RabbitMQ refuses a redeclaration with other arguments). **The buffer**: seven days at most, swept on `/health/jobs`, 1 000 events per stream (T-395). No queue or table holds a signed SET or the push credential (T-391, T-398), and the broker's transport and credentials are T-121's. Tests: `crates/axiam-amqp/src/outbound/topology.rs` `the_ssf_push_dlq_declaration_is_pinned` (the DLQ's arguments are exactly the 604 800 000 ms TTL; the primary and the retry queue carry only their dead-letter routing), `only_the_ssf_push_and_scim_push_dlqs_have_a_message_ttl` (renamed in T23.6.1: exactly the SSF push and SCIM push DLQs carry one, and no primary or retry queue of any kind); `crates/axiam-db/tests/ssf_event_buffer_test.rs` `expired_events_are_not_served_and_the_sweep_removes_them`. Residuals, stated rather than hidden. **Erasure**: the Art. 17 erasure and the administrator's delete remove the person's step-up record (T-404) but not events already held in a buffer or a queue, so an erased person's subject can outlive the erasure there for up to seven days (carried from T23.5.2). The `account-purged` event does so on purpose: telling recipients of an erasure is its job. **The primary and retry queues** declare no TTL: a message there lives through its retry schedule (`AXIAM__SSF_PUSH__MAX_ATTEMPTS` attempts, each delay at most `AXIAM__SSF_PUSH__BACKOFF_CEILING_MS`), and waits in the primary queue for as long as no consumer runs."
       },
       {
        "number": 404,
@@ -8141,6 +8584,155 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Every write of an SSF stream is read-modify-write: the receiver's `PATCH`, `PUT` and status write and the administrator's replacement each read the stream, decide, and write back the whole configuration they read. Two writes that overlap lose one: a receiver's write prepared before an administrator disabled, narrowed, re-bound or switched the subject format of its stream, landing after, puts the old status, allowance, binding and subject format back — undoing a `disabled` that D-51 says only an administrator may lift, without the administrator's page or audit row showing it, and a receiver can widen the window by writing at its rate limit. The push deliverer has the same shape across two reads: it reads the stream's endpoint, then opens its `Authorization` header, so a header supplied with a new endpoint in between is sent to the old one, against D-49's rule that a credential never follows an endpoint to another origin.",
        "mitigation": "Decided in the W4 F4 review (P23W4-01, 2026-10-04). Every stream write is conditional on the version it was prepared from: `SsfStreamUpdate::from_stream` carries the stream's `updated_at` and `SsfStreamRepository::update` writes `WHERE updated_at = $expected`, answering `Conflict` (not `NotFound`) when the stream exists but changed. The receiver's `PATCH`, `PUT` and status `POST` decide again from a fresh read when overtaken — so the D-51 check always judges the status the write would replace, and an administrator's `disabled` makes the retry a `403` — and answer `409` only if the stream kept changing over three attempts; the administrator's `PUT` answers `409` and the console reloads. The deliverer reads the stream again after opening the header and pushes only if it is still the version it signed against and whose endpoint it holds; otherwise the attempt is a retry. Contract §32.3 rule 4 and §32.6 say so (1.56, amended in place). Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `a_write_prepared_from_an_overtaken_read_does_not_land`; `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `a_credential_supplied_for_a_new_endpoint_never_reaches_the_old_one`. Residual: the deliverer's second read and the send are not one step, so an endpoint moved after that read is used for one attempt with the header that was stored for it — the header and the endpoint still belong together."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "7a537749-2b71-511e-804c-75a29eff8ae7",
+     "kind": "actor",
+     "x": 49,
+     "y": 1154,
+     "w": 150,
+     "h": 80,
+     "name": "Downstream SCIM service provider",
+     "lines": [
+      "Downstream SCIM",
+      "service provider"
+     ],
+     "description": "A SCIM 2.0 service provider a tenant administrator registered as a target (G-6): it receives `POST`, `PATCH`, `DELETE` and list requests for the tenant's users and groups, authenticated with a bearer token or with an OAuth2 client-credentials access token from its `token_url`. Trusted with the people the tenant sends it; never a source of AXIAM's directory data.",
+     "outOfScope": false,
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "1116d6a2-4538-5cfe-8a2e-83ed3df4d0fc",
+     "kind": "process",
+     "x": 374,
+     "y": 1114,
+     "w": 140,
+     "h": 160,
+     "name": "Outbound SCIM provisioning (target API, deliverer, reconciliation)",
+     "lines": [
+      "Outbound",
+      "SCIM",
+      "provisioning",
+      "(target",
+      "API,",
+      "deliverer,",
+      "reconciliation)"
+     ],
+     "description": "`axiam_scim::outbound` and `handlers::scim_targets` (T23.6.1 … T23.6.4; D-57, D-58): the target registry's management routes (contract §31, human-only), the `ScimProvisioner` every user and group repository reports a committed change to (`ProvisioningSink`), the `ScimPushDeliverer` the shared dispatcher's `scim_push` consumer calls — one level-triggered attempt per queued reference — and reconciliation, nightly (`scim_reconcile`) and on demand, through the same deliverer. Its one way out is `guarded_fetch_no_redirect` with `allow_private = false`.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 408,
+       "title": "The stored credential is sent to a host it was not registered for",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "AXIAM sends the stored bearer token to `base_url` and the client secret to `token_url`, from inside the deployment. If either URL could change without the credential being supplied again — by an administrator who may edit the target, by a write that overlaps another, or by a redirect the downstream answers with — AXIAM itself would hand the credential to whoever runs the new host, and an administrator who may change a target but was never given its credential could read it off a server of their own.",
+       "mitigation": "Built (T23.6.1, T23.6.2, T23.6.4; D-57). **Bound on write**: changing `base_url` of a bearer target, `token_url` of a client-credentials target, or the authentication kind, without the credential in the same write is `400` naming the field and changes nothing (contract §31.3 rule 2). The repository applies the rule against the very row it replaces — its write is conditional on the version it checked, so a write racing it is a `409`, never a credential aimed at a URL the rule did not see — and applies it to an unconditional update too. **Checked again before it leaves**: the deliverer reads the target, opens the credential, reads the target once more and sends only if `updated_at` is still the version whose URL it holds; otherwise the attempt is a retry and nothing leaves (the T-406 precedent). The access-token cache is keyed by target **and** `updated_at`, so any administrator write retires a cached token. **No redirect followed**: every request, the token request included, goes through the outbound client's one `guarded_fetch_no_redirect` call, which returns a `3xx` as a response whose `Location` is never resolved or fetched; the deliverer and the token fetch treat it as a retry. Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `changing_a_bearer_targets_base_url_needs_the_credential`, `changing_a_client_credentials_token_url_needs_the_credential`, `switching_the_auth_kind_needs_the_credential_both_ways`, `an_unconditional_update_still_checks_the_url_binding`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_bearer_credential_does_not_follow_the_base_url_to_another_one`, `a_client_secret_does_not_follow_the_token_url_nor_a_switch_of_kind`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_target_changed_between_the_read_and_the_send_is_a_retry_and_sends_nothing`, `a_redirect_is_a_retry_and_is_never_followed` (301, 302, 307 and 308: the `Location` host receives nothing), `the_client_credentials_token_is_fetched_once_and_reused`; `crates/axiam-scim/src/outbound/client.rs` `the_cache_is_per_target_version_and_flushable`; `crates/axiam-scim/src/outbound/deliverer.rs` `the_outbound_modules_use_the_no_redirect_guarded_fetch_and_nothing_else` (one call site across the five outbound modules, no redirect-following guard, no other HTTP client); `crates/axiam-pki/src/ssrf.rs` `no_redirect_returns_a_3xx_and_never_fetches_its_target`. Residuals: the second read and the send are not one step, and the requests of one attempt (a `POST`, the `GET` that adopts on `409`, the `PATCH` after it) or of one reconciliation run reuse the header opened at its start — always with the URLs of the version that header was checked against, so the credential and its URL still belong together. A client-credentials target's `base_url` is outside the binding by decision; what that lets reach another host is the access token rather than the secret, and T-409 carries it."
+      },
+      {
+       "number": 409,
+       "title": "An access token minted with the stored client secret follows a base URL moved without it",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A client-credentials target's secret goes to `token_url`, but every SCIM request carries the access token AXIAM obtained with it, and a write that moves `base_url` also moves `updated_at`, so the next attempt fetches a fresh token from the unchanged `token_url` and presents it to the new `base_url`. Were `base_url` free to move without the secret, an administrator who may change the target, and was never given its secret, could point it at a host they run and collect a live access token for the real downstream — usable there for its whole lifetime and with whatever the downstream grants AXIAM, which is more than AXIAM itself ever does with it (AXIAM touches no account whose `externalId` is not one of its tenant's, T-413). D-57 as first written bound the secret to `token_url` only, and contract §31.3 rule 2 called `base_url` “not the credential's destination”.",
+       "mitigation": "Built (the W5 F4 review, P23W5-01; D-57 amended, contract 1.57 §31.3 rule 2 amended in place). A client-credentials target's secret is bound to `base_url` as well as to `token_url`: a write that moves either without the secret in the same write is `400` naming the field and changes nothing — in the repository, checked against the very row its conditional write replaces (T-416), and in the handler; the console asks for the secret as soon as either URL is edited. With the secret re-entered the move is an ordinary write; the token cache is keyed by the target's version, so no token minted for the old base outlives it. The move stays a human-only, audited write (T-411, T-420) to a public host (T-410). Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `a_client_credentials_base_url_needs_the_credential_too` (it replaced `a_client_credentials_base_url_may_change_without_the_credential`, and failed before the fix), `changing_a_client_credentials_token_url_needs_the_credential`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_client_secret_does_not_follow_the_token_url_nor_a_switch_of_kind`; `frontend/src/services/scimTargets.test.ts` (`credentialRequiredFor`); `frontend/src/pages/scim-targets/ScimTargetsPage.test.tsx` `requires the secret again when a client-credentials target's base URL or token URL changes`. Residual: a token AXIAM already obtained is the downstream's and stays valid there for as long as its issuer says; AXIAM never sends it to another base and uses one for at most an hour."
+      },
+      {
+       "number": 410,
+       "title": "The SCIM base URL or token URL is used to reach internal services",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A tenant administrator chooses `base_url` and, for a client-credentials target, `token_url`, and AXIAM sends requests to both from inside the deployment — with a credential attached, and, for reconciliation, reading the answers. Pointed at a metadata service, a loopback admin port or a private address, or at a public name that resolves to one, the deliverer becomes a request forger with a credential, and the target's delivery state an oracle for what answered.",
+       "mitigation": "Built (T23.6.2, T23.6.4; D-57). **Write time**: both URLs are held to the webhook outbound address policy (`validate_push_endpoint`, as SSF push endpoints are, T-392): absolute `https`, a host, no userinfo or fragment, at most 2 048 bytes, no IP literal that is not globally routable (loopback, private, link-local, the metadata address, IPv4-mapped forms), no `localhost`, `*.localhost`, `*.local` or `*.internal`; a refused URL is `400` naming the field and is never echoed. **Delivery time**: every request — SCIM calls, reconciliation's listing and the OAuth2 token request alike — goes through `guarded_fetch_no_redirect` with `allow_private = false`, which only a hidden test seam sets: the name is resolved fresh, every address must be globally routable, the validated address is pinned into the connection, `https` is required, a `3xx` is returned and never followed, a request gets ten seconds, and a body is read to at most 64 KiB (1 MiB for a list). A name the write-time policy admitted that resolves to an internal address is caught here. What is recorded on the target's state and in the audit row is a fixed phrase (“the endpoint resolves to an address AXIAM does not connect to”), never the transport error's text, a URL or a body. Tests: `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_base_url_or_token_url_that_breaks_the_outbound_address_policy_is_400_and_never_echoed`; `crates/axiam-scim/tests/outbound_scim_test.rs` `the_production_deliverer_refuses_a_loopback_endpoint` (the production deliverer: nothing reaches the loopback server); `crates/axiam-scim/tests/outbound_reconcile_test.rs` `the_production_deliverer_reads_no_loopback_downstream`; `crates/axiam-scim/src/outbound/deliverer.rs` `the_outbound_modules_use_the_no_redirect_guarded_fetch_and_nothing_else` (one guarded call; `allow_private` false but in the hidden seam); `crates/axiam-scim/src/outbound/client.rs` `a_transport_reason_never_carries_the_error_text`; `crates/axiam-pki/src/ssrf.rs` `no_redirect_keeps_the_guard_on_the_one_hop`, `no_redirect_returns_a_redirect_to_an_internal_address_without_fetching_it`, `no_redirect_honours_the_content_length_cap`. Residuals: the guard honours the operator's `AXIAM__PKI__SSRF_ALLOWED_HOSTS` exception (SEC-107) exactly as it does for webhooks and SSF; and the fixed phrases still tell an administrator, through `state`, whether a name was blocked, did not resolve or did not answer — what a public DNS lookup tells anyone."
+      },
+      {
+       "number": 411,
+       "title": "Cross-tenant or non-administrator access to a target, its links or its state",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "Targets, link rows and delivery state of every tenant live in shared tables, and a target decides where a tenant's people are sent and holds the credential to send them. A tenant administrator who could name another tenant's target — in a path, or another tenant's group in a scope — or a service account, a machine token or a principal allowed only to read, could repoint another tenant's directory, read where it goes, enrol another tenant's group into a push, or start reconciliations against it.",
+       "mitigation": "Built (T23.6.1, T23.6.4). The tenant is the token's, never the request's: every route answers `404` for another tenant's target, exactly as for one that does not exist, and changes nothing; every repository verb of the three tables is tenant-scoped in its `WHERE`, so a foreign id is `NotFound` to every read, update, delete, credential opening and delivery-state write. A `groups` scope may name only groups of this tenant (`400` otherwise), on create and on replace. The namespace is **human-only**: `scim_targets:read` for `list` and `get`, `scim_targets:write` for the four writes, both in a `HUMAN_ONLY_FAMILIES` family, so a service-account token is `401` at the extractor whatever roles it holds (contract §31.3 rule 9). Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `every_verb_is_tenant_scoped`, `deleting_a_target_removes_its_links_and_state_and_only_its_own`, `the_tenant_delete_takes_the_tenants_scim_rows_and_only_those`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `another_tenants_target_is_404_on_every_route_and_is_not_touched`, `a_group_scope_cannot_name_another_tenants_group_even_when_replacing`, `reads_need_scim_targets_read_and_writes_need_scim_targets_write`, `a_service_account_token_is_refused_on_every_route_even_with_every_role`, `the_family_is_human_only_and_every_route_requires_its_permission`. Residual: inside its own tenant an administrator holding `scim_targets:write` is trusted to choose where its people go (assumption 7); T-412 states what that trust covers."
+      },
+      {
+       "number": 417,
+       "title": "The provisioning queue is flooded, or AXIAM and a downstream feed each other in a loop",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Every user or group change of a tenant becomes work for every enabled target: a directory sync that touches thousands of accounts, a bulk import, a reconciliation that queues the whole tenant. And a downstream that is also an inbound SCIM client of AXIAM — an identity provider that receives AXIAM's pushes and pushes its own changes to `/scim/v2` — could turn each push into a write back into AXIAM, which reports the change, which is pushed again, without end.",
+       "mitigation": "Built (T23.6.2, T23.6.3; D-57). **One reference per change per target**: the repositories report only after a committed write, a user `update` only when it writes a provisioned field (username, email, status, the name and display metadata), and login bookkeeping never. **Level-triggered and idempotent**: the deliverer computes the representation at the attempt and skips the `PATCH` when its digest equals the link's `synced_digest`, so a reference whose change was already sent — a duplicate, a retry, a reconciliation, or the echo of AXIAM's own push coming back through inbound SCIM — sends nothing, and a loop stops after one round trip because the echo carries what AXIAM sent. **Bounded per kind**: `scim_push` has a topology of its own, so a backlog delays only SCIM pushes, and the per-kind ceiling (`AXIAM__SCIM_PUSH__MAX_ATTEMPTS`, exponential backoff with a ceiling, then the dead-letter queue); a broker that refuses a reference costs one log line per report and never fails the write that reported it. Tests: `crates/axiam-db/tests/provisioning_sink_test.rs` `user_update_reports_only_a_change_to_a_provisioned_field`, `login_bookkeeping_never_reports`, `a_failed_write_reports_nothing`; `crates/axiam-scim/tests/outbound_scim_test.rs` `rename_propagates_as_patch_and_an_unchanged_resync_sends_nothing`, `a_5xx_and_a_429_retry_and_are_recorded_as_failures`; `crates/axiam-scim/tests/outbound_provisioner_test.rs` `a_user_change_enqueues_one_reference_per_enabled_target_of_the_tenant`, `a_tenant_with_no_target_enqueues_nothing`, `a_broker_that_is_down_never_fails_the_report`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `reconciliation_queues_references_only`; `crates/axiam-amqp/src/outbound/topology.rs` `the_scim_push_declaration_is_pinned`; `crates/axiam-amqp/src/outbound/retry.rs` `backoff_doubles_and_clamps` (the shared schedule). Residuals. A change is reported when a provisioned field is **written**, not only when its value changes, so an inbound SCIM client that rewrites every user queues one reference per user per target — each of which then sends nothing. A downstream that normalises a value (the case of an address) and writes it back changes AXIAM's copy once and converges on the next push; one that transforms a value differently every time keeps the loop going at the rate of its own inbound writes, which the `/scim/v2` bucket (600 a minute per address) bounds and nothing in AXIAM detects. Every attempt, a no-op included, writes a `scim_push.delivery_*` audit row, so the nightly reconciliation adds one row per in-scope resource per target per day, bounded by audit retention (T-119)."
+      },
+      {
+       "number": 419,
+       "title": "Reconciliation runs twice across replicas, or is driven in a loop",
+       "type": "Denial of service",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "A reconciliation run queues a reference for every resource in scope and pages the downstream with AXIAM's credential. Run by every replica's cleanup loop at once, or started on demand again and again, it would multiply the queue, the downstream's load and the audit trail, and two runs adopting and dropping the same links at once could undo each other's repairs.",
+       "mitigation": "Built (T23.6.1, T23.6.3, T23.6.4; D-58). A run first **claims** the target with a conditional write on `scim_target_state.last_reconciled_at` (the `claim_verification` pattern): one caller wins per interval across every replica, and the others match nothing. The scheduled job `scim_reconcile` (in the cleanup loop, registered in `SWEEP_JOBS`) claims for 24 hours; the on-demand `POST …/reconcile` claims for five minutes — the longest a run may take — and answers `409` while a run holds the claim or ran within it, `409` for a disabled target (no claim taken), and otherwise `202`, with the run on a task of its own. The route has its own bucket (`AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN`, 30 a minute, never moved by a profile), needs `scim_targets:write` (T-411) and is audited (T-420). Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `claim_reconciliation_succeeds_once_within_the_interval`, `concurrent_claims_have_one_winner`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_second_run_within_the_interval_is_already_claimed_and_does_nothing`, `two_concurrent_requests_make_one_run`, `the_scheduled_job_runs_a_due_target_once_a_day_and_the_on_demand_entry_sees_its_claim`, `a_disabled_target_is_not_reconciled_and_its_claim_is_not_taken`, `a_background_start_answers_at_the_claim_and_the_run_finishes_on_its_own`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `reconcile_now_is_202_when_claimed_then_409_while_the_claim_is_held`, `reconcile_now_on_a_disabled_target_is_409_and_on_an_unknown_one_404`, `every_write_route_has_its_own_bucket_and_reads_are_not_limited`, `the_shipped_bucket_is_thirty_a_minute`; `crates/axiam-server/tests/scim_reconcile_sweep_test.rs` `the_sweep_reconciles_a_due_target_once_and_reports_a_failed_run`; `crates/axiam-server/src/job_health.rs` `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (extended to `scim_reconcile`). Residuals: the claim stamps the **start** of a run and nothing marks its end, so a run that dies half way waits for the next interval (a day, or five minutes on demand); and an administrator can start one run per target every five minutes, each bounded by its page and time budgets (T-414)."
+      },
+      {
+       "number": 420,
+       "title": "Target changes and deliveries are not attributable",
+       "type": "Repudiation",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Where a tenant's people are sent is a security and a data-protection decision. Without a record, a target repointed at a collection host, a scope widened to everyone, a credential replaced, a reconciliation started, or a stream of deliveries a downstream later disputes could not be traced to the administrator or the attempt behind it.",
+       "mitigation": "Built (T23.6.2, T23.6.4). One audit row per write, with the administrator as actor: `scim_target.created`, `scim_target.updated` (the **names** of the changed fields, and whether the credential was replaced), `scim_target.deleted` and `scim_target.reconcile_requested` — never a URL, never the credential. Every delivery attempt writes the dispatcher's row, with the system actor and a fixed-vocabulary reason: `scim_push.delivery_succeeded`, `.delivery_attempt`, `.delivery_failed`; the target's `state` counts failures and dead letters once each, and a reconciliation run logs its findings as one line. Tests: `crates/axiam-api-rest/tests/scim_targets_test.rs` `every_write_is_audited_with_names_never_a_url_or_the_credential`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_dead_letter_writes_the_counter_and_the_reason_once`, `the_last_retryable_attempt_is_counted_as_the_dead_letter_the_consumer_makes_of_it`; `crates/axiam-amqp/src/outbound/consumer.rs` `audit_entry_uses_the_system_actor_and_the_kind_prefix`. Residual: a reconciliation's repairs (digests cleared, links dropped, accounts adopted for deprovisioning) are counts in a log line, not audit rows; the deliveries they cause are audited one by one."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "833f36e5-7889-59c2-ac8f-1c476fa445fa",
+     "kind": "store",
+     "x": 1079,
+     "y": 1154,
+     "w": 170,
+     "h": 80,
+     "name": "scim_target + scim_target_link + scim_target_state",
+     "lines": [
+      "scim_target +",
+      "scim_target_link +",
+      "scim_target_state"
+     ],
+     "description": "Schema v79 (T23.6.1, D-57): `scim_target` (the registry; the credential sealed under `pki_encryption_key`, write-only), `scim_target_link` (an AXIAM id and the downstream id per target, unique on both, the digest of the last representation sent, `erase_pending`; ids only) and `scim_target_state` (delivery counters, the last failure in a fixed vocabulary, the reconciliation claim; written only atomically, never by the administrator). The push kind's broker queues (`axiam.scim_push`, `.retry`, `.dlq`) hold only references (`{resource_type, axiam_id}`) and are drawn with the store rather than as an element of their own.",
+     "outOfScope": false,
+     "threats": [
+      {
+       "number": 407,
+       "title": "The target credential is disclosed at rest, in a response or in a log",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "Mitigated",
+       "description": "A SCIM target holds a credential to a third party: the bearer token AXIAM presents to the downstream SCIM service provider, or the OAuth2 client secret it exchanges there for an access token. It is a key to the tenant's downstream directory: whoever reads it — from the datastore or a backup, a management response, a log line, an error or a `Debug` print — can create, change and delete accounts there as AXIAM, without AXIAM ever being involved.",
+       "mitigation": "Built (T23.6.1, T23.6.4; D-57, in D-49's shape). Sealed with AES-256-GCM under `pki_encryption_key` (the key webhook secrets and SSF push headers use) with a fresh nonce per write, nonce and ciphertext in their own columns and a key version. Every read projects `PUBLIC_COLUMNS`, so the ciphertext leaves the datastore only through `ScimTargetRepository::decrypt_credential`, which only the deliverer calls; a value sealed under another key does not open. `ScimTarget` has no member for it, the write inputs redact it from `Debug`, the management API never returns it (no member of `ScimTargetResponse` says anything about it), audit rows name the field and whether the credential was replaced, never the value, and contract §31.5 makes it `Sensitive<T>`. Without the key, a write that carries a credential (every `create`) is `503` and stores nothing, while reads, `delete` and an update without a credential still answer. On the wire it is a header value marked sensitive; the client-credentials access token lives in memory only, per target version, for at most one hour, and is never persisted. Failure reasons are a fixed vocabulary, never a URL, a body or a value. Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `create_round_trips_every_field_and_never_reads_the_credential_back`, `decrypt_credential_round_trips`, `create_without_the_key_fails_closed_and_stores_nothing`, `an_update_that_supplies_a_credential_without_the_key_fails_closed`, `a_credential_sealed_under_another_key_does_not_open`; `crates/axiam-core/src/models/scim_target.rs` `the_target_serializes_with_the_decided_names_and_no_credential_member`, `debug_of_the_write_inputs_never_prints_the_credential`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_client_credentials_target_round_trips_and_shows_its_token_endpoint_but_no_secret`, `without_the_sealing_key_a_credential_cannot_be_stored`, `every_write_is_audited_with_names_never_a_url_or_the_credential`; `crates/axiam-scim/tests/outbound_scim_test.rs` `no_reason_state_row_or_message_carries_a_credential_or_a_person`; `crates/axiam-scim/src/outbound/client.rs` `a_transport_reason_never_carries_the_error_text`, `a_token_lifetime_is_capped_at_one_hour`. Residual: `pki_encryption_key` together with the datastore opens every target's credential, as it opens every webhook secret and SSF push header; and once sent, the credential is the downstream's to keep — T-408 bounds where it is sent."
+      },
+      {
+       "number": 415,
+       "title": "An erased person lingers downstream, in AXIAM's queues or in its link rows",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Provisioning copies a person to a third party. An Art. 17 erasure or an administrator's delete that ended at AXIAM's own tables would leave the person in every downstream directory; a `DELETE` that failed once, with nothing remembering it, would leave them there for good; and the machinery that carries the `DELETE` — queued messages, the dead-letter queue, the link row that knows the downstream id — would itself keep something of the person after the erasure.",
+       "mitigation": "Built (T23.6.2, T23.6.3; D-57, D-58). **Propagated**: `anonymize_user` and the delete path report to the provisioning sink like every other write, and the deliverer sends `DELETE` for an account that is `Deleted`, `Anonymized` or gone, **whatever** `deprovision` says; a `404` counts as done. **Remembered until it lands**: the link row survives the erasure cascade until that `DELETE` succeeds; an attempt that does not end in one (refused, retried, out of attempts) leaves the link `deprovisioned` with `erase_pending`; reconciliation re-queues every linked resource, so the `DELETE` is retried nightly until it lands, and a downstream account whose `externalId` names an erased user of this tenant is deleted when reconciliation finds it. **Nothing personal waits**: a queued message is `{resource_type, axiam_id}` and nothing else, the deliverer reads the person at the attempt, a link row holds ids and a digest, and `axiam.scim_push.dlq` drops a message seven days after it arrives (`x-message-ttl` 604 800 000 ms). `docs/compliance/gdpr-compliance.md` names the link table. Tests: `crates/axiam-server/tests/scim_erasure_propagation_test.rs` `an_erased_user_is_deleted_downstream_and_only_then_loses_the_link`, `a_failing_downstream_is_retried_and_the_link_goes_when_the_delete_succeeds`, `a_refused_erasure_keeps_the_link_pending_until_reconciliation_succeeds`, `the_admin_delete_endpoint_anonymises_and_deletes_downstream`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_deleted_user_is_deleted_downstream_whatever_the_policy_and_the_link_goes`, `an_anonymized_user_is_deleted_downstream_whatever_the_policy_and_the_link_goes`, `a_downstream_that_already_lost_the_user_counts_an_erasure_delete_as_done`, `no_attribute_of_a_person_is_ever_enqueued`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_pending_erasure_is_retried_by_reconciliation_until_the_delete_succeeds`, `an_erased_user_of_this_tenant_that_survives_downstream_is_deleted`, `reconciliation_queues_references_only`; `crates/axiam-db/tests/provisioning_sink_test.rs` `user_delete_and_anonymize_report_the_user`; `crates/axiam-amqp/src/outbound/topology.rs` `the_scim_push_declaration_is_pinned`, `only_the_ssf_push_and_scim_push_dlqs_have_a_message_ttl`. Residuals, stated rather than hidden. **Deleting a target** removes its links and state and deprovisions nothing downstream (contract §31.3 rule 8; the console says so before it deletes): the people AXIAM created there stay, a pending erasure included, and AXIAM no longer knows them — an administrator who wants them gone sets `deprovision` to `delete` and lets AXIAM push before deleting the target; deleting the tenant leaves the downstream the same way. **A downstream that refuses every `DELETE`** keeps the person; AXIAM retries nightly and says so on `state` and, where a rule asks, by mail (T-418). **A disabled target** sends nothing, an erasure included, until it is enabled again, which starts a reconciliation. An id in a dead-lettered reference lives up to seven days; the primary and retry queues declare no TTL and hold a reference through its retry schedule, or for as long as no consumer runs."
+      },
+      {
+       "number": 416,
+       "title": "A target write that overlaps another, or a delivery, puts back what the other changed",
+       "type": "Tampering",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "Three writers meet on a target: administrators replacing its configuration, the deliverer recording each attempt, and reconciliation claiming runs and adopting links. Read-modify-write among them (T-406's class) would let a replacement prepared before another land after it and put back the old URL, scope or `enabled`; let a delivery's bookkeeping overwrite an administrator's change; lose dead-letter counts when many deliveries finish at once; or let two attempts link one resource twice.",
+       "mitigation": "Built (T23.6.1, T23.6.4; D-57, T-406's rule). A replacement is conditional on the `updated_at` the route read for that request (`ScimTargetUpdate::expected_updated_at`): a write landing in between makes it change nothing, and it answers `409` (contract §31.3 rule 4). The deliverer and reconciliation **never write the target row**: delivery state lives in `scim_target_state`, written only with atomic increments and plain sets, retried on a write conflict up to 32 times so that no count is lost; the reconciliation claim is a conditional write (T-419). Links are written through both unique indexes, and an attempt that finds the resource linked meanwhile keeps that link if it names the same downstream id and retries otherwise. The deliverer reads the target again before the credential leaves (T-408). Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `a_stale_expected_updated_at_is_a_conflict_and_writes_nothing`, `update_with_the_current_version_writes_and_moves_the_version`, `an_update_of_a_missing_target_is_not_found_not_a_conflict`, `concurrent_dead_letters_are_all_counted`, `concurrent_failures_are_all_counted`, `the_link_unique_indexes_hold_on_both_axes`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_replacement_overtaken_by_another_is_409_and_does_not_land`, `two_reads_then_two_writes_the_second_is_a_conflict`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_target_changed_between_the_read_and_the_send_is_a_retry_and_sends_nothing`. Residuals: the `PUT` carries no version from the client, so an administrator who saves a form loaded before another administrator's save replaces that save whole — last writer wins between two humans, each audited with the names of what it changed (T-420), and never a way to move the credential, whose binding is checked against the stored row (T-408). An attempt under way when an administrator narrows the scope or disables the target finishes on the version it read, and so does a reconciliation run, for up to its five-minute budget; the next attempt sees the change."
       }
      ],
      "open": 0
@@ -8443,7 +9035,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Open",
        "description": "SSF signals exist so that a receiver can act on a change: end a session AXIAM revoked, stop trusting a disabled account. Production is best effort (D-52): an event that cannot be produced or queued is dropped with a log line, and the operation that caused it succeeds. A receiver that never hears of a revocation keeps the session it would have ended, and nothing tells it, the tenant or the user that an event was due.",
-       "mitigation": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation."
+       "mitigation": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost, in the full profile: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation. In the minimal profile (`AXIAM__AMQP__ENABLED=false`, D-59) a queued push waits in an in-process queue and is lost on restart, and a dead letter is its audit row alone (T-445)."
       }
      ],
      "open": 2
@@ -8485,20 +9077,114 @@ export const THREAT_MODEL: ThreatModel = {
      "protocol": "SurrealQL",
      "threats": [],
      "open": 0
+    },
+    {
+     "id": "dbedd6d1-2ad1-558f-91af-a1a4e13ff6bd",
+     "path": "M374,1194 L199,1194",
+     "name": "SCIM push / list",
+     "description": "",
+     "label": "SCIM push / list (HTTPS, RFC 7644)",
+     "labelLines": [
+      "SCIM push / list (HTTPS, RFC 7644)"
+     ],
+     "lx": 286.5,
+     "ly": 1194,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS, RFC 7644",
+     "threats": [
+      {
+       "number": 412,
+       "title": "More people, or more about them, leave the tenant than the administrator chose",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A target pushes a tenant's people to a third party. Provisioning that reaches beyond the scope the administrator set — users outside the listed groups, groups never asked for, accounts that are not active, service accounts — or that carries more of a person than a directory needs (a password hash, factors, a telephone number, an address, free-form metadata), or that keeps sending after a target was disabled, discloses personal data the tenant never agreed to share. A tenant administrator exporting the tenant's directory to a SCIM endpoint of their choosing is the feature itself, so the threat is everything beyond that choice.",
+       "mitigation": "Built (T23.6.2; D-57). **Who**: `all_users`, or `groups` — the direct members of up to 100 listed groups of this tenant; `push_groups` is off by default and, when on, pushes every group for `all_users` and only the listed ones otherwise; a group's `members` names only members already linked on that target, and a service account's membership is never reported. A user is created downstream only while `Active` and in scope — one who is not is never created inactive — and one who leaves scope or `Active` is deactivated or deleted per `deprovision`. A disabled target receives nothing: its queued references dead-letter (`target disabled`). **What**: a fixed attribute set, not a mapping language — `userName` (the username, or the email when the target says so), `name.givenName`, `name.familyName`, `displayName`, the primary email, `active` and `externalId` (the AXIAM id); an attribute AXIAM does not hold is omitted, and nothing else about a person is ever sent. Inside AXIAM only a reference travels (T-415). **The trust assumption**, stated rather than hidden (assumption 7): an administrator of the tenant holding `scim_targets:write` — a human (T-411) — decides which endpoint receives which of the tenant's people, and enabling a target starts a reconciliation that pushes everyone in scope at once; the choice is audited (T-420), shown in the console, and stated in contract §31. Tests: `crates/axiam-scim/tests/outbound_scim_test.rs` `create_propagates_as_post_with_the_axiam_id_as_external_id`, `the_user_name_follows_the_targets_mapping`, `a_change_to_a_name_the_mapping_carries_is_sent_and_one_it_does_not_is_not`, `a_user_entering_and_leaving_a_groups_scope_is_created_and_deprovisioned`, `group_membership_change_propagates_as_a_group_patch_of_linked_members`, `a_disabled_target_and_a_deleted_one_dead_letter`, `no_attribute_of_a_person_is_ever_enqueued`; `crates/axiam-scim/tests/outbound_provisioner_test.rs` `a_user_change_enqueues_one_reference_per_enabled_target_of_the_tenant`, `a_group_change_goes_only_to_targets_that_push_that_group`, `group_in_scope_is_push_groups_and_the_scope`; `crates/axiam-scim/src/outbound/wire.rs` `an_attribute_axiam_does_not_hold_is_omitted`, `a_patch_replaces_the_mapped_attributes_only`; `crates/axiam-db/tests/provisioning_sink_test.rs` `a_service_accounts_membership_is_not_provisioned`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_group_scope_cannot_name_another_tenants_group_even_when_replacing`, `an_enabled_target_starts_a_reconciliation_when_created_or_switched_on`. Residual: what reaches a downstream is that downstream's to keep and protect; AXIAM's erasure reaches it (T-415), AXIAM's retention does not."
+      },
+      {
+       "number": 413,
+       "title": "A hostile or lying downstream steers what AXIAM links, overwrites or deprovisions",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "The downstream's answers decide what AXIAM does next: the `id` of a created resource is linked and put into later paths, a `409` makes AXIAM look a resource up by `externalId` and adopt it, and reconciliation lists the downstream and repairs, re-creates or deprovisions what it finds. A downstream that lies — a compromised service provider, or one whose answers an attacker shapes — could try to make AXIAM adopt or overwrite an account that is not AXIAM's, deprovision accounts its own application created, link one AXIAM user to another's account, aim a later request at another path, or feed something back into AXIAM's directory.",
+       "mitigation": "Built (T23.6.2, T23.6.3; D-57, D-58). **One way only**: nothing read from a downstream is ever written into an AXIAM user or group; an answer yields at most an id to link, a match to adopt or a digest to clear. **Adoption** takes exactly one resource whose `externalId` is the AXIAM id — a provider that ignores the filter and answers with everything matches nothing else — and none or several is a dead letter, `conflict`. **Links** are unique on (target, type, AXIAM id) and on (target, type, downstream id), so one downstream id never stands for two AXIAM resources. A downstream id is linked only if it is 1–256 bytes, not `.` or `..`, and free of control characters, and it is percent-encoded into every path, as the filter is into the query. **Reconciliation never touches** a downstream resource whose `externalId` is missing, not a UUID, or not the id of a resource of **this tenant** that should not be there; it deletes no account it did not create or adopt; an attribute the mapping does not carry is not drift; and only a listing read to its end may drop a link. What a lying downstream can do is to its own data: refuse, mis-report, or make AXIAM send again what it already holds. Tests: `crates/axiam-scim/tests/outbound_scim_test.rs` `a_409_on_post_adopts_the_resource_that_carries_our_external_id`, `a_409_with_no_resource_of_ours_dead_letters_as_a_conflict`, `a_404_on_patch_drops_the_link_and_retries_then_recreates`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_downstream_user_with_a_foreign_or_missing_external_id_is_never_touched`, `a_downstream_user_whose_external_id_is_a_user_of_another_tenant_is_untouched`, `an_unchanged_downstream_is_not_patched_and_attributes_it_owns_are_not_drift`, `an_unreachable_downstream_fails_the_run_without_dropping_anything`; `crates/axiam-scim/src/outbound/deliverer.rs` `a_downstream_id_that_could_redirect_a_path_is_not_linked`, `urls_are_built_from_the_base_with_the_id_and_filter_encoded`; `crates/axiam-db/tests/scim_target_repository_test.rs` `the_link_unique_indexes_hold_on_both_axes`. Residual: a downstream that answers `404` to every `PATCH`, or leaves a linked resource out of a complete listing, makes AXIAM drop the link and `POST` the person again — one more copy of what it already holds, on every attempt or every nightly run, bounded by T-414 and T-417."
+      },
+      {
+       "number": 414,
+       "title": "A downstream exhausts the deliverer or reconciliation with large, endless or slow answers",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "A downstream controls the size, the number and the pace of its answers. A response body without end, a list whose `totalResults` never runs out, pages that arrive slowly, or a group so large that its member list cannot travel in one request would hold the consumer, a reconciliation run or AXIAM's memory for as long as the downstream likes — and with it the provisioning of every other target behind it.",
+       "mitigation": "Built (T23.6.2, T23.6.3; D-57, D-58). Every request has ten seconds, connect to last byte. A body is read to at most 64 KiB for a write and 1 MiB for a list; a larger one is a retry and is never buffered whole. A reconciliation run reads at most 100 pages of 100 per collection, for at most five minutes of wall clock, and a listing cut short by a budget is audited in part and never drops a link for what it did not reach. A group of more than 10 000 members dead-letters instead of being read whole, and AXIAM reads members 100 at a time. Retries follow the per-kind schedule (`AXIAM__SCIM_PUSH__*`: backoff with a ceiling, then the dead-letter queue), and `scim_push` has a topology of its own, so a slow downstream delays SCIM pushes and never webhooks or SSF events. Tests: `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_downstream_with_endless_pages_is_read_to_the_page_budget_and_no_link_is_dropped_for_it`, `a_large_downstream_is_read_in_pages_of_a_hundred`, `an_unreachable_downstream_fails_the_run_without_dropping_anything`; `crates/axiam-scim/src/outbound/reconcile.rs` `the_budgets_are_the_decided_ones`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_5xx_and_a_429_retry_and_are_recorded_as_failures`; `crates/axiam-pki/src/ssrf.rs` `read_capped_body_rejects_body_over_cap`, `no_redirect_honours_the_content_length_cap`; `crates/axiam-amqp/src/outbound/topology.rs` `the_scim_push_declaration_is_pinned`. Residuals: the 10 000-member bound is in the code (`MAX_GROUP_MEMBERS`) and no test pins it. And each replica's `scim_push` consumer makes one attempt at a time, for every tenant: a downstream that answers every request just inside ten seconds — or never, so that each attempt spends the full ten seconds, twenty with a token request — slows the SCIM pushes of every target on that replica, and a reconciliation that queues a whole tenant multiplies it (10 000 references at ten seconds each is more than a day). One tenant's chosen endpoint can delay another tenant's provisioning, never its webhooks, SSF events or sign-ins. The W5 F4 review reported it (P23W5-07) with a per-target circuit breaker as the proposed fix; the 10 000-member bound is reported as a coverage gap in the same issue."
+      }
+     ],
+     "open": 0
+    },
+    {
+     "id": "e42d7a8d-dcd9-5dd4-bec1-b2adc69052e6",
+     "path": "M514,1194 L1079,1194",
+     "name": "read targets, write links / state",
+     "description": "",
+     "label": "read targets, write links / state (SurrealQL)",
+     "labelLines": [
+      "read targets, write links / state",
+      "(SurrealQL)"
+     ],
+     "lx": 796.5,
+     "ly": 1194,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealQL",
+     "threats": [],
+     "open": 0
+    },
+    {
+     "id": "8dfb48c8-5a7d-5d6f-913e-b8d0db1045a0",
+     "path": "M510.7,1172.7 L678.8,1118.9 Q694,1114 694,1098 L694,644",
+     "name": "dead-letter audit row",
+     "description": "",
+     "label": "scim_push.delivery_failed (in-process)",
+     "labelLines": [
+      "scim_push.delivery_failed",
+      "(in-process)"
+     ],
+     "lx": 694,
+     "ly": 975.2,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [
+      {
+       "number": 418,
+       "title": "One notification mail per dead letter floods a rule's recipients while a target is down",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "D-58 lets a tenant's notification rules mail administrators when an outbound SCIM delivery is dead-lettered: the dispatcher's `scim_push.delivery_failed` audit row maps to the event `scim_delivery_failed`, and the notifying audit log hands it to the rule dispatcher, which enqueues one mail per matching rule per recipient. A target that is down past its retry budget, or that refuses AXIAM's credential (a bearer `401` or `403` dead-letters at once), dead-letters every reference: each change of each user, and the whole tenant at once at the next reconciliation or when the target is switched on. Mailed once per dead letter, a tenant of 10 000 users in scope whose downstream credential was revoked would mail each recipient of such a rule some 10 000 times a night, burying every other alert (T-117's class) and spending the deployment's mail quota and sender reputation — and whoever can make the downstream refuse could set it off. Until the W5 F4 review that is what happened.",
+       "mitigation": "Built (the W5 F4 review, P23W5-02, D-73). **One notification per target per hour.** The `scim_push` consumer's notifying audit log asks a `NotificationGate` before a dead letter reaches the rules, and the gate claims it with a conditional write on `scim_target_state.failure_notified_at` (schema v84; the `claim_reconciliation` pattern, so replicas agree; a target of another tenant, or one deleted since, claims nothing). **Every dead letter is still recorded**: its own `scim_push.delivery_failed` row, and a count on the target's `state` (`dead_lettered_total`, `last_failure_reason`), so the console shows the size of an outage the one mail announces. A gate that cannot decide stays silent and logs once rather than failing open into a flood, and `NotifyingAuditLog` has no constructor without a gate. Rules stay per event (T-117) and the mail is fixed text — the action and its outcome, never a URL, a person or the downstream's answer (D-16). Tests: `crates/axiam-server/tests/scim_dead_letter_notification_test.rs` `a_targets_dead_letters_mail_each_recipient_once_an_hour_not_once_each` (fifty dead letters, two mails; it failed before the fix with a hundred), `a_scim_dead_letter_row_mails_every_recipient_of_a_matching_rule`; `crates/axiam-db/tests/scim_target_repository_test.rs` `claim_failure_notification_succeeds_once_per_interval`, `concurrent_failure_notification_claims_have_one_winner`; `crates/axiam-db/src/schema.rs` `v84_adds_only_the_failure_notification_claim`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_dead_letter_writes_the_counter_and_the_reason_once`. Residual: a recovery is not announced (the console's `state` shows it), and a target that keeps failing mails each recipient once an hour until a rule or the target is changed."
+      }
+     ],
+     "open": 0
     }
    ],
-   "total": 40,
-   "open": 3,
+   "total": 55,
+   "open": 5,
    "bySeverity": {
-    "Medium": 26,
-    "High": 8,
-    "Low": 6
+    "Medium": 34,
+    "High": 12,
+    "Low": 9
    }
   },
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "description": "Runtime and platform view: the edge (ingress or reverse proxy), replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Since 1.0.0-beta08 the edge routes by path to a server that terminates its own TLS, and since 1.0.0-beta11 the gRPC listener may be published through the same edge. Threats here are largely deployment responsibilities rather than application code.",
+   "description": "Runtime and platform view: the edge (ingress or reverse proxy), replicated AXIAM pods, scheduled jobs, monitoring, and the stateful tier — SurrealDB, RabbitMQ, Vault/Secrets and backups. Since 1.0.0-beta08 the edge routes by path to a server that terminates its own TLS, and since 1.0.0-beta11 the gRPC listener may be published through the same edge. Threats here are largely deployment responsibilities rather than application code. At model 2.34.0 (T23.8.2) the minimal profile (AXIAM__AMQP__ENABLED=false, D-59: SurrealDB only, single-instance by a singleton lease) enters with its accepted durability trade, T-445: queued deliveries and mail, and the audit rows they would have written, are lost on restart, and external audit ingestion is unavailable.",
    "width": 1448,
    "height": 848,
    "boundaries": [
@@ -8742,9 +9428,18 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Only the SHA-256 hash of the one-time bootstrap setup token is stored, and the first-boot mint is a no-op once a token row exists, so an operator who lost the token had exactly one documented recovery: wipe the volume (DF-019). A subcommand that re-mints it removes that cliff and introduces a second credential path to POST /api/v1/admin/bootstrap, the endpoint that creates the first super-admin. Ungated, it would work on a deployment that already has administrators, and would therefore be an account takeover available to anyone who can run a command in the pod — with no authentication in front of it and nothing in the audit trail naming a principal.",
        "mitigation": "axiam-server setup-token --remint refuses, with exit code 2 and no write at all, unless the deployment has no user row AND no redeemed setup token — that is, unless nobody has bootstrapped it. Before bootstrap there is no administrator to take over and no credential to reset, which is exactly the state an operator who lost the first-boot token is in; after it, the deployment has an authenticated way to create accounts and a password-reset flow, so re-minting is never the answer. Both gates are evaluated before the existing hash is deleted, so a refused call leaves the current token working. The token is printed to stdout only, never through tracing, so it does not reach the container log a second time; there is deliberately no --print, because the plaintext is not stored and storing it so that it could be printed would be the wrong fix. The subcommand parse is its own unit-tested function so that setup-token with the flag missing or mistyped exits 2 rather than silently starting a second server. Pinned by remint_replaces_the_previous_hash, remint_refuses_once_a_user_exists and remint_refuses_once_a_token_was_consumed, the last two asserting that the stored hash is unchanged after a refusal."
+      },
+      {
+       "number": 445,
+       "title": "The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart",
+       "type": "Repudiation",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "With `AXIAM__AMQP__ENABLED=false` webhooks, SSF push, outbound SCIM, CIBA ping and transactional mail ride bounded in-process queues. A message queued, or sleeping before a retry, when the process stops is gone, and so is the terminal audit row its delivery would have written: the trail ends at a `<kind>.delivery_attempt`, or holds nothing for a message never attempted, and an enqueue refused because a queue is full leaves only a log line. A lost `ExportReady` mail strands a ready GDPR export whose download token travelled only in it. External services' audit events have no ingestion path at all, and a producer that publishes to a broker left running is confirmed by the broker while nothing consumes.",
+       "mitigation": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
       }
      ],
-     "open": 0
+     "open": 1
     },
     {
      "id": "d6917d9a-710b-50eb-82ff-1cb71c7fb7b4",
@@ -9174,12 +9869,12 @@ export const THREAT_MODEL: ThreatModel = {
      "open": 0
     }
    ],
-   "total": 28,
-   "open": 5,
+   "total": 29,
+   "open": 6,
    "bySeverity": {
     "High": 17,
     "Critical": 2,
-    "Medium": 9
+    "Medium": 10
    }
   },
   {

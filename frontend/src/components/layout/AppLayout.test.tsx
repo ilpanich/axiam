@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useEffect } from "react";
-import { createMemoryRouter } from "react-router";
+import { createMemoryRouter, useLocation } from "react-router";
 import { RouterProvider } from "react-router/dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { AppLayout } from "@/components/layout/AppLayout";
@@ -106,6 +106,63 @@ describe("AppLayout", () => {
     renderLayout();
     expect(screen.getByText("Login screen")).toBeInTheDocument();
     expect(screen.queryByText("Dashboard body content")).not.toBeInTheDocument();
+  });
+
+  // T23.7.2 -- a link in a CIBA notification mail lands here. Signing in must
+  // bring the user back to the page, and only that page: every other path keeps
+  // the plain login redirect.
+  describe("the login redirect of a signed-out visitor", () => {
+    const REQUEST_ID = "0b7f3a52-6c1e-4f0a-9d63-1f2a3b4c5d6e";
+
+    function LoginProbe() {
+      const { search } = useLocation();
+      return <div data-testid="login-search">{search}</div>;
+    }
+
+    function renderAt(path: string) {
+      const router = createMemoryRouter(
+        [
+          {
+            path: "/",
+            element: <AppLayout />,
+            children: [
+              { path: "ciba/approve", element: <div>Approval body</div> },
+              { path: "dashboard", element: <div>Dashboard body content</div> },
+            ],
+          },
+          { path: "/login", element: <LoginProbe /> },
+        ],
+        { initialEntries: [path] }
+      );
+      return render(
+        <QueryClientProvider client={makeClient()}>
+          <RouterProvider router={router} />
+        </QueryClientProvider>
+      );
+    }
+
+    beforeEach(() => {
+      useAuthStore.setState({ isAuthenticated: false, user: null });
+    });
+
+    it("carries the CIBA approval page as the return_to", () => {
+      const target = `/ciba/approve?request_id=${REQUEST_ID}`;
+      renderAt(target);
+      expect(screen.getByTestId("login-search")).toHaveTextContent(
+        `?return_to=${encodeURIComponent(target)}`
+      );
+    });
+
+    it("carries nothing for a CIBA path with anything else in its query", () => {
+      renderAt(`/ciba/approve?request_id=${REQUEST_ID}&next=https://evil.example`);
+      expect(screen.getByTestId("login-search")).toHaveTextContent("");
+      expect(screen.getByTestId("login-search").textContent).toBe("");
+    });
+
+    it("carries nothing for any other page", () => {
+      renderAt("/dashboard?tab=1");
+      expect(screen.getByTestId("login-search").textContent).toBe("");
+    });
   });
 
   it("opens the mobile sidebar drawer when the topbar menu button is clicked", async () => {

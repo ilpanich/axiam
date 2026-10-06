@@ -16,7 +16,9 @@ use actix_web::HttpMessage;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
-use tokio::sync::mpsc;
+use std::time::Duration;
+
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 /// Paths that should not generate audit entries.
@@ -99,6 +101,13 @@ pub trait AuditEventSink: Send + Sync {
 /// Default capacity for the audit write channel.
 const CHANNEL_CAPACITY: usize = 4096;
 
+/// What travels on the worker's channel: an entry, or [`AuditMiddleware::drain`]'s
+/// barrier, acknowledged once every entry queued before it has been written.
+enum Queued {
+    Event(AuditEvent),
+    Barrier(oneshot::Sender<()>),
+}
+
 /// Middleware factory for audit logging.
 ///
 /// Wraps every HTTP request/response pair and emits an audit log entry for
@@ -106,7 +115,7 @@ const CHANNEL_CAPACITY: usize = 4096;
 /// background worker task.
 #[derive(Clone)]
 pub struct AuditMiddleware {
-    tx: mpsc::Sender<AuditEvent>,
+    tx: mpsc::Sender<Queued>,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -158,6 +167,36 @@ impl AuditMiddleware {
         self.shutting_down.store(true, Ordering::SeqCst);
     }
 
+    /// Begin the orderly stop and wait, at most `within`, until every entry
+    /// queued before this call has been through the worker's append.
+    ///
+    /// [`Self::begin_shutdown`] alone only changes what the worker *says* when
+    /// its channel closes. It does not wait for anything, and the composition
+    /// root's teardown is followed by the end of the runtime, which drops the
+    /// worker wherever it is — so an entry the middleware had queued, whose
+    /// response had already gone out, could be lost on a perfectly orderly
+    /// stop. That mattered little while the queue was nearly always empty; it
+    /// matters when the stop is *because* the datastore was unreachable, which
+    /// is when the queue is full: the minimal profile's lost singleton lease
+    /// (T23.8.2, P23W5-A1) is exactly that case.
+    ///
+    /// The wait is a barrier, not a close: a marker goes through the same FIFO
+    /// channel and the worker acknowledges it once it reaches it, so this does
+    /// not depend on every other sender having been dropped first. Returns
+    /// `true` when the barrier was reached, `false` when `within` ran out or
+    /// the worker is gone (whatever it still held is lost, and the caller logs
+    /// it). Bounded, because a datastore that never answers must not hold the
+    /// process up indefinitely.
+    pub async fn drain(&self, within: Duration) -> bool {
+        self.begin_shutdown();
+        let (reached, barrier) = oneshot::channel();
+        let wait = async {
+            self.tx.send(Queued::Barrier(reached)).await.ok()?;
+            barrier.await.ok()
+        };
+        matches!(tokio::time::timeout(within, wait).await, Ok(Some(())))
+    }
+
     /// Whether [`Self::begin_shutdown`] has been called.
     ///
     /// The worker consults this when its channel closes, to decide whether the
@@ -168,13 +207,22 @@ impl AuditMiddleware {
 }
 
 async fn audit_worker<A: AuditLogRepository>(
-    mut rx: mpsc::Receiver<AuditEvent>,
+    mut rx: mpsc::Receiver<Queued>,
     repo: A,
     sink: Option<Arc<dyn AuditEventSink>>,
     shutting_down: Arc<AtomicBool>,
 ) {
     let mut written: u64 = 0;
-    while let Some(event) = rx.recv().await {
+    while let Some(queued) = rx.recv().await {
+        let event = match queued {
+            Queued::Event(event) => event,
+            Queued::Barrier(reached) => {
+                // Everything queued before the barrier has been appended (or
+                // failed and been logged). The caller may have given up.
+                let _ = reached.send(());
+                continue;
+            }
+        };
         // Append first. The audit record is the guarantee; a notification is
         // best-effort on top of it, and an event nobody was emailed about is a
         // far smaller failure than one that was never recorded.
@@ -223,7 +271,7 @@ where
 
 pub struct AuditMiddlewareService<S> {
     service: S,
-    tx: mpsc::Sender<AuditEvent>,
+    tx: mpsc::Sender<Queued>,
 }
 
 impl<S, B> Service<ServiceRequest> for AuditMiddlewareService<S>
@@ -318,7 +366,10 @@ where
                 })),
             };
 
-            if tx.try_send(AuditEvent { entry, org_id }).is_err() {
+            if tx
+                .try_send(Queued::Event(AuditEvent { entry, org_id }))
+                .is_err()
+            {
                 tracing::error!(
                     audit_dropped = true,
                     method = %method,

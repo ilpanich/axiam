@@ -169,7 +169,7 @@ struct World {
     org_id: Uuid,
     tenant_id: Uuid,
     other_tenant_id: Uuid,
-    state: AppState<TestDb>,
+    state: web::Data<AppState<TestDb>>,
 }
 
 async fn create_tenant(db: &Surreal<TestDb>, org_id: Uuid, slug: &str) -> Uuid {
@@ -257,7 +257,7 @@ async fn install_credential(
 fn world_state(
     db: &Surreal<TestDb>,
     auth: &AuthConfig,
-) -> (AppState<TestDb>, Arc<axiam_pki::CaKeyCustodians>) {
+) -> (web::Data<AppState<TestDb>>, Arc<axiam_pki::CaKeyCustodians>) {
     let mut state = AppState::for_test(db.clone(), auth.clone());
     let custodians = Arc::new(
         axiam_pki::ca_key_store::custodians_from(Some(runtime_bytes()), &|_| None).unwrap(),
@@ -288,10 +288,17 @@ fn world_state(
         Arc::clone(&state.crypto_semaphore),
     );
     state.session_repo = session_repo;
-    (state, custodians)
+    (web::Data::new(state), custodians)
 }
 
-async fn world() -> World {
+/// The in-memory database with its schema, and the organization with SAML on.
+///
+/// The embedded SurrealDB engine recurses deeply in a debug build: the settings
+/// upsert below alone reaches about 1.5 MB of the test thread's 2 MiB stack. The
+/// steps of [`world`] are therefore separate, boxed futures: whatever a step
+/// holds across an `.await` is not also on the stack of the frames above it
+/// while that query runs.
+async fn world_org() -> (Surreal<TestDb>, Uuid) {
     let db = Surreal::new::<Mem>(()).await.unwrap();
     db.use_ns("test").use_db("test").await.unwrap();
     axiam_db::run_migrations(&db).await.unwrap();
@@ -309,19 +316,33 @@ async fn world() -> World {
         .set_org_settings(org.id, settings)
         .await
         .unwrap();
-    let tenant_id = create_tenant(&db, org.id, "saml-a").await;
-    let other_tenant_id = create_tenant(&db, org.id, "saml-b").await;
+    (db, org.id)
+}
+
+/// Two tenants with their users and signing credentials, and the app state.
+async fn world_tenants(
+    db: &Surreal<TestDb>,
+    org_id: Uuid,
+) -> (Uuid, Uuid, web::Data<AppState<TestDb>>) {
+    let tenant_id = create_tenant(db, org_id, "saml-a").await;
+    let other_tenant_id = create_tenant(db, org_id, "saml-b").await;
     for name in ["alice", "carol"] {
-        create_user(&db, tenant_id, name).await;
+        create_user(db, tenant_id, name).await;
     }
-    create_user(&db, other_tenant_id, "bob").await;
+    create_user(db, other_tenant_id, "bob").await;
     let auth = auth_config();
-    let (state, custodians) = world_state(&db, &auth);
-    install_credential(&db, &custodians, org.id, tenant_id).await;
-    install_credential(&db, &custodians, org.id, other_tenant_id).await;
+    let (state, custodians) = world_state(db, &auth);
+    install_credential(db, &custodians, org_id, tenant_id).await;
+    install_credential(db, &custodians, org_id, other_tenant_id).await;
+    (tenant_id, other_tenant_id, state)
+}
+
+async fn world() -> World {
+    let (db, org_id) = Box::pin(world_org()).await;
+    let (tenant_id, other_tenant_id, state) = Box::pin(world_tenants(&db, org_id)).await;
     World {
         db,
-        org_id: org.id,
+        org_id,
         tenant_id,
         other_tenant_id,
         state,
@@ -416,7 +437,7 @@ macro_rules! app {
             App::new()
                 .wrap(SecurityHeadersMiddleware)
                 .app_data(web::Data::new(auth.clone()))
-                .app_data(web::Data::new($w.state.clone()))
+                .app_data($w.state.clone())
                 .app_data(web::Data::new(
                     Arc::new(SurrealTenantRepository::new($w.db.clone()))
                         as Arc<dyn axiam_api_rest::TenantScopeResolver>,
@@ -1364,6 +1385,7 @@ async fn back_channel_logout_is_dispatched_to_oidc_rps_bound_to_the_session() {
             browser_sso: false,
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Admin,
+            ciba: Default::default(),
         })
         .await
         .unwrap();
@@ -3023,7 +3045,7 @@ async fn the_request_log_records_no_message_parameter_of_slo() {
             })
             .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
             .app_data(web::Data::new(auth.clone()))
-            .app_data(web::Data::new(w.state.clone()))
+            .app_data(w.state.clone())
             .app_data(web::Data::new(
                 Arc::new(SurrealTenantRepository::new(w.db.clone()))
                     as Arc<dyn axiam_api_rest::TenantScopeResolver>,

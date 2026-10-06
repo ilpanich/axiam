@@ -180,6 +180,8 @@ pub struct MachineLimitPreset {
     pub authz_check_per_min: u32,
     /// `POST /api/v1/auth/device` per minute per IP.
     pub device_login_per_min: u32,
+    /// `POST /oauth2/bc-authorize` per minute per bucket (G-7).
+    pub bc_authorize_per_min: u32,
     /// gRPC `AuthorizationService` per second per IP — applied to
     /// `axiam_api_grpc::GrpcConfig::grpc_authz_per_sec` by the composition
     /// root (`axiam-server::main`). Kept here so the whole family has one
@@ -203,6 +205,8 @@ pub const ENV_DEVICE_LOGIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__DEVICE_LOGIN_PER_
 pub const ENV_TOKEN_EXCHANGE_PER_MIN: &str = "AXIAM__RATE_LIMIT__TOKEN_EXCHANGE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` — B5, never preset.
 pub const ENV_END_SESSION_PER_MIN: &str = "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN";
+/// `AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN` — G-7 (CIBA), preset.
+pub const ENV_BC_AUTHORIZE_PER_MIN: &str = "AXIAM__RATE_LIMIT__BC_AUTHORIZE_PER_MIN";
 /// `AXIAM__RATE_LIMIT__PAR_PER_MIN` — B5.
 pub const ENV_PAR_PER_MIN: &str = "AXIAM__RATE_LIMIT__PAR_PER_MIN";
 /// `AXIAM__RATE_LIMIT__DCR_PER_MIN` — T21.4, never preset.
@@ -215,6 +219,10 @@ pub const ENV_SAML_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SAML_ADMIN_PER_MIN"
 pub const ENV_SSF_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_PER_MIN";
 /// `AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN` — G-5 / T23.5.2, never preset.
 pub const ENV_SSF_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN";
+/// `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` — G-6 / T23.6.4, never preset.
+pub const ENV_SCIM_TARGET_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN";
+/// `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` — G-7 / T23.7.2, never preset.
+pub const ENV_CIBA_APPROVAL_PER_MIN: &str = "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN` — X2.
 pub const ENV_UMA_PERM_PER_MIN: &str = "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN` — X2.
@@ -276,6 +284,12 @@ impl RateLimitProfile {
                 revoke_per_min: 600,
                 authz_check_per_min: 6_000,
                 device_login_per_min: 300,
+                // G-7: 10/s per client, the token endpoint's gateway figure —
+                // a CIBA client's initiation precedes its token requests, so
+                // it can never need more. What protects a *user* from a flood
+                // of sign-in requests is the per-user notification bucket,
+                // which no preset moves.
+                bc_authorize_per_min: 600,
                 grpc_authz_per_sec: 1_000,
             }),
             // Private-network sizing: 6 000/min token = 100/s per client
@@ -290,6 +304,7 @@ impl RateLimitProfile {
                 revoke_per_min: 6_000,
                 authz_check_per_min: 60_000,
                 device_login_per_min: 3_000,
+                bc_authorize_per_min: 6_000,
                 grpc_authz_per_sec: 5_000,
             }),
         }
@@ -449,6 +464,22 @@ pub struct RateLimitConfig {
     /// there is a real identity to key on, and per-IP would collapse a whole
     /// deployment behind one NAT into a single bucket.
     pub par_per_min: u32,
+    /// Max `POST /oauth2/bc-authorize` requests per minute per bucket
+    /// (default: 60 — G-7, CIBA).
+    ///
+    /// Its own bucket, never the token endpoint's: every accepted request
+    /// **allocates state** (a pending request row) and may push a sign-in
+    /// request at a human, so a flood here costs storage and a user's
+    /// attention rather than CPU. Counted three ways — the per-IP governor and
+    /// the shared counter on the route (keyed like `/oauth2/token`, honouring
+    /// `AXIAM__RATE_LIMIT__KEY`, since the endpoint carries a `client_id`), and
+    /// a per-client bucket inside the handler after authentication, as PAR
+    /// does. The CIBA grant's token requests are counted by `token_per_min`
+    /// and by each request's own polling interval. A non-default profile
+    /// presets it ([`MachineLimitPreset::bc_authorize_per_min`]); the
+    /// notification a request sends a user is throttled per user by a fixed
+    /// bucket no preset moves (`axiam_oauth2::ciba`'s notification limit).
+    pub bc_authorize_per_min: u32,
     /// Max `/oauth2/end_session` requests per minute per IP (default: 30 —
     /// B5). Deliberately NOT part of [`MachineLimitPreset`]: like the other
     /// human-driven endpoints this is not sized from capacity.
@@ -543,6 +574,29 @@ pub struct RateLimitConfig {
     /// there; thirty a minute is far more than a person administering streams
     /// produces. One bucket per route; per-IP; never preset.
     pub ssf_admin_per_min: u32,
+    /// Max writes per minute per IP to the outbound SCIM target registry's
+    /// management routes — create, update, delete and *reconcile now* (default:
+    /// 30 — G-6, T23.6.4, CONTRACT §31). Reads are not in it. Each write can
+    /// repoint where a tenant's user directory is pushed, and the credential
+    /// sent there; *reconcile now* queues a reference per user in scope and
+    /// reads the downstream; thirty a minute is far more than a person
+    /// administering targets produces. One bucket per route; per-IP; never
+    /// preset.
+    pub scim_target_admin_per_min: u32,
+    /// Max requests per minute per IP to each of the CIBA approval routes — the
+    /// signed-in user's half of a backchannel authentication request:
+    /// `GET /api/v1/ciba/requests/{id}`, `POST …/approve` and `POST …/deny`
+    /// (default: 30 — G-7, T23.7.2).
+    ///
+    /// **One bucket per route** (the counter is keyed by the route's name), so a
+    /// page that reads a request and then decides it spends one from two
+    /// buckets, and a flood of reads cannot starve decisions. Not sized from
+    /// capacity: a person opens a handful of requests a minute at most, the
+    /// routes sit behind a session and a CSRF token, and a request id is a
+    /// handle rather than a secret (D-68), so the bound is on a signed-in
+    /// account probing ids — which all answer `404` whoever's they are. Per-IP;
+    /// never preset.
+    pub ciba_approval_per_min: u32,
     /// Max `/scim/v2/*` requests per minute per IP (default: 600 — R3.1/B4).
     ///
     /// **One bucket for the whole `/scim/v2` surface**, reads and writes
@@ -686,6 +740,9 @@ impl Default for RateLimitConfig {
             uma_perm_per_min: 120,
             uma_ticket_per_min: 120,
             par_per_min: 120,
+            // G-7 — half the token endpoint's: an initiation is rarer than
+            // the token requests that follow it.
+            bc_authorize_per_min: 60,
             end_session_per_min: 30,
             // T21.4 — see the field docs. The smallest limit here, because
             // this is the only unauthenticated *write* endpoint.
@@ -699,6 +756,10 @@ impl Default for RateLimitConfig {
             // G-5 / T23.5.2 — see the field docs.
             ssf_per_min: 60,
             ssf_admin_per_min: 30,
+            // G-6 / T23.6.4 — see the field docs.
+            scim_target_admin_per_min: 30,
+            // G-7 / T23.7.2 — see the field docs. Human-driven, per route.
+            ciba_approval_per_min: 30,
             // --- R3.1/B4 SCIM: the REST administrative surface -------------
             // 600/min == the gRPC Admin family's absolute ceiling
             // (ADMIN_PER_SEC_DEFAULT 10/s), copied deliberately and for the
@@ -784,6 +845,11 @@ impl RateLimitConfig {
                 ENV_DEVICE_LOGIN_PER_MIN,
                 &mut self.device_login_per_min,
                 preset.device_login_per_min,
+            ),
+            (
+                ENV_BC_AUTHORIZE_PER_MIN,
+                &mut self.bc_authorize_per_min,
+                preset.bc_authorize_per_min,
             ),
         ] {
             if is_set(env) {
@@ -900,6 +966,10 @@ impl RateLimitConfig {
         );
         assert!(self.par_per_min >= 1, "par_per_min must be >= 1");
         assert!(
+            self.bc_authorize_per_min >= 1,
+            "bc_authorize_per_min must be >= 1"
+        );
+        assert!(
             self.end_session_per_min >= 1,
             "end_session_per_min must be >= 1"
         );
@@ -917,6 +987,14 @@ impl RateLimitConfig {
         assert!(
             self.ssf_admin_per_min >= 1,
             "ssf_admin_per_min must be >= 1"
+        );
+        assert!(
+            self.scim_target_admin_per_min >= 1,
+            "scim_target_admin_per_min must be >= 1"
+        );
+        assert!(
+            self.ciba_approval_per_min >= 1,
+            "ciba_approval_per_min must be >= 1"
         );
         assert!(self.webauthn_per_min >= 1, "webauthn_per_min must be >= 1");
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
@@ -1045,6 +1123,7 @@ mod tests {
             (ENV_REVOKE_PER_MIN, d.revoke_per_min),
             (ENV_AUTHZ_CHECK_PER_MIN, d.authz_check_per_min),
             (ENV_DEVICE_LOGIN_PER_MIN, d.device_login_per_min),
+            (ENV_BC_AUTHORIZE_PER_MIN, d.bc_authorize_per_min),
             (
                 ENV_DEVICE_AUTHORIZATION_PER_MIN,
                 d.device_authorization_per_min,
@@ -1056,6 +1135,8 @@ mod tests {
             (ENV_SAML_ADMIN_PER_MIN, d.saml_admin_per_min),
             (ENV_SSF_PER_MIN, d.ssf_per_min),
             (ENV_SSF_ADMIN_PER_MIN, d.ssf_admin_per_min),
+            (ENV_SCIM_TARGET_ADMIN_PER_MIN, d.scim_target_admin_per_min),
+            (ENV_CIBA_APPROVAL_PER_MIN, d.ciba_approval_per_min),
         ] {
             assert_eq!(
                 documented_u32(&table, env, 0),
@@ -1094,6 +1175,7 @@ mod tests {
                 (ENV_REVOKE_PER_MIN, cfg.revoke_per_min),
                 (ENV_AUTHZ_CHECK_PER_MIN, cfg.authz_check_per_min),
                 (ENV_DEVICE_LOGIN_PER_MIN, cfg.device_login_per_min),
+                (ENV_BC_AUTHORIZE_PER_MIN, cfg.bc_authorize_per_min),
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1123,6 +1205,11 @@ mod tests {
             assert_eq!(cfg.saml_admin_per_min, shipped.saml_admin_per_min);
             assert_eq!(cfg.ssf_per_min, shipped.ssf_per_min);
             assert_eq!(cfg.ssf_admin_per_min, shipped.ssf_admin_per_min);
+            assert_eq!(
+                cfg.scim_target_admin_per_min,
+                shipped.scim_target_admin_per_min
+            );
+            assert_eq!(cfg.ciba_approval_per_min, shipped.ciba_approval_per_min);
             for env in [
                 ENV_LOGIN_PER_MIN,
                 ENV_REGISTER_PER_MIN,
@@ -1134,6 +1221,8 @@ mod tests {
                 ENV_SAML_ADMIN_PER_MIN,
                 ENV_SSF_PER_MIN,
                 ENV_SSF_ADMIN_PER_MIN,
+                ENV_SCIM_TARGET_ADMIN_PER_MIN,
+                ENV_CIBA_APPROVAL_PER_MIN,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1348,6 +1437,8 @@ mod tests {
         assert_eq!(d.saml_admin_per_min, 30);
         assert_eq!(d.ssf_per_min, 60);
         assert_eq!(d.ssf_admin_per_min, 30);
+        assert_eq!(d.scim_target_admin_per_min, 30);
+        assert_eq!(d.ciba_approval_per_min, 30);
         // The relationship is the point, not the literal. `RateLimitShared`
         // keys per `"{endpoint}:{ip}"`, so each of the six webauthn routes
         // carries this allowance independently and a ceremony spends one from

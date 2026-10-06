@@ -38,7 +38,7 @@ $cfg = [
     'tenant_slug' => $env('BENCH_TENANT_SLUG', 'default'),
     'org_slug' => $env('BENCH_ORG_SLUG', 'bench-org'),
     'username' => $env('BENCH_USERNAME', 'benchuser'),
-    'password' => $env('BENCH_PASSWORD', 'Bench@User123!'),
+    'password' => $env('BENCH_PASSWORD', ''),
     'action' => $env('BENCH_ACTION', 'read'),
     'resource_id' => $env('BENCH_RESOURCE_ID', 'bench-resource'),
     // H8 fix: HARNESS-SPEC.md documents BENCH_CA_CERT (a PEM file path) as

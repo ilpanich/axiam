@@ -38,7 +38,7 @@ string baseUrl = $"{scheme}://{host}:{port}";
 string tenantSlug = Env("BENCH_TENANT_SLUG", "default");
 string orgSlug = Env("BENCH_ORG_SLUG", "bench-org");
 string username = Env("BENCH_USERNAME", "benchuser");
-string password = Env("BENCH_PASSWORD", "Bench@User123!");
+string password = Env("BENCH_PASSWORD", "");
 string action = Env("BENCH_ACTION", "read");
 string resourceIdRaw = Env("BENCH_RESOURCE_ID", "");
 // TLS inputs (HARNESS-SPEC.md), all file PATHS: BENCH_CA_CERT is the trusted

@@ -81,7 +81,7 @@ mint() {
   if [ ! -s "$STATE/admin.jar" ]; then
     curl -sSk -c "$STATE/admin.jar" -o /dev/null -X POST "$BASE/api/v1/auth/login" \
       -H 'Content-Type: application/json' \
-      -d "{\"org_slug\":\"${BENCH_ORG_SLUG:-bench-org}\",\"tenant_slug\":\"${BENCH_TENANT_SLUG:-default}\",\"username_or_email\":\"${BENCH_ADMIN_USERNAME:-admin}\",\"password\":\"${BENCH_ADMIN_PASSWORD:-Bench@Admin123!}\"}"
+      -d "{\"org_slug\":\"${BENCH_ORG_SLUG:-bench-org}\",\"tenant_slug\":\"${BENCH_TENANT_SLUG:-default}\",\"username_or_email\":\"${BENCH_ADMIN_USERNAME:-admin}\",\"password\":\"${BENCH_ADMIN_PASSWORD:?no admin password in the seed env — re-run bench-seed}\"}"
   fi
 }
 mint

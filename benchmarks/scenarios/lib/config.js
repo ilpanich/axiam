@@ -43,9 +43,12 @@ export const cfg = {
   tenantSlug: str('BENCH_TENANT_SLUG', 'default'),
   realm: str('BENCH_REALM', 'bench'), // keycloak/zitadel realm name
   username: str('BENCH_USERNAME', 'benchuser'),
-  password: str('BENCH_PASSWORD', 'Bench@User123!'),
+  // Credentials have NO defaults: they are generated per run (runner/bench-creds.sh)
+  // and reach a scenario through the seed env the runner sources. By hand:
+  //   set -a; . .seed/<target>.seed.env; set +a; k6 run scenarios/<name>.js
+  password: str('BENCH_PASSWORD', ''),
   clientId: str('BENCH_CLIENT_ID', 'bench-client'),
-  clientSecret: str('BENCH_CLIENT_SECRET', 'bench-secret'),
+  clientSecret: str('BENCH_CLIENT_SECRET', ''),
   // AXIAM-only (oauth2_code_pkce.js): the PUBLIC client runner/seed.sh
   // registers in the shape an MCP client takes — `token_endpoint_auth_method:
   // none`, a loopback redirect URI, one RFC 8707 resource in
@@ -162,13 +165,13 @@ export const cfg = {
   setupTimeout: str('BENCH_SETUP_TIMEOUT', '900s'),
 
   // Bootstrap admin session used ONLY by the G5 keyspace provisioning in
-  // setup(). Defaults deliberately mirror runner/seed.sh's `admin` /
-  // BENCH_ADMIN_PASSWORD so no new secret has to be plumbed through: seed.sh
-  // bootstraps the org with username `admin` and password `Bench@Admin123!`
-  // unless BENCH_ADMIN_PASSWORD was overridden there. These are throwaway
-  // benchmark-fixture credentials for a disposable container; never log them.
+  // setup(). The user name mirrors runner/seed.sh's `admin`; the password is the
+  // per-run one `bench-up` generated and `bench-seed` wrote into the seed env as
+  // BENCH_ADMIN_PASSWORD (no default, so a scenario run without the seed env fails
+  // its admin login visibly instead of authenticating with a published string).
+  // Throwaway benchmark-fixture credentials for a disposable container; never log them.
   adminUsername: str('BENCH_ADMIN_USERNAME', 'admin'),
-  adminPassword: str('BENCH_ADMIN_PASSWORD', 'Bench@Admin123!'),
+  adminPassword: str('BENCH_ADMIN_PASSWORD', ''),
 
   // --- N1: nested-resource authorization depth sweep -----------------------
   // (authz_nested_rest.js / authz_nested_grpc.js, driven by `just bench-nested`)
@@ -223,12 +226,13 @@ export const cfg = {
   // Keycloak master-realm admin credentials, used ONLY by the nested-authz
   // setup() to provision the resource server (Keycloak's Authorization
   // Services config is not reachable through any non-admin API). Defaults
-  // mirror runner/seed.sh's KC_ADMIN / KC_ADMIN_PASSWORD, and the legacy
+  // mirror runner/seed.sh's KC_ADMIN / KC_ADMIN_PASSWORD (the password has no
+  // default: it is the per-run one the seed env carries), and the legacy
   // unprefixed names are still honoured so an operator who exported them for
   // seeding does not have to export them twice. Throwaway container
   // credentials; never logged.
   kcAdminUsername: str('BENCH_KC_ADMIN', str('KC_ADMIN', 'admin')),
-  kcAdminPassword: str('BENCH_KC_ADMIN_PASSWORD', str('KC_ADMIN_PASSWORD', 'admin')),
+  kcAdminPassword: str('BENCH_KC_ADMIN_PASSWORD', str('KC_ADMIN_PASSWORD', '')),
 
   // Name/URI prefix for every object the nested-authz setup provisions, on
   // every target. Deterministic so a re-run against a stack that was NOT torn

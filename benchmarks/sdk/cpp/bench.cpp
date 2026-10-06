@@ -123,7 +123,7 @@ Config load_config() {
     c.tenant_slug = env_str("BENCH_TENANT_SLUG", "default");
     c.org_slug = env_str("BENCH_ORG_SLUG", "bench-org");
     c.username = env_str("BENCH_USERNAME", "benchuser");
-    c.password = env_str("BENCH_PASSWORD", "Bench@User123!");
+    c.password = env_str("BENCH_PASSWORD", "");
     c.action = env_str("BENCH_ACTION", "read");
     c.resource_id = env_str("BENCH_RESOURCE_ID", "bench-resource");
     c.ca_pem = load_pem("BENCH_CA_CERT", c.setup_error);

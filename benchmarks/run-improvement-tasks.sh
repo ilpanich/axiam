@@ -132,8 +132,9 @@ k6_file() { find "$1" -name '*.k6.json' -print -quit 2>/dev/null; }
 
 # --- reading the running stack's own configuration ---------------------------
 # `just bench-up` bootstraps throwaway DB credentials inside its own recipe
-# shell (AXIAM__DB__USERNAME=bench / AXIAM__DB__PASSWORD=bench-local-only-pw)
-# and writes them to no file, so neither this script's environment nor
+# shell (AXIAM__DB__USERNAME=bench; the password is generated per stack into
+# .seed/axiam.stack.env, which bench-down removes)
+# and exports them to no shell of yours, so neither this script's environment nor
 # docker/.secrets/env knows them on a machine that never supplied real ones.
 # The containers are the source of truth, whatever the credentials came from.
 

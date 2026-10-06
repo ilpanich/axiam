@@ -42,7 +42,7 @@ public final class Bench {
     private static final String TENANT_SLUG = env("BENCH_TENANT_SLUG", "default");
     private static final String ORG_SLUG = env("BENCH_ORG_SLUG", "bench-org");
     private static final String USERNAME = env("BENCH_USERNAME", "benchuser");
-    private static final String PASSWORD = env("BENCH_PASSWORD", "Bench@User123!");
+    private static final String PASSWORD = env("BENCH_PASSWORD", "");
     private static final String ACTION = env("BENCH_ACTION", "read");
     private static final String RESOURCE_ID = env("BENCH_RESOURCE_ID", "bench-resource");
     private static final String TARGET = env("BENCH_TARGET", "axiam");

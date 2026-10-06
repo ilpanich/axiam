@@ -83,7 +83,7 @@ func loadConfig() config {
 		// as the next failure.
 		orgSlug:    env("BENCH_ORG_SLUG", "bench-org"),
 		username:   env("BENCH_USERNAME", "benchuser"),
-		password:   env("BENCH_PASSWORD", "Bench@User123!"),
+		password:   env("BENCH_PASSWORD", ""),
 		action:     env("BENCH_ACTION", "read"),
 		resourceID: env("BENCH_RESOURCE_ID", "bench-resource"),
 		caCertPath: env("BENCH_CA_CERT", ""),

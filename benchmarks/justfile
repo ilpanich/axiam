@@ -84,6 +84,11 @@ bench-up:
     set -euo pipefail
     source profiles/{{profile}}.env
     COMPOSE="targets/{{target}}/docker-compose.yml"
+    # Per-stack credentials (never literals): generated once per stack, required by
+    # every compose file, removed by bench-down. See runner/bench-creds.sh.
+    # shellcheck source=runner/bench-creds.sh
+    source runner/bench-creds.sh
+    case "{{target}}" in keycloak|zitadel) bench_creds_load "{{target}}" ;; esac
 
     # --- AXIAM target: secrets + image selection (competitors need neither) ---
     if [ "{{target}}" = "axiam" ]; then
@@ -136,9 +141,13 @@ bench-up:
       export AXIAM__AUTH__OPAQUE_SETUP_KEY="${AXIAM__AUTH__OPAQUE_SETUP_KEY:-$(genhex opaque_setup.hex)}"
       export AXIAM__AUTH__OAUTH2_ISSUER_URL="${AXIAM__AUTH__OAUTH2_ISSUER_URL:-${BENCH_ISSUER_URL:-http://localhost:${BENCH_APP_PORT:-8090}}}"
       export AXIAM__DB__USERNAME="${AXIAM__DB__USERNAME:-bench}"
-      export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-bench-local-only-pw}"
       export RABBITMQ_DEFAULT_USER="${RABBITMQ_DEFAULT_USER:-bench}"
-      export RABBITMQ_DEFAULT_PASS="${RABBITMQ_DEFAULT_PASS:-bench-local-only-pw}"
+      # The datastore and broker passwords, and the bootstrap admin's and the bench
+      # user's, are generated per stack (runner/bench-creds.sh) into
+      # .seed/axiam.stack.env, never literals; a value already exported (or in
+      # docker/.secrets/env, sourced above) wins. bench-down removes the file with
+      # the volumes it belongs to.
+      bench_creds_load axiam
       # A6: AMQP is TLS-only, so the bench broker needs a certificate before it
       # can serve the server. Idempotent and stable across runs, like the hex
       # secrets above — a rotated CA mid-matrix would only add a variable.
@@ -245,28 +254,9 @@ bench-up:
         echo "           Refusing rather than measuring plain TLS under an mTLS label." >&2
         exit 1
       fi
-      command -v openssl >/dev/null || { echo "[bench-up] openssl is required to generate authentik's per-run credentials"; exit 1; }
-      AK_STACK_ENV=".seed/authentik.stack.env"
-      mkdir -p .seed
-      if [ ! -s "$AK_STACK_ENV" ]; then
-        echo "[bench-up] generating per-run authentik credentials into $AK_STACK_ENV (mode 600; bench-down removes it)"
-        (
-          umask 077
-          {
-            echo "export BENCH_AUTHENTIK_SECRET_KEY=$(openssl rand -hex 32)"
-            echo "export BENCH_AUTHENTIK_PG_PASSWORD=$(openssl rand -hex 16)"
-            echo "export BENCH_AUTHENTIK_ADMIN_PASSWORD=Ak-$(openssl rand -hex 16)-Aa1"
-            echo "export BENCH_AUTHENTIK_ADMIN_TOKEN=$(openssl rand -hex 32)"
-          } > "$AK_STACK_ENV"
-        )
-      fi
-      # shellcheck disable=SC1090
-      source "$AK_STACK_ENV"
-      if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-        for v in BENCH_AUTHENTIK_SECRET_KEY BENCH_AUTHENTIK_PG_PASSWORD BENCH_AUTHENTIK_ADMIN_PASSWORD BENCH_AUTHENTIK_ADMIN_TOKEN; do
-          printf '::add-mask::%s\n' "${!v}"
-        done
-      fi
+      # Generated into .seed/authentik.stack.env on the first bring-up of a stack and
+      # re-sourced on every later one (see runner/bench-creds.sh); masked under CI.
+      bench_creds_load authentik
       if [ "{{profile}}" != "p0-plaintext" ]; then
         echo "[bench-up] NOTE: authentik's built-in HTTPS listener (container :9443) serves its own self-signed" >&2
         echo "           certificate, accepts TLS 1.2 AND 1.3 (k6 negotiates 1.3) and speaks HTTP/1.1 only." >&2
@@ -619,11 +609,13 @@ bench-down:
              | sed 's/^\${//; s/:?$//' | sort -u)
     docker compose -f "$COMPOSE" --profile tls down -v || \
       docker compose -f "$COMPOSE" down -v
-    # authentik: its per-run credentials belong to the volumes just removed
-    # (see bench-up); a surviving file would hand the next stack a database
-    # password and bootstrap token for data that no longer exists, and keep
-    # secrets on disk for no reason.
-    if [ "{{target}}" = "authentik" ]; then rm -f .seed/authentik.stack.env; fi
+    # Every target: its per-run credentials (runner/bench-creds.sh, see bench-up)
+    # belong to the volumes just removed; a surviving file would hand the next
+    # stack a database password and bootstrap token for data that no longer
+    # exists, and keep secrets on disk for no reason. (The seed env,
+    # .seed/<target>.seed.env, is left: the scenarios and SDK benches read it.)
+    source runner/bench-creds.sh
+    bench_creds_remove "{{target}}"
 
 # Dump a target's compose logs: every service, or only the ones named.
 #
@@ -872,7 +864,7 @@ sdk-bench:
     else
       echo "[sdk-bench] WARN: no seed env at $SEED_ENV — run 'just target={{target}} bench-seed' first" >&2
     fi
-    for var in BENCH_RESOURCE_ID BENCH_SUBJECT_ID BENCH_TENANT_SLUG BENCH_CLIENT_ID BENCH_CLIENT_SECRET; do
+    for var in BENCH_RESOURCE_ID BENCH_SUBJECT_ID BENCH_TENANT_SLUG BENCH_CLIENT_ID BENCH_CLIENT_SECRET BENCH_PASSWORD; do
       if [ -z "${!var:-}" ]; then
         echo "[sdk-bench] FATAL: $var is empty after sourcing $SEED_ENV — re-run 'just target={{target}} bench-seed' (H8: seed env must reach the SDK bench)." >&2
         exit 1
@@ -1287,7 +1279,8 @@ bench-quick:
     # fixture has no way to produce. The admin credential is the same one
     # `bench-seed` bootstrapped, so a machine that can seed can run this.
     JAR="$(mktemp)"; trap 'rm -f "$JAR"' EXIT
-    ADMIN_PW="${BENCH_ADMIN_PASSWORD:-Bench@Admin123!}"
+    # The seed env just sourced carries the per-run admin password; there is no default.
+    ADMIN_PW="${BENCH_ADMIN_PASSWORD:?no admin password in $SEED_ENV — re-run bench-seed}"
     curl -sSk --cert "$BENCH_CLIENT_CERT" --key "$BENCH_CLIENT_KEY" \
       -c "$JAR" -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
       -d "{\"org_slug\":\"${BENCH_ORG_SLUG:-bench-org}\",\"tenant_slug\":\"${BENCH_TENANT_SLUG:-default}\",\"username_or_email\":\"admin\",\"password\":\"$ADMIN_PW\"}" \

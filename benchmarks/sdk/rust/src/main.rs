@@ -130,7 +130,7 @@ impl Cfg {
             tenant_slug: env("BENCH_TENANT_SLUG", "default"),
             org_slug: env("BENCH_ORG_SLUG", "bench-org"),
             username: env("BENCH_USERNAME", "benchuser"),
-            password: env("BENCH_PASSWORD", "Bench@User123!"),
+            password: env("BENCH_PASSWORD", ""),
             action: env("BENCH_ACTION", "read"),
             resource_id,
             iterations: parse_usize("SDK_BENCH_ITERATIONS", "2000"),

@@ -5,12 +5,18 @@
 # security profile maps onto its own KC_HTTPS_* / KC_HTTP_* settings, selected
 # by the runner via the BENCH_* env it exports.
 #
-# Caps default to match the AXIAM target: server 2 CPU / 1 GiB, db 2 CPU / 1 GiB.
+# Caps (the run-5 caps): server 2 CPU / 2048m (BENCH_CPUS / BENCH_MEM), db 2 CPU /
+# 1024m (BENCH_DB_CPUS / BENCH_DB_MEM). Keycloak sizes its JVM heap as a percentage
+# of the container limit (MaxRAMPercentage=70, InitialRAMPercentage=50 by default),
+# so BENCH_MEM moves its heap with it; run 6 leaves both at the shipped defaults.
 name: bench-keycloak
 
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:26.7.0
+    # Pinned to Keycloak 26.8.0 (run 6). Override with BENCH_KEYCLOAK_IMAGE: the
+    # identical image is on Docker Hub as keycloak/keycloak:26.8.0, for a host that
+    # cannot reach quay.io. `meta.json` records the pulled digest either way.
+    image: ${BENCH_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.8.0}
     container_name: bench-keycloak
     cpus: ${BENCH_CPUS:-2}
     mem_limit: ${BENCH_MEM:-2048m}
@@ -45,12 +51,16 @@ services:
         fi
         exec /opt/keycloak/bin/kc.sh "$${ARGS[@]}"
     environment:
+      # CREDENTIALS. No literal: KC_ADMIN_PASSWORD and BENCH_KC_DB_PASSWORD are
+      # generated per run by `just target=keycloak bench-up` (runner/bench-creds.sh)
+      # and REQUIRED here, so a raw `docker compose up` fails closed. The admin
+      # user name is not a secret.
       KC_BOOTSTRAP_ADMIN_USERNAME: "${KC_ADMIN:-admin}"
-      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KC_ADMIN_PASSWORD:-admin}"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KC_ADMIN_PASSWORD:?generated per run by just target=keycloak bench-up}"
       KC_DB: postgres
       KC_DB_URL: "jdbc:postgresql://postgres:5432/keycloak"
       KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: keycloak
+      KC_DB_PASSWORD: "${BENCH_KC_DB_PASSWORD:?generated per run by just target=keycloak bench-up}"
       KC_HOSTNAME_STRICT: "false"
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
@@ -113,7 +123,7 @@ services:
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: keycloak
+      POSTGRES_PASSWORD: "${BENCH_KC_DB_PASSWORD:?generated per run by just target=keycloak bench-up}"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U keycloak"]
       interval: 5s

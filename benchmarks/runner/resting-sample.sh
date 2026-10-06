@@ -15,8 +15,11 @@
 #
 # It does not start, seed or stop anything: bring a stack up (`bench-up`), call
 # this, seed, call it again. Two stages are the convention:
-#     fresh   straight after bench-up: a freshly migrated, empty datastore
-#     seeded  after bench-seed: the benchmark fixture, still no load
+#     fresh    straight after bench-up: a freshly migrated, empty datastore
+#     fixture  after bench-seed: the benchmark fixture in place, still no load
+# (NOT `seeded`: `bench-pack` prunes every file name containing "seed" so that seed
+# material can never reach an archive, and a stage named `seeded` would be dropped from
+# the shareable results without a word. This script refuses such a label.)
 #
 # Method (what the numbers mean):
 #   * the containers are the target's own (the same list run-benchmark.sh records in
@@ -43,7 +46,7 @@
 #
 # Usage:  resting-sample.sh <target> <stage> [out-dir]
 #   target  axiam | keycloak | zitadel | authentik     (AXIAM minimal: say so via DEPLOY=minimal)
-#   stage   fresh | seeded | <any label>
+#   stage   fresh | fixture | <any label without "seed" in it>
 # Env:    SETTLE (90) INTERVAL (5) DURATION (60) DEPLOY (full|minimal, default: read off the stack)
 set -euo pipefail
 
@@ -55,6 +58,9 @@ SETTLE="${SETTLE:-90}"
 INTERVAL="${INTERVAL:-5}"
 DURATION="${DURATION:-60}"
 
+case "$STAGE" in
+  *seed*|*SEED*|*Seed*) echo "[resting] the stage label '$STAGE' contains 'seed': bench-pack prunes such file names, so this stage would be missing from the archive. Use 'fixture'." >&2; exit 2 ;;
+esac
 case "$TARGET" in
   axiam)     CONTAINERS="bench-axiam-server bench-axiam-surrealdb bench-axiam-rabbitmq" ;;
   keycloak)  CONTAINERS="bench-keycloak bench-keycloak-postgres" ;;

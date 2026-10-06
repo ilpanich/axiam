@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Benchmark run 6: the runbook and the harness it needs (G-10, T23.10.2(a), D-75,
+  D-76).** `claude_dev/run6-runbook.md` (built like run 5's; a complete copy-paste
+  section, the four pinned versions, what changed since run 5, the minimal-profile
+  measurement, the rate-limit posture per pass, and exactly what to send back for the
+  seventh draft). **Keycloak 26.8.0** and **Zitadel v4.19.4** (each with an image
+  override, `BENCH_KEYCLOAK_IMAGE` / `BENCH_ZITADEL_IMAGE`; Keycloak 26.8.0 needed no
+  configuration change and its six shared cells pass a dry run at p0, p2 and p3). **No
+  benchmark credential is a literal any more**: `runner/bench-creds.sh` generates every
+  target's passwords per stack into a mode-600 file (removed by `bench-down`), the compose
+  files require them (`${VAR:?…}`), the seed and k6 config carry no default, and a new
+  `runner/credential-selftest.sh` (CI) fails on the next one. `deploy=minimal` runs
+  AXIAM without the broker in the harness (a compose overlay, `axiam_deploy_profile` in
+  `meta.json`, a report banner, `BENCH_EXPECT_DEPLOY`, single instance, outbound deliveries
+  lost on restart per T-445); `runner/resting-sample.sh` measures a stack's memory at rest;
+  `runner/pull-pinned-images.sh` pins every image by digest; `BENCH_SCENARIO_ONLY` runs a
+  chosen cell set. **Fixed in the harness:** `rl=prod` left seven REST families at the
+  neutralized value while `rl-prod-check` compared them with the shipped one (now pinned
+  from the Rust source); `meta.json`'s `image_digest` was the image id; a stale
+  `axiam.bulk.env` survived `bench-down` and mislabelled later cells. No measurement is
+  published; the maintainer runs run 6 after `1.0.0-beta18` is cut.
+
 - **authentik as a fourth benchmark target (G-10, T23.10.1, D-7).**
   `benchmarks/targets/authentik/` pins **authentik 2026.8.3** in the shape of the
   Keycloak and Zitadel targets: a `server`, a `worker` and PostgreSQL (no Redis;

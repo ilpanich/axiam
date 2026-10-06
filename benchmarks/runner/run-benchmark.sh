@@ -1412,10 +1412,30 @@ EOF
 
 SCENARIO_COUNT=${#SCENARIOS[@]}
 
+# T23.10.2(a): the deployment profile the stack actually is must be the one the
+# pass says it is. A minimal-profile pass whose overlay silently did not apply (a
+# matrix that did not forward `deploy`, a stack left over from a full-profile run)
+# would file full-profile cells under a "minimal" label, and nothing else would
+# notice. BENCH_EXPECT_DEPLOY=minimal|full (exported by `bench-matrix` from its
+# `deploy` variable; set it by hand for a bare `bench-run`) is checked against the
+# container itself, and a mismatch fails in seconds. AXIAM only; unset asserts nothing.
+expect_deploy_preflight() {
+  local want="${BENCH_EXPECT_DEPLOY:-}" got
+  [ -n "$want" ] && [ "$TARGET" = "axiam" ] || return 0
+  got="$(axiam_deploy_profile)"
+  if [ "$got" != "$want" ]; then
+    echo "[run] FATAL (T23.10.2(a)): this pass expects the AXIAM '$want' profile but bench-axiam-server is '$got' (read off its AXIAM__AMQP__ENABLED)." >&2
+    echo "[run]   Fix: just target=axiam deploy=$want profile=$PROFILE bench-down && just target=axiam deploy=$want profile=$PROFILE bench-up   (then re-run this cell)" >&2
+    exit 1
+  fi
+  echo "[run] deploy profile OK — bench-axiam-server is the AXIAM '$got' profile"
+}
+
 # J9/E1: assert the runbook-required container env BEFORE the settle gate and
 # the first cell — the whole point is to fail in seconds rather than after the
 # k6 hours that produced run 5's empty stage-timing logs.
 require_env_preflight
+expect_deploy_preflight
 
 # G2 item 1: gate the FIRST cell of this run behind the settle check (once —
 # not per cell; every cell in this run records the same settle_wait_secs /

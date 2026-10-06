@@ -644,6 +644,11 @@ bench-down:
     # .seed/<target>.seed.env, is left: the scenarios and SDK benches read it.)
     source runner/bench-creds.sh
     bench_creds_remove "{{target}}"
+    # The bulk-seed record (.seed/axiam.bulk.env: fixture scale, deny ratio) describes
+    # the datastore volume just removed. Left behind, it labelled EVERY later cell as a
+    # 10x fixture (run-benchmark.sh sources it into meta.json) and exported its
+    # BENCH_SEED_DENY_RATIO into the next run's environment.
+    rm -f ".seed/{{target}}.bulk.env"
 
 # Dump a target's compose logs: every service, or only the ones named.
 #
@@ -717,6 +722,9 @@ bench-matrix:
     # BENCH_RESULTS_DIR unset do we fall back to the plain results/ root,
     # same as before.
     BASE_RESULTS_DIR="${BENCH_RESULTS_DIR:-$PWD/results}"
+    # T23.10.2(a): a `deploy=minimal` matrix asserts, per AXIAM cell, that the stack
+    # really is the minimal profile (run-benchmark.sh's expect_deploy_preflight).
+    export BENCH_EXPECT_DEPLOY="{{deploy}}"
     for i in $(seq 1 {{repeat}}); do
       RUN_DIR="$BASE_RESULTS_DIR/run-$i"
       echo "### repeat $i/{{repeat}} -> $RUN_DIR ###"
@@ -738,14 +746,14 @@ bench-matrix:
             continue
           fi
           echo "=== run $i: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
-          just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up
+          just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} deploy={{deploy}} bench-up
           just target=$t profile=$p bench-seed
           just target=$t profile=$p bench-run
           just target=$t bench-down
         done
       done
     done
-    unset BENCH_RESULTS_DIR BENCH_RUN_INDEX
+    unset BENCH_RESULTS_DIR BENCH_RUN_INDEX BENCH_EXPECT_DEPLOY
     # H1 item 2 (same clobber family): aggregate from wherever this matrix
     # actually wrote (BASE_RESULTS_DIR), not the hardcoded "results" root —
     # a caller-redirected matrix (e.g. a task's results/tasks/<id>/ subtree)
@@ -809,7 +817,7 @@ bench-dry-run:
           continue
         fi
         echo "=== dry-run: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
-        if ! just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up; then
+        if ! just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} deploy={{deploy}} bench-up; then
           note "$t" "$p" "(bench-up)" FAIL "stack never came up / never became ready — see the compose ps+logs dumped above"
           teardown "$t" "$p"
           continue
@@ -819,7 +827,7 @@ bench-dry-run:
           teardown "$t" "$p"
           continue
         fi
-        just target=$t profile=$p dry=1 bench-run || true
+        BENCH_EXPECT_DEPLOY="{{deploy}}" just target=$t profile=$p dry=1 bench-run || true
         teardown "$t" "$p"
       done
     done
@@ -1181,6 +1189,11 @@ bench-credential-selftest:
 # No docker, no k6.
 bench-rl-posture-selftest:
     bash runner/rl-prod-posture-selftest.sh
+
+# T23.10.2(a): the AXIAM deployment-profile guard (meta.json's axiam_deploy_profile,
+# BENCH_EXPECT_DEPLOY, the minimal overlay). A stub docker; no daemon, no stack.
+bench-deploy-profile-selftest:
+    bash runner/deploy-profile-selftest.sh
 
 # Verify every language bench presents its p3-mtls client certificate
 # (CONTRACT.md §6.1) — no AXIAM stack, no seed, no containers required: the

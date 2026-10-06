@@ -259,5 +259,11 @@ command -v openssl >/dev/null || { say "openssl is required"; exit 1; }
 ) > "$T/names.out" 2>&1 || true
 if [ -s "$T/names.out" ]; then while IFS= read -r line; do say "$line"; done < "$T/names.out"; fi
 
+# bench-down removes what belongs to the volumes it removes: the per-run credentials AND the
+# bulk-seed record (a stale axiam.bulk.env mislabels every later cell as a scaled fixture)
+down="$(awk '/^bench-down:/{f=1} f&&/^# Dump a target/{exit} f' "$BENCH/justfile")"
+grep -q 'bench_creds_remove' <<<"$down" || say "bench-down no longer removes the per-run credentials (.seed/<target>.stack.env)"
+grep -q 'bulk.env' <<<"$down" || say "bench-down no longer removes .seed/<target>.bulk.env — a scaled-fixture record would outlive its datastore and mislabel later cells"
+
 [ "$fail" -eq 0 ] || { echo "[credential-selftest] FAILED" >&2; exit 1; }
 echo "[credential-selftest] OK — every compose credential is a required variable, no script/scenario/SDK bench carries a credential default, the scanner flags its witnesses, and bench-creds.sh generates, persists, masks and removes per-run credentials for all four targets."

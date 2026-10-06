@@ -1806,6 +1806,32 @@ criterion (specification stability, one concrete adopter).
 
 ### G-10 — Benchmark currency — **P2**
 
+> **EXECUTED — G-10, T23.10.1, 2026-10-06** (T23.10.2(a) and (b) follow).
+> `benchmarks/targets/authentik/` (`293ec27`, Sonnet 5.5): authentik
+> **2026.8.3** as the fourth target in the Keycloak/Zitadel shape — server,
+> worker and PostgreSQL (no Redis since 2025.10), every credential generated per
+> run by `bench-up` and required by the compose file (no literal), seeded through
+> the bootstrap token's API, wired into the runner, the k6 adapter
+> (`scenarios/lib/targets.js`), the report and the scenario filters, with a new
+> hermetic `runner/authentik-selftest.sh` in CI's *Bench Harness Self-Tests* and
+> the filter self-test pinning each competitor's exact scenario set. The five
+> shared endpoints were checked on a running container: client credentials,
+> introspection (a bad client is `200 {"active":false}`, so the adapter requires
+> `active`), JWKS and userinfo are equivalent operations; **password login** goes
+> through authentik's flow executor (three calls, a real `pbkdf2_sha256` verify,
+> a session), because its ROPC path compares an app-password token and never
+> hashes, so that one cell is labelled `protocol-variant`; `token_refresh` runs as
+> a flagged `fallback-op`, as Zitadel's does (**D-79**). **Smoke-tested in the
+> sandbox** with the Docker Hub mirror `authentik/server:2026.8.3` (`ghcr.io`
+> blobs are blocked here) and k6 2.3.0 in Docker: the seed is idempotent, each
+> shared scenario passes a dry run at p0 and p2, and a full
+> `bench-dry-run` over p0/p3 finished with 5 PASS, 1 WARN (refresh), 0 FAIL; no
+> latency or throughput figure from the sandbox is a measurement. p3-mtls is
+> refused for authentik (no client-certificate listener), and p2 is its own
+> self-signed TLS listener (TLS 1.2 and 1.3, HTTP/1.1). Its cheap endpoints are
+> PostgreSQL-bound (JWKS ≈ 14, userinfo ≈ 23, introspection ≈ 72, client
+> credentials ≈ 203 transactions per request in the sandbox).
+
 **Target.** Re-measure Keycloak at 26.8 (which reports reduced memory) and
 Zitadel at v4.19, and add authentik 2026.8 as a fourth benchmark target, so
 that the authentik comparison can make a performance statement.
@@ -2367,6 +2393,7 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-76 | **Decided by the maintainer, 2026-10-06, at the start of W6** (the recommended option). Run 6 runs off the sandbox, on the maintainer's G-box: does W6 wait for it? | **Two PRs.** W6a now: T23.10.1, T23.10.2(a) (`run6-runbook.md`), T23.11.1 and its threat entries, the comparison refresh that needs no run-6 number, F4 and the phase close-out. W6b after the results: T23.10.2(b) — the seventh draft of `PUBLIC_BENCH_ANALYSIS.md`, the comparisons' performance rows and change-log lines, and the website where it quotes benchmark numbers — on `claude/phase23-w6b`, cut from `main` after W6a merges. The maintainer runs run 6 after W6a merges and beta18 is published. Phase 23 is recorded complete at W6a with T23.10.2(b) the one open task, tracked by G-10's issue and closed by W6b. Rejected: one PR held open until the results (a wave's reviewed work waits on an off-sandbox run with no date) |
 | D-77 | *Taken by the orchestrator, 2026-10-06, on T23.11.1's record (the maintainer may override in the W6a PR).* G-11 asks whether a RADIUS front end with EAP-TLS over the integrated CA fits AXIAM and what it would cost | **Decline the native front end now; the FreeRADIUS-backend route when a named adopter asks; publish a CRL regardless.** Reopen condition: a named adopter needs 802.1X, VPN or network-device login and will not run FreeRADIUS, or option B has shipped with a documented shortfall. The record's §6 is the security baseline any build starts from. Rejected: building option A in Phase 23 (XL for an audience nobody has named, and a new authentication path and trust boundary); a guide alone for option B (the tree publishes no CRL, so FreeRADIUS would have no revocation channel) |
 | D-78 | *Taken in T23.11.1's threat entries (Opus 5.5), 2026-10-06, accepted by the orchestrator.* How do threat entries for a surface that ships nothing enter the model, given that the W5 F4 review requires them? | **Threat Dragon's `NotApplicable` status, on a design-only diagram whose elements are out of scope.** Such an entry counts in the total and in neither the mitigated nor the open count, never appears in the open-risk register, and says what any build must do from its first commit and the status it would take; the commit that builds an element moves its entries to Mitigated or Open with tests. `gen-threat-model.mjs` counts the status apart. Rejected: Mitigated (no control exists — the T-108/T-117 mistake); Open (nothing is exposed and no task is building it, so the register would nearly double with entries that may never close) |
+| D-79 | *Taken by the orchestrator, 2026-10-06, on T23.10.1's report.* How is authentik measured fairly against the run-5 caps and the shared scenarios? | **(1) The worker carries the server's cap** (2 CPU / 2 GiB; database 2 CPU / 1 GiB), because authentik cannot run without it: the stack's configured ceiling is 6 CPU / 5 GiB against Keycloak's 4 / 3, and the report states that beside every whole-stack figure, while its "server only" variant sums server and worker. **(2) Password login is the flow executor's real password verification**, labelled `protocol-variant` for that one cell, not a not-comparable cell: it hashes for real, as the report requires of every target, but takes three calls. **(3) `token_refresh` stays a flagged `fallback-op`**, as for Zitadel (authentik issues no refresh token to ROPC or client credentials). **(4) The settle gate's 10 ops/s for authentik is a liveness check**; the runbook says to wait for a quiet stack and raise it once a settled rate is known. Rejected: squeezing server and worker into one 2-CPU budget (measures a deployment authentik does not ship); measuring ROPC as "password login" (a token compare, no hash) |
 
 ---
 

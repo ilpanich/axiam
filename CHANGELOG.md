@@ -1055,6 +1055,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Verifiable-credentials design (OID4VCI issuer, OID4VP verifier, SD-JWT VC) — design only, no code (T23.9.1)
 
+- RADIUS / EAP-TLS spike — decision record, no code: decline a native RADIUS front end for now, FreeRADIUS-backend route when asked, and the prerequisite finding that the tree publishes no CRL or OCSP (T23.11.1)
+
 - *Identity for agents* guide and website page (T23.15.1)
 
 - **RFC 7592 client configuration endpoint (T23.4.1).** A dynamically

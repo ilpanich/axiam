@@ -51,8 +51,17 @@ export interface SecSection {
   explorer?: boolean;
 }
 
-const { total, open, mitigated, diagramCount, areas, categories, severities, openRisks } =
-  THREAT_MODEL_SUMMARY;
+const {
+  total,
+  open,
+  mitigated,
+  notApplicable,
+  diagramCount,
+  areas,
+  categories,
+  severities,
+  openRisks,
+} = THREAT_MODEL_SUMMARY;
 
 
 export const SEC_SECTIONS: SecSection[] = [
@@ -103,22 +112,28 @@ export const SEC_SECTIONS: SecSection[] = [
           ["Diagrams", String(diagramCount)],
           ["Threats identified", String(total)],
           ["Mitigated / Open", `${mitigated} / ${open}`],
+          ["Not applicable (specified, not built)", String(notApplicable)],
         ],
       },
       {
         type: "p",
-        text: "Every threat is examined against the STRIDE categories that apply to its element type (actor, process, data store or data flow). A threat is marked **mitigated** only where a control exists in the codebase and can be pointed at; where the residual risk is accepted, deferred, or belongs to whoever deploys AXIAM, it stays **open** and explains itself. An honest open item is more useful than an optimistic closed one.",
+        text: "Every threat is examined against the STRIDE categories that apply to its element type (actor, process, data store or data flow). A threat is marked **mitigated** only where a control exists in the codebase and can be pointed at; where the residual risk is accepted, deferred, or belongs to whoever deploys AXIAM, it stays **open** and explains itself. An honest open item is more useful than an optimistic closed one. A third status, **not applicable**, is used for one thing only: entries written for a surface AXIAM does not have, so that a build would start from them. They count in the total and in neither of the other two, and each becomes mitigated or open in the commit that builds what it describes.",
       },
       { type: "h", id: "coverage", text: "Coverage by area" },
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Area", "Threats", "Open"],
-        rows: areas.map((a) => [a.title, String(a.total), String(a.open)]),
+        headers: ["Area", "Threats", "Open", "Not built"],
+        rows: areas.map((a) => [
+          a.title,
+          String(a.total),
+          String(a.open),
+          String(a.notApplicable),
+        ]),
       },
       {
         type: "p",
-        text: "The concentration of open items in *Deployment* and *Client SDKs* is deliberate and expected: those are the two areas where security is a shared responsibility between AXIAM and the people who run and integrate it. AXIAM's own request path — authentication, authorization, tokens, PKI, federation — carries **two** open items, and none is a defect. The directory identity source carries none: its last open item — with just-in-time provisioning on, a sign-in for a name AXIAM holds no account for reached the directory with no AXIAM counter in front of it (T-332) — closed with a failure counter per tenant and login name, as the trade-off before it, a tenant's directory host held to no address policy (T-300), closed with the connector's address guard. Three entered with the SAML identity provider's issuer: a leaked signing key outlives its retirement at service providers that pinned the certificate (T-306), credential rotation waited for a promote verb (T-309) — closed when the registry routes added it, in one transaction, with the next credential published in the IdP metadata first — and a `SessionIndex` shared by every SP of one sign-on let colluding SPs correlate it (T-312) — closed when single logout gave every SP a random index of its own, recorded before signing; a fourth that entered with it — whether an email `NameID` may carry an address AXIAM never verified — was decided by the SSO endpoint, which asserts an address only when it was verified or the account activated (T-313). The Low item the SSO endpoint added — a `RelayState` and the pending sign-on handle reaching the request log through the request tracer's record of the query string (T-325) — closed when the tracer began redacting query values, which also took `/oauth2/authorize`'s `state`, reset tokens and search terms out of the log. The one it briefly carried, the 60-second grace a rotated refresh token keeps, was recorded open at 1.0.0-beta13 rather than absorbed and then closed by a decision: the grace now applies only to the FAPI 2.0 profile that requires it and sender-constrains every token, and a rotated token presented again is marked and audited whichever way it is answered (T-254). And the two Medium items that had sat on the token service and on the SDK route guard since the first version of the model — the fifteen-minute revocation window, seen from each side — closed together at 1.0.0-beta14, when the optional revocation feed the server publishes gained a poller in all eleven SDKs (T-39, T-143). The twenty-eight SAML identity provider entries of model 2.25.0 (T-357 … T-384) were open for a reason none of these had: they were written before the code they describe, so they closed as the registry routes, the metadata endpoint and single logout landed — all but T-380, a service provider's own session outliving the AXIAM session, which is accepted. The Shared Signals Framework transmitter (model 2.27.0, T-385 … T-401) added four of the same kind on the *Audit, webhooks, email & notifications* diagram: the push endpoint at delivery time, event flooding of a receiver and the poll buffer stayed open until the delivery task built them on the controls already decided — it did, in model 2.28.0, and T-392, T-394 and T-395 are mitigated, each with the tests its mitigation names — leaving a replayed SET open until the SDK receiver helper that de-duplicates its `jti` ships (T-388). The delivery entries of model 2.29.0 add one more, and it is accepted rather than deferred: an SSF event that cannot be produced or queued is lost with a log line and nothing else, because a logout must not fail when a receiver's queue is down (T-405).",
+        text: "The concentration of open items in *Deployment* and *Client SDKs* is deliberate and expected: those are the two areas where security is a shared responsibility between AXIAM and the people who run and integrate it. AXIAM's own request path — authentication, authorization, tokens, PKI, federation — carries **two** open items, and none is a defect. The directory identity source carries none: its last open item — with just-in-time provisioning on, a sign-in for a name AXIAM holds no account for reached the directory with no AXIAM counter in front of it (T-332) — closed with a failure counter per tenant and login name, as the trade-off before it, a tenant's directory host held to no address policy (T-300), closed with the connector's address guard. Three entered with the SAML identity provider's issuer: a leaked signing key outlives its retirement at service providers that pinned the certificate (T-306), credential rotation waited for a promote verb (T-309) — closed when the registry routes added it, in one transaction, with the next credential published in the IdP metadata first — and a `SessionIndex` shared by every SP of one sign-on let colluding SPs correlate it (T-312) — closed when single logout gave every SP a random index of its own, recorded before signing; a fourth that entered with it — whether an email `NameID` may carry an address AXIAM never verified — was decided by the SSO endpoint, which asserts an address only when it was verified or the account activated (T-313). The Low item the SSO endpoint added — a `RelayState` and the pending sign-on handle reaching the request log through the request tracer's record of the query string (T-325) — closed when the tracer began redacting query values, which also took `/oauth2/authorize`'s `state`, reset tokens and search terms out of the log. The one it briefly carried, the 60-second grace a rotated refresh token keeps, was recorded open at 1.0.0-beta13 rather than absorbed and then closed by a decision: the grace now applies only to the FAPI 2.0 profile that requires it and sender-constrains every token, and a rotated token presented again is marked and audited whichever way it is answered (T-254). And the two Medium items that had sat on the token service and on the SDK route guard since the first version of the model — the fifteen-minute revocation window, seen from each side — closed together at 1.0.0-beta14, when the optional revocation feed the server publishes gained a poller in all eleven SDKs (T-39, T-143). The twenty-eight SAML identity provider entries of model 2.25.0 (T-357 … T-384) were open for a reason none of these had: they were written before the code they describe, so they closed as the registry routes, the metadata endpoint and single logout landed — all but T-380, a service provider's own session outliving the AXIAM session, which is accepted. The Shared Signals Framework transmitter (model 2.27.0, T-385 … T-401) added four of the same kind on the *Audit, webhooks, email & notifications* diagram: the push endpoint at delivery time, event flooding of a receiver and the poll buffer stayed open until the delivery task built them on the controls already decided — it did, in model 2.28.0, and T-392, T-394 and T-395 are mitigated, each with the tests its mitigation names — leaving a replayed SET open until the SDK receiver helper that de-duplicates its `jti` ships (T-388). The delivery entries of model 2.29.0 add one more, and it is accepted rather than deferred: an SSF event that cannot be produced or queued is lost with a log line and nothing else, because a logout must not fail when a receiver's queue is down (T-405). Model 2.36.0 adds a tenth diagram of a different kind: the RADIUS front end the G-11 spike declined, drawn so that a future build starts from its twenty-one entries (T-448 … T-468) — among them the limiter and lockout it must carry from its first commit, an Access-Reject that is no user oracle, a per-NAS secret sealed, write-only and bound to its address, a required `Message-Authenticator`, and the MD5-only attributes treated as the weakness they are. Nothing on it is built, so its threats are recorded **not applicable** rather than open or mitigated. The same pass re-judged T-102 and reopened it: AXIAM publishes no certificate revocation list, so a relying party that validates AXIAM-issued certificates itself cannot learn of a revocation; AXIAM's own mTLS checks the certificate's status on every connection.",
       },
       { type: "h", id: "coverage-stride", text: "Coverage by STRIDE category" },
       {
@@ -128,15 +143,25 @@ export const SEC_SECTIONS: SecSection[] = [
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Category", "Threats", "Open"],
-        rows: categories.map((c) => [c.name, String(c.total), String(c.open)]),
+        headers: ["Category", "Threats", "Open", "Not built"],
+        rows: categories.map((c) => [
+          c.name,
+          String(c.total),
+          String(c.open),
+          String(c.notApplicable),
+        ]),
       },
       { type: "h", id: "coverage-severity", text: "Coverage by severity" },
       {
         type: "table",
         proseFirstCol: true,
-        headers: ["Severity", "Threats", "Open"],
-        rows: severities.map((c) => [c.name, String(c.total), String(c.open)]),
+        headers: ["Severity", "Threats", "Open", "Not built"],
+        rows: severities.map((c) => [
+          c.name,
+          String(c.total),
+          String(c.open),
+          String(c.notApplicable),
+        ]),
       },
       {
         type: "p",
@@ -167,7 +192,7 @@ export const SEC_SECTIONS: SecSection[] = [
     blocks: [
       {
         type: "p",
-        text: "Ten trust boundaries recur across the system. A data flow that crosses one is a place where authentication, authorization, validation and transport protection all have to be re-established — nothing is assumed across a boundary.",
+        text: "Ten trust boundaries recur across the system as built, and the table closes with an eleventh that is drawn but not built: the RADIUS front end the G-11 spike declined. A data flow that crosses one is a place where authentication, authorization, validation and transport protection all have to be re-established — nothing is assumed across a boundary.",
       },
       {
         type: "table",
@@ -223,6 +248,11 @@ export const SEC_SECTIONS: SecSection[] = [
             "Server ↔ SDK / admin UI",
             "The server contract from its client implementations",
             "One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates",
+          ],
+          [
+            "NAS ↔ AXIAM — not built",
+            "The switches, access points and VPN gateways a tenant would register ↔ a RADIUS front end AXIAM does not have (G-11, declined 2026-10-06)",
+            "Specified for any build, from its first commit: `Message-Authenticator` required on every profile with a shared secret and verified before anything else; the per-NAS secret sealed, write-only and bound to the address it was registered for; the tenant the authenticated NAS's alone; one Access-Reject for every failure; the listener's own limiter and the console's lockout",
           ],
         ],
       },
@@ -410,6 +440,7 @@ export const SEC_SECTIONS: SecSection[] = [
           "**A certificate says what it is for, and a server certificate names only what the tenant may name.** In `1.0.0-beta17` AXIAM issues certificates a TLS *server* can present: a `Server` type, the only one that carries subject alternative names, requested through an explicit `subject_alt_names` field — a CSR that asks for a `subjectAltName` is still refused, so nothing a caller's CSR says reaches the name list. A leaf naming a host under the organization root is trusted by every relying party that trusts that root, so the new threat is a tenant administrator minting one for a name that is not theirs. The fence is `server_cert_allowed_names`, an organization list of DNS suffixes, exact hosts and IP prefixes: empty by default, which refuses every `Server` request until someone lists names; tighten-only for a tenant, through the same settings interlock as every other override; and computed as the intersection on every read when the organization later shrinks its list, so a tenant never keeps a withdrawn name. Every SAN and the common name must be admitted, on both leaf paths and both custodians, and trailing dots, Unicode labels, partial wildcards and IPv4-mapped IPv6 are refused. Every leaf now also carries a per-type usage profile — `clientAuth` for user, service and device certificates, `serverAuth` for server ones — so a server certificate fails the client-certificate verifiers, cannot be bound to a service account and cannot log a device in, and a rustls client trusting only the organization root accepts the issued leaf for its name and refuses it for any other. Leaves issued before carry neither extension and behave as before until rotated. Two limits are stated rather than implied: the fence is AXIAM's and is not yet embedded in the tenant CA as X.509 `nameConstraints` (deferred, D-7), so it does not bound a compromised AXIAM or a Vault token used outside it; and under Vault custody a `Server` certificate is issued by `POST /certificates` only, because `sign-verbatim` offers no channel for the names of a caller's CSR, so that request is refused. The `subject` a caller sends is a common name: one `CN=` prefix is understood and stripped, and a full distinguished name is refused rather than silently reduced.",
           "**CA signing keys live where you choose, and the choice is recorded per CA**: sealed AES-256-GCM into a separate, access-controlled table with the key held outside the datastore, held in HashiCorp Vault, or generated inside Vault's PKI engine and never exported at all. A deployment that configured Vault inherits it for CA custody rather than silently falling back to database rows; an explicit database choice beside a working Vault is called out at startup; and an existing key can be moved between custodians without re-issuing anything beneath it, in a copy-record-release order that can never leave the CA without its key. RSA-4096 CA keys generate under every custodian: the PKI guide said, until `1.0.0-beta17`, that generating one fails outside Vault custody, and the code disagreed. The real cost is time — RSA-4096 key generation is a probabilistic prime search, seconds on a server and tens of seconds on small ARM hardware — so a client timeout sized for Ed25519 will fire.",
           "**mTLS device authentication verifies the full chain** to the tenant/org CA after the fingerprint lookup, checks the issuing CA is active and within its validity window, and enforces the certificate's own validity period and live revocation status on every connection — a fingerprint match alone is never enough. The chain must also reach a CA an administrator has **enabled as an mTLS trust anchor** — on the proxy-terminated path exactly as on the native listener, where the client-CA bundle is built from the flagged anchors. The walk climbs the issuing chain (a tenant signing CA is deliberately an unflagged intermediate), requires every CA on the way to be active and in date, and is depth-bounded, so un-flagging a CA — the documented way to stop trusting it — takes effect everywhere. A certificate the listener admitted *without* a chain — possible only under the opt-in policy the OAuth2 self-signed client method needs — is refused here outright: device identity is chaining to a flagged anchor, and nothing else. The certificate must also be bound to a service account, `Device` certificates included — and the device guide said, through `1.0.0-beta16`, that a `Device` certificate needed no bind, which was wrong in the expensive direction: a fleet commissioned by the guide failed every login with no obvious cause. It now gives the order: service account, certificate, bind, login. Every refusal on the device login — an unknown, untrusted, self-asserted or unbound certificate — is a `401`; the unbound case had been a `403`, reached by matching the text of an error message, and the bodies stay distinct.",
+          "**Revocation is enforced where AXIAM terminates the connection, and nowhere else.** AXIAM publishes no certificate revocation list and runs no OCSP responder — its CAs carry the `cRLSign` key-usage bit, and nothing serves a list. A relying party that validates AXIAM-issued certificates itself — a FreeRADIUS server doing 802.1X, a VPN gateway, a peer service terminating its own mTLS — has no way to learn of a revocation and accepts a revoked certificate until it expires (T-102, open). Earlier revisions of the threat model and the design document described a CRL; there has never been one. Publishing one per issuing CA is tracked by an issue.",
           "**A device's token is as strong as its handshake.** A device authenticates by a TLS handshake with a client certificate — the strongest thing it can prove — and until `1.0.0-beta17` got back a plain bearer token, so a token read off the device's flash, out of a log or at an egress proxy authenticated as that device for its whole lifetime, with no key required. The machinery to close it was already in use: OAuth2 mTLS clients' tokens carry the RFC 8705 `cnf.x5t#S256` confirmation, and the device path was the one mint site that omitted it. The device token now carries the thumbprint of the certificate rustls verified for the connection, and no enforcement code changed, because both the REST extractors and the gRPC interceptor already refused a `cnf`-bearing token whose evidence does not match. The claim is made only where AXIAM itself verified the certificate: behind a proxy that forwards `X-Client-Certificate` the certificate is absent from every later request, so a bound token would be one AXIAM refuses on first use, and the device token stays a bearer token there — the PKI guide says so and names the remedy, terminating mTLS at AXIAM. Over gRPC the certificate reaches the interceptor only when that listener verifies client certificates (under transport, below). A token minted before the change carries no `cnf` and is accepted as before until it expires.",
           "**An organization CA can anchor mTLS directly.** Flagging it exports only the public certificate into the client-verification bundle — the signing key is never copied — and the bundle is rewritten as the whole flagged set on every change and hot-reloaded into the live verifier, so unflagging or revoking a CA removes its anchor instead of leaving one a restart would still trust. Client verification stays optional, and an operator's own explicitly configured bundle is never overridden.",
           "**OpenPGP keys** sign the audit trail and encrypt GDPR data exports, so both are independently verifiable and confidential.",
@@ -558,7 +589,7 @@ export const SEC_SECTIONS: SecSection[] = [
       { type: "h", id: "open-risks", text: "The open risk register" },
       {
         type: "p",
-        text: `Every threat the model does not record as mitigated, most severe first — ${open} of ${total}. The table is generated from the same Threat Dragon model as the diagrams above, so it cannot fall behind them; the last column is the model's own words on why the item is open and where responsibility for it lands. Each identifier links to that threat in the explorer.`,
+        text: `Every threat the model records as open, most severe first — ${open} of ${total}. The ${notApplicable} entries recorded *not applicable*, for a surface that is not built, are not risks anyone carries and are not listed. The table is generated from the same Threat Dragon model as the diagrams above, so it cannot fall behind them; the last column is the model's own words on why the item is open and where responsibility for it lands. Each identifier links to that threat in the explorer.`,
       },
       {
         type: "table",
@@ -573,7 +604,7 @@ export const SEC_SECTIONS: SecSection[] = [
       },
       {
         type: "p",
-        text: `None of these is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, or gaps on the SDK and distribution side. The rest of this section is the same list read as a checklist — what to do about each, grouped by who does it. The [STRIDE model](${GH_BLOB}/claude_dev/threat-model-stride.md) groups them the same way, with the review history behind each.`,
+        text: `With three exceptions — T-108, request audit that drops a row with only a log line to say so; T-117, notification mail that is not coalesced on the request path; and T-447, a relying party's access token that can approve a device authorization in its user's name, each with an issue body in the W5 F4 review — none of these is an unhandled defect in AXIAM's own request path: they are accepted design trade-offs, responsibilities that land on whoever deploys AXIAM, and gaps on the SDK and distribution side — and one on the PKI's publication side: T-102, a revoked certificate that a relying party outside AXIAM cannot learn about, because no revocation list is published yet. The rest of this section is the same list read as a checklist — what to do about each, grouped by who does it. The [STRIDE model](${GH_BLOB}/claude_dev/threat-model-stride.md) groups them the same way, with the review history behind each.`,
       },
       { type: "h", id: "platform-ops", text: "Platform & operations" },
       {
@@ -599,6 +630,7 @@ export const SEC_SECTIONS: SecSection[] = [
           "**Call the webhook verifier.** Every SDK now ships `verify_webhook(...)`, so the hard part is done — but a helper you never invoke protects nothing, and an unverified receiver acts on any POST that reaches its URL. Verify before you act on a delivery, and deduplicate on the delivery id. The same applies to AMQP: the contract requires HMAC verification on every consumed message.",
           "**Configure the tenant on any SDK route guard.** The guards bind each token to your configured tenant, which means they need to know it — a guard given no tenant to compare against fails closed and rejects every token, by design.",
           "**Attach the revocation-feed poller where sign-out has to take effect faster than a token lifetime**, and turn the feed on server-side (`AXIAM__AUTH__REVOCATION_FEED_ENABLED`): both halves are opt-in, and a feed nobody polls narrows nothing. Attaching it cannot admit anything local verification would have refused — it only ever rejects — and a guard that cannot reach it behaves exactly as one without it.",
+          "**Keep certificates short-lived wherever a relying party other than AXIAM validates them.** AXIAM publishes no revocation list, so a FreeRADIUS server, a VPN gateway or a peer service that checks an AXIAM-issued certificate itself accepts a revoked one until it expires (T-102). Cap leaf validity per tenant (`max_cert_validity_days`) to the window you can accept, or let the device authenticate at AXIAM and present the certificate-bound token it receives, so the check happens where AXIAM terminates the connection.",
           "Prefer **mTLS or short-lived workload identity** over static client secrets; rotate secrets through the rotation endpoint and enable secret scanning on your own repositories.",
           "Install SDKs under their **canonical package names**, commit lockfiles, and keep dependency scanning on — eleven public registries are eleven chances for a typosquat or a hijacked release.",
           "**Audit what your ingress logs** before registering a client for `client_secret_basic`. AXIAM keeps the `Authorization` header out of every log it writes and its SDKs never send one, but a proxy in front of it may log headers by default, and a client secret in an access log is the same exposure as one in a repository. Prefer `client_secret_post` for a shared secret, and a strong method for anything that matters.",

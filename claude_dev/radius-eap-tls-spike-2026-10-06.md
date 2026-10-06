@@ -1,7 +1,12 @@
 # RADIUS and EAP-TLS — a spike on whether AXIAM should speak RADIUS
 
-**Status: DECISION RECORD — no code.** No crate, schema, route, contract section
-or threat-model entry accompanies this document. It is G-11 of
+**Status: DECISION RECORD — no code.** No crate, schema, route or contract
+section accompanies this document. Its threat-model entries do: **T-448 … T-468**
+entered the model at **2.36.0** as *Not applicable* — design entries for a
+surface that is not built — on a diagram of their own
+([`threat-model-stride.md`](threat-model-stride.md) §5.10), and **T-102** was
+reopened for the revocation list the tree does not publish (§7 maps each risk to
+its entry). It is G-11 of
 [`competitor-gap-remediation-plan-2026-10-02.md`](competitor-gap-remediation-plan-2026-10-02.md)
 (task T23.11.1, a one-session spike) and exists so that, if the reopen condition
 in §1.4 is met, the work starts from argued decisions and a written security
@@ -73,7 +78,8 @@ would it cost, and what must it never do?*
    (§6.2: "Revoke … propagates to CRL"), the threat model (T-102, *Revocation &
    CRL*) and the website's threat-model data all describe a CRL, and the tree
    contains none — no publication endpoint, no OCSP responder, no CRL in the
-   OpenAPI spec (§2.2). (ii) `AuthService::login` refuses a locked account
+   OpenAPI spec (§2.2). The descriptions were repaired at threat model 2.36.0
+   (§8 D7); the list itself is D1. (ii) `AuthService::login` refuses a locked account
    *before* the Argon2id work that a wrong password costs, so a locked account is
    distinguishable by timing (§6.2). Both are listed for decision in §8.
 
@@ -721,14 +727,46 @@ approve anything.
 
 ## 7. Risks the threat entries must cover
 
-Prose, for the Opus executor who writes the model's entries. **Threat ids are
-assigned in the threat model (T-448 onwards)**; this list carries none and
-edits no threat-model file. *Status* reads: **Mitigated by design** — the §6
+Prose, written for the model's entries, which now exist (model 2.36.0,
+[`threat-model-stride.md`](threat-model-stride.md) §5.10); the table keeps this
+record's own numbering. *Status* below reads: **Mitigated by design** — the §6
 requirement closes it if the thing is built; **Open** — a residual or a decision
-that nothing in the design closes, or a finding about what exists today. Because
-nothing ships under the recommendation, the entries for option A are *design
-entries*: they enter the model with the code, per plan rule 2, and until then
-the status column is the status they would have.
+that nothing in the design closes, or a finding about what exists today. It is
+the status an entry would take **if built as specified**. In the model, every
+entry for option A or option B is recorded **Not applicable** — Threat Dragon's
+status for a threat that does not apply to the product as it stands — because
+nothing here is built: none is Mitigated, because no control exists, and none is
+Open, because nothing AXIAM runs is exposed; the commit that builds an element
+moves its entries to one or the other, with tests (plan rule 2). The model's §2
+and §5.10 give the rule and why the specified-ahead precedent, which entered
+such entries Open, does not fit a surface no task is building.
+
+**Where each risk entered the model:**
+
+| Risk | Threat entry |
+|---|---|
+| R1 | T-448 |
+| R2 | T-449 |
+| R3 | T-450 |
+| R4 | T-457 |
+| R5 | T-458 |
+| R6 | T-451 |
+| R7 | T-452 |
+| R8 | T-455 |
+| R9, R10 | consolidated into **T-459** — one tenant boundary and one mitigation (the tenant is the authenticated NAS's, checked against the certificate row), whether a certificate or a packet attribute would carry a request across it |
+| R11 | T-466 |
+| R12 | T-467 |
+| R13 | T-463 |
+| R14 | T-464 |
+| R15 | T-456 |
+| R16, R18 | consolidated into **T-460** — the RADIUS path as a weaker way in, by a password alone or by a client's token approving; both are closed by holding it to the console's rule |
+| R17 | T-461 |
+| R19 | T-465 |
+| R20 | T-453 |
+| R21 | T-462 |
+| R22 | not entered as a new threat, because it is a finding about what exists today: **T-102** (PKI diagram) was re-judged and reopened, its text and element repaired (§8 D7) |
+| R23 | T-468 |
+| R25 | T-454 |
 
 New trust boundary: **NAS ↔ AXIAM** (and, for option B, **FreeRADIUS ↔ AXIAM's
 authorize endpoint**, an ordinary authenticated REST boundary). New elements:
@@ -778,7 +816,7 @@ the one this record recommends doing regardless.
 | **D4** | Authorize endpoint for `rlm_rest` (§5.2 B-3) | M | **Opus 5.5** | Only after D3 shows the CRL interval or the attribute model inadequate |
 | **D5** | Reply-profile data model and the network-segment resource pattern, as a design note, not code | S | **Opus 5.5** | The cross-crate decision A-8 and B-3 both need; written only when one of them is scheduled |
 | **D6** | User-certificate binding (certificates bound to users, not only service accounts) | M | **Opus 5.5** | Needed for EAP-TLS on people's laptops; also unblocks the SSF `x509` source D-53 records as having none. Its own item, with its own reason to exist |
-| **D7** | Repair the description of T-102 and §6.2 of the design document if D1 is *not* scheduled, so the documents stop describing a CRL that does not exist | S | **Opus 5.5** (threat entry) | The alternative to D1; one of the two is owed |
+| **D7** | Repair the description of T-102 and §6.2 of the design document if D1 is *not* scheduled, so the documents stop describing a CRL that does not exist | S | **Opus 5.5** (threat entry) | **Done at threat model 2.36.0** (T23.11.1): T-102 reopened and rewritten, its element renamed, `design-document.md` §6.2 and its `pki` settings list corrected. D1 remains owed |
 | **D8** | Equalise the locked-account branch of `AuthService::login` with the dummy Argon2id verify, with a timing test | S | **Opus 5.5** | An authentication path; found, not built, here (§6.2). Separate from RADIUS |
 | **D9** | Comparison refresh: authentik gap item 6 and the matrix row G-11 read "decided 2026-10-06: decline native, FreeRADIUS backend when asked" | S | Sonnet 5.5 | Part of the W6 comparison refresh already planned |
 | **D10** | **If option A is ever reopened:** the task table of §5.1 (A-1 … A-12) becomes the issue list; then, separately, dynamic authorization (RFC 5176, inherits R12), accounting (RFC 2866), EAP-TTLS / PEAP, Access-Challenge for OTP | XL | mixed, §5.1 | Not scheduled |

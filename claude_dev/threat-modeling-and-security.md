@@ -22,6 +22,27 @@
 > executed on 2026-09-25 in the same commit as this text. The beta15 plan
 > records the pass before it.**
 >
+> **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
+> T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
+> 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):
+> AXIAM does not speak RADIUS. The W5 F4 review required the threat entries to
+> exist anyway, so that any build starts from them, and a tenth diagram — *RADIUS
+> front end, not built* — carries twenty-one, with an eleventh trust boundary,
+> **NAS ↔ AXIAM**, drawn on it. They are recorded **Not applicable**, Threat
+> Dragon's third status: no control exists, so not mitigated; nothing AXIAM runs
+> is exposed, so not open. They count in the total and in neither column, the
+> website's generator counts them apart, and they stay out of the open risk
+> register. Each names what any build must do from its first commit — the
+> limiter and lockout (**T-451**), no unknown-user oracle (**T-457**), the
+> per-NAS secret sealed, write-only and bound to its address (**T-466**,
+> **T-467**), `Message-Authenticator` required (**T-449**), MD5-only attributes
+> treated as the weakness they are (**T-450**). The same pass reopened **T-102**:
+> it recorded a certificate revocation list the tree never published; AXIAM
+> checks a certificate's status on every connection it terminates, and a relying
+> party that validates AXIAM-issued certificates itself has no revocation
+> channel until one is published (tracked by an issue). The model is **468
+> threats, 425 mitigated / 22 open / 21 not applicable**.
+>
 > **The W5 F4 security review (Phase 23, model 2.35.0 — T-409, T-418, T-424,
 > T-431, T-433 and T-435 closed; T-446 and T-447 enter; T-117 reopened; T-414
 > amended).** The review of the whole W5 wave
@@ -1032,7 +1053,7 @@
 >    against, quoted by the page's stamp. Hand-maintained on purpose: it records
 >    when someone re-derived the claims, which no version file can tell us.
 >
-> All nine diagrams render from that model, and every number on the page — the
+> All ten diagrams render from that model, and every number on the page — the
 > headline stats, the coverage tables by area, STRIDE category and severity, and
 > the open risk register — is interpolated from the generated summary rather than
 > typed in, so the page cannot drift from the model. Prose numbers quoted in this
@@ -1106,30 +1127,35 @@ open and says why.
 |---|---|
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
-| Diagrams | 9 |
-| Threats identified | 447 |
-| Mitigated / Open | 426 / 21 |
+| Diagrams | 10 |
+| Threats identified | 468 |
+| Mitigated / Open | 425 / 22 |
+| Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
 type (actor, process, data store or data flow). A threat is marked **mitigated**
 only where a control exists in the codebase and can be pointed at; where the
 residual risk is accepted, deferred, or belongs to whoever deploys AXIAM, it stays
 **open** and explains itself. An honest open item is more useful than an
-optimistic closed one.
+optimistic closed one. A third status, **not applicable**, is used for one thing
+only: entries written for a surface AXIAM does not have, so that a build would
+start from them. They count in the total and in neither of the other two, and
+each becomes mitigated or open in the commit that builds what it describes.
 
 ### Coverage by area
 
-| Area | Threats | Open |
-|---|---|---|
-| System context | 33 | 2 |
-| Authentication & session management | 35 | 0 |
-| OAuth2 / OIDC authorization server | 85 | 1 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 |
-| Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 |
-| PKI, certificates & IoT device identity | 30 | 1 |
-| Audit, webhooks, email & notifications | 55 | 5 |
-| Deployment & platform (Kubernetes) | 29 | 6 |
-| Client SDKs & admin-UI integration surface | 28 | 3 |
+| Area | Threats | Open | Not built |
+|---|---|---|---|
+| System context | 33 | 2 | 0 |
+| Authentication & session management | 35 | 0 | 0 |
+| OAuth2 / OIDC authorization server | 85 | 1 | 0 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
+| Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
+| PKI, certificates & IoT device identity | 30 | 2 | 0 |
+| Audit, webhooks, email & notifications | 55 | 5 | 0 |
+| Deployment & platform (Kubernetes) | 29 | 6 | 0 |
+| Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
+| RADIUS front end (not built — G-11, declined) | 21 | 0 | 21 |
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
@@ -1202,7 +1228,18 @@ two open items — T-117, reopened because the batched notifications it describe
 do not exist, so a request-path event an attacker can produce in volume mails
 each recipient of a rule once per event; and T-447, an access token minted for
 an OAuth2 client that can approve a device authorization in its user's name,
-which the review closed for CIBA — and one mitigated entry, T-446.
+which the review closed for CIBA — and one mitigated entry, T-446. Model 2.36.0
+adds a tenth diagram of a different kind: the RADIUS front end the G-11 spike
+declined, drawn so that a future build starts from its twenty-one entries
+(T-448 … T-468) — among them the limiter and lockout it must carry from its
+first commit, an Access-Reject that is no user oracle, a per-NAS secret sealed,
+write-only and bound to its address, a required `Message-Authenticator`, and
+the MD5-only attributes treated as the weakness they are. Nothing on it is
+built, so its threats are recorded **not applicable** rather than open or
+mitigated. The same pass re-judged T-102 and reopened it: AXIAM publishes no
+certificate revocation list, so a relying party that validates AXIAM-issued
+certificates itself cannot learn of a revocation; AXIAM's own mTLS checks the
+certificate's status on every connection.
 
 ### Coverage by STRIDE category
 
@@ -1212,27 +1249,27 @@ disclosed or flooded, a process can be all six — so the distribution below fol
 the shape of the system rather than a quota. Every threat is counted once, under
 the category recorded against it in the model.
 
-| Category | Threats | Open |
-|---|---|---|
-| Spoofing | 98 | 4 |
-| Tampering | 88 | 2 |
-| Repudiation | 15 | 2 |
-| Information disclosure | 105 | 6 |
-| Denial of service | 55 | 4 |
-| Elevation of privilege | 86 | 3 |
+| Category | Threats | Open | Not built |
+|---|---|---|---|
+| Spoofing | 101 | 5 | 3 |
+| Tampering | 93 | 2 | 5 |
+| Repudiation | 16 | 2 | 1 |
+| Information disclosure | 109 | 6 | 4 |
+| Denial of service | 59 | 4 | 4 |
+| Elevation of privilege | 90 | 3 | 4 |
 
 ### Coverage by severity
 
-| Severity | Threats | Open |
-|---|---|---|
-| Critical | 41 | 2 |
-| High | 187 | 9 |
-| Medium | 185 | 9 |
-| Low | 34 | 1 |
+| Severity | Threats | Open | Not built |
+|---|---|---|---|
+| Critical | 43 | 2 | 2 |
+| High | 196 | 10 | 9 |
+| Medium | 194 | 9 | 9 |
+| Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 21 still-open items are listed one by one in
+the weight the control carries. The 22 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -1240,7 +1277,9 @@ with the element it sits on and where responsibility for it lands.
 
 ## Trust boundaries
 
-Ten trust boundaries recur across the system. A data flow that crosses one is a
+Ten trust boundaries recur across the system as built, and the table closes with
+an eleventh that is drawn but not built: the RADIUS front end the G-11 spike
+declined. A data flow that crosses one is a
 place where authentication, authorization, validation and transport protection all
 have to be re-established — nothing is assumed across a boundary.
 
@@ -1256,6 +1295,7 @@ have to be re-established — nothing is assumed across a boundary.
 | **AXIAM ↔ SCIM downstream** | AXIAM's outbound SCIM client ↔ the SCIM 2.0 service providers a tenant registered as targets | Every request — the OAuth2 token request too — only to an `https` host resolved fresh to public addresses and pinned, with no redirect followed; a sealed credential bound to the URL it was registered for and opened only after the target is read again unchanged; only references on the queue and a fixed attribute set on the wire; nothing a downstream answers written into AXIAM's directory, and no downstream account touched unless its `externalId` is an id of this tenant |
 | **CIBA consumption device ↔ authentication device** | The device a CIBA client runs on ↔ the user's own device, where AXIAM authenticates them | The client authenticated as at the token endpoint and never standing in for the user: only the request's own user, after a full sign-in, approves it; the hint resolves silently; the binding message bounded and printable; the request identifier stored hashed and redeemable once, by the client that started it; prompts throttled per user; a ping only to a registered `https` endpoint under the outbound address policy |
 | **Server ↔ SDK / admin UI** | The server contract from its client implementations | One cross-language contract — TLS policy, secret redaction, CSRF, AMQP HMAC — enforced by CI drift and protobuf gates |
+| **NAS ↔ AXIAM — not built** | The switches, access points and VPN gateways a tenant would register ↔ a RADIUS front end AXIAM does not have (G-11, declined 2026-10-06) | Specified for any build, from its first commit: `Message-Authenticator` required on every profile with a shared secret and verified before anything else; the per-NAS secret sealed, write-only and bound to the address it was registered for; the tenant the authenticated NAS's alone; one Access-Reject for every failure; the listener's own limiter and the console's lockout |
 
 ### The assets worth protecting
 
@@ -2124,6 +2164,15 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
   an unknown, untrusted, self-asserted or unbound certificate — is a `401`; the
   unbound case had been a `403`, reached by matching the text of an error
   message, and the bodies stay distinct.
+- **Revocation is enforced where AXIAM terminates the connection, and nowhere
+  else.** AXIAM publishes no certificate revocation list and runs no OCSP
+  responder — its CAs carry the `cRLSign` key-usage bit, and nothing serves a
+  list. A relying party that validates AXIAM-issued certificates itself — a
+  FreeRADIUS server doing 802.1X, a VPN gateway, a peer service terminating its
+  own mTLS — has no way to learn of a revocation and accepts a revoked
+  certificate until it expires (T-102, open). Earlier revisions of the threat
+  model and the design document described a CRL; there has never been one.
+  Publishing one per issuing CA is tracked by an issue.
 - **A device's token is as strong as its handshake.** A device authenticates by
   a TLS handshake with a client certificate — the strongest thing it can prove —
   and until `1.0.0-beta17` got back a plain bearer token, so a token read off
@@ -2501,8 +2550,9 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model does not record as mitigated, most severe first — 21 of
-447. On the website this table is generated from the Threat Dragon model, so it
+Every threat the model records as open, most severe first — 22 of 468. The 21
+entries recorded *not applicable*, for the RADIUS front end that is not built,
+are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
 sits on, is in [§6 of the STRIDE model](threat-model-stride.md#6-open-risk-register),
 which also groups them by who owns them and carries the review history behind
@@ -2514,6 +2564,7 @@ each.
 | T-306 — A leaked signing key keeps forging assertions after the credential is retired | Critical | SAML service provider (registered per tenant) · *Federation — SAML SP & OIDC relying party* |
 | T-18 — Backup or snapshot exfiltration | High | SurrealDB cluster (all tenant data) · *System diagram* |
 | T-94 — Key extracted from device firmware or flash | High | IoT device · *PKI, certificates & IoT device identity* |
+| T-102 — A revoked certificate stays valid to every relying party that does not terminate at AXIAM | High | Revocation (status in AXIAM's store; no CRL published) · *PKI, certificates & IoT device identity* |
 | T-108 — Action succeeds while its audit write fails | High | Audit middleware & service · *Audit, webhooks, email & notifications* |
 | T-124 — Operator credentials grant unaudited data access | High | Cluster operator / SRE · *Deployment & platform (Kubernetes)* |
 | T-133 — Backup media accessible outside the cluster | High | Backups / volume snapshots · *Deployment & platform (Kubernetes)* |
@@ -2538,8 +2589,11 @@ path; and T-447, a relying party's access token that can approve a device
 authorization in its user's name, each with an issue body in the W5 F4 review —
 none of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
-and gaps on the SDK and distribution side. The rest of this section is the same
-list read as a checklist — what to do about each, grouped by who does it.
+and gaps on the SDK and distribution side — and one on the PKI's publication
+side: T-102, a revoked certificate that a relying party outside AXIAM cannot
+learn about, because no revocation list is published yet. The rest of this
+section is the same list read as a checklist — what to do about each, grouped
+by who does it.
 
 **Platform & operations**
 
@@ -2645,6 +2699,13 @@ list read as a checklist — what to do about each, grouped by who does it.
   nobody polls narrows nothing. Attaching it cannot admit anything local
   verification would have refused — it only ever rejects — and a guard that
   cannot reach it behaves exactly as one without it.
+- **Keep certificates short-lived wherever a relying party other than AXIAM
+  validates them.** AXIAM publishes no revocation list, so a FreeRADIUS server, a
+  VPN gateway or a peer service that checks an AXIAM-issued certificate itself
+  accepts a revoked one until it expires (T-102). Cap leaf validity per tenant
+  (`max_cert_validity_days`) to the window you can accept, or let the device
+  authenticate at AXIAM and present the certificate-bound token it receives, so
+  the check happens where AXIAM terminates the connection.
 - Prefer **mTLS or short-lived workload identity** over static client secrets;
   rotate secrets through the rotation endpoint and enable secret scanning on your
   own repositories.

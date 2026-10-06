@@ -1057,6 +1057,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - RADIUS / EAP-TLS spike — decision record, no code: decline a native RADIUS front end for now, FreeRADIUS-backend route when asked, and the prerequisite finding that the tree publishes no CRL or OCSP (T23.11.1)
 
+- Threat model 2.36.0 — the declined RADIUS front end entered as a design-only tenth diagram with the NAS ↔ AXIAM boundary, T-448 … T-468 recorded *Not applicable* (counted apart from mitigated and open on the website), and T-102 reopened: AXIAM publishes no CRL, so a relying party outside it has no revocation channel; `design-document.md` §6.2 and its `pki` settings corrected (T23.11.1, D7)
+
 - *Identity for agents* guide and website page (T23.15.1)
 
 - **RFC 7592 client configuration endpoint (T23.4.1).** A dynamically

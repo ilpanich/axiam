@@ -9,6 +9,8 @@ export interface ThreatModelArea {
   title: string;
   total: number;
   open: number;
+  /** Threats recorded `NotApplicable`: written for a surface that is not built. */
+  notApplicable: number;
 }
 
 /** One row of a coverage table — a STRIDE category, or a severity. */
@@ -16,6 +18,7 @@ export interface ThreatModelBucket {
   name: string;
   total: number;
   open: number;
+  notApplicable: number;
 }
 
 /** One entry of the open risk register. */
@@ -42,130 +45,162 @@ export interface ThreatModelSummary {
   total: number;
   open: number;
   mitigated: number;
+  /**
+   * Threats recorded `NotApplicable` — entries for a surface that is not
+   * built. Counted in `total`, in neither `open` nor `mitigated`.
+   */
+  notApplicable: number;
   /** Per-diagram counts, in model order. */
   areas: ThreatModelArea[];
   /** Counts per STRIDE category, in STRIDE order. */
   categories: ThreatModelBucket[];
   /** Counts per severity, most severe first. */
   severities: ThreatModelBucket[];
-  /** Every threat not recorded as mitigated, most severe first. */
+  /** Every threat recorded as open, most severe first. */
   openRisks: ThreatModelOpenRisk[];
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.35.0",
- "diagramCount": 9,
- "total": 447,
- "open": 21,
- "mitigated": 426,
+ "version": "2.36.0",
+ "diagramCount": 10,
+ "total": 468,
+ "open": 22,
+ "mitigated": 425,
+ "notApplicable": 21,
  "areas": [
   {
    "id": 0,
    "title": "System diagram",
    "total": 33,
-   "open": 2
+   "open": 2,
+   "notApplicable": 0
   },
   {
    "id": 1,
    "title": "Authentication & session management",
    "total": 35,
-   "open": 0
+   "open": 0,
+   "notApplicable": 0
   },
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
    "total": 85,
-   "open": 1
+   "open": 1,
+   "notApplicable": 0
   },
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
    "total": 125,
-   "open": 3
+   "open": 3,
+   "notApplicable": 0
   },
   {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
    "total": 27,
-   "open": 0
+   "open": 0,
+   "notApplicable": 0
   },
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
    "total": 30,
-   "open": 1
+   "open": 2,
+   "notApplicable": 0
   },
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 55,
-   "open": 5
+   "open": 5,
+   "notApplicable": 0
   },
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
    "total": 29,
-   "open": 6
+   "open": 6,
+   "notApplicable": 0
   },
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
    "total": 28,
-   "open": 3
+   "open": 3,
+   "notApplicable": 0
+  },
+  {
+   "id": 9,
+   "title": "RADIUS front end — not built (G-11, declined 2026-10-06)",
+   "total": 21,
+   "open": 0,
+   "notApplicable": 21
   }
  ],
  "categories": [
   {
    "name": "Spoofing",
-   "total": 98,
-   "open": 4
+   "total": 101,
+   "open": 5,
+   "notApplicable": 3
   },
   {
    "name": "Tampering",
-   "total": 88,
-   "open": 2
+   "total": 93,
+   "open": 2,
+   "notApplicable": 5
   },
   {
    "name": "Repudiation",
-   "total": 15,
-   "open": 2
+   "total": 16,
+   "open": 2,
+   "notApplicable": 1
   },
   {
    "name": "Information disclosure",
-   "total": 105,
-   "open": 6
+   "total": 109,
+   "open": 6,
+   "notApplicable": 4
   },
   {
    "name": "Denial of service",
-   "total": 55,
-   "open": 4
+   "total": 59,
+   "open": 4,
+   "notApplicable": 4
   },
   {
    "name": "Elevation of privilege",
-   "total": 86,
-   "open": 3
+   "total": 90,
+   "open": 3,
+   "notApplicable": 4
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 41,
-   "open": 2
+   "total": 43,
+   "open": 2,
+   "notApplicable": 2
   },
   {
    "name": "High",
-   "total": 187,
-   "open": 9
+   "total": 196,
+   "open": 10,
+   "notApplicable": 9
   },
   {
    "name": "Medium",
-   "total": 185,
-   "open": 9
+   "total": 194,
+   "open": 9,
+   "notApplicable": 9
   },
   {
    "name": "Low",
-   "total": 34,
-   "open": 1
+   "total": 35,
+   "open": 1,
+   "notApplicable": 1
   }
  ],
  "openRisks": [
@@ -208,6 +243,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "PKI, certificates & IoT device identity",
    "element": "IoT device",
    "residualRisk": "Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM limits the blast radius with per-device certificates, a maximum validity policy and immediate revocation."
+  },
+  {
+   "number": 102,
+   "title": "A revoked certificate stays valid to every relying party that does not terminate at AXIAM",
+   "category": "Spoofing",
+   "severity": "High",
+   "diagramId": 5,
+   "area": "PKI, certificates & IoT device identity",
+   "element": "Revocation (status in AXIAM's store; no CRL published)",
+   "residualRisk": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM terminates the connection, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every mTLS authentication, and a revoked CA anywhere in the chain refuses the leaf. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by an issue (spike record §8, D1); this entry closes with it."
   },
   {
    "number": 108,

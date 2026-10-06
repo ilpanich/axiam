@@ -53,6 +53,19 @@ const CATEGORY_ORDER = [
 ];
 const SEVERITY_ORDER = ["Critical", "High", "Medium", "Low"];
 
+/**
+ * A threat's standing for the counts.
+ *
+ * Threat Dragon records three statuses. `Mitigated` and `Open` mean what they
+ * say. `NotApplicable` is used for one thing in this model: an entry written for
+ * a surface that is not built (model 2.36.0's RADIUS diagram, G-11 declined).
+ * It is neither mitigated — no control exists — nor open — nothing in AXIAM is
+ * exposed — so it is counted on its own and never in the open risk register.
+ * Any other value counts as open, so an unexpected status is shown, not hidden.
+ */
+const isNotApplicable = (t) => t.status === "NotApplicable";
+const isOpen = (t) => t.status !== "Mitigated" && !isNotApplicable(t);
+
 /** Rough advance width of a character at `size`, used for greedy wrapping. */
 const charWidth = (size) => size * 0.54;
 
@@ -228,7 +241,8 @@ function buildDiagram(diagram) {
       description: cell.data?.description ?? "",
       outOfScope: Boolean(cell.data?.outOfScope),
       threats,
-      open: threats.filter((t) => t.status !== "Mitigated").length,
+      open: threats.filter(isOpen).length,
+      notApplicable: threats.filter(isNotApplicable).length,
     };
   });
 
@@ -264,7 +278,8 @@ function buildDiagram(diagram) {
         publicNetwork: Boolean(cell.data?.isPublicNetwork),
         protocol: cell.data?.protocol ?? "",
         threats,
-        open: threats.filter((t) => t.status !== "Mitigated").length,
+        open: threats.filter(isOpen).length,
+        notApplicable: threats.filter(isNotApplicable).length,
       },
     ];
   });
@@ -287,7 +302,8 @@ function buildDiagram(diagram) {
     nodes,
     edges,
     total: allThreats.length,
-    open: allThreats.filter((t) => t.status !== "Mitigated").length,
+    open: allThreats.filter(isOpen).length,
+    notApplicable: allThreats.filter(isNotApplicable).length,
     bySeverity,
   };
 }
@@ -296,6 +312,8 @@ const model = JSON.parse(readFileSync(MODEL, "utf8"));
 const diagrams = model.detail.diagrams.map(buildDiagram);
 const total = diagrams.reduce((n, d) => n + d.total, 0);
 const open = diagrams.reduce((n, d) => n + d.open, 0);
+const notApplicable = diagrams.reduce((n, d) => n + d.notApplicable, 0);
+const mitigated = total - open - notApplicable;
 
 const header = `// AUTO-GENERATED — do not edit by hand.
 //
@@ -321,7 +339,8 @@ const body = `export const THREAT_MODEL: ThreatModel = ${JSON.stringify(
     diagramCount: diagrams.length,
     total,
     open,
-    mitigated: total - open,
+    mitigated,
+    notApplicable,
     diagrams,
   },
   null,
@@ -336,15 +355,16 @@ writeFileSync(OUT, header + body);
  * `order` first and any unrecognised bucket after them.
  */
 function tally(order, key) {
-  const counts = new Map(order.map((name) => [name, { total: 0, open: 0 }]));
+  const counts = new Map(order.map((name) => [name, { total: 0, open: 0, notApplicable: 0 }]));
   for (const diagram of diagrams) {
     for (const el of [...diagram.nodes, ...diagram.edges]) {
       for (const threat of el.threats) {
         const name = key(threat);
-        if (!counts.has(name)) counts.set(name, { total: 0, open: 0 });
+        if (!counts.has(name)) counts.set(name, { total: 0, open: 0, notApplicable: 0 });
         const bucket = counts.get(name);
         bucket.total += 1;
-        if (threat.status !== "Mitigated") bucket.open += 1;
+        if (isOpen(threat)) bucket.open += 1;
+        if (isNotApplicable(threat)) bucket.notApplicable += 1;
       }
     }
   }
@@ -354,7 +374,9 @@ function tally(order, key) {
 const SEVERITY_RANK = new Map(SEVERITY_ORDER.map((s, i) => [s, i]));
 
 /**
- * Every threat the model does not record as mitigated, most severe first.
+ * Every threat the model records as open, most severe first. A `NotApplicable`
+ * entry describes a surface that is not built, so it is not a risk anyone
+ * carries and is left out.
  *
  * The Security page renders this as the open risk register. Each entry carries
  * the element and the diagram it sits on because "who owns it" is only legible
@@ -365,7 +387,7 @@ const openRisks = diagrams
   .flatMap((diagram) =>
     [...diagram.nodes, ...diagram.edges].flatMap((el) =>
       el.threats
-        .filter((t) => t.status !== "Mitigated")
+        .filter(isOpen)
         .map((t) => ({
           number: t.number,
           title: t.title,
@@ -390,12 +412,14 @@ const summary = {
   diagramCount: diagrams.length,
   total,
   open,
-  mitigated: total - open,
+  mitigated,
+  notApplicable,
   areas: diagrams.map((d) => ({
     id: d.id,
     title: d.title,
     total: d.total,
     open: d.open,
+    notApplicable: d.notApplicable,
   })),
   categories: tally(CATEGORY_ORDER, (t) => t.type),
   severities: tally(SEVERITY_ORDER, (t) => t.severity),
@@ -415,6 +439,8 @@ export interface ThreatModelArea {
   title: string;
   total: number;
   open: number;
+  /** Threats recorded \`NotApplicable\`: written for a surface that is not built. */
+  notApplicable: number;
 }
 
 /** One row of a coverage table — a STRIDE category, or a severity. */
@@ -422,6 +448,7 @@ export interface ThreatModelBucket {
   name: string;
   total: number;
   open: number;
+  notApplicable: number;
 }
 
 /** One entry of the open risk register. */
@@ -448,13 +475,18 @@ export interface ThreatModelSummary {
   total: number;
   open: number;
   mitigated: number;
+  /**
+   * Threats recorded \`NotApplicable\` — entries for a surface that is not
+   * built. Counted in \`total\`, in neither \`open\` nor \`mitigated\`.
+   */
+  notApplicable: number;
   /** Per-diagram counts, in model order. */
   areas: ThreatModelArea[];
   /** Counts per STRIDE category, in STRIDE order. */
   categories: ThreatModelBucket[];
   /** Counts per severity, most severe first. */
   severities: ThreatModelBucket[];
-  /** Every threat not recorded as mitigated, most severe first. */
+  /** Every threat recorded as open, most severe first. */
   openRisks: ThreatModelOpenRisk[];
 }
 
@@ -463,5 +495,5 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = ${JSON.stringify(summary
 );
 
 console.log(
-  `threatModel.ts: ${diagrams.length} diagrams, ${total} threats (${total - open} mitigated, ${open} open)`,
+  `threatModel.ts: ${diagrams.length} diagrams, ${total} threats (${mitigated} mitigated, ${open} open, ${notApplicable} not applicable)`,
 );

@@ -26,6 +26,11 @@ const STATS = [
   { value: String(THREAT_MODEL_SUMMARY.total), label: "STRIDE threats modelled" },
   { value: String(THREAT_MODEL_SUMMARY.mitigated), label: "Mitigated" },
   { value: String(THREAT_MODEL_SUMMARY.open), label: "Open — with guidance" },
+  // Entries written for a surface that is not built: counted in the total and
+  // in neither of the two figures before this one, so the page says so.
+  ...(THREAT_MODEL_SUMMARY.notApplicable > 0
+    ? [{ value: String(THREAT_MODEL_SUMMARY.notApplicable), label: "Specified, not built" }]
+    : []),
   { value: String(THREAT_MODEL_SUMMARY.diagramCount), label: "Data-flow diagrams" },
 ];
 

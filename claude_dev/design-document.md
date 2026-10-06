@@ -479,15 +479,19 @@ Organization CA Certificate (root of trust)
 | **Upload CA** | Organization | Import an existing CA certificate (public cert only) |
 | **Generate Cert** | Tenant | Create a certificate signed by the organization CA; private key returned once |
 | **Upload Cert** | Tenant | Import an externally-issued certificate |
-| **Revoke** | Any | Mark a certificate as revoked: its status in AXIAM's store, checked on every mTLS authentication AXIAM terminates |
+| **Revoke** | Any | Mark a certificate as revoked: its status in AXIAM's store, checked when AXIAM authenticates a device by its certificate (not at the TLS handshake, nor for OAuth2 `tls_client_auth`) |
 | **Rotate** | Any | Issue a new certificate and revoke the old one |
 
-**Revocation reaches only connections AXIAM terminates.** AXIAM publishes no
+**Revocation reaches only AXIAM's device sign-in.** AXIAM publishes no
 certificate revocation list and runs no OCSP responder: its CAs carry the
 `cRLSign` key-usage bit, and nothing serves a list. `DeviceAuthService`
 reads a certificate's status, and every CA's on its chain, on each
-authentication, so a revocation takes effect at once for AXIAM's own mTLS
-paths. A relying party that validates AXIAM-issued certificates itself — a
+authentication, so a revocation takes effect at once for device sign-in by
+certificate. Nothing else reads it: neither listener's TLS handshake checks
+revocation, and OAuth2 `tls_client_auth` matches the client's registered subject
+DN or SAN, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client
+until it expires or the registration changes (corrected by the W6 F4 review). A
+relying party that validates AXIAM-issued certificates itself — a
 FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its
 own mTLS — has no revocation channel, and honours a revoked certificate until it
 expires; the bound is the tenant's `max_cert_validity_days`. Earlier revisions of

@@ -38,10 +38,26 @@
 > **T-467**), `Message-Authenticator` required (**T-449**), MD5-only attributes
 > treated as the weakness they are (**T-450**). The same pass reopened **T-102**:
 > it recorded a certificate revocation list the tree never published; AXIAM
-> checks a certificate's status on every connection it terminates, and a relying
-> party that validates AXIAM-issued certificates itself has no revocation
-> channel until one is published (tracked by an issue). The model is **468
+> checks a certificate's status when it authenticates a device by it, and a
+> relying party that validates AXIAM-issued certificates itself has no revocation
+> channel until one is published (tracked by an issue). The model was **468
 > threats, 425 mitigated / 22 open / 21 not applicable**.
+>
+> **The W6 F4 security review (Phase 23, model 2.36.1 — T-469 enters, Open;
+> T-102 and T-30 corrected).** The review of the wave
+> ([`security-review-phase23-w6-2026-10-06.md`](security-review-phase23-w6-2026-10-06.md))
+> enters **T-469**: the temporary-lockout branch of the password login refuses
+> before any password verification, so a locked, and therefore existing, account
+> answers faster than an unknown name, and under hash-permit saturation answers
+> `401` where every verifying branch answers `503`; gRPC `ValidateCredentials`
+> runs no verify on any refusal. T-30's mitigation now points at it. It narrows
+> T-102's text: only device authentication by certificate reads a certificate's
+> status — neither listener's TLS handshake does, nor OAuth2 `tls_client_auth`,
+> which matches a registered name — so a revoked AXIAM-issued leaf keeps
+> authenticating its OAuth2 client too. And it corrects the count of open items
+> on AXIAM's own request path below, which said three here and two on the
+> website; it is seven, and three of them are not trade-offs. The model is **469
+> threats, 425 mitigated / 23 open / 21 not applicable**.
 >
 > **The W5 F4 security review (Phase 23, model 2.35.0 — T-409, T-418, T-424,
 > T-431, T-433 and T-435 closed; T-446 and T-447 enter; T-117 reopened; T-414
@@ -1128,8 +1144,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 468 |
-| Mitigated / Open | 425 / 22 |
+| Threats identified | 469 |
+| Mitigated / Open | 425 / 23 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1147,7 +1163,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | Area | Threats | Open | Not built |
 |---|---|---|---|
 | System context | 33 | 2 | 0 |
-| Authentication & session management | 35 | 0 | 0 |
+| Authentication & session management | 36 | 1 | 0 |
 | OAuth2 / OIDC authorization server | 85 | 1 | 0 |
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
@@ -1159,9 +1175,17 @@ each becomes mitigated or open in the commit that builds what it describes.
 
 The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
-between AXIAM and the people who run and integrate it. AXIAM's own request path
-— authentication, authorization, tokens, PKI, federation — carries **three**
-open items, and none is a defect. The directory identity source carries none:
+between AXIAM and the people who run and integrate it. The five diagrams of
+AXIAM's own request path — authentication, OAuth2 and tokens, federation,
+authorization, PKI — carry **seven** open items at model 2.36.1. Four are
+residuals that land at least partly outside AXIAM: a key extracted from a
+device (T-94), a partner's IdP populating the user table under opt-in
+just-in-time provisioning (T-161), a leaked SAML signing key that service
+providers pinned (T-306) and a service provider's own session outliving the
+AXIAM session (T-380). Three are not, and each has a fix drafted or filed: a
+relying party's access token approving a device authorization (T-447, issue
+#549), no published certificate revocation list (T-102) and a locked account
+told apart from an unknown name (T-469). The directory identity source carries none:
 its last open item — with just-in-time provisioning on, a sign-in for a name
 AXIAM holds no account for reached the directory with no AXIAM counter in front
 of it (T-332) — closed with a failure counter per tenant and login name, as the
@@ -1238,8 +1262,12 @@ the MD5-only attributes treated as the weakness they are. Nothing on it is
 built, so its threats are recorded **not applicable** rather than open or
 mitigated. The same pass re-judged T-102 and reopened it: AXIAM publishes no
 certificate revocation list, so a relying party that validates AXIAM-issued
-certificates itself cannot learn of a revocation; AXIAM's own mTLS checks the
-certificate's status on every connection.
+certificates itself cannot learn of a revocation, and inside AXIAM only device
+authentication by certificate reads a certificate's status (not the TLS
+handshake, nor OAuth2 `tls_client_auth`). The W6 F4 review (model 2.36.1)
+corrects that last point and adds T-469: the lockout branch of the password
+login answers without the equalising verify, so a locked account is told apart
+from an unknown name.
 
 ### Coverage by STRIDE category
 
@@ -1254,7 +1282,7 @@ the category recorded against it in the model.
 | Spoofing | 101 | 5 | 3 |
 | Tampering | 93 | 2 | 5 |
 | Repudiation | 16 | 2 | 1 |
-| Information disclosure | 109 | 6 | 4 |
+| Information disclosure | 110 | 7 | 4 |
 | Denial of service | 59 | 4 | 4 |
 | Elevation of privilege | 90 | 3 | 4 |
 
@@ -1264,12 +1292,12 @@ the category recorded against it in the model.
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
 | High | 196 | 10 | 9 |
-| Medium | 194 | 9 | 9 |
+| Medium | 195 | 10 | 9 |
 | Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 22 still-open items are listed one by one in
+the weight the control carries. The 23 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -2164,8 +2192,12 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
   an unknown, untrusted, self-asserted or unbound certificate — is a `401`; the
   unbound case had been a `403`, reached by matching the text of an error
   message, and the bodies stay distinct.
-- **Revocation is enforced where AXIAM terminates the connection, and nowhere
-  else.** AXIAM publishes no certificate revocation list and runs no OCSP
+- **Revocation is enforced where AXIAM authenticates a device by its
+  certificate, and nowhere else.** Device sign-in reads the certificate's status
+  on every authentication; neither listener's TLS handshake does, and OAuth2
+  `tls_client_auth` matches the client's registered name, so a revoked
+  AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the
+  registration changes. AXIAM publishes no certificate revocation list and runs no OCSP
   responder — its CAs carry the `cRLSign` key-usage bit, and nothing serves a
   list. A relying party that validates AXIAM-issued certificates itself — a
   FreeRADIUS server doing 802.1X, a VPN gateway, a peer service terminating its
@@ -2550,7 +2582,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 22 of 468. The 21
+Every threat the model records as open, most severe first — 23 of 469. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -2581,6 +2613,7 @@ each.
 | T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-445 — The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
 | T-447 — A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name | Medium | /oauth2/authorize (+ consent) · *OAuth2 / OIDC authorization server* |
+| T-469 — A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart | Medium | Login endpoints /auth/login + /auth/opaque/* · *Authentication & session management* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 With three exceptions — T-108, request audit that drops a row with only a log
@@ -2705,7 +2738,9 @@ by who does it.
   accepts a revoked one until it expires (T-102). Cap leaf validity per tenant
   (`max_cert_validity_days`) to the window you can accept, or let the device
   authenticate at AXIAM and present the certificate-bound token it receives, so
-  the check happens where AXIAM terminates the connection.
+  the check happens at AXIAM's device sign-in. For an OAuth2 client
+  authenticating with `tls_client_auth`, revoke by changing the client's
+  registration, since that path does not read the certificate's status.
 - Prefer **mTLS or short-lived workload identity** over static client secrets;
   rotate secrets through the rotation endpoint and enable secret scanning on your
   own repositories.

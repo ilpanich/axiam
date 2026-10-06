@@ -61,10 +61,10 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.36.0",
+ "version": "2.36.1",
  "diagramCount": 10,
- "total": 468,
- "open": 22,
+ "total": 469,
+ "open": 23,
  "mitigated": 425,
  "notApplicable": 21,
  "areas": [
@@ -78,8 +78,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 35,
-   "open": 0,
+   "total": 36,
+   "open": 1,
    "notApplicable": 0
   },
   {
@@ -160,8 +160,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 109,
-   "open": 6,
+   "total": 110,
+   "open": 7,
    "notApplicable": 4
   },
   {
@@ -192,8 +192,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Medium",
-   "total": 194,
-   "open": 9,
+   "total": 195,
+   "open": 10,
    "notApplicable": 9
   },
   {
@@ -252,7 +252,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "diagramId": 5,
    "area": "PKI, certificates & IoT device identity",
    "element": "Revocation (status in AXIAM's store; no CRL published)",
-   "residualRisk": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM terminates the connection, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every mTLS authentication, and a revoked CA anywhere in the chain refuses the leaf. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by an issue (spike record §8, D1); this entry closes with it."
+   "residualRisk": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM authenticates a device by its certificate, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf. Nothing else AXIAM terminates reads it (corrected by the W6 F4 review, model 2.36.1): neither listener's TLS handshake checks revocation, and OAuth2 `tls_client_auth` matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by an issue (spike record §8, D1, and the W6 F4 review's issue body); this entry closes with it, together with the listeners' verifiers loading that list or `tls_client_auth` reading the certificate's status."
   },
   {
    "number": 108,
@@ -413,6 +413,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "OAuth2 / OIDC authorization server",
    "element": "/oauth2/authorize (+ consent)",
    "residualRisk": "Narrowed by the W5 F4 review (P23W5-04 closed it for CIBA; P23W5-06 reports the device grant, where it is pre-existing since B2). CIBA: the approval routes refuse a token that carries a `client_id` — only a console sign-in decides (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `/api/v1/device/verify` and `/decide` still admit it; bounded by the token itself (a live session of a user of the tenant) and by the device client's registered scopes. Closes when `/api/v1/device/*` applies the same rule (issue body in the W5 F4 review, §14)."
+  },
+  {
+   "number": 469,
+   "title": "A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart",
+   "category": "Information disclosure",
+   "severity": "Medium",
+   "diagramId": 1,
+   "area": "Authentication & session management",
+   "element": "Login endpoints /auth/login + /auth/opaque/*",
+   "residualRisk": "Open (W6 F4 review, 2026-10-06, model 2.36.1; found by the T23.11.1 RADIUS spike, whose T-457 requires the same of any RADIUS build). Fix: run the equalising dummy verify, under the same bounded permit, on the lockout branch (still before the directory is contacted, T-302, and without verifying the real hash, so a correct password during a lockout neither succeeds nor shows) and on every refusal of `ValidateCredentials`. A timing-free test pins it: with no hash permit available, a locked account must answer the 503 an unknown name answers; today it answers 401 (issue body in the review, §14). Bounded meanwhile by the per-IP login limiter and by the lockout's exponential backoff, which makes every probe cost N failed attempts against a real user."
   },
   {
    "number": 161,

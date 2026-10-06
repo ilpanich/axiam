@@ -795,7 +795,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: `**Revocation is checked where AXIAM terminates the connection, and nowhere else.** A revoked certificate is refused on its next mTLS or certificate sign-in, but AXIAM publishes no CRL and runs no OCSP responder yet (T-102), so a relying party that validates AXIAM-issued certificates itself, such as a FreeRADIUS server or a VPN gateway, cannot learn of a revocation; keep leaf lifetimes short there. AXIAM does not speak RADIUS either: the G-11 spike declined a native front end for now and keeps a FreeRADIUS-backend route for when a named adopter asks, with publishing a CRL as the step that stands on its own ([decision record](${GH_BLOB}/claude_dev/radius-eap-tls-spike-2026-10-06.md)).`,
+        text: `**Revocation is checked at AXIAM's device sign-in, and nowhere else.** A revoked certificate is refused on its next certificate sign-in; an OAuth2 client authenticating with `tls_client_auth` is matched by its registered name and not by the certificate's status, so revoke it by changing the client's registration. AXIAM publishes no CRL and runs no OCSP responder yet (T-102), so a relying party that validates AXIAM-issued certificates itself, such as a FreeRADIUS server or a VPN gateway, cannot learn of a revocation; keep leaf lifetimes short there. AXIAM does not speak RADIUS either: the G-11 spike declined a native front end for now and keeps a FreeRADIUS-backend route for when a named adopter asks, with publishing a CRL as the step that stands on its own ([decision record](${GH_BLOB}/claude_dev/radius-eap-tls-spike-2026-10-06.md)).`,
       },
       {
         type: "note",

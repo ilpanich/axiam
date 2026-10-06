@@ -15,10 +15,10 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment, and — as a design-only diagram whose entries are recorded Not applicable — a RADIUS front end that is not built.",
- "version": "2.36.0",
+ "version": "2.36.1",
  "diagramCount": 10,
- "total": 468,
- "open": 22,
+ "total": 469,
+ "open": 23,
  "mitigated": 425,
  "notApplicable": 21,
  "diagrams": [
@@ -1153,7 +1153,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "Different status codes, error bodies or response times for existing versus non-existent accounts let an attacker enumerate valid usernames and email addresses.",
-       "mitigation": "Login returns a uniform failure for unknown-user and bad-password alike, and password verification runs on a dummy hash when the user does not exist so timing does not distinguish the cases."
+       "mitigation": "Login returns a uniform failure for unknown-user and bad-password alike, and password verification runs on a dummy hash when the user does not exist so timing does not distinguish the cases. Residual (W6 F4 review, model 2.36.1): the temporary-lockout branch answers without the dummy verify, and gRPC `ValidateCredentials` runs none on any refusal; recorded open as T-469."
       },
       {
        "number": 31,
@@ -1190,9 +1190,18 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Three CodeQL high-severity alerts on this wave, one class. `LoginOutput` gained a browser session token, and its derived `Debug` would have printed three credentials; a test panic formatted a whole `LoginResult`, whose non-`Success` variants carry a live MFA challenge token and a setup token; two assertions printed a full `Set-Cookie` header, token included, to explain a failed attribute check, and an `assert_ne!` on two cookie values prints both credentials when it fires. A panic message reaches stderr and a CI log that outlives the run, so a test is not exempt — the values are fixtures, but the sink is real and the next author's would not be.",
        "mitigation": "SECHRD-09 applied to every new sink rather than to the one CodeQL named. `LoginOutput`, `BasicCredentials` (T-253) and `UserInfoPostForm` (T-243) hand-write redacting `Debug` impls; the tests name the variant or the cookie that was set, never the value — compare, then assert. The TRACE-capture tests grep for the secret, its encoding and the header value rather than trusting the absence of a `{:?}`. `axiam-core`'s three redacting certificate `Debug` impls, which reach `{:?}` in handler-level tracing spans where `#[serde(skip_serializing)]` cannot help, are now asserted — `Option`-aware on purpose, since a `vault_pki` CA has no key and printing `[REDACTED]` would claim one was withheld. One adjacent hygiene fix on 2026-09-13 (fcc976d): the two redaction tests R-5 added for `DbConfig` and `AmqpConfig` wrote a literal fake password into the source, which a secret scanner (GitGuardian, on the PR) cannot tell from a real one and neither can a reader six months later. They now mint the value through `axiam_test_support::test_password`, so the assertion holds for whatever the helper produces rather than for one string, and the seeder derives its credential field-name list from the environment table rather than repeating it. No scanner exemption was added: `.gitguardian.yaml` is for published RFC test vectors, and silencing a detector over a value one can simply stop writing is how an exemption list stops meaning anything."
+      },
+      {
+       "number": 469,
+       "title": "A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "`AuthService::login` refuses an account serving a temporary lockout, local or directory, before it asks for a hash permit or runs any Argon2id verify (`crates/axiam-auth/src/service.rs`, step 2), while an unknown name and a wrong password each cost one verify (SEC-026, T-30). Lockout is set by the attacker's own failures, so a name that answers fast after N wrong passwords exists and one that keeps costing a verify does not: an enumeration oracle at N + 1 requests per name, which also locks the real user out (T-35). Under hash-permit saturation the difference is in the status itself: the locked account answers 401 while every branch that verifies answers 503. gRPC `UserService/ValidateCredentials` answers an unknown name, and a locked, non-active or directory account, `valid: false` with no verify at all, an oracle for any caller holding a validated token of the tenant.",
+       "mitigation": "Open (W6 F4 review, 2026-10-06, model 2.36.1; found by the T23.11.1 RADIUS spike, whose T-457 requires the same of any RADIUS build). Fix: run the equalising dummy verify, under the same bounded permit, on the lockout branch (still before the directory is contacted, T-302, and without verifying the real hash, so a correct password during a lockout neither succeeds nor shows) and on every refusal of `ValidateCredentials`. A timing-free test pins it: with no hash permit available, a locked account must answer the 503 an unknown name answers; today it answers 401 (issue body in the review, §14). Bounded meanwhile by the per-IP login limiter and by the lockout's exponential backoff, which makes every probe cost N failed attempts against a real user."
       }
      ],
-     "open": 0,
+     "open": 1,
      "notApplicable": 0
     },
     {
@@ -1949,12 +1958,12 @@ export const THREAT_MODEL: ThreatModel = {
      "notApplicable": 0
     }
    ],
-   "total": 35,
-   "open": 0,
+   "total": 36,
+   "open": 1,
    "notApplicable": 0,
    "bySeverity": {
     "High": 16,
-    "Medium": 14,
+    "Medium": 15,
     "Critical": 3,
     "Low": 2
    }
@@ -7734,7 +7743,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "High",
        "status": "Open",
        "description": "Revoking a certificate sets the status on its row in AXIAM's store. AXIAM publishes no CRL and runs no OCSP responder — its CAs carry the `cRLSign` key-usage bit and nothing serves a list — so a relying party that validates AXIAM-issued certificates itself (a FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its own mTLS) has no channel through which to learn of a revocation, and honours a revoked certificate until it expires. Until model 2.36.0 this entry described a CRL whose refresh interval bounded that window; the tree has never contained one.",
-       "mitigation": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM terminates the connection, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every mTLS authentication, and a revoked CA anywhere in the chain refuses the leaf. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by an issue (spike record §8, D1); this entry closes with it."
+       "mitigation": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM authenticates a device by its certificate, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf. Nothing else AXIAM terminates reads it (corrected by the W6 F4 review, model 2.36.1): neither listener's TLS handshake checks revocation, and OAuth2 `tls_client_auth` matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by an issue (spike record §8, D1, and the W6 F4 review's issue body); this entry closes with it, together with the listeners' verifiers loading that list or `tls_client_auth` reading the certificate's status."
       }
      ],
      "open": 1,

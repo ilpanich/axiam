@@ -385,10 +385,24 @@ filter_scenarios() {
       echo "[run] skipping $s (BENCH_SCENARIO_EXCLUDE)"
       record_dry "${s%.js}" "SKIP" "excluded via BENCH_SCENARIO_EXCLUDE (run separately, e.g. a different BENCH_MEM cap)"; continue
     fi
+    # T23.10.2(a): the inverse of BENCH_SCENARIO_EXCLUDE — a space-separated
+    # allow-list of scenario filenames, so one invocation can run a chosen SET of
+    # cells (the minimal-profile pass: the shared endpoints plus one authz cell)
+    # behind ONE settle gate and ONE seed check, instead of one invocation per cell.
+    # Unset (the default) is a no-op. A typo here would silently run nothing, so a
+    # name that matches no scenario file is a hard error below.
+    if [ -n "${BENCH_SCENARIO_ONLY:-}" ] && [[ " ${BENCH_SCENARIO_ONLY} " != *" $s "* ]]; then
+      record_dry "${s%.js}" "SKIP" "not in BENCH_SCENARIO_ONLY"; continue
+    fi
     out+=("$s")
   done
   SCENARIOS=("${out[@]}")
 }
+if [ -n "${BENCH_SCENARIO_ONLY:-}" ]; then
+  for _only in $BENCH_SCENARIO_ONLY; do
+    [ -f "$BENCH/scenarios/$_only" ] || { echo "[run] FATAL: BENCH_SCENARIO_ONLY names '$_only', which is not a file under scenarios/ (names carry the .js suffix)" >&2; exit 1; }
+  done
+fi
 filter_scenarios
 
 # G2 item 2: cell-order rotation. Run 3 found EVERY historical batch cell was
@@ -854,6 +868,25 @@ axiam_env_json() {
   echo -n "}"
 }
 
+# T23.10.2(a): which AXIAM deployment profile this stack is, read off the server
+# container (what ran, not what this shell believes): `minimal` when the container
+# carries AXIAM__AMQP__ENABLED=false (targets/axiam/docker-compose.minimal.yml, `just
+# deploy=minimal`), `full` otherwise, `n/a` for every other target. Recorded in every
+# cell's meta.json (`axiam_deploy_profile`) and banner-labelled by report.py, because
+# a minimal-profile figure must never be read as the full profile's: its outbound
+# deliveries are lost on restart (T-445) and it has no broker to pay for.
+axiam_deploy_profile() {
+  [ "$TARGET" = "axiam" ] || { echo -n "n/a"; return; }
+  command -v docker >/dev/null 2>&1 || { echo -n "unknown"; return; }
+  local v
+  v="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-${TARGET}-server" 2>/dev/null \
+        | sed -n 's/^AXIAM__AMQP__ENABLED=//p' | head -1)" || { echo -n "unknown"; return; }
+  case "$v" in
+    false|FALSE|False|0|no|off) echo -n "minimal" ;;
+    *)                          echo -n "full" ;;
+  esac
+}
+
 # --- J9/E1: required-env preflight ------------------------------------------
 # BENCH_REQUIRE_ENV is a space-separated list of environment variable NAMES a
 # runbook pass declares it depends on (e.g. `BENCH_REQUIRE_ENV="RUST_LOG"` for
@@ -976,8 +1009,8 @@ role_default_cpu_cap() {
 role_default_mem_mib() {
   local raw
   case "$1" in
-    server) raw="${BENCH_MEM:-1024m}" ;;
-    worker) raw="${BENCH_AUTHENTIK_WORKER_MEM:-${BENCH_MEM:-1024m}}" ;;
+    server) raw="${BENCH_MEM:-2048m}" ;;
+    worker) raw="${BENCH_AUTHENTIK_WORKER_MEM:-${BENCH_MEM:-2048m}}" ;;
     db)     raw="${BENCH_DB_MEM:-1024m}" ;;
     mq)     raw="${BENCH_MQ_MEM:-512m}" ;;
     edge)   raw="${BENCH_EDGE_MEM:-128m}" ;;
@@ -1022,7 +1055,15 @@ containers_json() {
     cname="${line%% *}"; role="${line#* }"
     docker inspect "$cname" >/dev/null 2>&1 || continue
     img="$(docker inspect --format '{{.Config.Image}}' "$cname" 2>/dev/null || echo unknown)"
-    dig="$(docker inspect --format '{{index .RepoDigests 0}}' "$cname" 2>/dev/null || echo '')"
+    # RepoDigests belongs to the IMAGE, not the container: asking the container
+    # (`docker inspect <container>`) always answered empty, so every cell fell
+    # through to the image id below — which equals the registry digest only on
+    # the containerd image store and differs on the classic one. Ask the image the
+    # container was created from, by id (T23.10.2(a): run 6 records the pulled
+    # digest of every image, and "image_digest" has to be that).
+    dig="$(docker image inspect --format '{{index .RepoDigests 0}}' "$(docker inspect --format '{{.Image}}' "$cname" 2>/dev/null)" 2>/dev/null || echo '')"
+    [ -n "$dig" ] || dig="$(docker image inspect --format '{{index .RepoDigests 0}}' "$img" 2>/dev/null || echo '')"
+    dig="${dig#*@}"
     # RepoDigests is empty (or the literal Go zero-value "<no value>" if the
     # index itself is out of range) for locally-built images — fall back to
     # the container's own image ID, then to `docker image inspect` on the
@@ -1315,7 +1356,7 @@ run_one() {
   "tls_min": "${BENCH_TLS_MIN:-}",
   "client_auth": "$([ -n "${BENCH_CLIENT_CERT:-}" ] && echo x509 || echo none)",
   "rate_limits": "$RL_POSTURE",
-  "caps": { "cpus": "${BENCH_CPUS:-2}", "mem": "${BENCH_MEM:-1024m}" },
+  "caps": { "cpus": "${BENCH_CPUS:-2}", "mem": "${BENCH_MEM:-2048m}" },
   "host": { "cpus": "$HOST_CPUS", "mem_mib": "$HOST_MEM_MIB" },
   "k6_summary_file": "$name.k6.json",
   "resource_csv": "$name.res.csv",
@@ -1335,6 +1376,7 @@ run_one() {
   "cell_order_index": $cell_order_index,
   "dry_run": $([ "$DRY_RUN" = "1" ] && echo true || echo false),
   "axiam_env": $(axiam_env_json),
+  "axiam_deploy_profile": "$(axiam_deploy_profile)",
   "connection_model": "$([ "${BENCH_NO_CONN_REUSE:-false}" = "true" ] && echo no-reuse || { [ "${BENCH_NO_VU_CONN_REUSE:-false}" = "true" ] && echo per-iteration-vu-pool || echo pooled-per-vu; })",
   "no_connection_reuse": ${BENCH_NO_CONN_REUSE:-false},
   "no_vu_connection_reuse": ${BENCH_NO_VU_CONN_REUSE:-false},

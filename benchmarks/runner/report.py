@@ -1102,6 +1102,29 @@ def build_report(cells, multi_run=False):
             ["scenario", "profile", "thr(req/s)", "p50(ms)", "p95(ms)", "err", "label"],
             rows), ""]
 
+    # 1c. T23.10.2(a): AXIAM MINIMAL-profile cells (`just deploy=minimal …`,
+    # AXIAM__AMQP__ENABLED=false). They are measured against the full profile's
+    # caps with no broker in the stack, and the minimal profile gives up the
+    # broker's durability (its outbound deliveries are lost on restart, T-445), so
+    # neither its footprint nor its throughput may be read as the full profile's.
+    # They belong in their own results tree; this banner is the guard for the day
+    # one is pointed at the shared one.
+    minimal_cells = [c for c in cells
+                     if (c.get("meta") or {}).get("axiam_deploy_profile") == "minimal"]
+    if minimal_cells:
+        lines += [
+            "## AXIAM minimal profile (no broker) — NOT the full profile",
+            "",
+            f"> {len(minimal_cells)} cell(s) in this report ran against AXIAM's **minimal "
+            "profile** (`AXIAM__AMQP__ENABLED=false`: SurrealDB and the server, no RabbitMQ; "
+            "a single instance by definition). Its outbound deliveries (webhooks, SSF push, "
+            "outbound SCIM, CIBA ping) and its mail run on in-process queues and are **lost "
+            "on restart** (T-445), so its resource figures are the figures of a profile that "
+            "gives up that durability. Never compare them with the full profile's, and never "
+            "median them with full-profile cells.",
+            "",
+        ]
+
     # 2. Efficiency comparison per (scenario, profile) across targets
     lines += ["## Efficiency comparison (across targets)", "",
               "Higher `thr/core` and lower `cpu_ms/req` is better. "

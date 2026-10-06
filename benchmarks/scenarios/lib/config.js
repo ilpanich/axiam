@@ -241,6 +241,14 @@ export const cfg = {
   nestedPrefix: str('BENCH_NESTED_PREFIX', 'bench-nest'),
 };
 
+// Credentials have no defaults (see above), so a scenario run by hand without the
+// seed env would otherwise fail with nothing but a wall of 401s. Say why, once.
+if (__VU === 0 && !cfg.clientSecret && !cfg.password) {
+  console.warn(
+    '[bench] neither BENCH_CLIENT_SECRET nor BENCH_PASSWORD is set: credentials are generated per run, ' +
+      'so export the seed env first (set -a; . .seed/<target>.seed.env; set +a) — see benchmarks/README.md, "Credentials".');
+}
+
 export function baseUrl() {
   return `${cfg.scheme}://${cfg.host}:${cfg.port}`;
 }

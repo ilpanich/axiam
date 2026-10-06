@@ -736,6 +736,24 @@ jobs:
       - name: authentik target self-test
         working-directory: benchmarks
         run: bash runner/authentik-selftest.sh
+      # T23.10.2(a): no benchmark credential is a literal. Generalises the check
+      # above to every target's compose file, and covers what compose does not: the
+      # seed and probe scripts, the justfile, the k6 config and the eleven SDK benches
+      # (a `:-password` default "to make it work on a laptop" is how a credential
+      # reaches the repository). It also exercises runner/bench-creds.sh, which
+      # generates, persists, masks and removes the per-run credentials the compose
+      # files require, and runs the scanner over known-bad fixtures so it cannot
+      # become a tautology. Hermetic: no docker, no k6.
+      - name: Benchmark credential self-test
+        working-directory: benchmarks
+        run: bash runner/credential-selftest.sh
+      # T23.10.2(a): `rl=prod` must pin every rate-limit family the AXIAM compose
+      # file neutralizes. A family in neither list keeps 1 000 000 under the
+      # "shipped" posture and `rl-prod-check` then FAILs a posture the harness never
+      # applied, which reads as a limiter bug. Hermetic.
+      - name: rl=prod posture self-test
+        working-directory: benchmarks
+        run: bash runner/rl-prod-posture-selftest.sh
       # Shell syntax gate for the runner scripts. `bash -n` is not a linter,
       # but the runner is 1 000+ lines of bash that only ever executes inside a
       # multi-hour matrix run — a syntax error there is otherwise discovered at

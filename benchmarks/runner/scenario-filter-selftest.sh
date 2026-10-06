@@ -108,7 +108,9 @@ check_runs() {
   local out="$FIX/runs-$target"
   mkdir -p "$out"
   local got want
-  got="$(BENCH_LIST_SCENARIOS=1 BENCH_SKIP_SEED_CHECK=1 BENCH_RESULTS_DIR="$out" \
+  # BENCH_CLIENT_SECRET only has to be non-empty: AXIAM's OAuth2 scenarios are dropped
+  # when no confidential client was seeded, and this test seeds nothing.
+  got="$(BENCH_CLIENT_SECRET=1 BENCH_LIST_SCENARIOS=1 BENCH_SKIP_SEED_CHECK=1 BENCH_RESULTS_DIR="$out" \
           bash "$HERE/run-benchmark.sh" --target "$target" --profile p0-plaintext --scenario all 2>/dev/null \
           | grep -E '^[a-z0-9_]+\.js$' | sort | tr '\n' ' ')"
   want="$(printf '%s\n' "$@" | sort | tr '\n' ' ')"
@@ -126,6 +128,29 @@ check_runs keycloak  $SHARED
 check_runs zitadel   $SHARED zitadel_userinfo_grpc.js
 # shellcheck disable=SC2086
 check_runs authentik $SHARED
+
+# Run 6 (T23.10.2(a)): AXIAM runs EVERYTHING that is not pending, opt-in or competitor-
+# only — the runbook's cell list quotes this set, so a scenario added or dropped has to
+# be decided here, in the same commit, and the runbook updated with it.
+# shellcheck disable=SC2086
+check_runs axiam authz_batch_grpc.js authz_batch_rest.js authz_check_grpc.js authz_check_rest.js \
+  device_authorization.js device_flow_poll.js device_verify.js grpc_admin_validate.js grpc_infra.js \
+  jwks_fetch.js oauth2_authorize.js oauth2_client_credentials.js oauth2_code_pkce.js oauth2_discovery.js \
+  oauth2_password_login.js oauth2_revoke.js opaque_login_start.js opaque_register_start.js \
+  scim_provisioning.js token_exchange.js token_introspection.js token_refresh.js uma2_perm.js \
+  uma_ticket_grant.js userinfo.js userinfo_grpc.js
+
+# BENCH_SCENARIO_ONLY (the minimal-profile pass runs a chosen SET behind one settle gate):
+# exactly the named cells survive, an unknown name is a hard error rather than an empty run.
+only_out="$FIX/only"; mkdir -p "$only_out"
+got="$(BENCH_SCENARIO_ONLY="jwks_fetch.js userinfo.js" BENCH_LIST_SCENARIOS=1 BENCH_SKIP_SEED_CHECK=1 BENCH_RESULTS_DIR="$only_out" \
+        bash "$HERE/run-benchmark.sh" --target keycloak --profile p0-plaintext --scenario all 2>/dev/null \
+        | grep -E '^[a-z0-9_]+\.js$' | sort | tr '\n' ' ')"
+[ "$got" = "jwks_fetch.js userinfo.js " ] || { echo "[scenario-filter-selftest] BENCH_SCENARIO_ONLY kept '$got', expected exactly 'jwks_fetch.js userinfo.js'" >&2; fail=1; }
+if BENCH_SCENARIO_ONLY="jwks_fetch.js userinfo_typo.js" BENCH_LIST_SCENARIOS=1 BENCH_SKIP_SEED_CHECK=1 BENCH_RESULTS_DIR="$only_out" \
+     bash "$HERE/run-benchmark.sh" --target keycloak --profile p0-plaintext --scenario all >"$only_out/typo.log" 2>&1; then
+  echo "[scenario-filter-selftest] a BENCH_SCENARIO_ONLY name that is not a scenario file did not fail the runner" >&2; fail=1
+fi
 
 [ "$fail" -eq 0 ] || { echo "[scenario-filter-selftest] FAILED" >&2; exit 1; }
 echo "[scenario-filter-selftest] OK — extension-less --scenario names are normalized before filtering."

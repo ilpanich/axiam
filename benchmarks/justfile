@@ -55,6 +55,16 @@ rl := "neutralized"
 #                       wires the two values through. An operator-supplied
 #                       BENCH_DB_CPUS/BENCH_DB_MEM still wins over either mode.
 dbcaps := "capped"
+# deploy selects AXIAM's DEPLOYMENT profile (axiam target only):
+#   full (default) — server + SurrealDB + RabbitMQ, the profile every earlier run
+#                    measured.
+#   minimal        — server + SurrealDB, AXIAM__AMQP__ENABLED=false (T23.8.1/T23.8.3;
+#                    targets/axiam/docker-compose.minimal.yml layered over the base).
+#                    SINGLE INSTANCE by definition; its outbound deliveries are lost
+#                    on restart (T-445), so its footprint is never the full profile's.
+#                    Write its cells to their own results tree (see claude_dev/
+#                    run6-runbook.md): they must not be medianed with full-profile cells.
+deploy := "full"
 # repeat controls how many times `bench-matrix` runs the whole target×profile
 # ×scenario matrix (C1: median-of-N). Each pass writes into its own
 # results/run-<i>/ subtree (same flat per-cell layout underneath), and
@@ -200,6 +210,13 @@ bench-up:
         export AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100
         export AXIAM__GRPC__GRPC_IDENTITY_PER_SEC=500
         export AXIAM__GRPC__GRPC_ADMIN_PER_SEC=10
+        # The seven REST families added since alpha24 that the compose file
+        # neutralizes but the exports above do not pin (device_authorization,
+        # token_exchange, uma_perm, uma_ticket, par, end_session, scim). Left out,
+        # they would keep their 1 000 000 under `rl=prod` and rl-prod-check would
+        # FAIL a posture the harness never applied. Values come from the Rust
+        # source, read-only, like everything rl-prod-check compares against.
+        eval "$(python3 runner/rl_prod_check.py --print-exports)"
       elif [ "{{rl}}" != "neutralized" ]; then
         echo "[bench-up] unknown rl='{{rl}}' (use rl=neutralized or rl=prod)" >&2; exit 1
       else
@@ -440,6 +457,17 @@ bench-up:
     EXTRA_ARG=""
     if [ "{{target}}" = "axiam" ] && [ -n "${BENCH_COMPOSE_OVERLAYS:-}" ]; then
       for f in $BENCH_COMPOSE_OVERLAYS; do EXTRA_ARG="$EXTRA_ARG -f $f"; done
+    fi
+    # deploy=minimal: AXIAM without the broker (see `deploy` at the top of this file).
+    if [ "{{deploy}}" = "minimal" ]; then
+      if [ "{{target}}" != "axiam" ]; then
+        echo "[bench-up] deploy=minimal is an AXIAM profile; target={{target}} has none" >&2; exit 1
+      fi
+      EXTRA_ARG="$EXTRA_ARG -f targets/axiam/docker-compose.minimal.yml"
+      echo "[bench-up] deploy=MINIMAL: AXIAM__AMQP__ENABLED=false, no RabbitMQ — a single instance; its outbound deliveries are lost on restart (T-445)." >&2
+      echo "           Label every figure from this stack 'minimal profile'; it is not the full profile's footprint or throughput." >&2
+    elif [ "{{deploy}}" != "full" ]; then
+      echo "[bench-up] unknown deploy='{{deploy}}' (use deploy=full or deploy=minimal)" >&2; exit 1
     fi
     if ! docker compose -f "$COMPOSE" $OVERRIDE_ARG $EXTRA_ARG $PROFILE_ARG up -d $UP_WAIT $BUILD_ARG; then
       echo "[bench-up] FAILED: a container did not start (see its last lines below)" >&2
@@ -1141,6 +1169,18 @@ bench-nested-selftest:
 # p3-mtls refusal still in place. No docker, no k6 — CI runs it on every PR.
 bench-authentik-selftest:
     bash runner/authentik-selftest.sh
+
+# T23.10.2(a): no credential literal anywhere in the benchmark harness — every target's
+# compose file (generalising the authentik check above), the scripts, the k6 config and
+# the SDK benches — plus a functional test of runner/bench-creds.sh, the helper that
+# generates, persists, masks and removes the per-run credentials. No docker, no k6.
+bench-credential-selftest:
+    bash runner/credential-selftest.sh
+
+# T23.10.2(a): `rl=prod` pins every rate-limit family the compose file neutralizes.
+# No docker, no k6.
+bench-rl-posture-selftest:
+    bash runner/rl-prod-posture-selftest.sh
 
 # Verify every language bench presents its p3-mtls client certificate
 # (CONTRACT.md §6.1) — no AXIAM stack, no seed, no containers required: the

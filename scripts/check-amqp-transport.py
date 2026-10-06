@@ -56,7 +56,23 @@ class ComposeLoader(yaml.SafeLoader):
     """
 
 
-def _passthrough(loader, _suffix, node):
+class _Reset:
+    """A value tagged ``!reset``: the overlay REMOVES the key it is set on.
+
+    Compose drops a ``!reset`` key from the merged service, so there is no URL
+    left to check in that file; the value the base file sets is checked where it
+    is set. Passing ``!reset null`` through as the string ``'null'`` reported the
+    minimal-profile overlay, which removes the broker URL along with the broker,
+    as a plaintext stack (W6 F4, P23W6-08).
+    """
+
+
+RESET = _Reset()
+
+
+def _passthrough(loader, suffix, node):
+    if suffix == "!reset":
+        return RESET
     if isinstance(node, yaml.MappingNode):
         return loader.construct_mapping(node)
     if isinstance(node, yaml.SequenceNode):
@@ -152,7 +168,7 @@ def main():
                         f"variable; the server does not read it."
                     )
 
-                if URL_KEY not in env:
+                if URL_KEY not in env or env[URL_KEY] is RESET:
                     continue
                 checked += 1
                 url = str(env[URL_KEY]).strip().strip("\"'").lower()

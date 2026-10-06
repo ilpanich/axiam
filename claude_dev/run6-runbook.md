@@ -42,8 +42,8 @@ Run 6 has five jobs, in this order of importance:
    (A4, B1's gate, E3, E4) that the harness supports today (§3).
 5. **Repeat the SDK pass** (§12.13), as run 5 did.
 
-Read §0 and §1 before touching anything: six defaults changed under the harness since run 5,
-and three of them silently change what a plain command line measures.
+Read §0 and §1 before touching anything: several defaults changed under the harness since run 5
+(§0.3), and some of them change what a plain command line measures without saying so.
 
 > **Just want the commands?** [**§12 is a complete copy-paste script**](#12-exact-commands--the-copy-paste-reference)
 > for the whole run, in order, with every environment variable and parameter spelled out.
@@ -319,8 +319,9 @@ neutralized passes that **`scim_per_min` was raised to 1 000 000 for the `scim_p
 there matters), and that **`device_verify` is throttled at its shipped 10/min**. Nothing run 6 does
 raises `ciba_approval_per_min`, and no scenario calls it.
 
-authentik, Keycloak and Zitadel: none acted on any measured endpoint in the smoke runs (zero
-429s anywhere).
+Keycloak and Zitadel ship no per-IP limiter (their posture is `n/a`); authentik's stock throttles
+did not act on any measured endpoint in its smoke runs (zero 429s anywhere) — the run says whether
+that held.
 
 ### 2.7 Keycloak 26.8's "reduced memory usage" — what is verified, and how run 6 captures it
 
@@ -383,8 +384,9 @@ Run the cell once with the stage-timing instrumentation on: `RUST_LOG="axiam=war
 investigation to exporting it for `bench-run`), with `BENCH_REQUIRE_ENV="RUST_LOG"` so a missing value
 fails in seconds. The events carry `stage="auth.refresh"`, `consume_us`, `user_lookup_us`,
 `session_create_us`, `token_mint_us`, `handler_total_us`. **Note the directive:** the events' target is
-`axiam::perf`, which `axiam_oauth2=debug` (what run 5's runbook set) does not match; `axiam::perf=debug`
-does. **Check the log is non-empty before trusting the cell** (§12.11 does).
+`axiam::perf`, and tracing matches a directive against the event's target by prefix, so `axiam_oauth2=debug` (what run 5's
+runbook set) does not match it while `axiam::perf=debug` does (an inference from that rule, not a finding: the grep in §12.11
+proves it either way). **Check the log is non-empty before trusting the cell** (§12.11 does).
 
 ### 3.3 A4 — strict revocation (the cost of REST's posture on gRPC)
 
@@ -486,8 +488,8 @@ From the Keycloak 26.8.0 smoke run in the sandbox (the image `keycloak/keycloak:
 - **A stage label containing `seed` is dropped from the archive** (`bench-pack` prunes it); the resting sampler's stages are
   `fresh` and `fixture`.
 - **Anonymous Docker Hub pulls are rate-limited** (`429`). Log in.
-- **`bench-up` needs all four credentials' files to be removable**: `bench-down` deletes `.seed/<target>.stack.env`; a hand-run
-  `docker compose down` does not, and the next `bench-up` would hand a fresh stack the old stack's passwords. Always `bench-down`.
+- **Always `bench-down`, never a hand-run `docker compose down -v`.** `bench-down` deletes `.seed/<target>.stack.env` (and the bulk-seed
+  record); a bare `compose down` leaves them, and the next `bench-up` would hand a fresh stack the old stack's passwords.
 
 Others a run needs to know:
 

@@ -82,6 +82,10 @@ export const NAV_DESTINATIONS: NavDestination[] = [
   { path: "/certificates", label: "Certificates", navPermission: "certificates:list", routePermission: "certificates:list" },
   { path: "/pgp-keys", label: "PGP Keys", navPermission: "pgp_keys:list", routePermission: "pgp_keys:list" },
   { path: "/webhooks", label: "Webhooks", navPermission: "webhooks:list", routePermission: "webhooks:list" },
+  // G-6 (Phase 23): the downstream SCIM service providers this tenant's users
+  // and groups are pushed to. Nav and route both gate on `scim_targets:read`;
+  // the writes are gated inside the page.
+  { path: "/scim-targets", label: "SCIM Targets", navPermission: "scim_targets:read", routePermission: "scim_targets:read" },
   { path: "/reactors", label: "Reactors", navPermission: "reactors:list", routePermission: "reactors:list" },
   { path: "/oauth2-clients", label: "OAuth2 Clients", navPermission: "oauth2_clients:list", routePermission: "oauth2_clients:list" },
   // This one was the finding: the sidebar declared no permission while the route
@@ -91,6 +95,17 @@ export const NAV_DESTINATIONS: NavDestination[] = [
   { path: "/audit-logs", label: "Audit Logs", navPermission: "audit_logs:list", routePermission: "audit_logs:list" },
   { path: "/notification-rules", label: "Notification Rules", navPermission: "notification_rules:list", routePermission: "notification_rules:list" },
   { path: "/device", label: "Connect a Device", navPermission: null, routePermission: null },
+  // G-7 (Phase 23): the user's half of a CIBA request, reached from the link in
+  // the notification mail, never from the sidebar, and gated by nothing but a
+  // session — the same self-service class as `/device`. Opened without a
+  // `request_id` it shows its "not found" state, never Access Denied.
+  {
+    path: "/ciba/approve",
+    label: "Approve a sign-in",
+    navPermission: null,
+    routePermission: null,
+    inNav: false,
+  },
   { path: "/profile", label: "Profile", navPermission: null, routePermission: null },
   { path: "/privacy", label: "Privacy & Data", navPermission: null, routePermission: null },
   { path: "/settings", label: "Settings", navPermission: "settings:get", routePermission: "settings:get" },

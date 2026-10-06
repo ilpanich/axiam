@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_SESSION_INDEXES"],"enum":["LogoutDelivery","LogoutStatus","ParsedLogoutMessage"],"fn":["parse_logout_message"],"struct":["LogoutSubject","OutboundLogout","ParsedLogoutRequest","ParsedLogoutResponse"]};

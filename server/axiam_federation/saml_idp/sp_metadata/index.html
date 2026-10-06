@@ -1,0 +1,53 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Importing a service provider’s metadata — a parse to a draft, never a write (G-2, T23.2.5, D-41)."><title>axiam_federation::saml_idp::sp_metadata - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_federation" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module sp_metadata</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_federation/index.html">axiam_<wbr>federation</a><span class="version">1.0.0-beta18</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module sp_<wbr>metadata</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#how-the-xml-is-refused" title="How the XML is refused">How the XML is refused</a></li><li><a href="#what-is-taken-and-what-is-trusted" title="What is taken, and what is trusted">What is taken, and what is trusted</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>federation::<wbr>saml_<wbr>idp</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_federation</a>::<wbr><a href="../index.html">saml_idp</a></div><h1>Module <span>sp_<wbr>metadata</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_federation/saml_idp/sp_metadata.rs.html#1-1275">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Importing a service provider’s metadata — a <strong>parse to a draft, never a
+write</strong> (G-2, T23.2.5, D-41).</p>
+<p>An SP’s metadata document is attacker-influenced XML (an upload, or whatever
+a URL serves) and it is usually unsigned. So this module only <em>suggests</em>: it
+turns a document into a <a href="struct.SpMetadataDraft.html" title="struct axiam_federation::saml_idp::sp_metadata::SpMetadataDraft"><code>SpMetadataDraft</code></a> — a
+[<code>SamlServiceProviderInput</code>] the administrator reads and then submits through
+the ordinary create or update, where the validator and the write-time
+refusals apply as to a manual entry. Nothing here touches the registry.</p>
+<h2 id="how-the-xml-is-refused"><a class="doc-anchor" href="#how-the-xml-is-refused">§</a>How the XML is refused</h2>
+<p>As the receiver refuses an <code>AuthnRequest</code> (<code>request.rs</code>), in the same order:</p>
+<ol>
+<li>the size (<a href="constant.MAX_SP_METADATA_BYTES.html" title="constant axiam_federation::saml_idp::sp_metadata::MAX_SP_METADATA_BYTES"><code>MAX_SP_METADATA_BYTES</code></a>, 512 KiB) and UTF-8;</li>
+<li><a href="../request/fn.refuse_markup_declarations.html" title="fn axiam_federation::saml_idp::request::refuse_markup_declarations"><code>refuse_markup_declarations</code></a> — any <code>&lt;!</code> other than a comment or CDATA
+section — and <a href="../request/fn.refuse_other_encodings.html" title="fn axiam_federation::saml_idp::request::refuse_other_encodings"><code>refuse_other_encodings</code></a> on the bytes, before any parser
+sees them: with no DTD there is no entity, external or internal, to read
+or to expand;</li>
+<li>libxml, without recovery, network or DTD defaults, which bounds the nesting
+depth and decides that the root really is <code>md:EntityDescriptor</code> (an
+<code>EntitiesDescriptor</code> aggregate is refused here, before <code>samael</code>’s
+recursive deserializer can be fed a deeply nested one);</li>
+<li><code>samael</code>’s metadata types, which open no network, and exactly one
+<code>SPSSODescriptor</code> supporting SAML 2.0.</li>
+</ol>
+<p>Every refusal is one of three generic <a href="enum.MetadataError.html" title="enum axiam_federation::saml_idp::sp_metadata::MetadataError"><code>MetadataError</code></a> categories. The
+message never carries the document, a parser’s text, a status line or an
+address (T-356’s lesson), so the route cannot be used to read an internal
+response back.</p>
+<h2 id="what-is-taken-and-what-is-trusted"><a class="doc-anchor" href="#what-is-taken-and-what-is-trusted">§</a>What is taken, and what is trusted</h2>
+<p>Taken, as a draft: <code>entityID</code>; the HTTP-POST <code>AssertionConsumerService</code>
+endpoints with their <code>index</code> and <code>isDefault</code>; one <code>SingleLogoutService</code>
+(HTTP-Redirect preferred over HTTP-POST — no signature to harvest, D-38);
+the first signing <code>KeyDescriptor</code> as the request-signing certificate and an
+<code>use="encryption"</code> one as the encryption certificate (<strong><code>encrypt_assertions</code>
+is never set</strong>, D-2); <code>AuthnRequestsSigned</code>; the first of persistent and
+<code>emailAddress</code> among the <code>NameIDFormat</code>s; a display name.</p>
+<p><strong>Trusted from an unsigned document: nothing.</strong> A <code>ds:Signature</code> in it is not
+evaluated — there is no anchor, and evaluating it against a certificate the
+same document carries would be circular — and its presence is reported as a
+warning. <code>validUntil</code> and <code>cacheDuration</code> are ignored (D-54: a <code>cacheDuration</code> on the
+<code>SPSSODescriptor</code> is dropped from the parsed tree before <code>samael</code> reads it, and an
+<code>AssertionConsumerService</code> with no <code>index</code> is given the lowest unused one — each
+with a warning). The SHA-256
+fingerprints of the certificates are returned for the administrator to compare
+out of band. AXIAM never re-reads an SP’s metadata on its own.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SpMetadataDraft.html" title="struct axiam_federation::saml_idp::sp_metadata::SpMetadataDraft">SpMetadata<wbr>Draft</a></dt><dd>What importing produced: a suggestion and what the administrator needs to
+judge it. Not a registration.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.MetadataError.html" title="enum axiam_federation::saml_idp::sp_metadata::MetadataError">Metadata<wbr>Error</a></dt><dd>Why metadata could not be imported: one of three generic categories, each
+with a fixed message. Nothing about the document, the response or the
+resolved address is in any of them.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_SP_METADATA_BYTES.html" title="constant axiam_federation::saml_idp::sp_metadata::MAX_SP_METADATA_BYTES">MAX_<wbr>SP_<wbr>METADATA_<wbr>BYTES</a></dt><dd>The largest metadata document accepted, in bytes — the cap the SP side’s
+<code>fetch_idp_metadata</code> already uses.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.fetch_sp_metadata.html" title="fn axiam_federation::saml_idp::sp_metadata::fetch_sp_metadata">fetch_<wbr>sp_<wbr>metadata</a></dt><dd>Fetch the metadata at <code>url</code>: <strong>one</strong> request through
+<a href="../../ssrf/fn.guarded_fetch.html" title="fn axiam_federation::ssrf::guarded_fetch"><code>axiam_pki::ssrf::guarded_fetch</code></a> — the name resolved once and the
+connection pinned to the vetted address, private, loopback, link-local and
+cloud-metadata addresses refused, every redirect hop re-validated, a
+transport timeout and cap — then held to <a href="constant.MAX_SP_METADATA_BYTES.html" title="constant axiam_federation::saml_idp::sp_metadata::MAX_SP_METADATA_BYTES"><code>MAX_SP_METADATA_BYTES</code></a>.</dd><dt><a class="fn" href="fn.parse_sp_metadata.html" title="fn axiam_federation::saml_idp::sp_metadata::parse_sp_metadata">parse_<wbr>sp_<wbr>metadata</a></dt><dd>Parse <code>document</code> into a draft.</dd></dl></section></div></main></body></html>

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["unverified_issuer_of"],"struct":["AuthorizationUrl","FederationCallbackResult","IdTokenClaims","OidcDiscoveryDocument","OidcFederationService","VerifiedIdToken"]};
+window.SIDEBAR_ITEMS = {"constant":["CLOCK_SKEW_LEEWAY_SECS"],"fn":["unverified_issuer_of"],"struct":["AuthorizationUrl","FederationCallbackResult","IdTokenClaims","OidcDiscoveryDocument","OidcFederationService","VerifiedIdToken"]};

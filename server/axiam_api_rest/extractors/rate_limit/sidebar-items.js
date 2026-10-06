@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["extract_form_client_id"],"struct":["ClientAwareKeyExtractor","RateLimitClientId","XForwardedForKeyExtractor"]};
+window.SIDEBAR_ITEMS = {"fn":["extract_basic_client_id","extract_client_id","extract_form_client_id"],"struct":["ClientAwareKeyExtractor","RateLimitClientId","XForwardedForKeyExtractor"]};

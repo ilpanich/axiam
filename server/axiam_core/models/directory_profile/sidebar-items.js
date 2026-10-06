@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_EMAIL_CHARS","MAX_NAME_CHARS"],"fn":["clean_display_name","clean_identifier","is_bidi_control","plausible_email"],"struct":["CleanedAttributes"]};

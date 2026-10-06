@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-grpc/src/services/user.rs`."><title>user.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_grpc" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_grpc/services/</div>user.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! UserService gRPC implementation.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-grpc/src/services/user.rs`."><title>user.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_grpc" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_grpc/services/</div>user.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! UserService gRPC implementation.
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>std::sync::Arc;
 <a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>std::time::Duration;
@@ -222,83 +222,93 @@
 <a href=#222 id=222 data-nosnippet>222</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(invalid);
 <a href=#223 id=223 data-nosnippet>223</a>        }
 <a href=#224 id=224 data-nosnippet>224</a>
-<a href=#225 id=225 data-nosnippet>225</a>        <span class="comment">// Verify password — CPU-bound Argon2id, gated and offloaded exactly as
-<a href=#226 id=226 data-nosnippet>226</a>        // `AuthService::login` does it (axiam-auth/src/service.rs, CQ-B02/B1).
-<a href=#227 id=227 data-nosnippet>227</a>        //
-<a href=#228 id=228 data-nosnippet>228</a>        // Both halves are load-bearing, and this handler had NEITHER until the
-<a href=#229 id=229 data-nosnippet>229</a>        // `grpc_admin_validate` benchmark cell exposed it (~44% INTERNAL at 50
-<a href=#230 id=230 data-nosnippet>230</a>        // VUs, identically across all three TLS profiles):
-<a href=#231 id=231 data-nosnippet>231</a>        //
-<a href=#232 id=232 data-nosnippet>232</a>        //   - The permit bounds peak memory. Each verify allocates a ~19 MiB
-<a href=#233 id=233 data-nosnippet>233</a>        //     arena; 50 concurrent is ~970 MiB against a 1024 MiB cap (the
-<a href=#234 id=234 data-nosnippet>234</a>        //     arithmetic in `AuthConfig::max_concurrent_hashes`'s docs). Without
-<a href=#235 id=235 data-nosnippet>235</a>        //     acquiring here, `AXIAM__AUTH__MAX_CONCURRENT_HASHES` bounded REST
-<a href=#236 id=236 data-nosnippet>236</a>        //     only, and this RPC — an online-password-guessing surface — was the
-<a href=#237 id=237 data-nosnippet>237</a>        //     one credential path that could ignore it.
-<a href=#238 id=238 data-nosnippet>238</a>        //   - `spawn_blocking` keeps the ~34 ms verify off the tonic runtime
-<a href=#239 id=239 data-nosnippet>239</a>        //     threads. Run inline, it starves the reactor that every other task
-<a href=#240 id=240 data-nosnippet>240</a>        //     on this runtime (including the datastore client this handler just
-<a href=#241 id=241 data-nosnippet>241</a>        //     used) needs to make progress.
-<a href=#242 id=242 data-nosnippet>242</a>        //
-<a href=#243 id=243 data-nosnippet>243</a>        // Note this is NOT a substitute for the `grpc_admin` rate-limit ceiling
-<a href=#244 id=244 data-nosnippet>244</a>        // (middleware/rate_limit.rs's `DEFAULT_ADMIN_PER_SEC`): that ceiling
-<a href=#245 id=245 data-nosnippet>245</a>        // bounds guessing *breadth* per IP, this gate bounds *concurrency* per
-<a href=#246 id=246 data-nosnippet>246</a>        // process. The benchmark neutralizes the former, which is precisely why
-<a href=#247 id=247 data-nosnippet>247</a>        // it could reach the missing latter.
-<a href=#248 id=248 data-nosnippet>248</a>        </span><span class="kw">let </span>_permit = acquire_hash_permit(
-<a href=#249 id=249 data-nosnippet>249</a>            <span class="kw-2">&amp;</span><span class="self">self</span>.crypto_semaphore,
-<a href=#250 id=250 data-nosnippet>250</a>            Duration::from_secs(<span class="self">self</span>.auth_config.hash_acquire_timeout_secs),
-<a href=#251 id=251 data-nosnippet>251</a>        )
-<a href=#252 id=252 data-nosnippet>252</a>        .<span class="kw">await
-<a href=#253 id=253 data-nosnippet>253</a>        </span>.map_err(|e| <span class="kw">match </span>e {
-<a href=#254 id=254 data-nosnippet>254</a>            <span class="comment">// A saturated hash gate is transient server capacity, not a client
-<a href=#255 id=255 data-nosnippet>255</a>            // quota violation — mirror REST's 503 with UNAVAILABLE rather than
-<a href=#256 id=256 data-nosnippet>256</a>            // RESOURCE_EXHAUSTED, which this listener already uses for
-<a href=#257 id=257 data-nosnippet>257</a>            // rate-limit rejections (middleware/rate_limit.rs). Keeping the two
-<a href=#258 id=258 data-nosnippet>258</a>            // distinct is what lets a caller (and the benchmark) tell "you sent
-<a href=#259 id=259 data-nosnippet>259</a>            // too much" apart from "the server is at capacity".
-<a href=#260 id=260 data-nosnippet>260</a>            </span>AxiamError::ServiceUnavailable(msg) =&gt; Status::unavailable(msg),
-<a href=#261 id=261 data-nosnippet>261</a>            other =&gt; Status::internal(other.to_string()),
-<a href=#262 id=262 data-nosnippet>262</a>        })<span class="question-mark">?</span>;
-<a href=#263 id=263 data-nosnippet>263</a>        <span class="kw">let </span>pw_owned = req.password.clone();
-<a href=#264 id=264 data-nosnippet>264</a>        <span class="kw">let </span>hash_owned = user.password_hash.clone();
-<a href=#265 id=265 data-nosnippet>265</a>        <span class="kw">let </span>pepper_owned = <span class="self">self</span>.auth_config.pepper.clone();
-<a href=#266 id=266 data-nosnippet>266</a>        <span class="kw">let </span>valid = tokio::task::spawn_blocking(<span class="kw">move </span>|| {
-<a href=#267 id=267 data-nosnippet>267</a>            password::verify_password(
-<a href=#268 id=268 data-nosnippet>268</a>                <span class="kw-2">&amp;</span>pw_owned,
-<a href=#269 id=269 data-nosnippet>269</a>                <span class="kw-2">&amp;</span>hash_owned,
-<a href=#270 id=270 data-nosnippet>270</a>                pepper_owned.as_ref().map(|p| p.expose_secret()),
-<a href=#271 id=271 data-nosnippet>271</a>            )
-<a href=#272 id=272 data-nosnippet>272</a>        })
-<a href=#273 id=273 data-nosnippet>273</a>        .<span class="kw">await
-<a href=#274 id=274 data-nosnippet>274</a>        </span>.map_err(|e| Status::internal(<span class="macro">format!</span>(<span class="string">"spawn_blocking join error: {e}"</span>)))<span class="question-mark">?
-<a href=#275 id=275 data-nosnippet>275</a>        </span>.map_err(|e| Status::internal(e.to_string()))<span class="question-mark">?</span>;
-<a href=#276 id=276 data-nosnippet>276</a>        <span class="comment">// Release the permit before the lockout write below: `record_failed_login`
-<a href=#277 id=277 data-nosnippet>277</a>        // is a datastore round-trip, not an Argon2id operation, and holding a
-<a href=#278 id=278 data-nosnippet>278</a>        // scarce hash permit across it would shrink effective verify concurrency
-<a href=#279 id=279 data-nosnippet>279</a>        // to the datastore's latency.
-<a href=#280 id=280 data-nosnippet>280</a>        </span>drop(_permit);
-<a href=#281 id=281 data-nosnippet>281</a>
-<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw">if </span>valid {
-<a href=#283 id=283 data-nosnippet>283</a>            <span class="prelude-val">Ok</span>(Response::new(ValidateCredentialsResponse {
-<a href=#284 id=284 data-nosnippet>284</a>                valid: <span class="bool-val">true</span>,
-<a href=#285 id=285 data-nosnippet>285</a>                user_id: user.id.to_string(),
-<a href=#286 id=286 data-nosnippet>286</a>            }))
-<a href=#287 id=287 data-nosnippet>287</a>        } <span class="kw">else </span>{
-<a href=#288 id=288 data-nosnippet>288</a>            <span class="comment">// SEC-026b / D-06: meter every failed credential check via the
-<a href=#289 id=289 data-nosnippet>289</a>            // shared lockout helper — the single source of truth for
-<a href=#290 id=290 data-nosnippet>290</a>            // failed-attempt accrual, no unmetered credential-check path.
-<a href=#291 id=291 data-nosnippet>291</a>            </span><span class="kw">let </span>policy = <span class="self">self</span>.lockout_policy.policy_for(claims_tenant_id).<span class="kw">await</span>;
-<a href=#292 id=292 data-nosnippet>292</a>            axiam_auth::lockout::record_failed_login(
-<a href=#293 id=293 data-nosnippet>293</a>                <span class="kw-2">&amp;</span><span class="self">self</span>.user_repo,
-<a href=#294 id=294 data-nosnippet>294</a>                <span class="kw-2">&amp;</span>policy,
-<a href=#295 id=295 data-nosnippet>295</a>                claims_tenant_id,
-<a href=#296 id=296 data-nosnippet>296</a>                <span class="kw-2">&amp;</span>user,
-<a href=#297 id=297 data-nosnippet>297</a>            )
-<a href=#298 id=298 data-nosnippet>298</a>            .<span class="kw">await
-<a href=#299 id=299 data-nosnippet>299</a>            </span>.map_err(|e| Status::internal(e.to_string()))<span class="question-mark">?</span>;
-<a href=#300 id=300 data-nosnippet>300</a>            <span class="prelude-val">Ok</span>(invalid)
-<a href=#301 id=301 data-nosnippet>301</a>        }
-<a href=#302 id=302 data-nosnippet>302</a>    }
-<a href=#303 id=303 data-nosnippet>303</a>}
+<a href=#225 id=225 data-nosnippet>225</a>        <span class="comment">// G-3 (T23.3.2): a directory account's password is its directory's to
+<a href=#226 id=226 data-nosnippet>226</a>        // check, and this RPC has no directory client. It answers `valid: false`
+<a href=#227 id=227 data-nosnippet>227</a>        // without verifying the account's local hash — an unusable random one —
+<a href=#228 id=228 data-nosnippet>228</a>        // and without counting a failure: the caller did not guess wrong, it
+<a href=#229 id=229 data-nosnippet>229</a>        // asked a credential check that cannot answer for this account. Never a
+<a href=#230 id=230 data-nosnippet>230</a>        // fallback to the local hash, exactly as `AuthService::login` refuses one.
+<a href=#231 id=231 data-nosnippet>231</a>        </span><span class="kw">if </span>user.is_directory_account() {
+<a href=#232 id=232 data-nosnippet>232</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(invalid);
+<a href=#233 id=233 data-nosnippet>233</a>        }
+<a href=#234 id=234 data-nosnippet>234</a>
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="comment">// Verify password — CPU-bound Argon2id, gated and offloaded exactly as
+<a href=#236 id=236 data-nosnippet>236</a>        // `AuthService::login` does it (axiam-auth/src/service.rs, CQ-B02/B1).
+<a href=#237 id=237 data-nosnippet>237</a>        //
+<a href=#238 id=238 data-nosnippet>238</a>        // Both halves are load-bearing, and this handler had NEITHER until the
+<a href=#239 id=239 data-nosnippet>239</a>        // `grpc_admin_validate` benchmark cell exposed it (~44% INTERNAL at 50
+<a href=#240 id=240 data-nosnippet>240</a>        // VUs, identically across all three TLS profiles):
+<a href=#241 id=241 data-nosnippet>241</a>        //
+<a href=#242 id=242 data-nosnippet>242</a>        //   - The permit bounds peak memory. Each verify allocates a ~19 MiB
+<a href=#243 id=243 data-nosnippet>243</a>        //     arena; 50 concurrent is ~970 MiB against a 1024 MiB cap (the
+<a href=#244 id=244 data-nosnippet>244</a>        //     arithmetic in `AuthConfig::max_concurrent_hashes`'s docs). Without
+<a href=#245 id=245 data-nosnippet>245</a>        //     acquiring here, `AXIAM__AUTH__MAX_CONCURRENT_HASHES` bounded REST
+<a href=#246 id=246 data-nosnippet>246</a>        //     only, and this RPC — an online-password-guessing surface — was the
+<a href=#247 id=247 data-nosnippet>247</a>        //     one credential path that could ignore it.
+<a href=#248 id=248 data-nosnippet>248</a>        //   - `spawn_blocking` keeps the ~34 ms verify off the tonic runtime
+<a href=#249 id=249 data-nosnippet>249</a>        //     threads. Run inline, it starves the reactor that every other task
+<a href=#250 id=250 data-nosnippet>250</a>        //     on this runtime (including the datastore client this handler just
+<a href=#251 id=251 data-nosnippet>251</a>        //     used) needs to make progress.
+<a href=#252 id=252 data-nosnippet>252</a>        //
+<a href=#253 id=253 data-nosnippet>253</a>        // Note this is NOT a substitute for the `grpc_admin` rate-limit ceiling
+<a href=#254 id=254 data-nosnippet>254</a>        // (middleware/rate_limit.rs's `DEFAULT_ADMIN_PER_SEC`): that ceiling
+<a href=#255 id=255 data-nosnippet>255</a>        // bounds guessing *breadth* per IP, this gate bounds *concurrency* per
+<a href=#256 id=256 data-nosnippet>256</a>        // process. The benchmark neutralizes the former, which is precisely why
+<a href=#257 id=257 data-nosnippet>257</a>        // it could reach the missing latter.
+<a href=#258 id=258 data-nosnippet>258</a>        </span><span class="kw">let </span>_permit = acquire_hash_permit(
+<a href=#259 id=259 data-nosnippet>259</a>            <span class="kw-2">&amp;</span><span class="self">self</span>.crypto_semaphore,
+<a href=#260 id=260 data-nosnippet>260</a>            Duration::from_secs(<span class="self">self</span>.auth_config.hash_acquire_timeout_secs),
+<a href=#261 id=261 data-nosnippet>261</a>        )
+<a href=#262 id=262 data-nosnippet>262</a>        .<span class="kw">await
+<a href=#263 id=263 data-nosnippet>263</a>        </span>.map_err(|e| <span class="kw">match </span>e {
+<a href=#264 id=264 data-nosnippet>264</a>            <span class="comment">// A saturated hash gate is transient server capacity, not a client
+<a href=#265 id=265 data-nosnippet>265</a>            // quota violation — mirror REST's 503 with UNAVAILABLE rather than
+<a href=#266 id=266 data-nosnippet>266</a>            // RESOURCE_EXHAUSTED, which this listener already uses for
+<a href=#267 id=267 data-nosnippet>267</a>            // rate-limit rejections (middleware/rate_limit.rs). Keeping the two
+<a href=#268 id=268 data-nosnippet>268</a>            // distinct is what lets a caller (and the benchmark) tell "you sent
+<a href=#269 id=269 data-nosnippet>269</a>            // too much" apart from "the server is at capacity".
+<a href=#270 id=270 data-nosnippet>270</a>            </span>AxiamError::ServiceUnavailable(msg) =&gt; Status::unavailable(msg),
+<a href=#271 id=271 data-nosnippet>271</a>            other =&gt; Status::internal(other.to_string()),
+<a href=#272 id=272 data-nosnippet>272</a>        })<span class="question-mark">?</span>;
+<a href=#273 id=273 data-nosnippet>273</a>        <span class="kw">let </span>pw_owned = req.password.clone();
+<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">let </span>hash_owned = user.password_hash.clone();
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">let </span>pepper_owned = <span class="self">self</span>.auth_config.pepper.clone();
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="kw">let </span>valid = tokio::task::spawn_blocking(<span class="kw">move </span>|| {
+<a href=#277 id=277 data-nosnippet>277</a>            password::verify_password(
+<a href=#278 id=278 data-nosnippet>278</a>                <span class="kw-2">&amp;</span>pw_owned,
+<a href=#279 id=279 data-nosnippet>279</a>                <span class="kw-2">&amp;</span>hash_owned,
+<a href=#280 id=280 data-nosnippet>280</a>                pepper_owned.as_ref().map(|p| p.expose_secret()),
+<a href=#281 id=281 data-nosnippet>281</a>            )
+<a href=#282 id=282 data-nosnippet>282</a>        })
+<a href=#283 id=283 data-nosnippet>283</a>        .<span class="kw">await
+<a href=#284 id=284 data-nosnippet>284</a>        </span>.map_err(|e| Status::internal(<span class="macro">format!</span>(<span class="string">"spawn_blocking join error: {e}"</span>)))<span class="question-mark">?
+<a href=#285 id=285 data-nosnippet>285</a>        </span>.map_err(|e| Status::internal(e.to_string()))<span class="question-mark">?</span>;
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="comment">// Release the permit before the lockout write below: `record_failed_login`
+<a href=#287 id=287 data-nosnippet>287</a>        // is a datastore round-trip, not an Argon2id operation, and holding a
+<a href=#288 id=288 data-nosnippet>288</a>        // scarce hash permit across it would shrink effective verify concurrency
+<a href=#289 id=289 data-nosnippet>289</a>        // to the datastore's latency.
+<a href=#290 id=290 data-nosnippet>290</a>        </span>drop(_permit);
+<a href=#291 id=291 data-nosnippet>291</a>
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="kw">if </span>valid {
+<a href=#293 id=293 data-nosnippet>293</a>            <span class="prelude-val">Ok</span>(Response::new(ValidateCredentialsResponse {
+<a href=#294 id=294 data-nosnippet>294</a>                valid: <span class="bool-val">true</span>,
+<a href=#295 id=295 data-nosnippet>295</a>                user_id: user.id.to_string(),
+<a href=#296 id=296 data-nosnippet>296</a>            }))
+<a href=#297 id=297 data-nosnippet>297</a>        } <span class="kw">else </span>{
+<a href=#298 id=298 data-nosnippet>298</a>            <span class="comment">// SEC-026b / D-06: meter every failed credential check via the
+<a href=#299 id=299 data-nosnippet>299</a>            // shared lockout helper — the single source of truth for
+<a href=#300 id=300 data-nosnippet>300</a>            // failed-attempt accrual, no unmetered credential-check path.
+<a href=#301 id=301 data-nosnippet>301</a>            </span><span class="kw">let </span>policy = <span class="self">self</span>.lockout_policy.policy_for(claims_tenant_id).<span class="kw">await</span>;
+<a href=#302 id=302 data-nosnippet>302</a>            axiam_auth::lockout::record_failed_login(
+<a href=#303 id=303 data-nosnippet>303</a>                <span class="kw-2">&amp;</span><span class="self">self</span>.user_repo,
+<a href=#304 id=304 data-nosnippet>304</a>                <span class="kw-2">&amp;</span>policy,
+<a href=#305 id=305 data-nosnippet>305</a>                claims_tenant_id,
+<a href=#306 id=306 data-nosnippet>306</a>                <span class="kw-2">&amp;</span>user,
+<a href=#307 id=307 data-nosnippet>307</a>            )
+<a href=#308 id=308 data-nosnippet>308</a>            .<span class="kw">await
+<a href=#309 id=309 data-nosnippet>309</a>            </span>.map_err(|e| Status::internal(e.to_string()))<span class="question-mark">?</span>;
+<a href=#310 id=310 data-nosnippet>310</a>            <span class="prelude-val">Ok</span>(invalid)
+<a href=#311 id=311 data-nosnippet>311</a>        }
+<a href=#312 id=312 data-nosnippet>312</a>    }
+<a href=#313 id=313 data-nosnippet>313</a>}
 </code></pre></div></section></main></body></html>

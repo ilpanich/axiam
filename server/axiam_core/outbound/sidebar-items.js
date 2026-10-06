@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DeliveryOutcome","OutboundError","OutboundKind"],"struct":["OutboundMessage"],"trait":["OutboundDeliverer","OutboundPublisher"],"type":["OutboundFuture"]};

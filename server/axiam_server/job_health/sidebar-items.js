@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["JobHealth"]};
+window.SIDEBAR_ITEMS = {"constant":["SWEEP_JOBS"],"struct":["JobHealth"]};

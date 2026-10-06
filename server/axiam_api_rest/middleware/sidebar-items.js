@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["authz","csrf","rate_limit_shared","security_headers","tenant_path"]};
+window.SIDEBAR_ITEMS = {"mod":["authz","csrf","rate_limit_shared","request_span","security_headers","tenant_path"]};

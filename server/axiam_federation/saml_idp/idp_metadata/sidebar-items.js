@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["IDP_METADATA_CACHE_CONTROL","IDP_METADATA_MEDIA_TYPE"],"fn":["build_idp_metadata","if_none_match_matches"],"struct":["IdpMetadataDocument"]};

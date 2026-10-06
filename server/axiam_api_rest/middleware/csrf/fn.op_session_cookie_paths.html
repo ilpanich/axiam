@@ -1,0 +1,68 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Every path a sign-in into `tenant_id` mints the OP-session cookie at (T23.1.8, D-11). The one list: every setter and every remover is built from it, so a path cannot be minted without also being cleared."><title>op_session_cookie_paths in axiam_api_rest::middleware::csrf - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">op_session_cookie_paths</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.0.0-beta18</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">op_<wbr>session_<wbr>cookie_<wbr>paths</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-one-name-for-every-path" title="Why one name for every path">Why one name for every path</a></li><li><a href="#why-one-value" title="Why one value">Why one value</a></li><li><a href="#the-path-is-the-canonical-one" title="The path is the canonical one">The path is the canonical one</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In axiam_<wbr>api_<wbr>rest::<wbr>middleware::<wbr>csrf</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_rest</a>::<wbr><a href="../index.html">middleware</a>::<wbr><a href="index.html">csrf</a></div><h1>Function <span class="fn">op_<wbr>session_<wbr>cookie_<wbr>paths</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_rest/middleware/csrf.rs.html#517-524">Source</a> </span></div><pre class="rust item-decl"><code>pub fn op_session_cookie_paths(
+    tenant_id: <a class="struct" href="https://docs.rs/uuid/1.26.1/uuid/struct.Uuid.html" title="struct uuid::Uuid">Uuid</a>,
+    config: &amp;AuthConfig,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/1.99.0/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.99.0/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><strong>Every path a sign-in into <code>tenant_id</code> mints the OP-session cookie at</strong>
+(T23.1.8, D-11). The one list: every setter and every remover is built from
+it, so a path cannot be minted without also being cleared.</p>
+<ul>
+<li>
+<p><code>/oauth2/authorize</code> — the deployment-wide issuer’s authorization endpoint,
+always. Unchanged by D-11.</p>
+</li>
+<li>
+<p><code>/t/{tenant_id}/oauth2/authorize</code> — the T21.6 per-tenant issuer’s, only
+where the deployment serves per-tenant paths
+(<code>AuthConfig::tenant_issuer_paths</code>), and only for <strong>the session’s own
+tenant</strong>. A browser signed in to tenant A holds no cookie scoped to any
+other tenant, so a request to <code>/t/B/oauth2/authorize</code> carries nothing it
+could be resolved from.</p>
+</li>
+<li>
+<p><code>/saml/v2/{tenant_id}/sso</code> — the tenant’s SAML 2.0 IdP SSO endpoint (G-2,
+T23.2.3), for the session’s own tenant, <strong>always</strong>: it is not gated on
+<code>tenant_issuer_paths</code> (the SAML routes are per-tenant paths by design), on
+the <code>saml</code> build feature, or on the tenant’s <code>saml_idp_enabled</code> setting.
+A sign-in cannot know cheaply whether the tenant serves SAML, and a cookie
+scoped to a path that answers <code>404</code> is read by nothing; minting it the same
+way in every build is also what keeps a build without SAML
+indistinguishable from a tenant with SAML off (D-20). The path covers the
+endpoint’s three sub-paths, <code>/continue</code> (the login hop’s return leg),
+<code>/idp-initiated</code> and <code>/logout</code> (the IdP-initiated logout trigger, T23.2.4,
+D-39 — it sits <strong>under</strong> this path precisely so the cookie reaches it, as
+<code>/oauth2/authorize/logout</code> sits under the authorization endpoint), and
+nothing else. <strong>No new path was minted for logout</strong>: <code>/slo</code>, the endpoint
+that receives a service provider’s <code>LogoutRequest</code>, is deliberately <em>not</em>
+under it (a cross-site POST would not carry a <code>Lax</code> cookie there anyway, and
+a fourth path would widen this layout), so it never sees the cookie and
+never decides anything by it.</p>
+</li>
+</ul>
+<h2 id="why-one-name-for-every-path"><a class="doc-anchor" href="#why-one-name-for-every-path">§</a>Why one name for every path</h2>
+<p>A browser keys cookies by name, domain <strong>and path</strong> (RFC 6265 §5.3 step 11),
+so several <code>axiam_op_session</code> cookies with different paths coexist, and a
+request carries the ones whose path is a prefix of its own (§5.1.4). The
+paths here are pairwise disjoint in that sense — <code>/oauth2/authorize</code> is not
+a prefix of <code>/t/{uuid}/oauth2/authorize</code>, nor the reverse, nor one tenant’s
+of another’s — so <strong>no request ever carries two of them</strong>, and the one
+resolution path that reads <code>COOKIE_OP_SESSION</code> serves the bare endpoint and
+every tenant endpoint unchanged. A distinct name per path would buy nothing
+a path does not already give, and would make the resolver choose a name by
+route — a second place the route-to-cookie mapping could drift.</p>
+<h2 id="why-one-value"><a class="doc-anchor" href="#why-one-value">§</a>Why one value</h2>
+<p>Every path carries the <strong>same</strong> value, so every cookie names the same
+session row through the one <code>browser_token_hash</code> it already stores — no
+schema change, and revoking the row ends every copy at once. What keeps a
+copy from being used in the wrong tenant is not its path (a path is a
+browser courtesy, and a cookie value can be replayed anywhere) but the
+resolver’s tenant-keyed lookup: a digest is looked up in the tenant the
+request names, and a session in tenant A is not there when the request
+names tenant B.</p>
+<h2 id="the-path-is-the-canonical-one"><a class="doc-anchor" href="#the-path-is-the-canonical-one">§</a>The path is the canonical one</h2>
+<p>The tenant segment is written as <code>Uuid</code>’s hyphenated lower-case form, which
+is what <a href="../../../axiam_oauth2/login_hop/fn.tenant_authorize_path.html" title="fn axiam_oauth2::login_hop::tenant_authorize_path"><code>axiam_oauth2::login_hop::tenant_authorize_path</code></a> builds and so
+what every <code>return_to</code> and every discovery document names. The <code>/t/</code> scope
+also routes the other spellings <code>Uuid::parse_str</code> accepts (upper case,
+unhyphenated); a browser that requests one of those carries no cookie,
+because cookie paths match case-sensitively and byte for byte, and fails
+closed as <code>login_required</code>. Nothing a server builds sends it there.</p>
+</div></details></section></div></main></body></html>

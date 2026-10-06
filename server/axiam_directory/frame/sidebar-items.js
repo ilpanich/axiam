@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_MESSAGE_BYTES","MAX_MAX_MESSAGE_BYTES","MAX_MESSAGE_BYTES_ENV","MAX_NESTING_DEPTH","MIN_MAX_MESSAGE_BYTES","STARTTLS_REQUEST"],"enum":["FrameError"],"fn":["children","clamp_max_message_bytes","is_starttls_success","max_message_bytes_from","read_message","split_element","validate_message"],"struct":["Element"]};

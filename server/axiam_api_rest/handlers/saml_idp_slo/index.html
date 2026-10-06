@@ -1,0 +1,52 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The SAML IdP’s single-logout endpoint and the IdP-initiated logout trigger (T23.2.4). Behind `saml`, like the SSO endpoint it sits beside. The SAML 2.0 identity provider’s single-logout endpoint (G-2, T23.2.4, D-37, D-38, D-39)."><title>axiam_api_rest::handlers::saml_idp_slo - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module saml_idp_slo</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.0.0-beta18</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module saml_<wbr>idp_<wbr>slo</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-a-verified-logoutrequest-ends" title="What a verified `LogoutRequest` ends">What a verified <code>LogoutRequest</code> ends</a></li><li><a href="#revoke-first-then-propagate" title="Revoke first, then propagate">Revoke first, then propagate</a></li><li><a href="#what-is-verified-before-anything-happens" title="What is verified before anything happens">What is verified before anything happens</a></li><li><a href="#the-browsers-cookies" title="The browser’s cookies">The browser’s cookies</a></li><li><a href="#d-20-and-what-is-never-logged" title="D-20, and what is never logged">D-20, and what is never logged</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>api_<wbr>rest::<wbr>handlers</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_rest</a>::<wbr><a href="../index.html">handlers</a></div><h1>Module <span>saml_<wbr>idp_<wbr>slo</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_rest/handlers/saml_idp_slo.rs.html#1-1059">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The SAML IdP’s single-logout endpoint and the IdP-initiated logout trigger
+(T23.2.4). Behind <code>saml</code>, like the SSO endpoint it sits beside.
+The SAML 2.0 identity provider’s single-logout endpoint (G-2, T23.2.4, D-37,
+D-38, D-39).</p>
+<p>Three routes under <code>/saml/v2/{tenant_id}</code>, behind the <code>saml</code> feature:</p>
+<div><table><thead><tr><th>Route</th><th>What it does</th></tr></thead><tbody>
+<tr><td><code>GET /slo</code></td><td>HTTP-Redirect binding: an SP’s <code>LogoutRequest</code>, or its <code>LogoutResponse</code> to one of ours</td></tr>
+<tr><td><code>POST /slo</code></td><td>HTTP-POST binding: the same, as a form post</td></tr>
+<tr><td><code>GET /sso/logout</code></td><td>the IdP-initiated trigger: end the browser’s own session and tell its SPs</td></tr>
+</tbody></table>
+</div><h2 id="what-a-verified-logoutrequest-ends"><a class="doc-anchor" href="#what-a-verified-logoutrequest-ends">§</a>What a verified <code>LogoutRequest</code> ends</h2>
+<p><strong>Whole AXIAM sessions</strong> — the ones <code>saml_sp_session</code> maps the request to, by
+(path tenant, the verified issuer’s SP, <code>SessionIndex</code>), and only when the
+request’s <code>NameID</code> value and format equal the row’s (T-379). With no
+<code>SessionIndex</code>: everything that SP holds for that <code>NameID</code>. For each session,
+in order: OIDC back-channel logout to the clients bound to it, then
+<code>AuthService::logout</code> — <code>SessionRepository::invalidate</code>, which publishes to the
+revocation feed when it is on — so SLO and the revocation feed revoke the same
+thing. No match is <code>Success</code>: the end state the SP asked for already holds.</p>
+<h2 id="revoke-first-then-propagate"><a class="doc-anchor" href="#revoke-first-then-propagate">§</a>Revoke first, then propagate</h2>
+<p>The sessions are gone before any other SP is told, so a chain that breaks
+never leaves an AXIAM session alive. Propagation is front-channel and
+sequential, through the browser, in a <code>saml_logout_run</code>: each other SP of those
+sessions that registered an <code>slo_url</code> is sent a signed <code>LogoutRequest</code> on its
+registered binding, one at a time, and its <code>LogoutResponse</code> here advances the
+chain. The chain ends with a signed <code>LogoutResponse</code> (<code>Success</code>, or
+<code>PartialLogout</code>) to the initiating SP’s registered <code>slo_url</code>, or AXIAM’s
+logged-out page.</p>
+<h2 id="what-is-verified-before-anything-happens"><a class="doc-anchor" href="#what-is-verified-before-anything-happens">§</a>What is verified before anything happens</h2>
+<p>Every message from an SP is signed by its registered certificate, always —
+the Redirect binding over the exact query octets, the POST binding as the
+root’s one enveloped signature — and <code>verify_signed_xml</code>, which checks only
+the first signature, is <strong>never</strong> called (D-23, D-38). An SP with no
+certificate cannot start a logout. Its <code>LogoutResponse</code> to a request of ours is
+accepted unsigned only to advance the chain, and is never counted as a
+confirmed logout. Anything refused before verification gets an error page that
+posts nowhere, and AXIAM <strong>never signs anything for an unverified request</strong>: a
+party with no session and no SP key cannot make the tenant’s key sign.</p>
+<h2 id="the-browsers-cookies"><a class="doc-anchor" href="#the-browsers-cookies">§</a>The browser’s cookies</h2>
+<p><code>/slo</code> never reads the OP cookie (its path is the SSO path, and a cross-site
+post carries no <code>Lax</code> cookie) and never decides anything by it. Every answer to
+a <strong>verified</strong> message clears every OP-cookie copy for the tenant and the API
+cookies, so the browser that carried the logout is signed out whichever
+session its cookie named.</p>
+<h2 id="d-20-and-what-is-never-logged"><a class="doc-anchor" href="#d-20-and-what-is-never-logged">§</a>D-20, and what is never logged</h2>
+<p>The tenant check — canonical id, tenant exists, effective <code>saml_idp_enabled</code>
+— runs before the body is read and answers the same empty <code>404</code> as an
+unmounted path. <code>SAMLRequest</code>, <code>SAMLResponse</code>, <code>RelayState</code>, <code>Signature</code>, a
+<code>NameID</code>, a <code>SessionIndex</code> and the OP cookie are never logged; refusals are the
+fixed reason and the tenant.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.slo_post.html" title="fn axiam_api_rest::handlers::saml_idp_slo::slo_post">slo_<wbr>post</a></dt><dd><code>POST /saml/v2/{tenant_id}/slo</code> — the HTTP-POST binding.</dd><dt><a class="fn" href="fn.slo_redirect.html" title="fn axiam_api_rest::handlers::saml_idp_slo::slo_redirect">slo_<wbr>redirect</a></dt><dd><code>GET /saml/v2/{tenant_id}/slo</code> — the HTTP-Redirect binding.</dd><dt><a class="fn" href="fn.sso_logout.html" title="fn axiam_api_rest::handlers::saml_idp_slo::sso_logout">sso_<wbr>logout</a></dt><dd><code>GET /saml/v2/{tenant_id}/sso/logout</code> — end the browser’s own session and tell
+the SPs that hold it (D-39).</dd></dl></section></div></main></body></html>

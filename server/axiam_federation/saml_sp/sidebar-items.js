@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MIN_SP_RSA_BITS"],"fn":["check_redirect_uri_registration","saml_sp_violations","saml_sp_write_refusals","sp_signing_certificate_refusal","validate_saml_service_provider","validate_saml_service_provider_write"]};

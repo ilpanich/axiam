@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["create_registration_token","list_registration_tokens","register"],"struct":["CreateRegistrationTokenRequest","CreateRegistrationTokenResponse","DcrErrorResponse","RegistrationTokenResponse"]};
+window.SIDEBAR_ITEMS = {"fn":["create_registration_token","delete_registration","list_registration_tokens","read_registration","register","update_registration"],"struct":["ClientIdPath","CreateRegistrationTokenRequest","CreateRegistrationTokenResponse","DcrErrorResponse","RegistrationTokenResponse"]};

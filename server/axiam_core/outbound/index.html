@@ -1,0 +1,64 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The shared outbound dispatcher’s ports (D-36, T23.5.1)."><title>axiam_core::outbound - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module outbound</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_core/index.html">axiam_<wbr>core</a><span class="version">1.0.0-beta18</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module outbound</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-three-pieces" title="The three pieces">The three pieces</a></li><li><a href="#adding-a-kind-ssf-push-outbound-scim" title="Adding a kind (SSF push, outbound SCIM)">Adding a kind (SSF push, outbound SCIM)</a></li><li><a href="#implementing-outbounddeliverer" title="Implementing `OutboundDeliverer`">Implementing <code>OutboundDeliverer</code></a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_core</a></div><h1>Module <span>outbound</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_core/outbound.rs.html#1-440">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The shared outbound dispatcher’s ports (D-36, T23.5.1).</p>
+<p>AXIAM pushes work to systems it does not control: webhooks today, Shared
+Signals Framework push (G-5) and outbound SCIM operations (G-6) next. All of
+them need the same machinery: a durable queue, one attempt per delivery,
+bounded exponential retry, a dead-letter queue, an audit trail. That
+machinery is in <code>axiam-amqp</code>; the protocol that decides <em>what one attempt
+does</em> lives in the crate that owns the protocol. This module is the seam
+between the two, and it is layer 0 so that every protocol crate, whichever
+layer it sits in, can reach it.</p>
+<h2 id="the-three-pieces"><a class="doc-anchor" href="#the-three-pieces">§</a>The three pieces</h2>
+<ul>
+<li><a href="struct.OutboundMessage.html" title="struct axiam_core::outbound::OutboundMessage"><code>OutboundMessage</code></a> — the envelope that travels through the queue.</li>
+<li><a href="trait.OutboundPublisher.html" title="trait axiam_core::outbound::OutboundPublisher"><code>OutboundPublisher</code></a> — <em>enqueue</em> a message. What a producer holds.</li>
+<li><a href="trait.OutboundDeliverer.html" title="trait axiam_core::outbound::OutboundDeliverer"><code>OutboundDeliverer</code></a> — make <em>one attempt</em> at delivering a message and
+report <a href="enum.DeliveryOutcome.html" title="enum axiam_core::outbound::DeliveryOutcome"><code>DeliveryOutcome</code></a>. What a protocol crate implements.</li>
+</ul>
+<p>Retry, backoff, the attempt counter, the maximum-attempts decision and the
+dead-letter queue are <strong>not</strong> the deliverer’s business. A deliverer never
+sleeps, never counts attempts and never republishes; it reports what
+happened and the consumer loop decides.</p>
+<h2 id="adding-a-kind-ssf-push-outbound-scim"><a class="doc-anchor" href="#adding-a-kind-ssf-push-outbound-scim">§</a>Adding a kind (SSF push, outbound SCIM)</h2>
+<ol>
+<li>Add one line to the <code>outbound_kinds!</code> invocation below:
+<code>SsfPush =&gt; "ssf_push"</code>. The slug fixes the kind’s queue names
+(<code>axiam.ssf_push</code>, <code>.retry</code>, <code>.dlq</code>), its env-var prefix
+(<code>AXIAM__&lt;SLUG&gt;__MAX_ATTEMPTS</code>, <code>…__BACKOFF_BASE_MS</code>,
+<code>…__BACKOFF_CEILING_MS</code>, with the slug upper-cased) and its audit action prefix
+(<code>ssf_push.delivery_succeeded</code>, <code>.delivery_attempt</code>, <code>.delivery_failed</code>).</li>
+<li>Implement <a href="trait.OutboundDeliverer.html" title="trait axiam_core::outbound::OutboundDeliverer"><code>OutboundDeliverer</code></a> in the crate that owns the protocol,
+returning that kind from <a href="trait.OutboundDeliverer.html#tymethod.kind" title="method axiam_core::outbound::OutboundDeliverer::kind"><code>OutboundDeliverer::kind</code></a>.</li>
+<li>In <code>axiam-server</code>: call <code>AmqpManager::declare_outbound_topology(kind)</code>,
+register the deliverer in <code>axiam_amqp::outbound::OutboundDeliverers</code>, and
+run <code>axiam_amqp::outbound::run_outbound_consumer</code> for the kind.</li>
+</ol>
+<p>No change to <code>axiam-amqp</code>’s loop, topology or publisher is needed.</p>
+<h2 id="implementing-outbounddeliverer"><a class="doc-anchor" href="#implementing-outbounddeliverer">§</a>Implementing <a href="trait.OutboundDeliverer.html" title="trait axiam_core::outbound::OutboundDeliverer"><code>OutboundDeliverer</code></a></h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>axiam_core::outbound::{
+    DeliveryOutcome, OutboundDeliverer, OutboundError, OutboundFuture, OutboundKind,
+    OutboundMessage,
+};
+
+<span class="kw">struct </span>Discarding;
+
+<span class="kw">impl </span>OutboundDeliverer <span class="kw">for </span>Discarding {
+    <span class="kw">fn </span>kind(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; OutboundKind {
+        OutboundKind::Webhook
+    }
+
+    <span class="kw">fn </span>deliver_attempt&lt;<span class="lifetime">'a</span>&gt;(
+        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
+        msg: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>OutboundMessage,
+    ) -&gt; OutboundFuture&lt;<span class="lifetime">'a</span>, <span class="prelude-ty">Result</span>&lt;DeliveryOutcome, OutboundError&gt;&gt; {
+        Box::pin(<span class="kw">async move </span>{
+            <span class="kw">if </span>msg.payload.is_null() {
+                <span class="comment">// Never going to succeed; do not burn the retry budget.
+                </span><span class="kw">return </span><span class="prelude-val">Ok</span>(DeliveryOutcome::DeadLetter { reason: <span class="string">"empty payload"</span>.into() });
+            }
+            <span class="prelude-val">Ok</span>(DeliveryOutcome::Delivered { response_status: <span class="prelude-val">Some</span>(<span class="number">204</span>) })
+        })
+    }
+}</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.OutboundMessage.html" title="struct axiam_core::outbound::OutboundMessage">Outbound<wbr>Message</a></dt><dd>The envelope for one outbound delivery, as it travels through the queue.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.DeliveryOutcome.html" title="enum axiam_core::outbound::DeliveryOutcome">Delivery<wbr>Outcome</a></dt><dd>What a single delivery attempt achieved. See <a href="trait.OutboundDeliverer.html" title="trait axiam_core::outbound::OutboundDeliverer"><code>OutboundDeliverer</code></a>.</dd><dt><a class="enum" href="enum.OutboundError.html" title="enum axiam_core::outbound::OutboundError">Outbound<wbr>Error</a></dt><dd>Failure to enqueue, or a deliverer that could not even report an outcome.</dd><dt><a class="enum" href="enum.OutboundKind.html" title="enum axiam_core::outbound::OutboundKind">Outbound<wbr>Kind</a></dt><dd>What an outbound delivery is <em>for</em>; selects the queue topology, the
+retry configuration and the <a href="trait.OutboundDeliverer.html" title="trait axiam_core::outbound::OutboundDeliverer"><code>OutboundDeliverer</code></a>.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.OutboundDeliverer.html" title="trait axiam_core::outbound::OutboundDeliverer">Outbound<wbr>Deliverer</a></dt><dd>Make one delivery attempt. The protocol side of the dispatcher.</dd><dt><a class="trait" href="trait.OutboundPublisher.html" title="trait axiam_core::outbound::OutboundPublisher">Outbound<wbr>Publisher</a></dt><dd>Enqueue an outbound delivery. The producer side of the dispatcher.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.OutboundFuture.html" title="type axiam_core::outbound::OutboundFuture">Outbound<wbr>Future</a></dt><dd>A boxed, <code>Send</code> future: the return type that keeps the ports object-safe
+(<code>Arc&lt;dyn OutboundPublisher&gt;</code> / <code>Arc&lt;dyn OutboundDeliverer&gt;</code>) without a
+dependency on an async-trait crate in layer 0.</dd></dl></section></div></main></body></html>

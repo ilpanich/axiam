@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PPOLICY_PERMANENT_LOCK","UAC_ACCOUNT_DISABLED"],"enum":["EntryLookup"],"fn":["disabled_attribute","is_disabled"],"struct":["ChangedEntries","DirectorySession","RootDse","SyncEntry"]};

@@ -1,0 +1,1109 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/handlers/ssf.rs`."><title>ssf.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/handlers/</div>ssf.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! The Shared Signals Framework transmitter's protocol surface (G-5, T23.5.2,
+<a href=#2 id=2 data-nosnippet>2</a>//! SSF 1.0 §7 and §8, contract §32.6): transmitter metadata and the stream
+<a href=#3 id=3 data-nosnippet>3</a>//! management API a receiver calls.
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! # Discovery (D-45)
+<a href=#6 id=6 data-nosnippet>6</a>//!
+<a href=#7 id=7 data-nosnippet>7</a>//! `GET /.well-known/ssf-configuration?tenant_id={t}` everywhere, and
+<a href=#8 id=8 data-nosnippet>8</a>//! `GET /.well-known/ssf-configuration/t/{t}` — SSF §7.2's insertion of the
+<a href=#9 id=9 data-nosnippet>9</a>//! well-known segment into the issuer `{root}/t/{t}` — where the deployment
+<a href=#10 id=10 data-nosnippet>10</a>//! serves tenant issuers (T21.6). Unauthenticated, as the specification
+<a href=#11 id=11 data-nosnippet>11</a>//! requires. **An empty `404`** for an unknown tenant, a tenant whose effective
+<a href=#12 id=12 data-nosnippet>12</a>//! `ssf_enabled` is off, a missing or malformed tenant id — one answer for every
+<a href=#13 id=13 data-nosnippet>13</a>//! way of having nothing to say, so the route tells nobody which tenants exist
+<a href=#14 id=14 data-nosnippet>14</a>//! or transmit (the D-20 shape).
+<a href=#15 id=15 data-nosnippet>15</a>//!
+<a href=#16 id=16 data-nosnippet>16</a>//! # The stream management API (D-50)
+<a href=#17 id=17 data-nosnippet>17</a>//!
+<a href=#18 id=18 data-nosnippet>18</a>//! `/ssf/v1/stream`, `/ssf/v1/status`, `/ssf/v1/verify`, authenticated by a
+<a href=#19 id=19 data-nosnippet>19</a>//! **receiver token**: an access token issued to an OAuth2 client by the
+<a href=#20 id=20 data-nosnippet>20</a>//! client-credentials grant with the `ssf.manage` scope ([`SsfReceiverToken`]).
+<a href=#21 id=21 data-nosnippet>21</a>//! A user token, a service-account token or a client token without the scope is
+<a href=#22 id=22 data-nosnippet>22</a>//! `403`. The tenant is the token's; a stream is the receiver's only when its
+<a href=#23 id=23 data-nosnippet>23</a>//! `receiver_client_id` is the token's `client_id`, and any other stream —
+<a href=#24 id=24 data-nosnippet>24</a>//! another receiver's, another tenant's, or one in a tenant whose transmitter
+<a href=#25 id=25 data-nosnippet>25</a>//! is switched off — is the same `404` as one that does not exist (SSF §8.1.1:
+<a href=#26 id=26 data-nosnippet>26</a>//! "no Event Stream with the given stream_id for this Event Receiver").
+<a href=#27 id=27 data-nosnippet>27</a>//!
+<a href=#28 id=28 data-nosnippet>28</a>//! Streams are registered and deleted by an administrator (`handlers::
+<a href=#29 id=29 data-nosnippet>29</a>//! ssf_admin`); `POST` and `DELETE` on the configuration endpoint are `403`.
+<a href=#30 id=30 data-nosnippet>30</a>//! What a receiver may change is `axiam_oauth2::ssf::apply_receiver_update`'s
+<a href=#31 id=31 data-nosnippet>31</a>//! rule: its requested events (never beyond the administrator's ceiling), its
+<a href=#32 id=32 data-nosnippet>32</a>//! description, its push endpoint under the outbound address policy, and the
+<a href=#33 id=33 data-nosnippet>33</a>//! push `Authorization` header. The status it may set unless an administrator
+<a href=#34 id=34 data-nosnippet>34</a>//! set something other than `enabled`. Verification is limited per stream by
+<a href=#35 id=35 data-nosnippet>35</a>//! `min_verification_interval` (`429`) besides the route's bucket.
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a></span><span class="kw">use </span>actix_web::{HttpRequest, HttpResponse, web};
+<a href=#38 id=38 data-nosnippet>38</a><span class="kw">use </span>axiam_auth::token::SubjectKind;
+<a href=#39 id=39 data-nosnippet>39</a><span class="kw">use </span>axiam_core::error::AxiamError;
+<a href=#40 id=40 data-nosnippet>40</a><span class="kw">use </span>axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+<a href=#41 id=41 data-nosnippet>41</a><span class="kw">use </span>axiam_core::models::ssf::{
+<a href=#42 id=42 data-nosnippet>42</a>    MIN_VERIFICATION_INTERVAL_SECS, POLL_MAX_EVENTS_PER_RESPONSE, SHARED_ISSUER_INACTIVE_REASON,
+<a href=#43 id=43 data-nosnippet>43</a>    SSF_MANAGE_SCOPE, SecretChange, SsfDeliveryMethod, SsfStatusActor, SsfStream, SsfStreamStatus,
+<a href=#44 id=44 data-nosnippet>44</a>    SsfStreamUpdate,
+<a href=#45 id=45 data-nosnippet>45</a>};
+<a href=#46 id=46 data-nosnippet>46</a><span class="kw">use </span>axiam_core::repository::{
+<a href=#47 id=47 data-nosnippet>47</a>    AuditLogRepository, SettingsRepository, SsfEventBufferRepository, SsfStreamRepository,
+<a href=#48 id=48 data-nosnippet>48</a>    TenantRepository,
+<a href=#49 id=49 data-nosnippet>49</a>};
+<a href=#50 id=50 data-nosnippet>50</a><span class="kw">use </span>axiam_oauth2::ssf::{
+<a href=#51 id=51 data-nosnippet>51</a>    ReceiverStreamUpdate, ReceiverUpdateMode, SsfConfiguration, SsfError, SsfStreamConfiguration,
+<a href=#52 id=52 data-nosnippet>52</a>    apply_receiver_update, build_ssf_configuration, prepare_verification, sign_set,
+<a href=#53 id=53 data-nosnippet>53</a>    stream_configuration, validate_status_reason,
+<a href=#54 id=54 data-nosnippet>54</a>};
+<a href=#55 id=55 data-nosnippet>55</a><span class="kw">use </span>chrono::Utc;
+<a href=#56 id=56 data-nosnippet>56</a><span class="kw">use </span>serde::{Deserialize, Serialize};
+<a href=#57 id=57 data-nosnippet>57</a><span class="kw">use </span>surrealdb::Connection;
+<a href=#58 id=58 data-nosnippet>58</a><span class="kw">use </span>uuid::Uuid;
+<a href=#59 id=59 data-nosnippet>59</a>
+<a href=#60 id=60 data-nosnippet>60</a><span class="kw">use </span><span class="kw">crate</span>::error::AxiamApiError;
+<a href=#61 id=61 data-nosnippet>61</a><span class="kw">use </span><span class="kw">crate</span>::extractors::client_info::client_ip;
+<a href=#62 id=62 data-nosnippet>62</a><span class="kw">use </span><span class="kw">crate</span>::state::AppState;
+<a href=#63 id=63 data-nosnippet>63</a>
+<a href=#64 id=64 data-nosnippet>64</a><span class="doccomment">/// Audit action: a receiver changed its stream's configuration.
+<a href=#65 id=65 data-nosnippet>65</a></span><span class="kw">pub const </span>AUDIT_RECEIVER_UPDATED: <span class="kw-2">&amp;</span>str = <span class="string">"ssf_stream.receiver_updated"</span>;
+<a href=#66 id=66 data-nosnippet>66</a><span class="doccomment">/// Audit action: a receiver changed its stream's status.
+<a href=#67 id=67 data-nosnippet>67</a></span><span class="kw">pub const </span>AUDIT_RECEIVER_STATUS: <span class="kw-2">&amp;</span>str = <span class="string">"ssf_stream.receiver_status_changed"</span>;
+<a href=#68 id=68 data-nosnippet>68</a><span class="doccomment">/// Audit action: a receiver asked for a verification event.
+<a href=#69 id=69 data-nosnippet>69</a></span><span class="kw">pub const </span>AUDIT_VERIFICATION: <span class="kw-2">&amp;</span>str = <span class="string">"ssf_stream.verification_requested"</span>;
+<a href=#70 id=70 data-nosnippet>70</a>
+<a href=#71 id=71 data-nosnippet>71</a><span class="doccomment">/// Audit action: a receiver reported, in a poll request's `setErrs`, that it
+<a href=#72 id=72 data-nosnippet>72</a>/// could not accept a SET (RFC 8936 §2.4). `metadata.err` is one of RFC 8935
+<a href=#73 id=73 data-nosnippet>73</a>/// §2.4's codes (or `unrecognized`); a receiver's free-text description is never
+<a href=#74 id=74 data-nosnippet>74</a>/// stored.
+<a href=#75 id=75 data-nosnippet>75</a></span><span class="kw">pub const </span>AUDIT_POLL_SET_ERROR: <span class="kw-2">&amp;</span>str = <span class="string">"ssf_stream.poll_set_error"</span>;
+<a href=#76 id=76 data-nosnippet>76</a>
+<a href=#77 id=77 data-nosnippet>77</a><span class="doccomment">/// Longest verification `state`, in bytes.
+<a href=#78 id=78 data-nosnippet>78</a></span><span class="kw">const </span>MAX_STATE_BYTES: usize = <span class="number">1024</span>;
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a><span class="doccomment">/// The longest a poll request waits for an event when it does not ask to return
+<a href=#81 id=81 data-nosnippet>81</a>/// immediately (D-48: a long poll is at most 30 s).
+<a href=#82 id=82 data-nosnippet>82</a></span><span class="kw">pub const </span>POLL_LONG_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(<span class="number">30</span>);
+<a href=#83 id=83 data-nosnippet>83</a><span class="doccomment">/// How often a waiting poll looks at the buffer again.
+<a href=#84 id=84 data-nosnippet>84</a></span><span class="kw">const </span>POLL_WAIT_STEP: std::time::Duration = std::time::Duration::from_millis(<span class="number">500</span>);
+<a href=#85 id=85 data-nosnippet>85</a><span class="doccomment">/// Largest request body a poll takes, in bytes.
+<a href=#86 id=86 data-nosnippet>86</a></span><span class="kw">pub const </span>POLL_MAX_BODY_BYTES: usize = <span class="number">32_768</span>;
+<a href=#87 id=87 data-nosnippet>87</a><span class="doccomment">/// Most `ack` entries one poll request may carry.
+<a href=#88 id=88 data-nosnippet>88</a></span><span class="kw">const </span>POLL_MAX_ACKS: usize = <span class="number">1_000</span>;
+<a href=#89 id=89 data-nosnippet>89</a><span class="doccomment">/// Most `setErrs` entries one poll request may carry.
+<a href=#90 id=90 data-nosnippet>90</a></span><span class="kw">const </span>POLL_MAX_SET_ERRS: usize = <span class="number">100</span>;
+<a href=#91 id=91 data-nosnippet>91</a><span class="doccomment">/// A `jti` longer than this names nothing (they are 32 characters).
+<a href=#92 id=92 data-nosnippet>92</a></span><span class="kw">const </span>MAX_JTI_BYTES: usize = <span class="number">64</span>;
+<a href=#93 id=93 data-nosnippet>93</a>
+<a href=#94 id=94 data-nosnippet>94</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#95 id=95 data-nosnippet>95</a>// The tenant switch
+<a href=#96 id=96 data-nosnippet>96</a>// ---------------------------------------------------------------------------
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a></span><span class="doccomment">/// Whether `tenant_id` exists, its effective `ssf_enabled` is on **and** the
+<a href=#99 id=99 data-nosnippet>99</a>/// D-55 gate does not hold. An unknown tenant is `false`, never an error a
+<a href=#100 id=100 data-nosnippet>100</a>/// caller could tell apart. Discovery, the receiver API, verification and the
+<a href=#101 id=101 data-nosnippet>101</a>/// stream-updated announcement all ask this, so the gate makes SSF behave
+<a href=#102 id=102 data-nosnippet>102</a>/// exactly as `ssf_enabled` off for every tenant.
+<a href=#103 id=103 data-nosnippet>103</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>ssf_enabled_for&lt;C: Connection + Clone&gt;(
+<a href=#104 id=104 data-nosnippet>104</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#105 id=105 data-nosnippet>105</a>    tenant_id: Uuid,
+<a href=#106 id=106 data-nosnippet>106</a>) -&gt; <span class="prelude-ty">Result</span>&lt;bool, AxiamError&gt; {
+<a href=#107 id=107 data-nosnippet>107</a>    <span class="prelude-val">Ok</span>(transmitter_status(state, tenant_id).<span class="kw">await</span><span class="question-mark">?</span>.is_none())
+<a href=#108 id=108 data-nosnippet>108</a>}
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a><span class="doccomment">/// Why the tenant's transmitter is inactive, or `None` when it is active: the
+<a href=#111 id=111 data-nosnippet>111</a>/// tenant does not exist, its `ssf_enabled` is off, or the D-55 gate holds.
+<a href=#112 id=112 data-nosnippet>112</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>transmitter_status&lt;C: Connection + Clone&gt;(
+<a href=#113 id=113 data-nosnippet>113</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#114 id=114 data-nosnippet>114</a>    tenant_id: Uuid,
+<a href=#115 id=115 data-nosnippet>115</a>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt;, AxiamError&gt; {
+<a href=#116 id=116 data-nosnippet>116</a>    <span class="kw">let </span>tenant = <span class="kw">match </span>state.tenant_repo.get_by_id(tenant_id).<span class="kw">await </span>{
+<a href=#117 id=117 data-nosnippet>117</a>        <span class="prelude-val">Ok</span>(tenant) =&gt; tenant,
+<a href=#118 id=118 data-nosnippet>118</a>        <span class="prelude-val">Err</span>(AxiamError::NotFound { .. }) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(NO_SUCH_TENANT)),
+<a href=#119 id=119 data-nosnippet>119</a>        <span class="prelude-val">Err</span>(other) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(other),
+<a href=#120 id=120 data-nosnippet>120</a>    };
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="kw">let </span>settings = state
+<a href=#122 id=122 data-nosnippet>122</a>        .settings_repo
+<a href=#123 id=123 data-nosnippet>123</a>        .get_effective_settings(tenant.organization_id, tenant_id)
+<a href=#124 id=124 data-nosnippet>124</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#125 id=125 data-nosnippet>125</a>    <span class="kw">if </span>!settings.oidc.ssf_enabled {
+<a href=#126 id=126 data-nosnippet>126</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(SWITCH_OFF));
+<a href=#127 id=127 data-nosnippet>127</a>    }
+<a href=#128 id=128 data-nosnippet>128</a>    <span class="kw">if </span>state.ssf.gate.check().<span class="kw">await</span><span class="question-mark">?</span>.holds() {
+<a href=#129 id=129 data-nosnippet>129</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(SHARED_ISSUER_INACTIVE_REASON));
+<a href=#130 id=130 data-nosnippet>130</a>    }
+<a href=#131 id=131 data-nosnippet>131</a>    <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>)
+<a href=#132 id=132 data-nosnippet>132</a>}
+<a href=#133 id=133 data-nosnippet>133</a>
+<a href=#134 id=134 data-nosnippet>134</a><span class="doccomment">/// [`transmitter_status`]'s answer for a tenant that does not exist.
+<a href=#135 id=135 data-nosnippet>135</a></span><span class="kw">const </span>NO_SUCH_TENANT: <span class="kw-2">&amp;</span>str = <span class="string">"the tenant does not exist"</span>;
+<a href=#136 id=136 data-nosnippet>136</a><span class="doccomment">/// [`transmitter_status`]'s answer for a tenant whose switch is off.
+<a href=#137 id=137 data-nosnippet>137</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">const </span>SWITCH_OFF: <span class="kw-2">&amp;</span>str = <span class="string">"ssf_enabled is off for this tenant"</span>;
+<a href=#138 id=138 data-nosnippet>138</a>
+<a href=#139 id=139 data-nosnippet>139</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#140 id=140 data-nosnippet>140</a>// Discovery
+<a href=#141 id=141 data-nosnippet>141</a>// ---------------------------------------------------------------------------
+<a href=#142 id=142 data-nosnippet>142</a>
+<a href=#143 id=143 data-nosnippet>143</a></span><span class="doccomment">/// `?tenant_id=` of the root discovery form.
+<a href=#144 id=144 data-nosnippet>144</a></span><span class="attr">#[derive(Debug, Deserialize)]
+<a href=#145 id=145 data-nosnippet>145</a></span><span class="kw">pub struct </span>SsfDiscoveryQuery {
+<a href=#146 id=146 data-nosnippet>146</a>    <span class="doccomment">/// The tenant whose transmitter metadata is asked for.
+<a href=#147 id=147 data-nosnippet>147</a>    </span><span class="kw">pub </span>tenant_id: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#148 id=148 data-nosnippet>148</a>}
+<a href=#149 id=149 data-nosnippet>149</a>
+<a href=#150 id=150 data-nosnippet>150</a><span class="kw">async fn </span>discovery_for&lt;C: Connection + Clone&gt;(
+<a href=#151 id=151 data-nosnippet>151</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#152 id=152 data-nosnippet>152</a>    tenant: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;,
+<a href=#153 id=153 data-nosnippet>153</a>) -&gt; HttpResponse {
+<a href=#154 id=154 data-nosnippet>154</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(tenant_id) = tenant.and_then(|raw| Uuid::parse_str(raw).ok()) <span class="kw">else </span>{
+<a href=#155 id=155 data-nosnippet>155</a>        <span class="kw">return </span>HttpResponse::NotFound().finish();
+<a href=#156 id=156 data-nosnippet>156</a>    };
+<a href=#157 id=157 data-nosnippet>157</a>    <span class="kw">match </span>ssf_enabled_for(state, tenant_id).<span class="kw">await </span>{
+<a href=#158 id=158 data-nosnippet>158</a>        <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>) =&gt; HttpResponse::Ok()
+<a href=#159 id=159 data-nosnippet>159</a>            .append_header((<span class="string">"Cache-Control"</span>, <span class="string">"public, max-age=300"</span>))
+<a href=#160 id=160 data-nosnippet>160</a>            .json(build_ssf_configuration(<span class="kw-2">&amp;</span>state.auth_config, tenant_id)),
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="prelude-val">Ok</span>(<span class="bool-val">false</span>) =&gt; HttpResponse::NotFound().finish(),
+<a href=#162 id=162 data-nosnippet>162</a>        <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#163 id=163 data-nosnippet>163</a>            <span class="macro">tracing::error!</span>(target: <span class="string">"axiam::ssf"</span>, %error, <span class="string">"SSF discovery could not read the tenant"</span>);
+<a href=#164 id=164 data-nosnippet>164</a>            HttpResponse::ServiceUnavailable().finish()
+<a href=#165 id=165 data-nosnippet>165</a>        }
+<a href=#166 id=166 data-nosnippet>166</a>    }
+<a href=#167 id=167 data-nosnippet>167</a>}
+<a href=#168 id=168 data-nosnippet>168</a>
+<a href=#169 id=169 data-nosnippet>169</a><span class="doccomment">/// `GET /.well-known/ssf-configuration` — SSF 1.0 §7 transmitter metadata.
+<a href=#170 id=170 data-nosnippet>170</a></span><span class="attr">#[utoipa::path(
+<a href=#171 id=171 data-nosnippet>171</a>    get,
+<a href=#172 id=172 data-nosnippet>172</a>    path = <span class="string">"/.well-known/ssf-configuration"</span>,
+<a href=#173 id=173 data-nosnippet>173</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#174 id=174 data-nosnippet>174</a>    params((<span class="string">"tenant_id" </span>= Uuid, Query, description = <span class="string">"The tenant whose transmitter metadata is asked for"</span>)),
+<a href=#175 id=175 data-nosnippet>175</a>    responses(
+<a href=#176 id=176 data-nosnippet>176</a>        (status = <span class="number">200</span>, description = <span class="string">"SSF transmitter metadata"</span>, body = SsfConfiguration),
+<a href=#177 id=177 data-nosnippet>177</a>        (status = <span class="number">404</span>, description = <span class="string">"Nothing to describe: an unknown tenant, or one whose \
+<a href=#178 id=178 data-nosnippet>178</a>                                      transmitter is off or inactive — `ssf_enabled` off, or a \
+<a href=#179 id=179 data-nosnippet>179</a>                                      deployment of several tenants without per-tenant issuers \
+<a href=#180 id=180 data-nosnippet>180</a>                                      (D-55) — (indistinguishable)"</span>),
+<a href=#181 id=181 data-nosnippet>181</a>        (status = <span class="number">429</span>, description = <span class="string">"Rate limit"</span>),
+<a href=#182 id=182 data-nosnippet>182</a>    ),
+<a href=#183 id=183 data-nosnippet>183</a>)]
+<a href=#184 id=184 data-nosnippet>184</a></span><span class="kw">pub async fn </span>ssf_configuration&lt;C: Connection + Clone&gt;(
+<a href=#185 id=185 data-nosnippet>185</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#186 id=186 data-nosnippet>186</a>    query: web::Query&lt;SsfDiscoveryQuery&gt;,
+<a href=#187 id=187 data-nosnippet>187</a>) -&gt; HttpResponse {
+<a href=#188 id=188 data-nosnippet>188</a>    discovery_for(<span class="kw-2">&amp;</span>state, query.tenant_id.as_deref()).<span class="kw">await
+<a href=#189 id=189 data-nosnippet>189</a></span>}
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a><span class="doccomment">/// `GET /.well-known/ssf-configuration/t/{tenant_id}` — the same metadata at
+<a href=#192 id=192 data-nosnippet>192</a>/// the SSF §7.2 insertion form of the tenant issuer `{root}/t/{tenant_id}`.
+<a href=#193 id=193 data-nosnippet>193</a>/// Mounted only where the deployment serves tenant issuers.
+<a href=#194 id=194 data-nosnippet>194</a></span><span class="attr">#[utoipa::path(
+<a href=#195 id=195 data-nosnippet>195</a>    get,
+<a href=#196 id=196 data-nosnippet>196</a>    path = <span class="string">"/.well-known/ssf-configuration/t/{tenant_id}"</span>,
+<a href=#197 id=197 data-nosnippet>197</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#198 id=198 data-nosnippet>198</a>    params((<span class="string">"tenant_id" </span>= Uuid, Path, description = <span class="string">"The tenant this issuer names"</span>)),
+<a href=#199 id=199 data-nosnippet>199</a>    responses(
+<a href=#200 id=200 data-nosnippet>200</a>        (status = <span class="number">200</span>, description = <span class="string">"SSF transmitter metadata"</span>, body = SsfConfiguration),
+<a href=#201 id=201 data-nosnippet>201</a>        (status = <span class="number">404</span>, description = <span class="string">"Nothing to describe: an unknown tenant, or one whose \
+<a href=#202 id=202 data-nosnippet>202</a>                                      transmitter is off (indistinguishable)"</span>),
+<a href=#203 id=203 data-nosnippet>203</a>        (status = <span class="number">429</span>, description = <span class="string">"Rate limit"</span>),
+<a href=#204 id=204 data-nosnippet>204</a>    ),
+<a href=#205 id=205 data-nosnippet>205</a>)]
+<a href=#206 id=206 data-nosnippet>206</a></span><span class="kw">pub async fn </span>ssf_configuration_tenant_path&lt;C: Connection + Clone&gt;(
+<a href=#207 id=207 data-nosnippet>207</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#208 id=208 data-nosnippet>208</a>    req: HttpRequest,
+<a href=#209 id=209 data-nosnippet>209</a>) -&gt; HttpResponse {
+<a href=#210 id=210 data-nosnippet>210</a>    discovery_for(<span class="kw-2">&amp;</span>state, req.match_info().get(<span class="string">"tenant_id"</span>)).<span class="kw">await
+<a href=#211 id=211 data-nosnippet>211</a></span>}
+<a href=#212 id=212 data-nosnippet>212</a>
+<a href=#213 id=213 data-nosnippet>213</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#214 id=214 data-nosnippet>214</a>// The receiver token
+<a href=#215 id=215 data-nosnippet>215</a>// ---------------------------------------------------------------------------
+<a href=#216 id=216 data-nosnippet>216</a>
+<a href=#217 id=217 data-nosnippet>217</a></span><span class="doccomment">/// A validated receiver token: an access token issued to an OAuth2 client by
+<a href=#218 id=218 data-nosnippet>218</a>/// the client-credentials grant, carrying `ssf.manage`. Its own extractor for
+<a href=#219 id=219 data-nosnippet>219</a>/// the reason `ProtectionApiToken` is: the subject is a `client_id`, not a
+<a href=#220 id=220 data-nosnippet>220</a>/// principal in the RBAC graph, and the scope **is** the gate.
+<a href=#221 id=221 data-nosnippet>221</a></span><span class="kw">pub struct </span>SsfReceiverToken {
+<a href=#222 id=222 data-nosnippet>222</a>    <span class="doccomment">/// The receiver's `client_id` — the token's `sub`.
+<a href=#223 id=223 data-nosnippet>223</a>    </span><span class="kw">pub </span>client_id: String,
+<a href=#224 id=224 data-nosnippet>224</a>    <span class="doccomment">/// The token's tenant.
+<a href=#225 id=225 data-nosnippet>225</a>    </span><span class="kw">pub </span>tenant_id: Uuid,
+<a href=#226 id=226 data-nosnippet>226</a>}
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a><span class="kw">fn </span>forbidden(reason: <span class="kw-2">&amp;</span>str) -&gt; AxiamApiError {
+<a href=#229 id=229 data-nosnippet>229</a>    AxiamApiError(AxiamError::AuthorizationDenied {
+<a href=#230 id=230 data-nosnippet>230</a>        reason: reason.to_owned(),
+<a href=#231 id=231 data-nosnippet>231</a>        action: <span class="prelude-val">None</span>,
+<a href=#232 id=232 data-nosnippet>232</a>        resource_id: <span class="prelude-val">None</span>,
+<a href=#233 id=233 data-nosnippet>233</a>    })
+<a href=#234 id=234 data-nosnippet>234</a>}
+<a href=#235 id=235 data-nosnippet>235</a>
+<a href=#236 id=236 data-nosnippet>236</a><span class="kw">fn </span>extract_receiver(req: <span class="kw-2">&amp;</span>HttpRequest) -&gt; <span class="prelude-ty">Result</span>&lt;SsfReceiverToken, AxiamApiError&gt; {
+<a href=#237 id=237 data-nosnippet>237</a>    <span class="kw">let </span>claims = <span class="kw">crate</span>::extractors::auth::parse_validated_claims(req)<span class="question-mark">?</span>.<span class="number">0</span>;
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="kw">if </span>claims.sub_kind != SubjectKind::OAuth2Client {
+<a href=#239 id=239 data-nosnippet>239</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(forbidden(
+<a href=#240 id=240 data-nosnippet>240</a>            <span class="string">"the SSF stream management API takes an OAuth2 client's client-credentials token"</span>,
+<a href=#241 id=241 data-nosnippet>241</a>        ));
+<a href=#242 id=242 data-nosnippet>242</a>    }
+<a href=#243 id=243 data-nosnippet>243</a>    <span class="kw">if </span>!claims
+<a href=#244 id=244 data-nosnippet>244</a>        .scope
+<a href=#245 id=245 data-nosnippet>245</a>        .as_deref()
+<a href=#246 id=246 data-nosnippet>246</a>        .is_some_and(|s| s.split(<span class="string">' '</span>).any(|granted| granted == SSF_MANAGE_SCOPE))
+<a href=#247 id=247 data-nosnippet>247</a>    {
+<a href=#248 id=248 data-nosnippet>248</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(forbidden(<span class="kw-2">&amp;</span><span class="macro">format!</span>(
+<a href=#249 id=249 data-nosnippet>249</a>            <span class="string">"the SSF stream management API requires the '{SSF_MANAGE_SCOPE}' scope"
+<a href=#250 id=250 data-nosnippet>250</a>        </span>)));
+<a href=#251 id=251 data-nosnippet>251</a>    }
+<a href=#252 id=252 data-nosnippet>252</a>    <span class="kw">let </span>tenant_id = Uuid::parse_str(<span class="kw-2">&amp;</span>claims.tenant_id).map_err(|<span class="kw">_</span>| {
+<a href=#253 id=253 data-nosnippet>253</a>        AxiamApiError(AxiamError::AuthenticationFailed {
+<a href=#254 id=254 data-nosnippet>254</a>            reason: <span class="string">"invalid tenant_id claim"</span>.into(),
+<a href=#255 id=255 data-nosnippet>255</a>        })
+<a href=#256 id=256 data-nosnippet>256</a>    })<span class="question-mark">?</span>;
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="prelude-val">Ok</span>(SsfReceiverToken {
+<a href=#258 id=258 data-nosnippet>258</a>        client_id: claims.sub,
+<a href=#259 id=259 data-nosnippet>259</a>        tenant_id,
+<a href=#260 id=260 data-nosnippet>260</a>    })
+<a href=#261 id=261 data-nosnippet>261</a>}
+<a href=#262 id=262 data-nosnippet>262</a>
+<a href=#263 id=263 data-nosnippet>263</a><span class="kw">impl </span>actix_web::FromRequest <span class="kw">for </span>SsfReceiverToken {
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="kw">type </span>Error = AxiamApiError;
+<a href=#265 id=265 data-nosnippet>265</a>    <span class="kw">type </span>Future = std::future::Ready&lt;<span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, <span class="self">Self</span>::Error&gt;&gt;;
+<a href=#266 id=266 data-nosnippet>266</a>
+<a href=#267 id=267 data-nosnippet>267</a>    <span class="kw">fn </span>from_request(
+<a href=#268 id=268 data-nosnippet>268</a>        req: <span class="kw-2">&amp;</span>actix_web::HttpRequest,
+<a href=#269 id=269 data-nosnippet>269</a>        _payload: <span class="kw-2">&amp;mut </span>actix_web::dev::Payload,
+<a href=#270 id=270 data-nosnippet>270</a>    ) -&gt; <span class="self">Self</span>::Future {
+<a href=#271 id=271 data-nosnippet>271</a>        std::future::ready(extract_receiver(req))
+<a href=#272 id=272 data-nosnippet>272</a>    }
+<a href=#273 id=273 data-nosnippet>273</a>}
+<a href=#274 id=274 data-nosnippet>274</a>
+<a href=#275 id=275 data-nosnippet>275</a><span class="kw">fn </span>no_such_stream() -&gt; AxiamApiError {
+<a href=#276 id=276 data-nosnippet>276</a>    AxiamApiError(AxiamError::NotFound {
+<a href=#277 id=277 data-nosnippet>277</a>        entity: <span class="string">"ssf_stream"</span>.into(),
+<a href=#278 id=278 data-nosnippet>278</a>        id: <span class="string">"for this receiver"</span>.into(),
+<a href=#279 id=279 data-nosnippet>279</a>    })
+<a href=#280 id=280 data-nosnippet>280</a>}
+<a href=#281 id=281 data-nosnippet>281</a>
+<a href=#282 id=282 data-nosnippet>282</a><span class="doccomment">/// The receiver's stream `raw_id`, or the one `404` for every other case.
+<a href=#283 id=283 data-nosnippet>283</a></span><span class="kw">async fn </span>owned_stream&lt;C: Connection + Clone&gt;(
+<a href=#284 id=284 data-nosnippet>284</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#285 id=285 data-nosnippet>285</a>    receiver: <span class="kw-2">&amp;</span>SsfReceiverToken,
+<a href=#286 id=286 data-nosnippet>286</a>    raw_id: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;,
+<a href=#287 id=287 data-nosnippet>287</a>) -&gt; <span class="prelude-ty">Result</span>&lt;SsfStream, AxiamApiError&gt; {
+<a href=#288 id=288 data-nosnippet>288</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(stream_id) = raw_id.and_then(|raw| Uuid::parse_str(raw).ok()) <span class="kw">else </span>{
+<a href=#289 id=289 data-nosnippet>289</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(no_such_stream());
+<a href=#290 id=290 data-nosnippet>290</a>    };
+<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">if </span>!ssf_enabled_for(state, receiver.tenant_id).<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(no_such_stream());
+<a href=#293 id=293 data-nosnippet>293</a>    }
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="kw">let </span>stream = <span class="kw">match </span>state
+<a href=#295 id=295 data-nosnippet>295</a>        .ssf
+<a href=#296 id=296 data-nosnippet>296</a>        .stream_repo
+<a href=#297 id=297 data-nosnippet>297</a>        .get(receiver.tenant_id, stream_id)
+<a href=#298 id=298 data-nosnippet>298</a>        .<span class="kw">await
+<a href=#299 id=299 data-nosnippet>299</a>    </span>{
+<a href=#300 id=300 data-nosnippet>300</a>        <span class="prelude-val">Ok</span>(stream) =&gt; stream,
+<a href=#301 id=301 data-nosnippet>301</a>        <span class="prelude-val">Err</span>(AxiamError::NotFound { .. }) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(no_such_stream()),
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="prelude-val">Err</span>(other) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(other)),
+<a href=#303 id=303 data-nosnippet>303</a>    };
+<a href=#304 id=304 data-nosnippet>304</a>    <span class="kw">if </span>stream.receiver_client_id != receiver.client_id {
+<a href=#305 id=305 data-nosnippet>305</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(no_such_stream());
+<a href=#306 id=306 data-nosnippet>306</a>    }
+<a href=#307 id=307 data-nosnippet>307</a>    <span class="prelude-val">Ok</span>(stream)
+<a href=#308 id=308 data-nosnippet>308</a>}
+<a href=#309 id=309 data-nosnippet>309</a>
+<a href=#310 id=310 data-nosnippet>310</a><span class="kw">async fn </span>audit_receiver&lt;C: Connection + Clone&gt;(
+<a href=#311 id=311 data-nosnippet>311</a>    state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;,
+<a href=#312 id=312 data-nosnippet>312</a>    http_req: <span class="kw-2">&amp;</span>HttpRequest,
+<a href=#313 id=313 data-nosnippet>313</a>    receiver: <span class="kw-2">&amp;</span>SsfReceiverToken,
+<a href=#314 id=314 data-nosnippet>314</a>    action: <span class="kw-2">&amp;</span>str,
+<a href=#315 id=315 data-nosnippet>315</a>    stream_id: Uuid,
+<a href=#316 id=316 data-nosnippet>316</a>    metadata: serde_json::Value,
+<a href=#317 id=317 data-nosnippet>317</a>) {
+<a href=#318 id=318 data-nosnippet>318</a>    <span class="kw">let </span><span class="kw-2">mut </span>metadata = metadata;
+<a href=#319 id=319 data-nosnippet>319</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(object) = metadata.as_object_mut() {
+<a href=#320 id=320 data-nosnippet>320</a>        object.insert(
+<a href=#321 id=321 data-nosnippet>321</a>            <span class="string">"receiver_client_id"</span>.into(),
+<a href=#322 id=322 data-nosnippet>322</a>            <span class="macro">serde_json::json!</span>(receiver.client_id),
+<a href=#323 id=323 data-nosnippet>323</a>        );
+<a href=#324 id=324 data-nosnippet>324</a>    }
+<a href=#325 id=325 data-nosnippet>325</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(error) = state
+<a href=#326 id=326 data-nosnippet>326</a>        .audit_repo
+<a href=#327 id=327 data-nosnippet>327</a>        .append(CreateAuditLogEntry {
+<a href=#328 id=328 data-nosnippet>328</a>            tenant_id: receiver.tenant_id,
+<a href=#329 id=329 data-nosnippet>329</a>            actor_id: Uuid::nil(),
+<a href=#330 id=330 data-nosnippet>330</a>            actor_type: ActorType::System,
+<a href=#331 id=331 data-nosnippet>331</a>            action: action.to_string(),
+<a href=#332 id=332 data-nosnippet>332</a>            resource_id: <span class="prelude-val">Some</span>(stream_id),
+<a href=#333 id=333 data-nosnippet>333</a>            outcome: AuditOutcome::Success,
+<a href=#334 id=334 data-nosnippet>334</a>            ip_address: client_ip(http_req),
+<a href=#335 id=335 data-nosnippet>335</a>            metadata: <span class="prelude-val">Some</span>(metadata),
+<a href=#336 id=336 data-nosnippet>336</a>        })
+<a href=#337 id=337 data-nosnippet>337</a>        .<span class="kw">await
+<a href=#338 id=338 data-nosnippet>338</a>    </span>{
+<a href=#339 id=339 data-nosnippet>339</a>        <span class="macro">tracing::error!</span>(target: <span class="string">"axiam::ssf"</span>, action, %error, <span class="string">"an SSF audit row could not be written"</span>);
+<a href=#340 id=340 data-nosnippet>340</a>    }
+<a href=#341 id=341 data-nosnippet>341</a>}
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a><span class="doccomment">/// A paused push stream was enabled again: enqueue what it held, oldest first
+<a href=#344 id=344 data-nosnippet>344</a>/// (D-48). Best effort and bounded — the held events stay buffered if the
+<a href=#345 id=345 data-nosnippet>345</a>/// broker is down, and the next resume (or a status write) takes them.
+<a href=#346 id=346 data-nosnippet>346</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>release_held&lt;C: Connection + Clone&gt;(state: <span class="kw-2">&amp;</span>AppState&lt;C&gt;, stream: <span class="kw-2">&amp;</span>SsfStream) {
+<a href=#347 id=347 data-nosnippet>347</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(outbox) = state.ssf.outbox.as_ref() <span class="kw">else </span>{
+<a href=#348 id=348 data-nosnippet>348</a>        <span class="kw">return</span>;
+<a href=#349 id=349 data-nosnippet>349</a>    };
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="kw">match </span>outbox.resume(stream).<span class="kw">await </span>{
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="prelude-val">Ok</span>(<span class="number">0</span>) =&gt; {}
+<a href=#352 id=352 data-nosnippet>352</a>        <span class="prelude-val">Ok</span>(released) =&gt; {
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="macro">tracing::info!</span>(target: <span class="string">"axiam::ssf"</span>, stream_id = %stream.id, released, <span class="string">"held SSF events released"</span>);
+<a href=#354 id=354 data-nosnippet>354</a>        }
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#356 id=356 data-nosnippet>356</a>            <span class="macro">tracing::warn!</span>(target: <span class="string">"axiam::ssf"</span>, stream_id = %stream.id, %error, <span class="string">"held SSF events could not be released"</span>);
+<a href=#357 id=357 data-nosnippet>357</a>        }
+<a href=#358 id=358 data-nosnippet>358</a>    }
+<a href=#359 id=359 data-nosnippet>359</a>}
+<a href=#360 id=360 data-nosnippet>360</a>
+<a href=#361 id=361 data-nosnippet>361</a><span class="kw">fn </span>no_store(<span class="kw-2">mut </span>builder: actix_web::HttpResponseBuilder) -&gt; actix_web::HttpResponseBuilder {
+<a href=#362 id=362 data-nosnippet>362</a>    builder.append_header((<span class="string">"Cache-Control"</span>, <span class="string">"no-store"</span>));
+<a href=#363 id=363 data-nosnippet>363</a>    builder
+<a href=#364 id=364 data-nosnippet>364</a>}
+<a href=#365 id=365 data-nosnippet>365</a>
+<a href=#366 id=366 data-nosnippet>366</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#367 id=367 data-nosnippet>367</a>// The configuration endpoint
+<a href=#368 id=368 data-nosnippet>368</a>// ---------------------------------------------------------------------------
+<a href=#369 id=369 data-nosnippet>369</a>
+<a href=#370 id=370 data-nosnippet>370</a></span><span class="doccomment">/// `?stream_id=` of the configuration and status endpoints.
+<a href=#371 id=371 data-nosnippet>371</a></span><span class="attr">#[derive(Debug, Deserialize)]
+<a href=#372 id=372 data-nosnippet>372</a></span><span class="kw">pub struct </span>StreamIdQuery {
+<a href=#373 id=373 data-nosnippet>373</a>    <span class="doccomment">/// The stream.
+<a href=#374 id=374 data-nosnippet>374</a>    </span><span class="kw">pub </span>stream_id: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#375 id=375 data-nosnippet>375</a>}
+<a href=#376 id=376 data-nosnippet>376</a>
+<a href=#377 id=377 data-nosnippet>377</a><span class="doccomment">/// `GET /ssf/v1/stream` — the receiver's stream, or all of them.
+<a href=#378 id=378 data-nosnippet>378</a></span><span class="attr">#[utoipa::path(
+<a href=#379 id=379 data-nosnippet>379</a>    get,
+<a href=#380 id=380 data-nosnippet>380</a>    path = <span class="string">"/ssf/v1/stream"</span>,
+<a href=#381 id=381 data-nosnippet>381</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#382 id=382 data-nosnippet>382</a>    params((<span class="string">"stream_id" </span>= <span class="prelude-ty">Option</span>&lt;String&gt;, Query, description = <span class="string">"One stream; omit for every stream of this receiver"</span>)),
+<a href=#383 id=383 data-nosnippet>383</a>    responses(
+<a href=#384 id=384 data-nosnippet>384</a>        (status = <span class="number">200</span>, description = <span class="string">"The stream configuration, or an array of them"</span>, body = SsfStreamConfiguration),
+<a href=#385 id=385 data-nosnippet>385</a>        (status = <span class="number">401</span>, description = <span class="string">"No valid token"</span>),
+<a href=#386 id=386 data-nosnippet>386</a>        (status = <span class="number">403</span>, description = <span class="string">"Not an OAuth2 client token with the ssf.manage scope"</span>),
+<a href=#387 id=387 data-nosnippet>387</a>        (status = <span class="number">404</span>, description = <span class="string">"No such stream for this receiver"</span>),
+<a href=#388 id=388 data-nosnippet>388</a>        (status = <span class="number">429</span>, description = <span class="string">"Rate limit"</span>),
+<a href=#389 id=389 data-nosnippet>389</a>    ),
+<a href=#390 id=390 data-nosnippet>390</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#391 id=391 data-nosnippet>391</a>)]
+<a href=#392 id=392 data-nosnippet>392</a><span class="kw">pub async fn </span>get_stream_configuration&lt;C: Connection + Clone&gt;(
+<a href=#393 id=393 data-nosnippet>393</a>    receiver: SsfReceiverToken,
+<a href=#394 id=394 data-nosnippet>394</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#395 id=395 data-nosnippet>395</a>    query: web::Query&lt;StreamIdQuery&gt;,
+<a href=#396 id=396 data-nosnippet>396</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#397 id=397 data-nosnippet>397</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(raw) = query.stream_id.as_deref() {
+<a href=#398 id=398 data-nosnippet>398</a>        <span class="kw">let </span>stream = owned_stream(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>receiver, <span class="prelude-val">Some</span>(raw)).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(
+<a href=#400 id=400 data-nosnippet>400</a>            no_store(HttpResponse::Ok()).json(stream_configuration(<span class="kw-2">&amp;</span>state.auth_config, <span class="kw-2">&amp;</span>stream))
+<a href=#401 id=401 data-nosnippet>401</a>        );
+<a href=#402 id=402 data-nosnippet>402</a>    }
+<a href=#403 id=403 data-nosnippet>403</a>    <span class="kw">let </span>streams = <span class="kw">if </span>ssf_enabled_for(<span class="kw-2">&amp;</span>state, receiver.tenant_id).<span class="kw">await</span><span class="question-mark">? </span>{
+<a href=#404 id=404 data-nosnippet>404</a>        state
+<a href=#405 id=405 data-nosnippet>405</a>            .ssf
+<a href=#406 id=406 data-nosnippet>406</a>            .stream_repo
+<a href=#407 id=407 data-nosnippet>407</a>            .list_for_receiver(receiver.tenant_id, <span class="kw-2">&amp;</span>receiver.client_id)
+<a href=#408 id=408 data-nosnippet>408</a>            .<span class="kw">await</span><span class="question-mark">?
+<a href=#409 id=409 data-nosnippet>409</a>    </span>} <span class="kw">else </span>{
+<a href=#410 id=410 data-nosnippet>410</a>        Vec::new()
+<a href=#411 id=411 data-nosnippet>411</a>    };
+<a href=#412 id=412 data-nosnippet>412</a>    <span class="kw">let </span>views: Vec&lt;SsfStreamConfiguration&gt; = streams
+<a href=#413 id=413 data-nosnippet>413</a>        .iter()
+<a href=#414 id=414 data-nosnippet>414</a>        .map(|s| stream_configuration(<span class="kw-2">&amp;</span>state.auth_config, s))
+<a href=#415 id=415 data-nosnippet>415</a>        .collect();
+<a href=#416 id=416 data-nosnippet>416</a>    <span class="prelude-val">Ok</span>(no_store(HttpResponse::Ok()).json(views))
+<a href=#417 id=417 data-nosnippet>417</a>}
+<a href=#418 id=418 data-nosnippet>418</a>
+<a href=#419 id=419 data-nosnippet>419</a><span class="doccomment">/// `POST /ssf/v1/stream` — refused: streams are registered by an
+<a href=#420 id=420 data-nosnippet>420</a>/// administrator (SSF §8.1.1.1 allows `403`).
+<a href=#421 id=421 data-nosnippet>421</a></span><span class="attr">#[utoipa::path(
+<a href=#422 id=422 data-nosnippet>422</a>    post,
+<a href=#423 id=423 data-nosnippet>423</a>    path = <span class="string">"/ssf/v1/stream"</span>,
+<a href=#424 id=424 data-nosnippet>424</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#425 id=425 data-nosnippet>425</a>    responses(
+<a href=#426 id=426 data-nosnippet>426</a>        (status = <span class="number">401</span>, description = <span class="string">"No valid token"</span>),
+<a href=#427 id=427 data-nosnippet>427</a>        (status = <span class="number">403</span>, description = <span class="string">"Always: streams are registered by a tenant administrator"</span>),
+<a href=#428 id=428 data-nosnippet>428</a>    ),
+<a href=#429 id=429 data-nosnippet>429</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#430 id=430 data-nosnippet>430</a>)]
+<a href=#431 id=431 data-nosnippet>431</a><span class="kw">pub async fn </span>create_stream_refused(
+<a href=#432 id=432 data-nosnippet>432</a>    _receiver: SsfReceiverToken,
+<a href=#433 id=433 data-nosnippet>433</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#434 id=434 data-nosnippet>434</a>    <span class="prelude-val">Err</span>(forbidden(
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="string">"SSF streams are registered by a tenant administrator, not by the receiver"</span>,
+<a href=#436 id=436 data-nosnippet>436</a>    ))
+<a href=#437 id=437 data-nosnippet>437</a>}
+<a href=#438 id=438 data-nosnippet>438</a>
+<a href=#439 id=439 data-nosnippet>439</a><span class="doccomment">/// How many times a receiver's write is prepared again from a fresh read when
+<a href=#440 id=440 data-nosnippet>440</a>/// another write overtook the read it was prepared from (F4 W4 P23W4-01). Past
+<a href=#441 id=441 data-nosnippet>441</a>/// that the answer is `409`.
+<a href=#442 id=442 data-nosnippet>442</a></span><span class="kw">const </span>RECEIVER_WRITE_ATTEMPTS: usize = <span class="number">3</span>;
+<a href=#443 id=443 data-nosnippet>443</a>
+<a href=#444 id=444 data-nosnippet>444</a><span class="doccomment">/// Whether a failed write lost a race to another write of the same stream and
+<a href=#445 id=445 data-nosnippet>445</a>/// should be prepared again from a fresh read.
+<a href=#446 id=446 data-nosnippet>446</a></span><span class="kw">fn </span>overtaken(error: <span class="kw-2">&amp;</span>AxiamError, attempt: usize) -&gt; bool {
+<a href=#447 id=447 data-nosnippet>447</a>    <span class="macro">matches!</span>(error, AxiamError::Conflict { .. }) &amp;&amp; attempt + <span class="number">1 </span>&lt; RECEIVER_WRITE_ATTEMPTS
+<a href=#448 id=448 data-nosnippet>448</a>}
+<a href=#449 id=449 data-nosnippet>449</a>
+<a href=#450 id=450 data-nosnippet>450</a><span class="kw">async fn </span>update_with&lt;C: Connection + Clone&gt;(
+<a href=#451 id=451 data-nosnippet>451</a>    receiver: SsfReceiverToken,
+<a href=#452 id=452 data-nosnippet>452</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#453 id=453 data-nosnippet>453</a>    http_req: HttpRequest,
+<a href=#454 id=454 data-nosnippet>454</a>    body: ReceiverStreamUpdate,
+<a href=#455 id=455 data-nosnippet>455</a>    mode: ReceiverUpdateMode,
+<a href=#456 id=456 data-nosnippet>456</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#457 id=457 data-nosnippet>457</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(raw_id) = body.stream_id.clone() <span class="kw">else </span>{
+<a href=#458 id=458 data-nosnippet>458</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::Validation {
+<a href=#459 id=459 data-nosnippet>459</a>            message: <span class="string">"stream_id is required"</span>.into(),
+<a href=#460 id=460 data-nosnippet>460</a>        }));
+<a href=#461 id=461 data-nosnippet>461</a>    };
+<a href=#462 id=462 data-nosnippet>462</a>    <span class="comment">// Read, decide, write — and if another write (an administrator's) landed
+<a href=#463 id=463 data-nosnippet>463</a>    // between the read and the write, decide again against what it left: the
+<a href=#464 id=464 data-nosnippet>464</a>    // update carries the version it was prepared from, so it never puts back
+<a href=#465 id=465 data-nosnippet>465</a>    // what that write changed (D-51, T-406).
+<a href=#466 id=466 data-nosnippet>466</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>attempt = <span class="number">0</span>;
+<a href=#467 id=467 data-nosnippet>467</a>    <span class="kw">let </span>(stream, updated, changed) = <span class="kw">loop </span>{
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="kw">let </span>stream = owned_stream(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>receiver, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>raw_id)).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="kw">let </span>update = apply_receiver_update(<span class="kw-2">&amp;</span>state.auth_config, <span class="kw-2">&amp;</span>stream, <span class="kw-2">&amp;</span>body, mode)
+<a href=#470 id=470 data-nosnippet>470</a>            .map_err(|message| AxiamApiError(AxiamError::Validation { message }))<span class="question-mark">?</span>;
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="kw">if </span><span class="macro">matches!</span>(update.authorization_header, SecretChange::Set(<span class="kw">_</span>))
+<a href=#472 id=472 data-nosnippet>472</a>            &amp;&amp; !state.ssf.stream_repo.has_encryption_key()
+<a href=#473 id=473 data-nosnippet>473</a>        {
+<a href=#474 id=474 data-nosnippet>474</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::ServiceUnavailable(
+<a href=#475 id=475 data-nosnippet>475</a>                <span class="string">"the push authorization header cannot be stored on this deployment"</span>.into(),
+<a href=#476 id=476 data-nosnippet>476</a>            )));
+<a href=#477 id=477 data-nosnippet>477</a>        }
+<a href=#478 id=478 data-nosnippet>478</a>        <span class="kw">let </span><span class="kw-2">mut </span>changed: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = Vec::new();
+<a href=#479 id=479 data-nosnippet>479</a>        <span class="kw">if </span>update.events_requested != stream.events_requested {
+<a href=#480 id=480 data-nosnippet>480</a>            changed.push(<span class="string">"events_requested"</span>);
+<a href=#481 id=481 data-nosnippet>481</a>        }
+<a href=#482 id=482 data-nosnippet>482</a>        <span class="kw">if </span>update.description != stream.description {
+<a href=#483 id=483 data-nosnippet>483</a>            changed.push(<span class="string">"description"</span>);
+<a href=#484 id=484 data-nosnippet>484</a>        }
+<a href=#485 id=485 data-nosnippet>485</a>        <span class="kw">if </span>update.endpoint_url != stream.endpoint_url {
+<a href=#486 id=486 data-nosnippet>486</a>            changed.push(<span class="string">"endpoint_url"</span>);
+<a href=#487 id=487 data-nosnippet>487</a>        }
+<a href=#488 id=488 data-nosnippet>488</a>        <span class="kw">if </span>!<span class="macro">matches!</span>(update.authorization_header, SecretChange::Keep) {
+<a href=#489 id=489 data-nosnippet>489</a>            changed.push(<span class="string">"authorization_header"</span>);
+<a href=#490 id=490 data-nosnippet>490</a>        }
+<a href=#491 id=491 data-nosnippet>491</a>        <span class="kw">match </span>state
+<a href=#492 id=492 data-nosnippet>492</a>            .ssf
+<a href=#493 id=493 data-nosnippet>493</a>            .stream_repo
+<a href=#494 id=494 data-nosnippet>494</a>            .update(receiver.tenant_id, stream.id, update)
+<a href=#495 id=495 data-nosnippet>495</a>            .<span class="kw">await
+<a href=#496 id=496 data-nosnippet>496</a>        </span>{
+<a href=#497 id=497 data-nosnippet>497</a>            <span class="prelude-val">Ok</span>(updated) =&gt; <span class="kw">break </span>(stream, updated, changed),
+<a href=#498 id=498 data-nosnippet>498</a>            <span class="prelude-val">Err</span>(error) <span class="kw">if </span>overtaken(<span class="kw-2">&amp;</span>error, attempt) =&gt; attempt += <span class="number">1</span>,
+<a href=#499 id=499 data-nosnippet>499</a>            <span class="prelude-val">Err</span>(error) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(error)),
+<a href=#500 id=500 data-nosnippet>500</a>        }
+<a href=#501 id=501 data-nosnippet>501</a>    };
+<a href=#502 id=502 data-nosnippet>502</a>    audit_receiver(
+<a href=#503 id=503 data-nosnippet>503</a>        <span class="kw-2">&amp;</span>state,
+<a href=#504 id=504 data-nosnippet>504</a>        <span class="kw-2">&amp;</span>http_req,
+<a href=#505 id=505 data-nosnippet>505</a>        <span class="kw-2">&amp;</span>receiver,
+<a href=#506 id=506 data-nosnippet>506</a>        AUDIT_RECEIVER_UPDATED,
+<a href=#507 id=507 data-nosnippet>507</a>        stream.id,
+<a href=#508 id=508 data-nosnippet>508</a>        <span class="macro">serde_json::json!</span>({ <span class="string">"changed"</span>: changed }),
+<a href=#509 id=509 data-nosnippet>509</a>    )
+<a href=#510 id=510 data-nosnippet>510</a>    .<span class="kw">await</span>;
+<a href=#511 id=511 data-nosnippet>511</a>    <span class="prelude-val">Ok</span>(no_store(HttpResponse::Ok()).json(stream_configuration(<span class="kw-2">&amp;</span>state.auth_config, <span class="kw-2">&amp;</span>updated)))
+<a href=#512 id=512 data-nosnippet>512</a>}
+<a href=#513 id=513 data-nosnippet>513</a>
+<a href=#514 id=514 data-nosnippet>514</a><span class="doccomment">/// `PATCH /ssf/v1/stream` — change the receiver-supplied members present.
+<a href=#515 id=515 data-nosnippet>515</a></span><span class="attr">#[utoipa::path(
+<a href=#516 id=516 data-nosnippet>516</a>    patch,
+<a href=#517 id=517 data-nosnippet>517</a>    path = <span class="string">"/ssf/v1/stream"</span>,
+<a href=#518 id=518 data-nosnippet>518</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#519 id=519 data-nosnippet>519</a>    request_body = ReceiverStreamUpdate,
+<a href=#520 id=520 data-nosnippet>520</a>    responses(
+<a href=#521 id=521 data-nosnippet>521</a>        (status = <span class="number">200</span>, description = <span class="string">"The updated configuration"</span>, body = SsfStreamConfiguration),
+<a href=#522 id=522 data-nosnippet>522</a>        (status = <span class="number">400</span>, description = <span class="string">"A transmitter-supplied member that does not match, an event \
+<a href=#523 id=523 data-nosnippet>523</a>                                      beyond the administrator's allowance, a delivery method \
+<a href=#524 id=524 data-nosnippet>524</a>                                      change, a refused endpoint, or a move to another origin \
+<a href=#525 id=525 data-nosnippet>525</a>                                      without the authorization header"</span>),
+<a href=#526 id=526 data-nosnippet>526</a>        (status = <span class="number">401</span>, description = <span class="string">"No valid token"</span>),
+<a href=#527 id=527 data-nosnippet>527</a>        (status = <span class="number">403</span>, description = <span class="string">"Not an OAuth2 client token with the ssf.manage scope"</span>),
+<a href=#528 id=528 data-nosnippet>528</a>        (status = <span class="number">404</span>, description = <span class="string">"No such stream for this receiver"</span>),
+<a href=#529 id=529 data-nosnippet>529</a>        (status = <span class="number">409</span>, description = <span class="string">"The stream kept changing under this write; read it again and retry"</span>),
+<a href=#530 id=530 data-nosnippet>530</a>        (status = <span class="number">429</span>, description = <span class="string">"Rate limit"</span>),
+<a href=#531 id=531 data-nosnippet>531</a>        (status = <span class="number">503</span>, description = <span class="string">"The header cannot be stored on this deployment"</span>),
+<a href=#532 id=532 data-nosnippet>532</a>    ),
+<a href=#533 id=533 data-nosnippet>533</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#534 id=534 data-nosnippet>534</a>)]
+<a href=#535 id=535 data-nosnippet>535</a><span class="kw">pub async fn </span>patch_stream_configuration&lt;C: Connection + Clone&gt;(
+<a href=#536 id=536 data-nosnippet>536</a>    receiver: SsfReceiverToken,
+<a href=#537 id=537 data-nosnippet>537</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#538 id=538 data-nosnippet>538</a>    http_req: HttpRequest,
+<a href=#539 id=539 data-nosnippet>539</a>    body: web::Json&lt;ReceiverStreamUpdate&gt;,
+<a href=#540 id=540 data-nosnippet>540</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#541 id=541 data-nosnippet>541</a>    update_with(
+<a href=#542 id=542 data-nosnippet>542</a>        receiver,
+<a href=#543 id=543 data-nosnippet>543</a>        state,
+<a href=#544 id=544 data-nosnippet>544</a>        http_req,
+<a href=#545 id=545 data-nosnippet>545</a>        body.into_inner(),
+<a href=#546 id=546 data-nosnippet>546</a>        ReceiverUpdateMode::Patch,
+<a href=#547 id=547 data-nosnippet>547</a>    )
+<a href=#548 id=548 data-nosnippet>548</a>    .<span class="kw">await
+<a href=#549 id=549 data-nosnippet>549</a></span>}
+<a href=#550 id=550 data-nosnippet>550</a>
+<a href=#551 id=551 data-nosnippet>551</a><span class="doccomment">/// `PUT /ssf/v1/stream` — replace the receiver-supplied members; an absent
+<a href=#552 id=552 data-nosnippet>552</a>/// one is deleted.
+<a href=#553 id=553 data-nosnippet>553</a></span><span class="attr">#[utoipa::path(
+<a href=#554 id=554 data-nosnippet>554</a>    put,
+<a href=#555 id=555 data-nosnippet>555</a>    path = <span class="string">"/ssf/v1/stream"</span>,
+<a href=#556 id=556 data-nosnippet>556</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#557 id=557 data-nosnippet>557</a>    request_body = ReceiverStreamUpdate,
+<a href=#558 id=558 data-nosnippet>558</a>    responses(
+<a href=#559 id=559 data-nosnippet>559</a>        (status = <span class="number">200</span>, description = <span class="string">"The replaced configuration"</span>, body = SsfStreamConfiguration),
+<a href=#560 id=560 data-nosnippet>560</a>        (status = <span class="number">400</span>, description = <span class="string">"As for PATCH, or no delivery"</span>),
+<a href=#561 id=561 data-nosnippet>561</a>        (status = <span class="number">401</span>, description = <span class="string">"No valid token"</span>),
+<a href=#562 id=562 data-nosnippet>562</a>        (status = <span class="number">403</span>, description = <span class="string">"Not an OAuth2 client token with the ssf.manage scope"</span>),
+<a href=#563 id=563 data-nosnippet>563</a>        (status = <span class="number">404</span>, description = <span class="string">"No such stream for this receiver"</span>),
+<a href=#564 id=564 data-nosnippet>564</a>        (status = <span class="number">409</span>, description = <span class="string">"The stream kept changing under this write; read it again and retry"</span>),
+<a href=#565 id=565 data-nosnippet>565</a>        (status = <span class="number">429</span>, description = <span class="string">"Rate limit"</span>),
+<a href=#566 id=566 data-nosnippet>566</a>        (status = <span class="number">503</span>, description = <span class="string">"The header cannot be stored on this deployment"</span>),
+<a href=#567 id=567 data-nosnippet>567</a>    ),
+<a href=#568 id=568 data-nosnippet>568</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#569 id=569 data-nosnippet>569</a>)]
+<a href=#570 id=570 data-nosnippet>570</a><span class="kw">pub async fn </span>replace_stream_configuration&lt;C: Connection + Clone&gt;(
+<a href=#571 id=571 data-nosnippet>571</a>    receiver: SsfReceiverToken,
+<a href=#572 id=572 data-nosnippet>572</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#573 id=573 data-nosnippet>573</a>    http_req: HttpRequest,
+<a href=#574 id=574 data-nosnippet>574</a>    body: web::Json&lt;ReceiverStreamUpdate&gt;,
+<a href=#575 id=575 data-nosnippet>575</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#576 id=576 data-nosnippet>576</a>    update_with(
+<a href=#577 id=577 data-nosnippet>577</a>        receiver,
+<a href=#578 id=578 data-nosnippet>578</a>        state,
+<a href=#579 id=579 data-nosnippet>579</a>        http_req,
+<a href=#580 id=580 data-nosnippet>580</a>        body.into_inner(),
+<a href=#581 id=581 data-nosnippet>581</a>        ReceiverUpdateMode::Replace,
+<a href=#582 id=582 data-nosnippet>582</a>    )
+<a href=#583 id=583 data-nosnippet>583</a>    .<span class="kw">await
+<a href=#584 id=584 data-nosnippet>584</a></span>}
+<a href=#585 id=585 data-nosnippet>585</a>
+<a href=#586 id=586 data-nosnippet>586</a><span class="doccomment">/// `DELETE /ssf/v1/stream` — refused for the receiver's own stream (an
+<a href=#587 id=587 data-nosnippet>587</a>/// administrator deletes streams); `404` for any other.
+<a href=#588 id=588 data-nosnippet>588</a></span><span class="attr">#[utoipa::path(
+<a href=#589 id=589 data-nosnippet>589</a>    delete,
+<a href=#590 id=590 data-nosnippet>590</a>    path = <span class="string">"/ssf/v1/stream"</span>,
+<a href=#591 id=591 data-nosnippet>591</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#592 id=592 data-nosnippet>592</a>    params((<span class="string">"stream_id" </span>= String, Query, description = <span class="string">"The stream"</span>)),
+<a href=#593 id=593 data-nosnippet>593</a>    responses(
+<a href=#594 id=594 data-nosnippet>594</a>        (status = <span class="number">401</span>, description = <span class="string">"No valid token"</span>),
+<a href=#595 id=595 data-nosnippet>595</a>        (status = <span class="number">403</span>, description = <span class="string">"Streams are deleted by a tenant administrator"</span>),
+<a href=#596 id=596 data-nosnippet>596</a>        (status = <span class="number">404</span>, description = <span class="string">"No such stream for this receiver"</span>),
+<a href=#597 id=597 data-nosnippet>597</a>    ),
+<a href=#598 id=598 data-nosnippet>598</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#599 id=599 data-nosnippet>599</a>)]
+<a href=#600 id=600 data-nosnippet>600</a><span class="kw">pub async fn </span>delete_stream_refused&lt;C: Connection + Clone&gt;(
+<a href=#601 id=601 data-nosnippet>601</a>    receiver: SsfReceiverToken,
+<a href=#602 id=602 data-nosnippet>602</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#603 id=603 data-nosnippet>603</a>    query: web::Query&lt;StreamIdQuery&gt;,
+<a href=#604 id=604 data-nosnippet>604</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#605 id=605 data-nosnippet>605</a>    owned_stream(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>receiver, query.stream_id.as_deref()).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#606 id=606 data-nosnippet>606</a>    <span class="prelude-val">Err</span>(forbidden(
+<a href=#607 id=607 data-nosnippet>607</a>        <span class="string">"SSF streams are deleted by a tenant administrator; set the status to disabled instead"</span>,
+<a href=#608 id=608 data-nosnippet>608</a>    ))
+<a href=#609 id=609 data-nosnippet>609</a>}
+<a href=#610 id=610 data-nosnippet>610</a>
+<a href=#611 id=611 data-nosnippet>611</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#612 id=612 data-nosnippet>612</a>// The status endpoint
+<a href=#613 id=613 data-nosnippet>613</a>// ---------------------------------------------------------------------------
+<a href=#614 id=614 data-nosnippet>614</a>
+<a href=#615 id=615 data-nosnippet>615</a></span><span class="doccomment">/// A stream's status (SSF §8.1.2.1).
+<a href=#616 id=616 data-nosnippet>616</a></span><span class="attr">#[derive(Debug, Serialize, utoipa::ToSchema)]
+<a href=#617 id=617 data-nosnippet>617</a></span><span class="kw">pub struct </span>SsfStreamStatusView {
+<a href=#618 id=618 data-nosnippet>618</a>    <span class="doccomment">/// The stream.
+<a href=#619 id=619 data-nosnippet>619</a>    </span><span class="kw">pub </span>stream_id: String,
+<a href=#620 id=620 data-nosnippet>620</a>    <span class="doccomment">/// `enabled`, `paused` or `disabled`.
+<a href=#621 id=621 data-nosnippet>621</a>    </span><span class="kw">pub </span>status: SsfStreamStatus,
+<a href=#622 id=622 data-nosnippet>622</a>    <span class="doccomment">/// Why, if anyone said.
+<a href=#623 id=623 data-nosnippet>623</a>    </span><span class="attr">#[serde(skip_serializing_if = <span class="string">"Option::is_none"</span>)]
+<a href=#624 id=624 data-nosnippet>624</a>    </span><span class="kw">pub </span>reason: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#625 id=625 data-nosnippet>625</a>}
+<a href=#626 id=626 data-nosnippet>626</a>
+<a href=#627 id=627 data-nosnippet>627</a><span class="kw">impl </span>From&lt;<span class="kw-2">&amp;</span>SsfStream&gt; <span class="kw">for </span>SsfStreamStatusView {
+<a href=#628 id=628 data-nosnippet>628</a>    <span class="kw">fn </span>from(s: <span class="kw-2">&amp;</span>SsfStream) -&gt; <span class="self">Self </span>{
+<a href=#629 id=629 data-nosnippet>629</a>        <span class="self">Self </span>{
+<a href=#630 id=630 data-nosnippet>630</a>            stream_id: s.id.to_string(),
+<a href=#631 id=631 data-nosnippet>631</a>            status: s.status,
+<a href=#632 id=632 data-nosnippet>632</a>            reason: s.status_reason.clone(),
+<a href=#633 id=633 data-nosnippet>633</a>        }
+<a href=#634 id=634 data-nosnippet>634</a>    }
+<a href=#635 id=635 data-nosnippet>635</a>}
+<a href=#636 id=636 data-nosnippet>636</a>
+<a href=#637 id=637 data-nosnippet>637</a><span class="doccomment">/// `POST /ssf/v1/status` body (SSF §8.1.2.2).
+<a href=#638 id=638 data-nosnippet>638</a></span><span class="attr">#[derive(Debug, Deserialize, utoipa::ToSchema)]
+<a href=#639 id=639 data-nosnippet>639</a></span><span class="kw">pub struct </span>SsfStatusUpdate {
+<a href=#640 id=640 data-nosnippet>640</a>    <span class="doccomment">/// The stream.
+<a href=#641 id=641 data-nosnippet>641</a>    </span><span class="kw">pub </span>stream_id: String,
+<a href=#642 id=642 data-nosnippet>642</a>    <span class="doccomment">/// `enabled`, `paused` or `disabled`.
+<a href=#643 id=643 data-nosnippet>643</a>    </span><span class="kw">pub </span>status: String,
+<a href=#644 id=644 data-nosnippet>644</a>    <span class="doccomment">/// Why; at most 256 bytes.
+<a href=#645 id=645 data-nosnippet>645</a>    </span><span class="attr">#[serde(default)]
+<a href=#646 id=646 data-nosnippet>646</a>    </span><span class="kw">pub </span>reason: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#647 id=647 data-nosnippet>647</a>}
+<a href=#648 id=648 data-nosnippet>648</a>
+<a href=#649 id=649 data-nosnippet>649</a><span class="doccomment">/// `GET /ssf/v1/status`
+<a href=#650 id=650 data-nosnippet>650</a></span><span class="attr">#[utoipa::path(
+<a href=#651 id=651 data-nosnippet>651</a>    get,
+<a href=#652 id=652 data-nosnippet>652</a>    path = <span class="string">"/ssf/v1/status"</span>,
+<a href=#653 id=653 data-nosnippet>653</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#654 id=654 data-nosnippet>654</a>    params((<span class="string">"stream_id" </span>= String, Query, description = <span class="string">"The stream"</span>)),
+<a href=#655 id=655 data-nosnippet>655</a>    responses(
+<a href=#656 id=656 data-nosnippet>656</a>        (status = <span class="number">200</span>, description = <span class="string">"The stream's status"</span>, body = SsfStreamStatusView),
+<a href=#657 id=657 data-nosnippet>657</a>        (status = <span class="number">401</span>, description = <span class="string">"No valid token"</span>),
+<a href=#658 id=658 data-nosnippet>658</a>        (status = <span class="number">403</span>, description = <span class="string">"Not an OAuth2 client token with the ssf.manage scope"</span>),
+<a href=#659 id=659 data-nosnippet>659</a>        (status = <span class="number">404</span>, description = <span class="string">"No such stream for this receiver"</span>),
+<a href=#660 id=660 data-nosnippet>660</a>        (status = <span class="number">429</span>, description = <span class="string">"Rate limit"</span>),
+<a href=#661 id=661 data-nosnippet>661</a>    ),
+<a href=#662 id=662 data-nosnippet>662</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#663 id=663 data-nosnippet>663</a>)]
+<a href=#664 id=664 data-nosnippet>664</a><span class="kw">pub async fn </span>get_stream_status&lt;C: Connection + Clone&gt;(
+<a href=#665 id=665 data-nosnippet>665</a>    receiver: SsfReceiverToken,
+<a href=#666 id=666 data-nosnippet>666</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#667 id=667 data-nosnippet>667</a>    query: web::Query&lt;StreamIdQuery&gt;,
+<a href=#668 id=668 data-nosnippet>668</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#669 id=669 data-nosnippet>669</a>    <span class="kw">let </span>stream = owned_stream(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>receiver, query.stream_id.as_deref()).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#670 id=670 data-nosnippet>670</a>    <span class="prelude-val">Ok</span>(no_store(HttpResponse::Ok()).json(SsfStreamStatusView::from(<span class="kw-2">&amp;</span>stream)))
+<a href=#671 id=671 data-nosnippet>671</a>}
+<a href=#672 id=672 data-nosnippet>672</a>
+<a href=#673 id=673 data-nosnippet>673</a><span class="doccomment">/// `POST /ssf/v1/status`
+<a href=#674 id=674 data-nosnippet>674</a></span><span class="attr">#[utoipa::path(
+<a href=#675 id=675 data-nosnippet>675</a>    post,
+<a href=#676 id=676 data-nosnippet>676</a>    path = <span class="string">"/ssf/v1/status"</span>,
+<a href=#677 id=677 data-nosnippet>677</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#678 id=678 data-nosnippet>678</a>    request_body = SsfStatusUpdate,
+<a href=#679 id=679 data-nosnippet>679</a>    responses(
+<a href=#680 id=680 data-nosnippet>680</a>        (status = <span class="number">200</span>, description = <span class="string">"The stream's new status"</span>, body = SsfStreamStatusView),
+<a href=#681 id=681 data-nosnippet>681</a>        (status = <span class="number">400</span>, description = <span class="string">"An unknown status or an over-long reason"</span>),
+<a href=#682 id=682 data-nosnippet>682</a>        (status = <span class="number">401</span>, description = <span class="string">"No valid token"</span>),
+<a href=#683 id=683 data-nosnippet>683</a>        (status = <span class="number">403</span>, description = <span class="string">"Not a receiver token, or an administrator set this status"</span>),
+<a href=#684 id=684 data-nosnippet>684</a>        (status = <span class="number">404</span>, description = <span class="string">"No such stream for this receiver"</span>),
+<a href=#685 id=685 data-nosnippet>685</a>        (status = <span class="number">409</span>, description = <span class="string">"The stream kept changing under this write; read it again and retry"</span>),
+<a href=#686 id=686 data-nosnippet>686</a>        (status = <span class="number">429</span>, description = <span class="string">"Rate limit"</span>),
+<a href=#687 id=687 data-nosnippet>687</a>    ),
+<a href=#688 id=688 data-nosnippet>688</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#689 id=689 data-nosnippet>689</a>)]
+<a href=#690 id=690 data-nosnippet>690</a><span class="kw">pub async fn </span>update_stream_status&lt;C: Connection + Clone&gt;(
+<a href=#691 id=691 data-nosnippet>691</a>    receiver: SsfReceiverToken,
+<a href=#692 id=692 data-nosnippet>692</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#693 id=693 data-nosnippet>693</a>    http_req: HttpRequest,
+<a href=#694 id=694 data-nosnippet>694</a>    body: web::Json&lt;SsfStatusUpdate&gt;,
+<a href=#695 id=695 data-nosnippet>695</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#696 id=696 data-nosnippet>696</a>    <span class="kw">let </span>body = body.into_inner();
+<a href=#697 id=697 data-nosnippet>697</a>    <span class="kw">let </span>status = SsfStreamStatus::from_wire(<span class="kw-2">&amp;</span>body.status).ok_or_else(|| {
+<a href=#698 id=698 data-nosnippet>698</a>        AxiamApiError(AxiamError::Validation {
+<a href=#699 id=699 data-nosnippet>699</a>            message: <span class="string">"status must be enabled, paused or disabled"</span>.into(),
+<a href=#700 id=700 data-nosnippet>700</a>        })
+<a href=#701 id=701 data-nosnippet>701</a>    })<span class="question-mark">?</span>;
+<a href=#702 id=702 data-nosnippet>702</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(reason) = <span class="kw-2">&amp;</span>body.reason {
+<a href=#703 id=703 data-nosnippet>703</a>        validate_status_reason(reason)
+<a href=#704 id=704 data-nosnippet>704</a>            .map_err(|message| AxiamApiError(AxiamError::Validation { message }))<span class="question-mark">?</span>;
+<a href=#705 id=705 data-nosnippet>705</a>    }
+<a href=#706 id=706 data-nosnippet>706</a>    <span class="kw">let </span>reason = body.reason.filter(|r| !r.is_empty());
+<a href=#707 id=707 data-nosnippet>707</a>    <span class="comment">// Read, decide, write; decided again from a fresh read when an
+<a href=#708 id=708 data-nosnippet>708</a>    // administrator's write landed in between (F4 W4 P23W4-01, T-406), so the
+<a href=#709 id=709 data-nosnippet>709</a>    // D-51 check below always judges the status the write would replace.
+<a href=#710 id=710 data-nosnippet>710</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>attempt = <span class="number">0</span>;
+<a href=#711 id=711 data-nosnippet>711</a>    <span class="kw">let </span>(stream, updated) = <span class="kw">loop </span>{
+<a href=#712 id=712 data-nosnippet>712</a>        <span class="kw">let </span>stream = owned_stream(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>receiver, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>body.stream_id)).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#713 id=713 data-nosnippet>713</a>        <span class="comment">// D-51: what an administrator stopped, only an administrator restarts.
+<a href=#714 id=714 data-nosnippet>714</a>        </span><span class="kw">if </span>stream.status_actor == SsfStatusActor::Admin &amp;&amp; stream.status != SsfStreamStatus::Enabled
+<a href=#715 id=715 data-nosnippet>715</a>        {
+<a href=#716 id=716 data-nosnippet>716</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(forbidden(
+<a href=#717 id=717 data-nosnippet>717</a>                <span class="string">"an administrator set this stream's status; only an administrator can change it"</span>,
+<a href=#718 id=718 data-nosnippet>718</a>            ));
+<a href=#719 id=719 data-nosnippet>719</a>        }
+<a href=#720 id=720 data-nosnippet>720</a>        <span class="kw">let </span><span class="kw-2">mut </span>update = SsfStreamUpdate::from_stream(<span class="kw-2">&amp;</span>stream);
+<a href=#721 id=721 data-nosnippet>721</a>        update.status = status;
+<a href=#722 id=722 data-nosnippet>722</a>        update.status_reason = reason.clone();
+<a href=#723 id=723 data-nosnippet>723</a>        update.status_actor = SsfStatusActor::Receiver;
+<a href=#724 id=724 data-nosnippet>724</a>        <span class="kw">match </span>state
+<a href=#725 id=725 data-nosnippet>725</a>            .ssf
+<a href=#726 id=726 data-nosnippet>726</a>            .stream_repo
+<a href=#727 id=727 data-nosnippet>727</a>            .update(receiver.tenant_id, stream.id, update)
+<a href=#728 id=728 data-nosnippet>728</a>            .<span class="kw">await
+<a href=#729 id=729 data-nosnippet>729</a>        </span>{
+<a href=#730 id=730 data-nosnippet>730</a>            <span class="prelude-val">Ok</span>(updated) =&gt; <span class="kw">break </span>(stream, updated),
+<a href=#731 id=731 data-nosnippet>731</a>            <span class="prelude-val">Err</span>(error) <span class="kw">if </span>overtaken(<span class="kw-2">&amp;</span>error, attempt) =&gt; attempt += <span class="number">1</span>,
+<a href=#732 id=732 data-nosnippet>732</a>            <span class="prelude-val">Err</span>(error) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(error)),
+<a href=#733 id=733 data-nosnippet>733</a>        }
+<a href=#734 id=734 data-nosnippet>734</a>    };
+<a href=#735 id=735 data-nosnippet>735</a>    <span class="kw">let </span>previous = stream.status;
+<a href=#736 id=736 data-nosnippet>736</a>    audit_receiver(
+<a href=#737 id=737 data-nosnippet>737</a>        <span class="kw-2">&amp;</span>state,
+<a href=#738 id=738 data-nosnippet>738</a>        <span class="kw-2">&amp;</span>http_req,
+<a href=#739 id=739 data-nosnippet>739</a>        <span class="kw-2">&amp;</span>receiver,
+<a href=#740 id=740 data-nosnippet>740</a>        AUDIT_RECEIVER_STATUS,
+<a href=#741 id=741 data-nosnippet>741</a>        stream.id,
+<a href=#742 id=742 data-nosnippet>742</a>        <span class="macro">serde_json::json!</span>({ <span class="string">"from"</span>: previous.as_str(), <span class="string">"to"</span>: updated.status.as_str() }),
+<a href=#743 id=743 data-nosnippet>743</a>    )
+<a href=#744 id=744 data-nosnippet>744</a>    .<span class="kw">await</span>;
+<a href=#745 id=745 data-nosnippet>745</a>    <span class="kw">if </span>previous == SsfStreamStatus::Paused &amp;&amp; updated.status == SsfStreamStatus::Enabled {
+<a href=#746 id=746 data-nosnippet>746</a>        release_held(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>updated).<span class="kw">await</span>;
+<a href=#747 id=747 data-nosnippet>747</a>    }
+<a href=#748 id=748 data-nosnippet>748</a>    <span class="prelude-val">Ok</span>(no_store(HttpResponse::Ok()).json(SsfStreamStatusView::from(<span class="kw-2">&amp;</span>updated)))
+<a href=#749 id=749 data-nosnippet>749</a>}
+<a href=#750 id=750 data-nosnippet>750</a>
+<a href=#751 id=751 data-nosnippet>751</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#752 id=752 data-nosnippet>752</a>// The verification endpoint
+<a href=#753 id=753 data-nosnippet>753</a>// ---------------------------------------------------------------------------
+<a href=#754 id=754 data-nosnippet>754</a>
+<a href=#755 id=755 data-nosnippet>755</a></span><span class="doccomment">/// `POST /ssf/v1/verify` body (SSF §8.1.4.2).
+<a href=#756 id=756 data-nosnippet>756</a></span><span class="attr">#[derive(Debug, Deserialize, utoipa::ToSchema)]
+<a href=#757 id=757 data-nosnippet>757</a></span><span class="kw">pub struct </span>SsfVerificationRequest {
+<a href=#758 id=758 data-nosnippet>758</a>    <span class="doccomment">/// The stream.
+<a href=#759 id=759 data-nosnippet>759</a>    </span><span class="kw">pub </span>stream_id: String,
+<a href=#760 id=760 data-nosnippet>760</a>    <span class="doccomment">/// Echoed in the verification event; at most 1 024 bytes.
+<a href=#761 id=761 data-nosnippet>761</a>    </span><span class="attr">#[serde(default)]
+<a href=#762 id=762 data-nosnippet>762</a>    </span><span class="kw">pub </span>state: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#763 id=763 data-nosnippet>763</a>}
+<a href=#764 id=764 data-nosnippet>764</a>
+<a href=#765 id=765 data-nosnippet>765</a><span class="doccomment">/// `POST /ssf/v1/verify` — have a verification event transmitted.
+<a href=#766 id=766 data-nosnippet>766</a></span><span class="attr">#[utoipa::path(
+<a href=#767 id=767 data-nosnippet>767</a>    post,
+<a href=#768 id=768 data-nosnippet>768</a>    path = <span class="string">"/ssf/v1/verify"</span>,
+<a href=#769 id=769 data-nosnippet>769</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#770 id=770 data-nosnippet>770</a>    request_body = SsfVerificationRequest,
+<a href=#771 id=771 data-nosnippet>771</a>    responses(
+<a href=#772 id=772 data-nosnippet>772</a>        (status = <span class="number">204</span>, description = <span class="string">"The verification event was submitted for delivery"</span>),
+<a href=#773 id=773 data-nosnippet>773</a>        (status = <span class="number">400</span>, description = <span class="string">"An over-long state, or a disabled stream"</span>),
+<a href=#774 id=774 data-nosnippet>774</a>        (status = <span class="number">401</span>, description = <span class="string">"No valid token"</span>),
+<a href=#775 id=775 data-nosnippet>775</a>        (status = <span class="number">403</span>, description = <span class="string">"Not an OAuth2 client token with the ssf.manage scope"</span>),
+<a href=#776 id=776 data-nosnippet>776</a>        (status = <span class="number">404</span>, description = <span class="string">"No such stream for this receiver"</span>),
+<a href=#777 id=777 data-nosnippet>777</a>        (status = <span class="number">429</span>, description = <span class="string">"Sooner than min_verification_interval, or the route's limit"</span>),
+<a href=#778 id=778 data-nosnippet>778</a>        (status = <span class="number">503</span>, description = <span class="string">"Event delivery is not available on this deployment"</span>),
+<a href=#779 id=779 data-nosnippet>779</a>    ),
+<a href=#780 id=780 data-nosnippet>780</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#781 id=781 data-nosnippet>781</a>)]
+<a href=#782 id=782 data-nosnippet>782</a><span class="kw">pub async fn </span>request_verification&lt;C: Connection + Clone&gt;(
+<a href=#783 id=783 data-nosnippet>783</a>    receiver: SsfReceiverToken,
+<a href=#784 id=784 data-nosnippet>784</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#785 id=785 data-nosnippet>785</a>    http_req: HttpRequest,
+<a href=#786 id=786 data-nosnippet>786</a>    body: web::Json&lt;SsfVerificationRequest&gt;,
+<a href=#787 id=787 data-nosnippet>787</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#788 id=788 data-nosnippet>788</a>    <span class="kw">let </span>body = body.into_inner();
+<a href=#789 id=789 data-nosnippet>789</a>    <span class="kw">let </span>stream = owned_stream(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>receiver, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>body.stream_id)).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#790 id=790 data-nosnippet>790</a>    <span class="kw">if </span>body
+<a href=#791 id=791 data-nosnippet>791</a>        .state
+<a href=#792 id=792 data-nosnippet>792</a>        .as_ref()
+<a href=#793 id=793 data-nosnippet>793</a>        .is_some_and(|s| s.len() &gt; MAX_STATE_BYTES)
+<a href=#794 id=794 data-nosnippet>794</a>    {
+<a href=#795 id=795 data-nosnippet>795</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::Validation {
+<a href=#796 id=796 data-nosnippet>796</a>            message: <span class="macro">format!</span>(<span class="string">"state must be at most {MAX_STATE_BYTES} bytes"</span>),
+<a href=#797 id=797 data-nosnippet>797</a>        }));
+<a href=#798 id=798 data-nosnippet>798</a>    }
+<a href=#799 id=799 data-nosnippet>799</a>    <span class="kw">if </span>stream.status == SsfStreamStatus::Disabled {
+<a href=#800 id=800 data-nosnippet>800</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::Validation {
+<a href=#801 id=801 data-nosnippet>801</a>            message: <span class="string">"the stream is disabled: nothing is transmitted on it"</span>.into(),
+<a href=#802 id=802 data-nosnippet>802</a>        }));
+<a href=#803 id=803 data-nosnippet>803</a>    }
+<a href=#804 id=804 data-nosnippet>804</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(outbox) = state.ssf.outbox.clone() <span class="kw">else </span>{
+<a href=#805 id=805 data-nosnippet>805</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::ServiceUnavailable(
+<a href=#806 id=806 data-nosnippet>806</a>            <span class="string">"SSF event delivery is not available on this deployment"</span>.into(),
+<a href=#807 id=807 data-nosnippet>807</a>        )));
+<a href=#808 id=808 data-nosnippet>808</a>    };
+<a href=#809 id=809 data-nosnippet>809</a>    <span class="kw">let </span>now = Utc::now();
+<a href=#810 id=810 data-nosnippet>810</a>    <span class="kw">if </span>!state
+<a href=#811 id=811 data-nosnippet>811</a>        .ssf
+<a href=#812 id=812 data-nosnippet>812</a>        .stream_repo
+<a href=#813 id=813 data-nosnippet>813</a>        .claim_verification(
+<a href=#814 id=814 data-nosnippet>814</a>            receiver.tenant_id,
+<a href=#815 id=815 data-nosnippet>815</a>            stream.id,
+<a href=#816 id=816 data-nosnippet>816</a>            now,
+<a href=#817 id=817 data-nosnippet>817</a>            MIN_VERIFICATION_INTERVAL_SECS,
+<a href=#818 id=818 data-nosnippet>818</a>        )
+<a href=#819 id=819 data-nosnippet>819</a>        .<span class="kw">await</span><span class="question-mark">?
+<a href=#820 id=820 data-nosnippet>820</a>    </span>{
+<a href=#821 id=821 data-nosnippet>821</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::RateLimited));
+<a href=#822 id=822 data-nosnippet>822</a>    }
+<a href=#823 id=823 data-nosnippet>823</a>    <span class="kw">let </span>event = prepare_verification(<span class="kw-2">&amp;</span>stream, body.state.as_deref(), now).map_err(|<span class="kw">_</span>| {
+<a href=#824 id=824 data-nosnippet>824</a>        AxiamApiError(AxiamError::Validation {
+<a href=#825 id=825 data-nosnippet>825</a>            message: <span class="string">"the stream is disabled: nothing is transmitted on it"</span>.into(),
+<a href=#826 id=826 data-nosnippet>826</a>        })
+<a href=#827 id=827 data-nosnippet>827</a>    })<span class="question-mark">?</span>;
+<a href=#828 id=828 data-nosnippet>828</a>    outbox.submit(<span class="kw-2">&amp;</span>stream, <span class="kw-2">&amp;</span>event).<span class="kw">await</span>.map_err(|error| {
+<a href=#829 id=829 data-nosnippet>829</a>        <span class="macro">tracing::warn!</span>(target: <span class="string">"axiam::ssf"</span>, stream_id = %stream.id, %error, <span class="string">"verification event not submitted"</span>);
+<a href=#830 id=830 data-nosnippet>830</a>        AxiamApiError(AxiamError::ServiceUnavailable(
+<a href=#831 id=831 data-nosnippet>831</a>            <span class="string">"the verification event could not be submitted"</span>.into(),
+<a href=#832 id=832 data-nosnippet>832</a>        ))
+<a href=#833 id=833 data-nosnippet>833</a>    })<span class="question-mark">?</span>;
+<a href=#834 id=834 data-nosnippet>834</a>    audit_receiver(
+<a href=#835 id=835 data-nosnippet>835</a>        <span class="kw-2">&amp;</span>state,
+<a href=#836 id=836 data-nosnippet>836</a>        <span class="kw-2">&amp;</span>http_req,
+<a href=#837 id=837 data-nosnippet>837</a>        <span class="kw-2">&amp;</span>receiver,
+<a href=#838 id=838 data-nosnippet>838</a>        AUDIT_VERIFICATION,
+<a href=#839 id=839 data-nosnippet>839</a>        stream.id,
+<a href=#840 id=840 data-nosnippet>840</a>        <span class="macro">serde_json::json!</span>({ <span class="string">"jti"</span>: event.jti }),
+<a href=#841 id=841 data-nosnippet>841</a>    )
+<a href=#842 id=842 data-nosnippet>842</a>    .<span class="kw">await</span>;
+<a href=#843 id=843 data-nosnippet>843</a>    <span class="prelude-val">Ok</span>(no_store(HttpResponse::NoContent()).finish())
+<a href=#844 id=844 data-nosnippet>844</a>}
+<a href=#845 id=845 data-nosnippet>845</a>
+<a href=#846 id=846 data-nosnippet>846</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#847 id=847 data-nosnippet>847</a>// The poll endpoint (RFC 8936)
+<a href=#848 id=848 data-nosnippet>848</a>// ---------------------------------------------------------------------------
+<a href=#849 id=849 data-nosnippet>849</a>
+<a href=#850 id=850 data-nosnippet>850</a></span><span class="doccomment">/// One `setErrs` entry (RFC 8936 §2.4).
+<a href=#851 id=851 data-nosnippet>851</a></span><span class="attr">#[derive(Debug, Deserialize, utoipa::ToSchema)]
+<a href=#852 id=852 data-nosnippet>852</a></span><span class="kw">pub struct </span>SsfSetError {
+<a href=#853 id=853 data-nosnippet>853</a>    <span class="doccomment">/// An RFC 8935 §2.4 error code.
+<a href=#854 id=854 data-nosnippet>854</a>    </span><span class="kw">pub </span>err: String,
+<a href=#855 id=855 data-nosnippet>855</a>    <span class="doccomment">/// Free text from the receiver. Accepted and **not stored**.
+<a href=#856 id=856 data-nosnippet>856</a>    </span><span class="attr">#[serde(default)]
+<a href=#857 id=857 data-nosnippet>857</a>    </span><span class="kw">pub </span>description: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#858 id=858 data-nosnippet>858</a>}
+<a href=#859 id=859 data-nosnippet>859</a>
+<a href=#860 id=860 data-nosnippet>860</a><span class="doccomment">/// `POST /ssf/v1/poll/{stream_id}` body (RFC 8936 §2.2). Every member is
+<a href=#861 id=861 data-nosnippet>861</a>/// optional; an empty body is `{}`.
+<a href=#862 id=862 data-nosnippet>862</a></span><span class="attr">#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+<a href=#863 id=863 data-nosnippet>863</a></span><span class="kw">pub struct </span>SsfPollRequest {
+<a href=#864 id=864 data-nosnippet>864</a>    <span class="doccomment">/// The most SETs to return, clamped to 100. `0` acknowledges only.
+<a href=#865 id=865 data-nosnippet>865</a>    </span><span class="attr">#[serde(rename = <span class="string">"maxEvents"</span>, default)]
+<a href=#866 id=866 data-nosnippet>866</a>    </span><span class="kw">pub </span>max_events: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#867 id=867 data-nosnippet>867</a>    <span class="doccomment">/// `true` answers at once, possibly with no SETs; `false` (the default)
+<a href=#868 id=868 data-nosnippet>868</a>    /// waits up to 30 s for one.
+<a href=#869 id=869 data-nosnippet>869</a>    </span><span class="attr">#[serde(rename = <span class="string">"returnImmediately"</span>, default)]
+<a href=#870 id=870 data-nosnippet>870</a>    </span><span class="kw">pub </span>return_immediately: <span class="prelude-ty">Option</span>&lt;bool&gt;,
+<a href=#871 id=871 data-nosnippet>871</a>    <span class="doccomment">/// The `jti`s of SETs the receiver processed: exactly those rows of this
+<a href=#872 id=872 data-nosnippet>872</a>    /// stream are deleted.
+<a href=#873 id=873 data-nosnippet>873</a>    </span><span class="attr">#[serde(default)]
+<a href=#874 id=874 data-nosnippet>874</a>    </span><span class="kw">pub </span>ack: Vec&lt;String&gt;,
+<a href=#875 id=875 data-nosnippet>875</a>    <span class="doccomment">/// SETs the receiver could not accept: each is deleted and audited.
+<a href=#876 id=876 data-nosnippet>876</a>    </span><span class="attr">#[serde(rename = <span class="string">"setErrs"</span>, default)]
+<a href=#877 id=877 data-nosnippet>877</a>    </span><span class="kw">pub </span>set_errs: std::collections::HashMap&lt;String, SsfSetError&gt;,
+<a href=#878 id=878 data-nosnippet>878</a>}
+<a href=#879 id=879 data-nosnippet>879</a>
+<a href=#880 id=880 data-nosnippet>880</a><span class="doccomment">/// `POST /ssf/v1/poll/{stream_id}` answer (RFC 8936 §2.3).
+<a href=#881 id=881 data-nosnippet>881</a></span><span class="attr">#[derive(Debug, Serialize, utoipa::ToSchema)]
+<a href=#882 id=882 data-nosnippet>882</a></span><span class="kw">pub struct </span>SsfPollResponse {
+<a href=#883 id=883 data-nosnippet>883</a>    <span class="doccomment">/// The compact SETs by `jti`: the oldest held events, up to `maxEvents`,
+<a href=#884 id=884 data-nosnippet>884</a>    /// signed now, against the stream as it is now.
+<a href=#885 id=885 data-nosnippet>885</a>    </span><span class="attr">#[schema(value_type = std::collections::HashMap&lt;String, String&gt;)]
+<a href=#886 id=886 data-nosnippet>886</a>    </span><span class="kw">pub </span>sets: serde_json::Map&lt;String, serde_json::Value&gt;,
+<a href=#887 id=887 data-nosnippet>887</a>    <span class="doccomment">/// Whether more are held than were returned.
+<a href=#888 id=888 data-nosnippet>888</a>    </span><span class="attr">#[serde(rename = <span class="string">"moreAvailable"</span>)]
+<a href=#889 id=889 data-nosnippet>889</a>    </span><span class="kw">pub </span>more_available: bool,
+<a href=#890 id=890 data-nosnippet>890</a>}
+<a href=#891 id=891 data-nosnippet>891</a>
+<a href=#892 id=892 data-nosnippet>892</a><span class="doccomment">/// The audit-safe reading of a receiver's `err`: one of RFC 8935 §2.4's codes,
+<a href=#893 id=893 data-nosnippet>893</a>/// else a fixed word. Free text from a third party is not written to the audit
+<a href=#894 id=894 data-nosnippet>894</a>/// log.
+<a href=#895 id=895 data-nosnippet>895</a></span><span class="kw">fn </span>audited_err_code(raw: <span class="kw-2">&amp;</span>str) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#896 id=896 data-nosnippet>896</a>    axiam_oauth2::ssf_delivery::RFC_8935_ERROR_CODES
+<a href=#897 id=897 data-nosnippet>897</a>        .into_iter()
+<a href=#898 id=898 data-nosnippet>898</a>        .find(|known| <span class="kw-2">*</span>known == raw)
+<a href=#899 id=899 data-nosnippet>899</a>        .unwrap_or(<span class="string">"unrecognized"</span>)
+<a href=#900 id=900 data-nosnippet>900</a>}
+<a href=#901 id=901 data-nosnippet>901</a>
+<a href=#902 id=902 data-nosnippet>902</a><span class="kw">fn </span>empty_poll_response() -&gt; HttpResponse {
+<a href=#903 id=903 data-nosnippet>903</a>    no_store(HttpResponse::Ok()).json(SsfPollResponse {
+<a href=#904 id=904 data-nosnippet>904</a>        sets: serde_json::Map::new(),
+<a href=#905 id=905 data-nosnippet>905</a>        more_available: <span class="bool-val">false</span>,
+<a href=#906 id=906 data-nosnippet>906</a>    })
+<a href=#907 id=907 data-nosnippet>907</a>}
+<a href=#908 id=908 data-nosnippet>908</a>
+<a href=#909 id=909 data-nosnippet>909</a><span class="doccomment">/// `POST /ssf/v1/poll/{stream_id}` — RFC 8936 poll delivery (D-48).
+<a href=#910 id=910 data-nosnippet>910</a>///
+<a href=#911 id=911 data-nosnippet>911</a>/// The receiver's token, as on the stream API, and the same single `404` for a
+<a href=#912 id=912 data-nosnippet>912</a>/// stream that is not its own. In this order: the acknowledgements, then the
+<a href=#913 id=913 data-nosnippet>913</a>/// reported errors, then the next SETs — so an event acknowledged here is not
+<a href=#914 id=914 data-nosnippet>914</a>/// returned by this same call. An unacknowledged event comes back on the next
+<a href=#915 id=915 data-nosnippet>915</a>/// poll (at-least-once); a SET is **signed now**, against the stream as it is
+<a href=#916 id=916 data-nosnippet>916</a>/// now, so a stream paused or disabled meanwhile answers an empty `sets`.
+<a href=#917 id=917 data-nosnippet>917</a>///
+<a href=#918 id=918 data-nosnippet>918</a>/// Without `returnImmediately` the call long-polls for up to 30 seconds; at most
+<a href=#919 id=919 data-nosnippet>919</a>/// one long poll waits per stream per server instance, and a second concurrent
+<a href=#920 id=920 data-nosnippet>920</a>/// request on the same stream is answered at once as if `returnImmediately` were
+<a href=#921 id=921 data-nosnippet>921</a>/// true (D-53).
+<a href=#922 id=922 data-nosnippet>922</a></span><span class="attr">#[utoipa::path(
+<a href=#923 id=923 data-nosnippet>923</a>    post,
+<a href=#924 id=924 data-nosnippet>924</a>    path = <span class="string">"/ssf/v1/poll/{stream_id}"</span>,
+<a href=#925 id=925 data-nosnippet>925</a>    tag = <span class="string">"ssf-receiver"</span>,
+<a href=#926 id=926 data-nosnippet>926</a>    params((<span class="string">"stream_id" </span>= String, Path, description = <span class="string">"The poll stream"</span>)),
+<a href=#927 id=927 data-nosnippet>927</a>    request_body = <span class="prelude-ty">Option</span>&lt;SsfPollRequest&gt;,
+<a href=#928 id=928 data-nosnippet>928</a>    responses(
+<a href=#929 id=929 data-nosnippet>929</a>        (status = <span class="number">200</span>, description = <span class="string">"The oldest held SETs, up to maxEvents, and whether more are held"</span>, body = SsfPollResponse),
+<a href=#930 id=930 data-nosnippet>930</a>        (status = <span class="number">400</span>, description = <span class="string">"A malformed body, a negative maxEvents, too many ack or \
+<a href=#931 id=931 data-nosnippet>931</a>                                      setErrs entries, or a push stream"</span>),
+<a href=#932 id=932 data-nosnippet>932</a>        (status = <span class="number">401</span>, description = <span class="string">"No valid token"</span>),
+<a href=#933 id=933 data-nosnippet>933</a>        (status = <span class="number">403</span>, description = <span class="string">"Not an OAuth2 client token with the ssf.manage scope"</span>),
+<a href=#934 id=934 data-nosnippet>934</a>        (status = <span class="number">404</span>, description = <span class="string">"No such stream for this receiver"</span>),
+<a href=#935 id=935 data-nosnippet>935</a>        (status = <span class="number">413</span>, description = <span class="string">"The body is over 32 KiB"</span>),
+<a href=#936 id=936 data-nosnippet>936</a>        (status = <span class="number">429</span>, description = <span class="string">"Rate limit"</span>),
+<a href=#937 id=937 data-nosnippet>937</a>    ),
+<a href=#938 id=938 data-nosnippet>938</a>    security((<span class="string">"bearer" </span>= []</span>))
+<a href=#939 id=939 data-nosnippet>939</a>)]
+<a href=#940 id=940 data-nosnippet>940</a><span class="kw">pub async fn </span>poll_events&lt;C: Connection + Clone&gt;(
+<a href=#941 id=941 data-nosnippet>941</a>    receiver: SsfReceiverToken,
+<a href=#942 id=942 data-nosnippet>942</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#943 id=943 data-nosnippet>943</a>    http_req: HttpRequest,
+<a href=#944 id=944 data-nosnippet>944</a>    path: web::Path&lt;String&gt;,
+<a href=#945 id=945 data-nosnippet>945</a>    body: web::Bytes,
+<a href=#946 id=946 data-nosnippet>946</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#947 id=947 data-nosnippet>947</a>    <span class="kw">let </span>raw_id = path.into_inner();
+<a href=#948 id=948 data-nosnippet>948</a>    <span class="kw">let </span><span class="kw-2">mut </span>stream = owned_stream(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>receiver, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>raw_id)).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#949 id=949 data-nosnippet>949</a>    <span class="kw">if </span>stream.delivery_method != SsfDeliveryMethod::Poll {
+<a href=#950 id=950 data-nosnippet>950</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::Validation {
+<a href=#951 id=951 data-nosnippet>951</a>            message: <span class="string">"this stream delivers by push; there is nothing to poll"</span>.into(),
+<a href=#952 id=952 data-nosnippet>952</a>        }));
+<a href=#953 id=953 data-nosnippet>953</a>    }
+<a href=#954 id=954 data-nosnippet>954</a>    <span class="kw">if </span>body.len() &gt; POLL_MAX_BODY_BYTES {
+<a href=#955 id=955 data-nosnippet>955</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(HttpResponse::PayloadTooLarge().finish());
+<a href=#956 id=956 data-nosnippet>956</a>    }
+<a href=#957 id=957 data-nosnippet>957</a>    <span class="kw">let </span>request: SsfPollRequest = <span class="kw">if </span>body.iter().all(u8::is_ascii_whitespace) {
+<a href=#958 id=958 data-nosnippet>958</a>        SsfPollRequest::default()
+<a href=#959 id=959 data-nosnippet>959</a>    } <span class="kw">else </span>{
+<a href=#960 id=960 data-nosnippet>960</a>        serde_json::from_slice(<span class="kw-2">&amp;</span>body).map_err(|<span class="kw">_</span>| {
+<a href=#961 id=961 data-nosnippet>961</a>            AxiamApiError(AxiamError::Validation {
+<a href=#962 id=962 data-nosnippet>962</a>                message: <span class="string">"the poll request is not a valid RFC 8936 JSON body"</span>.into(),
+<a href=#963 id=963 data-nosnippet>963</a>            })
+<a href=#964 id=964 data-nosnippet>964</a>        })<span class="question-mark">?
+<a href=#965 id=965 data-nosnippet>965</a>    </span>};
+<a href=#966 id=966 data-nosnippet>966</a>    <span class="kw">let </span>max_events = <span class="kw">match </span>request.max_events {
+<a href=#967 id=967 data-nosnippet>967</a>        <span class="prelude-val">None </span>=&gt; POLL_MAX_EVENTS_PER_RESPONSE,
+<a href=#968 id=968 data-nosnippet>968</a>        <span class="prelude-val">Some</span>(n) <span class="kw">if </span>n &lt; <span class="number">0 </span>=&gt; {
+<a href=#969 id=969 data-nosnippet>969</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::Validation {
+<a href=#970 id=970 data-nosnippet>970</a>                message: <span class="string">"maxEvents must not be negative"</span>.into(),
+<a href=#971 id=971 data-nosnippet>971</a>            }));
+<a href=#972 id=972 data-nosnippet>972</a>        }
+<a href=#973 id=973 data-nosnippet>973</a>        <span class="prelude-val">Some</span>(n) =&gt; usize::try_from(n)
+<a href=#974 id=974 data-nosnippet>974</a>            .unwrap_or(POLL_MAX_EVENTS_PER_RESPONSE)
+<a href=#975 id=975 data-nosnippet>975</a>            .min(POLL_MAX_EVENTS_PER_RESPONSE),
+<a href=#976 id=976 data-nosnippet>976</a>    };
+<a href=#977 id=977 data-nosnippet>977</a>    <span class="kw">if </span>request.ack.len() &gt; POLL_MAX_ACKS || request.set_errs.len() &gt; POLL_MAX_SET_ERRS {
+<a href=#978 id=978 data-nosnippet>978</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(AxiamApiError(AxiamError::Validation {
+<a href=#979 id=979 data-nosnippet>979</a>            message: <span class="macro">format!</span>(
+<a href=#980 id=980 data-nosnippet>980</a>                <span class="string">"a poll request carries at most {POLL_MAX_ACKS} ack and {POLL_MAX_SET_ERRS} \
+<a href=#981 id=981 data-nosnippet>981</a>                 setErrs entries"
+<a href=#982 id=982 data-nosnippet>982</a>            </span>),
+<a href=#983 id=983 data-nosnippet>983</a>        }));
+<a href=#984 id=984 data-nosnippet>984</a>    }
+<a href=#985 id=985 data-nosnippet>985</a>
+<a href=#986 id=986 data-nosnippet>986</a>    <span class="comment">// 1. Acknowledgements: exactly the named rows of this stream.
+<a href=#987 id=987 data-nosnippet>987</a>    </span><span class="kw">let </span>acked: Vec&lt;String&gt; = request
+<a href=#988 id=988 data-nosnippet>988</a>        .ack
+<a href=#989 id=989 data-nosnippet>989</a>        .into_iter()
+<a href=#990 id=990 data-nosnippet>990</a>        .filter(|jti| jti.len() &lt;= MAX_JTI_BYTES)
+<a href=#991 id=991 data-nosnippet>991</a>        .collect();
+<a href=#992 id=992 data-nosnippet>992</a>    state
+<a href=#993 id=993 data-nosnippet>993</a>        .ssf
+<a href=#994 id=994 data-nosnippet>994</a>        .buffer_repo
+<a href=#995 id=995 data-nosnippet>995</a>        .delete_by_jti(receiver.tenant_id, stream.id, <span class="kw-2">&amp;</span>acked)
+<a href=#996 id=996 data-nosnippet>996</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#997 id=997 data-nosnippet>997</a>
+<a href=#998 id=998 data-nosnippet>998</a>    <span class="comment">// 2. Errors the receiver reports: each row is deleted (the receiver will not
+<a href=#999 id=999 data-nosnippet>999</a>    //    accept that SET, so offering it again is pointless) and audited.
+<a href=#1000 id=1000 data-nosnippet>1000</a>    </span><span class="kw">for </span>(jti, reported) <span class="kw">in </span>request.set_errs {
+<a href=#1001 id=1001 data-nosnippet>1001</a>        <span class="kw">if </span>jti.len() &gt; MAX_JTI_BYTES {
+<a href=#1002 id=1002 data-nosnippet>1002</a>            <span class="kw">continue</span>;
+<a href=#1003 id=1003 data-nosnippet>1003</a>        }
+<a href=#1004 id=1004 data-nosnippet>1004</a>        <span class="kw">let </span>removed = state
+<a href=#1005 id=1005 data-nosnippet>1005</a>            .ssf
+<a href=#1006 id=1006 data-nosnippet>1006</a>            .buffer_repo
+<a href=#1007 id=1007 data-nosnippet>1007</a>            .delete_by_jti(receiver.tenant_id, stream.id, std::slice::from_ref(<span class="kw-2">&amp;</span>jti))
+<a href=#1008 id=1008 data-nosnippet>1008</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1009 id=1009 data-nosnippet>1009</a>        audit_receiver(
+<a href=#1010 id=1010 data-nosnippet>1010</a>            <span class="kw-2">&amp;</span>state,
+<a href=#1011 id=1011 data-nosnippet>1011</a>            <span class="kw-2">&amp;</span>http_req,
+<a href=#1012 id=1012 data-nosnippet>1012</a>            <span class="kw-2">&amp;</span>receiver,
+<a href=#1013 id=1013 data-nosnippet>1013</a>            AUDIT_POLL_SET_ERROR,
+<a href=#1014 id=1014 data-nosnippet>1014</a>            stream.id,
+<a href=#1015 id=1015 data-nosnippet>1015</a>            <span class="macro">serde_json::json!</span>({
+<a href=#1016 id=1016 data-nosnippet>1016</a>                <span class="string">"jti"</span>: jti,
+<a href=#1017 id=1017 data-nosnippet>1017</a>                <span class="string">"err"</span>: audited_err_code(<span class="kw-2">&amp;</span>reported.err),
+<a href=#1018 id=1018 data-nosnippet>1018</a>                <span class="string">"held"</span>: removed &gt; <span class="number">0</span>,
+<a href=#1019 id=1019 data-nosnippet>1019</a>            }),
+<a href=#1020 id=1020 data-nosnippet>1020</a>        )
+<a href=#1021 id=1021 data-nosnippet>1021</a>        .<span class="kw">await</span>;
+<a href=#1022 id=1022 data-nosnippet>1022</a>    }
+<a href=#1023 id=1023 data-nosnippet>1023</a>
+<a href=#1024 id=1024 data-nosnippet>1024</a>    <span class="comment">// 3. The next SETs. Nothing from a stream that is not enabled; max 0 asks
+<a href=#1025 id=1025 data-nosnippet>1025</a>    //    for acknowledgements only.
+<a href=#1026 id=1026 data-nosnippet>1026</a>    </span><span class="kw">if </span>stream.status != SsfStreamStatus::Enabled || max_events == <span class="number">0 </span>{
+<a href=#1027 id=1027 data-nosnippet>1027</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(empty_poll_response());
+<a href=#1028 id=1028 data-nosnippet>1028</a>    }
+<a href=#1029 id=1029 data-nosnippet>1029</a>    <span class="kw">let </span>return_immediately = request.return_immediately.unwrap_or(<span class="bool-val">false</span>);
+<a href=#1030 id=1030 data-nosnippet>1030</a>    <span class="kw">let </span>started = std::time::Instant::now();
+<a href=#1031 id=1031 data-nosnippet>1031</a>    <span class="comment">// D-53 (11): one waiting long poll per stream per instance. The slot is
+<a href=#1032 id=1032 data-nosnippet>1032</a>    // taken the first time this request would wait, and released when it
+<a href=#1033 id=1033 data-nosnippet>1033</a>    // returns or is dropped; a request that finds it taken answers at once.
+<a href=#1034 id=1034 data-nosnippet>1034</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>wait_slot: <span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::state::bundles::PollWaitGuard&gt; = <span class="prelude-val">None</span>;
+<a href=#1035 id=1035 data-nosnippet>1035</a>    <span class="comment">// A key that cannot sign stays unusable for the rest of a long poll, which
+<a href=#1036 id=1036 data-nosnippet>1036</a>    // looks at the buffer every half second: it is reported once per request,
+<a href=#1037 id=1037 data-nosnippet>1037</a>    // not once per look (F4 W4 P23W4-03).
+<a href=#1038 id=1038 data-nosnippet>1038</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>signing_failure_logged = <span class="bool-val">false</span>;
+<a href=#1039 id=1039 data-nosnippet>1039</a>    <span class="kw">loop </span>{
+<a href=#1040 id=1040 data-nosnippet>1040</a>        <span class="comment">// D-55 at signing, on every look: a gate that started to hold while
+<a href=#1041 id=1041 data-nosnippet>1041</a>        // this poll waited signs nothing.
+<a href=#1042 id=1042 data-nosnippet>1042</a>        </span><span class="kw">let </span>issuer = state.ssf.gate.check().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1043 id=1043 data-nosnippet>1043</a>        <span class="kw">let </span>held = state
+<a href=#1044 id=1044 data-nosnippet>1044</a>            .ssf
+<a href=#1045 id=1045 data-nosnippet>1045</a>            .buffer_repo
+<a href=#1046 id=1046 data-nosnippet>1046</a>            .list_oldest(receiver.tenant_id, stream.id, max_events + <span class="number">1</span>, Utc::now())
+<a href=#1047 id=1047 data-nosnippet>1047</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1048 id=1048 data-nosnippet>1048</a>        <span class="kw">if </span>!held.is_empty() {
+<a href=#1049 id=1049 data-nosnippet>1049</a>            <span class="kw">let </span>more_available = held.len() &gt; max_events;
+<a href=#1050 id=1050 data-nosnippet>1050</a>            <span class="kw">let </span><span class="kw-2">mut </span>sets = serde_json::Map::new();
+<a href=#1051 id=1051 data-nosnippet>1051</a>            <span class="kw">let </span><span class="kw-2">mut </span>unsignable: Vec&lt;String&gt; = Vec::new();
+<a href=#1052 id=1052 data-nosnippet>1052</a>            <span class="kw">for </span>pending <span class="kw">in </span>held.iter().take(max_events) {
+<a href=#1053 id=1053 data-nosnippet>1053</a>                <span class="kw">match </span>sign_set(<span class="kw-2">&amp;</span>state.auth_config, issuer, <span class="kw-2">&amp;</span>stream, pending) {
+<a href=#1054 id=1054 data-nosnippet>1054</a>                    <span class="prelude-val">Ok</span>(set) =&gt; {
+<a href=#1055 id=1055 data-nosnippet>1055</a>                        sets.insert(pending.jti.clone(), serde_json::Value::String(set));
+<a href=#1056 id=1056 data-nosnippet>1056</a>                    }
+<a href=#1057 id=1057 data-nosnippet>1057</a>                    <span class="comment">// A key that cannot sign is the operator's to fix; the event
+<a href=#1058 id=1058 data-nosnippet>1058</a>                    // stays for the next poll.
+<a href=#1059 id=1059 data-nosnippet>1059</a>                    </span><span class="prelude-val">Err</span>(SsfError::Signing(<span class="kw">_</span>)) =&gt; {
+<a href=#1060 id=1060 data-nosnippet>1060</a>                        <span class="kw">if </span>!signing_failure_logged {
+<a href=#1061 id=1061 data-nosnippet>1061</a>                            signing_failure_logged = <span class="bool-val">true</span>;
+<a href=#1062 id=1062 data-nosnippet>1062</a>                            <span class="macro">tracing::error!</span>(target: <span class="string">"axiam::ssf"</span>, stream_id = %stream.id, <span class="string">"a held SSF event could not be signed"</span>);
+<a href=#1063 id=1063 data-nosnippet>1063</a>                        }
+<a href=#1064 id=1064 data-nosnippet>1064</a>                    }
+<a href=#1065 id=1065 data-nosnippet>1065</a>                    <span class="comment">// D-55 started to hold while this poll waited: nothing is
+<a href=#1066 id=1066 data-nosnippet>1066</a>                    // signed, and the poll answers as a switched-off stream.
+<a href=#1067 id=1067 data-nosnippet>1067</a>                    </span><span class="prelude-val">Err</span>(SsfError::SharedIssuer) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(no_such_stream()),
+<a href=#1068 id=1068 data-nosnippet>1068</a>                    <span class="comment">// The stream no longer carries it (narrowed meanwhile) or it
+<a href=#1069 id=1069 data-nosnippet>1069</a>                    // can never be signed for this stream: drop it.
+<a href=#1070 id=1070 data-nosnippet>1070</a>                    </span><span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; unsignable.push(pending.jti.clone()),
+<a href=#1071 id=1071 data-nosnippet>1071</a>                }
+<a href=#1072 id=1072 data-nosnippet>1072</a>            }
+<a href=#1073 id=1073 data-nosnippet>1073</a>            <span class="kw">if </span>!unsignable.is_empty() {
+<a href=#1074 id=1074 data-nosnippet>1074</a>                state
+<a href=#1075 id=1075 data-nosnippet>1075</a>                    .ssf
+<a href=#1076 id=1076 data-nosnippet>1076</a>                    .buffer_repo
+<a href=#1077 id=1077 data-nosnippet>1077</a>                    .delete_by_jti(receiver.tenant_id, stream.id, <span class="kw-2">&amp;</span>unsignable)
+<a href=#1078 id=1078 data-nosnippet>1078</a>                    .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1079 id=1079 data-nosnippet>1079</a>            }
+<a href=#1080 id=1080 data-nosnippet>1080</a>            <span class="kw">if </span>!sets.is_empty() || return_immediately {
+<a href=#1081 id=1081 data-nosnippet>1081</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(no_store(HttpResponse::Ok()).json(SsfPollResponse {
+<a href=#1082 id=1082 data-nosnippet>1082</a>                    sets,
+<a href=#1083 id=1083 data-nosnippet>1083</a>                    more_available,
+<a href=#1084 id=1084 data-nosnippet>1084</a>                }));
+<a href=#1085 id=1085 data-nosnippet>1085</a>            }
+<a href=#1086 id=1086 data-nosnippet>1086</a>        }
+<a href=#1087 id=1087 data-nosnippet>1087</a>        <span class="kw">if </span>return_immediately || started.elapsed() &gt;= POLL_LONG_POLL_MAX {
+<a href=#1088 id=1088 data-nosnippet>1088</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(empty_poll_response());
+<a href=#1089 id=1089 data-nosnippet>1089</a>        }
+<a href=#1090 id=1090 data-nosnippet>1090</a>        <span class="kw">if </span>wait_slot.is_none() {
+<a href=#1091 id=1091 data-nosnippet>1091</a>            wait_slot = state.ssf.poll_waiters.try_enter(stream.id);
+<a href=#1092 id=1092 data-nosnippet>1092</a>            <span class="kw">if </span>wait_slot.is_none() {
+<a href=#1093 id=1093 data-nosnippet>1093</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(empty_poll_response());
+<a href=#1094 id=1094 data-nosnippet>1094</a>            }
+<a href=#1095 id=1095 data-nosnippet>1095</a>        }
+<a href=#1096 id=1096 data-nosnippet>1096</a>        <span class="comment">// `saturating_sub`: the 30 s may have run out since the check above, and
+<a href=#1097 id=1097 data-nosnippet>1097</a>        // a `Duration` subtraction that underflows panics.
+<a href=#1098 id=1098 data-nosnippet>1098</a>        </span>tokio::time::sleep(
+<a href=#1099 id=1099 data-nosnippet>1099</a>            POLL_WAIT_STEP.min(POLL_LONG_POLL_MAX.saturating_sub(started.elapsed())),
+<a href=#1100 id=1100 data-nosnippet>1100</a>        )
+<a href=#1101 id=1101 data-nosnippet>1101</a>        .<span class="kw">await</span>;
+<a href=#1102 id=1102 data-nosnippet>1102</a>        <span class="comment">// The stream as it is now: paused, disabled or gone while waiting.
+<a href=#1103 id=1103 data-nosnippet>1103</a>        </span>stream = owned_stream(<span class="kw-2">&amp;</span>state, <span class="kw-2">&amp;</span>receiver, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>raw_id)).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#1104 id=1104 data-nosnippet>1104</a>        <span class="kw">if </span>stream.status != SsfStreamStatus::Enabled {
+<a href=#1105 id=1105 data-nosnippet>1105</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(empty_poll_response());
+<a href=#1106 id=1106 data-nosnippet>1106</a>        }
+<a href=#1107 id=1107 data-nosnippet>1107</a>    }
+<a href=#1108 id=1108 data-nosnippet>1108</a>}
+</code></pre></div></section></main></body></html>

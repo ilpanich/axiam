@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["CreateGroup","Group","UpdateGroup"]};
+window.SIDEBAR_ITEMS = {"enum":["DirectoryMembershipWrite"],"struct":["CreateGroup","Group","UpdateGroup"]};

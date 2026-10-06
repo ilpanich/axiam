@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_GROUPS_PER_USER"],"enum":["ResolveError"],"fn":["mapped_group_ids","resolve_nested"],"struct":["GroupLookup","ResolvedGroups"],"trait":["GroupParents"]};

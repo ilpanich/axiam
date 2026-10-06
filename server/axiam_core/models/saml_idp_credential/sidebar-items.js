@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SamlIdpCredentialStatus"],"struct":["SamlIdpCredential","SamlIdpCredentialPromotion","SealedSamlIdpCredential","SealedSamlIdpKey","StoreSamlIdpCredential"]};

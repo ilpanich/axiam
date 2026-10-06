@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["auth","error","filter","groups","patch","routes","schema","scim_metadata","users"]};
+window.SIDEBAR_ITEMS = {"mod":["auth","error","filter","groups","outbound","patch","routes","schema","scim_metadata","users"]};

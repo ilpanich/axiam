@@ -1,0 +1,1599 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-directory/src/sync.rs`."><title>sync.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_directory" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_directory/</div>sync.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! The directory sync job (G-3, T23.3.5, D-31): keeping AXIAM's directory
+<a href=#2 id=2 data-nosnippet>2</a>//! accounts in step with the directory they came from, **without ever being
+<a href=#3 id=3 data-nosnippet>3</a>//! able to grant anything**.
+<a href=#4 id=4 data-nosnippet>4</a>//!
+<a href=#5 id=5 data-nosnippet>5</a>//! # What it does, per tenant with an enabled directory
+<a href=#6 id=6 data-nosnippet>6</a>//!
+<a href=#7 id=7 data-nosnippet>7</a>//! Two kinds of run, both read-only against the directory:
+<a href=#8 id=8 data-nosnippet>8</a>//!
+<a href=#9 id=9 data-nosnippet>9</a>//! * **Full** (the first run, then every [`SyncLimits::full_interval`]): look up
+<a href=#10 id=10 data-nosnippet>10</a>//!   **every** account carrying a `directory_external_id` by that identifier —
+<a href=#11 id=11 data-nosnippet>11</a>//!   `entryUUID=&lt;uuid&gt;`, or `objectGUID=&lt;binary-escaped octets&gt;`, under
+<a href=#12 id=12 data-nosnippet>12</a>//!   `base_dn`, exactly one entry. Found: refresh the account (below). Not
+<a href=#13 id=13 data-nosnippet>13</a>//!   found: **vanished**. Only a full run concludes "vanished", because only it
+<a href=#14 id=14 data-nosnippet>14</a>//!   has asked about everyone.
+<a href=#15 id=15 data-nosnippet>15</a>//! * **Incremental** (every `sync_interval_secs`): one search for entries whose
+<a href=#16 id=16 data-nosnippet>16</a>//!   change attribute is at or after a stored watermark, acting only on entries
+<a href=#17 id=17 data-nosnippet>17</a>//!   whose identifier belongs to a marked account. Deletions are invisible to
+<a href=#18 id=18 data-nosnippet>18</a>//!   it and are left to the full run. On Active Directory the watermark is
+<a href=#19 id=19 data-nosnippet>19</a>//!   `highestCommittedUSN` read from the rootDSE of the same server; a changed
+<a href=#20 id=20 data-nosnippet>20</a>//!   `dsServiceName`, or no usable watermark, falls back to a full run.
+<a href=#21 id=21 data-nosnippet>21</a>//!
+<a href=#22 id=22 data-nosnippet>22</a>//! # What it may write (D-31)
+<a href=#23 id=23 data-nosnippet>23</a>//!
+<a href=#24 id=24 data-nosnippet>24</a>//! * A vanished or directory-disabled account becomes **`Inactive`** — never
+<a href=#25 id=25 data-nosnippet>25</a>//!   `Deleted` (an anonymised tombstone), never a hard delete. Its sessions and
+<a href=#26 id=26 data-nosnippet>26</a>//!   OAuth2 refresh tokens are revoked **through the repositories** (so the
+<a href=#27 id=27 data-nosnippet>27</a>//!   session validation cache and the revocation feed see it), its
+<a href=#28 id=28 data-nosnippet>28</a>//!   directory-sourced memberships are removed through the D-30 mapper (so the
+<a href=#29 id=29 data-nosnippet>29</a>//!   decision cache is flushed), and `account_may_act` then refuses it on every
+<a href=#30 id=30 data-nosnippet>30</a>//!   path — passkeys and the OP cookie included, which closes T-303's residual.
+<a href=#31 id=31 data-nosnippet>31</a>//!   The row, its marker and its audit trail stay.
+<a href=#32 id=32 data-nosnippet>32</a>//! * An account that is present and enabled is refreshed: its username, email
+<a href=#33 id=33 data-nosnippet>33</a>//!   and display name follow the entry (through the same cleaners just-in-time
+<a href=#34 id=34 data-nosnippet>34</a>//!   provisioning applies; a change that would collide with another account is
+<a href=#35 id=35 data-nosnippet>35</a>//!   **skipped and audited**, never applied) and its group mapping is applied.
+<a href=#36 id=36 data-nosnippet>36</a>//! * **Nothing else.** The job never re-enables an account, never creates one
+<a href=#37 id=37 data-nosnippet>37</a>//!   and never links one by name (D-28): an `Inactive` account whose entry is
+<a href=#38 id=38 data-nosnippet>38</a>//!   present and enabled is **reported** — once — as needing an administrator.
+<a href=#39 id=39 data-nosnippet>39</a>//!   It never touches an account without a marker.
+<a href=#40 id=40 data-nosnippet>40</a>//!
+<a href=#41 id=41 data-nosnippet>41</a>//! # Why it is safe to be wrong about the directory
+<a href=#42 id=42 data-nosnippet>42</a>//!
+<a href=#43 id=43 data-nosnippet>43</a>//! * **Errors change nothing.** A directory that cannot be reached, a refused
+<a href=#44 id=44 data-nosnippet>44</a>//!   search, a deadline: the run ends before anything is written (the full run
+<a href=#45 id=45 data-nosnippet>45</a>//!   reads everything first, writes second), and the state records the failure.
+<a href=#46 id=46 data-nosnippet>46</a>//!   An empty or failed search never reads as "everyone vanished": the question
+<a href=#47 id=47 data-nosnippet>47</a>//!   that was not answered is an error, not a negative answer.
+<a href=#48 id=48 data-nosnippet>48</a>//! * **The safety valve.** A full run that would deactivate more than
+<a href=#49 id=49 data-nosnippet>49</a>//!   [`SyncLimits::valve_percent`] % of the tenant's directory accounts **and**
+<a href=#50 id=50 data-nosnippet>50</a>//!   at least [`SyncLimits::valve_min_accounts`] of them applies **nothing**,
+<a href=#51 id=51 data-nosnippet>51</a>//!   audits, and reports failure. An empty search after a misconfiguration or an
+<a href=#52 id=52 data-nosnippet>52</a>//!   outage must not disable a company.
+<a href=#53 id=53 data-nosnippet>53</a>//! * **Per-user failures skip that user.** A failed mapping, a failed write:
+<a href=#54 id=54 data-nosnippet>54</a>//!   that account is left as it was and the next run is a full one.
+<a href=#55 id=55 data-nosnippet>55</a>//! * **Order of a deactivation** is revoke, remove memberships, then flip the
+<a href=#56 id=56 data-nosnippet>56</a>//!   status **last** with a compare-and-set: a failure part-way leaves the
+<a href=#57 id=57 data-nosnippet>57</a>//!   account `Active` and the next run finds it again, so there is no state in
+<a href=#58 id=58 data-nosnippet>58</a>//!   which an account is `Inactive` yet still holds what the job should have
+<a href=#59 id=59 data-nosnippet>59</a>//!   taken.
+<a href=#60 id=60 data-nosnippet>60</a>//!
+<a href=#61 id=61 data-nosnippet>61</a>//! # Scheduling and bounds
+<a href=#62 id=62 data-nosnippet>62</a>//!
+<a href=#63 id=63 data-nosnippet>63</a>//! One tenant at a time, on the server's cleanup scheduler, through the same
+<a href=#64 id=64 data-nosnippet>64</a>//! bounded pool and deadlines as every other directory use; each run is also
+<a href=#65 id=65 data-nosnippet>65</a>//! bounded by [`SyncLimits::run_deadline`]. There is **no multi-replica guard**:
+<a href=#66 id=66 data-nosnippet>66</a>//! two replicas run the same job against the same rows. Every write is
+<a href=#67 id=67 data-nosnippet>67</a>//! idempotent or a compare-and-set, so the result is the same; the cost is
+<a href=#68 id=68 data-nosnippet>68</a>//! duplicated directory reads and, for refreshes, duplicated audit rows.
+<a href=#69 id=69 data-nosnippet>69</a>//!
+<a href=#70 id=70 data-nosnippet>70</a>//! No audit row, log line or error carries a name, an address, a DN or a
+<a href=#71 id=71 data-nosnippet>71</a>//! password: accounts are named by id and entries by their immutable identifier.
+<a href=#72 id=72 data-nosnippet>72</a>
+<a href=#73 id=73 data-nosnippet>73</a></span><span class="kw">use </span>std::collections::HashSet;
+<a href=#74 id=74 data-nosnippet>74</a><span class="kw">use </span>std::sync::Arc;
+<a href=#75 id=75 data-nosnippet>75</a><span class="kw">use </span>std::time::Duration;
+<a href=#76 id=76 data-nosnippet>76</a>
+<a href=#77 id=77 data-nosnippet>77</a><span class="kw">use </span>axiam_core::error::AxiamError;
+<a href=#78 id=78 data-nosnippet>78</a><span class="kw">use </span>axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+<a href=#79 id=79 data-nosnippet>79</a><span class="kw">use </span>axiam_core::models::directory::{
+<a href=#80 id=80 data-nosnippet>80</a>    DirectoryAuthError, DirectoryConfig, DirectoryKind, SharedDirectoryAuditSink,
+<a href=#81 id=81 data-nosnippet>81</a>    SharedDirectoryGroupMapper,
+<a href=#82 id=82 data-nosnippet>82</a>};
+<a href=#83 id=83 data-nosnippet>83</a><span class="kw">use </span>axiam_core::models::directory_profile::CleanedAttributes;
+<a href=#84 id=84 data-nosnippet>84</a><span class="kw">use </span>axiam_core::models::directory_sync::{
+<a href=#85 id=85 data-nosnippet>85</a>    AUDIT_ACCOUNT_DEACTIVATED, AUDIT_ACCOUNT_REAPPEARED, AUDIT_ACCOUNT_UPDATED,
+<a href=#86 id=86 data-nosnippet>86</a>    AUDIT_GROUPS_MAPPED, AUDIT_SYNC_ATTRIBUTE_SKIPPED, AUDIT_SYNC_RUN, AUDIT_SYNC_SAFETY_VALVE,
+<a href=#87 id=87 data-nosnippet>87</a>    AUDIT_SYNC_USER_SKIPPED, DirectorySyncResult, DirectorySyncState,
+<a href=#88 id=88 data-nosnippet>88</a>};
+<a href=#89 id=89 data-nosnippet>89</a><span class="kw">use </span>axiam_core::models::ssf::SsfSystemAccountSink;
+<a href=#90 id=90 data-nosnippet>90</a><span class="kw">use </span>axiam_core::models::user::{UpdateUser, User, UserStatus};
+<a href=#91 id=91 data-nosnippet>91</a><span class="kw">use </span>axiam_core::repository::{
+<a href=#92 id=92 data-nosnippet>92</a>    DirectoryConfigRepository, DirectorySyncStateRepository, RefreshTokenRepository,
+<a href=#93 id=93 data-nosnippet>93</a>    SessionRepository, UserRepository,
+<a href=#94 id=94 data-nosnippet>94</a>};
+<a href=#95 id=95 data-nosnippet>95</a><span class="kw">use </span>chrono::{DateTime, Utc};
+<a href=#96 id=96 data-nosnippet>96</a><span class="kw">use </span>uuid::Uuid;
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a><span class="kw">use </span><span class="kw">crate</span>::authenticator::RepositoryDirectoryAuthenticator;
+<a href=#99 id=99 data-nosnippet>99</a><span class="kw">use </span><span class="kw">crate</span>::escape::{external_id_filter, is_usn};
+<a href=#100 id=100 data-nosnippet>100</a><span class="kw">use </span><span class="kw">crate</span>::sync_lookup::{DirectorySession, EntryLookup, RootDse, SyncEntry};
+<a href=#101 id=101 data-nosnippet>101</a>
+<a href=#102 id=102 data-nosnippet>102</a><span class="doccomment">/// The bounds and thresholds of the job. [`Default`] is the documented values;
+<a href=#103 id=103 data-nosnippet>103</a>/// tests shrink them.
+<a href=#104 id=104 data-nosnippet>104</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#105 id=105 data-nosnippet>105</a></span><span class="kw">pub struct </span>SyncLimits {
+<a href=#106 id=106 data-nosnippet>106</a>    <span class="doccomment">/// How long after the last complete full run the next one is due (24 h).
+<a href=#107 id=107 data-nosnippet>107</a>    </span><span class="kw">pub </span>full_interval: Duration,
+<a href=#108 id=108 data-nosnippet>108</a>    <span class="doccomment">/// The longest one tenant's run may take, directory I/O and writes
+<a href=#109 id=109 data-nosnippet>109</a>    /// together. A run that exceeds it is abandoned; the next one is full.
+<a href=#110 id=110 data-nosnippet>110</a>    </span><span class="kw">pub </span>run_deadline: Duration,
+<a href=#111 id=111 data-nosnippet>111</a>    <span class="doccomment">/// The most directory accounts one full run handles. A tenant with more is
+<a href=#112 id=112 data-nosnippet>112</a>    /// refused with an error rather than half-synced.
+<a href=#113 id=113 data-nosnippet>113</a>    </span><span class="kw">pub </span>max_accounts: usize,
+<a href=#114 id=114 data-nosnippet>114</a>    <span class="doccomment">/// Accounts read from the store per page.
+<a href=#115 id=115 data-nosnippet>115</a>    </span><span class="kw">pub </span>page_size: u32,
+<a href=#116 id=116 data-nosnippet>116</a>    <span class="doccomment">/// The most entries one incremental search reads; more is a prefix, the
+<a href=#117 id=117 data-nosnippet>117</a>    /// entries read are applied, and the next run is a full one.
+<a href=#118 id=118 data-nosnippet>118</a>    </span><span class="kw">pub </span>max_changed_entries: usize,
+<a href=#119 id=119 data-nosnippet>119</a>    <span class="doccomment">/// The safety valve's percentage: a full run that would deactivate **more
+<a href=#120 id=120 data-nosnippet>120</a>    /// than** this share of the tenant's directory accounts is a candidate.
+<a href=#121 id=121 data-nosnippet>121</a>    </span><span class="kw">pub </span>valve_percent: usize,
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="doccomment">/// The safety valve's floor: …and only when it would deactivate **at
+<a href=#123 id=123 data-nosnippet>123</a>    /// least** this many.
+<a href=#124 id=124 data-nosnippet>124</a>    </span><span class="kw">pub </span>valve_min_accounts: usize,
+<a href=#125 id=125 data-nosnippet>125</a>}
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a><span class="kw">impl </span>Default <span class="kw">for </span>SyncLimits {
+<a href=#128 id=128 data-nosnippet>128</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#129 id=129 data-nosnippet>129</a>        <span class="self">Self </span>{
+<a href=#130 id=130 data-nosnippet>130</a>            full_interval: Duration::from_secs(<span class="number">24 </span>* <span class="number">60 </span>* <span class="number">60</span>),
+<a href=#131 id=131 data-nosnippet>131</a>            run_deadline: Duration::from_secs(<span class="number">15 </span>* <span class="number">60</span>),
+<a href=#132 id=132 data-nosnippet>132</a>            max_accounts: <span class="number">100_000</span>,
+<a href=#133 id=133 data-nosnippet>133</a>            page_size: <span class="number">500</span>,
+<a href=#134 id=134 data-nosnippet>134</a>            max_changed_entries: <span class="number">10_000</span>,
+<a href=#135 id=135 data-nosnippet>135</a>            valve_percent: <span class="number">10</span>,
+<a href=#136 id=136 data-nosnippet>136</a>            valve_min_accounts: <span class="number">5</span>,
+<a href=#137 id=137 data-nosnippet>137</a>        }
+<a href=#138 id=138 data-nosnippet>138</a>    }
+<a href=#139 id=139 data-nosnippet>139</a>}
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a><span class="doccomment">/// Which kind of run was made.
+<a href=#142 id=142 data-nosnippet>142</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#143 id=143 data-nosnippet>143</a></span><span class="kw">pub enum </span>RunKind {
+<a href=#144 id=144 data-nosnippet>144</a>    <span class="doccomment">/// Every marked account looked up by its identifier.
+<a href=#145 id=145 data-nosnippet>145</a>    </span>Full,
+<a href=#146 id=146 data-nosnippet>146</a>    <span class="doccomment">/// The entries changed since the watermark.
+<a href=#147 id=147 data-nosnippet>147</a>    </span>Incremental,
+<a href=#148 id=148 data-nosnippet>148</a>}
+<a href=#149 id=149 data-nosnippet>149</a>
+<a href=#150 id=150 data-nosnippet>150</a><span class="kw">impl </span>RunKind {
+<a href=#151 id=151 data-nosnippet>151</a>    <span class="doccomment">/// The spelling audit rows use.
+<a href=#152 id=152 data-nosnippet>152</a>    </span><span class="attr">#[must_use]
+<a href=#153 id=153 data-nosnippet>153</a>    </span><span class="kw">pub const fn </span>as_str(<span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#154 id=154 data-nosnippet>154</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#155 id=155 data-nosnippet>155</a>            <span class="self">Self</span>::Full =&gt; <span class="string">"full"</span>,
+<a href=#156 id=156 data-nosnippet>156</a>            <span class="self">Self</span>::Incremental =&gt; <span class="string">"incremental"</span>,
+<a href=#157 id=157 data-nosnippet>157</a>        }
+<a href=#158 id=158 data-nosnippet>158</a>    }
+<a href=#159 id=159 data-nosnippet>159</a>}
+<a href=#160 id=160 data-nosnippet>160</a>
+<a href=#161 id=161 data-nosnippet>161</a><span class="doccomment">/// Why a tenant's run did not complete. None of these changed the tenant's
+<a href=#162 id=162 data-nosnippet>162</a>/// accounts, except where stated.
+<a href=#163 id=163 data-nosnippet>163</a></span><span class="attr">#[derive(Debug, thiserror::Error)]
+<a href=#164 id=164 data-nosnippet>164</a></span><span class="kw">pub enum </span>SyncError {
+<a href=#165 id=165 data-nosnippet>165</a>    <span class="doccomment">/// The directory could not be used: unreachable, misconfigured, refusing the
+<a href=#166 id=166 data-nosnippet>166</a>    /// search or the service bind, or the bind secret unavailable.
+<a href=#167 id=167 data-nosnippet>167</a>    </span><span class="attr">#[error(<span class="string">"the directory could not be used for sync: {0:?}"</span>)]
+<a href=#168 id=168 data-nosnippet>168</a>    </span>Directory(DirectoryAuthError),
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="doccomment">/// The state row, the account store or the configuration could not be read
+<a href=#170 id=170 data-nosnippet>170</a>    /// or written.
+<a href=#171 id=171 data-nosnippet>171</a>    </span><span class="attr">#[error(<span class="string">"the sync state or the account store failed: {0}"</span>)]
+<a href=#172 id=172 data-nosnippet>172</a>    </span>Store(String),
+<a href=#173 id=173 data-nosnippet>173</a>    <span class="doccomment">/// The full run would have deactivated too many accounts and applied
+<a href=#174 id=174 data-nosnippet>174</a>    /// nothing.
+<a href=#175 id=175 data-nosnippet>175</a>    </span><span class="attr">#[error(
+<a href=#176 id=176 data-nosnippet>176</a>        <span class="string">"the safety valve tripped: a full run would deactivate {would_deactivate} of \
+<a href=#177 id=177 data-nosnippet>177</a>         {directory_accounts} directory accounts; nothing was applied"
+<a href=#178 id=178 data-nosnippet>178</a>    </span>)]
+<a href=#179 id=179 data-nosnippet>179</a>    </span>SafetyValve {
+<a href=#180 id=180 data-nosnippet>180</a>        <span class="doccomment">/// Accounts the run would have deactivated.
+<a href=#181 id=181 data-nosnippet>181</a>        </span>would_deactivate: usize,
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="doccomment">/// The tenant's directory accounts.
+<a href=#183 id=183 data-nosnippet>183</a>        </span>directory_accounts: usize,
+<a href=#184 id=184 data-nosnippet>184</a>    },
+<a href=#185 id=185 data-nosnippet>185</a>    <span class="doccomment">/// The tenant has more directory accounts than one run handles.
+<a href=#186 id=186 data-nosnippet>186</a>    </span><span class="attr">#[error(<span class="string">"the tenant has more than {0} directory accounts, more than one run handles"</span>)]
+<a href=#187 id=187 data-nosnippet>187</a>    </span>TooManyAccounts(usize),
+<a href=#188 id=188 data-nosnippet>188</a>    <span class="doccomment">/// The run exceeded its deadline and was abandoned part-way.
+<a href=#189 id=189 data-nosnippet>189</a>    </span><span class="attr">#[error(<span class="string">"the run exceeded its deadline"</span>)]
+<a href=#190 id=190 data-nosnippet>190</a>    </span>Deadline,
+<a href=#191 id=191 data-nosnippet>191</a>}
+<a href=#192 id=192 data-nosnippet>192</a>
+<a href=#193 id=193 data-nosnippet>193</a><span class="kw">impl </span>SyncError {
+<a href=#194 id=194 data-nosnippet>194</a>    <span class="doccomment">/// A short fixed tag for job health: what failed, never who.
+<a href=#195 id=195 data-nosnippet>195</a>    </span><span class="attr">#[must_use]
+<a href=#196 id=196 data-nosnippet>196</a>    </span><span class="kw">pub const fn </span>tag(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#198 id=198 data-nosnippet>198</a>            <span class="self">Self</span>::Directory(DirectoryAuthError::Unavailable) =&gt; <span class="string">"directory_unavailable"</span>,
+<a href=#199 id=199 data-nosnippet>199</a>            <span class="self">Self</span>::Directory(DirectoryAuthError::Misconfigured) =&gt; <span class="string">"directory_misconfigured"</span>,
+<a href=#200 id=200 data-nosnippet>200</a>            <span class="self">Self</span>::Directory(<span class="kw">_</span>) =&gt; <span class="string">"directory_refused"</span>,
+<a href=#201 id=201 data-nosnippet>201</a>            <span class="self">Self</span>::Store(<span class="kw">_</span>) =&gt; <span class="string">"store"</span>,
+<a href=#202 id=202 data-nosnippet>202</a>            <span class="self">Self</span>::SafetyValve { .. } =&gt; <span class="string">"safety_valve"</span>,
+<a href=#203 id=203 data-nosnippet>203</a>            <span class="self">Self</span>::TooManyAccounts(<span class="kw">_</span>) =&gt; <span class="string">"too_many_accounts"</span>,
+<a href=#204 id=204 data-nosnippet>204</a>            <span class="self">Self</span>::Deadline =&gt; <span class="string">"deadline"</span>,
+<a href=#205 id=205 data-nosnippet>205</a>        }
+<a href=#206 id=206 data-nosnippet>206</a>    }
+<a href=#207 id=207 data-nosnippet>207</a>}
+<a href=#208 id=208 data-nosnippet>208</a>
+<a href=#209 id=209 data-nosnippet>209</a><span class="kw">fn </span>store(error: AxiamError) -&gt; SyncError {
+<a href=#210 id=210 data-nosnippet>210</a>    SyncError::Store(error.to_string())
+<a href=#211 id=211 data-nosnippet>211</a>}
+<a href=#212 id=212 data-nosnippet>212</a>
+<a href=#213 id=213 data-nosnippet>213</a><span class="doccomment">/// What one tenant's completed run did. Counts only.
+<a href=#214 id=214 data-nosnippet>214</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#215 id=215 data-nosnippet>215</a></span><span class="kw">pub struct </span>TenantReport {
+<a href=#216 id=216 data-nosnippet>216</a>    <span class="doccomment">/// The tenant.
+<a href=#217 id=217 data-nosnippet>217</a>    </span><span class="kw">pub </span>tenant_id: Uuid,
+<a href=#218 id=218 data-nosnippet>218</a>    <span class="doccomment">/// The kind of run that was made.
+<a href=#219 id=219 data-nosnippet>219</a>    </span><span class="kw">pub </span>run: RunKind,
+<a href=#220 id=220 data-nosnippet>220</a>    <span class="doccomment">/// An incremental run was due but could not be trusted (no watermark, a
+<a href=#221 id=221 data-nosnippet>221</a>    /// different server, a previous bound hit or skipped account), so a full one
+<a href=#222 id=222 data-nosnippet>222</a>    /// was made instead.
+<a href=#223 id=223 data-nosnippet>223</a>    </span><span class="kw">pub </span>fell_back_to_full: bool,
+<a href=#224 id=224 data-nosnippet>224</a>    <span class="doccomment">/// Accounts the run evaluated against a directory answer.
+<a href=#225 id=225 data-nosnippet>225</a>    </span><span class="kw">pub </span>accounts_examined: usize,
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="doccomment">/// Accounts set `Inactive` because their entry vanished.
+<a href=#227 id=227 data-nosnippet>227</a>    </span><span class="kw">pub </span>deactivated_vanished: usize,
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="doccomment">/// Accounts set `Inactive` because the directory disabled them.
+<a href=#229 id=229 data-nosnippet>229</a>    </span><span class="kw">pub </span>deactivated_disabled: usize,
+<a href=#230 id=230 data-nosnippet>230</a>    <span class="doccomment">/// `Inactive` accounts reported for the first time as present and enabled.
+<a href=#231 id=231 data-nosnippet>231</a>    </span><span class="kw">pub </span>reappeared_reported: usize,
+<a href=#232 id=232 data-nosnippet>232</a>    <span class="doccomment">/// Accounts whose username, email or display name was updated.
+<a href=#233 id=233 data-nosnippet>233</a>    </span><span class="kw">pub </span>attributes_updated: usize,
+<a href=#234 id=234 data-nosnippet>234</a>    <span class="doccomment">/// Attribute changes not applied because they would collide.
+<a href=#235 id=235 data-nosnippet>235</a>    </span><span class="kw">pub </span>attributes_skipped: usize,
+<a href=#236 id=236 data-nosnippet>236</a>    <span class="doccomment">/// Accounts whose group memberships changed.
+<a href=#237 id=237 data-nosnippet>237</a>    </span><span class="kw">pub </span>memberships_changed: usize,
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="doccomment">/// Accounts left as they were because the run could not decide or write for
+<a href=#239 id=239 data-nosnippet>239</a>    /// them (an ambiguous or unaskable identifier, a failed mapping or write).
+<a href=#240 id=240 data-nosnippet>240</a>    </span><span class="kw">pub </span>accounts_skipped: usize,
+<a href=#241 id=241 data-nosnippet>241</a>    <span class="doccomment">/// An incremental search hit its bound; what was read was applied.
+<a href=#242 id=242 data-nosnippet>242</a>    </span><span class="kw">pub </span>bound_hit: bool,
+<a href=#243 id=243 data-nosnippet>243</a>}
+<a href=#244 id=244 data-nosnippet>244</a>
+<a href=#245 id=245 data-nosnippet>245</a><span class="kw">impl </span>TenantReport {
+<a href=#246 id=246 data-nosnippet>246</a>    <span class="kw">fn </span>new(tenant_id: Uuid, run: RunKind) -&gt; <span class="self">Self </span>{
+<a href=#247 id=247 data-nosnippet>247</a>        <span class="self">Self </span>{
+<a href=#248 id=248 data-nosnippet>248</a>            tenant_id,
+<a href=#249 id=249 data-nosnippet>249</a>            run,
+<a href=#250 id=250 data-nosnippet>250</a>            fell_back_to_full: <span class="bool-val">false</span>,
+<a href=#251 id=251 data-nosnippet>251</a>            accounts_examined: <span class="number">0</span>,
+<a href=#252 id=252 data-nosnippet>252</a>            deactivated_vanished: <span class="number">0</span>,
+<a href=#253 id=253 data-nosnippet>253</a>            deactivated_disabled: <span class="number">0</span>,
+<a href=#254 id=254 data-nosnippet>254</a>            reappeared_reported: <span class="number">0</span>,
+<a href=#255 id=255 data-nosnippet>255</a>            attributes_updated: <span class="number">0</span>,
+<a href=#256 id=256 data-nosnippet>256</a>            attributes_skipped: <span class="number">0</span>,
+<a href=#257 id=257 data-nosnippet>257</a>            memberships_changed: <span class="number">0</span>,
+<a href=#258 id=258 data-nosnippet>258</a>            accounts_skipped: <span class="number">0</span>,
+<a href=#259 id=259 data-nosnippet>259</a>            bound_hit: <span class="bool-val">false</span>,
+<a href=#260 id=260 data-nosnippet>260</a>        }
+<a href=#261 id=261 data-nosnippet>261</a>    }
+<a href=#262 id=262 data-nosnippet>262</a>
+<a href=#263 id=263 data-nosnippet>263</a>    <span class="doccomment">/// Accounts the run changed in any way, for job-health's "affected" count.
+<a href=#264 id=264 data-nosnippet>264</a>    </span><span class="attr">#[must_use]
+<a href=#265 id=265 data-nosnippet>265</a>    </span><span class="kw">pub fn </span>changed(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="self">self</span>.deactivated_vanished
+<a href=#267 id=267 data-nosnippet>267</a>            + <span class="self">self</span>.deactivated_disabled
+<a href=#268 id=268 data-nosnippet>268</a>            + <span class="self">self</span>.attributes_updated
+<a href=#269 id=269 data-nosnippet>269</a>            + <span class="self">self</span>.memberships_changed
+<a href=#270 id=270 data-nosnippet>270</a>    }
+<a href=#271 id=271 data-nosnippet>271</a>}
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a><span class="doccomment">/// What a scheduler pass did across tenants.
+<a href=#274 id=274 data-nosnippet>274</a></span><span class="attr">#[derive(Debug, Default)]
+<a href=#275 id=275 data-nosnippet>275</a></span><span class="kw">pub struct </span>SyncSummary {
+<a href=#276 id=276 data-nosnippet>276</a>    <span class="doccomment">/// Tenants whose run completed.
+<a href=#277 id=277 data-nosnippet>277</a>    </span><span class="kw">pub </span>reports: Vec&lt;TenantReport&gt;,
+<a href=#278 id=278 data-nosnippet>278</a>    <span class="doccomment">/// Tenants whose run failed, and why.
+<a href=#279 id=279 data-nosnippet>279</a>    </span><span class="kw">pub </span>failures: Vec&lt;(Uuid, SyncError)&gt;,
+<a href=#280 id=280 data-nosnippet>280</a>    <span class="doccomment">/// Tenants with an enabled directory that were not due.
+<a href=#281 id=281 data-nosnippet>281</a>    </span><span class="kw">pub </span>not_due: usize,
+<a href=#282 id=282 data-nosnippet>282</a>}
+<a href=#283 id=283 data-nosnippet>283</a>
+<a href=#284 id=284 data-nosnippet>284</a><span class="kw">impl </span>SyncSummary {
+<a href=#285 id=285 data-nosnippet>285</a>    <span class="doccomment">/// Accounts changed across every completed run.
+<a href=#286 id=286 data-nosnippet>286</a>    </span><span class="attr">#[must_use]
+<a href=#287 id=287 data-nosnippet>287</a>    </span><span class="kw">pub fn </span>changed(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; u64 {
+<a href=#288 id=288 data-nosnippet>288</a>        <span class="self">self</span>.reports.iter().map(|r| r.changed() <span class="kw">as </span>u64).sum()
+<a href=#289 id=289 data-nosnippet>289</a>    }
+<a href=#290 id=290 data-nosnippet>290</a>
+<a href=#291 id=291 data-nosnippet>291</a>    <span class="doccomment">/// One line for job health, naming how many tenants failed and with which
+<a href=#292 id=292 data-nosnippet>292</a>    /// fixed tags — never a tenant's data.
+<a href=#293 id=293 data-nosnippet>293</a>    </span><span class="attr">#[must_use]
+<a href=#294 id=294 data-nosnippet>294</a>    </span><span class="kw">pub fn </span>failure_message(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#295 id=295 data-nosnippet>295</a>        <span class="kw">if </span><span class="self">self</span>.failures.is_empty() {
+<a href=#296 id=296 data-nosnippet>296</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#297 id=297 data-nosnippet>297</a>        }
+<a href=#298 id=298 data-nosnippet>298</a>        <span class="kw">let </span>tags: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = <span class="self">self</span>.failures.iter().map(|(<span class="kw">_</span>, e)| e.tag()).collect();
+<a href=#299 id=299 data-nosnippet>299</a>        <span class="prelude-val">Some</span>(<span class="macro">format!</span>(
+<a href=#300 id=300 data-nosnippet>300</a>            <span class="string">"directory sync failed for {} of {} tenants ({})"</span>,
+<a href=#301 id=301 data-nosnippet>301</a>            <span class="self">self</span>.failures.len(),
+<a href=#302 id=302 data-nosnippet>302</a>            <span class="self">self</span>.failures.len() + <span class="self">self</span>.reports.len(),
+<a href=#303 id=303 data-nosnippet>303</a>            tags.join(<span class="string">", "</span>)
+<a href=#304 id=304 data-nosnippet>304</a>        ))
+<a href=#305 id=305 data-nosnippet>305</a>    }
+<a href=#306 id=306 data-nosnippet>306</a>}
+<a href=#307 id=307 data-nosnippet>307</a>
+<a href=#308 id=308 data-nosnippet>308</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#309 id=309 data-nosnippet>309</a>// The decision, as pure functions
+<a href=#310 id=310 data-nosnippet>310</a>// ---------------------------------------------------------------------------
+<a href=#311 id=311 data-nosnippet>311</a>
+<a href=#312 id=312 data-nosnippet>312</a></span><span class="doccomment">/// What the directory said about one account.
+<a href=#313 id=313 data-nosnippet>313</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#314 id=314 data-nosnippet>314</a></span><span class="kw">enum </span>Verdict {
+<a href=#315 id=315 data-nosnippet>315</a>    <span class="doccomment">/// The full run asked and the search completed with no match.
+<a href=#316 id=316 data-nosnippet>316</a>    </span>Vanished,
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="doccomment">/// The entry exists.
+<a href=#318 id=318 data-nosnippet>318</a>    </span>Present(Box&lt;SyncEntry&gt;),
+<a href=#319 id=319 data-nosnippet>319</a>}
+<a href=#320 id=320 data-nosnippet>320</a>
+<a href=#321 id=321 data-nosnippet>321</a><span class="doccomment">/// Why an account is deactivated.
+<a href=#322 id=322 data-nosnippet>322</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#323 id=323 data-nosnippet>323</a></span><span class="kw">enum </span>Reason {
+<a href=#324 id=324 data-nosnippet>324</a>    Vanished,
+<a href=#325 id=325 data-nosnippet>325</a>    Disabled,
+<a href=#326 id=326 data-nosnippet>326</a>}
+<a href=#327 id=327 data-nosnippet>327</a>
+<a href=#328 id=328 data-nosnippet>328</a><span class="kw">impl </span>Reason {
+<a href=#329 id=329 data-nosnippet>329</a>    <span class="kw">const fn </span>as_str(<span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#330 id=330 data-nosnippet>330</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#331 id=331 data-nosnippet>331</a>            <span class="self">Self</span>::Vanished =&gt; <span class="string">"vanished"</span>,
+<a href=#332 id=332 data-nosnippet>332</a>            <span class="self">Self</span>::Disabled =&gt; <span class="string">"disabled"</span>,
+<a href=#333 id=333 data-nosnippet>333</a>        }
+<a href=#334 id=334 data-nosnippet>334</a>    }
+<a href=#335 id=335 data-nosnippet>335</a>}
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a><span class="doccomment">/// What to do about one account, given its status and the directory's answer.
+<a href=#338 id=338 data-nosnippet>338</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#339 id=339 data-nosnippet>339</a></span><span class="kw">enum </span>Decision {
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="doccomment">/// Nothing: a tombstone, or an `Inactive` account the directory agrees is
+<a href=#341 id=341 data-nosnippet>341</a>    /// gone or disabled.
+<a href=#342 id=342 data-nosnippet>342</a>    </span>Ignore,
+<a href=#343 id=343 data-nosnippet>343</a>    <span class="doccomment">/// Set it `Inactive`.
+<a href=#344 id=344 data-nosnippet>344</a>    </span>Deactivate(Reason),
+<a href=#345 id=345 data-nosnippet>345</a>    <span class="doccomment">/// It is `Inactive` and its entry is present and enabled: say so, once.
+<a href=#346 id=346 data-nosnippet>346</a>    </span>Reappeared,
+<a href=#347 id=347 data-nosnippet>347</a>    <span class="doccomment">/// Keep it in step with its entry.
+<a href=#348 id=348 data-nosnippet>348</a>    </span>Refresh(Box&lt;SyncEntry&gt;),
+<a href=#349 id=349 data-nosnippet>349</a>}
+<a href=#350 id=350 data-nosnippet>350</a>
+<a href=#351 id=351 data-nosnippet>351</a><span class="doccomment">/// The whole rule of D-31, with no I/O. Note what is **absent**: no branch
+<a href=#352 id=352 data-nosnippet>352</a>/// leads to `Active`, to `Deleted`, or to any status but `Inactive`.
+<a href=#353 id=353 data-nosnippet>353</a></span><span class="kw">fn </span>decide(status: <span class="kw-2">&amp;</span>UserStatus, verdict: <span class="kw-2">&amp;</span>Verdict) -&gt; Decision {
+<a href=#354 id=354 data-nosnippet>354</a>    <span class="kw">match </span>status {
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="comment">// Tombstones carry no marker and are none of the job's business.
+<a href=#356 id=356 data-nosnippet>356</a>        </span>UserStatus::Deleted | UserStatus::Anonymized =&gt; Decision::Ignore,
+<a href=#357 id=357 data-nosnippet>357</a>        UserStatus::Inactive =&gt; <span class="kw">match </span>verdict {
+<a href=#358 id=358 data-nosnippet>358</a>            Verdict::Present(entry) <span class="kw">if </span>!entry.disabled =&gt; Decision::Reappeared,
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="kw">_ </span>=&gt; Decision::Ignore,
+<a href=#360 id=360 data-nosnippet>360</a>        },
+<a href=#361 id=361 data-nosnippet>361</a>        UserStatus::Active | UserStatus::PendingVerification | UserStatus::Locked =&gt; {
+<a href=#362 id=362 data-nosnippet>362</a>            <span class="kw">match </span>verdict {
+<a href=#363 id=363 data-nosnippet>363</a>                Verdict::Vanished =&gt; Decision::Deactivate(Reason::Vanished),
+<a href=#364 id=364 data-nosnippet>364</a>                Verdict::Present(entry) <span class="kw">if </span>entry.disabled =&gt; Decision::Deactivate(Reason::Disabled),
+<a href=#365 id=365 data-nosnippet>365</a>                Verdict::Present(entry) =&gt; Decision::Refresh(entry.clone()),
+<a href=#366 id=366 data-nosnippet>366</a>            }
+<a href=#367 id=367 data-nosnippet>367</a>        }
+<a href=#368 id=368 data-nosnippet>368</a>    }
+<a href=#369 id=369 data-nosnippet>369</a>}
+<a href=#370 id=370 data-nosnippet>370</a>
+<a href=#371 id=371 data-nosnippet>371</a><span class="doccomment">/// Whether a full run that would deactivate `would_deactivate` of `total`
+<a href=#372 id=372 data-nosnippet>372</a>/// directory accounts must apply nothing (D-31): **more than** `percent` % and
+<a href=#373 id=373 data-nosnippet>373</a>/// **at least** `min`.
+<a href=#374 id=374 data-nosnippet>374</a></span><span class="attr">#[must_use]
+<a href=#375 id=375 data-nosnippet>375</a></span><span class="kw">pub fn </span>valve_trips(would_deactivate: usize, total: usize, limits: <span class="kw-2">&amp;</span>SyncLimits) -&gt; bool {
+<a href=#376 id=376 data-nosnippet>376</a>    would_deactivate &gt;= limits.valve_min_accounts
+<a href=#377 id=377 data-nosnippet>377</a>        &amp;&amp; would_deactivate.saturating_mul(<span class="number">100</span>) &gt; total.saturating_mul(limits.valve_percent)
+<a href=#378 id=378 data-nosnippet>378</a>}
+<a href=#379 id=379 data-nosnippet>379</a>
+<a href=#380 id=380 data-nosnippet>380</a><span class="doccomment">/// Which run is due, from the stored state alone.
+<a href=#381 id=381 data-nosnippet>381</a></span><span class="kw">fn </span>choose_run(state: <span class="kw-2">&amp;</span>DirectorySyncState, now: DateTime&lt;Utc&gt;, limits: <span class="kw-2">&amp;</span>SyncLimits) -&gt; RunKind {
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="kw">let </span>full_due = <span class="kw">match </span>state.last_full_run_at {
+<a href=#383 id=383 data-nosnippet>383</a>        <span class="prelude-val">None </span>=&gt; <span class="bool-val">true</span>,
+<a href=#384 id=384 data-nosnippet>384</a>        <span class="prelude-val">Some</span>(last) =&gt; {
+<a href=#385 id=385 data-nosnippet>385</a>            chrono::Duration::from_std(limits.full_interval).map_or(<span class="bool-val">true</span>, |i| now - last &gt;= i)
+<a href=#386 id=386 data-nosnippet>386</a>        }
+<a href=#387 id=387 data-nosnippet>387</a>    };
+<a href=#388 id=388 data-nosnippet>388</a>    <span class="kw">if </span>state.full_required || state.watermark.is_none() || full_due {
+<a href=#389 id=389 data-nosnippet>389</a>        RunKind::Full
+<a href=#390 id=390 data-nosnippet>390</a>    } <span class="kw">else </span>{
+<a href=#391 id=391 data-nosnippet>391</a>        RunKind::Incremental
+<a href=#392 id=392 data-nosnippet>392</a>    }
+<a href=#393 id=393 data-nosnippet>393</a>}
+<a href=#394 id=394 data-nosnippet>394</a>
+<a href=#395 id=395 data-nosnippet>395</a><span class="doccomment">/// Whether a tenant is due for a run at all: the incremental schedule counts
+<a href=#396 id=396 data-nosnippet>396</a>/// from the last attempt, successful or not.
+<a href=#397 id=397 data-nosnippet>397</a></span><span class="kw">fn </span>is_due(config: <span class="kw-2">&amp;</span>DirectoryConfig, state: <span class="kw-2">&amp;</span>DirectorySyncState, now: DateTime&lt;Utc&gt;) -&gt; bool {
+<a href=#398 id=398 data-nosnippet>398</a>    <span class="kw">match </span>state.last_attempt_at {
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="prelude-val">None </span>=&gt; <span class="bool-val">true</span>,
+<a href=#400 id=400 data-nosnippet>400</a>        <span class="prelude-val">Some</span>(last) =&gt; {
+<a href=#401 id=401 data-nosnippet>401</a>            <span class="kw">let </span>interval = i64::try_from(config.sync_interval_secs).unwrap_or(i64::MAX);
+<a href=#402 id=402 data-nosnippet>402</a>            now - last &gt;= chrono::Duration::seconds(interval)
+<a href=#403 id=403 data-nosnippet>403</a>        }
+<a href=#404 id=404 data-nosnippet>404</a>    }
+<a href=#405 id=405 data-nosnippet>405</a>}
+<a href=#406 id=406 data-nosnippet>406</a>
+<a href=#407 id=407 data-nosnippet>407</a><span class="doccomment">/// The later of two watermarks of the same shape. Generalized times sort
+<a href=#408 id=408 data-nosnippet>408</a>/// lexicographically; USNs are compared as numbers (their lengths differ).
+<a href=#409 id=409 data-nosnippet>409</a></span><span class="kw">fn </span>later_watermark(a: <span class="kw-2">&amp;</span>str, b: <span class="kw-2">&amp;</span>str) -&gt; String {
+<a href=#410 id=410 data-nosnippet>410</a>    <span class="kw">if </span>is_usn(a) &amp;&amp; is_usn(b) {
+<a href=#411 id=411 data-nosnippet>411</a>        <span class="kw">let </span>(x, y) = (
+<a href=#412 id=412 data-nosnippet>412</a>            a.parse::&lt;u128&gt;().unwrap_or(<span class="number">0</span>),
+<a href=#413 id=413 data-nosnippet>413</a>            b.parse::&lt;u128&gt;().unwrap_or(<span class="number">0</span>),
+<a href=#414 id=414 data-nosnippet>414</a>        );
+<a href=#415 id=415 data-nosnippet>415</a>        <span class="kw">return if </span>x &gt;= y { a } <span class="kw">else </span>{ b }.to_string();
+<a href=#416 id=416 data-nosnippet>416</a>    }
+<a href=#417 id=417 data-nosnippet>417</a>    <span class="kw">if </span>a &gt;= b { a } <span class="kw">else </span>{ b }.to_string()
+<a href=#418 id=418 data-nosnippet>418</a>}
+<a href=#419 id=419 data-nosnippet>419</a>
+<a href=#420 id=420 data-nosnippet>420</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#421 id=421 data-nosnippet>421</a>// The engine
+<a href=#422 id=422 data-nosnippet>422</a>// ---------------------------------------------------------------------------
+<a href=#423 id=423 data-nosnippet>423</a>
+<a href=#424 id=424 data-nosnippet>424</a></span><span class="doccomment">/// The sync job: one instance per process, run by the cleanup scheduler.
+<a href=#425 id=425 data-nosnippet>425</a></span><span class="kw">pub struct </span>DirectorySync&lt;R, U, S, T, Z&gt; {
+<a href=#426 id=426 data-nosnippet>426</a>    configs: R,
+<a href=#427 id=427 data-nosnippet>427</a>    authenticator: Arc&lt;RepositoryDirectoryAuthenticator&lt;R&gt;&gt;,
+<a href=#428 id=428 data-nosnippet>428</a>    users: U,
+<a href=#429 id=429 data-nosnippet>429</a>    sessions: S,
+<a href=#430 id=430 data-nosnippet>430</a>    refresh_tokens: T,
+<a href=#431 id=431 data-nosnippet>431</a>    states: Z,
+<a href=#432 id=432 data-nosnippet>432</a>    mapper: SharedDirectoryGroupMapper,
+<a href=#433 id=433 data-nosnippet>433</a>    audit: SharedDirectoryAuditSink,
+<a href=#434 id=434 data-nosnippet>434</a>    limits: SyncLimits,
+<a href=#435 id=435 data-nosnippet>435</a>    <span class="doccomment">/// G-5 (D-52): told when the job deactivates an account, so an SSF
+<a href=#436 id=436 data-nosnippet>436</a>    /// `account-disabled` can follow. `None` — the default — tells nobody.
+<a href=#437 id=437 data-nosnippet>437</a>    </span>ssf_sink: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>SsfSystemAccountSink&gt;&gt;,
+<a href=#438 id=438 data-nosnippet>438</a>}
+<a href=#439 id=439 data-nosnippet>439</a>
+<a href=#440 id=440 data-nosnippet>440</a><span class="doccomment">/// What a full run read, before it writes anything.
+<a href=#441 id=441 data-nosnippet>441</a></span><span class="kw">struct </span>Plan {
+<a href=#442 id=442 data-nosnippet>442</a>    <span class="doccomment">/// Every marked account with the directory's verdict, in id order.
+<a href=#443 id=443 data-nosnippet>443</a>    </span>items: Vec&lt;(User, Verdict)&gt;,
+<a href=#444 id=444 data-nosnippet>444</a>    <span class="doccomment">/// Accounts the run could not decide for (ambiguous or unaskable).
+<a href=#445 id=445 data-nosnippet>445</a>    </span>undecided: Vec&lt;Uuid&gt;,
+<a href=#446 id=446 data-nosnippet>446</a>    <span class="doccomment">/// How many marked accounts the tenant has (tombstones excluded).
+<a href=#447 id=447 data-nosnippet>447</a>    </span>directory_accounts: usize,
+<a href=#448 id=448 data-nosnippet>448</a>}
+<a href=#449 id=449 data-nosnippet>449</a>
+<a href=#450 id=450 data-nosnippet>450</a><span class="doccomment">/// Which `reported` entries a run has confirmed or retired.
+<a href=#451 id=451 data-nosnippet>451</a></span><span class="kw">struct </span>Reports {
+<a href=#452 id=452 data-nosnippet>452</a>    <span class="doccomment">/// The accounts already reported, as stored.
+<a href=#453 id=453 data-nosnippet>453</a>    </span>known: HashSet&lt;Uuid&gt;,
+<a href=#454 id=454 data-nosnippet>454</a>    <span class="doccomment">/// The accounts reported or still reappeared in this run.
+<a href=#455 id=455 data-nosnippet>455</a>    </span>current: HashSet&lt;Uuid&gt;,
+<a href=#456 id=456 data-nosnippet>456</a>}
+<a href=#457 id=457 data-nosnippet>457</a>
+<a href=#458 id=458 data-nosnippet>458</a><span class="kw">impl</span>&lt;R, U, S, T, Z&gt; DirectorySync&lt;R, U, S, T, Z&gt;
+<a href=#459 id=459 data-nosnippet>459</a><span class="kw">where
+<a href=#460 id=460 data-nosnippet>460</a>    </span>R: DirectoryConfigRepository,
+<a href=#461 id=461 data-nosnippet>461</a>    U: UserRepository,
+<a href=#462 id=462 data-nosnippet>462</a>    S: SessionRepository,
+<a href=#463 id=463 data-nosnippet>463</a>    T: RefreshTokenRepository,
+<a href=#464 id=464 data-nosnippet>464</a>    Z: DirectorySyncStateRepository,
+<a href=#465 id=465 data-nosnippet>465</a>{
+<a href=#466 id=466 data-nosnippet>466</a>    <span class="doccomment">/// A job over the given repositories.
+<a href=#467 id=467 data-nosnippet>467</a>    ///
+<a href=#468 id=468 data-nosnippet>468</a>    /// `authenticator` is the one the sign-in path uses, so the sync draws on the
+<a href=#469 id=469 data-nosnippet>469</a>    /// same bounded pool and reads the same configuration; `mapper` is the
+<a href=#470 id=470 data-nosnippet>470</a>    /// D-30 group mapper built from it, with the decision-cache slot set by the
+<a href=#471 id=471 data-nosnippet>471</a>    /// composition root.
+<a href=#472 id=472 data-nosnippet>472</a>    </span><span class="attr">#[allow(clippy::too_many_arguments)] </span><span class="comment">// the collaborators are the unit of work
+<a href=#473 id=473 data-nosnippet>473</a>    </span><span class="kw">pub fn </span>new(
+<a href=#474 id=474 data-nosnippet>474</a>        configs: R,
+<a href=#475 id=475 data-nosnippet>475</a>        authenticator: Arc&lt;RepositoryDirectoryAuthenticator&lt;R&gt;&gt;,
+<a href=#476 id=476 data-nosnippet>476</a>        users: U,
+<a href=#477 id=477 data-nosnippet>477</a>        sessions: S,
+<a href=#478 id=478 data-nosnippet>478</a>        refresh_tokens: T,
+<a href=#479 id=479 data-nosnippet>479</a>        states: Z,
+<a href=#480 id=480 data-nosnippet>480</a>        mapper: SharedDirectoryGroupMapper,
+<a href=#481 id=481 data-nosnippet>481</a>        audit: SharedDirectoryAuditSink,
+<a href=#482 id=482 data-nosnippet>482</a>    ) -&gt; <span class="self">Self </span>{
+<a href=#483 id=483 data-nosnippet>483</a>        <span class="self">Self </span>{
+<a href=#484 id=484 data-nosnippet>484</a>            configs,
+<a href=#485 id=485 data-nosnippet>485</a>            authenticator,
+<a href=#486 id=486 data-nosnippet>486</a>            users,
+<a href=#487 id=487 data-nosnippet>487</a>            sessions,
+<a href=#488 id=488 data-nosnippet>488</a>            refresh_tokens,
+<a href=#489 id=489 data-nosnippet>489</a>            states,
+<a href=#490 id=490 data-nosnippet>490</a>            mapper,
+<a href=#491 id=491 data-nosnippet>491</a>            audit,
+<a href=#492 id=492 data-nosnippet>492</a>            limits: SyncLimits::default(),
+<a href=#493 id=493 data-nosnippet>493</a>            ssf_sink: <span class="prelude-val">None</span>,
+<a href=#494 id=494 data-nosnippet>494</a>        }
+<a href=#495 id=495 data-nosnippet>495</a>    }
+<a href=#496 id=496 data-nosnippet>496</a>
+<a href=#497 id=497 data-nosnippet>497</a>    <span class="doccomment">/// Report the accounts this job deactivates to `sink` (G-5, D-52): after the
+<a href=#498 id=498 data-nosnippet>498</a>    /// status change committed, once per account, never failing the run. Only
+<a href=#499 id=499 data-nosnippet>499</a>    /// a deactivation is reported — sync never re-enables an account (D-31), so
+<a href=#500 id=500 data-nosnippet>500</a>    /// there is no `account-enabled` to send for a reappearance.
+<a href=#501 id=501 data-nosnippet>501</a>    </span><span class="attr">#[must_use]
+<a href=#502 id=502 data-nosnippet>502</a>    </span><span class="kw">pub fn </span>with_ssf_sink(<span class="kw-2">mut </span><span class="self">self</span>, sink: Arc&lt;<span class="kw">dyn </span>SsfSystemAccountSink&gt;) -&gt; <span class="self">Self </span>{
+<a href=#503 id=503 data-nosnippet>503</a>        <span class="self">self</span>.ssf_sink = <span class="prelude-val">Some</span>(sink);
+<a href=#504 id=504 data-nosnippet>504</a>        <span class="self">self
+<a href=#505 id=505 data-nosnippet>505</a>    </span>}
+<a href=#506 id=506 data-nosnippet>506</a>
+<a href=#507 id=507 data-nosnippet>507</a>    <span class="doccomment">/// Replace the bounds (tests shrink them).
+<a href=#508 id=508 data-nosnippet>508</a>    </span><span class="attr">#[must_use]
+<a href=#509 id=509 data-nosnippet>509</a>    </span><span class="kw">pub fn </span>with_limits(<span class="kw-2">mut </span><span class="self">self</span>, limits: SyncLimits) -&gt; <span class="self">Self </span>{
+<a href=#510 id=510 data-nosnippet>510</a>        <span class="self">self</span>.limits = limits;
+<a href=#511 id=511 data-nosnippet>511</a>        <span class="self">self
+<a href=#512 id=512 data-nosnippet>512</a>    </span>}
+<a href=#513 id=513 data-nosnippet>513</a>
+<a href=#514 id=514 data-nosnippet>514</a>    <span class="doccomment">/// The bounds in force.
+<a href=#515 id=515 data-nosnippet>515</a>    </span><span class="attr">#[must_use]
+<a href=#516 id=516 data-nosnippet>516</a>    </span><span class="kw">pub fn </span>limits(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; SyncLimits {
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="self">self</span>.limits
+<a href=#518 id=518 data-nosnippet>518</a>    }
+<a href=#519 id=519 data-nosnippet>519</a>
+<a href=#520 id=520 data-nosnippet>520</a>    <span class="doccomment">/// One scheduler pass: every tenant with an **enabled** directory, one at a
+<a href=#521 id=521 data-nosnippet>521</a>    /// time, each only if it is due. A tenant without a directory, or with it
+<a href=#522 id=522 data-nosnippet>522</a>    /// disabled, is never listed, so no connection is made for it.
+<a href=#523 id=523 data-nosnippet>523</a>    ///
+<a href=#524 id=524 data-nosnippet>524</a>    /// # Errors
+<a href=#525 id=525 data-nosnippet>525</a>    ///
+<a href=#526 id=526 data-nosnippet>526</a>    /// [`SyncError::Store`] when the configurations cannot be listed. A tenant's
+<a href=#527 id=527 data-nosnippet>527</a>    /// own failure is not an error here: it is in [`SyncSummary::failures`], and
+<a href=#528 id=528 data-nosnippet>528</a>    /// the next tenant still runs.
+<a href=#529 id=529 data-nosnippet>529</a>    </span><span class="kw">pub async fn </span>run_due(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;SyncSummary, SyncError&gt; {
+<a href=#530 id=530 data-nosnippet>530</a>        <span class="kw">let </span>configs = <span class="self">self</span>.configs.list_enabled().<span class="kw">await</span>.map_err(store)<span class="question-mark">?</span>;
+<a href=#531 id=531 data-nosnippet>531</a>        <span class="kw">let </span><span class="kw-2">mut </span>summary = SyncSummary::default();
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="kw">for </span>config <span class="kw">in </span>configs {
+<a href=#533 id=533 data-nosnippet>533</a>            <span class="kw">match </span><span class="self">self</span>.sync_tenant(<span class="kw-2">&amp;</span>config, Utc::now()).<span class="kw">await </span>{
+<a href=#534 id=534 data-nosnippet>534</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(report)) =&gt; summary.reports.push(report),
+<a href=#535 id=535 data-nosnippet>535</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; summary.not_due += <span class="number">1</span>,
+<a href=#536 id=536 data-nosnippet>536</a>                <span class="comment">// Disabled or deleted between listing and opening: the tenant
+<a href=#537 id=537 data-nosnippet>537</a>                // has no enabled directory any more, which is a skip.
+<a href=#538 id=538 data-nosnippet>538</a>                </span><span class="prelude-val">Err</span>(SyncError::Directory(DirectoryAuthError::NotConfigured)) =&gt; {
+<a href=#539 id=539 data-nosnippet>539</a>                    summary.not_due += <span class="number">1</span>;
+<a href=#540 id=540 data-nosnippet>540</a>                }
+<a href=#541 id=541 data-nosnippet>541</a>                <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#542 id=542 data-nosnippet>542</a>                    <span class="macro">tracing::warn!</span>(
+<a href=#543 id=543 data-nosnippet>543</a>                        target: <span class="string">"axiam::directory"</span>,
+<a href=#544 id=544 data-nosnippet>544</a>                        tenant_id = %config.tenant_id,
+<a href=#545 id=545 data-nosnippet>545</a>                        outcome = error.tag(),
+<a href=#546 id=546 data-nosnippet>546</a>                        <span class="string">"directory sync failed for a tenant; nothing was changed by the failing step"
+<a href=#547 id=547 data-nosnippet>547</a>                    </span>);
+<a href=#548 id=548 data-nosnippet>548</a>                    summary.failures.push((config.tenant_id, error));
+<a href=#549 id=549 data-nosnippet>549</a>                }
+<a href=#550 id=550 data-nosnippet>550</a>            }
+<a href=#551 id=551 data-nosnippet>551</a>        }
+<a href=#552 id=552 data-nosnippet>552</a>        <span class="prelude-val">Ok</span>(summary)
+<a href=#553 id=553 data-nosnippet>553</a>    }
+<a href=#554 id=554 data-nosnippet>554</a>
+<a href=#555 id=555 data-nosnippet>555</a>    <span class="doccomment">/// One tenant's pass: `Ok(None)` when it is not yet due.
+<a href=#556 id=556 data-nosnippet>556</a>    ///
+<a href=#557 id=557 data-nosnippet>557</a>    /// # Errors
+<a href=#558 id=558 data-nosnippet>558</a>    ///
+<a href=#559 id=559 data-nosnippet>559</a>    /// The [`SyncError`] that ended the run.
+<a href=#560 id=560 data-nosnippet>560</a>    </span><span class="kw">pub async fn </span>sync_tenant(
+<a href=#561 id=561 data-nosnippet>561</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#562 id=562 data-nosnippet>562</a>        config: <span class="kw-2">&amp;</span>DirectoryConfig,
+<a href=#563 id=563 data-nosnippet>563</a>        now: DateTime&lt;Utc&gt;,
+<a href=#564 id=564 data-nosnippet>564</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;TenantReport&gt;, SyncError&gt; {
+<a href=#565 id=565 data-nosnippet>565</a>        <span class="kw">let </span>tenant_id = config.tenant_id;
+<a href=#566 id=566 data-nosnippet>566</a>        <span class="kw">let </span><span class="kw-2">mut </span>state = <span class="self">self
+<a href=#567 id=567 data-nosnippet>567</a>            </span>.states
+<a href=#568 id=568 data-nosnippet>568</a>            .get(tenant_id)
+<a href=#569 id=569 data-nosnippet>569</a>            .<span class="kw">await
+<a href=#570 id=570 data-nosnippet>570</a>            </span>.map_err(store)<span class="question-mark">?
+<a href=#571 id=571 data-nosnippet>571</a>            </span>.unwrap_or_else(|| DirectorySyncState::new(tenant_id));
+<a href=#572 id=572 data-nosnippet>572</a>        <span class="kw">if </span>!is_due(config, <span class="kw-2">&amp;</span>state, now) {
+<a href=#573 id=573 data-nosnippet>573</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#574 id=574 data-nosnippet>574</a>        }
+<a href=#575 id=575 data-nosnippet>575</a>        <span class="kw">let </span>run = choose_run(<span class="kw-2">&amp;</span>state, now, <span class="kw-2">&amp;</span><span class="self">self</span>.limits);
+<a href=#576 id=576 data-nosnippet>576</a>        state.last_attempt_at = <span class="prelude-val">Some</span>(now);
+<a href=#577 id=577 data-nosnippet>577</a>
+<a href=#578 id=578 data-nosnippet>578</a>        <span class="kw">let </span>outcome = tokio::time::timeout(
+<a href=#579 id=579 data-nosnippet>579</a>            <span class="self">self</span>.limits.run_deadline,
+<a href=#580 id=580 data-nosnippet>580</a>            <span class="self">self</span>.execute(config, <span class="kw-2">&amp;mut </span>state, run, now),
+<a href=#581 id=581 data-nosnippet>581</a>        )
+<a href=#582 id=582 data-nosnippet>582</a>        .<span class="kw">await</span>;
+<a href=#583 id=583 data-nosnippet>583</a>        <span class="kw">let </span>(result, outcome) = <span class="kw">match </span>outcome {
+<a href=#584 id=584 data-nosnippet>584</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">Ok</span>(report)) =&gt; (
+<a href=#585 id=585 data-nosnippet>585</a>                <span class="kw">if </span>report.accounts_skipped &gt; <span class="number">0 </span>{
+<a href=#586 id=586 data-nosnippet>586</a>                    DirectorySyncResult::Partial
+<a href=#587 id=587 data-nosnippet>587</a>                } <span class="kw">else </span>{
+<a href=#588 id=588 data-nosnippet>588</a>                    DirectorySyncResult::Ok
+<a href=#589 id=589 data-nosnippet>589</a>                },
+<a href=#590 id=590 data-nosnippet>590</a>                <span class="prelude-val">Ok</span>(report),
+<a href=#591 id=591 data-nosnippet>591</a>            ),
+<a href=#592 id=592 data-nosnippet>592</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">Err</span>(error)) =&gt; (
+<a href=#593 id=593 data-nosnippet>593</a>                <span class="kw">if </span><span class="macro">matches!</span>(error, SyncError::SafetyValve { .. }) {
+<a href=#594 id=594 data-nosnippet>594</a>                    DirectorySyncResult::SafetyValve
+<a href=#595 id=595 data-nosnippet>595</a>                } <span class="kw">else </span>{
+<a href=#596 id=596 data-nosnippet>596</a>                    DirectorySyncResult::Failed
+<a href=#597 id=597 data-nosnippet>597</a>                },
+<a href=#598 id=598 data-nosnippet>598</a>                <span class="prelude-val">Err</span>(error),
+<a href=#599 id=599 data-nosnippet>599</a>            ),
+<a href=#600 id=600 data-nosnippet>600</a>            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
+<a href=#601 id=601 data-nosnippet>601</a>                <span class="comment">// Abandoned part-way: some accounts may have been handled, so
+<a href=#602 id=602 data-nosnippet>602</a>                // the next run reconciles everything.
+<a href=#603 id=603 data-nosnippet>603</a>                </span>state.full_required = <span class="bool-val">true</span>;
+<a href=#604 id=604 data-nosnippet>604</a>                (DirectorySyncResult::Failed, <span class="prelude-val">Err</span>(SyncError::Deadline))
+<a href=#605 id=605 data-nosnippet>605</a>            }
+<a href=#606 id=606 data-nosnippet>606</a>        };
+<a href=#607 id=607 data-nosnippet>607</a>        state.last_result = <span class="prelude-val">Some</span>(result);
+<a href=#608 id=608 data-nosnippet>608</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(error) = <span class="self">self</span>.states.save(<span class="kw-2">&amp;</span>state).<span class="kw">await </span>{
+<a href=#609 id=609 data-nosnippet>609</a>            <span class="macro">tracing::error!</span>(
+<a href=#610 id=610 data-nosnippet>610</a>                target: <span class="string">"axiam::directory"</span>,
+<a href=#611 id=611 data-nosnippet>611</a>                %tenant_id,
+<a href=#612 id=612 data-nosnippet>612</a>                %error,
+<a href=#613 id=613 data-nosnippet>613</a>                <span class="string">"the directory sync state could not be saved"
+<a href=#614 id=614 data-nosnippet>614</a>            </span>);
+<a href=#615 id=615 data-nosnippet>615</a>            <span class="kw">if </span>outcome.is_ok() {
+<a href=#616 id=616 data-nosnippet>616</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(store(error));
+<a href=#617 id=617 data-nosnippet>617</a>            }
+<a href=#618 id=618 data-nosnippet>618</a>        }
+<a href=#619 id=619 data-nosnippet>619</a>        outcome.map(<span class="prelude-val">Some</span>)
+<a href=#620 id=620 data-nosnippet>620</a>    }
+<a href=#621 id=621 data-nosnippet>621</a>
+<a href=#622 id=622 data-nosnippet>622</a>    <span class="kw">async fn </span>execute(
+<a href=#623 id=623 data-nosnippet>623</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#624 id=624 data-nosnippet>624</a>        config: <span class="kw-2">&amp;</span>DirectoryConfig,
+<a href=#625 id=625 data-nosnippet>625</a>        state: <span class="kw-2">&amp;mut </span>DirectorySyncState,
+<a href=#626 id=626 data-nosnippet>626</a>        run: RunKind,
+<a href=#627 id=627 data-nosnippet>627</a>        now: DateTime&lt;Utc&gt;,
+<a href=#628 id=628 data-nosnippet>628</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;TenantReport, SyncError&gt; {
+<a href=#629 id=629 data-nosnippet>629</a>        <span class="kw">let </span>session = <span class="kw">match </span><span class="self">self</span>.authenticator.open_sync(config.tenant_id).<span class="kw">await </span>{
+<a href=#630 id=630 data-nosnippet>630</a>            <span class="prelude-val">Ok</span>(session) =&gt; session,
+<a href=#631 id=631 data-nosnippet>631</a>            <span class="prelude-val">Err</span>(error) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(SyncError::Directory(error)),
+<a href=#632 id=632 data-nosnippet>632</a>        };
+<a href=#633 id=633 data-nosnippet>633</a>        <span class="kw">match </span>run {
+<a href=#634 id=634 data-nosnippet>634</a>            RunKind::Full =&gt; <span class="self">self</span>.full_run(<span class="kw-2">&amp;</span>session, state, now, <span class="bool-val">false</span>).<span class="kw">await</span>,
+<a href=#635 id=635 data-nosnippet>635</a>            RunKind::Incremental =&gt; <span class="self">self</span>.incremental_run(<span class="kw-2">&amp;</span>session, state, now).<span class="kw">await</span>,
+<a href=#636 id=636 data-nosnippet>636</a>        }
+<a href=#637 id=637 data-nosnippet>637</a>    }
+<a href=#638 id=638 data-nosnippet>638</a>
+<a href=#639 id=639 data-nosnippet>639</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#640 id=640 data-nosnippet>640</a>    // Full run
+<a href=#641 id=641 data-nosnippet>641</a>    // -----------------------------------------------------------------------
+<a href=#642 id=642 data-nosnippet>642</a>
+<a href=#643 id=643 data-nosnippet>643</a>    </span><span class="kw">async fn </span>full_run(
+<a href=#644 id=644 data-nosnippet>644</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#645 id=645 data-nosnippet>645</a>        session: <span class="kw-2">&amp;</span>DirectorySession,
+<a href=#646 id=646 data-nosnippet>646</a>        state: <span class="kw-2">&amp;mut </span>DirectorySyncState,
+<a href=#647 id=647 data-nosnippet>647</a>        now: DateTime&lt;Utc&gt;,
+<a href=#648 id=648 data-nosnippet>648</a>        fell_back: bool,
+<a href=#649 id=649 data-nosnippet>649</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;TenantReport, SyncError&gt; {
+<a href=#650 id=650 data-nosnippet>650</a>        <span class="kw">let </span>config = session.config();
+<a href=#651 id=651 data-nosnippet>651</a>        <span class="kw">let </span>tenant_id = config.tenant_id;
+<a href=#652 id=652 data-nosnippet>652</a>        <span class="kw">let </span>kind = config.kind;
+<a href=#653 id=653 data-nosnippet>653</a>        <span class="kw">let </span><span class="kw-2">mut </span>report = TenantReport::new(tenant_id, RunKind::Full);
+<a href=#654 id=654 data-nosnippet>654</a>        report.fell_back_to_full = fell_back;
+<a href=#655 id=655 data-nosnippet>655</a>
+<a href=#656 id=656 data-nosnippet>656</a>        <span class="comment">// Active Directory's watermark is read **before** anything is looked up:
+<a href=#657 id=657 data-nosnippet>657</a>        // any change after this point has a higher USN and is seen by the next
+<a href=#658 id=658 data-nosnippet>658</a>        // incremental run. A failed read is not a failed run; it is "no
+<a href=#659 id=659 data-nosnippet>659</a>        // watermark". A tenant with no directory accounts has nothing to resume
+<a href=#660 id=660 data-nosnippet>660</a>        // and the directory is not asked.
+<a href=#661 id=661 data-nosnippet>661</a>        </span><span class="kw">let </span>root_dse = <span class="kw">if </span>kind == DirectoryKind::ActiveDirectory
+<a href=#662 id=662 data-nosnippet>662</a>            &amp;&amp; !<span class="self">self
+<a href=#663 id=663 data-nosnippet>663</a>                </span>.users
+<a href=#664 id=664 data-nosnippet>664</a>                .list_directory_accounts(tenant_id, <span class="prelude-val">None</span>, <span class="number">1</span>)
+<a href=#665 id=665 data-nosnippet>665</a>                .<span class="kw">await
+<a href=#666 id=666 data-nosnippet>666</a>                </span>.map_err(store)<span class="question-mark">?
+<a href=#667 id=667 data-nosnippet>667</a>                </span>.is_empty()
+<a href=#668 id=668 data-nosnippet>668</a>        {
+<a href=#669 id=669 data-nosnippet>669</a>            <span class="kw">match </span>session.read_root_dse().<span class="kw">await </span>{
+<a href=#670 id=670 data-nosnippet>670</a>                <span class="prelude-val">Ok</span>(dse) =&gt; <span class="prelude-val">Some</span>(dse),
+<a href=#671 id=671 data-nosnippet>671</a>                <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#672 id=672 data-nosnippet>672</a>                    <span class="macro">tracing::warn!</span>(
+<a href=#673 id=673 data-nosnippet>673</a>                        target: <span class="string">"axiam::directory"</span>,
+<a href=#674 id=674 data-nosnippet>674</a>                        %tenant_id,
+<a href=#675 id=675 data-nosnippet>675</a>                        outcome = <span class="question-mark">?</span>error,
+<a href=#676 id=676 data-nosnippet>676</a>                        <span class="string">"the rootDSE could not be read; the next incremental run will be a full one"
+<a href=#677 id=677 data-nosnippet>677</a>                    </span>);
+<a href=#678 id=678 data-nosnippet>678</a>                    <span class="prelude-val">None
+<a href=#679 id=679 data-nosnippet>679</a>                </span>}
+<a href=#680 id=680 data-nosnippet>680</a>            }
+<a href=#681 id=681 data-nosnippet>681</a>        } <span class="kw">else </span>{
+<a href=#682 id=682 data-nosnippet>682</a>            <span class="prelude-val">None
+<a href=#683 id=683 data-nosnippet>683</a>        </span>};
+<a href=#684 id=684 data-nosnippet>684</a>
+<a href=#685 id=685 data-nosnippet>685</a>        <span class="comment">// Phase 1: read. Nothing is written until everything is known, so an
+<a href=#686 id=686 data-nosnippet>686</a>        // error anywhere in this phase leaves every account as it was.
+<a href=#687 id=687 data-nosnippet>687</a>        </span><span class="kw">let </span>plan = <span class="self">self</span>.read_everything(session).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#688 id=688 data-nosnippet>688</a>        report.accounts_examined = plan.items.len();
+<a href=#689 id=689 data-nosnippet>689</a>
+<a href=#690 id=690 data-nosnippet>690</a>        <span class="comment">// The valve: counted over the decisions, before any is applied.
+<a href=#691 id=691 data-nosnippet>691</a>        </span><span class="kw">let </span>would_deactivate = plan
+<a href=#692 id=692 data-nosnippet>692</a>            .items
+<a href=#693 id=693 data-nosnippet>693</a>            .iter()
+<a href=#694 id=694 data-nosnippet>694</a>            .filter(|(user, verdict)| {
+<a href=#695 id=695 data-nosnippet>695</a>                <span class="macro">matches!</span>(decide(<span class="kw-2">&amp;</span>user.status, verdict), Decision::Deactivate(<span class="kw">_</span>))
+<a href=#696 id=696 data-nosnippet>696</a>            })
+<a href=#697 id=697 data-nosnippet>697</a>            .count();
+<a href=#698 id=698 data-nosnippet>698</a>        <span class="kw">if </span>valve_trips(would_deactivate, plan.directory_accounts, <span class="kw-2">&amp;</span><span class="self">self</span>.limits) {
+<a href=#699 id=699 data-nosnippet>699</a>            <span class="kw">if </span>state.last_result != <span class="prelude-val">Some</span>(DirectorySyncResult::SafetyValve) {
+<a href=#700 id=700 data-nosnippet>700</a>                <span class="self">self</span>.record(
+<a href=#701 id=701 data-nosnippet>701</a>                    tenant_id,
+<a href=#702 id=702 data-nosnippet>702</a>                    AUDIT_SYNC_SAFETY_VALVE,
+<a href=#703 id=703 data-nosnippet>703</a>                    <span class="prelude-val">None</span>,
+<a href=#704 id=704 data-nosnippet>704</a>                    AuditOutcome::Denied,
+<a href=#705 id=705 data-nosnippet>705</a>                    <span class="macro">serde_json::json!</span>({
+<a href=#706 id=706 data-nosnippet>706</a>                        <span class="string">"run"</span>: RunKind::Full.as_str(),
+<a href=#707 id=707 data-nosnippet>707</a>                        <span class="string">"would_deactivate"</span>: would_deactivate,
+<a href=#708 id=708 data-nosnippet>708</a>                        <span class="string">"directory_accounts"</span>: plan.directory_accounts,
+<a href=#709 id=709 data-nosnippet>709</a>                        <span class="string">"valve_percent"</span>: <span class="self">self</span>.limits.valve_percent,
+<a href=#710 id=710 data-nosnippet>710</a>                        <span class="string">"valve_min_accounts"</span>: <span class="self">self</span>.limits.valve_min_accounts,
+<a href=#711 id=711 data-nosnippet>711</a>                        <span class="string">"applied"</span>: <span class="string">"nothing"</span>,
+<a href=#712 id=712 data-nosnippet>712</a>                    }),
+<a href=#713 id=713 data-nosnippet>713</a>                )
+<a href=#714 id=714 data-nosnippet>714</a>                .<span class="kw">await</span>;
+<a href=#715 id=715 data-nosnippet>715</a>            }
+<a href=#716 id=716 data-nosnippet>716</a>            <span class="macro">tracing::error!</span>(
+<a href=#717 id=717 data-nosnippet>717</a>                target: <span class="string">"axiam::directory"</span>,
+<a href=#718 id=718 data-nosnippet>718</a>                %tenant_id,
+<a href=#719 id=719 data-nosnippet>719</a>                would_deactivate,
+<a href=#720 id=720 data-nosnippet>720</a>                directory_accounts = plan.directory_accounts,
+<a href=#721 id=721 data-nosnippet>721</a>                <span class="string">"directory sync safety valve tripped: a full run would deactivate too many \
+<a href=#722 id=722 data-nosnippet>722</a>                 accounts; nothing was applied"
+<a href=#723 id=723 data-nosnippet>723</a>            </span>);
+<a href=#724 id=724 data-nosnippet>724</a>            <span class="comment">// The next attempt is a full run again, so the situation is
+<a href=#725 id=725 data-nosnippet>725</a>            // re-evaluated rather than skipped past by an incremental.
+<a href=#726 id=726 data-nosnippet>726</a>            </span>state.full_required = <span class="bool-val">true</span>;
+<a href=#727 id=727 data-nosnippet>727</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(SyncError::SafetyValve {
+<a href=#728 id=728 data-nosnippet>728</a>                would_deactivate,
+<a href=#729 id=729 data-nosnippet>729</a>                directory_accounts: plan.directory_accounts,
+<a href=#730 id=730 data-nosnippet>730</a>            });
+<a href=#731 id=731 data-nosnippet>731</a>        }
+<a href=#732 id=732 data-nosnippet>732</a>
+<a href=#733 id=733 data-nosnippet>733</a>        <span class="comment">// Phase 2: write. Each account is handled on its own; a failure skips
+<a href=#734 id=734 data-nosnippet>734</a>        // that account only.
+<a href=#735 id=735 data-nosnippet>735</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>reports = Reports {
+<a href=#736 id=736 data-nosnippet>736</a>            known: state.reported_user_ids.iter().copied().collect(),
+<a href=#737 id=737 data-nosnippet>737</a>            current: HashSet::new(),
+<a href=#738 id=738 data-nosnippet>738</a>        };
+<a href=#739 id=739 data-nosnippet>739</a>        <span class="kw">let </span><span class="kw-2">mut </span>newest_change: <span class="prelude-ty">Option</span>&lt;String&gt; = <span class="prelude-val">None</span>;
+<a href=#740 id=740 data-nosnippet>740</a>        <span class="kw">for </span>(user, verdict) <span class="kw">in </span><span class="kw-2">&amp;</span>plan.items {
+<a href=#741 id=741 data-nosnippet>741</a>            <span class="kw">if let </span>Verdict::Present(entry) = verdict
+<a href=#742 id=742 data-nosnippet>742</a>                &amp;&amp; <span class="kw">let </span><span class="prelude-val">Some</span>(change) = <span class="kw-2">&amp;</span>entry.change_value
+<a href=#743 id=743 data-nosnippet>743</a>            {
+<a href=#744 id=744 data-nosnippet>744</a>                newest_change = <span class="prelude-val">Some</span>(<span class="kw">match </span>newest_change {
+<a href=#745 id=745 data-nosnippet>745</a>                    <span class="prelude-val">Some</span>(have) =&gt; later_watermark(<span class="kw-2">&amp;</span>have, change),
+<a href=#746 id=746 data-nosnippet>746</a>                    <span class="prelude-val">None </span>=&gt; change.clone(),
+<a href=#747 id=747 data-nosnippet>747</a>                });
+<a href=#748 id=748 data-nosnippet>748</a>            }
+<a href=#749 id=749 data-nosnippet>749</a>            <span class="self">self</span>.apply(
+<a href=#750 id=750 data-nosnippet>750</a>                session,
+<a href=#751 id=751 data-nosnippet>751</a>                user,
+<a href=#752 id=752 data-nosnippet>752</a>                verdict,
+<a href=#753 id=753 data-nosnippet>753</a>                RunKind::Full,
+<a href=#754 id=754 data-nosnippet>754</a>                <span class="kw-2">&amp;mut </span>reports,
+<a href=#755 id=755 data-nosnippet>755</a>                <span class="kw-2">&amp;mut </span>report,
+<a href=#756 id=756 data-nosnippet>756</a>            )
+<a href=#757 id=757 data-nosnippet>757</a>            .<span class="kw">await</span>;
+<a href=#758 id=758 data-nosnippet>758</a>        }
+<a href=#759 id=759 data-nosnippet>759</a>        report.accounts_skipped += plan.undecided.len();
+<a href=#760 id=760 data-nosnippet>760</a>
+<a href=#761 id=761 data-nosnippet>761</a>        <span class="comment">// The next incremental run resumes from here, or — with nothing to
+<a href=#762 id=762 data-nosnippet>762</a>        // resume from — is a full one.
+<a href=#763 id=763 data-nosnippet>763</a>        </span><span class="kw">let </span>(watermark, server_identity) = <span class="kw">match </span>kind {
+<a href=#764 id=764 data-nosnippet>764</a>            DirectoryKind::ActiveDirectory =&gt; <span class="kw">match </span>root_dse {
+<a href=#765 id=765 data-nosnippet>765</a>                <span class="prelude-val">Some</span>(RootDse {
+<a href=#766 id=766 data-nosnippet>766</a>                    server_identity: <span class="prelude-val">Some</span>(identity),
+<a href=#767 id=767 data-nosnippet>767</a>                    highest_committed_usn: <span class="prelude-val">Some</span>(usn),
+<a href=#768 id=768 data-nosnippet>768</a>                }) =&gt; (<span class="prelude-val">Some</span>(usn), <span class="prelude-val">Some</span>(identity)),
+<a href=#769 id=769 data-nosnippet>769</a>                <span class="kw">_ </span>=&gt; (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>),
+<a href=#770 id=770 data-nosnippet>770</a>            },
+<a href=#771 id=771 data-nosnippet>771</a>            DirectoryKind::OpenLdap =&gt; (newest_change, <span class="prelude-val">None</span>),
+<a href=#772 id=772 data-nosnippet>772</a>        };
+<a href=#773 id=773 data-nosnippet>773</a>        state.watermark = watermark;
+<a href=#774 id=774 data-nosnippet>774</a>        state.server_identity = server_identity;
+<a href=#775 id=775 data-nosnippet>775</a>        state.full_required = report.accounts_skipped &gt; <span class="number">0</span>;
+<a href=#776 id=776 data-nosnippet>776</a>        state.last_full_run_at = <span class="prelude-val">Some</span>(now);
+<a href=#777 id=777 data-nosnippet>777</a>        <span class="comment">// Reported accounts the run did not look at (undecided) keep their
+<a href=#778 id=778 data-nosnippet>778</a>        // entry; every other one is re-derived from what the run saw.
+<a href=#779 id=779 data-nosnippet>779</a>        </span><span class="kw">for </span>id <span class="kw">in </span><span class="kw-2">&amp;</span>plan.undecided {
+<a href=#780 id=780 data-nosnippet>780</a>            <span class="kw">if </span>reports.known.contains(id) {
+<a href=#781 id=781 data-nosnippet>781</a>                reports.current.insert(<span class="kw-2">*</span>id);
+<a href=#782 id=782 data-nosnippet>782</a>            }
+<a href=#783 id=783 data-nosnippet>783</a>        }
+<a href=#784 id=784 data-nosnippet>784</a>        state.reported_user_ids = sorted(reports.current);
+<a href=#785 id=785 data-nosnippet>785</a>
+<a href=#786 id=786 data-nosnippet>786</a>        <span class="self">self</span>.record(
+<a href=#787 id=787 data-nosnippet>787</a>            tenant_id,
+<a href=#788 id=788 data-nosnippet>788</a>            AUDIT_SYNC_RUN,
+<a href=#789 id=789 data-nosnippet>789</a>            <span class="prelude-val">None</span>,
+<a href=#790 id=790 data-nosnippet>790</a>            <span class="kw">if </span>report.accounts_skipped &gt; <span class="number">0 </span>{
+<a href=#791 id=791 data-nosnippet>791</a>                AuditOutcome::Failure
+<a href=#792 id=792 data-nosnippet>792</a>            } <span class="kw">else </span>{
+<a href=#793 id=793 data-nosnippet>793</a>                AuditOutcome::Success
+<a href=#794 id=794 data-nosnippet>794</a>            },
+<a href=#795 id=795 data-nosnippet>795</a>            <span class="macro">serde_json::json!</span>({
+<a href=#796 id=796 data-nosnippet>796</a>                <span class="string">"run"</span>: RunKind::Full.as_str(),
+<a href=#797 id=797 data-nosnippet>797</a>                <span class="string">"fell_back_to_full"</span>: report.fell_back_to_full,
+<a href=#798 id=798 data-nosnippet>798</a>                <span class="string">"accounts_examined"</span>: report.accounts_examined,
+<a href=#799 id=799 data-nosnippet>799</a>                <span class="string">"deactivated_vanished"</span>: report.deactivated_vanished,
+<a href=#800 id=800 data-nosnippet>800</a>                <span class="string">"deactivated_disabled"</span>: report.deactivated_disabled,
+<a href=#801 id=801 data-nosnippet>801</a>                <span class="string">"reappeared_reported"</span>: report.reappeared_reported,
+<a href=#802 id=802 data-nosnippet>802</a>                <span class="string">"attributes_updated"</span>: report.attributes_updated,
+<a href=#803 id=803 data-nosnippet>803</a>                <span class="string">"attributes_skipped"</span>: report.attributes_skipped,
+<a href=#804 id=804 data-nosnippet>804</a>                <span class="string">"memberships_changed"</span>: report.memberships_changed,
+<a href=#805 id=805 data-nosnippet>805</a>                <span class="string">"accounts_skipped"</span>: report.accounts_skipped,
+<a href=#806 id=806 data-nosnippet>806</a>            }),
+<a href=#807 id=807 data-nosnippet>807</a>        )
+<a href=#808 id=808 data-nosnippet>808</a>        .<span class="kw">await</span>;
+<a href=#809 id=809 data-nosnippet>809</a>        <span class="prelude-val">Ok</span>(report)
+<a href=#810 id=810 data-nosnippet>810</a>    }
+<a href=#811 id=811 data-nosnippet>811</a>
+<a href=#812 id=812 data-nosnippet>812</a>    <span class="doccomment">/// Phase 1 of a full run: page through the tenant's marked accounts and ask
+<a href=#813 id=813 data-nosnippet>813</a>    /// the directory about each. Any directory failure ends the run.
+<a href=#814 id=814 data-nosnippet>814</a>    </span><span class="kw">async fn </span>read_everything(<span class="kw-2">&amp;</span><span class="self">self</span>, session: <span class="kw-2">&amp;</span>DirectorySession) -&gt; <span class="prelude-ty">Result</span>&lt;Plan, SyncError&gt; {
+<a href=#815 id=815 data-nosnippet>815</a>        <span class="kw">let </span>config = session.config();
+<a href=#816 id=816 data-nosnippet>816</a>        <span class="kw">let </span>tenant_id = config.tenant_id;
+<a href=#817 id=817 data-nosnippet>817</a>        <span class="kw">let </span>id_attribute = <span class="kw-2">&amp;</span>config.user_attribute_map.external_id;
+<a href=#818 id=818 data-nosnippet>818</a>        <span class="kw">let </span><span class="kw-2">mut </span>plan = Plan {
+<a href=#819 id=819 data-nosnippet>819</a>            items: Vec::new(),
+<a href=#820 id=820 data-nosnippet>820</a>            undecided: Vec::new(),
+<a href=#821 id=821 data-nosnippet>821</a>            directory_accounts: <span class="number">0</span>,
+<a href=#822 id=822 data-nosnippet>822</a>        };
+<a href=#823 id=823 data-nosnippet>823</a>        <span class="kw">let </span><span class="kw-2">mut </span>after: <span class="prelude-ty">Option</span>&lt;Uuid&gt; = <span class="prelude-val">None</span>;
+<a href=#824 id=824 data-nosnippet>824</a>        <span class="kw">loop </span>{
+<a href=#825 id=825 data-nosnippet>825</a>            <span class="kw">let </span>page = <span class="self">self
+<a href=#826 id=826 data-nosnippet>826</a>                </span>.users
+<a href=#827 id=827 data-nosnippet>827</a>                .list_directory_accounts(tenant_id, after, <span class="self">self</span>.limits.page_size)
+<a href=#828 id=828 data-nosnippet>828</a>                .<span class="kw">await
+<a href=#829 id=829 data-nosnippet>829</a>                </span>.map_err(store)<span class="question-mark">?</span>;
+<a href=#830 id=830 data-nosnippet>830</a>            <span class="kw">let </span><span class="prelude-val">Some</span>(last) = page.last() <span class="kw">else </span>{ <span class="kw">break </span>};
+<a href=#831 id=831 data-nosnippet>831</a>            after = <span class="prelude-val">Some</span>(last.id);
+<a href=#832 id=832 data-nosnippet>832</a>            <span class="kw">for </span>user <span class="kw">in </span>page {
+<a href=#833 id=833 data-nosnippet>833</a>                <span class="kw">if </span><span class="macro">matches!</span>(user.status, UserStatus::Deleted | UserStatus::Anonymized) {
+<a href=#834 id=834 data-nosnippet>834</a>                    <span class="kw">continue</span>;
+<a href=#835 id=835 data-nosnippet>835</a>                }
+<a href=#836 id=836 data-nosnippet>836</a>                plan.directory_accounts += <span class="number">1</span>;
+<a href=#837 id=837 data-nosnippet>837</a>                <span class="kw">if </span>plan.directory_accounts &gt; <span class="self">self</span>.limits.max_accounts {
+<a href=#838 id=838 data-nosnippet>838</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(SyncError::TooManyAccounts(<span class="self">self</span>.limits.max_accounts));
+<a href=#839 id=839 data-nosnippet>839</a>                }
+<a href=#840 id=840 data-nosnippet>840</a>                <span class="kw">let </span><span class="prelude-val">Some</span>(marker) = user.directory_external_id.clone() <span class="kw">else </span>{
+<a href=#841 id=841 data-nosnippet>841</a>                    <span class="kw">continue</span>;
+<a href=#842 id=842 data-nosnippet>842</a>                };
+<a href=#843 id=843 data-nosnippet>843</a>                <span class="comment">// An identifier that cannot be put in a filter is a question
+<a href=#844 id=844 data-nosnippet>844</a>                // that cannot be asked: the account is skipped, never read as
+<a href=#845 id=845 data-nosnippet>845</a>                // vanished.
+<a href=#846 id=846 data-nosnippet>846</a>                </span><span class="kw">if </span>external_id_filter(id_attribute, <span class="kw-2">&amp;</span>marker).is_none() {
+<a href=#847 id=847 data-nosnippet>847</a>                    plan.undecided.push(user.id);
+<a href=#848 id=848 data-nosnippet>848</a>                    <span class="kw">continue</span>;
+<a href=#849 id=849 data-nosnippet>849</a>                }
+<a href=#850 id=850 data-nosnippet>850</a>                <span class="kw">match </span>session
+<a href=#851 id=851 data-nosnippet>851</a>                    .lookup_by_external_id(<span class="kw-2">&amp;</span>marker)
+<a href=#852 id=852 data-nosnippet>852</a>                    .<span class="kw">await
+<a href=#853 id=853 data-nosnippet>853</a>                    </span>.map_err(SyncError::Directory)<span class="question-mark">?
+<a href=#854 id=854 data-nosnippet>854</a>                </span>{
+<a href=#855 id=855 data-nosnippet>855</a>                    EntryLookup::Found(entry) =&gt; plan.items.push((user, Verdict::Present(entry))),
+<a href=#856 id=856 data-nosnippet>856</a>                    EntryLookup::NotFound =&gt; plan.items.push((user, Verdict::Vanished)),
+<a href=#857 id=857 data-nosnippet>857</a>                    EntryLookup::Ambiguous =&gt; plan.undecided.push(user.id),
+<a href=#858 id=858 data-nosnippet>858</a>                }
+<a href=#859 id=859 data-nosnippet>859</a>            }
+<a href=#860 id=860 data-nosnippet>860</a>        }
+<a href=#861 id=861 data-nosnippet>861</a>        <span class="prelude-val">Ok</span>(plan)
+<a href=#862 id=862 data-nosnippet>862</a>    }
+<a href=#863 id=863 data-nosnippet>863</a>
+<a href=#864 id=864 data-nosnippet>864</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#865 id=865 data-nosnippet>865</a>    // Incremental run
+<a href=#866 id=866 data-nosnippet>866</a>    // -----------------------------------------------------------------------
+<a href=#867 id=867 data-nosnippet>867</a>
+<a href=#868 id=868 data-nosnippet>868</a>    </span><span class="kw">async fn </span>incremental_run(
+<a href=#869 id=869 data-nosnippet>869</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#870 id=870 data-nosnippet>870</a>        session: <span class="kw-2">&amp;</span>DirectorySession,
+<a href=#871 id=871 data-nosnippet>871</a>        state: <span class="kw-2">&amp;mut </span>DirectorySyncState,
+<a href=#872 id=872 data-nosnippet>872</a>        now: DateTime&lt;Utc&gt;,
+<a href=#873 id=873 data-nosnippet>873</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;TenantReport, SyncError&gt; {
+<a href=#874 id=874 data-nosnippet>874</a>        <span class="kw">let </span>config = session.config();
+<a href=#875 id=875 data-nosnippet>875</a>        <span class="kw">let </span>tenant_id = config.tenant_id;
+<a href=#876 id=876 data-nosnippet>876</a>        <span class="kw">let </span>kind = config.kind;
+<a href=#877 id=877 data-nosnippet>877</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(watermark) = state.watermark.clone() <span class="kw">else </span>{
+<a href=#878 id=878 data-nosnippet>878</a>            <span class="kw">return </span><span class="self">self</span>.full_run(session, state, now, <span class="bool-val">true</span>).<span class="kw">await</span>;
+<a href=#879 id=879 data-nosnippet>879</a>        };
+<a href=#880 id=880 data-nosnippet>880</a>
+<a href=#881 id=881 data-nosnippet>881</a>        <span class="comment">// Active Directory: the watermark counts one server's USNs. Read the
+<a href=#882 id=882 data-nosnippet>882</a>        // server's identity and its current high-water mark *before* searching;
+<a href=#883 id=883 data-nosnippet>883</a>        // a different server, or no readable mark, cannot be trusted.
+<a href=#884 id=884 data-nosnippet>884</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>next_watermark: <span class="prelude-ty">Option</span>&lt;String&gt; = <span class="prelude-val">None</span>;
+<a href=#885 id=885 data-nosnippet>885</a>        <span class="kw">if </span>kind == DirectoryKind::ActiveDirectory {
+<a href=#886 id=886 data-nosnippet>886</a>            <span class="kw">let </span>dse = <span class="kw">match </span>session.read_root_dse().<span class="kw">await </span>{
+<a href=#887 id=887 data-nosnippet>887</a>                <span class="prelude-val">Ok</span>(dse) =&gt; dse,
+<a href=#888 id=888 data-nosnippet>888</a>                <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#889 id=889 data-nosnippet>889</a>                    <span class="macro">tracing::warn!</span>(
+<a href=#890 id=890 data-nosnippet>890</a>                        target: <span class="string">"axiam::directory"</span>,
+<a href=#891 id=891 data-nosnippet>891</a>                        %tenant_id,
+<a href=#892 id=892 data-nosnippet>892</a>                        outcome = <span class="question-mark">?</span>error,
+<a href=#893 id=893 data-nosnippet>893</a>                        <span class="string">"the rootDSE could not be read; running a full reconciliation instead"
+<a href=#894 id=894 data-nosnippet>894</a>                    </span>);
+<a href=#895 id=895 data-nosnippet>895</a>                    <span class="kw">return </span><span class="self">self</span>.full_run(session, state, now, <span class="bool-val">true</span>).<span class="kw">await</span>;
+<a href=#896 id=896 data-nosnippet>896</a>                }
+<a href=#897 id=897 data-nosnippet>897</a>            };
+<a href=#898 id=898 data-nosnippet>898</a>            <span class="kw">let </span>same_server =
+<a href=#899 id=899 data-nosnippet>899</a>                dse.server_identity.is_some() &amp;&amp; dse.server_identity == state.server_identity;
+<a href=#900 id=900 data-nosnippet>900</a>            <span class="kw">if </span>!same_server || dse.highest_committed_usn.is_none() {
+<a href=#901 id=901 data-nosnippet>901</a>                <span class="macro">tracing::info!</span>(
+<a href=#902 id=902 data-nosnippet>902</a>                    target: <span class="string">"axiam::directory"</span>,
+<a href=#903 id=903 data-nosnippet>903</a>                    %tenant_id,
+<a href=#904 id=904 data-nosnippet>904</a>                    <span class="string">"the directory server changed or gave no watermark; running a full \
+<a href=#905 id=905 data-nosnippet>905</a>                     reconciliation instead"
+<a href=#906 id=906 data-nosnippet>906</a>                </span>);
+<a href=#907 id=907 data-nosnippet>907</a>                <span class="kw">return </span><span class="self">self</span>.full_run(session, state, now, <span class="bool-val">true</span>).<span class="kw">await</span>;
+<a href=#908 id=908 data-nosnippet>908</a>            }
+<a href=#909 id=909 data-nosnippet>909</a>            next_watermark = dse.highest_committed_usn;
+<a href=#910 id=910 data-nosnippet>910</a>        }
+<a href=#911 id=911 data-nosnippet>911</a>
+<a href=#912 id=912 data-nosnippet>912</a>        <span class="kw">let </span>changed = session
+<a href=#913 id=913 data-nosnippet>913</a>            .search_changed(<span class="kw-2">&amp;</span>watermark, <span class="self">self</span>.limits.max_changed_entries)
+<a href=#914 id=914 data-nosnippet>914</a>            .<span class="kw">await
+<a href=#915 id=915 data-nosnippet>915</a>            </span>.map_err(SyncError::Directory)<span class="question-mark">?</span>;
+<a href=#916 id=916 data-nosnippet>916</a>
+<a href=#917 id=917 data-nosnippet>917</a>        <span class="kw">let </span><span class="kw-2">mut </span>report = TenantReport::new(tenant_id, RunKind::Incremental);
+<a href=#918 id=918 data-nosnippet>918</a>        report.bound_hit = !changed.complete;
+<a href=#919 id=919 data-nosnippet>919</a>        <span class="kw">let </span><span class="kw-2">mut </span>reports = Reports {
+<a href=#920 id=920 data-nosnippet>920</a>            known: state.reported_user_ids.iter().copied().collect(),
+<a href=#921 id=921 data-nosnippet>921</a>            current: state.reported_user_ids.iter().copied().collect(),
+<a href=#922 id=922 data-nosnippet>922</a>        };
+<a href=#923 id=923 data-nosnippet>923</a>        <span class="kw">let </span><span class="kw-2">mut </span>newest = <span class="prelude-val">Some</span>(watermark.clone());
+<a href=#924 id=924 data-nosnippet>924</a>        <span class="kw">for </span>entry <span class="kw">in </span>changed.entries {
+<a href=#925 id=925 data-nosnippet>925</a>            <span class="comment">// Every entry read — marked or not — advances an OpenLDAP watermark:
+<a href=#926 id=926 data-nosnippet>926</a>            // each was changed at or after it, and the next search resumes there.
+<a href=#927 id=927 data-nosnippet>927</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(change) = <span class="kw-2">&amp;</span>entry.change_value {
+<a href=#928 id=928 data-nosnippet>928</a>                newest = <span class="prelude-val">Some</span>(<span class="kw">match </span>newest {
+<a href=#929 id=929 data-nosnippet>929</a>                    <span class="prelude-val">Some</span>(have) =&gt; later_watermark(<span class="kw-2">&amp;</span>have, change),
+<a href=#930 id=930 data-nosnippet>930</a>                    <span class="prelude-val">None </span>=&gt; change.clone(),
+<a href=#931 id=931 data-nosnippet>931</a>                });
+<a href=#932 id=932 data-nosnippet>932</a>            }
+<a href=#933 id=933 data-nosnippet>933</a>            <span class="comment">// Only an entry whose identifier belongs to a marked account is
+<a href=#934 id=934 data-nosnippet>934</a>            // acted on. A directory that changes an entry no account owns
+<a href=#935 id=935 data-nosnippet>935</a>            // creates nothing: the job never provisions and never links.
+<a href=#936 id=936 data-nosnippet>936</a>            </span><span class="kw">let </span>user = <span class="kw">match </span><span class="self">self
+<a href=#937 id=937 data-nosnippet>937</a>                </span>.users
+<a href=#938 id=938 data-nosnippet>938</a>                .get_by_directory_external_id(tenant_id, <span class="kw-2">&amp;</span>entry.identity.external_id)
+<a href=#939 id=939 data-nosnippet>939</a>                .<span class="kw">await
+<a href=#940 id=940 data-nosnippet>940</a>            </span>{
+<a href=#941 id=941 data-nosnippet>941</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(user)) =&gt; user,
+<a href=#942 id=942 data-nosnippet>942</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="kw">continue</span>,
+<a href=#943 id=943 data-nosnippet>943</a>                <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#944 id=944 data-nosnippet>944</a>                    <span class="macro">tracing::warn!</span>(
+<a href=#945 id=945 data-nosnippet>945</a>                        target: <span class="string">"axiam::directory"</span>,
+<a href=#946 id=946 data-nosnippet>946</a>                        %tenant_id,
+<a href=#947 id=947 data-nosnippet>947</a>                        %error,
+<a href=#948 id=948 data-nosnippet>948</a>                        <span class="string">"an account could not be looked up by its directory identifier"
+<a href=#949 id=949 data-nosnippet>949</a>                    </span>);
+<a href=#950 id=950 data-nosnippet>950</a>                    report.accounts_skipped += <span class="number">1</span>;
+<a href=#951 id=951 data-nosnippet>951</a>                    <span class="kw">continue</span>;
+<a href=#952 id=952 data-nosnippet>952</a>                }
+<a href=#953 id=953 data-nosnippet>953</a>            };
+<a href=#954 id=954 data-nosnippet>954</a>            report.accounts_examined += <span class="number">1</span>;
+<a href=#955 id=955 data-nosnippet>955</a>            <span class="kw">let </span>verdict = Verdict::Present(Box::new(entry));
+<a href=#956 id=956 data-nosnippet>956</a>            <span class="self">self</span>.apply(
+<a href=#957 id=957 data-nosnippet>957</a>                session,
+<a href=#958 id=958 data-nosnippet>958</a>                <span class="kw-2">&amp;</span>user,
+<a href=#959 id=959 data-nosnippet>959</a>                <span class="kw-2">&amp;</span>verdict,
+<a href=#960 id=960 data-nosnippet>960</a>                RunKind::Incremental,
+<a href=#961 id=961 data-nosnippet>961</a>                <span class="kw-2">&amp;mut </span>reports,
+<a href=#962 id=962 data-nosnippet>962</a>                <span class="kw-2">&amp;mut </span>report,
+<a href=#963 id=963 data-nosnippet>963</a>            )
+<a href=#964 id=964 data-nosnippet>964</a>            .<span class="kw">await</span>;
+<a href=#965 id=965 data-nosnippet>965</a>        }
+<a href=#966 id=966 data-nosnippet>966</a>
+<a href=#967 id=967 data-nosnippet>967</a>        <span class="comment">// The watermark moves only when everything it covers was handled: a
+<a href=#968 id=968 data-nosnippet>968</a>        // bound hit or a skipped account leaves it and makes the next run full.
+<a href=#969 id=969 data-nosnippet>969</a>        </span><span class="kw">let </span>clean = changed.complete &amp;&amp; report.accounts_skipped == <span class="number">0</span>;
+<a href=#970 id=970 data-nosnippet>970</a>        <span class="kw">if </span>clean {
+<a href=#971 id=971 data-nosnippet>971</a>            state.watermark = <span class="kw">match </span>kind {
+<a href=#972 id=972 data-nosnippet>972</a>                DirectoryKind::ActiveDirectory =&gt; next_watermark.or(<span class="prelude-val">Some</span>(watermark)),
+<a href=#973 id=973 data-nosnippet>973</a>                DirectoryKind::OpenLdap =&gt; newest,
+<a href=#974 id=974 data-nosnippet>974</a>            };
+<a href=#975 id=975 data-nosnippet>975</a>        }
+<a href=#976 id=976 data-nosnippet>976</a>        state.full_required = !clean;
+<a href=#977 id=977 data-nosnippet>977</a>        state.reported_user_ids = sorted(reports.current);
+<a href=#978 id=978 data-nosnippet>978</a>        <span class="prelude-val">Ok</span>(report)
+<a href=#979 id=979 data-nosnippet>979</a>    }
+<a href=#980 id=980 data-nosnippet>980</a>
+<a href=#981 id=981 data-nosnippet>981</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#982 id=982 data-nosnippet>982</a>    // Applying one decision
+<a href=#983 id=983 data-nosnippet>983</a>    // -----------------------------------------------------------------------
+<a href=#984 id=984 data-nosnippet>984</a>
+<a href=#985 id=985 data-nosnippet>985</a>    </span><span class="doccomment">/// Decide for one account and carry it out. Never returns an error: a
+<a href=#986 id=986 data-nosnippet>986</a>    /// failure skips the account (counted) and the run goes on.
+<a href=#987 id=987 data-nosnippet>987</a>    </span><span class="kw">async fn </span>apply(
+<a href=#988 id=988 data-nosnippet>988</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#989 id=989 data-nosnippet>989</a>        session: <span class="kw-2">&amp;</span>DirectorySession,
+<a href=#990 id=990 data-nosnippet>990</a>        user: <span class="kw-2">&amp;</span>User,
+<a href=#991 id=991 data-nosnippet>991</a>        verdict: <span class="kw-2">&amp;</span>Verdict,
+<a href=#992 id=992 data-nosnippet>992</a>        run: RunKind,
+<a href=#993 id=993 data-nosnippet>993</a>        reports: <span class="kw-2">&amp;mut </span>Reports,
+<a href=#994 id=994 data-nosnippet>994</a>        report: <span class="kw-2">&amp;mut </span>TenantReport,
+<a href=#995 id=995 data-nosnippet>995</a>    ) {
+<a href=#996 id=996 data-nosnippet>996</a>        <span class="kw">let </span>tenant_id = session.config().tenant_id;
+<a href=#997 id=997 data-nosnippet>997</a>        <span class="kw">match </span>decide(<span class="kw-2">&amp;</span>user.status, verdict) {
+<a href=#998 id=998 data-nosnippet>998</a>            Decision::Ignore =&gt; {
+<a href=#999 id=999 data-nosnippet>999</a>                <span class="comment">// Disabled or gone *and* already inactive: nothing is waiting
+<a href=#1000 id=1000 data-nosnippet>1000</a>                // for an administrator, so nothing stays reported.
+<a href=#1001 id=1001 data-nosnippet>1001</a>                </span><span class="kw">if </span>run == RunKind::Incremental {
+<a href=#1002 id=1002 data-nosnippet>1002</a>                    reports.current.remove(<span class="kw-2">&amp;</span>user.id);
+<a href=#1003 id=1003 data-nosnippet>1003</a>                }
+<a href=#1004 id=1004 data-nosnippet>1004</a>            }
+<a href=#1005 id=1005 data-nosnippet>1005</a>            Decision::Reappeared =&gt; {
+<a href=#1006 id=1006 data-nosnippet>1006</a>                reports.current.insert(user.id);
+<a href=#1007 id=1007 data-nosnippet>1007</a>                <span class="kw">if </span>!reports.known.contains(<span class="kw-2">&amp;</span>user.id) {
+<a href=#1008 id=1008 data-nosnippet>1008</a>                    reports.known.insert(user.id);
+<a href=#1009 id=1009 data-nosnippet>1009</a>                    report.reappeared_reported += <span class="number">1</span>;
+<a href=#1010 id=1010 data-nosnippet>1010</a>                    <span class="self">self</span>.record(
+<a href=#1011 id=1011 data-nosnippet>1011</a>                        tenant_id,
+<a href=#1012 id=1012 data-nosnippet>1012</a>                        AUDIT_ACCOUNT_REAPPEARED,
+<a href=#1013 id=1013 data-nosnippet>1013</a>                        <span class="prelude-val">Some</span>(user.id),
+<a href=#1014 id=1014 data-nosnippet>1014</a>                        AuditOutcome::Denied,
+<a href=#1015 id=1015 data-nosnippet>1015</a>                        <span class="macro">serde_json::json!</span>({
+<a href=#1016 id=1016 data-nosnippet>1016</a>                            <span class="string">"run"</span>: run.as_str(),
+<a href=#1017 id=1017 data-nosnippet>1017</a>                            <span class="string">"reason"</span>: <span class="string">"the directory entry is present and enabled while the \
+<a href=#1018 id=1018 data-nosnippet>1018</a>                                       account is inactive; sync never re-enables"</span>,
+<a href=#1019 id=1019 data-nosnippet>1019</a>                            <span class="string">"action"</span>: <span class="string">"administrator action required"</span>,
+<a href=#1020 id=1020 data-nosnippet>1020</a>                            <span class="string">"directory_external_id"</span>: user.directory_external_id,
+<a href=#1021 id=1021 data-nosnippet>1021</a>                        }),
+<a href=#1022 id=1022 data-nosnippet>1022</a>                    )
+<a href=#1023 id=1023 data-nosnippet>1023</a>                    .<span class="kw">await</span>;
+<a href=#1024 id=1024 data-nosnippet>1024</a>                }
+<a href=#1025 id=1025 data-nosnippet>1025</a>            }
+<a href=#1026 id=1026 data-nosnippet>1026</a>            Decision::Deactivate(reason) =&gt; {
+<a href=#1027 id=1027 data-nosnippet>1027</a>                reports.current.remove(<span class="kw-2">&amp;</span>user.id);
+<a href=#1028 id=1028 data-nosnippet>1028</a>                <span class="kw">match </span><span class="self">self</span>.deactivate(session, user, reason, run).<span class="kw">await </span>{
+<a href=#1029 id=1029 data-nosnippet>1029</a>                    <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>) =&gt; <span class="kw">match </span>reason {
+<a href=#1030 id=1030 data-nosnippet>1030</a>                        Reason::Vanished =&gt; report.deactivated_vanished += <span class="number">1</span>,
+<a href=#1031 id=1031 data-nosnippet>1031</a>                        Reason::Disabled =&gt; report.deactivated_disabled += <span class="number">1</span>,
+<a href=#1032 id=1032 data-nosnippet>1032</a>                    },
+<a href=#1033 id=1033 data-nosnippet>1033</a>                    <span class="prelude-val">Ok</span>(<span class="bool-val">false</span>) =&gt; {}
+<a href=#1034 id=1034 data-nosnippet>1034</a>                    <span class="prelude-val">Err</span>(()) =&gt; report.accounts_skipped += <span class="number">1</span>,
+<a href=#1035 id=1035 data-nosnippet>1035</a>                }
+<a href=#1036 id=1036 data-nosnippet>1036</a>            }
+<a href=#1037 id=1037 data-nosnippet>1037</a>            Decision::Refresh(entry) =&gt; {
+<a href=#1038 id=1038 data-nosnippet>1038</a>                reports.current.remove(<span class="kw-2">&amp;</span>user.id);
+<a href=#1039 id=1039 data-nosnippet>1039</a>                <span class="kw">if </span><span class="self">self
+<a href=#1040 id=1040 data-nosnippet>1040</a>                    </span>.refresh(session, user, <span class="kw-2">&amp;</span>entry, run, report)
+<a href=#1041 id=1041 data-nosnippet>1041</a>                    .<span class="kw">await
+<a href=#1042 id=1042 data-nosnippet>1042</a>                    </span>.is_err()
+<a href=#1043 id=1043 data-nosnippet>1043</a>                {
+<a href=#1044 id=1044 data-nosnippet>1044</a>                    report.accounts_skipped += <span class="number">1</span>;
+<a href=#1045 id=1045 data-nosnippet>1045</a>                }
+<a href=#1046 id=1046 data-nosnippet>1046</a>            }
+<a href=#1047 id=1047 data-nosnippet>1047</a>        }
+<a href=#1048 id=1048 data-nosnippet>1048</a>    }
+<a href=#1049 id=1049 data-nosnippet>1049</a>
+<a href=#1050 id=1050 data-nosnippet>1050</a>    <span class="doccomment">/// Revoke, remove memberships, flip the status last. `Ok(true)` when this
+<a href=#1051 id=1051 data-nosnippet>1051</a>    /// call made the account `Inactive`; `Ok(false)` when another did; `Err`
+<a href=#1052 id=1052 data-nosnippet>1052</a>    /// when a step failed and the account was left `Active` for the next run.
+<a href=#1053 id=1053 data-nosnippet>1053</a>    </span><span class="kw">async fn </span>deactivate(
+<a href=#1054 id=1054 data-nosnippet>1054</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#1055 id=1055 data-nosnippet>1055</a>        session: <span class="kw-2">&amp;</span>DirectorySession,
+<a href=#1056 id=1056 data-nosnippet>1056</a>        user: <span class="kw-2">&amp;</span>User,
+<a href=#1057 id=1057 data-nosnippet>1057</a>        reason: Reason,
+<a href=#1058 id=1058 data-nosnippet>1058</a>        run: RunKind,
+<a href=#1059 id=1059 data-nosnippet>1059</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;bool, ()&gt; {
+<a href=#1060 id=1060 data-nosnippet>1060</a>        <span class="kw">let </span>tenant_id = session.config().tenant_id;
+<a href=#1061 id=1061 data-nosnippet>1061</a>        <span class="kw">let </span>failed = |stage: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, error: String| <span class="kw">async move </span>{
+<a href=#1062 id=1062 data-nosnippet>1062</a>            <span class="macro">tracing::error!</span>(
+<a href=#1063 id=1063 data-nosnippet>1063</a>                target: <span class="string">"axiam::directory"</span>,
+<a href=#1064 id=1064 data-nosnippet>1064</a>                %tenant_id,
+<a href=#1065 id=1065 data-nosnippet>1065</a>                user_id = %user.id,
+<a href=#1066 id=1066 data-nosnippet>1066</a>                stage,
+<a href=#1067 id=1067 data-nosnippet>1067</a>                %error,
+<a href=#1068 id=1068 data-nosnippet>1068</a>                <span class="string">"deactivating a directory account failed; it is left as it was and the next \
+<a href=#1069 id=1069 data-nosnippet>1069</a>                 run retries"
+<a href=#1070 id=1070 data-nosnippet>1070</a>            </span>);
+<a href=#1071 id=1071 data-nosnippet>1071</a>            <span class="self">self</span>.record(
+<a href=#1072 id=1072 data-nosnippet>1072</a>                tenant_id,
+<a href=#1073 id=1073 data-nosnippet>1073</a>                AUDIT_ACCOUNT_DEACTIVATED,
+<a href=#1074 id=1074 data-nosnippet>1074</a>                <span class="prelude-val">Some</span>(user.id),
+<a href=#1075 id=1075 data-nosnippet>1075</a>                AuditOutcome::Failure,
+<a href=#1076 id=1076 data-nosnippet>1076</a>                <span class="macro">serde_json::json!</span>({
+<a href=#1077 id=1077 data-nosnippet>1077</a>                    <span class="string">"run"</span>: run.as_str(),
+<a href=#1078 id=1078 data-nosnippet>1078</a>                    <span class="string">"reason"</span>: reason.as_str(),
+<a href=#1079 id=1079 data-nosnippet>1079</a>                    <span class="string">"stage"</span>: stage,
+<a href=#1080 id=1080 data-nosnippet>1080</a>                    <span class="string">"directory_external_id"</span>: user.directory_external_id,
+<a href=#1081 id=1081 data-nosnippet>1081</a>                }),
+<a href=#1082 id=1082 data-nosnippet>1082</a>            )
+<a href=#1083 id=1083 data-nosnippet>1083</a>            .<span class="kw">await</span>;
+<a href=#1084 id=1084 data-nosnippet>1084</a>        };
+<a href=#1085 id=1085 data-nosnippet>1085</a>
+<a href=#1086 id=1086 data-nosnippet>1086</a>        <span class="comment">// Through the repositories, so the session validation cache and the
+<a href=#1087 id=1087 data-nosnippet>1087</a>        // revocation feed see it (as linking does, D-28).
+<a href=#1088 id=1088 data-nosnippet>1088</a>        </span><span class="kw">if let </span><span class="prelude-val">Err</span>(error) = <span class="self">self
+<a href=#1089 id=1089 data-nosnippet>1089</a>            </span>.sessions
+<a href=#1090 id=1090 data-nosnippet>1090</a>            .invalidate_user_sessions(tenant_id, user.id)
+<a href=#1091 id=1091 data-nosnippet>1091</a>            .<span class="kw">await
+<a href=#1092 id=1092 data-nosnippet>1092</a>        </span>{
+<a href=#1093 id=1093 data-nosnippet>1093</a>            failed(<span class="string">"sessions"</span>, error.to_string()).<span class="kw">await</span>;
+<a href=#1094 id=1094 data-nosnippet>1094</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(());
+<a href=#1095 id=1095 data-nosnippet>1095</a>        }
+<a href=#1096 id=1096 data-nosnippet>1096</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(error) = <span class="self">self
+<a href=#1097 id=1097 data-nosnippet>1097</a>            </span>.refresh_tokens
+<a href=#1098 id=1098 data-nosnippet>1098</a>            .revoke_all_for_user(tenant_id, user.id)
+<a href=#1099 id=1099 data-nosnippet>1099</a>            .<span class="kw">await
+<a href=#1100 id=1100 data-nosnippet>1100</a>        </span>{
+<a href=#1101 id=1101 data-nosnippet>1101</a>            failed(<span class="string">"refresh_tokens"</span>, error.to_string()).<span class="kw">await</span>;
+<a href=#1102 id=1102 data-nosnippet>1102</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(());
+<a href=#1103 id=1103 data-nosnippet>1103</a>        }
+<a href=#1104 id=1104 data-nosnippet>1104</a>        <span class="comment">// The D-30 mapper, so the decision cache is flushed and manual
+<a href=#1105 id=1105 data-nosnippet>1105</a>        // memberships are never touched.
+<a href=#1106 id=1106 data-nosnippet>1106</a>        </span><span class="kw">let </span>removed = <span class="kw">match </span><span class="self">self
+<a href=#1107 id=1107 data-nosnippet>1107</a>            </span>.mapper
+<a href=#1108 id=1108 data-nosnippet>1108</a>            .remove_directory_memberships(tenant_id, user.id)
+<a href=#1109 id=1109 data-nosnippet>1109</a>            .<span class="kw">await
+<a href=#1110 id=1110 data-nosnippet>1110</a>        </span>{
+<a href=#1111 id=1111 data-nosnippet>1111</a>            <span class="prelude-val">Ok</span>(outcome) =&gt; outcome.removed.len(),
+<a href=#1112 id=1112 data-nosnippet>1112</a>            <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#1113 id=1113 data-nosnippet>1113</a>                failed(<span class="string">"memberships"</span>, <span class="macro">format!</span>(<span class="string">"{error:?}"</span>)).<span class="kw">await</span>;
+<a href=#1114 id=1114 data-nosnippet>1114</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(());
+<a href=#1115 id=1115 data-nosnippet>1115</a>            }
+<a href=#1116 id=1116 data-nosnippet>1116</a>        };
+<a href=#1117 id=1117 data-nosnippet>1117</a>        <span class="comment">// Last, and as one compare-and-set: from here `account_may_act` refuses
+<a href=#1118 id=1118 data-nosnippet>1118</a>        // the account everywhere.
+<a href=#1119 id=1119 data-nosnippet>1119</a>        </span><span class="kw">match </span><span class="self">self
+<a href=#1120 id=1120 data-nosnippet>1120</a>            </span>.users
+<a href=#1121 id=1121 data-nosnippet>1121</a>            .deactivate_directory_account(tenant_id, user.id)
+<a href=#1122 id=1122 data-nosnippet>1122</a>            .<span class="kw">await
+<a href=#1123 id=1123 data-nosnippet>1123</a>        </span>{
+<a href=#1124 id=1124 data-nosnippet>1124</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(<span class="kw">_</span>)) =&gt; {
+<a href=#1125 id=1125 data-nosnippet>1125</a>                <span class="kw">if let </span><span class="prelude-val">Some</span>(sink) = <span class="kw-2">&amp;</span><span class="self">self</span>.ssf_sink {
+<a href=#1126 id=1126 data-nosnippet>1126</a>                    sink.account_disabled(tenant_id, user).<span class="kw">await</span>;
+<a href=#1127 id=1127 data-nosnippet>1127</a>                }
+<a href=#1128 id=1128 data-nosnippet>1128</a>                <span class="self">self</span>.record(
+<a href=#1129 id=1129 data-nosnippet>1129</a>                    tenant_id,
+<a href=#1130 id=1130 data-nosnippet>1130</a>                    AUDIT_ACCOUNT_DEACTIVATED,
+<a href=#1131 id=1131 data-nosnippet>1131</a>                    <span class="prelude-val">Some</span>(user.id),
+<a href=#1132 id=1132 data-nosnippet>1132</a>                    AuditOutcome::Success,
+<a href=#1133 id=1133 data-nosnippet>1133</a>                    <span class="macro">serde_json::json!</span>({
+<a href=#1134 id=1134 data-nosnippet>1134</a>                        <span class="string">"run"</span>: run.as_str(),
+<a href=#1135 id=1135 data-nosnippet>1135</a>                        <span class="string">"reason"</span>: reason.as_str(),
+<a href=#1136 id=1136 data-nosnippet>1136</a>                        <span class="string">"sessions_and_refresh_tokens_revoked"</span>: <span class="bool-val">true</span>,
+<a href=#1137 id=1137 data-nosnippet>1137</a>                        <span class="string">"directory_memberships_removed"</span>: removed,
+<a href=#1138 id=1138 data-nosnippet>1138</a>                        <span class="string">"directory_external_id"</span>: user.directory_external_id,
+<a href=#1139 id=1139 data-nosnippet>1139</a>                    }),
+<a href=#1140 id=1140 data-nosnippet>1140</a>                )
+<a href=#1141 id=1141 data-nosnippet>1141</a>                .<span class="kw">await</span>;
+<a href=#1142 id=1142 data-nosnippet>1142</a>                <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>)
+<a href=#1143 id=1143 data-nosnippet>1143</a>            }
+<a href=#1144 id=1144 data-nosnippet>1144</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; <span class="prelude-val">Ok</span>(<span class="bool-val">false</span>),
+<a href=#1145 id=1145 data-nosnippet>1145</a>            <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#1146 id=1146 data-nosnippet>1146</a>                failed(<span class="string">"status"</span>, error.to_string()).<span class="kw">await</span>;
+<a href=#1147 id=1147 data-nosnippet>1147</a>                <span class="prelude-val">Err</span>(())
+<a href=#1148 id=1148 data-nosnippet>1148</a>            }
+<a href=#1149 id=1149 data-nosnippet>1149</a>        }
+<a href=#1150 id=1150 data-nosnippet>1150</a>    }
+<a href=#1151 id=1151 data-nosnippet>1151</a>
+<a href=#1152 id=1152 data-nosnippet>1152</a>    <span class="doccomment">/// Keep a present, enabled account in step with its entry: group mapping
+<a href=#1153 id=1153 data-nosnippet>1153</a>    /// first (a failure there skips the user, changing nothing), then the
+<a href=#1154 id=1154 data-nosnippet>1154</a>    /// attributes.
+<a href=#1155 id=1155 data-nosnippet>1155</a>    </span><span class="kw">async fn </span>refresh(
+<a href=#1156 id=1156 data-nosnippet>1156</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#1157 id=1157 data-nosnippet>1157</a>        session: <span class="kw-2">&amp;</span>DirectorySession,
+<a href=#1158 id=1158 data-nosnippet>1158</a>        user: <span class="kw-2">&amp;</span>User,
+<a href=#1159 id=1159 data-nosnippet>1159</a>        entry: <span class="kw-2">&amp;</span>SyncEntry,
+<a href=#1160 id=1160 data-nosnippet>1160</a>        run: RunKind,
+<a href=#1161 id=1161 data-nosnippet>1161</a>        report: <span class="kw-2">&amp;mut </span>TenantReport,
+<a href=#1162 id=1162 data-nosnippet>1162</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), ()&gt; {
+<a href=#1163 id=1163 data-nosnippet>1163</a>        <span class="kw">let </span>tenant_id = session.config().tenant_id;
+<a href=#1164 id=1164 data-nosnippet>1164</a>
+<a href=#1165 id=1165 data-nosnippet>1165</a>        <span class="comment">// The DN is the one the directory returned for this very entry.
+<a href=#1166 id=1166 data-nosnippet>1166</a>        </span><span class="kw">match </span><span class="self">self
+<a href=#1167 id=1167 data-nosnippet>1167</a>            </span>.mapper
+<a href=#1168 id=1168 data-nosnippet>1168</a>            .apply_for_user(tenant_id, user.id, <span class="kw-2">&amp;</span>entry.identity.dn)
+<a href=#1169 id=1169 data-nosnippet>1169</a>            .<span class="kw">await
+<a href=#1170 id=1170 data-nosnippet>1170</a>        </span>{
+<a href=#1171 id=1171 data-nosnippet>1171</a>            <span class="prelude-val">Ok</span>(outcome) =&gt; {
+<a href=#1172 id=1172 data-nosnippet>1172</a>                <span class="kw">if </span>outcome.changed() {
+<a href=#1173 id=1173 data-nosnippet>1173</a>                    report.memberships_changed += <span class="number">1</span>;
+<a href=#1174 id=1174 data-nosnippet>1174</a>                    <span class="self">self</span>.record(
+<a href=#1175 id=1175 data-nosnippet>1175</a>                        tenant_id,
+<a href=#1176 id=1176 data-nosnippet>1176</a>                        AUDIT_GROUPS_MAPPED,
+<a href=#1177 id=1177 data-nosnippet>1177</a>                        <span class="prelude-val">Some</span>(user.id),
+<a href=#1178 id=1178 data-nosnippet>1178</a>                        AuditOutcome::Success,
+<a href=#1179 id=1179 data-nosnippet>1179</a>                        <span class="macro">serde_json::json!</span>({
+<a href=#1180 id=1180 data-nosnippet>1180</a>                            <span class="string">"source"</span>: <span class="string">"sync"</span>,
+<a href=#1181 id=1181 data-nosnippet>1181</a>                            <span class="string">"run"</span>: run.as_str(),
+<a href=#1182 id=1182 data-nosnippet>1182</a>                            <span class="string">"groups_added"</span>: outcome.added,
+<a href=#1183 id=1183 data-nosnippet>1183</a>                            <span class="string">"groups_removed"</span>: outcome.removed,
+<a href=#1184 id=1184 data-nosnippet>1184</a>                            <span class="string">"added_count"</span>: outcome.added.len(),
+<a href=#1185 id=1185 data-nosnippet>1185</a>                            <span class="string">"removed_count"</span>: outcome.removed.len(),
+<a href=#1186 id=1186 data-nosnippet>1186</a>                            <span class="string">"manual_memberships_left"</span>: outcome.left_manual.len(),
+<a href=#1187 id=1187 data-nosnippet>1187</a>                            <span class="string">"directory_groups_resolved"</span>: outcome.directory_groups_resolved,
+<a href=#1188 id=1188 data-nosnippet>1188</a>                            <span class="string">"directory_groups_mapped"</span>: outcome.directory_groups_mapped,
+<a href=#1189 id=1189 data-nosnippet>1189</a>                        }),
+<a href=#1190 id=1190 data-nosnippet>1190</a>                    )
+<a href=#1191 id=1191 data-nosnippet>1191</a>                    .<span class="kw">await</span>;
+<a href=#1192 id=1192 data-nosnippet>1192</a>                }
+<a href=#1193 id=1193 data-nosnippet>1193</a>            }
+<a href=#1194 id=1194 data-nosnippet>1194</a>            <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#1195 id=1195 data-nosnippet>1195</a>                <span class="macro">tracing::warn!</span>(
+<a href=#1196 id=1196 data-nosnippet>1196</a>                    target: <span class="string">"axiam::directory"</span>,
+<a href=#1197 id=1197 data-nosnippet>1197</a>                    %tenant_id,
+<a href=#1198 id=1198 data-nosnippet>1198</a>                    user_id = %user.id,
+<a href=#1199 id=1199 data-nosnippet>1199</a>                    outcome = <span class="question-mark">?</span>error,
+<a href=#1200 id=1200 data-nosnippet>1200</a>                    <span class="string">"the group mapping could not be applied; the account is skipped"
+<a href=#1201 id=1201 data-nosnippet>1201</a>                </span>);
+<a href=#1202 id=1202 data-nosnippet>1202</a>                <span class="self">self</span>.record(
+<a href=#1203 id=1203 data-nosnippet>1203</a>                    tenant_id,
+<a href=#1204 id=1204 data-nosnippet>1204</a>                    AUDIT_SYNC_USER_SKIPPED,
+<a href=#1205 id=1205 data-nosnippet>1205</a>                    <span class="prelude-val">Some</span>(user.id),
+<a href=#1206 id=1206 data-nosnippet>1206</a>                    AuditOutcome::Failure,
+<a href=#1207 id=1207 data-nosnippet>1207</a>                    <span class="macro">serde_json::json!</span>({
+<a href=#1208 id=1208 data-nosnippet>1208</a>                        <span class="string">"run"</span>: run.as_str(),
+<a href=#1209 id=1209 data-nosnippet>1209</a>                        <span class="string">"reason"</span>: <span class="string">"group_mapping_not_applied"</span>,
+<a href=#1210 id=1210 data-nosnippet>1210</a>                        <span class="string">"directory_external_id"</span>: user.directory_external_id,
+<a href=#1211 id=1211 data-nosnippet>1211</a>                    }),
+<a href=#1212 id=1212 data-nosnippet>1212</a>                )
+<a href=#1213 id=1213 data-nosnippet>1213</a>                .<span class="kw">await</span>;
+<a href=#1214 id=1214 data-nosnippet>1214</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(());
+<a href=#1215 id=1215 data-nosnippet>1215</a>            }
+<a href=#1216 id=1216 data-nosnippet>1216</a>        }
+<a href=#1217 id=1217 data-nosnippet>1217</a>
+<a href=#1218 id=1218 data-nosnippet>1218</a>        <span class="self">self</span>.refresh_attributes(tenant_id, user, entry, run, report)
+<a href=#1219 id=1219 data-nosnippet>1219</a>            .<span class="kw">await
+<a href=#1220 id=1220 data-nosnippet>1220</a>    </span>}
+<a href=#1221 id=1221 data-nosnippet>1221</a>
+<a href=#1222 id=1222 data-nosnippet>1222</a>    <span class="doccomment">/// Update username, email and display name to the entry's, through the
+<a href=#1223 id=1223 data-nosnippet>1223</a>    /// cleaners provisioning uses, skipping and auditing any change that would
+<a href=#1224 id=1224 data-nosnippet>1224</a>    /// collide with another account.
+<a href=#1225 id=1225 data-nosnippet>1225</a>    </span><span class="kw">async fn </span>refresh_attributes(
+<a href=#1226 id=1226 data-nosnippet>1226</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#1227 id=1227 data-nosnippet>1227</a>        tenant_id: Uuid,
+<a href=#1228 id=1228 data-nosnippet>1228</a>        user: <span class="kw-2">&amp;</span>User,
+<a href=#1229 id=1229 data-nosnippet>1229</a>        entry: <span class="kw-2">&amp;</span>SyncEntry,
+<a href=#1230 id=1230 data-nosnippet>1230</a>        run: RunKind,
+<a href=#1231 id=1231 data-nosnippet>1231</a>        report: <span class="kw-2">&amp;mut </span>TenantReport,
+<a href=#1232 id=1232 data-nosnippet>1232</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), ()&gt; {
+<a href=#1233 id=1233 data-nosnippet>1233</a>        <span class="kw">let </span>cleaned = CleanedAttributes::from_identity(<span class="kw-2">&amp;</span>entry.identity);
+<a href=#1234 id=1234 data-nosnippet>1234</a>        <span class="kw">let </span><span class="kw-2">mut </span>update = UpdateUser::default();
+<a href=#1235 id=1235 data-nosnippet>1235</a>        <span class="kw">let </span><span class="kw-2">mut </span>fields: Vec&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt; = Vec::new();
+<a href=#1236 id=1236 data-nosnippet>1236</a>
+<a href=#1237 id=1237 data-nosnippet>1237</a>        <span class="comment">// An attribute the entry lacks, or carries in a form that cannot be
+<a href=#1238 id=1238 data-nosnippet>1238</a>        // cleaned, leaves the account's value alone.
+<a href=#1239 id=1239 data-nosnippet>1239</a>        </span><span class="kw">for </span>(field, new, current) <span class="kw">in </span>[
+<a href=#1240 id=1240 data-nosnippet>1240</a>            (
+<a href=#1241 id=1241 data-nosnippet>1241</a>                <span class="string">"username"</span>,
+<a href=#1242 id=1242 data-nosnippet>1242</a>                cleaned.username.as_deref(),
+<a href=#1243 id=1243 data-nosnippet>1243</a>                user.username.as_str(),
+<a href=#1244 id=1244 data-nosnippet>1244</a>            ),
+<a href=#1245 id=1245 data-nosnippet>1245</a>            (<span class="string">"email"</span>, cleaned.email.as_deref(), user.email.as_str()),
+<a href=#1246 id=1246 data-nosnippet>1246</a>        ] {
+<a href=#1247 id=1247 data-nosnippet>1247</a>            <span class="kw">let </span><span class="prelude-val">Some</span>(new) = new <span class="kw">else </span>{ <span class="kw">continue </span>};
+<a href=#1248 id=1248 data-nosnippet>1248</a>            <span class="kw">if </span>new == current {
+<a href=#1249 id=1249 data-nosnippet>1249</a>                <span class="kw">continue</span>;
+<a href=#1250 id=1250 data-nosnippet>1250</a>            }
+<a href=#1251 id=1251 data-nosnippet>1251</a>            <span class="kw">match </span><span class="self">self
+<a href=#1252 id=1252 data-nosnippet>1252</a>                </span>.users
+<a href=#1253 id=1253 data-nosnippet>1253</a>                .find_identity_collision_excluding(tenant_id, <span class="kw-2">&amp;</span>[new.to_string()], user.id)
+<a href=#1254 id=1254 data-nosnippet>1254</a>                .<span class="kw">await
+<a href=#1255 id=1255 data-nosnippet>1255</a>            </span>{
+<a href=#1256 id=1256 data-nosnippet>1256</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; {
+<a href=#1257 id=1257 data-nosnippet>1257</a>                    <span class="kw">if </span>field == <span class="string">"username" </span>{
+<a href=#1258 id=1258 data-nosnippet>1258</a>                        update.username = <span class="prelude-val">Some</span>(new.to_string());
+<a href=#1259 id=1259 data-nosnippet>1259</a>                    } <span class="kw">else </span>{
+<a href=#1260 id=1260 data-nosnippet>1260</a>                        update.email = <span class="prelude-val">Some</span>(new.to_string());
+<a href=#1261 id=1261 data-nosnippet>1261</a>                    }
+<a href=#1262 id=1262 data-nosnippet>1262</a>                    fields.push(field);
+<a href=#1263 id=1263 data-nosnippet>1263</a>                }
+<a href=#1264 id=1264 data-nosnippet>1264</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(collision)) =&gt; {
+<a href=#1265 id=1265 data-nosnippet>1265</a>                    report.attributes_skipped += <span class="number">1</span>;
+<a href=#1266 id=1266 data-nosnippet>1266</a>                    <span class="self">self</span>.record_skip(tenant_id, user, field, <span class="prelude-val">Some</span>(collision), run)
+<a href=#1267 id=1267 data-nosnippet>1267</a>                        .<span class="kw">await</span>;
+<a href=#1268 id=1268 data-nosnippet>1268</a>                }
+<a href=#1269 id=1269 data-nosnippet>1269</a>                <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#1270 id=1270 data-nosnippet>1270</a>                    <span class="macro">tracing::warn!</span>(
+<a href=#1271 id=1271 data-nosnippet>1271</a>                        target: <span class="string">"axiam::directory"</span>,
+<a href=#1272 id=1272 data-nosnippet>1272</a>                        %tenant_id,
+<a href=#1273 id=1273 data-nosnippet>1273</a>                        user_id = %user.id,
+<a href=#1274 id=1274 data-nosnippet>1274</a>                        %error,
+<a href=#1275 id=1275 data-nosnippet>1275</a>                        <span class="string">"the collision probe failed; the account's attributes are left alone"
+<a href=#1276 id=1276 data-nosnippet>1276</a>                    </span>);
+<a href=#1277 id=1277 data-nosnippet>1277</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(());
+<a href=#1278 id=1278 data-nosnippet>1278</a>                }
+<a href=#1279 id=1279 data-nosnippet>1279</a>            }
+<a href=#1280 id=1280 data-nosnippet>1280</a>        }
+<a href=#1281 id=1281 data-nosnippet>1281</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(name) = cleaned.display_name.as_deref() {
+<a href=#1282 id=1282 data-nosnippet>1282</a>            <span class="kw">let </span>current = user
+<a href=#1283 id=1283 data-nosnippet>1283</a>                .metadata
+<a href=#1284 id=1284 data-nosnippet>1284</a>                .get(<span class="string">"oidc"</span>)
+<a href=#1285 id=1285 data-nosnippet>1285</a>                .and_then(|oidc| oidc.get(<span class="string">"name"</span>))
+<a href=#1286 id=1286 data-nosnippet>1286</a>                .and_then(serde_json::Value::as_str);
+<a href=#1287 id=1287 data-nosnippet>1287</a>            <span class="kw">if </span>current != <span class="prelude-val">Some</span>(name) {
+<a href=#1288 id=1288 data-nosnippet>1288</a>                <span class="kw">let </span><span class="kw-2">mut </span>metadata = <span class="kw">if </span>user.metadata.is_object() {
+<a href=#1289 id=1289 data-nosnippet>1289</a>                    user.metadata.clone()
+<a href=#1290 id=1290 data-nosnippet>1290</a>                } <span class="kw">else </span>{
+<a href=#1291 id=1291 data-nosnippet>1291</a>                    <span class="macro">serde_json::json!</span>({})
+<a href=#1292 id=1292 data-nosnippet>1292</a>                };
+<a href=#1293 id=1293 data-nosnippet>1293</a>                <span class="kw">if </span>!metadata
+<a href=#1294 id=1294 data-nosnippet>1294</a>                    .get(<span class="string">"oidc"</span>)
+<a href=#1295 id=1295 data-nosnippet>1295</a>                    .is_some_and(serde_json::Value::is_object)
+<a href=#1296 id=1296 data-nosnippet>1296</a>                {
+<a href=#1297 id=1297 data-nosnippet>1297</a>                    metadata[<span class="string">"oidc"</span>] = <span class="macro">serde_json::json!</span>({});
+<a href=#1298 id=1298 data-nosnippet>1298</a>                }
+<a href=#1299 id=1299 data-nosnippet>1299</a>                metadata[<span class="string">"oidc"</span>][<span class="string">"name"</span>] = serde_json::Value::String(name.to_string());
+<a href=#1300 id=1300 data-nosnippet>1300</a>                update.metadata = <span class="prelude-val">Some</span>(metadata);
+<a href=#1301 id=1301 data-nosnippet>1301</a>                fields.push(<span class="string">"display_name"</span>);
+<a href=#1302 id=1302 data-nosnippet>1302</a>            }
+<a href=#1303 id=1303 data-nosnippet>1303</a>        }
+<a href=#1304 id=1304 data-nosnippet>1304</a>        <span class="kw">if </span>fields.is_empty() {
+<a href=#1305 id=1305 data-nosnippet>1305</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#1306 id=1306 data-nosnippet>1306</a>        }
+<a href=#1307 id=1307 data-nosnippet>1307</a>        <span class="kw">match </span><span class="self">self</span>.users.update(tenant_id, user.id, update).<span class="kw">await </span>{
+<a href=#1308 id=1308 data-nosnippet>1308</a>            <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; {
+<a href=#1309 id=1309 data-nosnippet>1309</a>                report.attributes_updated += <span class="number">1</span>;
+<a href=#1310 id=1310 data-nosnippet>1310</a>                <span class="self">self</span>.record(
+<a href=#1311 id=1311 data-nosnippet>1311</a>                    tenant_id,
+<a href=#1312 id=1312 data-nosnippet>1312</a>                    AUDIT_ACCOUNT_UPDATED,
+<a href=#1313 id=1313 data-nosnippet>1313</a>                    <span class="prelude-val">Some</span>(user.id),
+<a href=#1314 id=1314 data-nosnippet>1314</a>                    AuditOutcome::Success,
+<a href=#1315 id=1315 data-nosnippet>1315</a>                    <span class="macro">serde_json::json!</span>({
+<a href=#1316 id=1316 data-nosnippet>1316</a>                        <span class="string">"run"</span>: run.as_str(),
+<a href=#1317 id=1317 data-nosnippet>1317</a>                        <span class="string">"fields"</span>: fields,
+<a href=#1318 id=1318 data-nosnippet>1318</a>                        <span class="string">"directory_external_id"</span>: user.directory_external_id,
+<a href=#1319 id=1319 data-nosnippet>1319</a>                    }),
+<a href=#1320 id=1320 data-nosnippet>1320</a>                )
+<a href=#1321 id=1321 data-nosnippet>1321</a>                .<span class="kw">await</span>;
+<a href=#1322 id=1322 data-nosnippet>1322</a>                <span class="prelude-val">Ok</span>(())
+<a href=#1323 id=1323 data-nosnippet>1323</a>            }
+<a href=#1324 id=1324 data-nosnippet>1324</a>            <span class="comment">// Another account took the name between the probe and the write: a
+<a href=#1325 id=1325 data-nosnippet>1325</a>            // collision after all.
+<a href=#1326 id=1326 data-nosnippet>1326</a>            </span><span class="prelude-val">Err</span>(AxiamError::AlreadyExists { .. }) =&gt; {
+<a href=#1327 id=1327 data-nosnippet>1327</a>                report.attributes_skipped += <span class="number">1</span>;
+<a href=#1328 id=1328 data-nosnippet>1328</a>                <span class="self">self</span>.record_skip(tenant_id, user, <span class="string">"username_or_email"</span>, <span class="prelude-val">None</span>, run)
+<a href=#1329 id=1329 data-nosnippet>1329</a>                    .<span class="kw">await</span>;
+<a href=#1330 id=1330 data-nosnippet>1330</a>                <span class="prelude-val">Ok</span>(())
+<a href=#1331 id=1331 data-nosnippet>1331</a>            }
+<a href=#1332 id=1332 data-nosnippet>1332</a>            <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#1333 id=1333 data-nosnippet>1333</a>                <span class="macro">tracing::warn!</span>(
+<a href=#1334 id=1334 data-nosnippet>1334</a>                    target: <span class="string">"axiam::directory"</span>,
+<a href=#1335 id=1335 data-nosnippet>1335</a>                    %tenant_id,
+<a href=#1336 id=1336 data-nosnippet>1336</a>                    user_id = %user.id,
+<a href=#1337 id=1337 data-nosnippet>1337</a>                    %error,
+<a href=#1338 id=1338 data-nosnippet>1338</a>                    <span class="string">"updating a directory account's attributes failed; it is skipped"
+<a href=#1339 id=1339 data-nosnippet>1339</a>                </span>);
+<a href=#1340 id=1340 data-nosnippet>1340</a>                <span class="prelude-val">Err</span>(())
+<a href=#1341 id=1341 data-nosnippet>1341</a>            }
+<a href=#1342 id=1342 data-nosnippet>1342</a>        }
+<a href=#1343 id=1343 data-nosnippet>1343</a>    }
+<a href=#1344 id=1344 data-nosnippet>1344</a>
+<a href=#1345 id=1345 data-nosnippet>1345</a>    <span class="kw">async fn </span>record_skip(
+<a href=#1346 id=1346 data-nosnippet>1346</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#1347 id=1347 data-nosnippet>1347</a>        tenant_id: Uuid,
+<a href=#1348 id=1348 data-nosnippet>1348</a>        user: <span class="kw-2">&amp;</span>User,
+<a href=#1349 id=1349 data-nosnippet>1349</a>        attribute: <span class="kw-2">&amp;</span>str,
+<a href=#1350 id=1350 data-nosnippet>1350</a>        collision: <span class="prelude-ty">Option</span>&lt;axiam_core::models::user::IdentityCollision&gt;,
+<a href=#1351 id=1351 data-nosnippet>1351</a>        run: RunKind,
+<a href=#1352 id=1352 data-nosnippet>1352</a>    ) {
+<a href=#1353 id=1353 data-nosnippet>1353</a>        <span class="self">self</span>.record(
+<a href=#1354 id=1354 data-nosnippet>1354</a>            tenant_id,
+<a href=#1355 id=1355 data-nosnippet>1355</a>            AUDIT_SYNC_ATTRIBUTE_SKIPPED,
+<a href=#1356 id=1356 data-nosnippet>1356</a>            <span class="prelude-val">Some</span>(user.id),
+<a href=#1357 id=1357 data-nosnippet>1357</a>            AuditOutcome::Denied,
+<a href=#1358 id=1358 data-nosnippet>1358</a>            <span class="macro">serde_json::json!</span>({
+<a href=#1359 id=1359 data-nosnippet>1359</a>                <span class="string">"run"</span>: run.as_str(),
+<a href=#1360 id=1360 data-nosnippet>1360</a>                <span class="string">"reason"</span>: <span class="string">"collision"</span>,
+<a href=#1361 id=1361 data-nosnippet>1361</a>                <span class="string">"attribute"</span>: attribute,
+<a href=#1362 id=1362 data-nosnippet>1362</a>                <span class="string">"existing_user_id"</span>: collision.map(|c| c.user_id.to_string()),
+<a href=#1363 id=1363 data-nosnippet>1363</a>                <span class="string">"existing_attribute"</span>: collision.map(|c| c.attribute.as_str()),
+<a href=#1364 id=1364 data-nosnippet>1364</a>                <span class="string">"directory_external_id"</span>: user.directory_external_id,
+<a href=#1365 id=1365 data-nosnippet>1365</a>            }),
+<a href=#1366 id=1366 data-nosnippet>1366</a>        )
+<a href=#1367 id=1367 data-nosnippet>1367</a>        .<span class="kw">await</span>;
+<a href=#1368 id=1368 data-nosnippet>1368</a>    }
+<a href=#1369 id=1369 data-nosnippet>1369</a>
+<a href=#1370 id=1370 data-nosnippet>1370</a>    <span class="doccomment">/// One audit row, as the system. Never fails the run: the sink logs a row it
+<a href=#1371 id=1371 data-nosnippet>1371</a>    /// cannot write.
+<a href=#1372 id=1372 data-nosnippet>1372</a>    </span><span class="kw">async fn </span>record(
+<a href=#1373 id=1373 data-nosnippet>1373</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#1374 id=1374 data-nosnippet>1374</a>        tenant_id: Uuid,
+<a href=#1375 id=1375 data-nosnippet>1375</a>        action: <span class="kw-2">&amp;</span>str,
+<a href=#1376 id=1376 data-nosnippet>1376</a>        resource_id: <span class="prelude-ty">Option</span>&lt;Uuid&gt;,
+<a href=#1377 id=1377 data-nosnippet>1377</a>        outcome: AuditOutcome,
+<a href=#1378 id=1378 data-nosnippet>1378</a>        metadata: serde_json::Value,
+<a href=#1379 id=1379 data-nosnippet>1379</a>    ) {
+<a href=#1380 id=1380 data-nosnippet>1380</a>        <span class="self">self</span>.audit
+<a href=#1381 id=1381 data-nosnippet>1381</a>            .record(CreateAuditLogEntry {
+<a href=#1382 id=1382 data-nosnippet>1382</a>                tenant_id,
+<a href=#1383 id=1383 data-nosnippet>1383</a>                actor_id: Uuid::nil(),
+<a href=#1384 id=1384 data-nosnippet>1384</a>                actor_type: ActorType::System,
+<a href=#1385 id=1385 data-nosnippet>1385</a>                action: action.to_string(),
+<a href=#1386 id=1386 data-nosnippet>1386</a>                resource_id,
+<a href=#1387 id=1387 data-nosnippet>1387</a>                outcome,
+<a href=#1388 id=1388 data-nosnippet>1388</a>                ip_address: <span class="prelude-val">None</span>,
+<a href=#1389 id=1389 data-nosnippet>1389</a>                metadata: <span class="prelude-val">Some</span>(metadata),
+<a href=#1390 id=1390 data-nosnippet>1390</a>            })
+<a href=#1391 id=1391 data-nosnippet>1391</a>            .<span class="kw">await</span>;
+<a href=#1392 id=1392 data-nosnippet>1392</a>    }
+<a href=#1393 id=1393 data-nosnippet>1393</a>}
+<a href=#1394 id=1394 data-nosnippet>1394</a>
+<a href=#1395 id=1395 data-nosnippet>1395</a><span class="kw">fn </span>sorted(set: HashSet&lt;Uuid&gt;) -&gt; Vec&lt;Uuid&gt; {
+<a href=#1396 id=1396 data-nosnippet>1396</a>    <span class="kw">let </span><span class="kw-2">mut </span>ids: Vec&lt;Uuid&gt; = set.into_iter().collect();
+<a href=#1397 id=1397 data-nosnippet>1397</a>    ids.sort();
+<a href=#1398 id=1398 data-nosnippet>1398</a>    ids
+<a href=#1399 id=1399 data-nosnippet>1399</a>}
+<a href=#1400 id=1400 data-nosnippet>1400</a>
+<a href=#1401 id=1401 data-nosnippet>1401</a><span class="attr">#[cfg(test)]
+<a href=#1402 id=1402 data-nosnippet>1402</a></span><span class="kw">mod </span>tests {
+<a href=#1403 id=1403 data-nosnippet>1403</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#1404 id=1404 data-nosnippet>1404</a>    <span class="kw">use </span>axiam_core::models::directory::DirectoryIdentity;
+<a href=#1405 id=1405 data-nosnippet>1405</a>
+<a href=#1406 id=1406 data-nosnippet>1406</a>    <span class="kw">fn </span>entry(disabled: bool) -&gt; Verdict {
+<a href=#1407 id=1407 data-nosnippet>1407</a>        Verdict::Present(Box::new(SyncEntry {
+<a href=#1408 id=1408 data-nosnippet>1408</a>            identity: DirectoryIdentity {
+<a href=#1409 id=1409 data-nosnippet>1409</a>                external_id: <span class="string">"id"</span>.into(),
+<a href=#1410 id=1410 data-nosnippet>1410</a>                dn: <span class="string">"uid=x,dc=example,dc=com"</span>.into(),
+<a href=#1411 id=1411 data-nosnippet>1411</a>                username: <span class="prelude-val">None</span>,
+<a href=#1412 id=1412 data-nosnippet>1412</a>                email: <span class="prelude-val">None</span>,
+<a href=#1413 id=1413 data-nosnippet>1413</a>                display_name: <span class="prelude-val">None</span>,
+<a href=#1414 id=1414 data-nosnippet>1414</a>            },
+<a href=#1415 id=1415 data-nosnippet>1415</a>            disabled,
+<a href=#1416 id=1416 data-nosnippet>1416</a>            change_value: <span class="prelude-val">None</span>,
+<a href=#1417 id=1417 data-nosnippet>1417</a>        }))
+<a href=#1418 id=1418 data-nosnippet>1418</a>    }
+<a href=#1419 id=1419 data-nosnippet>1419</a>
+<a href=#1420 id=1420 data-nosnippet>1420</a>    <span class="kw">const </span>ACTIONABLE: [UserStatus; <span class="number">3</span>] = [
+<a href=#1421 id=1421 data-nosnippet>1421</a>        UserStatus::Active,
+<a href=#1422 id=1422 data-nosnippet>1422</a>        UserStatus::PendingVerification,
+<a href=#1423 id=1423 data-nosnippet>1423</a>        UserStatus::Locked,
+<a href=#1424 id=1424 data-nosnippet>1424</a>    ];
+<a href=#1425 id=1425 data-nosnippet>1425</a>
+<a href=#1426 id=1426 data-nosnippet>1426</a>    <span class="attr">#[test]
+<a href=#1427 id=1427 data-nosnippet>1427</a>    </span><span class="kw">fn </span>a_vanished_or_disabled_account_is_deactivated_from_any_live_status() {
+<a href=#1428 id=1428 data-nosnippet>1428</a>        <span class="kw">for </span>status <span class="kw">in </span><span class="kw-2">&amp;</span>ACTIONABLE {
+<a href=#1429 id=1429 data-nosnippet>1429</a>            <span class="macro">assert_eq!</span>(
+<a href=#1430 id=1430 data-nosnippet>1430</a>                decide(status, <span class="kw-2">&amp;</span>Verdict::Vanished),
+<a href=#1431 id=1431 data-nosnippet>1431</a>                Decision::Deactivate(Reason::Vanished)
+<a href=#1432 id=1432 data-nosnippet>1432</a>            );
+<a href=#1433 id=1433 data-nosnippet>1433</a>            <span class="macro">assert_eq!</span>(
+<a href=#1434 id=1434 data-nosnippet>1434</a>                decide(status, <span class="kw-2">&amp;</span>entry(<span class="bool-val">true</span>)),
+<a href=#1435 id=1435 data-nosnippet>1435</a>                Decision::Deactivate(Reason::Disabled)
+<a href=#1436 id=1436 data-nosnippet>1436</a>            );
+<a href=#1437 id=1437 data-nosnippet>1437</a>        }
+<a href=#1438 id=1438 data-nosnippet>1438</a>    }
+<a href=#1439 id=1439 data-nosnippet>1439</a>
+<a href=#1440 id=1440 data-nosnippet>1440</a>    <span class="attr">#[test]
+<a href=#1441 id=1441 data-nosnippet>1441</a>    </span><span class="kw">fn </span>a_present_enabled_account_is_refreshed() {
+<a href=#1442 id=1442 data-nosnippet>1442</a>        <span class="kw">for </span>status <span class="kw">in </span><span class="kw-2">&amp;</span>ACTIONABLE {
+<a href=#1443 id=1443 data-nosnippet>1443</a>            <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1444 id=1444 data-nosnippet>1444</a>                decide(status, <span class="kw-2">&amp;</span>entry(<span class="bool-val">false</span>)),
+<a href=#1445 id=1445 data-nosnippet>1445</a>                Decision::Refresh(<span class="kw">_</span>)
+<a href=#1446 id=1446 data-nosnippet>1446</a>            ));
+<a href=#1447 id=1447 data-nosnippet>1447</a>        }
+<a href=#1448 id=1448 data-nosnippet>1448</a>    }
+<a href=#1449 id=1449 data-nosnippet>1449</a>
+<a href=#1450 id=1450 data-nosnippet>1450</a>    <span class="doccomment">/// D-31: sync never re-enables. An inactive account is at most *reported*,
+<a href=#1451 id=1451 data-nosnippet>1451</a>    /// and only when its entry is present and enabled.
+<a href=#1452 id=1452 data-nosnippet>1452</a>    </span><span class="attr">#[test]
+<a href=#1453 id=1453 data-nosnippet>1453</a>    </span><span class="kw">fn </span>an_inactive_account_is_never_acted_on_only_reported() {
+<a href=#1454 id=1454 data-nosnippet>1454</a>        <span class="macro">assert_eq!</span>(
+<a href=#1455 id=1455 data-nosnippet>1455</a>            decide(<span class="kw-2">&amp;</span>UserStatus::Inactive, <span class="kw-2">&amp;</span>entry(<span class="bool-val">false</span>)),
+<a href=#1456 id=1456 data-nosnippet>1456</a>            Decision::Reappeared
+<a href=#1457 id=1457 data-nosnippet>1457</a>        );
+<a href=#1458 id=1458 data-nosnippet>1458</a>        <span class="macro">assert_eq!</span>(
+<a href=#1459 id=1459 data-nosnippet>1459</a>            decide(<span class="kw-2">&amp;</span>UserStatus::Inactive, <span class="kw-2">&amp;</span>entry(<span class="bool-val">true</span>)),
+<a href=#1460 id=1460 data-nosnippet>1460</a>            Decision::Ignore
+<a href=#1461 id=1461 data-nosnippet>1461</a>        );
+<a href=#1462 id=1462 data-nosnippet>1462</a>        <span class="macro">assert_eq!</span>(
+<a href=#1463 id=1463 data-nosnippet>1463</a>            decide(<span class="kw-2">&amp;</span>UserStatus::Inactive, <span class="kw-2">&amp;</span>Verdict::Vanished),
+<a href=#1464 id=1464 data-nosnippet>1464</a>            Decision::Ignore
+<a href=#1465 id=1465 data-nosnippet>1465</a>        );
+<a href=#1466 id=1466 data-nosnippet>1466</a>    }
+<a href=#1467 id=1467 data-nosnippet>1467</a>
+<a href=#1468 id=1468 data-nosnippet>1468</a>    <span class="attr">#[test]
+<a href=#1469 id=1469 data-nosnippet>1469</a>    </span><span class="kw">fn </span>a_tombstone_is_never_touched() {
+<a href=#1470 id=1470 data-nosnippet>1470</a>        <span class="kw">for </span>status <span class="kw">in </span>[UserStatus::Deleted, UserStatus::Anonymized] {
+<a href=#1471 id=1471 data-nosnippet>1471</a>            <span class="kw">for </span>verdict <span class="kw">in </span>[Verdict::Vanished, entry(<span class="bool-val">true</span>), entry(<span class="bool-val">false</span>)] {
+<a href=#1472 id=1472 data-nosnippet>1472</a>                <span class="macro">assert_eq!</span>(decide(<span class="kw-2">&amp;</span>status, <span class="kw-2">&amp;</span>verdict), Decision::Ignore);
+<a href=#1473 id=1473 data-nosnippet>1473</a>            }
+<a href=#1474 id=1474 data-nosnippet>1474</a>        }
+<a href=#1475 id=1475 data-nosnippet>1475</a>    }
+<a href=#1476 id=1476 data-nosnippet>1476</a>
+<a href=#1477 id=1477 data-nosnippet>1477</a>    <span class="doccomment">/// The structural property behind "never re-enable, never `Deleted`": no
+<a href=#1478 id=1478 data-nosnippet>1478</a>    /// decision exists that writes any status but `Inactive`.
+<a href=#1479 id=1479 data-nosnippet>1479</a>    </span><span class="attr">#[test]
+<a href=#1480 id=1480 data-nosnippet>1480</a>    </span><span class="kw">fn </span>no_decision_leads_anywhere_but_inactive() {
+<a href=#1481 id=1481 data-nosnippet>1481</a>        <span class="kw">for </span>status <span class="kw">in </span>[
+<a href=#1482 id=1482 data-nosnippet>1482</a>            UserStatus::Active,
+<a href=#1483 id=1483 data-nosnippet>1483</a>            UserStatus::Inactive,
+<a href=#1484 id=1484 data-nosnippet>1484</a>            UserStatus::Locked,
+<a href=#1485 id=1485 data-nosnippet>1485</a>            UserStatus::PendingVerification,
+<a href=#1486 id=1486 data-nosnippet>1486</a>            UserStatus::Anonymized,
+<a href=#1487 id=1487 data-nosnippet>1487</a>            UserStatus::Deleted,
+<a href=#1488 id=1488 data-nosnippet>1488</a>        ] {
+<a href=#1489 id=1489 data-nosnippet>1489</a>            <span class="kw">for </span>verdict <span class="kw">in </span>[Verdict::Vanished, entry(<span class="bool-val">true</span>), entry(<span class="bool-val">false</span>)] {
+<a href=#1490 id=1490 data-nosnippet>1490</a>                <span class="kw">match </span>decide(<span class="kw-2">&amp;</span>status, <span class="kw-2">&amp;</span>verdict) {
+<a href=#1491 id=1491 data-nosnippet>1491</a>                    Decision::Ignore
+<a href=#1492 id=1492 data-nosnippet>1492</a>                    | Decision::Deactivate(<span class="kw">_</span>)
+<a href=#1493 id=1493 data-nosnippet>1493</a>                    | Decision::Reappeared
+<a href=#1494 id=1494 data-nosnippet>1494</a>                    | Decision::Refresh(<span class="kw">_</span>) =&gt; {}
+<a href=#1495 id=1495 data-nosnippet>1495</a>                }
+<a href=#1496 id=1496 data-nosnippet>1496</a>            }
+<a href=#1497 id=1497 data-nosnippet>1497</a>        }
+<a href=#1498 id=1498 data-nosnippet>1498</a>    }
+<a href=#1499 id=1499 data-nosnippet>1499</a>
+<a href=#1500 id=1500 data-nosnippet>1500</a>    <span class="attr">#[test]
+<a href=#1501 id=1501 data-nosnippet>1501</a>    </span><span class="kw">fn </span>the_valve_needs_both_more_than_the_percentage_and_at_least_the_floor() {
+<a href=#1502 id=1502 data-nosnippet>1502</a>        <span class="kw">let </span>limits = SyncLimits::default();
+<a href=#1503 id=1503 data-nosnippet>1503</a>        <span class="comment">// 5 of 40 = 12.5 %: both conditions.
+<a href=#1504 id=1504 data-nosnippet>1504</a>        </span><span class="macro">assert!</span>(valve_trips(<span class="number">5</span>, <span class="number">40</span>, <span class="kw-2">&amp;</span>limits));
+<a href=#1505 id=1505 data-nosnippet>1505</a>        <span class="comment">// 4 of 10 = 40 %, but under the floor of 5.
+<a href=#1506 id=1506 data-nosnippet>1506</a>        </span><span class="macro">assert!</span>(!valve_trips(<span class="number">4</span>, <span class="number">10</span>, <span class="kw-2">&amp;</span>limits));
+<a href=#1507 id=1507 data-nosnippet>1507</a>        <span class="comment">// 5 of 50 = exactly 10 %: not *more than*.
+<a href=#1508 id=1508 data-nosnippet>1508</a>        </span><span class="macro">assert!</span>(!valve_trips(<span class="number">5</span>, <span class="number">50</span>, <span class="kw-2">&amp;</span>limits));
+<a href=#1509 id=1509 data-nosnippet>1509</a>        <span class="comment">// 6 of 50 = 12 %.
+<a href=#1510 id=1510 data-nosnippet>1510</a>        </span><span class="macro">assert!</span>(valve_trips(<span class="number">6</span>, <span class="number">50</span>, <span class="kw-2">&amp;</span>limits));
+<a href=#1511 id=1511 data-nosnippet>1511</a>        <span class="comment">// 5 of 60 = 8.3 %.
+<a href=#1512 id=1512 data-nosnippet>1512</a>        </span><span class="macro">assert!</span>(!valve_trips(<span class="number">5</span>, <span class="number">60</span>, <span class="kw-2">&amp;</span>limits));
+<a href=#1513 id=1513 data-nosnippet>1513</a>        <span class="comment">// Nothing to deactivate never trips, whatever the size.
+<a href=#1514 id=1514 data-nosnippet>1514</a>        </span><span class="macro">assert!</span>(!valve_trips(<span class="number">0</span>, <span class="number">0</span>, <span class="kw-2">&amp;</span>limits));
+<a href=#1515 id=1515 data-nosnippet>1515</a>        <span class="macro">assert!</span>(!valve_trips(<span class="number">0</span>, <span class="number">1000</span>, <span class="kw-2">&amp;</span>limits));
+<a href=#1516 id=1516 data-nosnippet>1516</a>        <span class="comment">// Everyone of a hundred.
+<a href=#1517 id=1517 data-nosnippet>1517</a>        </span><span class="macro">assert!</span>(valve_trips(<span class="number">100</span>, <span class="number">100</span>, <span class="kw-2">&amp;</span>limits));
+<a href=#1518 id=1518 data-nosnippet>1518</a>    }
+<a href=#1519 id=1519 data-nosnippet>1519</a>
+<a href=#1520 id=1520 data-nosnippet>1520</a>    <span class="attr">#[test]
+<a href=#1521 id=1521 data-nosnippet>1521</a>    </span><span class="kw">fn </span>the_valve_does_not_overflow() {
+<a href=#1522 id=1522 data-nosnippet>1522</a>        <span class="macro">assert!</span>(!valve_trips(usize::MAX, usize::MAX, <span class="kw-2">&amp;</span>SyncLimits::default()));
+<a href=#1523 id=1523 data-nosnippet>1523</a>    }
+<a href=#1524 id=1524 data-nosnippet>1524</a>
+<a href=#1525 id=1525 data-nosnippet>1525</a>    <span class="kw">fn </span>state() -&gt; DirectorySyncState {
+<a href=#1526 id=1526 data-nosnippet>1526</a>        DirectorySyncState::new(Uuid::nil())
+<a href=#1527 id=1527 data-nosnippet>1527</a>    }
+<a href=#1528 id=1528 data-nosnippet>1528</a>
+<a href=#1529 id=1529 data-nosnippet>1529</a>    <span class="attr">#[test]
+<a href=#1530 id=1530 data-nosnippet>1530</a>    </span><span class="kw">fn </span>the_first_run_is_full_and_so_is_one_without_a_watermark_or_after_a_skip() {
+<a href=#1531 id=1531 data-nosnippet>1531</a>        <span class="kw">let </span>limits = SyncLimits::default();
+<a href=#1532 id=1532 data-nosnippet>1532</a>        <span class="kw">let </span>now = Utc::now();
+<a href=#1533 id=1533 data-nosnippet>1533</a>        <span class="macro">assert_eq!</span>(choose_run(<span class="kw-2">&amp;</span>state(), now, <span class="kw-2">&amp;</span>limits), RunKind::Full);
+<a href=#1534 id=1534 data-nosnippet>1534</a>
+<a href=#1535 id=1535 data-nosnippet>1535</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = state();
+<a href=#1536 id=1536 data-nosnippet>1536</a>        s.last_full_run_at = <span class="prelude-val">Some</span>(now - chrono::Duration::hours(<span class="number">1</span>));
+<a href=#1537 id=1537 data-nosnippet>1537</a>        s.watermark = <span class="prelude-val">Some</span>(<span class="string">"42"</span>.into());
+<a href=#1538 id=1538 data-nosnippet>1538</a>        <span class="macro">assert_eq!</span>(choose_run(<span class="kw-2">&amp;</span>s, now, <span class="kw-2">&amp;</span>limits), RunKind::Incremental);
+<a href=#1539 id=1539 data-nosnippet>1539</a>
+<a href=#1540 id=1540 data-nosnippet>1540</a>        <span class="kw">let </span><span class="kw-2">mut </span>no_mark = s.clone();
+<a href=#1541 id=1541 data-nosnippet>1541</a>        no_mark.watermark = <span class="prelude-val">None</span>;
+<a href=#1542 id=1542 data-nosnippet>1542</a>        <span class="macro">assert_eq!</span>(choose_run(<span class="kw-2">&amp;</span>no_mark, now, <span class="kw-2">&amp;</span>limits), RunKind::Full);
+<a href=#1543 id=1543 data-nosnippet>1543</a>
+<a href=#1544 id=1544 data-nosnippet>1544</a>        <span class="kw">let </span><span class="kw-2">mut </span>skipped = s.clone();
+<a href=#1545 id=1545 data-nosnippet>1545</a>        skipped.full_required = <span class="bool-val">true</span>;
+<a href=#1546 id=1546 data-nosnippet>1546</a>        <span class="macro">assert_eq!</span>(choose_run(<span class="kw-2">&amp;</span>skipped, now, <span class="kw-2">&amp;</span>limits), RunKind::Full);
+<a href=#1547 id=1547 data-nosnippet>1547</a>    }
+<a href=#1548 id=1548 data-nosnippet>1548</a>
+<a href=#1549 id=1549 data-nosnippet>1549</a>    <span class="attr">#[test]
+<a href=#1550 id=1550 data-nosnippet>1550</a>    </span><span class="kw">fn </span>a_full_run_is_due_a_day_after_the_last() {
+<a href=#1551 id=1551 data-nosnippet>1551</a>        <span class="kw">let </span>limits = SyncLimits::default();
+<a href=#1552 id=1552 data-nosnippet>1552</a>        <span class="kw">let </span>now = Utc::now();
+<a href=#1553 id=1553 data-nosnippet>1553</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = state();
+<a href=#1554 id=1554 data-nosnippet>1554</a>        s.watermark = <span class="prelude-val">Some</span>(<span class="string">"42"</span>.into());
+<a href=#1555 id=1555 data-nosnippet>1555</a>        s.last_full_run_at = <span class="prelude-val">Some</span>(now - chrono::Duration::hours(<span class="number">23</span>));
+<a href=#1556 id=1556 data-nosnippet>1556</a>        <span class="macro">assert_eq!</span>(choose_run(<span class="kw-2">&amp;</span>s, now, <span class="kw-2">&amp;</span>limits), RunKind::Incremental);
+<a href=#1557 id=1557 data-nosnippet>1557</a>        s.last_full_run_at = <span class="prelude-val">Some</span>(now - chrono::Duration::hours(<span class="number">25</span>));
+<a href=#1558 id=1558 data-nosnippet>1558</a>        <span class="macro">assert_eq!</span>(choose_run(<span class="kw-2">&amp;</span>s, now, <span class="kw-2">&amp;</span>limits), RunKind::Full);
+<a href=#1559 id=1559 data-nosnippet>1559</a>    }
+<a href=#1560 id=1560 data-nosnippet>1560</a>
+<a href=#1561 id=1561 data-nosnippet>1561</a>    <span class="attr">#[test]
+<a href=#1562 id=1562 data-nosnippet>1562</a>    </span><span class="kw">fn </span>the_later_watermark_compares_numbers_as_numbers() {
+<a href=#1563 id=1563 data-nosnippet>1563</a>        <span class="macro">assert_eq!</span>(later_watermark(<span class="string">"99"</span>, <span class="string">"100"</span>), <span class="string">"100"</span>);
+<a href=#1564 id=1564 data-nosnippet>1564</a>        <span class="macro">assert_eq!</span>(later_watermark(<span class="string">"1000"</span>, <span class="string">"99"</span>), <span class="string">"1000"</span>);
+<a href=#1565 id=1565 data-nosnippet>1565</a>        <span class="macro">assert_eq!</span>(
+<a href=#1566 id=1566 data-nosnippet>1566</a>            later_watermark(<span class="string">"20261003120000Z"</span>, <span class="string">"20261003130000Z"</span>),
+<a href=#1567 id=1567 data-nosnippet>1567</a>            <span class="string">"20261003130000Z"
+<a href=#1568 id=1568 data-nosnippet>1568</a>        </span>);
+<a href=#1569 id=1569 data-nosnippet>1569</a>        <span class="macro">assert_eq!</span>(
+<a href=#1570 id=1570 data-nosnippet>1570</a>            later_watermark(<span class="string">"20261003130000Z"</span>, <span class="string">"20261003120000Z"</span>),
+<a href=#1571 id=1571 data-nosnippet>1571</a>            <span class="string">"20261003130000Z"
+<a href=#1572 id=1572 data-nosnippet>1572</a>        </span>);
+<a href=#1573 id=1573 data-nosnippet>1573</a>    }
+<a href=#1574 id=1574 data-nosnippet>1574</a>
+<a href=#1575 id=1575 data-nosnippet>1575</a>    <span class="attr">#[test]
+<a href=#1576 id=1576 data-nosnippet>1576</a>    </span><span class="kw">fn </span>a_failure_message_names_counts_and_tags_only() {
+<a href=#1577 id=1577 data-nosnippet>1577</a>        <span class="kw">let </span><span class="kw-2">mut </span>summary = SyncSummary::default();
+<a href=#1578 id=1578 data-nosnippet>1578</a>        <span class="macro">assert!</span>(summary.failure_message().is_none());
+<a href=#1579 id=1579 data-nosnippet>1579</a>        summary.failures.push((
+<a href=#1580 id=1580 data-nosnippet>1580</a>            Uuid::new_v4(),
+<a href=#1581 id=1581 data-nosnippet>1581</a>            SyncError::Directory(DirectoryAuthError::Unavailable),
+<a href=#1582 id=1582 data-nosnippet>1582</a>        ));
+<a href=#1583 id=1583 data-nosnippet>1583</a>        summary.failures.push((
+<a href=#1584 id=1584 data-nosnippet>1584</a>            Uuid::new_v4(),
+<a href=#1585 id=1585 data-nosnippet>1585</a>            SyncError::SafetyValve {
+<a href=#1586 id=1586 data-nosnippet>1586</a>                would_deactivate: <span class="number">7</span>,
+<a href=#1587 id=1587 data-nosnippet>1587</a>                directory_accounts: <span class="number">20</span>,
+<a href=#1588 id=1588 data-nosnippet>1588</a>            },
+<a href=#1589 id=1589 data-nosnippet>1589</a>        ));
+<a href=#1590 id=1590 data-nosnippet>1590</a>        summary
+<a href=#1591 id=1591 data-nosnippet>1591</a>            .reports
+<a href=#1592 id=1592 data-nosnippet>1592</a>            .push(TenantReport::new(Uuid::new_v4(), RunKind::Full));
+<a href=#1593 id=1593 data-nosnippet>1593</a>        <span class="macro">assert_eq!</span>(
+<a href=#1594 id=1594 data-nosnippet>1594</a>            summary.failure_message().as_deref(),
+<a href=#1595 id=1595 data-nosnippet>1595</a>            <span class="prelude-val">Some</span>(<span class="string">"directory sync failed for 2 of 3 tenants (directory_unavailable, safety_valve)"</span>)
+<a href=#1596 id=1596 data-nosnippet>1596</a>        );
+<a href=#1597 id=1597 data-nosnippet>1597</a>    }
+<a href=#1598 id=1598 data-nosnippet>1598</a>}
+</code></pre></div></section></main></body></html>

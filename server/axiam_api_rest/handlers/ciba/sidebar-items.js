@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CIBA_INITIATED_AUDIT_ACTION","USER_NOTIFICATIONS_PER_MIN"],"fn":["bc_authorize"]};

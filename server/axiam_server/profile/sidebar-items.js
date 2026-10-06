@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ProfileRefusal"],"fn":["acquire_lease","enforce_minimal_profile","exit_on_lease_lost","refuse_broadcast","refuse_enabled_reactors","signal_on_lease_lost","spawn_lease_loss_stop","spawn_lease_renewal"],"struct":["LeaseTiming"],"type":["OnLeaseLost"]};

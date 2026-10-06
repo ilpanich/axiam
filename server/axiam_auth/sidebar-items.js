@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["attestation","client_secret","config","crypto","crypto_gate","error","hibp_breaker","lockout","mfa_methods","opaque","password","password_reset","policy","secrets","service","token","totp","verification","webauthn"]};
+window.SIDEBAR_ITEMS = {"mod":["attestation","client_secret","config","crypto","crypto_gate","error","hibp_breaker","lockout","mfa_methods","opaque","password","password_reset","policy","secrets","service","token","totp","unknown_name_lockout","verification","webauthn"]};

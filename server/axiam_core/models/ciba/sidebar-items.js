@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CIBA_GRANT_TYPE"],"enum":["CibaDeliveryMode","CibaRequestSigningAlg","CibaRequestStatus"],"struct":["CibaApprovalEvidence","CibaClientMetadata","CibaPingCredentials","CibaPingNotification","CibaRequest","CibaUserNotification","CreateCibaRequest","NoopCibaUserNotifier"],"trait":["CibaUserNotifier"],"type":["CibaNotifyFuture"]};

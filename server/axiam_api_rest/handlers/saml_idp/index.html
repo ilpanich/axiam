@@ -1,0 +1,69 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The SAML 2.0 identity provider’s SSO endpoint (G-2, T23.2.3)."><title>axiam_api_rest::handlers::saml_idp - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module saml_idp</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.0.0-beta18</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module saml_<wbr>idp</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#two-legs-and-why" title="Two legs, and why">Two legs, and why</a></li><li><a href="#what-the-first-leg-refuses-before-anyone-is-asked-to-sign-in" title="What the first leg refuses, before anyone is asked to sign in">What the first leg refuses, before anyone is asked to sign in</a></li><li><a href="#the-second-leg" title="The second leg">The second leg</a></li><li><a href="#d-20" title="D-20">D-20</a></li><li><a href="#what-is-never-logged" title="What is never logged">What is never logged</a></li></ul><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>api_<wbr>rest::<wbr>handlers</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_api_rest</a>::<wbr><a href="../index.html">handlers</a></div><h1>Module <span>saml_<wbr>idp</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_api_rest/handlers/saml_idp.rs.html#1-1377">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The SAML 2.0 identity provider’s SSO endpoint (G-2, T23.2.3).</p>
+<p>The routes under <code>/saml/v2/{tenant_id}</code>, behind the <code>saml</code> feature (single
+logout, <code>/slo</code> and <code>/sso/logout</code>, is <a href="../saml_idp_slo/index.html" title="mod axiam_api_rest::handlers::saml_idp_slo"><code>super::saml_idp_slo</code></a>):</p>
+<div><table><thead><tr><th>Route</th><th>What it does</th></tr></thead><tbody>
+<tr><td><code>GET /sso</code></td><td>HTTP-Redirect binding: an SP-initiated <code>AuthnRequest</code></td></tr>
+<tr><td><code>POST /sso</code></td><td>HTTP-POST binding: the same, as a form post</td></tr>
+<tr><td><code>GET /sso/idp-initiated?sp=…[&amp;RelayState=…]</code></td><td>IdP-initiated sign-on, for an SP that opted in (D-3)</td></tr>
+<tr><td><code>GET /sso/continue?handle=…</code></td><td>the second leg: resolve the browser’s session, hop to sign in if needed, issue</td></tr>
+<tr><td><code>GET</code>/<code>HEAD /metadata</code></td><td>the tenant’s IdP metadata (T23.2.5, D-40), unauthenticated</td></tr>
+</tbody></table>
+</div><h2 id="two-legs-and-why"><a class="doc-anchor" href="#two-legs-and-why">§</a>Two legs, and why</h2>
+<p>A SAML <code>AuthnRequest</code> is an authorization request with a different wire
+format, and it signs the user in through the same login hop and OP-session
+cookie as <code>/oauth2/authorize</code> (X7.3, D-11): MFA, OPAQUE and passkeys apply
+unchanged because the session is the same session. But the HTTP-POST binding
+arrives as a <strong>cross-site form post</strong>: a <code>SameSite=Lax</code> cookie is not sent
+on it, and the browser cannot be sent to the sign-in page and then re-post
+it. So the first leg checks the request and stores what it decided (the
+<code>saml_authn_request</code> row, schema v73) under an opaque handle, and answers
+<code>303</code> to the second leg, a top-level <code>GET</code> that carries the cookie. Both
+bindings and IdP-initiated sign-on take the same path from there.</p>
+<h2 id="what-the-first-leg-refuses-before-anyone-is-asked-to-sign-in"><a class="doc-anchor" href="#what-the-first-leg-refuses-before-anyone-is-asked-to-sign-in">§</a>What the first leg refuses, before anyone is asked to sign in</h2>
+<p>Everything decidable without a principal (the #524 / P23W2-03 lesson): an
+undecodable, oversized or DTD-bearing message, anything but a SAML 2.0
+<code>AuthnRequest</code>, a bad <code>ID</code>, a stale <code>IssueInstant</code>, an unknown issuer, a
+missing, misplaced or failing signature for an SP that signs, a
+<code>Destination</code> other than this tenant’s SSO URL, an ACS URL or index outside
+the registration, a <code>ProtocolBinding</code> other than HTTP-POST, an over-long
+<code>RelayState</code>, a replayed request <code>ID</code> — each answered with an error page
+that posts nowhere — and a disabled SP, encryption requested, or a
+<code>NameIDPolicy</code> that conflicts with the SP’s, each answered with a SAML
+failure response posted to the (already checked) ACS URL. None of them
+writes a pending row, and none redirects to <code>/login</code>.</p>
+<h2 id="the-second-leg"><a class="doc-anchor" href="#the-second-leg">§</a>The second leg</h2>
+<p>It requires the browser-binding cookie the first leg set (so a handle copied
+to another browser is worthless), resolves the session from the OP cookie
+through the tenant-keyed digest lookup alone, and applies <code>account_may_act</code>.
+<code>ForceAuthn</code> is <strong>bound</strong>, not marker-based (it does not inherit
+P23W1-08): the session must have authenticated <em>after</em> the first leg
+accepted the request, so a forged hop marker cannot skip the sign-in.
+<code>IsPassive</code> never shows the sign-in page. The pending row is consumed on the
+X6 arbiter immediately before issuing, so one handle yields at most one
+response.</p>
+<p><strong>The participant record (T23.2.4, D-37).</strong> After the handle is consumed and
+before anything is signed, the second leg records — or reads back — the
+<code>saml_sp_session</code> row for this (session, SP): the <code>NameID</code> the SP is about to
+be given and its <strong>per-SP random <code>SessionIndex</code></strong>. The assertion carries that
+index, never the session id, so single logout can map a <code>LogoutRequest</code> back
+to the session (<code>/slo</code>, <a href="../saml_idp_slo/index.html" title="mod axiam_api_rest::handlers::saml_idp_slo"><code>super::saml_idp_slo</code></a>) and SPs that compare notes
+cannot correlate a person’s sessions. A failed write is a <code>Responder</code> failure
+and <strong>no assertion</strong>: nothing is signed that logout could not find again.</p>
+<h2 id="d-20"><a class="doc-anchor" href="#d-20">§</a>D-20</h2>
+<p>Every route answers <a href="fn.not_found.html" title="fn axiam_api_rest::handlers::saml_idp::not_found"><code>not_found</code></a> — an empty <code>404</code>, the answer for a path
+nothing is mounted at — when the tenant does not exist, its path segment is
+not the canonical UUID spelling, or its effective <code>saml_idp_enabled</code> is off;
+that check runs before the body is read. A build without <code>saml</code> mounts no
+route, which answers the same <code>404</code>.</p>
+<h2 id="what-is-never-logged"><a class="doc-anchor" href="#what-is-never-logged">§</a>What is never logged</h2>
+<p><code>SAMLRequest</code>, <code>SAMLResponse</code>, <code>RelayState</code>, the handle, the binding value
+and the OP cookie. Refusals are logged as the fixed reason and the tenant
+(and the SP’s record id once known).</p>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.BINDING_COOKIE_PREFIX.html" title="constant axiam_api_rest::handlers::saml_idp::BINDING_COOKIE_PREFIX">BINDING_<wbr>COOKIE_<wbr>PREFIX</a></dt><dd>The browser-binding cookie’s name prefix. The full name is the prefix and
+sixteen hex digits of the handle’s digest, so concurrent sign-ons in one
+browser (two tabs, two SPs) each keep their own binding.</dd><dt><a class="constant" href="constant.MAX_POST_BODY_BYTES.html" title="constant axiam_api_rest::handlers::saml_idp::MAX_POST_BODY_BYTES">MAX_<wbr>POST_<wbr>BODY_<wbr>BYTES</a></dt><dd>The largest HTTP-POST body read, in bytes. A signed <code>AuthnRequest</code> with a
+certificate in <code>KeyInfo</code>, base64 and form-encoded, is a few kilobytes; the
+decoded document is bounded separately
+(<a href="../../../axiam_federation/saml_idp/request/constant.MAX_REQUEST_XML_BYTES.html" title="constant axiam_federation::saml_idp::request::MAX_REQUEST_XML_BYTES"><code>saml_request::MAX_REQUEST_XML_BYTES</code></a>).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.metadata.html" title="fn axiam_api_rest::handlers::saml_idp::metadata">metadata</a></dt><dd><code>GET</code>/<code>HEAD /saml/v2/{tenant_id}/metadata</code> — the tenant’s IdP metadata
+(T23.2.5, D-40).</dd><dt><a class="fn" href="fn.not_found.html" title="fn axiam_api_rest::handlers::saml_idp::not_found">not_<wbr>found</a></dt><dd>The <code>404</code> every SAML route answers when the tenant does not serve SAML, and
+what an unmounted path answers: empty body, no headers of its own.</dd><dt><a class="fn" href="fn.sso_continue.html" title="fn axiam_api_rest::handlers::saml_idp::sso_continue">sso_<wbr>continue</a></dt><dd><code>GET /saml/v2/{tenant_id}/sso/continue?handle=…[&amp;axiam_login_hop=1]</code>.</dd><dt><a class="fn" href="fn.sso_idp_initiated.html" title="fn axiam_api_rest::handlers::saml_idp::sso_idp_initiated">sso_<wbr>idp_<wbr>initiated</a></dt><dd><code>GET /saml/v2/{tenant_id}/sso/idp-initiated?sp=&lt;entity id&gt;[&amp;RelayState=…]</code>.</dd><dt><a class="fn" href="fn.sso_post.html" title="fn axiam_api_rest::handlers::saml_idp::sso_post">sso_<wbr>post</a></dt><dd><code>POST /saml/v2/{tenant_id}/sso</code> — the HTTP-POST binding.</dd><dt><a class="fn" href="fn.sso_redirect.html" title="fn axiam_api_rest::handlers::saml_idp::sso_redirect">sso_<wbr>redirect</a></dt><dd><code>GET /saml/v2/{tenant_id}/sso</code> — the HTTP-Redirect binding.</dd></dl></section></div></main></body></html>

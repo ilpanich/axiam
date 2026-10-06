@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["ALLOWED_HOSTS_ENV"],"enum":["SsrfError"],"fn":["allowed_hosts","guarded_fetch","guarded_fetch_with_cap","is_disallowed_ip","parse_allowed_hosts","pinned_client","read_capped_body","resolve_and_pick","set_allowed_hosts"]};
+window.SIDEBAR_ITEMS = {"constant":["ALLOWED_HOSTS_ENV"],"enum":["SsrfError"],"fn":["allowed_hosts","guarded_fetch","guarded_fetch_no_redirect","guarded_fetch_with_cap","is_disallowed_ip","parse_allowed_hosts","pinned_client","read_capped_body","resolve_and_pick","set_allowed_hosts"]};

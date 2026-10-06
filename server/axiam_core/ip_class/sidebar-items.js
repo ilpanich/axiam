@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IpClass","IpNetworkError"],"fn":["canonical","classify","is_disallowed_ip","is_never_allowed"],"struct":["IpNetwork"]};

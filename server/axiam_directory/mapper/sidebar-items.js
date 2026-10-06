@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["apply_backed_groups","plan_memberships"],"struct":["MembershipChangeSlot","MembershipPlan","RepositoryGroupMapper"],"type":["MembershipChangeHook"]};

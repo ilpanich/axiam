@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["idp_entity_id","idp_slo_url","idp_sso_url"]};

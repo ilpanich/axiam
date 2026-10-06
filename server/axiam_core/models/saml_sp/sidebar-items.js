@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ATTRIBUTE_NAME_FORMATS","MAX_ACS_ENDPOINTS","MAX_ALLOWED_GROUPS","MAX_ATTRIBUTE_MAPPINGS","MAX_ATTRIBUTE_NAME_BYTES","MAX_DISPLAY_NAME_BYTES","MAX_ENTITY_ID_BYTES","MAX_SP_CERT_PEM_BYTES"],"enum":["AttributeSource","NameIdFormat","SamlBinding"],"struct":["AcsEndpoint","AttributeMapping","SamlServiceProvider","SamlServiceProviderInput"]};

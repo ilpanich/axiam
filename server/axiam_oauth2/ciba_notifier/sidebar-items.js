@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["APPROVAL_PAGE_PATH"],"struct":["CibaMailNotifier"]};

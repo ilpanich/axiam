@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AUDIT_CONFIG_CREATED","AUDIT_CONFIG_DELETED","AUDIT_CONFIG_UPDATED"],"fn":["delete_directory","directory_json_config","get_directory","get_sync_status","link_account","set_directory","update_directory"],"struct":["DirectoryLinkResult","DirectorySyncStatus","LinkDirectoryAccount","SetDirectoryConfig","UpdateDirectoryConfig"]};

@@ -1,0 +1,72 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The directory sync job (G-3, T23.3.5, D-31): keeping AXIAM’s directory accounts in step with the directory they came from, without ever being able to grant anything."><title>axiam_directory::sync - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_directory" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module sync</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_directory/index.html">axiam_<wbr>directory</a><span class="version">1.0.0-beta18</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module sync</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-it-does-per-tenant-with-an-enabled-directory" title="What it does, per tenant with an enabled directory">What it does, per tenant with an enabled directory</a></li><li><a href="#what-it-may-write-d-31" title="What it may write (D-31)">What it may write (D-31)</a></li><li><a href="#why-it-is-safe-to-be-wrong-about-the-directory" title="Why it is safe to be wrong about the directory">Why it is safe to be wrong about the directory</a></li><li><a href="#scheduling-and-bounds" title="Scheduling and bounds">Scheduling and bounds</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>directory</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_directory</a></div><h1>Module <span>sync</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_directory/sync.rs.html#1-1598">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The directory sync job (G-3, T23.3.5, D-31): keeping AXIAM’s directory
+accounts in step with the directory they came from, <strong>without ever being
+able to grant anything</strong>.</p>
+<h2 id="what-it-does-per-tenant-with-an-enabled-directory"><a class="doc-anchor" href="#what-it-does-per-tenant-with-an-enabled-directory">§</a>What it does, per tenant with an enabled directory</h2>
+<p>Two kinds of run, both read-only against the directory:</p>
+<ul>
+<li><strong>Full</strong> (the first run, then every <a href="struct.SyncLimits.html#structfield.full_interval" title="field axiam_directory::sync::SyncLimits::full_interval"><code>SyncLimits::full_interval</code></a>): look up
+<strong>every</strong> account carrying a <code>directory_external_id</code> by that identifier —
+<code>entryUUID=&lt;uuid&gt;</code>, or <code>objectGUID=&lt;binary-escaped octets&gt;</code>, under
+<code>base_dn</code>, exactly one entry. Found: refresh the account (below). Not
+found: <strong>vanished</strong>. Only a full run concludes “vanished”, because only it
+has asked about everyone.</li>
+<li><strong>Incremental</strong> (every <code>sync_interval_secs</code>): one search for entries whose
+change attribute is at or after a stored watermark, acting only on entries
+whose identifier belongs to a marked account. Deletions are invisible to
+it and are left to the full run. On Active Directory the watermark is
+<code>highestCommittedUSN</code> read from the rootDSE of the same server; a changed
+<code>dsServiceName</code>, or no usable watermark, falls back to a full run.</li>
+</ul>
+<h2 id="what-it-may-write-d-31"><a class="doc-anchor" href="#what-it-may-write-d-31">§</a>What it may write (D-31)</h2>
+<ul>
+<li>A vanished or directory-disabled account becomes <strong><code>Inactive</code></strong> — never
+<code>Deleted</code> (an anonymised tombstone), never a hard delete. Its sessions and
+OAuth2 refresh tokens are revoked <strong>through the repositories</strong> (so the
+session validation cache and the revocation feed see it), its
+directory-sourced memberships are removed through the D-30 mapper (so the
+decision cache is flushed), and <code>account_may_act</code> then refuses it on every
+path — passkeys and the OP cookie included, which closes T-303’s residual.
+The row, its marker and its audit trail stay.</li>
+<li>An account that is present and enabled is refreshed: its username, email
+and display name follow the entry (through the same cleaners just-in-time
+provisioning applies; a change that would collide with another account is
+<strong>skipped and audited</strong>, never applied) and its group mapping is applied.</li>
+<li><strong>Nothing else.</strong> The job never re-enables an account, never creates one
+and never links one by name (D-28): an <code>Inactive</code> account whose entry is
+present and enabled is <strong>reported</strong> — once — as needing an administrator.
+It never touches an account without a marker.</li>
+</ul>
+<h2 id="why-it-is-safe-to-be-wrong-about-the-directory"><a class="doc-anchor" href="#why-it-is-safe-to-be-wrong-about-the-directory">§</a>Why it is safe to be wrong about the directory</h2>
+<ul>
+<li><strong>Errors change nothing.</strong> A directory that cannot be reached, a refused
+search, a deadline: the run ends before anything is written (the full run
+reads everything first, writes second), and the state records the failure.
+An empty or failed search never reads as “everyone vanished”: the question
+that was not answered is an error, not a negative answer.</li>
+<li><strong>The safety valve.</strong> A full run that would deactivate more than
+<a href="struct.SyncLimits.html#structfield.valve_percent" title="field axiam_directory::sync::SyncLimits::valve_percent"><code>SyncLimits::valve_percent</code></a> % of the tenant’s directory accounts <strong>and</strong>
+at least <a href="struct.SyncLimits.html#structfield.valve_min_accounts" title="field axiam_directory::sync::SyncLimits::valve_min_accounts"><code>SyncLimits::valve_min_accounts</code></a> of them applies <strong>nothing</strong>,
+audits, and reports failure. An empty search after a misconfiguration or an
+outage must not disable a company.</li>
+<li><strong>Per-user failures skip that user.</strong> A failed mapping, a failed write:
+that account is left as it was and the next run is a full one.</li>
+<li><strong>Order of a deactivation</strong> is revoke, remove memberships, then flip the
+status <strong>last</strong> with a compare-and-set: a failure part-way leaves the
+account <code>Active</code> and the next run finds it again, so there is no state in
+which an account is <code>Inactive</code> yet still holds what the job should have
+taken.</li>
+</ul>
+<h2 id="scheduling-and-bounds"><a class="doc-anchor" href="#scheduling-and-bounds">§</a>Scheduling and bounds</h2>
+<p>One tenant at a time, on the server’s cleanup scheduler, through the same
+bounded pool and deadlines as every other directory use; each run is also
+bounded by <a href="struct.SyncLimits.html#structfield.run_deadline" title="field axiam_directory::sync::SyncLimits::run_deadline"><code>SyncLimits::run_deadline</code></a>. There is <strong>no multi-replica guard</strong>:
+two replicas run the same job against the same rows. Every write is
+idempotent or a compare-and-set, so the result is the same; the cost is
+duplicated directory reads and, for refreshes, duplicated audit rows.</p>
+<p>No audit row, log line or error carries a name, an address, a DN or a
+password: accounts are named by id and entries by their immutable identifier.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DirectorySync.html" title="struct axiam_directory::sync::DirectorySync">Directory<wbr>Sync</a></dt><dd>The sync job: one instance per process, run by the cleanup scheduler.</dd><dt><a class="struct" href="struct.SyncLimits.html" title="struct axiam_directory::sync::SyncLimits">Sync<wbr>Limits</a></dt><dd>The bounds and thresholds of the job. <a href="https://doc.rust-lang.org/1.99.0/core/default/trait.Default.html" title="trait core::default::Default"><code>Default</code></a> is the documented values;
+tests shrink them.</dd><dt><a class="struct" href="struct.SyncSummary.html" title="struct axiam_directory::sync::SyncSummary">Sync<wbr>Summary</a></dt><dd>What a scheduler pass did across tenants.</dd><dt><a class="struct" href="struct.TenantReport.html" title="struct axiam_directory::sync::TenantReport">Tenant<wbr>Report</a></dt><dd>What one tenant’s completed run did. Counts only.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.RunKind.html" title="enum axiam_directory::sync::RunKind">RunKind</a></dt><dd>Which kind of run was made.</dd><dt><a class="enum" href="enum.SyncError.html" title="enum axiam_directory::sync::SyncError">Sync<wbr>Error</a></dt><dd>Why a tenant’s run did not complete. None of these changed the tenant’s
+accounts, except where stated.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.valve_trips.html" title="fn axiam_directory::sync::valve_trips">valve_<wbr>trips</a></dt><dd>Whether a full run that would deactivate <code>would_deactivate</code> of <code>total</code>
+directory accounts must apply nothing (D-31): <strong>more than</strong> <code>percent</code> % and
+<strong>at least</strong> <code>min</code>.</dd></dl></section></div></main></body></html>

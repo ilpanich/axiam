@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["cleanup","cli","healthcheck","job_health","legacy_env","mds_job","mtls_anchors","tls"]};
+window.SIDEBAR_ITEMS = {"mod":["boot","cleanup","cli","healthcheck","job_health","legacy_env","mds_job","messaging","mtls_anchors","profile","scim_notification","tls"]};

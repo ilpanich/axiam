@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FAILURE_NOTIFICATION_INTERVAL_SECS","SCIM_DEAD_LETTER_AUDIT_ACTION"],"enum":["DeprovisionPolicy","ScimLinkState","ScimResourceType","ScimTargetAuth","ScimTargetScope","UserNameSource"],"struct":["NewScimTarget","NewScimTargetLink","ScimTarget","ScimTargetLink","ScimTargetState","ScimTargetUpdate"]};

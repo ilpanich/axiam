@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["axiam_scim",[["impl&lt;T, L, S, U, G&gt; <a class=\"trait\" href=\"axiam_api_rest/state/bundles/trait.ScimReconcileTrigger.html\" title=\"trait axiam_api_rest::state::bundles::ScimReconcileTrigger\">ScimReconcileTrigger</a> for <a class=\"struct\" href=\"axiam_scim/outbound/struct.ReconcileLauncher.html\" title=\"struct axiam_scim::outbound::ReconcileLauncher\">ReconcileLauncher</a>&lt;T, L, S, U, G&gt;<div class=\"where\">where\n    T: <a class=\"trait\" href=\"axiam_core/repository/trait.ScimTargetRepository.html\" title=\"trait axiam_core::repository::ScimTargetRepository\">ScimTargetRepository</a> + 'static,\n    L: <a class=\"trait\" href=\"axiam_core/repository/trait.ScimTargetLinkRepository.html\" title=\"trait axiam_core::repository::ScimTargetLinkRepository\">ScimTargetLinkRepository</a> + 'static,\n    S: <a class=\"trait\" href=\"axiam_core/repository/trait.ScimTargetStateRepository.html\" title=\"trait axiam_core::repository::ScimTargetStateRepository\">ScimTargetStateRepository</a> + 'static,\n    U: <a class=\"trait\" href=\"axiam_core/repository/trait.UserRepository.html\" title=\"trait axiam_core::repository::UserRepository\">UserRepository</a> + 'static,\n    G: <a class=\"trait\" href=\"axiam_core/repository/trait.GroupRepository.html\" title=\"trait axiam_core::repository::GroupRepository\">GroupRepository</a> + 'static,</div>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[1375]}

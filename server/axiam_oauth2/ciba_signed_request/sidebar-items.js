@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_JTI_BYTES","MAX_NBF_AGE_SECS","MAX_REQUEST_BYTES","MAX_SIGNED_REQUEST_LIFETIME_SECS"],"enum":["SignedRequestError"],"fn":["jose_algorithm","key_set_supports","supported_algorithm_names","verify_signed_request"],"struct":["JwksSignedRequestVerifier","VerifiedSignedRequest"],"trait":["SignedRequestVerifier"],"type":["SignedRequestFuture"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_LOGOUT_RUN_PARTICIPANTS","SAML_LOGOUT_RUN_TTL_SECS"],"enum":["SamlLogoutInitiator"],"struct":["NewSamlLogoutRun","NewSamlSpSession","SamlLogoutPlan","SamlLogoutProgress","SamlLogoutRun","SamlSpSession"]};

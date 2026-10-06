@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAIL_CHANNEL_CAPACITY","MAIL_MAX_PENDING_RETRIES","MAIL_RETRY_CAPACITY_CLASS"],"fn":["in_process_mail_channel","in_process_mail_channel_with_capacity","spawn_in_process_mail_worker","spawn_in_process_mail_worker_default"],"struct":["InProcessMailPublisher","InProcessMailQueue"]};

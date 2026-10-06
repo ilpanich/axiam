@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["directory_client","serve"],"struct":["AppConfig","AuditCollectionConfig","ServeOptions"]};

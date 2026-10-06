@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["backoff_ttl_ms","env_var_name"],"struct":["OutboundRetryConfig"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AUDIT_STREAM_CREATED","AUDIT_STREAM_DELETED","AUDIT_STREAM_UPDATED"],"fn":["create_stream","delete_stream","get_stream","json_config","list_streams","update_stream"],"struct":["SsfStream","SsfStreamInput"]};

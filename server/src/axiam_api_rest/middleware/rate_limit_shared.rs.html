@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/middleware/rate_limit_shared.rs`."><title>rate_limit_shared.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/middleware/</div>rate_limit_shared.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Shared (cross-replica) rate-limit pre-check middleware
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/middleware/rate_limit_shared.rs`."><title>rate_limit_shared.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/middleware/</div>rate_limit_shared.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Shared (cross-replica) rate-limit pre-check middleware
 <a href=#2 id=2 data-nosnippet>2</a>//! (SECHRD-03 / D-01a, D-01b, D-01d).
 <a href=#3 id=3 data-nosnippet>3</a>//!
 <a href=#4 id=4 data-nosnippet>4</a>//! [`RateLimitShared`] consults the process-wide write-behind
@@ -66,7 +66,7 @@
 <a href=#66 id=66 data-nosnippet>66</a>
 <a href=#67 id=67 data-nosnippet>67</a><span class="kw">use </span><span class="kw">crate</span>::config::rate_limit::RateLimitKeyMode;
 <a href=#68 id=68 data-nosnippet>68</a><span class="kw">use </span><span class="kw">crate</span>::extractors::rate_limit::{
-<a href=#69 id=69 data-nosnippet>69</a>    RateLimitClientId, XForwardedForKeyExtractor, extract_form_client_id,
+<a href=#69 id=69 data-nosnippet>69</a>    RateLimitClientId, XForwardedForKeyExtractor, extract_client_id,
 <a href=#70 id=70 data-nosnippet>70</a>};
 <a href=#71 id=71 data-nosnippet>71</a><span class="kw">use </span><span class="kw">crate</span>::state::AppState;
 <a href=#72 id=72 data-nosnippet>72</a>
@@ -172,257 +172,265 @@
 <a href=#172 id=172 data-nosnippet>172</a>    }
 <a href=#173 id=173 data-nosnippet>173</a>
 <a href=#174 id=174 data-nosnippet>174</a>    <span class="doccomment">/// D8 constructor for the three endpoints where an OAuth2 client
-<a href=#175 id=175 data-nosnippet>175</a>    /// authenticates itself via a form-encoded `client_id`
-<a href=#176 id=176 data-nosnippet>176</a>    /// (`client_secret_post`, RFC 6749 §2.3.1): `/oauth2/token`,
-<a href=#177 id=177 data-nosnippet>177</a>    /// `/oauth2/revoke`, `/oauth2/introspect`.
-<a href=#178 id=178 data-nosnippet>178</a>    ///
-<a href=#179 id=179 data-nosnippet>179</a>    /// When `key_mode` is [`RateLimitKeyMode::ClientId`] or
-<a href=#180 id=180 data-nosnippet>180</a>    /// [`RateLimitKeyMode::IpClientId`], this middleware peeks (and
-<a href=#181 id=181 data-nosnippet>181</a>    /// restores) the request body to read `client_id`, and stashes it into
-<a href=#182 id=182 data-nosnippet>182</a>    /// the request extensions (as [`RateLimitClientId`]) so the downstream
-<a href=#183 id=183 data-nosnippet>183</a>    /// in-memory `Governor`'s `ClientAwareKeyExtractor` on the SAME
-<a href=#184 id=184 data-nosnippet>184</a>    /// resource can reuse it without a second body read. When `key_mode` is
-<a href=#185 id=185 data-nosnippet>185</a>    /// [`RateLimitKeyMode::Ip`] this is exactly as if `new()` had been
-<a href=#186 id=186 data-nosnippet>186</a>    /// called — the body is never touched.
-<a href=#187 id=187 data-nosnippet>187</a>    ///
-<a href=#188 id=188 data-nosnippet>188</a>    /// **Do not use this constructor for `/auth/login` or any other
-<a href=#189 id=189 data-nosnippet>189</a>    /// endpoint without a client identity** — see
-<a href=#190 id=190 data-nosnippet>190</a>    /// [`crate::config::rate_limit::RateLimitKeyMode`] docs.
-<a href=#191 id=191 data-nosnippet>191</a>    </span><span class="kw">pub fn </span>new_client_identity_aware(
-<a href=#192 id=192 data-nosnippet>192</a>        endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
-<a href=#193 id=193 data-nosnippet>193</a>        limit: u32,
-<a href=#194 id=194 data-nosnippet>194</a>        key_mode: RateLimitKeyMode,
-<a href=#195 id=195 data-nosnippet>195</a>    ) -&gt; <span class="self">Self </span>{
-<a href=#196 id=196 data-nosnippet>196</a>        <span class="self">Self </span>{
-<a href=#197 id=197 data-nosnippet>197</a>            endpoint,
-<a href=#198 id=198 data-nosnippet>198</a>            limit,
-<a href=#199 id=199 data-nosnippet>199</a>            key_mode,
-<a href=#200 id=200 data-nosnippet>200</a>            client_identity_aware: <span class="bool-val">true</span>,
-<a href=#201 id=201 data-nosnippet>201</a>            _marker: PhantomData,
-<a href=#202 id=202 data-nosnippet>202</a>        }
-<a href=#203 id=203 data-nosnippet>203</a>    }
-<a href=#204 id=204 data-nosnippet>204</a>}
-<a href=#205 id=205 data-nosnippet>205</a>
-<a href=#206 id=206 data-nosnippet>206</a><span class="kw">impl</span>&lt;C: Connection + Clone&gt; Clone <span class="kw">for </span>RateLimitShared&lt;C&gt; {
-<a href=#207 id=207 data-nosnippet>207</a>    <span class="kw">fn </span>clone(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
-<a href=#208 id=208 data-nosnippet>208</a>        <span class="self">Self </span>{
-<a href=#209 id=209 data-nosnippet>209</a>            endpoint: <span class="self">self</span>.endpoint,
-<a href=#210 id=210 data-nosnippet>210</a>            limit: <span class="self">self</span>.limit,
-<a href=#211 id=211 data-nosnippet>211</a>            key_mode: <span class="self">self</span>.key_mode,
-<a href=#212 id=212 data-nosnippet>212</a>            client_identity_aware: <span class="self">self</span>.client_identity_aware,
-<a href=#213 id=213 data-nosnippet>213</a>            _marker: PhantomData,
-<a href=#214 id=214 data-nosnippet>214</a>        }
-<a href=#215 id=215 data-nosnippet>215</a>    }
-<a href=#216 id=216 data-nosnippet>216</a>}
-<a href=#217 id=217 data-nosnippet>217</a>
-<a href=#218 id=218 data-nosnippet>218</a><span class="kw">impl</span>&lt;S, B, C&gt; Transform&lt;S, ServiceRequest&gt; <span class="kw">for </span>RateLimitShared&lt;C&gt;
-<a href=#219 id=219 data-nosnippet>219</a><span class="kw">where
-<a href=#220 id=220 data-nosnippet>220</a>    </span>S: Service&lt;ServiceRequest, Response = ServiceResponse&lt;B&gt;, Error = Error&gt; + <span class="lifetime">'static</span>,
-<a href=#221 id=221 data-nosnippet>221</a>    B: <span class="lifetime">'static</span>,
-<a href=#222 id=222 data-nosnippet>222</a>    C: Connection + Clone + <span class="lifetime">'static</span>,
-<a href=#223 id=223 data-nosnippet>223</a>{
-<a href=#224 id=224 data-nosnippet>224</a>    <span class="kw">type </span>Response = ServiceResponse&lt;EitherBody&lt;B&gt;&gt;;
-<a href=#225 id=225 data-nosnippet>225</a>    <span class="kw">type </span>Error = Error;
-<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">type </span>Transform = RateLimitSharedService&lt;S, C&gt;;
-<a href=#227 id=227 data-nosnippet>227</a>    <span class="kw">type </span>InitError = ();
-<a href=#228 id=228 data-nosnippet>228</a>    <span class="kw">type </span>Future = Ready&lt;<span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>::Transform, <span class="self">Self</span>::InitError&gt;&gt;;
-<a href=#229 id=229 data-nosnippet>229</a>
-<a href=#230 id=230 data-nosnippet>230</a>    <span class="kw">fn </span>new_transform(<span class="kw-2">&amp;</span><span class="self">self</span>, service: S) -&gt; <span class="self">Self</span>::Future {
-<a href=#231 id=231 data-nosnippet>231</a>        ready(<span class="prelude-val">Ok</span>(RateLimitSharedService {
-<a href=#232 id=232 data-nosnippet>232</a>            inner: Rc::new(service),
-<a href=#233 id=233 data-nosnippet>233</a>            endpoint: <span class="self">self</span>.endpoint,
-<a href=#234 id=234 data-nosnippet>234</a>            limit: <span class="self">self</span>.limit,
-<a href=#235 id=235 data-nosnippet>235</a>            key_mode: <span class="self">self</span>.key_mode,
-<a href=#236 id=236 data-nosnippet>236</a>            client_identity_aware: <span class="self">self</span>.client_identity_aware,
-<a href=#237 id=237 data-nosnippet>237</a>            _marker: PhantomData,
-<a href=#238 id=238 data-nosnippet>238</a>        }))
-<a href=#239 id=239 data-nosnippet>239</a>    }
-<a href=#240 id=240 data-nosnippet>240</a>}
-<a href=#241 id=241 data-nosnippet>241</a>
-<a href=#242 id=242 data-nosnippet>242</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#243 id=243 data-nosnippet>243</a>// Inner service
-<a href=#244 id=244 data-nosnippet>244</a>// ---------------------------------------------------------------------------
-<a href=#245 id=245 data-nosnippet>245</a>
-<a href=#246 id=246 data-nosnippet>246</a></span><span class="kw">pub struct </span>RateLimitSharedService&lt;S, C: Connection + Clone&gt; {
-<a href=#247 id=247 data-nosnippet>247</a>    inner: Rc&lt;S&gt;,
-<a href=#248 id=248 data-nosnippet>248</a>    endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
-<a href=#249 id=249 data-nosnippet>249</a>    limit: u32,
-<a href=#250 id=250 data-nosnippet>250</a>    key_mode: RateLimitKeyMode,
-<a href=#251 id=251 data-nosnippet>251</a>    client_identity_aware: bool,
-<a href=#252 id=252 data-nosnippet>252</a>    _marker: PhantomData&lt;C&gt;,
-<a href=#253 id=253 data-nosnippet>253</a>}
-<a href=#254 id=254 data-nosnippet>254</a>
-<a href=#255 id=255 data-nosnippet>255</a><span class="kw">impl</span>&lt;S, B, C&gt; Service&lt;ServiceRequest&gt; <span class="kw">for </span>RateLimitSharedService&lt;S, C&gt;
-<a href=#256 id=256 data-nosnippet>256</a><span class="kw">where
-<a href=#257 id=257 data-nosnippet>257</a>    </span>S: Service&lt;ServiceRequest, Response = ServiceResponse&lt;B&gt;, Error = Error&gt; + <span class="lifetime">'static</span>,
-<a href=#258 id=258 data-nosnippet>258</a>    B: <span class="lifetime">'static</span>,
-<a href=#259 id=259 data-nosnippet>259</a>    C: Connection + Clone + <span class="lifetime">'static</span>,
-<a href=#260 id=260 data-nosnippet>260</a>{
-<a href=#261 id=261 data-nosnippet>261</a>    <span class="kw">type </span>Response = ServiceResponse&lt;EitherBody&lt;B&gt;&gt;;
-<a href=#262 id=262 data-nosnippet>262</a>    <span class="kw">type </span>Error = Error;
-<a href=#263 id=263 data-nosnippet>263</a>    <span class="kw">type </span>Future = std::pin::Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>::Response, <span class="self">Self</span>::Error&gt;&gt;&gt;&gt;;
-<a href=#264 id=264 data-nosnippet>264</a>
-<a href=#265 id=265 data-nosnippet>265</a>    <span class="kw">fn </span>poll_ready(
-<a href=#266 id=266 data-nosnippet>266</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#267 id=267 data-nosnippet>267</a>        cx: <span class="kw-2">&amp;mut </span>std::task::Context&lt;<span class="lifetime">'_</span>&gt;,
-<a href=#268 id=268 data-nosnippet>268</a>    ) -&gt; std::task::Poll&lt;<span class="prelude-ty">Result</span>&lt;(), <span class="self">Self</span>::Error&gt;&gt; {
-<a href=#269 id=269 data-nosnippet>269</a>        <span class="self">self</span>.inner.poll_ready(cx)
-<a href=#270 id=270 data-nosnippet>270</a>    }
-<a href=#271 id=271 data-nosnippet>271</a>
-<a href=#272 id=272 data-nosnippet>272</a>    <span class="kw">fn </span>call(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="kw-2">mut </span>req: ServiceRequest) -&gt; <span class="self">Self</span>::Future {
-<a href=#273 id=273 data-nosnippet>273</a>        <span class="kw">let </span>endpoint = <span class="self">self</span>.endpoint;
-<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">let </span>limit = <span class="self">self</span>.limit;
-<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">let </span>key_mode = <span class="self">self</span>.key_mode;
-<a href=#276 id=276 data-nosnippet>276</a>        <span class="kw">let </span>client_identity_aware = <span class="self">self</span>.client_identity_aware;
-<a href=#277 id=277 data-nosnippet>277</a>        <span class="kw">let </span>inner = Rc::clone(<span class="kw-2">&amp;</span><span class="self">self</span>.inner);
-<a href=#278 id=278 data-nosnippet>278</a>
-<a href=#279 id=279 data-nosnippet>279</a>        <span class="comment">// Reuse the EXACT fixed IP-key extraction logic (D-01d) so the
-<a href=#280 id=280 data-nosnippet>280</a>        // shared bucket key and the in-memory governor's key agree.
-<a href=#281 id=281 data-nosnippet>281</a>        </span><span class="kw">let </span>extractor = XForwardedForKeyExtractor::with_trusted_hops(trusted_hops());
-<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw">let </span>ip = extractor.extract(<span class="kw-2">&amp;</span>req).ok();
-<a href=#283 id=283 data-nosnippet>283</a>
-<a href=#284 id=284 data-nosnippet>284</a>        <span class="comment">// The process-wide write-behind counter is read from
-<a href=#285 id=285 data-nosnippet>285</a>        // `web::Data&lt;AppState&lt;C&gt;&gt;` (QUAL-01 — was a standalone
-<a href=#286 id=286 data-nosnippet>286</a>        // `web::Data&lt;Surreal&lt;C&gt;&gt;` registration used to build a repository per
-<a href=#287 id=287 data-nosnippet>287</a>        // request). Its absence is treated exactly like the old missing-DB-
-<a href=#288 id=288 data-nosnippet>288</a>        // handle case below — fail open to the in-memory governor.
-<a href=#289 id=289 data-nosnippet>289</a>        //
-<a href=#290 id=290 data-nosnippet>290</a>        // This is a cheap `Arc` clone of the ONE counter registered in
-<a href=#291 id=291 data-nosnippet>291</a>        // `main.rs`, never a new counter: a per-request (or per-worker)
-<a href=#292 id=292 data-nosnippet>292</a>        // instance would fragment the local count.
-<a href=#293 id=293 data-nosnippet>293</a>        </span><span class="kw">let </span>counter = req
-<a href=#294 id=294 data-nosnippet>294</a>            .app_data::&lt;web::Data&lt;AppState&lt;C&gt;&gt;&gt;()
-<a href=#295 id=295 data-nosnippet>295</a>            .map(|d| d.shared_rate_limit.clone());
-<a href=#296 id=296 data-nosnippet>296</a>
-<a href=#297 id=297 data-nosnippet>297</a>        Box::pin(<span class="kw">async move </span>{
-<a href=#298 id=298 data-nosnippet>298</a>            <span class="comment">// D8: for the client-identity-aware endpoints only
-<a href=#299 id=299 data-nosnippet>299</a>            // (`/oauth2/token`, `/oauth2/revoke`, `/oauth2/introspect` —
-<a href=#300 id=300 data-nosnippet>300</a>            // never `/auth/login`), peek the form-encoded body for
-<a href=#301 id=301 data-nosnippet>301</a>            // `client_id` and restore the payload so the handler's
-<a href=#302 id=302 data-nosnippet>302</a>            // `web::Form&lt;..&gt;` extractor still sees the full body
-<a href=#303 id=303 data-nosnippet>303</a>            // untouched. This ALSO stashes the result into request
-<a href=#304 id=304 data-nosnippet>304</a>            // extensions for the downstream in-memory `Governor`'s
-<a href=#305 id=305 data-nosnippet>305</a>            // `ClientAwareKeyExtractor` to reuse (see
-<a href=#306 id=306 data-nosnippet>306</a>            // `extractors::rate_limit::RateLimitClientId`).
-<a href=#307 id=307 data-nosnippet>307</a>            //
-<a href=#308 id=308 data-nosnippet>308</a>            // Skipped entirely in `ip` mode (the default) — no body read,
-<a href=#309 id=309 data-nosnippet>309</a>            // byte-for-byte the pre-D8 code path.
-<a href=#310 id=310 data-nosnippet>310</a>            </span><span class="kw">let </span>client_id = <span class="kw">if </span>client_identity_aware {
-<a href=#311 id=311 data-nosnippet>311</a>                <span class="kw">let </span>client_id = <span class="kw">if </span>key_mode != RateLimitKeyMode::Ip {
-<a href=#312 id=312 data-nosnippet>312</a>                    <span class="kw">let </span>bytes = req.extract::&lt;web::Bytes&gt;().<span class="kw">await</span>.unwrap_or_default();
-<a href=#313 id=313 data-nosnippet>313</a>                    <span class="kw">let </span>client_id = extract_form_client_id(<span class="kw-2">&amp;</span>bytes);
-<a href=#314 id=314 data-nosnippet>314</a>                    <span class="comment">// Restore the body EXACTLY as read so the handler's
-<a href=#315 id=315 data-nosnippet>315</a>                    // `web::Form&lt;..&gt;` extraction downstream is unaffected —
-<a href=#316 id=316 data-nosnippet>316</a>                    // this middleware must be transparent to the request.
-<a href=#317 id=317 data-nosnippet>317</a>                    </span>req.set_payload(Payload::from(bytes));
-<a href=#318 id=318 data-nosnippet>318</a>                    client_id
-<a href=#319 id=319 data-nosnippet>319</a>                } <span class="kw">else </span>{
-<a href=#320 id=320 data-nosnippet>320</a>                    <span class="prelude-val">None
-<a href=#321 id=321 data-nosnippet>321</a>                </span>};
-<a href=#322 id=322 data-nosnippet>322</a>                req.extensions_mut()
-<a href=#323 id=323 data-nosnippet>323</a>                    .insert(RateLimitClientId(client_id.clone()));
-<a href=#324 id=324 data-nosnippet>324</a>                client_id
-<a href=#325 id=325 data-nosnippet>325</a>            } <span class="kw">else </span>{
-<a href=#326 id=326 data-nosnippet>326</a>                <span class="prelude-val">None
-<a href=#327 id=327 data-nosnippet>327</a>            </span>};
-<a href=#328 id=328 data-nosnippet>328</a>
-<a href=#329 id=329 data-nosnippet>329</a>            <span class="comment">// The bucket-key "identity" part: IP alone (`ip` mode, or
-<a href=#330 id=330 data-nosnippet>330</a>            // fail-safe fallback when no client_id was found), the
-<a href=#331 id=331 data-nosnippet>331</a>            // client_id alone, or the `(ip, client_id)` pair. Mirrors
-<a href=#332 id=332 data-nosnippet>332</a>            // `extractors::rate_limit::ClientAwareKeyExtractor` exactly so
-<a href=#333 id=333 data-nosnippet>333</a>            // this shared-store pre-check and the in-memory governor never
-<a href=#334 id=334 data-nosnippet>334</a>            // disagree about which bucket a request belongs to.
-<a href=#335 id=335 data-nosnippet>335</a>            </span><span class="kw">let </span>key_part = <span class="kw">match </span>(key_mode, <span class="kw-2">&amp;</span>client_id) {
-<a href=#336 id=336 data-nosnippet>336</a>                (RateLimitKeyMode::Ip, <span class="kw">_</span>) | (<span class="kw">_</span>, <span class="prelude-val">None</span>) =&gt; ip.map(|ip| ip.to_string()),
-<a href=#337 id=337 data-nosnippet>337</a>                (RateLimitKeyMode::ClientId, <span class="prelude-val">Some</span>(cid)) =&gt; <span class="prelude-val">Some</span>(<span class="macro">format!</span>(<span class="string">"client:{cid}"</span>)),
-<a href=#338 id=338 data-nosnippet>338</a>                (RateLimitKeyMode::IpClientId, <span class="prelude-val">Some</span>(cid)) =&gt; {
-<a href=#339 id=339 data-nosnippet>339</a>                    ip.map(|ip| <span class="macro">format!</span>(<span class="string">"{ip}:client:{cid}"</span>))
-<a href=#340 id=340 data-nosnippet>340</a>                }
-<a href=#341 id=341 data-nosnippet>341</a>            };
-<a href=#342 id=342 data-nosnippet>342</a>
-<a href=#343 id=343 data-nosnippet>343</a>            <span class="kw">let </span>now = Utc::now();
-<a href=#344 id=344 data-nosnippet>344</a>            <span class="comment">// Carried past the decision so a downstream rejection can be
-<a href=#345 id=345 data-nosnippet>345</a>            // refunded against the SAME key and window (run-5 J1).
-<a href=#346 id=346 data-nosnippet>346</a>            </span><span class="kw">let </span>charged = <span class="kw">match </span>(key_part, counter) {
-<a href=#347 id=347 data-nosnippet>347</a>                (<span class="prelude-val">Some</span>(key_part), <span class="prelude-val">Some</span>(counter)) =&gt; {
-<a href=#348 id=348 data-nosnippet>348</a>                    <span class="comment">// Same bucket key as before — `{endpoint}:{key_part}` —
-<a href=#349 id=349 data-nosnippet>349</a>                    // so an in-flight upgrade keeps counting against the same
-<a href=#350 id=350 data-nosnippet>350</a>                    // `rate_limit_bucket` records.
-<a href=#351 id=351 data-nosnippet>351</a>                    </span><span class="kw">let </span>key = <span class="macro">format!</span>(<span class="string">"{endpoint}:{key_part}"</span>);
-<a href=#352 id=352 data-nosnippet>352</a>                    <span class="comment">// Fully synchronous: no datastore round trip on the
-<a href=#353 id=353 data-nosnippet>353</a>                    // request path (H2 fix). Store outages are reported by
-<a href=#354 id=354 data-nosnippet>354</a>                    // the counter's background flusher, which keeps serving
-<a href=#355 id=355 data-nosnippet>355</a>                    // decisions from local counts (fail open, D-01b).
-<a href=#356 id=356 data-nosnippet>356</a>                    //
-<a href=#357 id=357 data-nosnippet>357</a>                    // `check_at` (not `check`) so the counter sees where
-<a href=#358 id=358 data-nosnippet>358</a>                    // inside the window the request landed and can apply the
-<a href=#359 id=359 data-nosnippet>359</a>                    // sliding-window bound that closes the run-5 J1
-<a href=#360 id=360 data-nosnippet>360</a>                    // over-admission (`axiam_db::rate_limit_counter::WindowMode`).
-<a href=#361 id=361 data-nosnippet>361</a>                    </span><span class="kw">let </span>allow = counter.check_at(<span class="kw-2">&amp;</span>key, now, limit);
-<a href=#362 id=362 data-nosnippet>362</a>                    <span class="prelude-val">Some</span>((counter, key, allow))
-<a href=#363 id=363 data-nosnippet>363</a>                }
-<a href=#364 id=364 data-nosnippet>364</a>                <span class="comment">// No key part (IP unavailable) or no counter registered —
-<a href=#365 id=365 data-nosnippet>365</a>                // fail open; the in-memory governor still makes the real
-<a href=#366 id=366 data-nosnippet>366</a>                // decision. (A counter built with
-<a href=#367 id=367 data-nosnippet>367</a>                // `AXIAM__RATE_LIMIT__SHARED=off` also always allows, from
-<a href=#368 id=368 data-nosnippet>368</a>                // inside `check_at`.)
-<a href=#369 id=369 data-nosnippet>369</a>                </span><span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
-<a href=#370 id=370 data-nosnippet>370</a>            };
-<a href=#371 id=371 data-nosnippet>371</a>
-<a href=#372 id=372 data-nosnippet>372</a>            <span class="kw">let </span>allow = charged.as_ref().is_none_or(|(<span class="kw">_</span>, <span class="kw">_</span>, allow)| <span class="kw-2">*</span>allow);
-<a href=#373 id=373 data-nosnippet>373</a>
-<a href=#374 id=374 data-nosnippet>374</a>            <span class="kw">if </span>allow {
-<a href=#375 id=375 data-nosnippet>375</a>                <span class="kw">let </span>res = inner.call(req).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#376 id=376 data-nosnippet>376</a>                <span class="comment">// Run-5 J1: the in-memory governor sits INSIDE this
-<a href=#377 id=377 data-nosnippet>377</a>                // middleware and may reject with 429 a request this layer
-<a href=#378 id=378 data-nosnippet>378</a>                // already charged. Charging capacity to a request that was
-<a href=#379 id=379 data-nosnippet>379</a>                // never served is what starved the gRPC families down to
-<a href=#380 id=380 data-nosnippet>380</a>                // 1/33 of their ceiling; refund it so the cross-replica
-<a href=#381 id=381 data-nosnippet>381</a>                // counter tracks *served* traffic. See
-<a href=#382 id=382 data-nosnippet>382</a>                // `SharedRateLimitCounter::refund`.
-<a href=#383 id=383 data-nosnippet>383</a>                </span><span class="kw">if </span>res.status() == StatusCode::TOO_MANY_REQUESTS
-<a href=#384 id=384 data-nosnippet>384</a>                    &amp;&amp; <span class="kw">let </span><span class="prelude-val">Some</span>((counter, key, <span class="bool-val">true</span>)) = <span class="kw-2">&amp;</span>charged
-<a href=#385 id=385 data-nosnippet>385</a>                {
-<a href=#386 id=386 data-nosnippet>386</a>                    counter.refund(key, now);
-<a href=#387 id=387 data-nosnippet>387</a>                }
-<a href=#388 id=388 data-nosnippet>388</a>                <span class="prelude-val">Ok</span>(res.map_into_left_body())
-<a href=#389 id=389 data-nosnippet>389</a>            } <span class="kw">else </span>{
-<a href=#390 id=390 data-nosnippet>390</a>                <span class="kw">let </span>res = req.into_response(too_many_requests_response());
-<a href=#391 id=391 data-nosnippet>391</a>                <span class="prelude-val">Ok</span>(res.map_into_right_body())
-<a href=#392 id=392 data-nosnippet>392</a>            }
-<a href=#393 id=393 data-nosnippet>393</a>        })
-<a href=#394 id=394 data-nosnippet>394</a>    }
-<a href=#395 id=395 data-nosnippet>395</a>}
-<a href=#396 id=396 data-nosnippet>396</a>
-<a href=#397 id=397 data-nosnippet>397</a><span class="attr">#[cfg(test)]
-<a href=#398 id=398 data-nosnippet>398</a></span><span class="kw">mod </span>window_contract_tests {
-<a href=#399 id=399 data-nosnippet>399</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#400 id=400 data-nosnippet>400</a>
-<a href=#401 id=401 data-nosnippet>401</a>    <span class="doccomment">/// [`WINDOW_SECS`] and the shared counter's configured window are one
-<a href=#402 id=402 data-nosnippet>402</a>    /// contract split across two crates: this middleware hands
-<a href=#403 id=403 data-nosnippet>403</a>    /// `SharedRateLimitCounter::check_at` a raw `now` and lets the counter
-<a href=#404 id=404 data-nosnippet>404</a>    /// derive the window, so if the two ever disagreed the `Retry-After` this
-<a href=#405 id=405 data-nosnippet>405</a>    /// middleware advertises would be a lie about a window nobody uses.
-<a href=#406 id=406 data-nosnippet>406</a>    </span><span class="attr">#[test]
-<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="kw">fn </span>window_secs_matches_the_shared_counters_window() {
-<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw">let </span>counter_window = axiam_db::SharedRateLimitConfig::default().window;
-<a href=#409 id=409 data-nosnippet>409</a>        <span class="macro">assert_eq!</span>(
-<a href=#410 id=410 data-nosnippet>410</a>            counter_window.as_secs() <span class="kw">as </span>i64,
-<a href=#411 id=411 data-nosnippet>411</a>            WINDOW_SECS,
-<a href=#412 id=412 data-nosnippet>412</a>            <span class="string">"REST WINDOW_SECS must equal the shared counter's window"
-<a href=#413 id=413 data-nosnippet>413</a>        </span>);
-<a href=#414 id=414 data-nosnippet>414</a>    }
-<a href=#415 id=415 data-nosnippet>415</a>
-<a href=#416 id=416 data-nosnippet>416</a>    <span class="doccomment">/// The local truncation helper must agree with the counter's, so a
-<a href=#417 id=417 data-nosnippet>417</a>    /// `Retry-After` computed here points at the same boundary the counter
-<a href=#418 id=418 data-nosnippet>418</a>    /// will roll over on.
-<a href=#419 id=419 data-nosnippet>419</a>    </span><span class="attr">#[test]
-<a href=#420 id=420 data-nosnippet>420</a>    </span><span class="kw">fn </span>window_start_truncates_to_the_window_boundary() {
-<a href=#421 id=421 data-nosnippet>421</a>        <span class="kw">let </span>now = DateTime::&lt;Utc&gt;::from_timestamp(<span class="number">1_800_000_045</span>, <span class="number">0</span>).expect(<span class="string">"valid epoch"</span>);
-<a href=#422 id=422 data-nosnippet>422</a>        <span class="kw">let </span>start = window_start(now);
+<a href=#175 id=175 data-nosnippet>175</a>    /// authenticates itself and names itself by a form-encoded `client_id`
+<a href=#176 id=176 data-nosnippet>176</a>    /// (`client_secret_post`, RFC 6749 §2.3.1) or by an `Authorization: Basic`
+<a href=#177 id=177 data-nosnippet>177</a>    /// header (`client_secret_basic`, T23.1.5): `/oauth2/token`,
+<a href=#178 id=178 data-nosnippet>178</a>    /// `/oauth2/revoke`, `/oauth2/introspect`.
+<a href=#179 id=179 data-nosnippet>179</a>    ///
+<a href=#180 id=180 data-nosnippet>180</a>    /// When `key_mode` is [`RateLimitKeyMode::ClientId`] or
+<a href=#181 id=181 data-nosnippet>181</a>    /// [`RateLimitKeyMode::IpClientId`], this middleware peeks (and
+<a href=#182 id=182 data-nosnippet>182</a>    /// restores) the request body to read `client_id`, and stashes it into
+<a href=#183 id=183 data-nosnippet>183</a>    /// the request extensions (as [`RateLimitClientId`]) so the downstream
+<a href=#184 id=184 data-nosnippet>184</a>    /// in-memory `Governor`'s `ClientAwareKeyExtractor` on the SAME
+<a href=#185 id=185 data-nosnippet>185</a>    /// resource can reuse it without a second body read. When `key_mode` is
+<a href=#186 id=186 data-nosnippet>186</a>    /// [`RateLimitKeyMode::Ip`] this is exactly as if `new()` had been
+<a href=#187 id=187 data-nosnippet>187</a>    /// called — the body is never touched.
+<a href=#188 id=188 data-nosnippet>188</a>    ///
+<a href=#189 id=189 data-nosnippet>189</a>    /// **Do not use this constructor for `/auth/login` or any other
+<a href=#190 id=190 data-nosnippet>190</a>    /// endpoint without a client identity** — see
+<a href=#191 id=191 data-nosnippet>191</a>    /// [`crate::config::rate_limit::RateLimitKeyMode`] docs.
+<a href=#192 id=192 data-nosnippet>192</a>    </span><span class="kw">pub fn </span>new_client_identity_aware(
+<a href=#193 id=193 data-nosnippet>193</a>        endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#194 id=194 data-nosnippet>194</a>        limit: u32,
+<a href=#195 id=195 data-nosnippet>195</a>        key_mode: RateLimitKeyMode,
+<a href=#196 id=196 data-nosnippet>196</a>    ) -&gt; <span class="self">Self </span>{
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="self">Self </span>{
+<a href=#198 id=198 data-nosnippet>198</a>            endpoint,
+<a href=#199 id=199 data-nosnippet>199</a>            limit,
+<a href=#200 id=200 data-nosnippet>200</a>            key_mode,
+<a href=#201 id=201 data-nosnippet>201</a>            client_identity_aware: <span class="bool-val">true</span>,
+<a href=#202 id=202 data-nosnippet>202</a>            _marker: PhantomData,
+<a href=#203 id=203 data-nosnippet>203</a>        }
+<a href=#204 id=204 data-nosnippet>204</a>    }
+<a href=#205 id=205 data-nosnippet>205</a>}
+<a href=#206 id=206 data-nosnippet>206</a>
+<a href=#207 id=207 data-nosnippet>207</a><span class="kw">impl</span>&lt;C: Connection + Clone&gt; Clone <span class="kw">for </span>RateLimitShared&lt;C&gt; {
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="kw">fn </span>clone(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="self">Self </span>{
+<a href=#210 id=210 data-nosnippet>210</a>            endpoint: <span class="self">self</span>.endpoint,
+<a href=#211 id=211 data-nosnippet>211</a>            limit: <span class="self">self</span>.limit,
+<a href=#212 id=212 data-nosnippet>212</a>            key_mode: <span class="self">self</span>.key_mode,
+<a href=#213 id=213 data-nosnippet>213</a>            client_identity_aware: <span class="self">self</span>.client_identity_aware,
+<a href=#214 id=214 data-nosnippet>214</a>            _marker: PhantomData,
+<a href=#215 id=215 data-nosnippet>215</a>        }
+<a href=#216 id=216 data-nosnippet>216</a>    }
+<a href=#217 id=217 data-nosnippet>217</a>}
+<a href=#218 id=218 data-nosnippet>218</a>
+<a href=#219 id=219 data-nosnippet>219</a><span class="kw">impl</span>&lt;S, B, C&gt; Transform&lt;S, ServiceRequest&gt; <span class="kw">for </span>RateLimitShared&lt;C&gt;
+<a href=#220 id=220 data-nosnippet>220</a><span class="kw">where
+<a href=#221 id=221 data-nosnippet>221</a>    </span>S: Service&lt;ServiceRequest, Response = ServiceResponse&lt;B&gt;, Error = Error&gt; + <span class="lifetime">'static</span>,
+<a href=#222 id=222 data-nosnippet>222</a>    B: <span class="lifetime">'static</span>,
+<a href=#223 id=223 data-nosnippet>223</a>    C: Connection + Clone + <span class="lifetime">'static</span>,
+<a href=#224 id=224 data-nosnippet>224</a>{
+<a href=#225 id=225 data-nosnippet>225</a>    <span class="kw">type </span>Response = ServiceResponse&lt;EitherBody&lt;B&gt;&gt;;
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">type </span>Error = Error;
+<a href=#227 id=227 data-nosnippet>227</a>    <span class="kw">type </span>Transform = RateLimitSharedService&lt;S, C&gt;;
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="kw">type </span>InitError = ();
+<a href=#229 id=229 data-nosnippet>229</a>    <span class="kw">type </span>Future = Ready&lt;<span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>::Transform, <span class="self">Self</span>::InitError&gt;&gt;;
+<a href=#230 id=230 data-nosnippet>230</a>
+<a href=#231 id=231 data-nosnippet>231</a>    <span class="kw">fn </span>new_transform(<span class="kw-2">&amp;</span><span class="self">self</span>, service: S) -&gt; <span class="self">Self</span>::Future {
+<a href=#232 id=232 data-nosnippet>232</a>        ready(<span class="prelude-val">Ok</span>(RateLimitSharedService {
+<a href=#233 id=233 data-nosnippet>233</a>            inner: Rc::new(service),
+<a href=#234 id=234 data-nosnippet>234</a>            endpoint: <span class="self">self</span>.endpoint,
+<a href=#235 id=235 data-nosnippet>235</a>            limit: <span class="self">self</span>.limit,
+<a href=#236 id=236 data-nosnippet>236</a>            key_mode: <span class="self">self</span>.key_mode,
+<a href=#237 id=237 data-nosnippet>237</a>            client_identity_aware: <span class="self">self</span>.client_identity_aware,
+<a href=#238 id=238 data-nosnippet>238</a>            _marker: PhantomData,
+<a href=#239 id=239 data-nosnippet>239</a>        }))
+<a href=#240 id=240 data-nosnippet>240</a>    }
+<a href=#241 id=241 data-nosnippet>241</a>}
+<a href=#242 id=242 data-nosnippet>242</a>
+<a href=#243 id=243 data-nosnippet>243</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#244 id=244 data-nosnippet>244</a>// Inner service
+<a href=#245 id=245 data-nosnippet>245</a>// ---------------------------------------------------------------------------
+<a href=#246 id=246 data-nosnippet>246</a>
+<a href=#247 id=247 data-nosnippet>247</a></span><span class="kw">pub struct </span>RateLimitSharedService&lt;S, C: Connection + Clone&gt; {
+<a href=#248 id=248 data-nosnippet>248</a>    inner: Rc&lt;S&gt;,
+<a href=#249 id=249 data-nosnippet>249</a>    endpoint: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#250 id=250 data-nosnippet>250</a>    limit: u32,
+<a href=#251 id=251 data-nosnippet>251</a>    key_mode: RateLimitKeyMode,
+<a href=#252 id=252 data-nosnippet>252</a>    client_identity_aware: bool,
+<a href=#253 id=253 data-nosnippet>253</a>    _marker: PhantomData&lt;C&gt;,
+<a href=#254 id=254 data-nosnippet>254</a>}
+<a href=#255 id=255 data-nosnippet>255</a>
+<a href=#256 id=256 data-nosnippet>256</a><span class="kw">impl</span>&lt;S, B, C&gt; Service&lt;ServiceRequest&gt; <span class="kw">for </span>RateLimitSharedService&lt;S, C&gt;
+<a href=#257 id=257 data-nosnippet>257</a><span class="kw">where
+<a href=#258 id=258 data-nosnippet>258</a>    </span>S: Service&lt;ServiceRequest, Response = ServiceResponse&lt;B&gt;, Error = Error&gt; + <span class="lifetime">'static</span>,
+<a href=#259 id=259 data-nosnippet>259</a>    B: <span class="lifetime">'static</span>,
+<a href=#260 id=260 data-nosnippet>260</a>    C: Connection + Clone + <span class="lifetime">'static</span>,
+<a href=#261 id=261 data-nosnippet>261</a>{
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="kw">type </span>Response = ServiceResponse&lt;EitherBody&lt;B&gt;&gt;;
+<a href=#263 id=263 data-nosnippet>263</a>    <span class="kw">type </span>Error = Error;
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="kw">type </span>Future = std::pin::Pin&lt;Box&lt;<span class="kw">dyn </span>Future&lt;Output = <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>::Response, <span class="self">Self</span>::Error&gt;&gt;&gt;&gt;;
+<a href=#265 id=265 data-nosnippet>265</a>
+<a href=#266 id=266 data-nosnippet>266</a>    <span class="kw">fn </span>poll_ready(
+<a href=#267 id=267 data-nosnippet>267</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#268 id=268 data-nosnippet>268</a>        cx: <span class="kw-2">&amp;mut </span>std::task::Context&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#269 id=269 data-nosnippet>269</a>    ) -&gt; std::task::Poll&lt;<span class="prelude-ty">Result</span>&lt;(), <span class="self">Self</span>::Error&gt;&gt; {
+<a href=#270 id=270 data-nosnippet>270</a>        <span class="self">self</span>.inner.poll_ready(cx)
+<a href=#271 id=271 data-nosnippet>271</a>    }
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a>    <span class="kw">fn </span>call(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="kw-2">mut </span>req: ServiceRequest) -&gt; <span class="self">Self</span>::Future {
+<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">let </span>endpoint = <span class="self">self</span>.endpoint;
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">let </span>limit = <span class="self">self</span>.limit;
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="kw">let </span>key_mode = <span class="self">self</span>.key_mode;
+<a href=#277 id=277 data-nosnippet>277</a>        <span class="kw">let </span>client_identity_aware = <span class="self">self</span>.client_identity_aware;
+<a href=#278 id=278 data-nosnippet>278</a>        <span class="kw">let </span>inner = Rc::clone(<span class="kw-2">&amp;</span><span class="self">self</span>.inner);
+<a href=#279 id=279 data-nosnippet>279</a>
+<a href=#280 id=280 data-nosnippet>280</a>        <span class="comment">// Reuse the EXACT fixed IP-key extraction logic (D-01d) so the
+<a href=#281 id=281 data-nosnippet>281</a>        // shared bucket key and the in-memory governor's key agree.
+<a href=#282 id=282 data-nosnippet>282</a>        </span><span class="kw">let </span>extractor = XForwardedForKeyExtractor::with_trusted_hops(trusted_hops());
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="kw">let </span>ip = extractor.extract(<span class="kw-2">&amp;</span>req).ok();
+<a href=#284 id=284 data-nosnippet>284</a>
+<a href=#285 id=285 data-nosnippet>285</a>        <span class="comment">// The process-wide write-behind counter is read from
+<a href=#286 id=286 data-nosnippet>286</a>        // `web::Data&lt;AppState&lt;C&gt;&gt;` (QUAL-01 — was a standalone
+<a href=#287 id=287 data-nosnippet>287</a>        // `web::Data&lt;Surreal&lt;C&gt;&gt;` registration used to build a repository per
+<a href=#288 id=288 data-nosnippet>288</a>        // request). Its absence is treated exactly like the old missing-DB-
+<a href=#289 id=289 data-nosnippet>289</a>        // handle case below — fail open to the in-memory governor.
+<a href=#290 id=290 data-nosnippet>290</a>        //
+<a href=#291 id=291 data-nosnippet>291</a>        // This is a cheap `Arc` clone of the ONE counter registered in
+<a href=#292 id=292 data-nosnippet>292</a>        // `main.rs`, never a new counter: a per-request (or per-worker)
+<a href=#293 id=293 data-nosnippet>293</a>        // instance would fragment the local count.
+<a href=#294 id=294 data-nosnippet>294</a>        </span><span class="kw">let </span>counter = req
+<a href=#295 id=295 data-nosnippet>295</a>            .app_data::&lt;web::Data&lt;AppState&lt;C&gt;&gt;&gt;()
+<a href=#296 id=296 data-nosnippet>296</a>            .map(|d| d.shared_rate_limit.clone());
+<a href=#297 id=297 data-nosnippet>297</a>
+<a href=#298 id=298 data-nosnippet>298</a>        Box::pin(<span class="kw">async move </span>{
+<a href=#299 id=299 data-nosnippet>299</a>            <span class="comment">// D8: for the client-identity-aware endpoints only
+<a href=#300 id=300 data-nosnippet>300</a>            // (`/oauth2/token`, `/oauth2/revoke`, `/oauth2/introspect` —
+<a href=#301 id=301 data-nosnippet>301</a>            // never `/auth/login`), peek the form-encoded body for
+<a href=#302 id=302 data-nosnippet>302</a>            // `client_id` and restore the payload so the handler's
+<a href=#303 id=303 data-nosnippet>303</a>            // `web::Form&lt;..&gt;` extractor still sees the full body
+<a href=#304 id=304 data-nosnippet>304</a>            // untouched. This ALSO stashes the result into request
+<a href=#305 id=305 data-nosnippet>305</a>            // extensions for the downstream in-memory `Governor`'s
+<a href=#306 id=306 data-nosnippet>306</a>            // `ClientAwareKeyExtractor` to reuse (see
+<a href=#307 id=307 data-nosnippet>307</a>            // `extractors::rate_limit::RateLimitClientId`).
+<a href=#308 id=308 data-nosnippet>308</a>            //
+<a href=#309 id=309 data-nosnippet>309</a>            // Skipped entirely in `ip` mode (the default) — no body read,
+<a href=#310 id=310 data-nosnippet>310</a>            // byte-for-byte the pre-D8 code path.
+<a href=#311 id=311 data-nosnippet>311</a>            </span><span class="kw">let </span>client_id = <span class="kw">if </span>client_identity_aware {
+<a href=#312 id=312 data-nosnippet>312</a>                <span class="kw">let </span>client_id = <span class="kw">if </span>key_mode != RateLimitKeyMode::Ip {
+<a href=#313 id=313 data-nosnippet>313</a>                    <span class="kw">let </span>bytes = req.extract::&lt;web::Bytes&gt;().<span class="kw">await</span>.unwrap_or_default();
+<a href=#314 id=314 data-nosnippet>314</a>                    <span class="comment">// T23.1.5: the form's `client_id`, else the one an
+<a href=#315 id=315 data-nosnippet>315</a>                    // `Authorization: Basic` header names — a
+<a href=#316 id=316 data-nosnippet>316</a>                    // `client_secret_basic` client sends it there alone.
+<a href=#317 id=317 data-nosnippet>317</a>                    </span><span class="kw">let </span>authorization = req
+<a href=#318 id=318 data-nosnippet>318</a>                        .headers()
+<a href=#319 id=319 data-nosnippet>319</a>                        .get(actix_web::http::header::AUTHORIZATION)
+<a href=#320 id=320 data-nosnippet>320</a>                        .and_then(|v| v.to_str().ok());
+<a href=#321 id=321 data-nosnippet>321</a>                    <span class="kw">let </span>client_id = extract_client_id(<span class="kw-2">&amp;</span>bytes, authorization);
+<a href=#322 id=322 data-nosnippet>322</a>                    <span class="comment">// Restore the body EXACTLY as read so the handler's
+<a href=#323 id=323 data-nosnippet>323</a>                    // `web::Form&lt;..&gt;` extraction downstream is unaffected —
+<a href=#324 id=324 data-nosnippet>324</a>                    // this middleware must be transparent to the request.
+<a href=#325 id=325 data-nosnippet>325</a>                    </span>req.set_payload(Payload::from(bytes));
+<a href=#326 id=326 data-nosnippet>326</a>                    client_id
+<a href=#327 id=327 data-nosnippet>327</a>                } <span class="kw">else </span>{
+<a href=#328 id=328 data-nosnippet>328</a>                    <span class="prelude-val">None
+<a href=#329 id=329 data-nosnippet>329</a>                </span>};
+<a href=#330 id=330 data-nosnippet>330</a>                req.extensions_mut()
+<a href=#331 id=331 data-nosnippet>331</a>                    .insert(RateLimitClientId(client_id.clone()));
+<a href=#332 id=332 data-nosnippet>332</a>                client_id
+<a href=#333 id=333 data-nosnippet>333</a>            } <span class="kw">else </span>{
+<a href=#334 id=334 data-nosnippet>334</a>                <span class="prelude-val">None
+<a href=#335 id=335 data-nosnippet>335</a>            </span>};
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a>            <span class="comment">// The bucket-key "identity" part: IP alone (`ip` mode, or
+<a href=#338 id=338 data-nosnippet>338</a>            // fail-safe fallback when no client_id was found), the
+<a href=#339 id=339 data-nosnippet>339</a>            // client_id alone, or the `(ip, client_id)` pair. Mirrors
+<a href=#340 id=340 data-nosnippet>340</a>            // `extractors::rate_limit::ClientAwareKeyExtractor` exactly so
+<a href=#341 id=341 data-nosnippet>341</a>            // this shared-store pre-check and the in-memory governor never
+<a href=#342 id=342 data-nosnippet>342</a>            // disagree about which bucket a request belongs to.
+<a href=#343 id=343 data-nosnippet>343</a>            </span><span class="kw">let </span>key_part = <span class="kw">match </span>(key_mode, <span class="kw-2">&amp;</span>client_id) {
+<a href=#344 id=344 data-nosnippet>344</a>                (RateLimitKeyMode::Ip, <span class="kw">_</span>) | (<span class="kw">_</span>, <span class="prelude-val">None</span>) =&gt; ip.map(|ip| ip.to_string()),
+<a href=#345 id=345 data-nosnippet>345</a>                (RateLimitKeyMode::ClientId, <span class="prelude-val">Some</span>(cid)) =&gt; <span class="prelude-val">Some</span>(<span class="macro">format!</span>(<span class="string">"client:{cid}"</span>)),
+<a href=#346 id=346 data-nosnippet>346</a>                (RateLimitKeyMode::IpClientId, <span class="prelude-val">Some</span>(cid)) =&gt; {
+<a href=#347 id=347 data-nosnippet>347</a>                    ip.map(|ip| <span class="macro">format!</span>(<span class="string">"{ip}:client:{cid}"</span>))
+<a href=#348 id=348 data-nosnippet>348</a>                }
+<a href=#349 id=349 data-nosnippet>349</a>            };
+<a href=#350 id=350 data-nosnippet>350</a>
+<a href=#351 id=351 data-nosnippet>351</a>            <span class="kw">let </span>now = Utc::now();
+<a href=#352 id=352 data-nosnippet>352</a>            <span class="comment">// Carried past the decision so a downstream rejection can be
+<a href=#353 id=353 data-nosnippet>353</a>            // refunded against the SAME key and window (run-5 J1).
+<a href=#354 id=354 data-nosnippet>354</a>            </span><span class="kw">let </span>charged = <span class="kw">match </span>(key_part, counter) {
+<a href=#355 id=355 data-nosnippet>355</a>                (<span class="prelude-val">Some</span>(key_part), <span class="prelude-val">Some</span>(counter)) =&gt; {
+<a href=#356 id=356 data-nosnippet>356</a>                    <span class="comment">// Same bucket key as before — `{endpoint}:{key_part}` —
+<a href=#357 id=357 data-nosnippet>357</a>                    // so an in-flight upgrade keeps counting against the same
+<a href=#358 id=358 data-nosnippet>358</a>                    // `rate_limit_bucket` records.
+<a href=#359 id=359 data-nosnippet>359</a>                    </span><span class="kw">let </span>key = <span class="macro">format!</span>(<span class="string">"{endpoint}:{key_part}"</span>);
+<a href=#360 id=360 data-nosnippet>360</a>                    <span class="comment">// Fully synchronous: no datastore round trip on the
+<a href=#361 id=361 data-nosnippet>361</a>                    // request path (H2 fix). Store outages are reported by
+<a href=#362 id=362 data-nosnippet>362</a>                    // the counter's background flusher, which keeps serving
+<a href=#363 id=363 data-nosnippet>363</a>                    // decisions from local counts (fail open, D-01b).
+<a href=#364 id=364 data-nosnippet>364</a>                    //
+<a href=#365 id=365 data-nosnippet>365</a>                    // `check_at` (not `check`) so the counter sees where
+<a href=#366 id=366 data-nosnippet>366</a>                    // inside the window the request landed and can apply the
+<a href=#367 id=367 data-nosnippet>367</a>                    // sliding-window bound that closes the run-5 J1
+<a href=#368 id=368 data-nosnippet>368</a>                    // over-admission (`axiam_db::rate_limit_counter::WindowMode`).
+<a href=#369 id=369 data-nosnippet>369</a>                    </span><span class="kw">let </span>allow = counter.check_at(<span class="kw-2">&amp;</span>key, now, limit);
+<a href=#370 id=370 data-nosnippet>370</a>                    <span class="prelude-val">Some</span>((counter, key, allow))
+<a href=#371 id=371 data-nosnippet>371</a>                }
+<a href=#372 id=372 data-nosnippet>372</a>                <span class="comment">// No key part (IP unavailable) or no counter registered —
+<a href=#373 id=373 data-nosnippet>373</a>                // fail open; the in-memory governor still makes the real
+<a href=#374 id=374 data-nosnippet>374</a>                // decision. (A counter built with
+<a href=#375 id=375 data-nosnippet>375</a>                // `AXIAM__RATE_LIMIT__SHARED=off` also always allows, from
+<a href=#376 id=376 data-nosnippet>376</a>                // inside `check_at`.)
+<a href=#377 id=377 data-nosnippet>377</a>                </span><span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#378 id=378 data-nosnippet>378</a>            };
+<a href=#379 id=379 data-nosnippet>379</a>
+<a href=#380 id=380 data-nosnippet>380</a>            <span class="kw">let </span>allow = charged.as_ref().is_none_or(|(<span class="kw">_</span>, <span class="kw">_</span>, allow)| <span class="kw-2">*</span>allow);
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>            <span class="kw">if </span>allow {
+<a href=#383 id=383 data-nosnippet>383</a>                <span class="kw">let </span>res = inner.call(req).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#384 id=384 data-nosnippet>384</a>                <span class="comment">// Run-5 J1: the in-memory governor sits INSIDE this
+<a href=#385 id=385 data-nosnippet>385</a>                // middleware and may reject with 429 a request this layer
+<a href=#386 id=386 data-nosnippet>386</a>                // already charged. Charging capacity to a request that was
+<a href=#387 id=387 data-nosnippet>387</a>                // never served is what starved the gRPC families down to
+<a href=#388 id=388 data-nosnippet>388</a>                // 1/33 of their ceiling; refund it so the cross-replica
+<a href=#389 id=389 data-nosnippet>389</a>                // counter tracks *served* traffic. See
+<a href=#390 id=390 data-nosnippet>390</a>                // `SharedRateLimitCounter::refund`.
+<a href=#391 id=391 data-nosnippet>391</a>                </span><span class="kw">if </span>res.status() == StatusCode::TOO_MANY_REQUESTS
+<a href=#392 id=392 data-nosnippet>392</a>                    &amp;&amp; <span class="kw">let </span><span class="prelude-val">Some</span>((counter, key, <span class="bool-val">true</span>)) = <span class="kw-2">&amp;</span>charged
+<a href=#393 id=393 data-nosnippet>393</a>                {
+<a href=#394 id=394 data-nosnippet>394</a>                    counter.refund(key, now);
+<a href=#395 id=395 data-nosnippet>395</a>                }
+<a href=#396 id=396 data-nosnippet>396</a>                <span class="prelude-val">Ok</span>(res.map_into_left_body())
+<a href=#397 id=397 data-nosnippet>397</a>            } <span class="kw">else </span>{
+<a href=#398 id=398 data-nosnippet>398</a>                <span class="kw">let </span>res = req.into_response(too_many_requests_response());
+<a href=#399 id=399 data-nosnippet>399</a>                <span class="prelude-val">Ok</span>(res.map_into_right_body())
+<a href=#400 id=400 data-nosnippet>400</a>            }
+<a href=#401 id=401 data-nosnippet>401</a>        })
+<a href=#402 id=402 data-nosnippet>402</a>    }
+<a href=#403 id=403 data-nosnippet>403</a>}
+<a href=#404 id=404 data-nosnippet>404</a>
+<a href=#405 id=405 data-nosnippet>405</a><span class="attr">#[cfg(test)]
+<a href=#406 id=406 data-nosnippet>406</a></span><span class="kw">mod </span>window_contract_tests {
+<a href=#407 id=407 data-nosnippet>407</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#408 id=408 data-nosnippet>408</a>
+<a href=#409 id=409 data-nosnippet>409</a>    <span class="doccomment">/// [`WINDOW_SECS`] and the shared counter's configured window are one
+<a href=#410 id=410 data-nosnippet>410</a>    /// contract split across two crates: this middleware hands
+<a href=#411 id=411 data-nosnippet>411</a>    /// `SharedRateLimitCounter::check_at` a raw `now` and lets the counter
+<a href=#412 id=412 data-nosnippet>412</a>    /// derive the window, so if the two ever disagreed the `Retry-After` this
+<a href=#413 id=413 data-nosnippet>413</a>    /// middleware advertises would be a lie about a window nobody uses.
+<a href=#414 id=414 data-nosnippet>414</a>    </span><span class="attr">#[test]
+<a href=#415 id=415 data-nosnippet>415</a>    </span><span class="kw">fn </span>window_secs_matches_the_shared_counters_window() {
+<a href=#416 id=416 data-nosnippet>416</a>        <span class="kw">let </span>counter_window = axiam_db::SharedRateLimitConfig::default().window;
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="macro">assert_eq!</span>(
+<a href=#418 id=418 data-nosnippet>418</a>            counter_window.as_secs() <span class="kw">as </span>i64,
+<a href=#419 id=419 data-nosnippet>419</a>            WINDOW_SECS,
+<a href=#420 id=420 data-nosnippet>420</a>            <span class="string">"REST WINDOW_SECS must equal the shared counter's window"
+<a href=#421 id=421 data-nosnippet>421</a>        </span>);
+<a href=#422 id=422 data-nosnippet>422</a>    }
 <a href=#423 id=423 data-nosnippet>423</a>
-<a href=#424 id=424 data-nosnippet>424</a>        <span class="macro">assert_eq!</span>(start.timestamp() % WINDOW_SECS, <span class="number">0</span>, <span class="string">"aligned to the window"</span>);
-<a href=#425 id=425 data-nosnippet>425</a>        <span class="macro">assert!</span>(start &lt;= now &amp;&amp; now.timestamp() - start.timestamp() &lt; WINDOW_SECS);
-<a href=#426 id=426 data-nosnippet>426</a>    }
-<a href=#427 id=427 data-nosnippet>427</a>}
+<a href=#424 id=424 data-nosnippet>424</a>    <span class="doccomment">/// The local truncation helper must agree with the counter's, so a
+<a href=#425 id=425 data-nosnippet>425</a>    /// `Retry-After` computed here points at the same boundary the counter
+<a href=#426 id=426 data-nosnippet>426</a>    /// will roll over on.
+<a href=#427 id=427 data-nosnippet>427</a>    </span><span class="attr">#[test]
+<a href=#428 id=428 data-nosnippet>428</a>    </span><span class="kw">fn </span>window_start_truncates_to_the_window_boundary() {
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="kw">let </span>now = DateTime::&lt;Utc&gt;::from_timestamp(<span class="number">1_800_000_045</span>, <span class="number">0</span>).expect(<span class="string">"valid epoch"</span>);
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="kw">let </span>start = window_start(now);
+<a href=#431 id=431 data-nosnippet>431</a>
+<a href=#432 id=432 data-nosnippet>432</a>        <span class="macro">assert_eq!</span>(start.timestamp() % WINDOW_SECS, <span class="number">0</span>, <span class="string">"aligned to the window"</span>);
+<a href=#433 id=433 data-nosnippet>433</a>        <span class="macro">assert!</span>(start &lt;= now &amp;&amp; now.timestamp() - start.timestamp() &lt; WINDOW_SECS);
+<a href=#434 id=434 data-nosnippet>434</a>    }
+<a href=#435 id=435 data-nosnippet>435</a>}
 </code></pre></div></section></main></body></html>

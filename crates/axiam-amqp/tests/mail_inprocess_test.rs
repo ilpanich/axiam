@@ -4,6 +4,7 @@
 //! [`MAX_RETRIES`] times, with the retries re-dispatched in process, and the
 //! PII-minimal `email.delivery_failed` row is the whole record afterwards.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use axiam_amqp::mail_consumer::MAX_RETRIES;
@@ -18,7 +19,6 @@ use axiam_db::{
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
 use uuid::Uuid;
@@ -30,9 +30,15 @@ async fn setup_db() -> Surreal<Db> {
     db
 }
 
-/// A 32-byte key derived at run time, never a literal.
+/// An AES-256-GCM key generated at run time, never a literal.
 fn email_key() -> [u8; 32] {
-    Sha256::digest(axiam_test_support::test_password().as_bytes()).into()
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    *KEY.get_or_init(|| {
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        bytes
+    })
 }
 
 fn failing_smtp() -> ProviderConfig {

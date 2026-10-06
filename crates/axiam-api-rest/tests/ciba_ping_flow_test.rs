@@ -369,6 +369,22 @@ async fn world(endpoint: &str) -> World {
     }
 }
 
+impl World {
+    /// Wait (bounded) until the deliverer has reported. The receiver records a
+    /// ping before it answers, so the ping arriving does not mean the
+    /// deliverer has read the answer and reported yet.
+    async fn wait_for_outcome(&self) -> Vec<DeliveryOutcome> {
+        for _ in 0..500 {
+            let reported = self.outcomes.lock().unwrap().clone();
+            if !reported.is_empty() {
+                return reported;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        self.outcomes.lock().unwrap().clone()
+    }
+}
+
 macro_rules! app {
     ($w:expr) => {{
         let limits: RateLimitConfig = limits();
@@ -620,7 +636,7 @@ async fn an_approval_pings_the_client_which_then_redeems_once() {
     let pings = receiver.wait_for(1).await;
     assert_eq!(pings.len(), 1, "one ping per decision");
     assert_is_the_ping(&pings[0], &w, &auth_req_id);
-    let reported = w.outcomes.lock().unwrap().clone();
+    let reported = w.wait_for_outcome().await;
     assert_eq!(
         reported,
         vec![DeliveryOutcome::Delivered {
@@ -698,13 +714,7 @@ async fn a_ping_that_cannot_be_delivered_does_not_stop_the_client_polling() {
     );
 
     // The deliverer reports a retry (the dispatcher would redeliver).
-    for _ in 0..500 {
-        if !w.outcomes.lock().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let reported = w.outcomes.lock().unwrap().clone();
+    let reported = w.wait_for_outcome().await;
     assert_eq!(reported.len(), 1);
     assert!(
         matches!(reported[0], DeliveryOutcome::Retry { .. }),

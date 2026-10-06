@@ -33,7 +33,9 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, classify_replay_write_error, is_transaction_conflict};
+use crate::helpers::{
+    CountRow, classify_replay_write_error, is_transaction_conflict, retry_on_write_conflict,
+};
 
 const SELECT_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, session_id, user_id, sp_id, \
      sp_entity_id, name_id, name_id_format, session_index, created_at, expires_at";
@@ -139,42 +141,50 @@ impl<C: Connection> SurrealSamlSpSessionRepository<C> {
 impl<C: Connection> SamlSpSessionRepository for SurrealSamlSpSessionRepository<C> {
     async fn record(&self, input: NewSamlSpSession) -> AxiamResult<SamlSpSession> {
         let row_id = new_id().to_string();
-        let created = self
-            .db
-            .current()
-            .query(
-                "CREATE type::record('saml_sp_session', $id) SET \
-                 tenant_id = $tenant_id, \
-                 session_id = $session_id, \
-                 user_id = $user_id, \
-                 sp_id = $sp_id, \
-                 sp_entity_id = $sp_entity_id, \
-                 name_id = $name_id, \
-                 name_id_format = $name_id_format, \
-                 session_index = $session_index, \
-                 created_at = $created_at, \
-                 expires_at = $expires_at, \
-                 ended_at = NONE",
-            )
-            .bind(("id", row_id))
-            .bind(("tenant_id", input.tenant_id.to_string()))
-            .bind(("session_id", input.session_id.to_string()))
-            .bind(("user_id", input.user_id.to_string()))
-            .bind(("sp_id", input.sp_id.to_string()))
-            .bind(("sp_entity_id", input.sp_entity_id.clone()))
-            .bind(("name_id", input.name_id.clone()))
-            .bind(("name_id_format", input.name_id_format.clone()))
-            .bind(("session_index", input.session_index.clone()))
-            .bind(("created_at", Utc::now()))
-            .bind(("expires_at", input.expires_at))
-            .await
-            .map_err(DbError::from)?;
+        // A write conflict is not proof that another sign-on's row exists: on
+        // SurrealKV a conflict aborts BOTH transactions, so with every racer
+        // conflicted none has committed and the read-back below finds nothing.
+        // Retry instead; once a racer has committed, the retry meets the unique
+        // index and takes the refresh branch.
+        let created = retry_on_write_conflict(|| async {
+            self.db
+                .current()
+                .query(
+                    "CREATE type::record('saml_sp_session', $id) SET \
+                     tenant_id = $tenant_id, \
+                     session_id = $session_id, \
+                     user_id = $user_id, \
+                     sp_id = $sp_id, \
+                     sp_entity_id = $sp_entity_id, \
+                     name_id = $name_id, \
+                     name_id_format = $name_id_format, \
+                     session_index = $session_index, \
+                     created_at = $created_at, \
+                     expires_at = $expires_at, \
+                     ended_at = NONE",
+                )
+                .bind(("id", row_id.clone()))
+                .bind(("tenant_id", input.tenant_id.to_string()))
+                .bind(("session_id", input.session_id.to_string()))
+                .bind(("user_id", input.user_id.to_string()))
+                .bind(("sp_id", input.sp_id.to_string()))
+                .bind(("sp_entity_id", input.sp_entity_id.clone()))
+                .bind(("name_id", input.name_id.clone()))
+                .bind(("name_id_format", input.name_id_format.clone()))
+                .bind(("session_index", input.session_index.clone()))
+                .bind(("created_at", Utc::now()))
+                .bind(("expires_at", input.expires_at))
+                .await?
+                .check()
+                .map(|_| ())
+        })
+        .await;
 
-        // A unique violation — or a write conflict, which is what two sign-ons
-        // racing to create the same row can be told instead — means the session
-        // already has (or is about to have) a row for this SP.
-        let exists = match created.check() {
-            Ok(_) => false,
+        // A unique violation means the session already has a row for this SP.
+        // A conflict that outlasted the retries is treated the same way: the
+        // read-back below decides whether the row is there.
+        let exists = match created {
+            Ok(()) => false,
             Err(e) if is_transaction_conflict(&e) => true,
             Err(e) => match classify_replay_write_error(e) {
                 AxiamError::ReplayDetected => true,
@@ -183,26 +193,29 @@ impl<C: Connection> SamlSpSessionRepository for SurrealSamlSpSessionRepository<C
         };
         if exists {
             // Refresh what is now being asserted; the original index stays.
-            let refreshed = self
-                .db
-                .current()
-                .query(
-                    "UPDATE saml_sp_session SET \
-                     name_id = $name_id, name_id_format = $name_id_format, \
-                     sp_entity_id = $sp_entity_id \
-                     WHERE tenant_id = $tenant_id AND session_id = $session_id \
-                     AND sp_id = $sp_id",
-                )
-                .bind(("tenant_id", input.tenant_id.to_string()))
-                .bind(("session_id", input.session_id.to_string()))
-                .bind(("sp_id", input.sp_id.to_string()))
-                .bind(("sp_entity_id", input.sp_entity_id.clone()))
-                .bind(("name_id", input.name_id.clone()))
-                .bind(("name_id_format", input.name_id_format.clone()))
-                .await
-                .map_err(DbError::from)?;
-            match refreshed.check() {
-                Ok(_) => {}
+            let refreshed = retry_on_write_conflict(|| async {
+                self.db
+                    .current()
+                    .query(
+                        "UPDATE saml_sp_session SET \
+                         name_id = $name_id, name_id_format = $name_id_format, \
+                         sp_entity_id = $sp_entity_id \
+                         WHERE tenant_id = $tenant_id AND session_id = $session_id \
+                         AND sp_id = $sp_id",
+                    )
+                    .bind(("tenant_id", input.tenant_id.to_string()))
+                    .bind(("session_id", input.session_id.to_string()))
+                    .bind(("sp_id", input.sp_id.to_string()))
+                    .bind(("sp_entity_id", input.sp_entity_id.clone()))
+                    .bind(("name_id", input.name_id.clone()))
+                    .bind(("name_id_format", input.name_id_format.clone()))
+                    .await?
+                    .check()
+                    .map(|_| ())
+            })
+            .await;
+            match refreshed {
+                Ok(()) => {}
                 // The racing writer wrote the same facts; the read-back below
                 // decides whether the row is there.
                 Err(e) if is_transaction_conflict(&e) => {}

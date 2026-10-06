@@ -205,7 +205,7 @@ command -v openssl >/dev/null || { say "openssl is required"; exit 1; }
   for tgt in axiam keycloak zitadel authentik; do
     ( # a clean environment per target: nothing the caller exported may leak in
       for name in $(bench_creds_spec "$tgt" | awk '{print $1}'); do unset "$name"; done
-      bench_creds_load "$tgt" 2>/dev/null
+      bench_creds_load "$tgt" >/dev/null 2>&1
       f="$(bench_creds_file "$tgt")"
       [ "$(stat -c %a "$f")" = "600" ] || { echo "stack file for $tgt is mode $(stat -c %a "$f"), not 600"; exit 1; }
       first=""
@@ -222,7 +222,7 @@ command -v openssl >/dev/null || { say "openssl is required"; exit 1; }
       done < <(bench_creds_spec "$tgt")
       # a second load yields the same values (a still-running stack keeps its credentials)
       for name in $(bench_creds_spec "$tgt" | awk '{print $1}'); do unset "$name"; done
-      bench_creds_load "$tgt" 2>/dev/null
+      bench_creds_load "$tgt" >/dev/null 2>&1
       second=""
       while read -r name kind; do [ -n "$name" ] && second="$second$name=${!name};"; done < <(bench_creds_spec "$tgt")
       [ "$first" = "$second" ] || { echo "$tgt: a second bench_creds_load changed the credentials"; exit 1; }
@@ -231,7 +231,7 @@ command -v openssl >/dev/null || { say "openssl is required"; exit 1; }
       rm -f "$f"
       one="$(bench_creds_spec "$tgt" | awk 'NR==1{print $1}')"
       export "$one=operator'chose \$this"
-      bench_creds_load "$tgt" 2>/dev/null
+      bench_creds_load "$tgt" >/dev/null 2>&1
       [ "${!one}" = "operator'chose \$this" ] || { echo "$tgt: an exported $one did not win over the generated value"; exit 1; }
       unset "$one"; . "$f"
       [ "${!one}" = "operator'chose \$this" ] || { echo "$tgt: the stack file did not record the exported $one verbatim"; exit 1; }
@@ -277,11 +277,11 @@ if [ -s "$T/names.out" ]; then while IFS= read -r line; do say "$line"; done < "
   for name in $(bench_creds_spec keycloak | awk '{print $1}'); do unset "$name"; done
   # a stack file left empty and world-readable by something else
   mkdir -p "$BENCH_SEED_DIR"; : > "$(bench_creds_file keycloak)"; chmod 644 "$(bench_creds_file keycloak)"
-  bench_creds_load keycloak 2>/dev/null
+  bench_creds_load keycloak >/dev/null 2>&1
   m="$(stat -c %a "$(bench_creds_file keycloak)")"
   [ "$m" = "600" ] || echo "a pre-existing empty stack file kept mode $m when the credentials were written into it"
   rm -rf "$BENCH_SEED_DIR"
-  bench_creds_load keycloak 2>/dev/null
+  bench_creds_load keycloak >/dev/null 2>&1
   m="$(stat -c %a "$BENCH_SEED_DIR")"
   [ "$m" = "700" ] || echo "bench-creds.sh created the seed directory mode $m, not 700"
   # seed.sh's write_seed, run as it is written, with chmod observed: the file must

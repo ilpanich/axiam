@@ -408,7 +408,194 @@ const zitadel = {
   },
 };
 
-const ADAPTERS = { axiam, keycloak, zitadel };
+// --- authentik --------------------------------------------------------------
+// How authentik serves the five shared operations, determined against a live
+// 2026.8.3 container (benchmarks/README.md "authentik target" has the full
+// table and the evidence):
+//
+//   client_credentials  POST /application/o/token/ with client_id + client_secret
+//                       in the body. Needs the provider's `grant_types` to list
+//                       client_credentials (an empty list is refused with
+//                       invalid_grant — seed.sh sets it). The token's subject is
+//                       a generated service-account user.
+//   introspection       POST /application/o/introspect/, authenticated with the
+//                       provider's own client credentials. A failed client
+//                       authentication is NOT an HTTP error: authentik answers
+//                       200 {"active": false}. A status check alone would
+//                       therefore count a mis-seeded client as a success, so
+//                       the request carries a `require` predicate on
+//                       `active === true`.
+//   JWKS                GET /application/o/<app-slug>/jwks/ — per application,
+//                       unlike the global endpoints above.
+//   userinfo            GET /application/o/userinfo/ with a bearer token. The
+//                       claims returned follow the scopes the token was minted
+//                       with, so every token this adapter mints asks for
+//                       `profile email` too: without them userinfo returns the
+//                       bare `sub` and the cell would measure less than the
+//                       others' identity read.
+//   password login      NOT the token endpoint — see login() below.
+const AK_SCOPE = 'openid profile email';
+function akBase() {
+  return `${baseUrl()}/application/o`;
+}
+function akFlowUrl() {
+  return `${baseUrl()}/api/v3/flows/executor/${cfg.authentikFlowSlug}/`;
+}
+function akFlowComponent(r) {
+  try {
+    return r.json().component;
+  } catch (_e) {
+    return undefined;
+  }
+}
+const authentik = {
+  // PASSWORD LOGIN. `grant_type=password` (ROPC) exists on authentik's token
+  // endpoint, but it does NOT verify the user's password: its backend is
+  // authentik's TokenBackend, which accepts an *app-password token* in the
+  // `password` field and rejects the real password with invalid_grant
+  // (determined on the running container; a token comparison involves no
+  // password hash at all). Benchmarking it would measure a cheap token lookup
+  // under a "password login" label — the exact misreading this harness exists
+  // to prevent — so it is not used here.
+  //
+  // What does verify the real password, with authentik's real hash (PBKDF2-
+  // SHA256, 1 000 000 iterations on the stored hash), is the flow executor
+  // that every browser login goes through: GET the identification challenge,
+  // POST the username, POST the password. The authentication flow then skips
+  // MFA (the bench user has no device), runs the login stage — which creates
+  // an authenticated session — and answers with a redirect challenge. k6
+  // follows the executor's 302s, so that is three client calls and about six
+  // server requests per login, measured as ONE operation (see doSteps() in
+  // metrics.js). It is a session login like AXIAM's /api/v1/auth/login and
+  // Zitadel's session API: the output is an authenticated session, not an
+  // OAuth token. It is not a single-request op like the other three targets'
+  // login, and the report labels the cell protocol-variant for that reason.
+  //
+  // Each step carries a `require` on the executor's `component` because a
+  // WRONG password is HTTP 200 too (with `response_errors`): without the
+  // predicate a bad credential would be counted as a successful login.
+  login() {
+    const url = akFlowUrl();
+    const json = { headers: { 'Content-Type': 'application/json', Accept: 'application/json' } };
+    return {
+      steps: [
+        {
+          method: 'GET',
+          url,
+          params: { headers: { Accept: 'application/json' } },
+          expect: 200,
+          require: { 'flow offers the identification stage': (r) => akFlowComponent(r) === 'ak-stage-identification' },
+        },
+        {
+          method: 'POST',
+          url,
+          body: JSON.stringify({ component: 'ak-stage-identification', uid_field: cfg.username }),
+          params: json,
+          expect: 200,
+          require: { 'flow offers the password stage': (r) => akFlowComponent(r) === 'ak-stage-password' },
+        },
+        {
+          method: 'POST',
+          url,
+          body: JSON.stringify({ component: 'ak-stage-password', password: cfg.password }),
+          params: json,
+          expect: 200,
+          require: { 'flow ends in the post-login redirect': (r) => akFlowComponent(r) === 'xak-flow-redirect' },
+        },
+      ],
+      expect: 200,
+    };
+  },
+  // A real user-subject token, for setup() of the scenarios that need one
+  // (userinfo, token_refresh). Redeemed through the ROPC grant with the bench
+  // user's app-password token — see login() above for why that grant is fine
+  // for setup and wrong for measurement. auth.js mintUserToken() prefers this
+  // over a client_credentials token when login() is a multi-step op.
+  //
+  // No refresh token comes back, and none can: on 2026.8.3 authentik issues
+  // refresh tokens only from the authorization-code and device grants (its
+  // token view, views/token.py), not from ROPC or client_credentials, whatever
+  // scope is asked for. token_refresh.js therefore has nothing to refresh on
+  // this target and measures its client_credentials fallback, tagged
+  // fallback-op and excluded from the head-to-head — the same treatment as
+  // Zitadel's. Reaching a refresh token would take a scripted authorization-
+  // code exchange per VU, which the five shared endpoints do not need.
+  userToken() {
+    return {
+      method: 'POST',
+      url: `${akBase()}/token/`,
+      body: formBody({
+        grant_type: 'password',
+        client_id: cfg.clientId,
+        client_secret: cfg.clientSecret,
+        username: cfg.username,
+        password: cfg.authentikUserToken,
+        scope: AK_SCOPE,
+      }),
+      params: FORM,
+      expect: 200,
+    };
+  },
+  clientCredentials() {
+    return {
+      method: 'POST',
+      url: `${akBase()}/token/`,
+      body: formBody({
+        grant_type: 'client_credentials',
+        client_id: cfg.clientId,
+        client_secret: cfg.clientSecret,
+        scope: AK_SCOPE,
+      }),
+      params: FORM,
+      expect: 200,
+    };
+  },
+  introspect(token) {
+    return {
+      method: 'POST',
+      url: `${akBase()}/introspect/`,
+      body: formBody({ token, client_id: cfg.clientId, client_secret: cfg.clientSecret }),
+      params: FORM,
+      expect: 200,
+      require: {
+        'token is active': (r) => {
+          try {
+            return r.json().active === true;
+          } catch (_e) {
+            return false;
+          }
+        },
+      },
+    };
+  },
+  refresh(refreshToken) {
+    return {
+      method: 'POST',
+      url: `${akBase()}/token/`,
+      body: formBody({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: cfg.clientId,
+        client_secret: cfg.clientSecret,
+      }),
+      params: FORM,
+      expect: 200,
+    };
+  },
+  jwks() {
+    return { method: 'GET', url: `${akBase()}/${cfg.authentikAppSlug}/jwks/`, expect: 200 };
+  },
+  userinfo(accessToken) {
+    return {
+      method: 'GET',
+      url: `${akBase()}/userinfo/`,
+      params: { headers: { Authorization: `Bearer ${accessToken}` } },
+      expect: 200,
+    };
+  },
+};
+
+const ADAPTERS = { axiam, keycloak, zitadel, authentik };
 
 export function adapter() {
   const a = ADAPTERS[cfg.target];

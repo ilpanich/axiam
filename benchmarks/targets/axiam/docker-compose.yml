@@ -376,7 +376,8 @@ services:
     networks: [bench]
 
   rabbitmq:
-    image: rabbitmq:4-management-alpine
+    # BENCH_RABBITMQ_IMAGE pins it (runner/pull-pinned-images.sh exports the digest).
+    image: ${BENCH_RABBITMQ_IMAGE:-rabbitmq:4-management-alpine}
     container_name: bench-axiam-rabbitmq
     cpus: ${BENCH_MQ_CPUS:-1}
     mem_limit: ${BENCH_MQ_MEM:-512m}

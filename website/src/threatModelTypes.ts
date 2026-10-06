@@ -18,6 +18,10 @@ export type TmCategory =
 
 export type TmSeverity = "Critical" | "High" | "Medium" | "Low";
 
+/**
+ * `NotApplicable` marks an entry written for a surface that is not built (the
+ * RADIUS diagram, model 2.36.0): neither mitigated nor open.
+ */
 export type TmStatus = "Mitigated" | "Open" | "NotApplicable";
 
 export interface TmThreat {
@@ -38,8 +42,10 @@ interface TmThreatBearing {
   name: string;
   description: string;
   threats: TmThreat[];
-  /** Number of threats whose status is not `Mitigated`. */
+  /** Number of threats that are open (neither `Mitigated` nor `NotApplicable`). */
   open: number;
+  /** Number of threats recorded `NotApplicable`. */
+  notApplicable: number;
 }
 
 /** A dashed trust-boundary box. Purely decorative — it carries no threats. */
@@ -92,6 +98,7 @@ export interface TmDiagram {
   edges: TmEdge[];
   total: number;
   open: number;
+  notApplicable: number;
   bySeverity: Record<string, number>;
 }
 
@@ -105,5 +112,6 @@ export interface ThreatModel {
   total: number;
   open: number;
   mitigated: number;
+  notApplicable: number;
   diagrams: TmDiagram[];
 }

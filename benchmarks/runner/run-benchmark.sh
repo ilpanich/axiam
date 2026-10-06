@@ -385,10 +385,24 @@ filter_scenarios() {
       echo "[run] skipping $s (BENCH_SCENARIO_EXCLUDE)"
       record_dry "${s%.js}" "SKIP" "excluded via BENCH_SCENARIO_EXCLUDE (run separately, e.g. a different BENCH_MEM cap)"; continue
     fi
+    # T23.10.2(a): the inverse of BENCH_SCENARIO_EXCLUDE — a space-separated
+    # allow-list of scenario filenames, so one invocation can run a chosen SET of
+    # cells (the minimal-profile pass: the shared endpoints plus one authz cell)
+    # behind ONE settle gate and ONE seed check, instead of one invocation per cell.
+    # Unset (the default) is a no-op. A typo here would silently run nothing, so a
+    # name that matches no scenario file is a hard error below.
+    if [ -n "${BENCH_SCENARIO_ONLY:-}" ] && [[ " ${BENCH_SCENARIO_ONLY} " != *" $s "* ]]; then
+      record_dry "${s%.js}" "SKIP" "not in BENCH_SCENARIO_ONLY"; continue
+    fi
     out+=("$s")
   done
   SCENARIOS=("${out[@]}")
 }
+if [ -n "${BENCH_SCENARIO_ONLY:-}" ]; then
+  for _only in $BENCH_SCENARIO_ONLY; do
+    [ -f "$BENCH/scenarios/$_only" ] || { echo "[run] FATAL: BENCH_SCENARIO_ONLY names '$_only', which is not a file under scenarios/ (names carry the .js suffix)" >&2; exit 1; }
+  done
+fi
 filter_scenarios
 
 # G2 item 2: cell-order rotation. Run 3 found EVERY historical batch cell was
@@ -416,6 +430,17 @@ rotate_scenarios() {
   echo "[run] cell-order rotation: run index $idx -> shifted scenario order by $shift_by (BENCH_RUN_INDEX)"
 }
 rotate_scenarios
+
+# BENCH_LIST_SCENARIOS=1: print the scenarios this target/profile WOULD run
+# (one per line, after every filter above) and stop. Hermetic by construction —
+# no k6, no stack, nothing measured — which is what lets
+# runner/scenario-filter-selftest.sh pin the exact set a target runs, including
+# the sets a filter list should have excluded (an AXIAM-only cell that reaches a
+# competitor is a red cell that reads as "the product is broken").
+if [ "${BENCH_LIST_SCENARIOS:-0}" = "1" ]; then
+  [ "${#SCENARIOS[@]}" -eq 0 ] || printf '%s\n' "${SCENARIOS[@]}"
+  exit 0
+fi
 
 command -v k6 >/dev/null || { echo "[run] k6 not installed — see https://k6.io/docs/get-started/installation/" >&2; exit 1; }
 
@@ -588,7 +613,24 @@ json_escape() {
 BENCH_SETTLE="${BENCH_SETTLE:-1}"                                # 0 to skip entirely (quick manual runs)
 BENCH_SETTLE_BURST_VUS="${BENCH_SETTLE_BURST_VUS:-20}"            # concurrent probe workers
 BENCH_SETTLE_BURST_SECS="${BENCH_SETTLE_BURST_SECS:-15}"          # seconds each probe attempt runs
-BENCH_SETTLE_PROBE_THR="${BENCH_SETTLE_PROBE_THR:-400}"           # ops/s pass threshold (OR'd with p50 below)
+# The 400 ops/s default is calibrated on AXIAM's post-seed clamp (settled ~730
+# ops/s vs ~44 in-window) and is trivially cleared by Keycloak's and Zitadel's JWKS,
+# which is all the fallback probe asks of a competitor. authentik cannot reach it
+# at any point: its JWKS costs roughly a dozen PostgreSQL transactions per request
+# (cache and sessions live in the database since 2025.10), and on the small host
+# its target was developed on the probe read ~15-30 ops/s from the first probe to
+# the last — no clamp, just a slow endpoint. With 400 it would burn the whole
+# BENCH_SETTLE_TIMEOUT_SECS on every run and stamp `settle_timeout: true` on every
+# cell, which report.py turns into refused cells. So for authentik the default is
+# "it serves 10 ops/s under 20-way concurrency" — a does-it-answer check, and
+# honestly nothing more than that: no post-seed transient has been characterised
+# for this target. Raise BENCH_SETTLE_PROBE_THR once run 6 shows its settled rate;
+# the value used is recorded in every cell's meta.json (`settle_probe_thr`).
+case "$TARGET" in
+  authentik) _SETTLE_THR_DEFAULT=10 ;;
+  *)         _SETTLE_THR_DEFAULT=400 ;;
+esac
+BENCH_SETTLE_PROBE_THR="${BENCH_SETTLE_PROBE_THR:-$_SETTLE_THR_DEFAULT}"           # ops/s pass threshold (OR'd with p50 below)
 BENCH_SETTLE_PROBE_P50_MS="${BENCH_SETTLE_PROBE_P50_MS:-150}"     # p50-under-load pass threshold (ms)
 BENCH_SETTLE_RETRY_SECS="${BENCH_SETTLE_RETRY_SECS:-30}"          # gap between failed probe attempts
 BENCH_SETTLE_TIMEOUT_SECS="${BENCH_SETTLE_TIMEOUT_SECS:-600}"     # hard cap, then warn + proceed
@@ -659,6 +701,7 @@ _burst_worker() {
   case "$TARGET" in
     keycloak) url="$BASE/realms/${BENCH_REALM:-bench}/protocol/openid-connect/certs" ;;
     zitadel)  url="$BASE/oauth/v2/keys" ;;
+    authentik) url="$BASE/application/o/${BENCH_AUTHENTIK_APP_SLUG:-bench-app}/jwks/" ;;
   esac
   while [ "$(date +%s)" -lt "$deadline" ]; do
     curl -sSk --max-time 5 "${_SETTLE_CURL_MTLS[@]}" -o /dev/null -w '%{http_code}\t%{time_total}\n' "$url" 2>/dev/null >> "$outfile"
@@ -785,6 +828,15 @@ settle_gate() {
 # packed content for SECRET/PASSWORD, specifically so these legitimately-named
 # (and fully redacted) keys don't trip it — see the comment there.
 AXIAM_ENV_REDACT_RE='PASSWORD|SECRET|KEY|PEPPER|PEM|TOKEN'
+# P23W6-01: a credential can also sit in a VALUE whose key no name rule matches —
+# AXIAM__AMQP__URL is `amqps://user:<broker password>@host`, and that password is a
+# generated per-run credential (runner/bench-creds.sh). Any `scheme://userinfo@`
+# value keeps its scheme and host and loses the userinfo, exactly as the server's
+# own Debug renders it (axiam-amqp `redact_amqp_url`). sed -E, so a value that
+# does not match passes through untouched.
+redact_url_userinfo() {
+  printf '%s' "${1-}" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@#\1<redacted>@#'
+}
 # J9/E1: the AXIAM__* prefix is not the whole story. `RUST_LOG` governs whether
 # the `axiam::perf` stage-timing events an investigation pass depends on are
 # emitted at all, and it carries NO prefix — so run 5's I5 pass recorded a
@@ -818,11 +870,30 @@ axiam_env_json() {
     if printf '%s' "$k" | grep -qiE "$AXIAM_ENV_REDACT_RE"; then
       printf '    "%s": "<redacted>"' "$(json_escape "$k")"
     else
-      printf '    "%s": "%s"' "$(json_escape "$k")" "$(json_escape "$v")"
+      printf '    "%s": "%s"' "$(json_escape "$k")" "$(json_escape "$(redact_url_userinfo "$v")")"
     fi
   done <<< "$env_dump"
   [ "$first" -eq 1 ] || echo
   echo -n "}"
+}
+
+# T23.10.2(a): which AXIAM deployment profile this stack is, read off the server
+# container (what ran, not what this shell believes): `minimal` when the container
+# carries AXIAM__AMQP__ENABLED=false (targets/axiam/docker-compose.minimal.yml, `just
+# deploy=minimal`), `full` otherwise, `n/a` for every other target. Recorded in every
+# cell's meta.json (`axiam_deploy_profile`) and banner-labelled by report.py, because
+# a minimal-profile figure must never be read as the full profile's: its outbound
+# deliveries are lost on restart (T-445) and it has no broker to pay for.
+axiam_deploy_profile() {
+  [ "$TARGET" = "axiam" ] || { echo -n "n/a"; return; }
+  command -v docker >/dev/null 2>&1 || { echo -n "unknown"; return; }
+  local v
+  v="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-${TARGET}-server" 2>/dev/null \
+        | sed -n 's/^AXIAM__AMQP__ENABLED=//p' | head -1)" || { echo -n "unknown"; return; }
+  case "$v" in
+    false|FALSE|False|0|no|off) echo -n "minimal" ;;
+    *)                          echo -n "full" ;;
+  esac
 }
 
 # --- J9/E1: required-env preflight ------------------------------------------
@@ -914,6 +985,15 @@ bench-zitadel server
 bench-zitadel-postgres db
 EOF
       ;;
+    authentik)
+      # authentik is deployed as a server AND a worker (Redis is gone since
+      # 2025.10); both carry the server cap and both are in the stack's footprint.
+      cat <<EOF
+bench-authentik server
+bench-authentik-worker worker
+bench-authentik-postgres db
+EOF
+      ;;
   esac
 }
 
@@ -923,6 +1003,7 @@ EOF
 role_default_cpu_cap() {
   case "$1" in
     server) echo "${BENCH_CPUS:-2}" ;;
+    worker) echo "${BENCH_AUTHENTIK_WORKER_CPUS:-${BENCH_CPUS:-2}}" ;;
     db)     echo "${BENCH_DB_CPUS:-2}" ;;
     mq)     echo "${BENCH_MQ_CPUS:-1}" ;;
     edge)   echo "${BENCH_EDGE_CPUS:-1}" ;;
@@ -937,7 +1018,8 @@ role_default_cpu_cap() {
 role_default_mem_mib() {
   local raw
   case "$1" in
-    server) raw="${BENCH_MEM:-1024m}" ;;
+    server) raw="${BENCH_MEM:-2048m}" ;;
+    worker) raw="${BENCH_AUTHENTIK_WORKER_MEM:-${BENCH_MEM:-2048m}}" ;;
     db)     raw="${BENCH_DB_MEM:-1024m}" ;;
     mq)     raw="${BENCH_MQ_MEM:-512m}" ;;
     edge)   raw="${BENCH_EDGE_MEM:-128m}" ;;
@@ -982,7 +1064,15 @@ containers_json() {
     cname="${line%% *}"; role="${line#* }"
     docker inspect "$cname" >/dev/null 2>&1 || continue
     img="$(docker inspect --format '{{.Config.Image}}' "$cname" 2>/dev/null || echo unknown)"
-    dig="$(docker inspect --format '{{index .RepoDigests 0}}' "$cname" 2>/dev/null || echo '')"
+    # RepoDigests belongs to the IMAGE, not the container: asking the container
+    # (`docker inspect <container>`) always answered empty, so every cell fell
+    # through to the image id below — which equals the registry digest only on
+    # the containerd image store and differs on the classic one. Ask the image the
+    # container was created from, by id (T23.10.2(a): run 6 records the pulled
+    # digest of every image, and "image_digest" has to be that).
+    dig="$(docker image inspect --format '{{index .RepoDigests 0}}' "$(docker inspect --format '{{.Image}}' "$cname" 2>/dev/null)" 2>/dev/null || echo '')"
+    [ -n "$dig" ] || dig="$(docker image inspect --format '{{index .RepoDigests 0}}' "$img" 2>/dev/null || echo '')"
+    dig="${dig#*@}"
     # RepoDigests is empty (or the literal Go zero-value "<no value>" if the
     # index itself is out of range) for locally-built images — fall back to
     # the container's own image ID, then to `docker image inspect` on the
@@ -1275,7 +1365,7 @@ run_one() {
   "tls_min": "${BENCH_TLS_MIN:-}",
   "client_auth": "$([ -n "${BENCH_CLIENT_CERT:-}" ] && echo x509 || echo none)",
   "rate_limits": "$RL_POSTURE",
-  "caps": { "cpus": "${BENCH_CPUS:-2}", "mem": "${BENCH_MEM:-1024m}" },
+  "caps": { "cpus": "${BENCH_CPUS:-2}", "mem": "${BENCH_MEM:-2048m}" },
   "host": { "cpus": "$HOST_CPUS", "mem_mib": "$HOST_MEM_MIB" },
   "k6_summary_file": "$name.k6.json",
   "resource_csv": "$name.res.csv",
@@ -1295,6 +1385,7 @@ run_one() {
   "cell_order_index": $cell_order_index,
   "dry_run": $([ "$DRY_RUN" = "1" ] && echo true || echo false),
   "axiam_env": $(axiam_env_json),
+  "axiam_deploy_profile": "$(axiam_deploy_profile)",
   "connection_model": "$([ "${BENCH_NO_CONN_REUSE:-false}" = "true" ] && echo no-reuse || { [ "${BENCH_NO_VU_CONN_REUSE:-false}" = "true" ] && echo per-iteration-vu-pool || echo pooled-per-vu; })",
   "no_connection_reuse": ${BENCH_NO_CONN_REUSE:-false},
   "no_vu_connection_reuse": ${BENCH_NO_VU_CONN_REUSE:-false},
@@ -1330,10 +1421,30 @@ EOF
 
 SCENARIO_COUNT=${#SCENARIOS[@]}
 
+# T23.10.2(a): the deployment profile the stack actually is must be the one the
+# pass says it is. A minimal-profile pass whose overlay silently did not apply (a
+# matrix that did not forward `deploy`, a stack left over from a full-profile run)
+# would file full-profile cells under a "minimal" label, and nothing else would
+# notice. BENCH_EXPECT_DEPLOY=minimal|full (exported by `bench-matrix` from its
+# `deploy` variable; set it by hand for a bare `bench-run`) is checked against the
+# container itself, and a mismatch fails in seconds. AXIAM only; unset asserts nothing.
+expect_deploy_preflight() {
+  local want="${BENCH_EXPECT_DEPLOY:-}" got
+  [ -n "$want" ] && [ "$TARGET" = "axiam" ] || return 0
+  got="$(axiam_deploy_profile)"
+  if [ "$got" != "$want" ]; then
+    echo "[run] FATAL (T23.10.2(a)): this pass expects the AXIAM '$want' profile but bench-axiam-server is '$got' (read off its AXIAM__AMQP__ENABLED)." >&2
+    echo "[run]   Fix: just target=axiam deploy=$want profile=$PROFILE bench-down && just target=axiam deploy=$want profile=$PROFILE bench-up   (then re-run this cell)" >&2
+    exit 1
+  fi
+  echo "[run] deploy profile OK — bench-axiam-server is the AXIAM '$got' profile"
+}
+
 # J9/E1: assert the runbook-required container env BEFORE the settle gate and
 # the first cell — the whole point is to fail in seconds rather than after the
 # k6 hours that produced run 5's empty stage-timing logs.
 require_env_preflight
+expect_deploy_preflight
 
 # G2 item 1: gate the FIRST cell of this run behind the settle check (once —
 # not per cell; every cell in this run records the same settle_wait_secs /

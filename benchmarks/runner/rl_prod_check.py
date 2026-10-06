@@ -301,6 +301,32 @@ def read_configured_defaults():
     return configured
 
 
+# The REST families that `targets/axiam/docker-compose.yml` neutralizes to
+# 1 000 000 by default but that `just rl=prod`'s hand-written exports (login,
+# register, password_reset, mfa, webauthn, token, introspect, revoke, authz_check)
+# do not pin. Under `rl=prod` each of these would therefore keep the NEUTRALIZED
+# value while `check()` compares it against the shipped one, so a cell that ran
+# (device_authorization, token_exchange, uma_perm, uma_ticket_grant, scim_provisioning)
+# would read FAIL for a posture the harness never applied. `--print-exports` emits
+# the shipped value of each, read from the source like everything else here, for
+# the justfile's rl=prod branch to export. device_verify is deliberately absent
+# from the compose file (its OWASP bound makes 1 000 000 a boot refusal), so the
+# shipped 10/min already applies; the families added after alpha24 (CIBA, DCR, SSF,
+# SAML/directory/SCIM-target admin) are in neither list and keep their defaults in
+# every posture.
+PROD_PIN_FIELDS = (
+    "device_authorization_per_min", "token_exchange_per_min", "uma_perm_per_min",
+    "uma_ticket_per_min", "par_per_min", "end_session_per_min", "scim_per_min",
+)
+
+
+def prod_pin_exports():
+    """`export AXIAM__RATE_LIMIT__<FIELD>=<shipped default>` lines for
+    PROD_PIN_FIELDS, extracted read-only from the source."""
+    configured = read_configured_defaults()
+    return [f"export AXIAM__RATE_LIMIT__{f.upper()}={configured[f]}" for f in PROD_PIN_FIELDS]
+
+
 def _import_report():
     """Import runner/report.py without leaving `runner/` on sys.path."""
     sys.path.insert(0, HERE)
@@ -438,13 +464,21 @@ def write_summary(results, profile, rows):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--results", required=True)
+    ap.add_argument("--results", default=None)
+    ap.add_argument("--print-exports", action="store_true",
+                     help="print `export AXIAM__RATE_LIMIT__*=<shipped default>` lines for the "
+                          "families `just rl=prod` does not pin by hand, then exit")
     ap.add_argument("--target", default="axiam")
     ap.add_argument("--profile", default="p0-plaintext")
     ap.add_argument("--configured-json", default=None,
                      help="JSON object overriding any configured-limit field "
                           "(e.g. a gateway/mesh preset's numbers)")
     args = ap.parse_args()
+    if args.print_exports:
+        print("\n".join(prod_pin_exports()))
+        return
+    if not args.results:
+        ap.error("--results is required")
 
     overrides = json.loads(args.configured_json) if args.configured_json else {}
     rows, any_fail = check(args.results, args.target, args.profile, overrides)

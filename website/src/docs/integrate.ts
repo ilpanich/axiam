@@ -1000,6 +1000,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Per request:** 10 seconds from connect to last byte; a response body is read to 64 KiB (1 MiB for a list) and never logged.",
           "**Retry schedule:** up to five attempts with exponential backoff from five seconds to one hour. The three variables are `AXIAM__SCIM_PUSH__MAX_ATTEMPTS`, `AXIAM__SCIM_PUSH__BACKOFF_BASE_MS` and `AXIAM__SCIM_PUSH__BACKOFF_CEILING_MS`; see [Webhooks → retry](#/docs/webhooks) for the table.",
           "**Ordering is not promised and is not needed**, because each attempt computes the desired state fresh.",
+          "**One attempt at a time per replica, for every tenant.** Each replica runs a single delivery at a time, so a downstream that is slow or never answers (up to 10 seconds an attempt, 20 when a token is fetched first), or a reconciliation that queues a large tenant, delays the SCIM pushes of every target on that replica. Webhooks, SSF events and sign-ins are not affected. A per-target circuit breaker is proposed and undecided; [issue #550](https://github.com/ilpanich/axiam/issues/550) tracks it. Until then, keep a target disabled while its service provider is unreachable.",
           "**Rate limit:** the registry's four writes (create, replace, delete, reconcile now) each have a per-IP bucket under `AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN` (default 30 a minute); reads are not limited, and no rate-limit profile moves it.",
         ],
       },
@@ -1028,6 +1029,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**No two-way sync.** Nothing is read back into AXIAM; the downstream is only read to find drift, and its own accounts are left alone.",
           "**No private downstream.** A service provider on a private address, a `.local` or `.internal` name or plain `http` is refused, at write time and again at delivery.",
           "**No deprovisioning on delete,** as above.",
+          "**No parallel delivery.** One attempt at a time per replica, so a slow downstream can stall provisioning on that replica; see the limits above.",
         ],
       },
       {
@@ -1933,7 +1935,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "approval", text: "2. The user approves" },
       {
         type: "p",
-        text: "A request for a person who may sign in sends them **one e-mail** (the built-in `ciba_approval` template, customisable per organization or tenant) with the client's name, the binding message and a link to the console page. The link carries the request's record id, **never** the `auth_req_id` or any token. A signed-out user is taken to the sign-in page and brought back to the same page afterwards. Mail is sent only to an account that may sign in, and **at most three times a minute per user, whatever the clients asking**, so a flood of requests cannot become a flood of prompts: a request past that is stored and answered as usual and the user is simply not told again.",
+        text: "A request for a person who may sign in sends them **one e-mail** (the built-in `ciba_approval` template, customisable per organization or tenant) with the client's name, the binding message and a link to the console page. The link carries the request's record id, **never** the `auth_req_id` or any token. A signed-out user is taken to the sign-in page and brought back to the same page afterwards. Mail is sent only to an account that may sign in **and whose address something vouches for** (a verified address, or an account that is `Active`), and **at most three times a minute per user, whatever the clients asking**, so a flood of requests cannot become a flood of prompts: a request past that is stored and answered as usual and the user is simply not told again. **An account that has no vouched-for address gets no mail at all** — notably a federated account, which stays pending verification unless an address was verified: its request is stored and answered like any other, but the approval page is addressed by the request's id and nothing lists pending requests, so without the mail the request runs to its expiry unless the person is given the link another way.",
       },
       {
         type: "api",
@@ -2037,9 +2039,10 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**Push mode.** FAPI-CIBA forbids it, and AXIAM offers poll and ping only.",
-          "**`login_hint_token`, `user_code` and `request_uri`.** The first has no defined format here, a user code would have to be checked against something that is not the password, and AXIAM never fetches a request.",
+          "**`login_hint_token`, `user_code` and `request_uri`.** The first has no defined format here, a user code would have to be checked against something that is not the password (a client registering `backchannel_user_code_parameter`, or sending a `user_code`, is refused, and discovery says `false`), and AXIAM never fetches a request.",
           "**`unknown_user_id`.** Never sent, deliberately (above).",
           "**A push-notification channel to the user's phone.** The user is told by e-mail today; a push channel is later work.",
+          "**An approval e-mail for an account with no vouched-for address,** which includes a federated account unless an address was verified. The request is stored, but the approval page is reached by a link that only the mail carries, so the user has to be given it another way or the request expires.",
           "**Console fields for the CIBA metadata.** Register over the API for now.",
           "**An SDK `approve` call.** The approval API needs a human session and belongs to the console.",
         ],

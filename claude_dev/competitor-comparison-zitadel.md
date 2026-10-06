@@ -12,7 +12,12 @@
 > release pages, protobuf definitions, `cmd/defaults.yaml` and the
 > documentation sources under `apps/docs/content/`, which zitadel.com/docs is
 > built from. Performance figures come from this repository's run-5
-> benchmark, which measured Zitadel v4.16.2.
+> benchmark, which measured Zitadel v4.16.2. **Run 6 is the re-measurement:** it
+> measures Zitadel v4.19.4, Keycloak 26.8.0 and authentik 2026.8.3 against AXIAM
+> `1.0.0-beta18` on the same G-box with the run-5 caps (G-10; the authentik
+> target now exists in `benchmarks/targets/authentik/`). Its numbers follow the
+> run; until then every performance figure here is run 5's, taken against
+> Zitadel v4.16.2.
 
 ## 1. Overview
 
@@ -56,11 +61,11 @@ ahead on the polish of a mature hosted product.
 | RP-initiated / back-channel logout | Yes | Yes | [Z7][Z13] |
 | SAML 2.0 | **IdP** (G-2, Phase 23) and SP | **IdP** (and SAML external IdPs) | [Z14][Z15] |
 | External IdPs | OIDC, OAuth2, SAML, **LDAP / Active Directory** (G-3), Google, GitHub, Microsoft, Apple | OIDC, OAuth2, JWT, SAML, **LDAP**, Azure AD, GitHub, GitLab, Google, Apple, Zitadel | [Z15] |
-| SCIM 2.0 server | Yes (users and groups); and, since G-6 (Phase 23, W5), an outbound SCIM client for downstream applications | **Preview**; users documented | [Z16] |
+| SCIM 2.0 server | Yes (users and groups); and, since G-6 (Phase 23, W5), an outbound SCIM client for downstream applications (*one delivery attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 is decided*) | **Preview**; users documented | [Z16] |
 | Extension model | Reactors (external AMQP actors, any SDK language), HMAC-signed webhooks | Actions v2: signed webhook/call targets on request, response, function and event | [Z17] |
 | APIs | REST, gRPC, AMQP | gRPC, connectRPC and REST for every resource (management-oriented) | [Z1] |
 | Rate limiting | **On by default**, posture presets | No built-in limiter; lockout off by default (`MaxPasswordAttempts: 0`) | [Z18] |
-| Server RSS (run 5, v4.16.2) | 88–119 MiB | 138–154 MiB | `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5 |
+| Server RSS (run 5, v4.16.2; run 6 re-measures v4.19.4) | 88–119 MiB | 138–154 MiB | `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5 |
 | Whole-stack RSS (run 5, under load) | 375–533 MiB (server + SurrealDB + RabbitMQ). *At rest, measured 2026-10-05 (G-8): **207 MiB** minimal (server + SurrealDB, no broker), 331 MiB full — a different metric, see the note in §5* | 281–457 MiB (server + PostgreSQL) | idem |
 | Licence | Apache-2.0 | AGPL-3.0 (since v3) | [Z4] |
 
@@ -125,10 +130,12 @@ ahead on the polish of a mature hosted product.
    per-tenant issuance and in-process mTLS for devices (`crates/axiam-pki/`).
    Zitadel has no certificate-based client or user authentication [Z6].
 4. **Data-plane performance.** Run 5 measured about 6.5× Zitadel's
-   client-credentials throughput and 4.8× its introspection rate. AXIAM's
-   gRPC userinfo served 12 307/s, against Zitadel's 191–201/s on its own
-   gRPC surface (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §1). Zitadel's gRPC
-   is a management API; AXIAM's is a data plane.
+   client-credentials throughput and 4.8× its introspection rate (against
+   v4.16.2; run 6 re-measures v4.19.4 on the same G-box with the run-5 caps, and
+   its numbers follow). AXIAM's gRPC userinfo served 12 307/s, against
+   Zitadel's 191–201/s on its own gRPC surface
+   (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §1). Zitadel's gRPC is a management
+   API; AXIAM's is a data plane.
 5. **Safe defaults.** AXIAM enables rate limiting by default. Zitadel ships
    no limiter and leaves lockout disabled (`MaxPasswordAttempts: 0`) [Z18].
    Zitadel's 4.16–4.19 line also fixed several critical account-takeover
@@ -145,6 +152,7 @@ ahead on the polish of a mature hosted product.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-06 | W6 comparison refresh (G-10, G-11). **G-10 (benchmark currency)**: the run-5 figures stay as they are, because they are still run 5's against Zitadel v4.16.2; the header, the RSS row and §4 item 4 now say that run 6 re-measures Zitadel v4.19.4, Keycloak 26.8.0 and authentik 2026.8.3 against AXIAM `1.0.0-beta18` on the same G-box with the run-5 caps, and that numbers follow. **G-11 (RADIUS)**: decided (D-77) to decline a native RADIUS front end for now; the G-11 spike's search found no Zitadel RADIUS feature, so no row here changes, and AXIAM publishes no CRL today (T-102 reopened), see [the record](radius-eap-tls-spike-2026-10-06.md). **Not-do statement:** outbound SCIM delivers one attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 (P23W5-07) is decided. This comparison has no CIBA row. | [Z16] |
 | 2026-10-05 | G-8 (AMQP-less minimal profile and whole-stack footprint) complete on the Phase 23 W5 branch: `AXIAM__AMQP__ENABLED=false` runs AXIAM on SurrealDB alone (`docker-compose.minimal.yml`, single instance by definition), and the resting footprint is measured with one method for both stacks — **207.3 MiB** minimal (server + SurrealDB) against **330.9 MiB** full (+ RabbitMQ), at rest, server as a native release binary (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5). The whole-stack cell above gains a dated note rather than a changed Zitadel figure: that figure was taken under load and no Zitadel stack was measured at rest, so P2 item 3 is partly closed, not flipped. | — |
 | 2026-10-05 | G-6 (outbound SCIM provisioning) complete on the Phase 23 W5 branch: AXIAM can push a tenant's users and groups to downstream SCIM 2.0 service providers (contract §31). The compared Zitadel surface is the SCIM *server*, so the row's Zitadel cell is unchanged; AXIAM's cell now also names the outbound client. | — |
 | 2026-10-04 | G-2 (SAML 2.0 identity provider) complete on the Phase 23 W4 branch: per-tenant IdP with SP- and IdP-initiated Web Browser SSO over HTTP-Redirect and HTTP-POST, always-signed assertions under a tenant credential issued by the tenant's own CA (issue / promote / retire), a pairwise persistent `NameID` by default, per-SP `SessionIndex` and single logout tied to session revocation and the revocation feed, IdP metadata, SP metadata import as a reviewed draft, the SP registry API (contract §29) and console page; round-tripped with samael as a reference SP and with a real Keycloak 26.7.0 brokering to AXIAM. Assertion encryption and the artifact binding stay out (D-2). | — |

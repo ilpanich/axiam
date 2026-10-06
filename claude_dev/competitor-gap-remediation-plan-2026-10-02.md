@@ -1,6 +1,8 @@
 # Competitor gap remediation plan — 2026-10-02
 
-> **Status: ACCEPTED — in execution as Phase 23.** W1 (G-1 X7.1–X7.3, G-4,
+> **Status: ACCEPTED — Phase 23 complete with W6a (2026-10-06), but for
+> T23.10.2(b), the run-6 report, which rides W6b (#561); the phase summary closes
+> §5.** W1 (G-1 X7.1–X7.3, G-4,
 > G-9, G-12, G-15) executed 2026-10-02/03 on `claude/phase23-w1` and merged
 > (PR #521); D-9 and D-10 taken during it. W2 (G-1 X7.4–X7.9 and the
 > submission package, T23.1.8, G-3's crate and bind path) runs on
@@ -15,7 +17,12 @@
 > it; merged as PR #543 on 2026-10-04. G-2 and G-5 are complete. W5 (G-6
 > outbound SCIM, G-7 CIBA, G-8 AMQP-less profile) runs on `claude/phase23-w5`,
 > with D-56 taken at its start and D-57 … D-74 during it (D-60 by the
-> maintainer); its PR follows the F4 review. Written against AXIAM `1.0.0-beta17` from the three
+> maintainer); merged as PR #559 (merge commit `406a155`) on 2026-10-06. W6
+(G-10 benchmark currency, G-11 RADIUS spike, the comparison refresh; the last
+wave) runs on `claude/phase23-w6` as W6a, with D-75 and D-76 taken at its start;
+W6b (the run-6 report) follows the maintainer's run. W6a took D-77 … D-79
+during it and ended with the W6 F4 review; its PR closes #561's first half,
+#562 and nothing else open. Written against AXIAM `1.0.0-beta17` from the three
 > comparisons in this directory:
 > [`competitor-comparison-keycloak.md`](competitor-comparison-keycloak.md)
 > (Keycloak 26.8.0),
@@ -1803,6 +1810,67 @@ criterion (specification stability, one concrete adopter).
 
 ### G-10 — Benchmark currency — **P2**
 
+> **EXECUTED — G-10, T23.10.1, 2026-10-06** (T23.10.2(a) and (b) follow).
+> `benchmarks/targets/authentik/` (`293ec27`, Sonnet 5.5): authentik
+> **2026.8.3** as the fourth target in the Keycloak/Zitadel shape — server,
+> worker and PostgreSQL (no Redis since 2025.10), every credential generated per
+> run by `bench-up` and required by the compose file (no literal), seeded through
+> the bootstrap token's API, wired into the runner, the k6 adapter
+> (`scenarios/lib/targets.js`), the report and the scenario filters, with a new
+> hermetic `runner/authentik-selftest.sh` in CI's *Bench Harness Self-Tests* and
+> the filter self-test pinning each competitor's exact scenario set. The five
+> shared endpoints were checked on a running container: client credentials,
+> introspection (a bad client is `200 {"active":false}`, so the adapter requires
+> `active`), JWKS and userinfo are equivalent operations; **password login** goes
+> through authentik's flow executor (three calls, a real `pbkdf2_sha256` verify,
+> a session), because its ROPC path compares an app-password token and never
+> hashes, so that one cell is labelled `protocol-variant`; `token_refresh` runs as
+> a flagged `fallback-op`, as Zitadel's does (**D-79**). **Smoke-tested in the
+> sandbox** with the Docker Hub mirror `authentik/server:2026.8.3` (`ghcr.io`
+> blobs are blocked here) and k6 2.3.0 in Docker: the seed is idempotent, each
+> shared scenario passes a dry run at p0 and p2, and a full
+> `bench-dry-run` over p0/p3 finished with 5 PASS, 1 WARN (refresh), 0 FAIL; no
+> latency or throughput figure from the sandbox is a measurement. p3-mtls is
+> refused for authentik (no client-certificate listener), and p2 is its own
+> self-signed TLS listener (TLS 1.2 and 1.3, HTTP/1.1). Its cheap endpoints are
+> PostgreSQL-bound (JWKS ≈ 14, userinfo ≈ 23, introspection ≈ 72, client
+> credentials ≈ 203 transactions per request in the sandbox).
+>
+> **EXECUTED — G-10, T23.10.2(a), 2026-10-06** (`7924cf4`, `d2b4c5a`,
+> `70fd055`, `c211018`, Sonnet 5.5). [`run6-runbook.md`](run6-runbook.md), built
+> like `run5-runbook.md`, with §12 as the complete copy-paste reference (every
+> environment variable spelled out), §10 as the list of what the maintainer sends
+> back for W6b and §11 as what the seventh draft consumes. It measures the
+> released **`1.0.0-beta18`** (D-75; the tag's commit is a blank the maintainer
+> fills when cutting it), **Keycloak 26.8.0** (pins bumped; §1.3 re-checks
+> quay.io for a later 26.8.x patch first), **Zitadel v4.19.4** and **authentik
+> 2026.8.3**, on the G-box with the run-5 caps. Keycloak 26.8's "reduced memory
+> usage" is verified as a release-note claim with no figure and no new default
+> flag; run 6 measures it at defaults, at rest (`runner/resting-sample.sh`) and
+> under load, untuned. The **minimal profile** is measured as T23.8.3 documents
+> it — `deploy=minimal` (`targets/axiam/docker-compose.minimal.yml`), one
+> instance, the profile recorded in `meta.json` and asserted per cell — at rest
+> and in seven p0 cells with a full-profile control, and the report must say its
+> deliveries are lost on restart (T-445). W5 F4 §15's rules are §2.5, §2.6 and
+> §9: SCIM targets disabled or on a loopback that answers (P23W5-07), every
+> raised limit named (`scim_per_min` only for `scim_provisioning`), the approval
+> and SCIM limits never preset. **Every benchmark credential is now generated per
+> stack** (`runner/bench-creds.sh`, mode 600, masked under CI, removed by
+> `bench-down`; an exported value wins, so the FAPI conformance workflow is
+> unchanged) — the literal defaults of the AXIAM, Keycloak and Zitadel targets,
+> the probes and the eleven SDK benches are gone, and a hermetic
+> `credential-selftest.sh` keeps them gone. Harness defects found and fixed on the
+> way: `rl=prod` left seven REST families neutralized while `rl-prod-check`
+> compared them with shipped values (now pinned from the Rust source, with a
+> self-test); `meta.json`'s `image_digest` was the local image id; a stale bulk
+> fixture survived `bench-down`. Keycloak 26.8.0 was smoke-tested in the sandbox
+> end to end (`bench-dry-run` p0/p2/p3: 18 PASS, 0 FAIL), authentik re-checked
+> after the credential refactor (10 PASS, 2 WARN — the documented refresh
+> fallback); AXIAM beta18 does not exist yet and Zitadel v4.19.4 cannot be pulled
+> here (`ghcr.io` blobs blocked), so the runbook's §12.5 dry run is their first
+> check. T23.10.2(b) — the seventh draft, the comparisons' performance rows and
+> the website's numbers — is W6b (D-76).
+
 **Target.** Re-measure Keycloak at 26.8 (which reports reduced memory) and
 Zitadel at v4.19, and add authentik 2026.8 as a fourth benchmark target, so
 that the authentik comparison can make a performance statement.
@@ -1819,6 +1887,36 @@ logs dated.
 **Size.** M. **Model.** Sonnet 5.
 
 ### G-11 — RADIUS: spike — **P3**
+
+> **EXECUTED — G-11 (T23.11.1), 2026-10-06.** The decision record is
+> [`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)
+> (`ac88b00`, Sonnet 5.5); no product code. **Verdict: partial fit, unproven
+> demand** — 802.1X for fleets holding AXIAM-issued certificates fits;
+> password-based network login does not (MS-CHAPv2 and CHAP cannot run against
+> an Argon2id store) and no adopter has asked. **Decision (D-77): decline the
+> native front end now** (option A, XL, about 24–36 sessions, mostly Opus);
+> AXIAM as the CA and policy backend behind FreeRADIUS (option B, L) is the first
+> step when the reopen condition is met; publishing a CRL (item D1) is worth
+> doing regardless. The record carries every W5 F4 §15 constraint as a
+> requirement from a build's first commit: its own limiter in the machine
+> presets and the tenant lockout (T-429's class); one byte-identical Access-Reject
+> with an equalising verify, so no user oracle (D-63); the per-NAS secret
+> generated, sealed under `pki_encryption_key`, write-only and bound to its
+> address, transport and RadSec pin (P23W5-01's rule); `Message-Authenticator`
+> on every packet and `Proxy-State` refused (Blast-RADIUS); MD5-only attributes
+> only under an explicit per-NAS `legacy_udp` flag. **Threat entries T-448 …
+> T-468** (Opus 5.5, `5c29828`, model **2.36.0**) on a tenth, design-only
+> diagram with the NAS ↔ AXIAM boundary, recorded *Not applicable* (**D-78**):
+> no control exists to call them Mitigated, and nothing AXIAM runs is exposed.
+> The spike found two things about today's tree: **no CRL or OCSP is published**,
+> although T-102 and the design document described one — the text is repaired
+> and **T-102 reopened** (High, Open: a relying party that does not terminate at
+> AXIAM has no revocation channel), the CRL itself filed (D1); and the
+> locked-account branch of `AuthService::login` returns before any Argon2id work
+> (a timing difference), handed to the W6 F4 review. Model 2.36.0: 468 threats,
+> 425 mitigated / 22 open / 21 not applicable. RFC text could not be fetched in
+> the sandbox; the record's §9.2 lists eleven recalled claims to re-read before
+> anything is built on them.
 
 **Target.** A one-session spike answering whether a RADIUS front end with
 EAP-TLS over the integrated CA is a fit for AXIAM's network-device audience,
@@ -2096,6 +2194,103 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > through a `NotificationGate`; any approval surface takes a console sign-in only;
 > new ids start at T-448.
 
+> **W5 merged (PR #559, `406a155`), 2026-10-06; W6 kickoff, 2026-10-06.** `main`
+> at `406a155`; PR #559 closed #537, #544, #545 and #546. Open from W5 and **not
+> W6 scope**: the review findings #549 … #555, the SDK fan-outs #547 (contract
+> 1.57) and #548 (1.58), and #513 (G-1, the maintainer's conformance runs). §8 is
+> unchanged since W5. W6 is the phase's last wave and merges in two PRs (**D-76**):
+> **W6a** on `claude/phase23-w6` — T23.10.1 (the authentik target, Sonnet 5.5),
+> T23.10.2(a) (`run6-runbook.md`, Sonnet 5.5), T23.11.1 (the RADIUS / EAP-TLS
+> spike, Sonnet 5.5; its threat entries on Opus 5.5 per §6's rule (b)), the
+> comparison refresh that needs no run-6 number (Sonnet 5.5), F4 (Opus 5.5) and
+> the phase close-out; **W6b** on `claude/phase23-w6b`, cut from `main` after W6a
+> merges — T23.10.2(b), the seventh draft of `PUBLIC_BENCH_ANALYSIS.md` and the
+> comparisons' performance rows, once the maintainer has run run 6. Run 6
+> measures **`1.0.0-beta18`**, a release the maintainer cuts from `main` after
+> W6a merges (**D-75**). Competitor versions pinned at kickoff (latest patch of
+> each named line on 2026-10-06): **Keycloak 26.8.0** (the only 26.8.x tag on the
+> Docker Hub mirror; `quay.io` is unreachable from the sandbox, so the runbook
+> re-checks for a later patch before the run), **Zitadel v4.19.4** (latest
+> `v4.19.*` tag on `ghcr.io`), **authentik 2026.8.3** (latest `2026.8.*` tag;
+> pulled here from Docker Hub's `authentik/server`, because `ghcr.io` blob
+> downloads are blocked by the sandbox proxy). Docker runs in the sandbox, so the
+> authentik target is smoke-tested here. Numbering at kickoff: next decision
+> **D-75**, next threat **T-448** (model 2.35.0: 447 threats, 426 mitigated / 21
+> open), schema **v84** (W6 should need none), contract **1.58** (unchanged),
+> findings **P23W6-NN**.
+
+> **W6 F4, 2026-10-06:** [`security-review-phase23-w6-2026-10-06.md`](security-review-phase23-w6-2026-10-06.md).
+> Twelve findings, no merge blocker after fixes. Fixed on the branch: the generated
+> broker password reached every full-profile cell's `meta.json` and the
+> `bench-pack` archive inside `AXIAM__AMQP__URL` (**P23W6-01**, Low); `rl=prod`'s
+> source pin failed open, `eval` discarding the script's status (**P23W6-02**,
+> Low); the seed env, now holding the admin passwords, was readable between write
+> and `chmod` (**P23W6-03**, Low); `check-amqp-transport.py` read the minimal
+> overlay's `!reset null` as a URL and would have turned W6a's CI red
+> (**P23W6-08**, Low); T-102's text, the design document and the website said
+> revocation reaches every connection AXIAM terminates, but OAuth2
+> `tls_client_auth` reads no certificate status (**P23W6-04**, text); the "own
+> request path" count said three (write-up) and two (website), "none a defect" —
+> it is seven, three of them not trade-offs (P23W6-05); the run-6 runbook now says
+> the targets listen on every interface and the overlay is no deployment file
+> (P23W6-06); **D-74 amended** — an unvouched account's request cannot be reached,
+> nothing lists it, so a federated account cannot approve CIBA (P23W6-07; the
+> decision stands). Reported, all pre-existing, filed as ilpanich/axiam#564 … #569: a
+> locked account is refused before any password verify — faster than an unknown
+> name, and `401` against `503` under saturation, shown by a timing-free test;
+> gRPC `ValidateCredentials` verifies nothing on any refusal (**P23W6-09**, Medium,
+> new **T-469**, Open, #564); the CRL, and `tls_client_auth`'s missing status check
+> (**P23W6-10**, Medium, T-102, #565); loopback binding for the benchmark targets
+> (P23W6-06, #567); a CIBA pending list on the console (P23W6-07, #566); eight families with
+> no `rl-prod-check` row (P23W6-11, #568); the stop grace against actix's shutdown, and
+> `genhex`'s write-then-chmod (P23W6-12, #569). The harness otherwise held: no
+> credential literal, eight self-test mutations caught, CI masking right, and the
+> FAPI workflow's exported password wins through both `bench-up`s (traced). D-78
+> is sound and the generator hides no open entry. Threat model **2.36.1 — 469
+> threats, 425 mitigated / 23 open / 21 not applicable**. Its §15 is for the
+> project: what stays open, the preconditions future work inherits, and what to
+> schedule before 1.0 (#549, T-469, the CRL first). New ids start at **T-470**.
+
+### Phase 23 summary — 2026-10-06
+
+Six waves, W1 … W6a, merged or merging as PRs #521, #527, #534, #543, #559 and
+W6a's; one task, T23.10.2(b), rides W6b. Decisions **D-1 … D-79** (D-11, D-55,
+D-60, D-75 and D-76 by the maintainer); six F4 reviews, **79 findings**. The
+threat model went from **2.17.0 — 288 threats, 275 mitigated / 13 open** at the
+start of the phase to **2.36.1 — 469
+threats, 425 mitigated / 23 open / 21 not applicable**; contract **1.52 → 1.58**
+(§28.12, §29 … §33).
+
+| Gap | Outcome | Issue | What stays open |
+|---|---|---|---|
+| **G-1** Certification | **Shipped** the X7 work (gates and profile-confusion matrix, session evidence, OP cookie and `return_to` hop, honour lane, sensitive scopes, `client_secret_basic`, the per-tenant OP cookie D-11) and the Basic OP harness; `fapi-conformance.yml` runs end to end (D-60) | #513 (open) | The submissions themselves: the maintainer's browser-driven conformance runs |
+| **G-2** SAML 2.0 IdP | **Shipped** (W3–W4): SP- and IdP-initiated SSO, signed assertions under a tenant CA credential, pairwise `NameID`, SLO tied to session revocation, metadata, SP registry (§29), console; the Critical SP signature-confusion defect fixed on the way (D-23) | #528 (closed) | #536 (console switch), #538 (SLO against a real SP), #530, #531 (SP verifier). Assertion encryption and artifact binding declined (D-2) |
+| **G-3** LDAP / AD | **Shipped** (W2–W3): bind-as-user over TLS, JIT, group mapping, sync, address guard, §30, console, tested against OpenLDAP and Samba AD | #522 (closed) | Kerberos declined (D-1) |
+| **G-4** RFC 7592 | **Shipped** (W1, §28.12) | #514 (closed) | — |
+| **G-5** SSF transmitter | **Shipped** (W4): CAEP and RISC SETs, push and poll, stream management (§32), per-tenant issuers (D-55) | #542 (closed) | SDK receiver helper #541 (T-388); a receiver is later (D-4) |
+| **G-6** Outbound SCIM | **Shipped** (W5, §31) | #544 (closed) | #550 (a tarpit downstream stalls a replica) |
+| **G-7** CIBA | **Shipped** (W5, §33): poll and ping, FAPI-CIBA; no push, no `user_code` (D-64, D-65) | #545 (closed) | #566 (no pending list; federated accounts cannot approve, D-74 amended), #549 (the device grant's twin of T-447), SDK helper #548 |
+| **G-8** AMQP-less profile | **Shipped** (W5): the minimal profile and its resting footprint | #546 (closed) | #552, #553, #554 (audit durability and orderly exits); #569 |
+| **G-9** Verifiable credentials | **Design only**, as planned (W1) | #515 (closed) | Implementation waits for specification stability and an adopter |
+| **G-10** Benchmark currency | **Half shipped** (W6a): the authentik target, the run-6 runbook, Keycloak 26.8.0 and Zitadel v4.19.4 pins, per-run credentials | #561 (open) | Run 6 against `1.0.0-beta18` and the seventh draft (W6b) |
+| **G-11** RADIUS | **Spike done; native front end declined** (D-77) | #562 (closed by W6a) | #563 (FreeRADIUS route, on request); the CRL #565 |
+| **G-12** Front-channel logout | **Declined** and recorded (D-6) | #515 (closed) | Reopens only on an adopter request |
+| **G-13** Social presets | **On demand**; no task | — | — |
+| **G-14** Portal features | **Watch, do not chase**; no task | — | — |
+| **G-15** Agent identity | **Shipped** as documentation (W1) | #515 (closed) | — |
+
+**Declined or deferred by decision:** Kerberos (D-1), SAML assertion encryption
+(D-2), an SSF receiver (D-4), front-channel logout (D-6), CIBA push mode and
+`user_code` (D-64, D-65), a native RADIUS front end (D-77).
+
+**Open after Phase 23**, by kind (the W6 F4 review's §15 has the detail and the
+order to schedule them in — #549, T-469 #564 and the CRL #565 first):
+- *the phase's own remainder:* #513 (G-1 submissions), #561 (G-10's W6b);
+- *SDK fan-out (D-35):* #540, #541, #547, #548;
+- *review findings, W1–W6:* #517, #518, #519, #520 · #523, #524, #525, #526 ·
+  #529, #530, #531, #532, #533 · #535, #536, #538 · #549 … #555 · #564 … #569;
+- *on request only:* #563 (RADIUS).
+
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This
 plan does not edit `roadmap.md`; the phase is added when the maintainer
@@ -2304,7 +2499,12 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-71 | *Taken by the orchestrator, 2026-10-05, on T23.7.3's report.* §4 G-7 asks for "poll and ping end to end in the e2e harness", but the compose e2e stack cannot reach a ping receiver without weakening production: the deliverer requires `https` and refuses private addresses (`AXIAM__PKI__SSRF_ALLOWED_HOSTS` exempts the address rule, never the scheme), its client trusts the webpki roots only, the write-time policy refuses private literals and local names, and the e2e compose sets no `pki_encryption_key` | **Poll runs end to end in the compose e2e harness** (`frontend/e2e/ciba.spec.ts`, real browser approval); **ping runs end to end at the Rust level** (`ciba_ping_flow_test`: the REST routes, `CibaService` and the production `CibaPingDeliverer` through its loopback test seam, against a loopback receiver), the precedent W4 set for SSF push. Rejected: an operator setting for extra trust anchors on guarded outbound fetches (new production surface and a threat entry, to serve a test); dropping ping from the acceptance |
 | D-72 | *Raised in T23.8.2 (Opus 5.5), 2026-10-05; taken by the orchestrator.* D-59 says an instance that loses its singleton lease "exits non-zero" but not how soon; the first build exited at once, wherever it was, losing queued audit rows (T23.8.2's A1) | **An orderly stop with a 15 s backstop.** A lost lease raises a flag; the instance stops accepting at once, finishes in-flight requests, drains the audit queue (bounded at 5 s), joins the cleanup task and exits non-zero; `std::process::exit(1)` remains only as the backstop after 15 s (`LeaseTiming::lost_stop_deadline`). The audit drain applies to every orderly stop, SIGTERM in the full profile included. Rejected: an immediate exit (the regression); waiting the 30 s lease TTL (two instances serve longer) |
 | D-73 | *Proposed by the W5 F4 review (Opus 5.5), 2026-10-05, P23W5-02; accepted by the orchestrator (implemented; the maintainer may override in the wave PR).* T-418: one `scim_delivery_failed` notification mail per SCIM dead letter floods a rule's recipients while a target is down | **At most one `scim_delivery_failed` notification per target per hour; every dead letter keeps its audit row and its count.** `NotifyingAuditLog` takes a `NotificationGate` (no constructor without one), asked only for a notifiable row after the append; the SCIM gate claims `scim_target_state.failure_notified_at` with a conditional write (schema **v84**), so replicas agree; a target of another tenant or a deleted one claims nothing; a gate that cannot decide stays silent and logs once. The console's `state` shows the outage's size. Rejected: notify only on the transition into failure (a flapping target floods again); an in-memory per-process window (N replicas, N mails); a digest mail; changing the generic dispatcher for every event (T-117's own issue, #551) |
-| D-74 | *Proposed by the W5 F4 review (Opus 5.5), 2026-10-05, P23W5-03; accepted by the orchestrator (implemented; the maintainer may override in the wave PR).* T23.7.2 mailed the CIBA approval prompt to whatever address an account carried, proven or not — a self-registered account with a stranger's address plus a client that can call `bc-authorize` makes AXIAM mail that stranger | **The approval mail goes only to an address D-25's rule vouches for** — `email_verified_at` set, or the account `Active` — the rule the SAML IdP applies to an email `NameID` and SSF to an email subject. An unvouched address is the same quiet no-op as an account that may not sign in; the request is stored, answered as before (T-422) and waits on the approval page. Consequence: a federated account (`PendingVerification` for life, T-160) gets no approval mail unless an address was verified. Rejected: mailing any address (a phishing relay quoting client-chosen text); verified-only (ends mail for administrator-created accounts) |
+| D-74 | *Proposed by the W5 F4 review (Opus 5.5), 2026-10-05, P23W5-03; accepted by the orchestrator (implemented; the maintainer may override in the wave PR).* T23.7.2 mailed the CIBA approval prompt to whatever address an account carried, proven or not — a self-registered account with a stranger's address plus a client that can call `bc-authorize` makes AXIAM mail that stranger | **The approval mail goes only to an address D-25's rule vouches for** — `email_verified_at` set, or the account `Active` — the rule the SAML IdP applies to an email `NameID` and SSF to an email subject. An unvouched address is the same quiet no-op as an account that may not sign in; the request is stored, answered as before (T-422) and waits on the approval page. Consequence: a federated account (`PendingVerification` for life, T-160) gets no approval mail unless an address was verified. Rejected: mailing any address (a phishing relay quoting client-chosen text); verified-only (ends mail for administrator-created accounts). *Amended by the W6 F4 review, 2026-10-06 (P23W6-07): "waits on the approval page" describes a page nobody can reach. The console has no list of a user's pending requests — only `GET /api/v1/ciba/requests/{request_id}` and its `approve`/`deny` — and the record id travels only in the mail, so an unmailed request cannot be opened and runs to expiry; the client sees `expired_token`. A federated account with no verified address therefore cannot approve a CIBA request at all, and CIBA is usable only for accounts with a vouched address. The decision stands (mailing an unvouched address is the relay it closed); the remedy, a signed-in user's own pending-request list on the console, is an issue body in the review.* |
+| D-75 | **Decided by the maintainer, 2026-10-06, at the start of W6** (the recommended option). Which AXIAM build does benchmark run 6 measure? `1.0.0-beta17` (2026-09-25) predates every Phase 23 wave | **A new release, `v1.0.0-beta18`, cut by the maintainer from `main` after W6a merges**, so it contains W1–W5 and W6a's harness; run 6 measures the published image `ghcr.io/ilpanich/axiam/server:1.0.0-beta18`, as run 5 measured `1.0.0-alpha24`. The runbook names the tag and lets the provenance preflight check the image's `build_ref` against `origin/main`; the commit is recorded when the tag is cut. Rejected: the beta17 image (measures none of Phase 23 — no minimal profile, no CIBA, SCIM client or SAML IdP in the binary); a source build (loses the release-image parity with run 5 and the provenance preflight) |
+| D-76 | **Decided by the maintainer, 2026-10-06, at the start of W6** (the recommended option). Run 6 runs off the sandbox, on the maintainer's G-box: does W6 wait for it? | **Two PRs.** W6a now: T23.10.1, T23.10.2(a) (`run6-runbook.md`), T23.11.1 and its threat entries, the comparison refresh that needs no run-6 number, F4 and the phase close-out. W6b after the results: T23.10.2(b) — the seventh draft of `PUBLIC_BENCH_ANALYSIS.md`, the comparisons' performance rows and change-log lines, and the website where it quotes benchmark numbers — on `claude/phase23-w6b`, cut from `main` after W6a merges. The maintainer runs run 6 after W6a merges and beta18 is published. Phase 23 is recorded complete at W6a with T23.10.2(b) the one open task, tracked by G-10's issue and closed by W6b. Rejected: one PR held open until the results (a wave's reviewed work waits on an off-sandbox run with no date) |
+| D-77 | *Taken by the orchestrator, 2026-10-06, on T23.11.1's record (the maintainer may override in the W6a PR).* G-11 asks whether a RADIUS front end with EAP-TLS over the integrated CA fits AXIAM and what it would cost | **Decline the native front end now; the FreeRADIUS-backend route when a named adopter asks; publish a CRL regardless.** Reopen condition: a named adopter needs 802.1X, VPN or network-device login and will not run FreeRADIUS, or option B has shipped with a documented shortfall. The record's §6 is the security baseline any build starts from. Rejected: building option A in Phase 23 (XL for an audience nobody has named, and a new authentication path and trust boundary); a guide alone for option B (the tree publishes no CRL, so FreeRADIUS would have no revocation channel) |
+| D-78 | *Taken in T23.11.1's threat entries (Opus 5.5), 2026-10-06, accepted by the orchestrator.* How do threat entries for a surface that ships nothing enter the model, given that the W5 F4 review requires them? | **Threat Dragon's `NotApplicable` status, on a design-only diagram whose elements are out of scope.** Such an entry counts in the total and in neither the mitigated nor the open count, never appears in the open-risk register, and says what any build must do from its first commit and the status it would take; the commit that builds an element moves its entries to Mitigated or Open with tests. `gen-threat-model.mjs` counts the status apart. Rejected: Mitigated (no control exists — the T-108/T-117 mistake); Open (nothing is exposed and no task is building it, so the register would nearly double with entries that may never close) |
+| D-79 | *Taken by the orchestrator, 2026-10-06, on T23.10.1's report.* How is authentik measured fairly against the run-5 caps and the shared scenarios? | **(1) The worker carries the server's cap** (2 CPU / 2 GiB; database 2 CPU / 1 GiB), because authentik cannot run without it: the stack's configured ceiling is 6 CPU / 5 GiB against Keycloak's 4 / 3, and the report states that beside every whole-stack figure, while its "server only" variant sums server and worker. **(2) Password login is the flow executor's real password verification**, labelled `protocol-variant` for that one cell, not a not-comparable cell: it hashes for real, as the report requires of every target, but takes three calls. **(3) `token_refresh` stays a flagged `fallback-op`**, as for Zitadel (authentik issues no refresh token to ROPC or client credentials). **(4) The settle gate's 10 ops/s for authentik is a liveness check**; the runbook says to wait for a quiet stack and raise it once a settled rate is known. Rejected: squeezing server and worker into one 2-CPU budget (measures a deployment authentik does not ship); measuring ROPC as "password login" (a token compare, no hash) |
 
 ---
 

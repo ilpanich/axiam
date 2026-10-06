@@ -69,7 +69,7 @@ bootstrap 400s (masked by `|| true`), admin login then fails, seeding aborts.
    service environment in `targets/axiam/docker-compose.yml` (bench-only; do not touch
    `docker/docker-compose.prod.yml`).
 3. Call bootstrap with the new body:
-   `{"organization_name":"Bench Org","tenant_name":"Bench Tenant","tenant_slug":"default","email":"admin@bench.dev","username":"admin","password":"Bench@Admin123!"}`
+   `{"organization_name":"Bench Org","tenant_name":"Bench Tenant","tenant_slug":"default","email":"admin@bench.dev","username":"admin","password":"<generated per run>"}`
    and parse `organization_id` / `tenant_id` / `tenant_slug` from `BootstrapResponse` into
    `ORG_ID` / `TENANT_ID` / `TENANT_SLUG` (prefer `jq` over `sed`; `jq` is already a documented
    prerequisite in `README.md`).

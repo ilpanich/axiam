@@ -14,12 +14,13 @@ export type { ThreatModel, TmDiagram };
 export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
- "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
- "version": "2.35.0",
- "diagramCount": 9,
- "total": 447,
- "open": 21,
- "mitigated": 426,
+ "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment, and — as a design-only diagram whose entries are recorded Not applicable — a RADIUS front end that is not built.",
+ "version": "2.36.1",
+ "diagramCount": 10,
+ "total": 469,
+ "open": 23,
+ "mitigated": 425,
+ "notApplicable": 21,
  "diagrams": [
   {
    "id": 0,
@@ -96,7 +97,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Every state-changing request is written to the append-only audit_log with actor id, actor type, IP, outcome and timestamp; audit batches are signed with the tenant OpenPGP key."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2f920e4f-a713-5e0e-9185-033f9d45c36e",
@@ -124,7 +126,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Client secrets are stored HMAC-SHA256 hashed, never in plaintext; secrets are redacted from Debug output; rotation is supported. Deployments should prefer mTLS or short-lived workload identity over static secrets."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "dcbee205-bc5b-5a53-95de-ff3f301d7014",
@@ -151,7 +154,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "SEC-024: mTLS auth verifies the full chain to the tenant/org CA after the fingerprint lookup and fails closed when no active CA exists. Revocation invalidates the device immediately. Devices should hold keys in a secure element where available."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "62dc12c6-8941-5127-b674-5001c783ba60",
@@ -178,7 +182,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Assertions are signature-verified against pinned IdP keys; JWKS and discovery documents are fetched only through the SSRF-guarded resolve-and-pin helper; attribute-to-role mapping is explicit and tenant-scoped. Federation is a deliberate trust delegation — the tenant owner accepts the IdP as an authority."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "df34f1a4-ec9f-557f-8120-7b151eb06d54",
@@ -206,7 +211,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Tokens are CSPRNG-generated, single-use and short-lived; reset confirms only over an authenticated POST; provider API keys are encrypted at rest and TLS is required on every provider hop."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1121595d-5951-5a6f-9335-898c5dd0d41b",
@@ -233,7 +239,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Every delivery carries an HMAC-SHA256 signature computed with the per-endpoint shared secret; receivers must verify it before acting."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "6b97cb3c-b213-5c17-acc3-209252e7e436",
@@ -270,7 +277,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is a deployment responsibility and is not shipped with AXIAM."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "cb51a43e-b63a-5602-8eb7-fc0fcfa02750",
@@ -342,7 +350,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "T22.13 (S-9, 2026-09-23). Decision D-5 admits a service-account token on eight permission families — resources, scopes, permissions, roles (assignments included), groups, service accounts, certificates (generate, sign-csr, bind, list, get, revoke) and webhooks — whose 66 handlers now take AuthenticatedPrincipal; every other guarded route keeps AuthenticatedUser and still answers a machine token with 401. The boundary is two constants in permissions.rs checked against PERMISSION_REGISTRY, and a sweep drives every route of ROUTE_PERMISSION_MAP, plus every other non-public /api/v1 operation in the OpenAPI document, with real service-account tokens: admitted exactly on those families, refused everywhere else, and an account with no role reaches none of them (403 authorization_denied — RBAC is default-deny). Reaching a route is not being allowed on it; each is authorized by the roles assigned to the account. Widening the surface made four latent properties of AuthenticatedPrincipal matter, and all four are closed. (1) A machine-audience token is admitted only with sub_kind = service_account, because an RFC 8693 exchange can narrow a user's token to axiam:m2m and the machine branch skips the session check — such a token would have acted as that user with no session behind it. (2) Its user branch is now AuthenticatedUser's own code, not a copy; the copy read the session id from jti where the original reads sid first, so an OAuth2-issued user token would have been refused on every converted route; a differential test compares both extractors case by case. (3) The T21.6 tenant-path binding applies to both kinds. (4) X-Axiam-Tenant is resolved for a service account through the same function as for a user, so only an organization-level account may name another tenant of its organization, within its tenant_scope; and no service account is an organization principal for issuance, so the organization CA stays human-only (S-1's gate). A certificate-bound device token is refused on the new surface without its certificate, since enforce_sender_constraint runs on every extraction path. The audit middleware records the actor type from the signed sub_kind claim, so a service account's write reads service_account rather than user, and grant.pre_assign payloads carry actor_type for four-eyes rules. The CSRF exemption for bearer-only callers (T-200) is unchanged and does not cover a request that also carries a session cookie. Residual: a service account holding roles:assign can grant itself any role of its tenant, exactly as a user with that permission can — RBAC is the control, and granting it is the operator's decision; a machine token has no session to revoke, so disabling an account stops new tokens and the last one lives out its access-token lifetime (15 minutes by default); families outside D-5 still require a person, each to be argued on its own."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "c840f79b-58af-5760-bed5-695977fed95e",
@@ -378,7 +387,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "T22.12 (S-8, 2026-09-23). Two flat variables beside the certificate pair: AXIAM__GRPC_TLS_CLIENT_AUTH (off default | optional | required) and AXIAM__GRPC_TLS_CLIENT_CA_PATH. The verifying modes install a ReloadableClientCertVerifier — the REST listener's mechanism, as a second instance, because the policy is fixed per verifier and the two listeners may be configured differently — registered with reload_trust_anchors, which re-reads each gRPC listener's own bundle so it never trusts a set its next boot would not read. Pointed at the REST bundle, flagging a CA reaches both listeners without a restart, and only then is the reload reported as applied. required is enforced by rustls in the handshake, ahead of every RPC. The verified certificate reaches the interceptor through tonic's TlsConnectInfo, which the custom accept loop already produced — confirmed against tonic 0.14.6 and end to end rather than assumed — so a device token is now accepted over gRPC with its own certificate and refused with another device's or with none. Boot is refused, not warned about, on an unknown mode, on optional_self_signed, on a verifying mode without a bundle, on a bundle under off, on an empty or unreadable bundle, and on either variable set while the listener is plaintext. A reload that finds the bundle empty or unreadable keeps the previous anchors. off keeps with_no_client_auth(); the I1 compares handshakes, not structs, across four client shapes against the pre-change configuration, including a client holding a certificate, which is neither asked for it nor has it reach the server. Residual, by design: the default is off, so a deployment that sets nothing keeps a bearer-only gRPC listener; and the certificate is proof of possession and a gate, never an identity."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "f1483c57-3f03-5760-9437-ed84f813a320",
@@ -406,7 +416,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "SEC-022 / SEC-055: messages carry an HMAC-SHA256 signature over the canonical JSON body, verified with constant-time comparison before the message is processed; a failed check is nacked without requeue and logged as a security event. SDK CONTRACT §8 makes this mandatory for every SDK that consumes AXIAM queues."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "6e37431c-2faf-5dbe-a94a-a425b4edd17f",
@@ -456,7 +467,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta05: is_bearer_only(authorization, has_session_cookie) is a pure function so the condition can be pinned by unit tests. A bearer token with no session cookie is exempt — CSRF is an attack on credentials the browser attaches by itself, and a cross-site page cannot set an Authorization header on a victim’s behalf. A bearer header alongside a session cookie is deliberately not exempt (the load-bearing case), and no bearer means no exemption whatever the cookies say. Scheme matching is case-insensitive and leading-whitespace tolerant, and the machine principal extractor accepts the axiam:m2m audience."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "76d7e689-0541-59d7-ad98-0c2f633e96f2",
@@ -489,7 +501,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "SEC-040 — closed (B1). The engine now supports explicit deny: a grant carries effect: \"allow\" | \"deny\", and a deny overrides every allow, at any depth of the resource hierarchy and at equal specificity (deny-override, not most-specific-wins). Adding a deny rule can never widen access and can never be undone by adding allows — asserted by an exhaustive property test. Modelling exclusions by granting lower in the hierarchy remains valid but is no longer the only option. See claude_dev/deny-override-design.md for the precedence table and the scope-interaction rules. Amended 2026-09-22 (T22.11, DF-021): an assignment can also be made non-inheritable — inherit: false on the has_role edge — so a role granted high in the hierarchy can be stopped at its node instead of cascading to every child (\"here and no further\"), for allows and denies alike. Precedence is unchanged: the flag decides which assignments are applicable at a resource, never how deny-override weighs them (deny-override-design.md §2.2 rows 9–11). The flag's own hazards are T-285."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b0953520-e5ca-5c39-8233-e8a9a3b7446b",
@@ -534,7 +547,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "2d371ad. `retry_on_write_conflict` now exists; `update` — which every administrative and SCIM write goes through — and `increment_failed_logins` use it, and replay is safe because a conflicted transaction commits *nothing*, which is also why the non-idempotent `failed_login_attempts += 1` can be retried at all. `classify_write_error` gains a conflict branch feeding `DbError::Conflict`, ordered after the UNIQUE check so a constraint violation — a statement about the request, which retrying only reproduces — still wins, and a contended write is no longer reported as a schema-migration failure that sends operators hunting a broken migration; the HTTP status stayed `5xx` pending a separate decision, which was taken on 2026-09-12 (R-4, decision A): a contended write now answers **`503 Service Unavailable` with `Retry-After: 1`** over REST and `UNAVAILABLE` over gRPC, through one new payload-free `AxiamError::WriteContention` and one mapping. `503` because the answer is a statement about the *server* — come back in a moment — which is what an IdP driving SCIM provisioning (Okta, Entra) treats as transient and retries; `409` in SCIM means \"your request conflicts with the resource's state\" (RFC 7644 §3.12), a statement about the request that changing the request is the response to, and `500` tells a client to stop when the correct advice is the opposite. The variant carries no payload, so the engine's own words stay on `DbError::Conflict` for the log and can never reach a body; the `Retry-After: 1` is a convention rather than a measurement, and CONTRACT §16.1 makes every SDK honour it as a floor so a client's own backoff still governs the wait. The UNIQUE-before-conflict ordering is what keeps a constraint violation on `409`, and it is pinned by its own I4 twin. No SDK behaviour needed to change — §16.3 already retries `5xx` on an eligible operation — and each SDK gains one test pinning that. Both legacy literals now live in `WRITE_CONFLICT_MARKERS` beside the v3 phrasing and the helper delegates, so the two sets can never again disagree about what a conflict looks like — the drift D-09 and `scripts/check-conflict-markers.py` exist to prevent, and which survived because these were never one set. Seven tests, one pinning the verbatim message captured from the failing run. **Corrected 2026-09-13 (f7d5ab8).** The sentence above claimed `503` *over REST*, and for a day it was true of every REST surface but the one the defect was found on: `axiam-scim`'s own error type maps `AxiamError` itself, its 5xx branch redacted every body to \"An internal error occurred\", and `WriteContention` fell through its catch-all as `500` — the exact answer an IdP reads as a failed sync. It now maps to `ScimError::retry_later`: `503`, `Retry-After: 1`, no `scimType` (RFC 7644 §3.12 defines none for a 5xx), the header and the body's exemption from redaction set from one field so they cannot drift apart, and the echoed `detail` a fixed, payload-free sentence — the engine's own words stay on `DbError::Conflict`, in the log, and a control test asserts that an ordinary `500` still redacts and advertises no retry. Four handler-level tests over the wire, one row on the mapping table. A control wired on two of three surfaces had been recorded here as whole; it is recorded now as it was."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "729c29f1-a3e5-5c09-9304-ccb838d250ff",
@@ -562,7 +576,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The audit_log table grants no UPDATE or DELETE at the SurrealDB permission level, and batches are signed with the tenant OpenPGP key so removal or edit is detectable. Ship audit records to an external WORM sink for defence in depth."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "d52c38c4-1341-5d1f-8517-836feb9cfadb",
@@ -590,7 +605,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Consumer prefetch is bounded by configuration and broker credentials are per-service so a single misbehaving producer can be revoked. Async authz is a deferred path; synchronous gRPC checks are unaffected."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "bcca5e76-1845-552a-9430-1d8d3a20e3ae",
@@ -617,7 +633,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The signing key is fetched through the pluggable secret provider — HashiCorp Vault by default in the production stacks (AXIAM__AUTH__SECRET_PROVIDER=vault), Kubernetes Secrets otherwise — and never lives in the image or a ConfigMap; CA private keys are additionally AES-256-GCM encrypted at rest. Rotate signing keys on a schedule — JWKS publishes multiple key ids so rotation is non-breaking — and where Kubernetes Secrets are the source, enable envelope encryption for etcd."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "edges": [
@@ -647,7 +664,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "TLS 1.3 minimum; HSTS emitted by the security-headers middleware; auth cookies carry the Secure attribute so they are never sent over plaintext."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e1c3fab6-33e4-5f72-8d50-6ce012cdfa39",
@@ -676,7 +694,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "SDK CONTRACT §6 makes strict TLS verification unconditional and absolutely prohibits any bypass API (no skip_tls_verification, insecure, allow_insecure, verify_peer(false)); the only escape hatch is with_custom_ca(pem) for development CAs. CI lint gates in each SDK repository grep for bypass patterns such as InsecureSkipVerify."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "d6507045-ba09-5901-9d86-da1fb27d443a",
@@ -694,7 +713,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "mTLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "92e26258-1a86-54c7-9fc8-990e014020f2",
@@ -712,7 +732,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "HTTP/2",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "6b70ad3d-16a6-51ec-a18a-8d19a065e3c0",
@@ -730,7 +751,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "gRPC/HTTP2",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ecc39267-ad38-50ad-b761-29328c662a83",
@@ -748,7 +770,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "436d50ed-17d6-5352-a5b1-ca761479c87c",
@@ -766,7 +789,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "448ca573-9d04-5851-b041-bf1518676601",
@@ -785,7 +809,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3f35443c-4a63-58df-9d48-619b7c795989",
@@ -804,7 +829,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "84874875-b0fc-5d01-9e46-7e5b070e1611",
@@ -833,7 +859,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Parameterised queries only — SurrealDB bind parameters are used throughout axiam-db; no query is assembled by string concatenation of user input."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a537610b-f08b-593a-908b-7aab0a292fad",
@@ -852,7 +879,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL/WSS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ef3facab-deb6-57a7-93a0-b7c49bdd5991",
@@ -871,7 +899,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "AMQPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a8a236be-cf02-5339-bc5f-dbec6bb1caf7",
@@ -890,7 +919,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "AMQPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ce605a4f-1539-5038-b600-290b738469c5",
@@ -909,7 +939,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "K8s API / file",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2feed68f-7d68-59be-b820-8ecc432a3a37",
@@ -938,7 +969,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "SEC-069 / D-01: guarded_fetch resolves A and AAAA fresh, rejects loopback, private, link-local, ULA and unspecified addresses, pins the validated IP for the connect (closing the DNS-rebind TOCTOU window), enforces https on every hop including redirects, and caps the advertised body size. SEC-107 adds a deliberate, bounded bypass for same-network IdPs: AXIAM__PKI__SSRF_ALLOWED_HOSTS is default-empty, set only at the composition root, matches exact hosts (no wildcards, no CIDRs), applies to the first hop only with redirects always strict, and logs every use — and cloud metadata endpoints stay blocked even for an allowlisted host, with IPv4-mapped canonicalisation running before that check so the allowlist cannot re-open SEC-094."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "0a71dad5-4d7f-51ff-bde4-a79e4e0898f1",
@@ -957,7 +989,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "SMTP-TLS / HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2ad94690-1f56-5241-ac1b-a7d47b2cd04d",
@@ -985,11 +1018,13 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Webhook delivery uses the same guarded_fetch resolve-and-pin guard as federation: private and loopback destinations are rejected before connect."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "total": 33,
    "open": 2,
+   "notApplicable": 0,
    "bySeverity": {
     "High": 17,
     "Medium": 13,
@@ -1063,7 +1098,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "WebAuthn/FIDO2 passkeys and hardware keys are supported and are origin-bound, so they resist real-time proxy phishing. Tenants requiring phishing resistance should mandate WebAuthn rather than TOTP."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "c0035bef-d326-5b96-960a-2106baccf92d",
@@ -1089,7 +1125,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Reset tokens are CSPRNG-generated (never UUIDv7 — see the design-document note on id generation), single-use and expire quickly; consuming a reset invalidates existing sessions."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "6800fc4b-a3b4-581c-b613-969b5a6e9d2d",
@@ -1116,7 +1153,7 @@ export const THREAT_MODEL: ThreatModel = {
        "severity": "Medium",
        "status": "Mitigated",
        "description": "Different status codes, error bodies or response times for existing versus non-existent accounts let an attacker enumerate valid usernames and email addresses.",
-       "mitigation": "Login returns a uniform failure for unknown-user and bad-password alike, and password verification runs on a dummy hash when the user does not exist so timing does not distinguish the cases."
+       "mitigation": "Login returns a uniform failure for unknown-user and bad-password alike, and password verification runs on a dummy hash when the user does not exist so timing does not distinguish the cases. Residual (W6 F4 review, model 2.36.1): the temporary-lockout branch answers without the dummy verify, and gRPC `ValidateCredentials` runs none on any refusal; recorded open as T-469."
       },
       {
        "number": 31,
@@ -1153,9 +1190,19 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Three CodeQL high-severity alerts on this wave, one class. `LoginOutput` gained a browser session token, and its derived `Debug` would have printed three credentials; a test panic formatted a whole `LoginResult`, whose non-`Success` variants carry a live MFA challenge token and a setup token; two assertions printed a full `Set-Cookie` header, token included, to explain a failed attribute check, and an `assert_ne!` on two cookie values prints both credentials when it fires. A panic message reaches stderr and a CI log that outlives the run, so a test is not exempt — the values are fixtures, but the sink is real and the next author's would not be.",
        "mitigation": "SECHRD-09 applied to every new sink rather than to the one CodeQL named. `LoginOutput`, `BasicCredentials` (T-253) and `UserInfoPostForm` (T-243) hand-write redacting `Debug` impls; the tests name the variant or the cookie that was set, never the value — compare, then assert. The TRACE-capture tests grep for the secret, its encoding and the header value rather than trusting the absence of a `{:?}`. `axiam-core`'s three redacting certificate `Debug` impls, which reach `{:?}` in handler-level tracing spans where `#[serde(skip_serializing)]` cannot help, are now asserted — `Option`-aware on purpose, since a `vault_pki` CA has no key and printing `[REDACTED]` would claim one was withheld. One adjacent hygiene fix on 2026-09-13 (fcc976d): the two redaction tests R-5 added for `DbConfig` and `AmqpConfig` wrote a literal fake password into the source, which a secret scanner (GitGuardian, on the PR) cannot tell from a real one and neither can a reader six months later. They now mint the value through `axiam_test_support::test_password`, so the assertion holds for whatever the helper produces rather than for one string, and the seeder derives its credential field-name list from the environment table rather than repeating it. No scanner exemption was added: `.gitguardian.yaml` is for published RFC test vectors, and silencing a detector over a value one can simply stop writing is how an exemption list stops meaning anything."
+      },
+      {
+       "number": 469,
+       "title": "A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "Open",
+       "description": "`AuthService::login` refuses an account serving a temporary lockout, local or directory, before it asks for a hash permit or runs any Argon2id verify (`crates/axiam-auth/src/service.rs`, step 2), while an unknown name and a wrong password each cost one verify (SEC-026, T-30). Lockout is set by the attacker's own failures, so a name that answers fast after N wrong passwords exists and one that keeps costing a verify does not: an enumeration oracle at N + 1 requests per name, which also locks the real user out (T-35). Under hash-permit saturation the difference is in the status itself: the locked account answers 401 while every branch that verifies answers 503. gRPC `UserService/ValidateCredentials` answers an unknown name, and a locked, non-active or directory account, `valid: false` with no verify at all, an oracle for any caller holding a validated token of the tenant.",
+       "mitigation": "Open (W6 F4 review, 2026-10-06, model 2.36.1; found by the T23.11.1 RADIUS spike, whose T-457 requires the same of any RADIUS build). Fix: run the equalising dummy verify, under the same bounded permit, on the lockout branch (still before the directory is contacted, T-302, and without verifying the real hash, so a correct password during a lockout neither succeeds nor shows) and on every refusal of `ValidateCredentials`. A timing-free test pins it: with no hash permit available, a locked account must answer the 503 an unknown name answers; today it answers 401 (ilpanich/axiam#564). Bounded meanwhile by the per-IP login limiter and by the lockout's exponential backoff, which makes every probe cost N failed attempts against a real user."
       }
      ],
-     "open": 0
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "cfb2181e-2bde-5024-81d2-ee89349748f7",
@@ -1256,7 +1303,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "M-3 (2026-09-13): POST /auth/webauthn/setup/register/start and /finish both decode the token with the same purpose-checked decoder the TOTP twins use — a challenge token, an expired token or a session bearer are all 401 — and both then ask MfaMethodService whether the account already has any factor, refusing with 400, the same answer setup/enroll gives. The question is asked of MfaMethodService and not AuthService because it spans the TOTP secret and the WebAuthn credential rows, and a check that read only the TOTP half would let a captured token add a second passkey. Nothing about what may register differs from the profile-page ceremony: the attestation policy and the user-verification policy are read from the token's tenant — which for a setup token is the principal tenant — and passed to the same start_registration_for_policy, and finish runs the same enforce_mds_freshness and finish_registration_for_policy (T-229/T-230 hold unchanged). The completion shares one session-issuance tail with the TOTP path, complete_setup_token_login, rather than a second copy: basic-op-gap-plan.md §4 lists every path funnelling through create_session_and_tokens and this adds no unlisted one. The evidence recorded matches what the WebAuthn authentication path records for the same credential kind — pwd for the password that earned the token, hwk or swk for the credential, mfa for the two factors, and user only under a Required user-verification policy, the one setting that rejects a ceremony whose UV bit is clear — so the session lands in urn:axiam:acr:mfa. Unlike the profile-page finish, a failure to mark MFA required fails the request: there is no profile page to correct it from and a session issued while the account still reads no-second-factor would send the user through forced enrolment again with a credential already registered. Both routes are CSRF-exempt and public for the same reason the TOTP twins are — the caller has no session and no cookie to echo, and the only credential is a body token, so there is no ambient credential for a cross-site request to ride."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "bf8d511e-1da8-59ad-909b-a4ad6a647b85",
@@ -1311,7 +1359,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta01: the REST login handler, OPAQUE login-finish and gRPC ValidateCredentials all resolve the org→tenant effective LockoutPolicy before accruing, so an account locks after the same number of failures whichever transport the attacker uses. record_failed_login now takes a LockoutPolicy rather than an AuthConfig — there is no longer a type that fits the parameter and carries the wrong numbers. A settings-resolution failure falls back to the deployment default rather than to no threshold, so a settings outage cannot open a brute-force window."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fcccaa5a-620f-5695-afdb-bae022846c05",
@@ -1359,7 +1408,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Accepted trade-off for stateless verification. The 15-minute lifetime bounds the window; sessions are invalidated on password change; deployments needing immediate revocation can use the gRPC introspection path rather than local JWT verification. **Narrowed server-side on 2026-09-12 (R-6, decision C) and Mitigated on 2026-09-13, when the SDK half landed in all eleven repositories.** `GET /oauth2/revocations` — off by default (`AXIAM__AUTH__REVOCATION_FEED_ENABLED`), and with it off the route is not mounted, no row is written and the deployment is byte-identical to one built before it existed — publishes the base64url SHA-256 of each session id revoked within the last access-token lifetime. Five properties make it safe to serve unauthenticated: entries are **hashes, never identifiers** (a `sid` is a session id and not a subject, so the document discloses neither who was revoked nor how many users are behind it; the argument is non-enumerability of a UUIDv4 preimage space, not that a hash is magic); it is **bounded** by the revocation rate over one token lifetime rather than by history, filtered on read as well as swept so a late sweep makes the table large and never the document untruthful; it is cacheable with an `ETag` over the entry list only; a guard **never fails closed on it**, which is what stops a network blip becoming an outage; and the token format is unchanged. Three deliberate revocation paths publish — logout, a password or MFA reset, and \"sign out everywhere else\", which does not publish the session it keeps — while the two single-use redemption paths deliberately do not, because a handoff being exchanged is not a session being withdrawn and publishing it would reject a caller whose grant is proceeding normally. Contract 1.44 §10.4 makes polling a **SHOULD** for a guard and scopes §10.2's MUST NOT to per-request polling, which is what it always said. Schema v62; conformance rows 165–169. **Closed on 2026-09-13, by the SDK half.** The entry stayed Open for a day on purpose — a feed nobody polls narrows nothing, the same shape of gap T-266 records for `mtls_endpoint_aliases` — and it flips now because every one of the eleven SDKs implements contract §10.4 (PRs rust #104, typescript #103, python #80, java #92, kotlin #62, csharp #87, php #67, go #77, swift #60, c #59, cplusplus #60, each merged and released at that SDK's 1.0.0-beta14), and §10.4.1 records the attachment point per SDK with no row that `declines`. Each poller was checked against the four rules that make the feature safe rather than merely present: default off, never on the request path, never fail closed (an unreachable feed, a non-`200`, an unparseable body or an unknown `alg` behaves as no feed at all — and specifically not as an empty list), and reject-only. The residual, stated plainly: the window is one poll interval (30–60 s recommended, 15 s floor) rather than zero, and it is opt-in on **both** sides — a deployment that leaves the feed off, or an integration that attaches no poller, keeps the fifteen-minute window and the introspection answer. The trade is narrowed, not removed, which is why the register's accepted-trade-off bullet keeps it.\n\n**Amended 2026-10-03 (F4 P23W1-01).** “The 15-minute lifetime bounds the window” was not true of an account disable. Locking or deactivating a user through `PUT /api/v1/users/{id}` revokes no credential (deletion, SCIM deprovisioning and a credential reset do), and the OAuth2 `refresh_token` grant did not re-read the account. Each rotation stamps a fresh `expires_at`, so a relying party holding a suspended user's grant kept minting access and ID tokens for as long as it kept refreshing: unbounded, not fifteen minutes. T23.1.3 closed the same gap for the OP cookie at `/oauth2/authorize` and recorded that endpoint as the one place a session became a principal without the read; it was not. The `authorization_code` and `refresh_token` grants now re-read the account and refuse a suspended one (`Locked`, `Inactive`, `Anonymized`, `Deleted`, or no account) through the function `/oauth2/authorize` uses (`axiam_auth::service::account_may_act`); `PendingVerification` is not refused, whatever its grace period, because every federated account holds it for life (P23W1-03). A refused account is `invalid_grant`; nothing is minted or rotated, and nothing is revoked, so reactivation restores the grant as it restores the session. The code grant is covered too because the bearer and `axiam_access` path at `/oauth2/authorize` does not re-read the account, and redeeming its code is what turned a 15-minute credential into a long-lived one. What remains is the window this entry always described: an access token already issued lives to its `exp`, and introspection and UserInfo answer it until then. Tests: `token_service.rs::p23w1_01_*` (three refused statuses and a removed account, on both grants; the active, no-user and pending twins) and `oauth2_flow_test.rs::p23w1_01_a_suspended_accounts_refresh_token_mints_nothing_until_reactivated`, each failing before the fix."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "0a06a341-40e5-5a4a-a53e-e095a5c62ca7",
@@ -1397,7 +1447,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Resend is capped (max 2 per day per account) and the endpoint is rate limited."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "4239d8ce-a5f5-5908-86c6-a68436c8e359",
@@ -1426,7 +1477,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "HIBP is queried with the k-anonymity model: only the first five characters of the SHA-1 hash leave the server. A circuit breaker prevents the optional check from becoming an availability dependency."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "723bd2e1-0555-5a1b-9fca-915b84a37849",
@@ -1463,7 +1515,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Each tenant's OPRF seed and AKE keypair (opaque_server_setup, schema v42) are AES-256-GCM encrypted at rest under opaque_setup_key, which is held outside the datastore in the secret provider (Vault in production), so a database-only disclosure yields no dictionary attack to mount at any cost. The trade-off is stated in docs/deployment/vault.md: losing opaque_setup_key means a password reset for every user in every tenant — which is why the Vault seeder never regenerates an existing key, and why the setup key is split from the cheap-to-rotate opaque_session_key."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e27104a1-bf6c-5076-ae53-119e529fc25b",
@@ -1490,7 +1543,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Sessions store a token hash, not the token; the bearer value never rests in the database in usable form."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "56326314-a524-54b8-b713-02a5f29b0a0b",
@@ -1517,7 +1571,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Seeds are AES-256-GCM encrypted at rest with a key held outside the datastore, so a database-only compromise does not yield usable seeds."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e2df752c-693a-54e1-952e-5df6f22f80b6",
@@ -1544,7 +1599,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The shared pre-check fails open onto the per-replica in-memory governor, which is retained unchanged as the fallback — degraded but never absent protection."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a555ee1a-48e7-50f5-a8d1-b431b33657c0",
@@ -1571,7 +1627,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Keys are loaded from Kubernetes Secrets, never from the image; JWKS publishes multiple key ids so rotation is non-breaking; rotate on a schedule and immediately on suspicion."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "edges": [
@@ -1591,7 +1648,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "bc6e4e36-9b83-5308-b703-cd93807ad7ce",
@@ -1609,7 +1667,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "cb9e18e2-9aa5-520f-8421-d72fb83af566",
@@ -1627,7 +1686,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3fbe78c5-695d-5a49-9c82-cdc50d8c0449",
@@ -1646,7 +1706,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "faf43688-3d52-56d9-8b50-da376e04ea80",
@@ -1664,7 +1725,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "98fdc3ac-e829-5af2-8e87-6763ce5b6dab",
@@ -1682,7 +1744,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2ab836c5-adfd-5688-a818-cb732cdd34fb",
@@ -1719,7 +1782,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta03 (CodeQL rust/insecure-cookie): each removal cookie is built by calling the cookie's own setter and expiring the result, so HttpOnly, Secure, SameSite and Path are mirrored by construction rather than by repetition — there is exactly one place per cookie where those attributes are written, the deliberately JS-readable CSRF cookie included (D-07). Tests assert the attributes on the wire for all three cookies, across both logout paths and both cookie_secure values."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "4a77cae1-0cbc-5d8e-b492-ca5be800a0b1",
@@ -1737,7 +1801,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "78349ccf-99d8-5c4e-8c20-da10651453db",
@@ -1755,7 +1820,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "047c2b7d-cf6b-56c9-a4ed-26b167c896ee",
@@ -1773,7 +1839,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "cc949af1-5a7d-5a77-ade2-d29a0755bf2c",
@@ -1791,7 +1858,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "78a00103-7d6e-5909-b092-5361fdcc7f0d",
@@ -1809,7 +1877,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "9874896f-1579-5692-b9b2-dabc038fcdea",
@@ -1828,7 +1897,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "SMTP-TLS / HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "f68e80a7-7555-5514-b62f-e0e95d1426a1",
@@ -1846,7 +1916,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a03f46f1-5e49-54b5-a6d8-26c34a48b286",
@@ -1864,7 +1935,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "169093ba-c8b9-5edb-b1a3-76043f13a2de",
@@ -1882,14 +1954,16 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
-   "total": 35,
-   "open": 0,
+   "total": 36,
+   "open": 1,
+   "notApplicable": 0,
    "bySeverity": {
     "High": 16,
-    "Medium": 14,
+    "Medium": 15,
     "Critical": 3,
     "Low": 2
    }
@@ -1961,7 +2035,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Authorization Code with PKCE is the supported flow for public clients; the code_verifier replaces the secret as proof of possession. The implicit grant is not offered."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "f87eea4c-e8b9-54be-b890-88743fe08b84",
@@ -1988,7 +2063,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Tokens carry issuer, audience and tenant claims; SDK verifiers check iss and aud against configuration, and the discovery document publishes the expected issuer."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "02c75ad6-34a0-5a3d-86d0-0f684e0c5ae1",
@@ -2024,7 +2100,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "065f37c: the sign-in page gains a Cancel control, shown only when a pending authorization is being decided, which returns through `axiam_user_declined`. The refusal is delivered on the same terms as every other authorization error — only to a `redirect_uri` this client registered, compared exactly, with the request's own `state`, and for a pushed request both come from the pushed copy (T-256); consuming the `request_uri` there is correct, since it is single-use and the request has just been answered terminally. A sensitive-scope consent decision is recorded either way: the `consent` row is live state and `gdpr.oidc_scope_consent_*` in the append-only audit log is the history (Art. 7(1))."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "0df1ba0d-316d-5394-91be-646cb231fc84",
@@ -2159,7 +2236,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Narrowed by the W5 F4 review (P23W5-04 closed it for CIBA; P23W5-06 reports the device grant, where it is pre-existing since B2). CIBA: the approval routes refuse a token that carries a `client_id` — only a console sign-in decides (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `/api/v1/device/verify` and `/decide` still admit it; bounded by the token itself (a live session of a user of the tenant) and by the device client's registered scopes. Closes when `/api/v1/device/*` applies the same rule (issue body in the W5 F4 review, §14)."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "85a0d330-603a-516c-b60a-8e989081343d",
@@ -2288,7 +2366,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Mitigated by the maintainer's decision of 2026-09-12, which is two things and needed both. **The window is now a `fapi2` behaviour.** `axiam_oauth2::fapi::refresh_rotation_grace_secs` is the gate — the same registration-decides mechanism as `auth_code_lifetime_secs`, not a second one — and `TokenService::refresh` picks a retirement lane from it: `supersede` for a `fapi2` client, `revoke_rotated` for every other, which is the pre-065f37c behaviour (`invalid_grant`, \"already consumed\", on a second presentation). What remains on `fapi2` is a 60-second window in which the previous token is redeemable by a client that also holds the private key every token on that profile is bound to. **And a replay is now marked whatever the window.** Both lanes stamp `rotated_at` in the same statement that retires the row (schema v60, additive, backfilling nothing), so a presentation of a rotated token is distinguishable from an ordinary stale credential — `find_rotated` answers `None` for one revoked at logout. Every such presentation, accepted under the grace or refused, increments a per-outcome counter on the session the token names and appends an `oauth2.refresh_token_replayed` audit row naming the client, its profile, the session and the disposition, never the token or its digest; `GET /api/v1/users/{user_id}/sessions` serves the derived verdict and the admin UI renders \"FAPI grace retry\" and \"Replay refused\" as two visibly different badges. The single-use race is untouched: both lanes keep `revoked = false AND expires_at > time::now()` in the WHERE, so the loser of two concurrent rotations still gets `NotFound`. A password or MFA reset still revokes the whole family through `revoke_all_for_user`, and T-249's `sid` extends that to the access tokens in flight. Pinned by the `t254_*` tests in `axiam-oauth2/tests/token_service.rs` and `fapi.rs`, by `refresh_token_rotation_retires_old_on_a_standard_client` and `a_refused_refresh_replay_is_audited` in `oauth2_flow_test.rs`, and by the invariant-4 twin each of them carries."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "12ef7ba0-6262-5ee5-bd0c-53e29bf97e30",
@@ -2316,7 +2395,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "S256 is required; the plain method is rejected, and a code issued with a challenge cannot be redeemed without a matching verifier."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fc37d424-69f0-57e0-88af-7392afd9c8af",
@@ -2343,7 +2423,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Introspection requires client authentication and is scoped to the caller's own tenant (SEC-068); unknown tokens return the uniform inactive response with no distinguishing detail."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "0e4c6d78-5d60-5e5c-8155-001a2aa194a3",
@@ -2417,7 +2498,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "`AXIAM__AUTH__OAUTH2_MTLS_BASE_URL` adds aliases for the six back-channel endpoints — token, userinfo, revocation, introspection, device authorization and PAR — each the top-level endpoint of the same name re-based on the mTLS host through one macro, so the two cannot drift. `authorization_endpoint`, `end_session_endpoint` and `jwks_uri` are deliberately not aliased (the first two authenticate the user and never the client; the third is public key material), and the `issuer` does not move because OIDC Core §2 requires it to equal every token's `iss`, including one minted at an alias. The member is absent by default and absence is correct — a present member instructs a client to switch hosts, so a single-listener deployment must emit none, including one running `client_auth = optional` — and it is omitted rather than serialised as `null`. A configured-but-unusable value, or one carrying a query or fragment, fails the discovery request with `500` rather than quietly dropping the aliases. Since b9232f3 the aliases carry the tenant (T-244): an alias tells an mTLS client it *must* use that URL, so one that omitted the tenant would be strictly worse than no alias. The conformance rig runs exactly this split — an nginx sidecar on the issuer for the front channel, the server's own rustls listener for the back channel — because `axiam_oauth2::mtls` refuses the `X-Client-Certificate` proxy header for OAuth2 client authentication by construction. Contract 1.40 §21.3 rule 2 is the SDK half (T-266)."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ac473925-1f97-55be-aafc-97c12a7fe1d6",
@@ -2473,7 +2555,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Wave W1's gates, in `fapi.rs`'s existing two-layer pattern: `FapiRegistrationError::{AuthnParamsOnFapiClient, SensitiveScopesOnFapiClient}` enforced on create **and** on update, at both handler call sites; `touches_security_profile` now covers `scopes`, so a scope-only patch costs the merged read it previously skipped instead of validating against the wrong list; a `fapi2` row somehow on `honour` is refused again at request time with `tracing::error!`. `reject_sensitive_scopes_when_disabled` is the tenant-switch gate, found missing while writing W7's tests — `validate_registration` is a pure function four layers below the settings row — and it runs on create and on the merged update, because a gate that only runs on create is a gate with a PATCH around it. `browser_sso` is permitted on a `fapi2` client by decision (plan §11 D2), and `m7_…` asserts the flag changes nothing about what a request may contain on either profile. The admin API echoes both new fields so an operator can audit the posture from the endpoint; pre-v54 rows decode to today's behaviour; and the `WeakClientAuth` gate asks `is_strong()` rather than enumerating variants, so the fifth authentication method needed no new refusal code to be refused."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "f8c49d07-806e-5df3-9676-9bf67219bb9e",
@@ -2490,7 +2573,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ea2fab0b-2102-5d72-b336-747899b41383",
@@ -2535,7 +2619,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "a76161b and 065f37c: `AuthorizationCodeRepository::replayed_session` returns the session for a code that exists and is spent — `used = true` is what makes it a replay rather than a lookup, `client_id` and `redirect_uri` are matched so a caller presenting the wrong pair cannot revoke somebody else's session, and expiry is deliberately *not* filtered, because a replayed code that has since expired still minted tokens. Revocation reaches the session: an AXIAM access token is a stateless JWT, so what can be revoked is the session its `sid` names (T-249), which every resource request already checks. Two costs are stated in the code rather than glossed — the session is the browser session, so revoking it signs the user out of everything it reaches, admin UI included; and a legitimate client retrying after a lost `200` replays a code exactly as an attacker does. The server cannot tell them apart, which is precisely why §10.5's answer is to revoke rather than to guess. Not an oracle: both paths return the same `invalid_grant`, and a hash naming nothing revokes nothing; a replay costs one extra read and one write, distinguishable by timing only to an attacker who already holds a real code. The FAPI lifetime is a per-client cap taken as the minimum of the profile's 60 seconds and the operator's own setting — never a lower global default, which would shorten the window for every existing client to satisfy a profile none of them is on, and never a longer one, because a security profile must not make a deployment less strict."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "80616398-b151-54a9-8b63-8ddda79c7552",
@@ -2552,7 +2637,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "443fa9af-3c1e-571b-8b1e-e97fd5e13e83",
@@ -2579,7 +2665,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "JWKS publishes the active key plus a bounded overlap window matching the maximum token lifetime, then drops the retired kid."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "c237826a-f4f2-5097-ac9a-591ed35d79f6",
@@ -2617,7 +2704,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "2026-09-14 (ad1cb67). `ParService::push` refuses a `state` or `nonce` longer than `MAX_FAPI_OPAQUE_PARAM_CHARS` — 256 characters, counted as characters rather than bytes so the bound does not depend on how many non-ASCII code points an opaque value happens to contain — with `invalid_request`, checked at push, where the client is authenticated and the refusal is attributable and reaches it as a protocol error, rather than at `/oauth2/authorize`, where it would surface in a browser after a sign-in nobody should have been asked for. Gated on `ClientProfile::Fapi2` deliberately: a cap is a breaking change for a `standard` client that packs data into `state` — a bad practice, a widespread one, and one a deployment upgrading AXIAM has not agreed to — while the FAPI profile is where the stricter bundle was agreed and where the suite requires the refusal. A `const` block pins the cap against the suite's own probes and against what a conformant client sends (`86 <= cap < 384`), so relaxing it past either fails to compile rather than surfacing as a failed certification. The residual on the `standard` profile is stated rather than hidden, and is small: the pusher is an authenticated client reflecting text into its *own* registered `redirect_uri`, the row lives 60 seconds on a route under the per-IP rate limit, and the whole form is bounded by actix's default 16 KiB body cap on `/oauth2/par`. Four FAPI 2.0 modules moved from `REVIEW` to `PASSED` per module (`-with-long-state`, `-with-long-nonce`, `-different-nonce-inside-and-outside-request-object`, `-different-state-inside-and-outside-request-object`), and a `standard` client still accepts a 1000-character `state`, asserted."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7a5c9644-3db1-4d22-ad8d-fdd39b62946a",
@@ -2683,7 +2771,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "2026-09-17 (MCP-02, `013903d`). `axiam_oauth2::resource::normalise` reserves the whole `axiam` scheme rather than the two literals, so an audience added later is covered without anybody having to remember the rule exists. It is checked after parsing, against the scheme `url` resolved, so `AXIAM:user` cannot slip past a byte comparison on the input, and every door answers `invalid_target`: registration refuses the entry, and the token endpoint refuses the parameter even for a row that somehow holds one, because `is_allowed` normalises both sides. Fail-closed and reachable by no existing deployment — `allowed_resources` ships in the same unreleased version, so no stored row can contain one. Asserted at the parser and at both endpoints."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "02a44c35-6670-495e-900c-92c24dfaa00c",
@@ -2729,7 +2818,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Mitigated in T23.4.1. **Minting and storage.** 32 CSPRNG bytes, base64url, returned once in the registration's `201` (and the rotated value once in a `PUT`'s `200`); only its SHA-256 is stored, on the client row (schema v69, optional, no backfill). **Who has one.** Only a `managed_by: dcr` client registered after v69; an administrator's client, a CIMD shadow row and an older `dcr` row hold none. **Authentication.** `Authorization: Bearer` only; a token in the query string is refused `400` even beside a good header, and no form body is read. The digest is compared in the datastore in one `WHERE` with the tenant the request resolved (query or T21.6 path), the path's `client_id` and `managed_by = 'dcr'` — a digest looked up by index, the pattern refresh and initial access tokens use — so a token names exactly one row in one tenant, and a user token, a service-account token, a client secret or another client's token hashes to something that row does not hold. Unknown client, wrong token, other tenant and no-token client are one `401 invalid_token` with an RFC 6750 challenge (RFC 7592 §2.1: existence is not revealed); `404` is never used. **Replacement.** A `PUT` is a full replacement held to the same `dcr::validate` as a registration under the tenant's **current** policy (grants within `{authorization_code, refresh_token}`, scopes within `dcr_allowed_scopes`, hosts within the glob plus loopback, audiences forced to `external_client_allowed_resources`); widening is `400 invalid_client_metadata`; the four server-stated members and a foreign `client_id` are `400 invalid_request`; the authentication method cannot change; and the repository type it writes through has no field for the profile, the X7 flags, the provenance or the tenant. Refused under `disabled`. **Rotation** is one compare-and-swap on the presented digest with X6's two layers (transaction, then a read-back of the new digest as the nonce), so of racing `PUT`s one wins and the rest get `401`. **Deletion** is conditional on the digest; the token dies with the row, a second `DELETE` is `401`, the client's refresh tokens are revoked through `revoke_all_for_client`, and the `dcr_max_clients` slot is released. **Redaction and audit.** Every request, served or refused, writes an `oauth2.client_configuration_*` audit row carrying the operation, the error code and the `client_id` only when it has the minted `oa_` shape — never the token or its digest; asserted under a `TRACE` subscriber and against the audit API. Marked **Sensitive** in CONTRACT §28.12 and given its own OpenAPI security scheme. **DoS.** The three routes share one per-IP bucket at the registration preset (`dcr_per_min`, 5/min), separate from `POST /oauth2/register`'s, with a 16 KiB body limit. **Residuals.** A stolen token is good until the client next updates (no expiry, as RFC 7592 permits) — the holder can repoint redirects only within the tenant's glob and loopback, and every use is audited. Access tokens already issued to a deleted client stay valid for their remaining lifetime (≤ the access-token TTL), as for any client an administrator deletes. Consent records keyed by the deleted `client_id` are left to their users, since the identifier is never reissued."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "50084f15-5206-4550-ae51-f0ff7e0e6bc5",
@@ -2767,7 +2857,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Closed in `0a273ec` (MCP-03, #469): Not a default: CIMD is off by default and the field ships empty, so no deployment has this posture without an operator writing it. The address guard still holds, so the residual is an outbound `GET` to public URLs a caller chooses, with AXIAM's source address and no attribution — not an internal-network primitive. **Closed** (`0a273ec`), filed as MCP-03 (#469) against T21.5. `*` is refused in `trusted_client_id_domains`, and so is a wildcard over a whole top-level domain (`*.com`), which is the same posture spelled longer; it stays admissible in `trusted_redirect_domains`, where an empty list is a working posture and the entries are not fetch targets. The argument is the one T21.5's amendment 2 made for refusing the empty list: an unrestricted trusted-publisher list is a request-forgery primitive offered to strangers **and no second control does that job**, so a control with a one-character bypass is not the control. Enforced at both settings doors by one condition, since `validate_cimd_policy` runs on the merged policy too, and the validator's entry-shape message no longer offers `*` for this field. It is a floor and not a public-suffix check: `*.github.io` still passes, because trusting shared hosting is a decision an operator may reasonably make, and what bounds it is T-275's quota. Validation runs on write, so a stored `*` survives until that row is next saved — and no released deployment can hold one, CIMD being unreleased."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "bcb5139c-1607-43dd-badd-6256ff7b2b31",
@@ -2796,7 +2887,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Two checks, and the 2026-09-17 review (V2) confirmed both against live routes rather than against the functions. `enforce_issuer` refuses a token whose `iss` names a tenant its `tenant_id` claim does not, so a token can never be internally ambiguous; it is a no-op with the flag off, where `jsonwebtoken`'s pinned-issuer check is kept verbatim, so I1 holds by construction. `enforce_tenant_path_binding` refuses a principal whose tenant is not the tenant the path named, and sits in `extract_user` — the funnel **both** extractor arms pass through — so a route mounted under the scope later inherits it rather than having to remember it; it is placed after the decode because the scope middleware cannot decode a token. The refusal is the same `401` an uncredentialed request gets, so the holder of a tenant-A token is not told tenant B exists. A `tenant_id` query parameter on a tenant path is refused outright with `invalid_request`, so the two selectors can never both be present. Introspection is tenant-scoped independently — the token's `tenant_id` is compared with the request's and a mismatch answers `active: false` — so the shared key set does not make introspection a cross-tenant read either. One note for whoever widens the scope: only the OAuth2 endpoints are mounted under `/t/{tenant_id}` today, and the binding is checked against the principal's *home* tenant, which the organization-level tenant header can move afterwards; that does not meet a path selector on any route as things stand."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "89558645-355b-40c7-952c-081d58a6656b",
@@ -2823,7 +2915,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Closed in `0b216c6` (MCP-04, #470): The bound is the number of distinct URLs that both match `trusted_client_id_domains` and serve a valid document, which for the profile the documentation recommends — a named publisher, `*.vendor.example` — is small, and the entry would be theoretical. It stops being theoretical the moment a tenant trusts shared hosting, which is a natural thing to do because shared hosting is where a small tool publishes a JSON file; any third party who can publish under that domain then mints unbounded rows at one unauthenticated request each. It compounds with T-276, where `*` makes every domain shared hosting. **Closed** (`0b216c6`), filed as MCP-04 (#470) against T21.5, in three parts and with no migration. `dcr_max_clients` now caps `cimd` rows as a separate count against the same number — which is what the repository's own comment on `count_by_managed_by` asked for — and the count is checked **before** the fetch, so a tenant at its ceiling is not an outbound amplifier either; the refusal is audited in T21.4a's shape and carries no caller-supplied string. `dcr_unused_client_ttl_days` now sweeps `cimd` rows on their own `/health/jobs` counter and their own clock, `max(updated_at, last_authorized_at, created_at)`: no column was added because `updated_at` is *already* \"last presented\", every resolve upserting the row whether or not a fetch happened. And the in-memory document cache evicts entries past their TTL and stale window on the insert path. Eviction on last-seen is *coherent* with T21.4's cache argument rather than against it — a row deleted while its document is still published is re-materialised on the next request, which is what a cache should do; what the old argument said nothing about is storage, and a cache that is never evicted is not a cache. T-276's closure did not lower this one: `*` was the one-character path to shared hosting and is gone, but naming `*.github.io` is one settings line, is a reasonable operator decision, and is the path this entry was filed about. The accepted residual is the ordering overshoot T-272 records, which applies here identically."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "85b33ce6-dea8-545c-8ee5-840c358057ab",
@@ -2859,7 +2952,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.7.1, D-62). RFC 7591 accepts the CIBA grant **only in `initial_access_token` mode** — the registration an administrator authorised by minting a single-use token — and refuses it in `anonymous` mode with `invalid_client_metadata`; the CIBA metadata is validated by the same rules as the admin API's, and a CIBA-only registration needs no redirect URI. Tests: `crates/axiam-oauth2/src/dcr.rs` `an_anonymous_registration_cannot_name_the_ciba_grant`, `an_initial_access_token_registration_may_name_it_without_redirect_uris`, `the_ciba_metadata_rules_apply_to_a_registration`; `crates/axiam-api-rest/tests/ciba_test.rs` `an_anonymous_registration_cannot_obtain_the_ciba_grant`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3c33fdd2-685b-5587-8571-836183810548",
@@ -2960,7 +3054,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.7.1, D-61). A `request` over 16 KiB is refused before it is parsed, and a `jti` over 256 bytes before it is recorded; only candidate keys of the registered algorithm are tried, and the `jti` is recorded only after the signature verified, so garbage cannot fill the replay table. Key sets come through the shared federation JWKS cache (TTL, stale-while-revalidate, SEC-054 guard) keyed per client, so verification does not fetch per request. The route's governor, the shared `bc_authorize_per_min` counter and the per-client bucket after authentication (T-428) all count signed requests like any other. Tests: `crates/axiam-oauth2/src/ciba_signed_request.rs` `an_oversized_or_non_jws_request_is_malformed`, `a_blank_or_oversized_jti_is_unusable`; `crates/axiam-api-rest/tests/ciba_test.rs` `the_limiter_counts_bc_authorize`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fdbd0326-30ee-5184-abdd-7ecdd22a271a",
@@ -3024,7 +3119,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.7.1). A request lives at most ten minutes (`requested_expiry` 30–600 s); the cleanup loop's `ciba_request` job — listed in `/health/jobs` from boot — marks every pending or approved request past its expiry `expired`, and deletes any request ten minutes after it expired (long enough to answer a late poll `expired_token`). The row carries `user_id`, so both erasure paths delete the user's requests, and the tenant-delete transaction deletes the tenant's. Tests: `crates/axiam-db/tests/ciba_request_repository_test.rs` `expiry_is_marked_conditionally_and_the_sweep_marks_then_deletes`, `erasure_and_tenant_deletion_remove_the_requests`; `crates/axiam-server/src/job_health.rs` `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (the `ciba_request` sweep is recorded by the loop and registered); `crates/axiam-db/src/schema.rs` `v80_defines_the_ciba_request_store_additively`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "edges": [
@@ -3044,7 +3140,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ab8fabac-ca3c-59c1-8e47-4b4ff03ef429",
@@ -3062,7 +3159,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7847cec2-07c0-5923-b9a6-35a1410b69de",
@@ -3099,7 +3197,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "X5.1 implements RFC 9207: every AXIAM authorization response carries an iss parameter naming the issuer, and discovery advertises authorization_response_iss_parameter_supported: true. Emitted for EVERY client regardless of profile and on the ERROR redirect as well as the success one — unconditionally, because mix-up is the attack a client does not know it is under, and because one variant works by injecting an error response, so a client validating iss on success and skipping it on failure has left ajar the door it just closed. Contract 1.15 §21.4 requires SDKs implementing the §12 relying-party flow to compare it against the issuer the flow began with. Residual risk sits with the relying party: a client that ignores the parameter gains nothing, which is why §21.4 is a SHOULD any SDK talking to multiple issuers should treat as a MUST."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "bb992b31-a584-539e-a48c-e7cbb26b33f5",
@@ -3118,7 +3217,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fa20de0f-8500-5d55-a768-70b1cfb2987a",
@@ -3136,7 +3236,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "232715ea-ee5d-57b5-8c1e-bfaabae39c4a",
@@ -3154,7 +3255,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1a62f5d9-a0d4-50c2-a610-db0dc2e62706",
@@ -3172,7 +3274,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "62e50b82-a954-58e8-b662-e2b50c15a5c0",
@@ -3190,7 +3293,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1fbe6fdf-fc66-538c-8304-b2133feec620",
@@ -3208,7 +3312,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "8c33029d-e874-5112-a604-a29d67a52fa7",
@@ -3226,7 +3331,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "90f05dc7-d368-5a66-bcfc-506dbe503b21",
@@ -3244,7 +3350,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "04c4bf40-9894-57ea-90bf-1a687467e58d",
@@ -3262,7 +3369,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "93dcf70e-d837-5cfa-b68d-86fddb92d85a",
@@ -3280,7 +3388,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a7cd4b40-6136-5fc2-bcac-86f9dc87f4e8",
@@ -3298,7 +3407,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7d7cfd30-662e-5161-8ad2-3473fc705b20",
@@ -3316,7 +3426,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "38d4ddc5-e88e-5e58-ab7a-05d4e8b6526e",
@@ -3334,7 +3445,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "73b64273-1551-5046-a08b-7b734c165fd3",
@@ -3353,7 +3465,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a59b2622-0df1-5dd6-b209-92cd9dbdd180",
@@ -3371,7 +3484,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "cfb25907-2444-4138-9d15-1ad1e919c642",
@@ -3390,7 +3504,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "13fde7ec-9950-4ffd-8d7e-0af440e9cb5f",
@@ -3408,7 +3523,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a5448b82-8370-45f9-95ee-d6a202fd9bc2",
@@ -3426,7 +3542,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "0cf3d510-ec6f-458d-945e-183f5b8f9f1f",
@@ -3444,7 +3561,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "62fb1252-a30d-4166-9e04-d421ac131bcb",
@@ -3462,7 +3580,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "6fb9306e-7335-48ce-b065-6329211e21b3",
@@ -3480,7 +3599,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "611cd2a9-3f9e-4bd1-8bf7-b7118ed7fd1b",
@@ -3498,7 +3618,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e3cef156-70ea-5f39-9b1b-534441c8012b",
@@ -3516,7 +3637,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b9a496a9-5911-5bd3-864d-6ab46243807c",
@@ -3554,7 +3676,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.7.1, D-61). `aud` must name this authorization server's issuer identifier — the deployment's or the tenant path's, as a string or inside an array; the endpoint URL is not an issuer. `exp`, `nbf`, `iat` and `jti` are all required (§7.1.1); `exp` must be in the future, `nbf` and `iat` not, `exp - nbf` at most sixty minutes and `nbf` no older than sixty minutes (FAPI-CIBA §5.2.2), with sixty seconds' skew, for every client. The `jti` is **single-use**: recorded after verification in `oauth2_proof_replay` (kind `ciba_request_object`, scope the client id, schema v81) by `CREATE` against the UNIQUE `(tenant_id, kind, scope, jti)` index — the arbiter client assertions and DPoP proofs already use, with no read in the path — and a guard that cannot record refuses rather than accepting. Tests: `crates/axiam-oauth2/src/ciba_signed_request.rs` `both_issuer_forms_are_an_audience_as_a_string_or_in_an_array`, `every_claim_section_7_1_1_requires_is_required`, `the_fapi_ciba_lifetime_bounds_hold`, `a_blank_or_oversized_jti_is_unusable`; `crates/axiam-api-rest/tests/ciba_test.rs` `signed_request_refusals_are_invalid_request_and_store_nothing` (missing `jti`, expired, over sixty minutes, a foreign `aud`, the endpoint as `aud`; the same request twice is `invalid_request` the second time and stores one row; another client may use the same `jti` value), `a_signed_request_is_verified_and_its_claims_are_the_request` (both issuer forms and an array); `crates/axiam-db/src/schema.rs` `v81_admits_the_signing_alg_and_the_request_object_replay_kind`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1e71bc5c-8cee-5772-985c-022d90f5f6ad",
@@ -3573,7 +3696,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b852cced-d3c4-589b-b3bc-e8d06d418183",
@@ -3611,7 +3735,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (the W5 F4 review, P23W5-03, D-74). The notifier mails only an address something vouches for — D-25's rule, the one the SAML IdP applies to an email `NameID` and SSF to an email subject: `email_verified_at` is set, or the account is `Active`, a state only the verification flow, an administrator, SCIM or the directory path put an account in. Anything else is the same quiet no-op as an account that may not sign in: the request is stored and answered as usual (T-422) and waits on the approval page. Test: `crates/axiam-oauth2/tests/ciba_notifier_test.rs` `an_address_nothing_vouches_for_is_not_mailed` (it failed before the fix). Residual: a federated account stays `PendingVerification` for life (T-160) and has no vouched address unless one was verified, so it is sent no approval mail."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "5638e544-e852-5b31-92d2-a9330fce072b",
@@ -3640,7 +3765,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.7.2; verified and tightened by the W5 F4 review). The page is the console's `/ciba/approve` over `GET /api/v1/ciba/requests/{id}`, `POST …/approve` and `…/deny`: only a **console sign-in** of the request's own user decides — a token with no live session row behind it is `403`, and so, since the W5 F4 review (T-447), is a token AXIAM minted for an OAuth2 client, which names the user and a session too; `/api/v1`'s CSRF double-submit guards both decisions; the console serves `frame-ancestors 'none'` and `X-Frame-Options: DENY`. The page shows the client's name, the scopes and the binding message as text and passes back the version it read, so a request decided, expired or changed since is the one indistinguishable `404` (T-430). A request asking for a class the session has not achieved is `403 step_up_required`, and the page sends the user through the login hop's re-authentication, consuming nothing on the way back (T-404's lesson). Each decision is audited with its session (T-435). Tests: `crates/axiam-api-rest/tests/ciba_approval_test.rs` `the_routes_need_a_session_and_a_csrf_token`, `a_token_minted_for_a_client_cannot_decide_a_request`, `another_users_request_is_a_404_identical_to_an_unknown_id`, `a_request_for_mfa_needs_a_step_up_and_then_approves`, `a_decision_on_a_stale_version_is_refused`, `an_expired_request_is_refused_on_the_page_and_on_both_decisions`; `frontend/src/pages/ciba/CibaApprovalPage.test.tsx` `renders the binding message as text, never as markup`, `offers the step-up up front when the session has not achieved the class`; `frontend/e2e/ciba.spec.ts` (a real browser approval; an MFA request a password session cannot approve)."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "befc0d61-587e-5c27-b0bd-76337daf35e1",
@@ -3678,7 +3804,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.7.1). `scope` must include `openid` and name only scopes the client is registered for (`invalid_scope` otherwise); the RFC 8707 `resource` is validated against the client's `allowed_resources` at `bc-authorize` and **bound**: a token request may repeat it, never change it (`invalid_target`); tokens are minted for the redeeming client, which must be the starting client (T-425), with the request's scopes and the approval's evidence (T-430). Tests: `crates/axiam-oauth2/src/ciba.rs` `scope_must_carry_openid_and_stay_registered`; `crates/axiam-api-rest/tests/ciba_test.rs` `bc_authorize_refuses_each_malformed_request_with_its_section_13_code` (`invalid_scope`, `invalid_target`), `pending_then_slow_down_then_tokens_with_the_approvals_evidence` (the scope and client of the minted tokens)."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "568bd2f3-589f-5dfa-aac6-cd31ef264941",
@@ -3696,7 +3823,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a052c53c-af43-5c92-bb5b-74ff87dff55c",
@@ -3724,11 +3852,13 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.7.1 at write time, T23.7.2 at delivery; verified by the W5 F4 review). Write time: the endpoint is required in ping mode, refused in poll mode, and held to the webhook outbound address policy (`validate_push_endpoint`) at the admin API and RFC 7591/7592. Delivery: the `CibaPing` deliverer's one way out is `guarded_fetch_no_redirect` with `allow_private = false` — the name resolved fresh, every address globally routable, the validated address pinned, `https` required, a `3xx` a retry and never followed — and the client is read again after the sealed credentials are opened, the ping leaving only if it is the version whose endpoint was read (W4 F4 §15). Only the record id travels on the queue. Reasons are a fixed vocabulary, never the endpoint, a header or a body. Tests: `crates/axiam-oauth2/tests/ciba_ping_test.rs` `the_address_guard_refuses_an_internal_endpoint_at_delivery`, `a_redirect_is_not_followed`, `no_reason_carries_a_credential_or_the_endpoint`, `the_clients_current_registration_decides`, `a_decision_queues_a_message_with_nothing_secret_in_it`; `crates/axiam-oauth2/src/ciba.rs` `a_ping_registration_needs_a_public_https_endpoint`; `crates/axiam-api-rest/tests/ciba_test.rs` `admin_registration_accepts_and_validates_the_ciba_metadata`; `crates/axiam-api-rest/tests/ciba_ping_flow_test.rs` `an_approval_pings_the_client_which_then_redeems_once`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "total": 85,
    "open": 1,
+   "notApplicable": 0,
    "bySeverity": {
     "High": 35,
     "Medium": 39,
@@ -3819,7 +3949,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "jwks_uri is validated and fetched only through guarded_fetch with https enforcement and IP pinning; the discovery document itself is fetched the same way. (The equivalent PHP SDK gap, SDK-19, is tracked in that SDK's own repository.)"
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "31b120a0-2b7e-5174-a1a1-d2f04c2a6038",
@@ -3845,7 +3976,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Linking requires the IdP to assert email_verified, or an explicit administrator-configured linking policy per federation config; unverified matches create a distinct identity rather than merging."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2d094b8d-06ff-58ab-8ed6-30c4beb86f98",
@@ -3937,7 +4069,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Templated issuers are supported, and a config with one and an **empty** `allowed_issuer_tenants` is refused at create and update time — the message names both ways out (a tenant-specific authority, or a list of accepted tenants), because that configuration is occasionally intended and never intended by accident. The refusal is repeated at sign-in time, so a row written before the check existed cannot fall through to \"accept anyone\". The `tid` is read from the *unverified* payload solely to select which of a closed, operator-written set of issuer strings to require: it must parse as a UUID (otherwise a crafted value could substitute path segments), it must appear in the allow-list, and the signature check and the verified `iss` comparison both still run afterwards. It can never widen the accepted set."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "37936176-ed8c-5749-9a8d-fba8d8d8d736",
@@ -3983,7 +4116,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The SP fails closed: an assertion without a valid signature from the configured IdP certificate is rejected, and signature presence is not inferred from the response envelope."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ec39c350-7067-521d-a682-8283e1487344",
@@ -4020,7 +4154,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "SEC-069: the advertised Content-Length is checked against a maximum before the body is read, and the fetch is refused when it exceeds the cap."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "f4c8c207-b57d-5538-8320-11af50a2d6a6",
@@ -4076,7 +4211,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Off by default (linked_only refuses unknown subjects). Every JIT provision is audited with the provider and the external subject, and a provisioned user holds no roles, so the exchange that created them still yields no token. Residual risk accepted: the same exposure the browser SSO JIT path already carries, bounded by the same per-client exchange rate limit."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "24bff414-a751-52a6-bb4e-b0b187da2873",
@@ -4121,7 +4257,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Raster only — `image/png`, `image/jpeg`, `image/webp` — with `image/svg+xml` refused by name and the refusal saying why. Bounded to 16 KiB decoded, checked on the data URL's length first (so a multi-megabyte paste is rejected before anything walks it) and then on the decoded size; the admin UI crops to 64×64 in the browser, so what is uploaded is a few kilobytes and the source file never reaches the server. The value is only ever rendered as an `<img src>` under the SPA's `default-src 'self'; img-src 'self' data:` CSP. It is refused outright for the branded kinds, whose published sign-in-button rules require their own mark."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2e5acb1c-d395-5736-8d76-92e0d99b06de",
@@ -4148,7 +4285,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Cache entries are bounded by a short TTL and are re-fetched through the same guarded path; an unknown kid forces an immediate refresh rather than a silent failure."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "26b9def1-178d-5611-b43a-75ec800c46ee",
@@ -4175,7 +4313,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Certificate validity is checked at assertion-verification time, not only at configuration time, and expiry raises an admin notification through the compliance notification category."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e4028335-ec1c-5586-8b2b-49dc66c2cb6a",
@@ -4203,7 +4342,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "An unknown organization or tenant and a known one with nothing configured return the **same** answer: `200` with an empty list. That is deliberately different from `oidc_start_public`, which answers `401` for a slug miss: there every failure is a `401`, so the answer carries nothing, whereas a *list* endpoint answering `401` for unknown and `200 []` for known-but-empty would be two-valued. The rate is bounded by the same `login_per_min` budget the sign-in endpoints use, through both the per-process governor and the shared limiter. The response body is a dedicated struct carrying only what a button needs — config id, provider kind, display name, protocol, and the operator's icon — rather than a narrowed admin response, so a field added to the admin surface cannot reach it by inheritance; an integration test asserts the body contains no client id, secret, metadata URL or endpoint."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a0a5052d-6eca-5b6c-9ddd-2b3b6c284f89",
@@ -4249,7 +4389,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "An address the provider does not affirmatively mark verified is **never** adopted on this path: `email_verified` must be truthy or the login is refused with `UnverifiedExternalEmail`, and absent, `null` and falsey all read as false. For GitHub the primary *verified* address comes from a second, mandatory call to the `/emails` resource — derived from the configured `userinfo_endpoint`, so GitHub Enterprise Server works too — and only a `primary && verified` entry is taken, because a verified non-primary address is somebody else's choice of which mailbox represents them. Where a provider offers no verification signal at all (Facebook's Graph API), the decision is the operator's and is written down where it can be audited: an `attribute_map` literal, `\"email_verified\": \"@true\"`. Refusing rather than provisioning without an address is deliberate — an account that cannot recover itself is not a better outcome than a clear failure. See design doc §5.3."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3cb98d5d-ccdd-57f7-9c34-e5cb08d5b33a",
@@ -4277,7 +4418,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Visibility and provisioning are decided in one place each and are deliberately different: `effective_providers` decides which configs a tenant may use, and `provision_or_link_identity` is documented and tested to create the user and the link in the **requesting** tenant. A login resolves its config through the same `effective_providers` the buttons were rendered from, so a config that is disabled, not inheritable, or shadowed by a tenant override cannot be reached by posting its id. `FederationLink`'s `(tenant_id, federation_config_id, external_subject)` uniqueness still means one link per external identity per tenant — verified, not assumed — so one Google account signing into two tenants through one inherited config gets two AXIAM users, which is what tenant isolation requires. A tenant's own config of the same kind always shadows the inherited one, **including a disabled one**, so \"disable\" cannot come to mean \"re-enable the organization's\". The SAML assertion-consumer path is the one place where the two tenants both do real work and differently: `handle_saml_response_for` records the assertion-replay row under the **config's** tenant — a no-op for a config the requesting tenant owns, and strictly stronger for an inherited one, since an assertion spent in one tenant cannot then be spent in a sibling — while the user and the link are created in the **requesting** tenant like every other protocol. Both ACS entry points resolve the config through `effective_providers` first, exactly as the OIDC and OAuth2 callbacks do; loading it with a `get_by_id` scoped to the requesting tenant, as the ACS originally did, could not find an inherited config at all."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "252914d7-795a-5c03-bbf0-52017e519ff4",
@@ -4305,7 +4447,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "TLS verification is mandatory with per-tenant anchors. The tenant's `trust_anchors_pem` (CA certificates only, checked at save time; the organization's own CA can be one) is the whole trust store for its directory; only an empty list selects the public `webpki-roots` bundle the rest of the workspace trusts, and the two are never combined. The name verified is the URL's host, by rustls' WebPKI verifier, under the `ring` provider named explicitly. No code path disables verification. A failed handshake is `Unavailable` and is never retried in a weaker form. Tests: `a_certificate_outside_the_tenant_anchors_is_refused_before_any_bind`, `a_server_name_mismatch_is_refused_before_any_bind`, `the_public_bundle_does_not_trust_a_private_ca`. An IPv6-literal URL fails closed: `ldap3` cannot derive a server name from a bracketed host, so such a directory is unusable rather than unverified."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "54acf578-5395-5fed-addc-172837ec6c9b",
@@ -4524,7 +4667,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Decided in the W3 F4 review (P23W3-04, 2026-10-04): for a host **name**, every refusal that depends on what the name resolved to — it did not resolve, it resolved to too many addresses, to loopback, link-local or the metadata service, unspecified, multicast or special-purpose space, an own listener, or a private range outside the allow-list — is one `400` message and one audit rule, `address_guard.not_permitted`; the specific rule goes to the operator's log only. An IP literal, an IPv6 literal and an unparseable URL keep their specific answers, which reveal nothing the administrator did not type. The writes stay on the `directory_admin` bucket (30 a minute) and every refusal is audited. Tests: `p23w3_04_a_refused_host_name_gets_one_answer_whatever_it_resolves_to`, `the_address_guard_refuses_each_class_as_a_400_naming_the_rule`. Residual: a write that succeeds still tells the administrator that the name resolved into a permitted range — inherent in saving it, and confined to networks the operator listed for directories."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "5ecdb607-7d05-50ee-867f-13653e64219b",
@@ -4560,7 +4704,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Unavailable rather than insecure. Without the key a save is refused with an error naming it, `decrypt_bind_secret` answers `ServiceUnavailable`, and the authenticator turns that into `Unavailable` before any connection is opened. Boot logs the key's absence at INFO and continues. Test: `a_missing_encryption_key_is_unavailable_with_no_connection`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "0650fae0-6076-575a-82ea-efbb5f39ab39",
@@ -4589,7 +4734,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Partly mitigated. Retiring the credential destroys its key and takes its certificate out of the tenant's metadata (D-21; the metadata endpoint is T23.2.5), and a credential is valid for at most two years (`MAX_SAML_IDP_CREDENTIAL_VALIDITY_DAYS`), after which AXIAM's own signer refuses it (T-308) and SPs that check validity do too. Open because nothing AXIAM does reaches an SP's pinned trust: recovering from a leak means telling every SP administrator, which is a procedure, not a control. T-304 and T-305 are what keep the key from leaking."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "d311d7ba-fb5e-54ed-aab1-9d7aed357c69",
@@ -4699,7 +4845,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The tenant's key signs one shape of document only: a response carrying exactly one assertion (T-311). Failure responses (`Requester`, `Responder`, `NoPassive`, `AuthnFailed`, `RequestDenied`, `InvalidNameIDPolicy`) carry no assertion and are never signed, which SAML Profiles §4.1.3.5 permits, and they have no status message or detail. Tests: `failure_responses_are_status_only_unsigned_and_echo_what_can_be_echoed`, `axiam_own_sp_refuses_a_failure_response`. Constraint for T23.2.4: a signed `LogoutRequest` or `LogoutResponse` is exactly such a document, so SLO signing needs its own decision rather than reusing this key by default. Decided for SLO (T23.2.8, 2026-10-04, D-38): AXIAM signs a logout message only for a session holder or in reply to a verified SP request, detached over the query on HTTP-Redirect so no XML signature exists to harvest; recorded as T-373."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2a2a1983-07c2-5847-a3d0-7de61be737f2",
@@ -4735,7 +4882,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29 and D-42: an `issue_idp_credential` into the `next` slot and a `promote_idp_credential` that, in one transaction, retires the old `active` and activates `next`, refused unless the id is the current `next` and inside its validity window; D-40 makes the metadata endpoint publish `active` and then `next`, so an SP has the successor before it signs, with `Cache-Control: max-age=3600`; §29 `get_idp` and `list_idp_credentials` show `not_after` so an administrator sees expiry coming. Tests (T23.2.5): `saml_admin_test.rs::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key`, `::a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing`, `::a_promotion_repeated_with_a_stale_page_is_a_409`, `::metadata::the_document_parses_back_with_samael_active_before_next_and_never_a_retired_key` and `::metadata::a_promotion_changes_what_is_published`; in `axiam-db`, `saml_idp_credential_test.rs::of_concurrent_promotions_exactly_one_wins`. Residual: a tenant that never rotates stops at `not_after`, and retiring the active credential without a successor stops sign-on at once — deliberate, as the incident response to T-306. The failure is closed: the signer never falls back to another credential, a weaker one, or an unsigned assertion."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7443c8b5-68b4-5ac9-bd3d-f39cdb1d21be",
@@ -4862,7 +5010,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Every value is HTML-escaped (`&`, `<`, `>`, `\"`, `'`). The page carries its own `Content-Security-Policy` — `default-src 'none'`, the one inline `submit()` under a per-response nonce, `form-action` the ACS origin only, `frame-ancestors 'none'`, `base-uri 'none'` — stricter than the global policy in every directive; the security-headers middleware writes the global policy only when a handler set none (D-27). `Cache-Control: no-store`. Tests: `post_binding_signed_end_to_end_verified_by_axiam_own_sp` (a `RelayState` of `relay&<x>` arrives escaped and round-trips), `security_headers::tests::the_global_policy_is_written_unless_the_handler_set_its_own`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "00b1c269-bd14-572b-a277-4946eed1f557",
@@ -4889,7 +5038,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Only SHA-256 digests of the handle and of the binding value are stored, as `sso_handoff_code` stores its codes; a digest cannot be presented. Rows are tenant-scoped on every query, removed with their tenant in the tenant-delete transaction, and swept when expired (`saml_authn_request` on `/health/jobs`). Tests: `saml_authn_request_test` (cross-tenant read and consume refused, expiry and sweep, the tenant cascade); `v73_defines_the_pending_authn_request_table_additively` (no raw column)."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "53ad9895-e646-51e4-88b4-fc1e675e7cbc",
@@ -5010,7 +5160,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Every change the job makes is a row on the append-only audit log carrying identifiers and reasons, never names or values: `directory.account_deactivated` (`reason` vanished or disabled, `run` full or incremental), `directory.account_updated` (the fields, not their values), `directory.sync_attribute_skipped`, `directory.sync_user_skipped`, `directory.groups_mapped`, `directory.sync_safety_valve`, and one `directory.sync_run` row of counts per full run; job health records each run. Tests: `a_full_run_writes_one_summary_row_of_counts`, `a_vanished_entry_deactivates_the_account_and_takes_back_what_the_directory_gave`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2994dd70-ce2c-50ac-b49f-72d1f7dfd235",
@@ -5037,7 +5188,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "One row per tenant (schema v75) holding a watermark, the identity of the server it belongs to, timestamps, the last result and account ids — no name, address or person's DN; read and written by tenant id only, and deleted in the tenant's delete transaction. Tests: `tenants_cannot_read_each_others_state`, `a_tenants_state_goes_with_the_tenant`, `the_reported_list_is_trimmed_to_its_cap_keeping_the_newest`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "6c7796cb-edff-5c81-aa70-06e97fe3ee19",
@@ -5064,7 +5216,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Every edge the mapping writes carries `member_of.source = directory` (schema v74; the datastore admits no other owner value, and an edge without the field reads as manual). The mapping removes only directory-sourced edges the directory no longer backs, never touches or duplicates a manual edge, and leaves a manual edge of the same pair as it is; removals run before additions, so a stop part-way leaves less access. Tests: `a_manual_membership_is_untouched_by_every_application`, `a_manual_membership_of_the_same_pair_is_left_alone_and_never_removed`, `removing_a_directory_membership_removes_only_that_edge`, `the_datastore_admits_no_owner_but_directory`, `apply_backed_groups_reports_what_it_did_and_leaves_manual_edges`. Residual: an administrator's `add_member` on a pair the directory already owns is a conflict, not a promotion to manual, so that membership leaves with the directory — the safe direction (`add_member_on_a_directory_edge_is_still_a_conflict`)."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2c859601-e642-5294-8142-a9ed10a36135",
@@ -5081,7 +5234,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "A human administrator of one tenant holding `saml_sp:read`, `saml_sp:write` or `saml_idp:credential`. Service-account tokens are refused on the `saml` namespace in this revision (D-42).",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "de15bf38-6ec2-5998-a6c9-a20a44ae1780",
@@ -5182,7 +5336,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "**Built (T23.2.5, 2026-10-04).** Contract §29.2 and D-42: `SamlIdpCredential` on the wire is a response type of its own with the public facts only (certificate, serial, fingerprint, dates, status, issuer CA) — no key, no ciphertext, no custody — built from `SamlIdpCredential`, which carries no key field, and never from `SealedSamlIdpCredential`; only the signer calls `get_active_sealed`. The core type derives no `Serialize`, so a route cannot expose the row by accident. SDKs must drop an undeclared key member (§29.5). Tests (T23.2.5): `saml_admin_test.rs::the_credential_list_is_a_bare_array_newest_first_and_carries_no_key`, `::issuing_fills_an_empty_slot_with_a_keyless_answer_and_a_sealed_key`, `::promote_swaps_the_slots_in_one_transaction_and_destroys_the_old_key`, `::retire_works_on_next_and_active_and_is_idempotent`, `::a_promotion_that_cannot_happen_is_a_409_or_404_and_changes_nothing` (the error bodies) and `::the_spec_has_the_eleven_operations_and_a_credential_with_no_key_member` — each asserts that no answer contains `PRIVATE KEY`, a key column name or the sealed bytes."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2d150b0e-0535-5769-8bdc-0c75f7669c8e",
@@ -5209,7 +5364,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "**Built (T23.2.4, 2026-10-04).** Every repository method is tenant-keyed and `entity_id` is unique per tenant (T23.2.1, Mitigated at the repository); rows go with their tenant in the tenant-delete transaction. D-37 and §29.3 rule 5: deleting an SP deletes its pending `AuthnRequest`s and its `saml_sp_session` rows in the same transaction (`SP_DELETE_CASCADE`), so a stale participation can never drive a logout or keep a `NameID` for an SP that no longer exists; the registry holds no secret (certificates are public). Tests (T23.2.4): in `axiam-db`, `saml_service_provider_test.rs::deleting_an_sp_removes_what_the_datastore_holds_for_it` (the pending requests and the participant rows of the deleted SP are gone, another SP's stay, a refused delete cascades nothing), `saml_slo_test.rs::deleting_an_sp_removes_its_participant_rows_and_only_its_own` and `::deleting_a_tenant_removes_both_tables_rows_and_only_its_own`; over HTTP, `saml_admin_test.rs::deleting_an_sp_over_http_removes_its_pending_requests_and_only_its_own`; the repository tenant-isolation tests of T23.2.1 in `saml_service_provider_test.rs`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e7c6d16d-b27f-5884-b98a-d3b974004b47",
@@ -5255,7 +5411,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "**Built (T23.2.5, 2026-10-04).** D-40: a per-route governor with the `end_session_per_min` preset and the shared bucket `saml_idp_metadata`; at most two certificates per document; `Cache-Control: public, max-age=3600` and a strong `ETag` so SPs and caches revalidate cheaply (`304`). Tests (T23.2.5): `saml_admin_test.rs::metadata::the_metadata_route_is_rate_limited_with_a_bucket_of_its_own` and `::metadata::the_etag_revalidates_with_304_and_head_answers_like_get`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "98615ed3-7338-5a0e-a46a-c202a2371450",
@@ -5364,7 +5521,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Accepted design trade-off (D-38, D-39). SAML has no back channel through the browser; the SOAP binding that would provide one is not implemented. What bounds it: SLO revokes the AXIAM session first, so a broken chain never keeps an AXIAM session alive; assertions are valid for five minutes and single-use; a revoked session or a suspended account obtains no new assertion (T-328), so the SP session cannot be renewed through AXIAM; and the SP's own session lifetime is the SP administrator's to set. A later decision may add SOAP back-channel logout or drive a chain from `end_session`."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "a2a0c721-f0d1-5524-a648-bf8002e851f5",
@@ -5409,7 +5567,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "**Built (T23.2.4, 2026-10-04).** D-37/D-39: one participant row per (session, SP), refreshed rather than duplicated; runs expire after ten minutes; both tables are swept by the cleanup scheduler and reported on `/health/jobs` as `saml_sp_session` and `saml_logout_run`. Tests (T23.2.4): in `axiam-db`, `saml_slo_test.rs::the_sweeper_removes_expired_rows_and_rows_of_sessions_that_are_gone`, `::expired_runs_are_swept_and_a_runs_user_rows_are_erased`, `::a_second_sign_on_to_one_sp_in_one_session_keeps_the_first_index` and `::concurrent_records_for_one_session_and_sp_agree_on_one_index`; over HTTP, `saml_idp_sso_test.rs::the_assertion_carries_a_per_sp_index_that_is_not_the_session_id` (a second sign-on adds no row); in `axiam-server`, `job_health::tests::the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ba9784ec-399d-526d-8530-f9541a09249a",
@@ -5436,7 +5595,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "**Built (T23.2.4, 2026-10-04).** D-39: the outbound request `ID` is stored as its SHA-256 digest, consumed once, and accepted only from the SP it was sent to (with its signature when it registered a certificate); runs are tenant-scoped, expire after ten minutes and go with their tenant. A forged response could at most continue a logout already under way. Tests (T23.2.4): in `axiam-db`, `saml_slo_test.rs::the_run_holds_a_digest_of_the_outbound_id_and_no_name_id` and the schema test `v76_stores_digests_and_record_ids_only_where_it_must`; over HTTP in `saml_idp_slo_test.rs`, `the_other_sps_receive_signed_logout_requests_in_sequence_and_a_partial_run_ends_in_partial_logout` (the stored run holds the digest and the serialised table never contains the `ID`), `::a_replayed_or_foreign_in_response_to_is_refused` (only the SP the request went to can consume it) and `::non_success_answers_make_the_run_partial_and_unverified_ones_are_refused_unconsumed` (an unsigned or wrong-key answer from an SP with a certificate is refused and consumes nothing)."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "84aeaa23-2930-5ea3-8269-d1e7fd183781",
@@ -5453,7 +5613,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "The AXIAM session rows and, when the feed is on, the revocation feed's `revoked_session` entries (shown in full on the authentication diagram). SLO revokes through `SessionRepository::invalidate`, which publishes the revoked session's hash.",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "edges": [
@@ -5473,7 +5634,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7e9584c7-4b8e-5c93-9835-c8a7ec6af35b",
@@ -5491,7 +5653,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "9e03e6e6-b9d0-5824-88e3-c725f288b339",
@@ -5509,7 +5672,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "02f48d17-7444-5ab1-bff1-98ac686a404e",
@@ -5537,7 +5701,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "HTTP-POST binding keeps the assertion out of the URL; TLS 1.3 protects it in transit; assertion encryption is supported where the IdP offers it."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a2b6640b-3f26-5aa4-ba7e-fac7b9079c17",
@@ -5556,7 +5721,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "db23722f-f9bb-5d54-97f2-ab42353cafa6",
@@ -5574,7 +5740,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "9a0e03b2-45b7-5021-984f-fb05cc62fa5a",
@@ -5593,7 +5760,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS (pinned IP)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "aea86934-e8ce-57de-a373-fbe64e6486a8",
@@ -5611,7 +5779,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ac6ff234-22e1-5da9-89dc-c41b3595fc49",
@@ -5629,7 +5798,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "93a2fe06-54a3-5df7-aaae-9c38551267bf",
@@ -5647,7 +5817,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "f457b6d9-d424-5ede-be01-de924ac41936",
@@ -5665,7 +5836,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "5990d5fc-2789-5ed8-bf06-0429e0e58555",
@@ -5683,7 +5855,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "be826e94-7b03-5922-a02b-b3f09f0b03ff",
@@ -5702,7 +5875,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a8e4a89b-05d8-5e08-94c5-70e7fc2932e1",
@@ -5720,7 +5894,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "aaf682f3-9e81-5764-83d7-a9a53e798847",
@@ -5738,7 +5913,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "44226f03-37d0-500d-84b8-a594f933aee7",
@@ -5756,7 +5932,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (TLS)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b0cf1693-6f8f-567b-b49e-4f2a5466e7d8",
@@ -5785,7 +5962,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The code is 256 bits from the same CSPRNG as `state`; only its SHA-256 hash is stored, so a database read yields nothing usable; it lives **60 seconds**, not the ten minutes a login state row gets, because it exists to survive exactly one redirect; and it is consumed atomically by the same `SELECT`+`DELETE` transaction pattern as `consume_by_state`, so a replay is refused with the same answer as an unknown code. It carries no token material at all — the session is minted from `user_id`/`tenant_id` at redemption, so a code that is never redeemed leaves no session behind. The redirect response sets `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and the SPA strips the parameter with `history.replaceState` before doing anything else.\n\n**Where the code may be delivered is the load-bearing part, and it is not the caller's choice.** `redirect_uri` reaches AXIAM on an *unauthenticated* start endpoint, and `validate_redirect_uri` checks its scheme only — every `https://` host on the internet passes it. The two cross-site flows have no provider-side backstop **by construction**: a SAML IdP is pointed at AXIAM's own ACS and Apple at AXIAM's own form-callback, so the provider never sees the SPA URI and never validates it — AXIAM alone decides where the browser goes next, carrying a credential the handoff endpoint will exchange for session cookies for whoever presents it. Without a check, anyone could start a login with `redirect_uri = https://attacker.example/`, lure a victim through the victim's own real IdP, and read a working session out of their access log; the 60-second TTL, the single use and the hash-only storage are all irrelevant when the attacker *is* the destination. `require_deployment_spa_origin` therefore confines the target to the **origin of** `AuthConfig::effective_issuer()` — the same value the ACS and form-callback URLs are built from, so it cannot be wrong where these flows work at all — plus anything an operator names in `AXIAM__AUTH__SSO_SPA_ORIGINS` for a separately hosted SPA. Compared as origins via `Url::origin`, so a userinfo prefix, a path, a port or a scheme cannot smuggle a second host past it. It is enforced at login start (a `400` naming the knob), again at the mint (so a state row written by an older binary is not honoured), and on the error redirect. It runs *after* workspace and config resolution, so an unknown slug still answers the uniform `401`. This is the rule T-52 already states for the OAuth2 authorization server's own `redirect_uri`.\n\n**Enforced on all four start paths since 1.0.0-beta12 (R-3), not only the cross-site two.** The OIDC and plain-OAuth2 paths were left on the scheme-only check because the identity provider *is* handed the same `redirect_uri` and *does* compare it against its registered set. That backstop is real and it stays — but it is only as strict as each provider's registration hygiene, and several providers accept wildcard or prefix registrations; more to the point it is a control AXIAM neither owns nor can inspect, so nothing on this side can tell whether a given tenant's provider was registered tightly. The rule the server owns is therefore uniform across the four flows, and on the OIDC and OAuth2 flows the provider's registered-redirect check is now a second, independent layer rather than the only one. The `TODO(T19.14)` that proposed a per-`FederationConfig` registered-redirect allowlist is retired rather than carried: the deployment-origin rule already answers where a code may go, and a second list to keep in sync is a second place to get wrong. `sdks/CONTRACT.md` §12.1 rule 12a widened to match (contract 1.39), additive and restrictive server-side only. One class of deployment must act: an SPA on an origin other than the issuer's, signing in through OIDC or OAuth2, needs `AXIAM__AUTH__SSO_SPA_ORIGINS` set — the requirement SAML and Apple have imposed since beta08, and the `400` names the variable.\n\nWeakening the session cookies to `SameSite=Lax` would have removed the need for any of this, and re-opened the CSRF surface `Strict` closes across every endpoint, permanently, to serve two flows. Residual risk accepted: an attacker who reads the URL inside 60 seconds *and* redeems before the legitimate SPA gets a session — and the legitimate user gets a visible failure, because the code is gone. That is the same trade the OAuth authorization code itself makes."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "f2c61652-ff60-5339-805e-609b8a94c3ff",
@@ -5804,7 +5982,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "5459bc1e-deb2-5bec-ab7b-b862818ac7fe",
@@ -5823,7 +6002,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "LDAP over TLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1b53155b-1339-575b-b5e3-6aaf45a3c8ef",
@@ -5852,7 +6032,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Plaintext is refused at three points: `config::validate` at save time (`ldap://` only with `start_tls`, `ldaps://` only without, every other scheme refused); the authenticator against the stored row; and `DirectoryClient::connect`, the only place a socket is opened. With StartTLS, `ldap3` sends the extended operation first and fails the connection when it is refused; AXIAM binds only after the connection call returns, which is after the handshake. `ldap3`'s `no_tls_verify` is never set. Tests: `a_refused_starttls_fails_closed_with_no_bind_in_the_clear` (the server would accept a clear-text bind, and receives none), `bind_as_user_succeeds_over_starttls_and_nothing_precedes_the_upgrade`, `a_plaintext_target_is_refused_with_zero_connections`, `a_stored_plaintext_url_is_refused_before_any_connection`. TLS 1.2 is the floor toward a directory rather than 1.3 because Active Directory on Windows Server 2019 and earlier, and many OpenLDAP builds, stop at 1.2; rustls restricts 1.2 to forward-secret AEAD suites."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "58b75628-0c13-55c4-a1ee-00739c3c753b",
@@ -5870,7 +6051,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "LDAP over TLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "5b264422-f2c5-536d-9358-ba838a281afd",
@@ -5888,7 +6070,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7d696844-4832-50fc-875a-20131322325c",
@@ -5906,7 +6089,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "f92614c0-f205-5e5f-9730-1b48f5a720cb",
@@ -5925,7 +6109,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS (SAML HTTP-POST binding)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "86f8777a-f3dc-5554-8c11-a5915843dd41",
@@ -5944,7 +6129,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS (SAML bindings)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "55ea167f-3347-575f-8690-1f8ca464a0b9",
@@ -5973,7 +6159,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "**Closed 2026-10-04 (W3 F4 review, P23W3-03).** `axiam-server` wraps the application in `TracingLogger::<RedactingRootSpanBuilder>` (`axiam_api_rest::middleware::request_span`): the default builder's field set, span name and target, with `http.target` recorded as the path and every query **value** replaced by `[redacted]` unless its parameter is on a short allow-list of structural ones (tenant, organization and client ids, protocol switches, pagination), and a `{token}` path segment redacted too; parameter names stay. An allow-list rather than a deny-list, so a parameter added later is redacted until someone decides otherwise. The same change takes `/oauth2/authorize`'s `state` and `login_hint`, `end_session`'s `id_token_hint`, password-reset, GDPR-cancellation and export tokens and administrators' search terms out of the request log, which the default builder recorded on every route (with the shipped `axiam=info` filter the root span is recorded only where an operator enables `tracing_actix_web`). Unchanged: the SSO handlers never log `SAMLRequest`, `SAMLResponse`, `RelayState`, the handle, the binding value or the OP cookie, the audit middleware records paths only, and a handle is useless without the browser's binding cookie (T-322) and single-use. Tests: `request_span::tests` (each sensitive parameter redacted and each structural one kept, the export token redacted from the path, and a request through `TracingLogger` whose recorded span carries the redacted target and never the handle) and `t9_4_the_request_logging_layer_records_no_headers_at_all` (the server installs this builder, and the builder reads no header but `User-Agent`)."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "0cb2b6b5-fab7-5f04-bac9-6abe03099111",
@@ -5991,7 +6178,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "371da1a7-3637-565b-8c77-5b7b69034023",
@@ -6009,7 +6197,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fc29364c-ec65-5863-ba0e-8bdb23ac0f36",
@@ -6029,7 +6218,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "LDAP over TLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3cab2c3b-a0e3-527b-8d9c-f6c4702469e0",
@@ -6047,7 +6237,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "LDAP over TLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7ad160e9-27fe-5fe7-973a-d9bb6ed74961",
@@ -6065,7 +6256,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "61f7d0d2-6d12-56e2-a2c0-484166cfd156",
@@ -6083,7 +6275,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7e78b413-27fd-5738-b8b9-ffc1bd9485be",
@@ -6102,7 +6295,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7d593dc0-6b7f-53bd-82bb-0dd4a569a55d",
@@ -6121,7 +6315,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "838d668f-79a3-5423-9b67-3a6cab44d25b",
@@ -6139,7 +6334,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS (REST)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7a016eb8-b689-5611-8e99-4c70624d8222",
@@ -6157,7 +6353,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "da053c41-980b-5812-930d-c75174de5ed2",
@@ -6176,7 +6373,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "aecc212e-9e49-5c1a-87f9-aedc40961889",
@@ -6194,7 +6392,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b2044a54-8193-5743-bbd3-5e8ea2c42a5e",
@@ -6212,7 +6411,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fe16fedf-59bb-5766-bb45-b05c50734f1b",
@@ -6230,7 +6430,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3e31b42d-3cf5-5187-af38-eb02cf56ae4c",
@@ -6249,7 +6450,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "4673f45b-efb4-5d72-893b-47935b6e0e14",
@@ -6278,7 +6480,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "**Built (T23.2.4, 2026-10-04).** The W3 F4 request tracer (`RedactingRootSpanBuilder`) redacts every query value not on `KEPT_QUERY_PARAMETERS`; D-38 adds no SLO parameter to that list (`SigAlg`, an algorithm URI, was already a kept structural parameter: its value is recorded as received, which reveals nothing, and what it must be is T-370's rule, not this one's), and the handlers log no message, `NameID`, `RelayState` or cookie. Tests (T23.2.4): `saml_idp_slo_test.rs::the_request_log_records_no_message_parameter_of_slo` (the real `/slo` route through the tracer: `SAMLRequest`, `SAMLResponse`, `RelayState` and `Signature` are recorded as `[redacted]` and no value reaches the log) and, in `axiam-api-rest`, `middleware::request_span::tests::the_single_logout_parameters_are_redacted_and_none_was_added_to_the_kept_list`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "4eb779bc-f741-50dc-898c-4cd860b2cab4",
@@ -6297,7 +6500,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS (front channel)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "8d529853-83b0-5696-9f8a-d0872c14e3a8",
@@ -6316,7 +6520,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "10587f12-ae62-5b32-aa7c-bb4acb8c4d4a",
@@ -6335,7 +6540,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3dc774a1-2785-5cb6-afe9-73808f2fd5a0",
@@ -6353,7 +6559,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b77f0d5a-cdda-595a-9403-4517d88a7573",
@@ -6372,7 +6579,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7919cd3f-7265-50a2-a0e3-85f4f52f24f1",
@@ -6390,7 +6598,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b8fa4fa2-ba50-57fa-a281-9aeaca24d89c",
@@ -6408,7 +6617,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "edf438c0-318e-5508-8865-782c1cecda5e",
@@ -6427,7 +6637,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "5dad8923-1903-5abd-afa5-748f475447bc",
@@ -6445,11 +6656,13 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealDB (private network)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "total": 125,
    "open": 3,
+   "notApplicable": 0,
    "bySeverity": {
     "High": 44,
     "Medium": 51,
@@ -6515,7 +6728,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The gRPC interceptor authenticates the caller and derives the tenant from the verified JWT; a check for a subject outside the caller's tenant is refused. Grant the authz-check permission only to service accounts that are trusted policy enforcement points."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e79cc991-c755-5476-a130-2a8c32a86e64",
@@ -6542,7 +6756,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "CONTRACT §8 v2 (key_version = 2) binds a per-message nonce and an issued_at timestamp into the signed body. The server records (tenant_id, nonce) durably and rejects a duplicate within the freshness window, a stale or future issued_at, or any key_version below 2 — nack without requeue, no grace window."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "20764854-1aa7-566c-80f7-3df5d1770633",
@@ -6568,7 +6783,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "role.assigned and role.unassigned are audited with actor, target and resource, emitted as webhook events, and can raise an admin notification under the Access category."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "0d81f06f-8403-5b1c-a67d-0dd0e43a6750",
@@ -6631,7 +6847,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta09. `AuthenticatedPrincipal` resolves the acting tenant exactly as `AuthenticatedUser` does — same header, same tenant lookup, same reach check, same refusal when the caller's own tenant is not the organization scope — through one implementation, `resolve_active_tenant_for`, keyed on the home tenant id, so there is one copy of the check and both extractors run it. The session-revocation check keeps reading the principal's own tenant and still runs before the header is applied, which is where the session row lives. Both call sites pick the subject scope rather than hard-coding it, and the `authz:check_as` guard reads the caller's grants through `subject_scope()` for the same reason — with the fixed scope it looked for the permission in the wrong tenant and would refuse a caller that holds it. Only `authz_check.rs` binds this extractor, so the blast radius was the two check endpoints; a regression test pins the tenant a check is evaluated in."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "31ac62b4-23bd-5e5e-bb0a-c15534a3ee67",
@@ -6669,7 +6886,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Batch size limits, per-caller rate limiting and the decision cache bound the work a single caller can induce."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ef218dd1-6a4f-5171-af2d-010a9bf7ebcc",
@@ -6697,7 +6915,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Responses are correlated by the signed correlation id and published to the configured response queue; the decision is tenant-scoped to the verified producer identity."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "4d799b4c-16c2-598d-9e74-a9e7758e6f93",
@@ -6799,7 +7018,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "T22.11 (2026-09-22). One clause in applicable_role_ids — the assignment's own resource always applies, an ancestor's only when inherit is true — shared by evaluate and evaluate_batch; the repository reads the field in both the direct and the group-inherited SELECT and in every assignment listing. Schema v66 adds it as option<bool> with no backfill, and absent reads as true, so every existing assignment and every client that does not send the field keeps its meaning. The three assign routes (user, group, service account) refuse inherit: false with 400 when no resource_id is named and when the role is global, each with an I4 twin that the same request without the field, or with true, is accepted. There is no update: has_role is UNIQUE(in, out), so changing the flag is an unassign and an assign, each of which invalidates the subject's cached decisions (the tenant's, for a group), and the grant.pre_assign four-eyes hook payload carries inherit. Property tests over every rule set of a three-node chain: adding a deny never widens access whatever its flag; false on an allow never widens; false on a deny can, with row 10 as the asserted witness. Rows 9–11 are proved end to end through both evaluate and evaluate_batch, for a group-inherited assignment, and over gRPC CheckAccess and BatchCheckAccess; the clause was broken on purpose (the inherit guard alone, then the whole ancestor term) and the new tests went red both times. Residual, documented: making a role global after assigning it non-inheritably widens that assignment to everywhere, as it widens every assignment of the role. Amended 2026-09-23 (T22.11b, S-10b): the admin console offers the flag only where the server would store and apply it (a resource chosen, a role that is not global) and changes it as the same unassign then assign, restoring the old assignment when the second call is refused and saying in so many words when even the restore fails; the console decides nothing the three assign routes do not decide again. Saving a role as global while it has non-inheritable assignments now opens a confirmation that names them and the widening; the residual stands (the server accepts the change by design), and the console no longer lets it happen unannounced."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "cb90bd7e-3fb9-5083-b48b-28b85d9208fa",
@@ -6844,7 +7064,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "invalidate_subject sweeps every shard (1.0.0-beta02); a subject id is unique across the deployment, so the sweep removes exactly that subject's entries and nothing else. SubKey carries subject_tenant_id, so cache-key correctness does not depend on a subject's home tenant being fixed."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a2cfad41-880d-59f4-838a-a6616c8ecd30",
@@ -6880,7 +7101,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta05: ORGANIZATION_LEVEL_ACTIONS in axiam-core is the single nine-action, exact-match list both layers read. The seeder withholds those actions from an ordinary tenant’s super-admin and admin roles, and the reconciler learned to revoke — deliberately narrow: only the three seeded default roles, only the listed actions, only outside the organization scope, with a WARN naming each tenant it touches, so an operator’s own custom grants are never swept. The invariant — an action can be withheld only if every handler requiring it is scope-guarded — is enforced by a consistency test that reads the handler sources and fails in both directions; email_config:write is deliberately excluded because it also guards a tenant’s own mail configuration. Operational note: on the first boot after upgrade the revocation removes grants the scope guard was already refusing, so no working call stops working."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "44f386cf-7043-5b1c-b947-6b6a7540772a",
@@ -6897,7 +7119,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "cb57e62c-3f96-5aa3-b50c-3bd2c828b118",
@@ -6924,7 +7147,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Authorization outcomes are written with an explicit outcome field covering both allow and deny, so denial patterns are queryable and can drive the security notification category."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "edges": [
@@ -6944,7 +7168,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "gRPC/TLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "53cc3c52-75f1-559a-a713-8b97d5ea9332",
@@ -6972,7 +7197,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Messages carry an HMAC signature over the payload that the consumer verifies before evaluating; the broker connection is TLS-only — AXIAM__AMQP__URL must be amqps:// and every other scheme is refused before a socket is opened, in a debug build exactly as in a release one, with the AXIAM__AMQP__ALLOW_PLAINTEXT escape hatch removed."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a2d81dca-d3f3-53bb-b696-e51d0a92ac14",
@@ -6991,7 +7217,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fc5d73bb-d929-5905-96ba-9a777aefe5c1",
@@ -7009,7 +7236,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "292fc454-d584-5526-bbb1-7f2d77cd0d06",
@@ -7027,7 +7255,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "c532668f-3e45-5825-8b43-046479f6df36",
@@ -7045,7 +7274,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "60d1b5b0-9381-5b9d-a279-370c8a37411a",
@@ -7063,7 +7293,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b6241bb8-e374-585f-957f-d16fc9460758",
@@ -7081,7 +7312,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "4e2428c7-82ec-5cfb-ac98-c9f4bb393d7e",
@@ -7099,7 +7331,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "359cbb76-fafc-5a7c-95a9-2bff25b576a2",
@@ -7117,7 +7350,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "71648efe-c997-5933-bcc3-31d76d7ca466",
@@ -7135,11 +7369,13 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "AMQPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "total": 27,
    "open": 0,
+   "notApplicable": 0,
    "bySeverity": {
     "Critical": 6,
     "High": 14,
@@ -7149,7 +7385,7 @@ export const THREAT_MODEL: ThreatModel = {
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "description": "Organization and tenant CA lifecycle with per-CA key custody (sealed database row or Vault), tenant signing CAs beneath the organization CA, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification against hot-reloadable trust anchors, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.",
+   "description": "Organization and tenant CA lifecycle with per-CA key custody (sealed database row or Vault), tenant signing CAs beneath the organization CA, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification against hot-reloadable trust anchors, revocation by certificate status (AXIAM publishes no CRL and runs no OCSP responder, T-102), and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.",
    "width": 1438,
    "height": 828,
    "boundaries": [
@@ -7204,7 +7440,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "CA operations are organization-scoped and require an organization-level administrative permission; every operation is audited and raises an admin notification."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "81a1ec38-73fb-580b-980b-5f7376093125",
@@ -7230,7 +7467,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM limits the blast radius with per-device certificates, a maximum validity policy and immediate revocation."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "1014a143-dacc-51c3-ba15-48d93d55c6ba",
@@ -7247,7 +7485,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "0c72c6c7-3a13-591f-b51f-c7db336ebbc0",
@@ -7304,7 +7543,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta02: the repository writes the ciphertext it is given in the same single statement that records the custodian, so the Vault→database direction carries the key and the database→Vault direction still clears the column — clearing is now the caller's decision, not the repository's assumption. The operation orders copy, record, then release, so a failure before the record leaves the CA exactly as it was. Five integration tests drive the real Vault key store against a mock HTTP server, including that a migrated-back key still decrypts and equals the one Vault handed over."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "eb80874d-646f-5abc-ac17-db54f759c1e3",
@@ -7388,7 +7628,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "T22.14 (S-7, 2026-09-23). A fourth certificate type, Server, is the only one that may carry SANs, and they come only from an explicit subject_alt_names request field — a CSR that requests a subjectAltName is still refused (inspect_csr), so nothing a caller's CSR says reaches the SAN list. Every SAN and the common name must be admitted by the tenant's effective server_cert_allowed_names: DNS suffixes (strictly below, on label boundaries), exact hosts and IP prefixes, case-insensitive, with trailing dots, Unicode labels, partial wildcards and IPv4-mapped IPv6 refused. The list is written in the organization baseline, is empty by default, and empty refuses every Server request. It rides the settings interlock every other override uses: a tenant may remove or narrow an entry and a widening one is a 400 at write time; when the baseline later shrinks, the effective list is the intersection, computed on every read, so a tenant never keeps a withdrawn name nor gains one it had removed. The fence runs before the issuing CA is looked up, on both leaf paths and both custodians. Under vault_pki custody the admitted names travel inside the CSR AXIAM builds, because sign-verbatim ignores alt_names and ip_sans (observed on Vault 1.18.3), and a caller-CSR Server request is refused because no channel for its names exists. Every leaf now carries a per-type profile — clientAuth for User, Service and Device, serverAuth for Server, keyEncipherment for RSA only — so a Server leaf fails the clientAuth check of the REST and gRPC client-certificate verifiers (InvalidPurposeContext), bind refuses it with 400 and device login refuses it. Tests: the matcher and interlock unit tests in axiam-core, two repository tests of the stored baseline and its shrinking, generate and sign-csr twins in cert_test.rs and sign_csr_test.rs (issued leaves parsed, the profile table for every type and key), four Vault twins, the bind and wire-level settings tests in axiam-api-rest, and a browser-shaped acceptance in axiam-server: a rustls client trusting only the organization root completes a handshake with an actix listener presenting the issued leaf, and fails for a name the leaf does not carry. Nine deliberate mutations of the fence each turned a named test red. Residual, recorded as decision D-7: the fence is AXIAM's and is not embedded in the tenant CA as X.509 nameConstraints, so a relying party trusts the chain for any name AXIAM was made to sign; a compromised AXIAM or a Vault token used outside AXIAM is not bounded by it. Embedding it would make every policy change a CA re-issuance and is deferred to the next PKI pass."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "54f0ec8e-f431-57a9-934c-f48ff965061b",
@@ -7473,7 +7714,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "S-3 (2026-09-22): issue_service_account_token takes a cnf and device_auth builds one from the thumbprint of the certificate rustls verified for this connection, so the token names the key the device proved it holds. No enforcement code changed, and that is the finding rather than a shortcut: both surfaces already refuse a cnf-bearing token whose evidence does not match — axiam-api-rest's enforce_sender_constraint runs inside validate_presented_token, which every extractor reaches including the service-account one, and axiam-api-grpc's interceptor reads peer_certs() and runs the same verify_token_binding. The claim was the only missing half. The thumbprint is recorded only where rustls verified the certificate on this connection: the trusted-proxy X-Client-Certificate path mints no cnf, deliberately, because the certificate is present at login and absent from every later request there, so a bound token would be one AXIAM itself refuses on first use — an asymmetry stated in CertificateAuthenticated::certificate_thumbprint's own documentation and in docs/pki/README.md rather than left to be discovered. Tokens minted before this change carry no cnf and are accepted exactly as before, so the migration lasts one access-token lifetime. Three unit tests in axiam-auth pin the stamp, the refusal without and with a wrong certificate, the acceptance with the right one, and the I1 that an unbound token demands nothing. Amended 2026-09-23 (T22.12, S-8): with AXIAM__GRPC_TLS_CLIENT_AUTH set to optional or required the gRPC listener verifies the device's certificate and the interceptor finds it in peer_certs(), so a device token is accepted over gRPC with its own certificate and refused with another device's or with none. Under off it is refused, as before. See T-286."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "9a80f354-ab85-50c6-8405-8a91a50e9681",
@@ -7482,25 +7724,30 @@ export const THREAT_MODEL: ThreatModel = {
      "y": 284,
      "w": 140,
      "h": 140,
-     "name": "Revocation & CRL",
+     "name": "Revocation (status in AXIAM's store; no CRL published)",
      "lines": [
       "Revocation",
-      "& CRL"
+      "(status in",
+      "AXIAM's",
+      "store;",
+      "no CRL",
+      "published)"
      ],
-     "description": "",
+     "description": "Revoke and rotate set the certificate row's status. AXIAM publishes no CRL and runs no OCSP responder: the CAs carry the cRLSign key-usage bit and nothing serves a list (T-102).",
      "outOfScope": false,
      "threats": [
       {
        "number": 102,
-       "title": "Revoked certificate honoured until the CRL refreshes",
+       "title": "A revoked certificate stays valid to every relying party that does not terminate at AXIAM",
        "type": "Spoofing",
        "severity": "High",
-       "status": "Mitigated",
-       "description": "If relying parties depend only on a periodically published CRL, a revoked device keeps authenticating for the refresh interval.",
-       "mitigation": "AXIAM checks certificate status in its own store on every mTLS authentication, so revocation takes effect immediately for AXIAM-terminated connections. External relying parties consuming the CRL remain bound by its publication interval."
+       "status": "Open",
+       "description": "Revoking a certificate sets the status on its row in AXIAM's store. AXIAM publishes no CRL and runs no OCSP responder — its CAs carry the `cRLSign` key-usage bit and nothing serves a list — so a relying party that validates AXIAM-issued certificates itself (a FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its own mTLS) has no channel through which to learn of a revocation, and honours a revoked certificate until it expires. Until model 2.36.0 this entry described a CRL whose refresh interval bounded that window; the tree has never contained one.",
+       "mitigation": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM authenticates a device by its certificate, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf. Nothing else AXIAM terminates reads it (corrected by the W6 F4 review, model 2.36.1): neither listener's TLS handshake checks revocation, and OAuth2 `tls_client_auth` matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by ilpanich/axiam#565 (spike record §8, D1); this entry closes with it, together with the listeners' verifiers loading that list or `tls_client_auth` reading the certificate's status."
       }
      ],
-     "open": 0
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "522c5d92-8100-5357-8571-396a2b44ff19",
@@ -7531,7 +7778,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "PGP key management is tenant-scoped and administratively audited, key rotation is itself an audited event, and verification pins the key fingerprint recorded with the batch."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e006e495-addb-55a7-bbdf-44b2df1c1882",
@@ -7559,7 +7807,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta02: no PKI-specific pair now means the Vault the deployment already configured, not no Vault at all, and the startup custody line carries vault_inherited so an operator who never set a PKI variable can read why their keys are in Vault. The PKI pair still wins outright when set. Database custody beside a working Vault is reachable only by writing AXIAM__PKI__CA_KEY_STORE=database explicitly, and is reported at startup as a warning naming what is at stake. Custody is recorded per CA, and the migrate-custody endpoint moves existing keys into Vault without re-issuing anything."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "d96b65b5-6a1e-5f22-b54b-357e84d4dd27",
@@ -7587,7 +7836,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Status transitions go through the audited API path; direct datastore write access is restricted to the service credentials on the private data tier and is treated as full administrative compromise."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "94966cac-9ba7-5d7d-97e4-2e2890a69c29",
@@ -7605,7 +7855,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "18ed2d20-aec6-5ddb-91e2-d348cb5405a2",
@@ -7661,7 +7912,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "CLOSED (T-153), opt-in. AXIAM__PKI__MDS_MAX_STALE_DAYS bounds the window: past that many days beyond nextUpdate, an attested registration is refused with AttestationDenyReason::MetadataStale before the ceremony is finished, so nothing is written and then rejected. Default 0 (disabled) keeps the documented fail-open behaviour deliberately: the right bound is a property of the deployment — a high-assurance tenant may want days, while an air-gapped one on MDS_BLOB_PATH, with no automatic refresh path at all, would be taken offline by anything short of months. Scoped to attested ceremonies only: under AttestationMode::None no metadata is consulted, and never-ingested metadata is the policy's unknown_aaguid setting's job. Staleness still never hard-fails ingestion, and air-gapped operators must still re-supply the BLOB themselves."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "65a3b482-ded2-5ac6-9daf-0f2a8cdf3b51",
@@ -7689,7 +7941,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Same posture as the certificate store (T-104): these tables are written only by the verified ingestion path (weekly refresh job or the admin-triggered refresh endpoint), which always re-derives entries from a BLOB that passed the full digest-pinned trust-chain verification. Direct datastore write access is restricted to the service credentials on the private data tier and is treated as full administrative compromise."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "edges": [
@@ -7709,7 +7962,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fe2654d6-f234-534e-bc78-9fd1f942a090",
@@ -7727,7 +7981,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "074052f6-5d7b-5ed0-af33-7ae9cbb36dd5",
@@ -7756,7 +8011,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Delivery is over TLS 1.3 only, the key is never persisted server-side and is never repeated in any later response, and the issuance is audited so an unexpected issuance is visible."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "4e73667e-2731-541d-9997-73d7b8604655",
@@ -7774,7 +8030,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "mTLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "46138ad1-3469-549d-b5dc-f6261f66b945",
@@ -7793,7 +8050,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "mTLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3e5d300c-c3ee-594e-94e9-cbda2d6f43c1",
@@ -7811,7 +8069,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "21fc4e9f-d560-5c66-99db-d0b31b9ef68c",
@@ -7829,7 +8088,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "6c597229-9ad6-5f68-af39-26c6475d902b",
@@ -7848,7 +8108,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "8b505f19-c48a-5847-83f0-3d7d581a06da",
@@ -7867,7 +8128,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "47f7efa8-043f-5ccd-9f38-efd13cc7d374",
@@ -7885,7 +8147,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "9586ec55-bcbd-57d9-8d6c-890721b9cee2",
@@ -7903,7 +8166,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3780b9c2-45ab-5d9f-93c5-b7d4bc54d730",
@@ -7921,7 +8185,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "9c1d31a8-b76b-59b4-b344-92247caee2ab",
@@ -7939,7 +8204,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e86be81e-0435-5173-8f0c-c4dab7566d7d",
@@ -7957,11 +8223,13 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "total": 30,
-   "open": 1,
+   "open": 2,
+   "notApplicable": 0,
    "bySeverity": {
     "Critical": 7,
     "High": 18,
@@ -8042,7 +8310,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Every delivery carries an HMAC-SHA256 signature over the payload with the per-endpoint secret; the SDK contract documents verification as mandatory on the receiving side."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1baadc97-d0c0-5bd6-8dc9-29fee7fe5f3a",
@@ -8058,7 +8327,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "67f064a7-b520-5fcc-92a1-71dff9459724",
@@ -8084,7 +8354,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Provider credentials are encrypted at rest and redacted from Debug output; configuration changes are audited. Rotate keys on any suspicion and scope them to send-only."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "176a8db0-29b3-5da5-8dbf-101539a77419",
@@ -8103,7 +8374,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "5c5402bf-0738-5484-b624-590047e0e6d3",
@@ -8158,7 +8430,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.8.2). A lost lease only raises a flag; the composition root then stops through the SIGTERM path — no new connections, in-flight requests finished, the cleanup task's current tick finished, so an erasure and its row stay together — and every orderly stop drains the audit queue with `AuditMiddleware::drain`, a FIFO barrier bounded at 5 s, before `serve` returns; after a lost lease it returns an error, the non-zero exit D-59 requires. The process exit survives only as a backstop after `LeaseTiming::lost_stop_deadline` (15 s). Tests: `crates/axiam-server/tests/minimal_profile_boot.rs` `an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_rows`; `crates/axiam-server/src/profile.rs` `a_lost_lease_starts_the_orderly_stop_at_once_and_the_backstop_only_after_the_deadline`, `an_orderly_stop_that_finishes_in_time_disarms_the_backstop`; `crates/axiam-audit/tests/service_and_middleware.rs` `drain_returns_once_every_queued_entry_is_written`, `drain_is_bounded_when_the_datastore_does_not_answer`. Residuals: a SIGKILL, an OOM kill and the backstop still lose the queue; the gRPC listener is not part of the orderly stop, and the full profile still exits mid-flight when an AMQP consumer dies (review P23W5-A11, A12)."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "564e10a1-ee60-5981-91af-b9a8d05a75fa",
@@ -8185,7 +8458,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Signing failures raise a compliance admin notification rather than failing silently, so an unsigned batch is visible."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1e6088d7-61e3-57c2-b772-39df74574e10",
@@ -8233,7 +8507,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Retries use exponential backoff with a per-webhook configurable policy, concurrent deliveries are bounded, and each attempt is logged to the audit trail."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "da53123e-3f19-52d0-b83a-bf3515d6f6e1",
@@ -8273,7 +8548,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Addresses and headers are constructed through the typed lettre API, which rejects embedded control characters, rather than by string assembly."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "42999a33-a324-5b3c-baef-e2176cd7a52c",
@@ -8302,7 +8578,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Reopened at model 2.35.0 by the W5 F4 review (P23W5-13). Until then this entry read “notifications are delivered in configurable batches through the mail queue, and rules are per-category so a noisy category can be tuned without disabling the rest”; nothing batches them. What is built: rules are per event, so a noisy event can be taken out of a rule without disabling the rest; a mail is fixed text; the events a caller can provoke ride rate-limited routes (sign-in per address and per account, with brute-force lockout, T-27); and the one event a background process raises, `scim_delivery_failed`, is coalesced to one notification per target per hour (T-418, D-73). What is not: `NotificationDispatcher::dispatch` enqueues one mail per matched recipient per audit row, so a request-path event an attacker can produce in volume — failed sign-ins spread over addresses and accounts — mails each recipient of a rule for it once per event, with no coalescing, cool-down or digest. Open until per-rule coalescing exists (issue body in the W5 F4 review, §14)."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "54f8e397-5ae5-5288-b810-bc75e2af389d",
@@ -8338,7 +8615,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "CLOSED (T-119). AXIAM now prunes audit records on a clock, defaulting to a 730-day retention window. AuditLogRepository::prune_older_than is the table's first deletion path and is deliberately narrow: reachable only from the background sweep, never from any HTTP handler — retention is a deployment-wide policy, not an operation an administrator can aim at a time range of their choosing — and deployment-wide rather than per-tenant, so one tenant's settings cannot decide how long another tenant's records survive on shared storage. 0 disables pruning and restores the old behaviour, and both states are logged at startup so the window in force is visible rather than inferable from config. Archival to an external WORM sink before the window expires remains the operator's choice (T-118)."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "9883f81e-42c5-5275-81eb-22eeaa0782b9",
@@ -8365,7 +8643,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "SEC-067: Webhook, CreateWebhook and the secret-rotation type all carry manual Debug implementations that redact the secret, mirroring the treatment already applied to federation secrets under SECHRD-09."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b2654591-5a21-5db9-bfb5-75953efc9909",
@@ -8392,7 +8671,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Broker access is credentialed per service on the private network, and the transport is always TLS — the server refuses any non-amqps:// broker URL in every build profile; tokens are single-use and short-lived so a stale queued message has limited value."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ca5dcc2e-8c77-530c-b35e-5fa3aac86bc9",
@@ -8419,7 +8699,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "`SsfReceiverToken` (`handlers::ssf`, D-50): only an access token issued to an OAuth2 client by the client-credentials grant (`sub_kind` `OAuth2Client`) **and** carrying the dedicated scope `ssf.manage` is accepted; a user token (even an administrator's), a service-account token or a client token without the scope is `403`, no token `401`. A stream is the receiver's only when its administrator-set `receiver_client_id` is the token's `client_id`; every other stream answers the same `404` as one that does not exist. The scope reaches a client only through its registration (`OAuth2Client::scopes`, refused by the token endpoint otherwise) and the binding only through an administrator (§32). Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `the_receiver_api_needs_a_client_token_with_the_scope`, `another_receivers_or_another_tenants_stream_is_not_found`."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2cb70f89-99d6-5c6b-8862-a03dea020ff9",
@@ -8522,7 +8803,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.5.3, 2026-10-04; D-48, D-53 (11)). Nothing waits before the caller is shown to be the stream's receiver: the token (client credentials, `ssf.manage`) and the stream binding are checked first, and a stream that is not its own is `404` (T-385, T-386). At most **one long poll waits per stream per server instance** (`PollWaiters`: a slot taken the first time a request would wait and released when it answers or is dropped, including when the receiver hangs up). A second concurrent request on the same stream answers at once with what is held, as if `returnImmediately` were true. A wait ends after 30 seconds, or as soon as the stream is paused, disabled or deleted. The route has a bucket of its own, `ssf_poll`, under `AXIAM__RATE_LIMIT__SSF_PER_MIN` (60 a minute per client address, as in T-393), of which an honest long-polling receiver uses about two a minute. Tests: `crates/axiam-api-rest/tests/ssf_test.rs` `a_second_long_poll_on_a_stream_answers_at_once_while_one_is_waiting` (the second answers an empty `sets` in less than one wait step, the first still receives the event that arrives meanwhile, and the slot is free once it has answered), `an_empty_poll_returns_at_once_or_waits_for_an_event` (the 30-second cap), `the_poll_route_has_its_own_rate_limit_bucket`; `crates/axiam-api-rest/src/state/bundles.rs` `one_slot_per_stream_released_on_drop`. An abandoned long poll gives its slot back, and a held event the deployment key cannot sign is logged once per request rather than on every look (W4 F4, P23W4-03: before, about sixty `ERROR` lines per waiting receiver per half minute, a log flood a receiver could sustain by polling); the wait step cannot underflow past the 30-second cap. Tests (W4 F4): `an_unsignable_held_event_is_logged_once_per_poll_and_an_abandoned_poll_frees_its_slot`. Residuals: the slot is per instance, so *n* replicas can hold *n* long polls per stream, each re-reading about sixty times over a full wait. A receiver that runs several pollers on one stream turns all but one into immediate answers and busy-loops; what that spends is its own `ssf_poll` budget. It is self-inflicted, and costs others nothing beyond the per-address bound."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "380feb66-2da4-5fd3-aa96-231aa7263516",
@@ -8586,7 +8868,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Decided in the W4 F4 review (P23W4-01, 2026-10-04). Every stream write is conditional on the version it was prepared from: `SsfStreamUpdate::from_stream` carries the stream's `updated_at` and `SsfStreamRepository::update` writes `WHERE updated_at = $expected`, answering `Conflict` (not `NotFound`) when the stream exists but changed. The receiver's `PATCH`, `PUT` and status `POST` decide again from a fresh read when overtaken — so the D-51 check always judges the status the write would replace, and an administrator's `disabled` makes the retry a `403` — and answer `409` only if the stream kept changing over three attempts; the administrator's `PUT` answers `409` and the console reloads. The deliverer reads the stream again after opening the header and pushes only if it is still the version it signed against and whose endpoint it holds; otherwise the attempt is a retry. Contract §32.3 rule 4 and §32.6 say so (1.56, amended in place). Tests: `crates/axiam-db/tests/ssf_stream_repository_test.rs` `a_write_prepared_from_an_overtaken_read_does_not_land`; `crates/axiam-oauth2/tests/ssf_delivery_test.rs` `a_credential_supplied_for_a_new_endpoint_never_reaches_the_old_one`. Residual: the deliverer's second read and the send are not one step, so an endpoint moved after that read is used for one attempt with the header that was stored for it — the header and the endpoint still belong together."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7a537749-2b71-511e-804c-75a29eff8ae7",
@@ -8603,7 +8886,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "A SCIM 2.0 service provider a tenant administrator registered as a target (G-6): it receives `POST`, `PATCH`, `DELETE` and list requests for the tenant's users and groups, authenticated with a bearer token or with an OAuth2 client-credentials access token from its `token_url`. Trusted with the people the tenant sends it; never a source of AXIAM's directory data.",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1116d6a2-4538-5cfe-8a2e-83ed3df4d0fc",
@@ -8689,7 +8973,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.6.2, T23.6.4). One audit row per write, with the administrator as actor: `scim_target.created`, `scim_target.updated` (the **names** of the changed fields, and whether the credential was replaced), `scim_target.deleted` and `scim_target.reconcile_requested` — never a URL, never the credential. Every delivery attempt writes the dispatcher's row, with the system actor and a fixed-vocabulary reason: `scim_push.delivery_succeeded`, `.delivery_attempt`, `.delivery_failed`; the target's `state` counts failures and dead letters once each, and a reconciliation run logs its findings as one line. Tests: `crates/axiam-api-rest/tests/scim_targets_test.rs` `every_write_is_audited_with_names_never_a_url_or_the_credential`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_dead_letter_writes_the_counter_and_the_reason_once`, `the_last_retryable_attempt_is_counted_as_the_dead_letter_the_consumer_makes_of_it`; `crates/axiam-amqp/src/outbound/consumer.rs` `audit_entry_uses_the_system_actor_and_the_kind_prefix`. Residual: a reconciliation's repairs (digests cleared, links dropped, accounts adopted for deprovisioning) are counts in a log line, not audit rows; the deliveries they cause are audited one by one."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "833f36e5-7889-59c2-ac8f-1c476fa445fa",
@@ -8735,7 +9020,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.6.1, T23.6.4; D-57, T-406's rule). A replacement is conditional on the `updated_at` the route read for that request (`ScimTargetUpdate::expected_updated_at`): a write landing in between makes it change nothing, and it answers `409` (contract §31.3 rule 4). The deliverer and reconciliation **never write the target row**: delivery state lives in `scim_target_state`, written only with atomic increments and plain sets, retried on a write conflict up to 32 times so that no count is lost; the reconciliation claim is a conditional write (T-419). Links are written through both unique indexes, and an attempt that finds the resource linked meanwhile keeps that link if it names the same downstream id and retries otherwise. The deliverer reads the target again before the credential leaves (T-408). Tests: `crates/axiam-db/tests/scim_target_repository_test.rs` `a_stale_expected_updated_at_is_a_conflict_and_writes_nothing`, `update_with_the_current_version_writes_and_moves_the_version`, `an_update_of_a_missing_target_is_not_found_not_a_conflict`, `concurrent_dead_letters_are_all_counted`, `concurrent_failures_are_all_counted`, `the_link_unique_indexes_hold_on_both_axes`; `crates/axiam-api-rest/tests/scim_targets_test.rs` `a_replacement_overtaken_by_another_is_409_and_does_not_land`, `two_reads_then_two_writes_the_second_is_a_conflict`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_target_changed_between_the_read_and_the_send_is_a_retry_and_sends_nothing`. Residuals: the `PUT` carries no version from the client, so an administrator who saves a form loaded before another administrator's save replaces that save whole — last writer wins between two humans, each audited with the names of what it changed (T-420), and never a way to move the credential, whose binding is checked against the stored row (T-408). An attempt under way when an administrator narrows the scope or disables the target finishes on the version it read, and so does a reconciliation run, for up to its five-minute budget; the next attempt sees the change."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "edges": [
@@ -8755,7 +9041,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e671d12f-58a9-5a28-95ef-5ee1ddb25fcb",
@@ -8773,7 +9060,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e46b372a-dcb2-51bb-a440-992a3f5aca99",
@@ -8791,7 +9079,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "abc77d7a-19e3-5032-a223-94c60718fcf3",
@@ -8809,7 +9098,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fe72441b-2d67-5f36-b917-4dfac9a65d52",
@@ -8827,7 +9117,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "8274ff45-69b2-5ca2-a5be-62e206704c39",
@@ -8855,7 +9146,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Payloads carry the event type, timestamp, tenant context and event-specific data only — never credentials, password hashes, MFA secrets or private keys."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "9fc1bed4-7a84-53e7-b32f-0cc37039913c",
@@ -8873,7 +9165,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "AMQPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "39ea5288-689d-5b8d-a3e6-be87388164e4",
@@ -8891,7 +9184,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "AMQPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a8792892-1209-587a-adb1-12de73bab6a2",
@@ -8909,7 +9203,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "SMTP-TLS / HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1044da13-065c-5f8c-a94c-f2c2ccc5956d",
@@ -8937,7 +9232,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Inherent to email. Bounded by making the tokens carried in mail single-use and short-lived, so interception has a narrow window. Deploy MTA-STS and DANE on the sending domain to harden the onward hops."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "e955fc76-7cef-5e3c-af0c-ac91b633f76a",
@@ -8955,7 +9251,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "email",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "c5f29b0a-ce93-5eed-b6fa-46dc9d9ba5b2",
@@ -9038,7 +9335,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost, in the full profile: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation. In the minimal profile (`AXIAM__AMQP__ENABLED=false`, D-59) a queued push waits in an in-process queue and is lost on restart, and a dead letter is its audit row alone (T-445)."
       }
      ],
-     "open": 2
+     "open": 2,
+     "notApplicable": 0
     },
     {
      "id": "c18a02c4-5509-5935-9f28-9e14d95c1a2d",
@@ -9057,7 +9355,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS, client credentials",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fa7ee1e5-990d-5faa-9f82-f7c132011459",
@@ -9076,7 +9375,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "dbedd6d1-2ad1-558f-91af-a1a4e13ff6bd",
@@ -9122,7 +9422,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.6.2, T23.6.3; D-57, D-58). Every request has ten seconds, connect to last byte. A body is read to at most 64 KiB for a write and 1 MiB for a list; a larger one is a retry and is never buffered whole. A reconciliation run reads at most 100 pages of 100 per collection, for at most five minutes of wall clock, and a listing cut short by a budget is audited in part and never drops a link for what it did not reach. A group of more than 10 000 members dead-letters instead of being read whole, and AXIAM reads members 100 at a time. Retries follow the per-kind schedule (`AXIAM__SCIM_PUSH__*`: backoff with a ceiling, then the dead-letter queue), and `scim_push` has a topology of its own, so a slow downstream delays SCIM pushes and never webhooks or SSF events. Tests: `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_downstream_with_endless_pages_is_read_to_the_page_budget_and_no_link_is_dropped_for_it`, `a_large_downstream_is_read_in_pages_of_a_hundred`, `an_unreachable_downstream_fails_the_run_without_dropping_anything`; `crates/axiam-scim/src/outbound/reconcile.rs` `the_budgets_are_the_decided_ones`; `crates/axiam-scim/tests/outbound_scim_test.rs` `a_5xx_and_a_429_retry_and_are_recorded_as_failures`; `crates/axiam-pki/src/ssrf.rs` `read_capped_body_rejects_body_over_cap`, `no_redirect_honours_the_content_length_cap`; `crates/axiam-amqp/src/outbound/topology.rs` `the_scim_push_declaration_is_pinned`. Residuals: the 10 000-member bound is in the code (`MAX_GROUP_MEMBERS`) and no test pins it. And each replica's `scim_push` consumer makes one attempt at a time, for every tenant: a downstream that answers every request just inside ten seconds — or never, so that each attempt spends the full ten seconds, twenty with a token request — slows the SCIM pushes of every target on that replica, and a reconciliation that queues a whole tenant multiplies it (10 000 references at ten seconds each is more than a day). One tenant's chosen endpoint can delay another tenant's provisioning, never its webhooks, SSF events or sign-ins. The W5 F4 review reported it (P23W5-07) with a per-target circuit breaker as the proposed fix; the 10 000-member bound is reported as a coverage gap in the same issue."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e42d7a8d-dcd9-5dd4-bec1-b2adc69052e6",
@@ -9141,7 +9442,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "SurrealQL",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "8dfb48c8-5a7d-5d6f-913e-b8d0db1045a0",
@@ -9170,11 +9472,13 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (the W5 F4 review, P23W5-02, D-73). **One notification per target per hour.** The `scim_push` consumer's notifying audit log asks a `NotificationGate` before a dead letter reaches the rules, and the gate claims it with a conditional write on `scim_target_state.failure_notified_at` (schema v84; the `claim_reconciliation` pattern, so replicas agree; a target of another tenant, or one deleted since, claims nothing). **Every dead letter is still recorded**: its own `scim_push.delivery_failed` row, and a count on the target's `state` (`dead_lettered_total`, `last_failure_reason`), so the console shows the size of an outage the one mail announces. A gate that cannot decide stays silent and logs once rather than failing open into a flood, and `NotifyingAuditLog` has no constructor without a gate. Rules stay per event (T-117) and the mail is fixed text — the action and its outcome, never a URL, a person or the downstream's answer (D-16). Tests: `crates/axiam-server/tests/scim_dead_letter_notification_test.rs` `a_targets_dead_letters_mail_each_recipient_once_an_hour_not_once_each` (fifty dead letters, two mails; it failed before the fix with a hundred), `a_scim_dead_letter_row_mails_every_recipient_of_a_matching_rule`; `crates/axiam-db/tests/scim_target_repository_test.rs` `claim_failure_notification_succeeds_once_per_interval`, `concurrent_failure_notification_claims_have_one_winner`; `crates/axiam-db/src/schema.rs` `v84_adds_only_the_failure_notification_claim`; `crates/axiam-scim/tests/outbound_reconcile_test.rs` `a_dead_letter_writes_the_counter_and_the_reason_once`. Residual: a recovery is not announced (the console's `state` shows it), and a target that keeps failing mails each recipient once an hour until a rule or the target is changed."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "total": 55,
    "open": 5,
+   "notApplicable": 0,
    "bySeverity": {
     "Medium": 34,
     "High": 12,
@@ -9228,7 +9532,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "4f10242a-8405-59a8-bb6a-366deb737eb3",
@@ -9255,7 +9560,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Outside the application boundary. Restrict RBAC on Secrets and exec, enable Kubernetes audit logging, and treat cluster-admin as equivalent to full AXIAM compromise in your threat register."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "679db7b9-8d10-51ad-aff4-35b7abfee484",
@@ -9282,7 +9588,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta08. `AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT` gates the fallback and defaults to **false**, so the header is consulted only where an operator asserts that a proxy they run performs the mTLS handshake and overwrites the header on every request. Native mTLS is unaffected and always preferred: a certificate rustls verified on the connection is authoritative and the setting is never consulted. Defence in depth rather than a single gate — the edge Caddyfile and `docker/nginx.conf.template` both strip `X-Client-Certificate` from inbound requests, so neither half has to be the only one. The FAPI2 client-credential path never accepted the header at all and still does not (`claude_dev/threat-model-stride.md` §5.3, X5.1): a client credential must not be assertable by anything that can set a header, and this brings the device path to the same standard. Devices that need real mTLS get a route the edge does not terminate — a second hostname or a TCP-passthrough Service — where rustls verifies the certificate itself."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "fe65f1aa-1900-57d3-abb9-27b1b23182ba",
@@ -9328,7 +9635,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta08. The rule is stated as `trusted_hops = proxies − 1` with a derivation and a per-topology table in `crates/axiam-api-rest/src/extractors/rate_limit.rs`, `docs/deployment/README.md` and the docs site. Five tests in `rate_limit_keying_test.rs` pin the table, including a regression witness asserting that the old advice really does collapse two different clients onto one key. Structurally, the topology change removes the second hop, so both shipped deployments now have exactly one proxy and the default `0` is correct — and both set it **explicitly** anyway, with the derivation in a comment, because a value that is right by accident is one nobody re-derives when they add a load balancer. The gRPC listener shares the same variable and the same derivation, which is why publishing gRPC is sound only through the same proxy (T-233). Made **observable** in 1.0.0-beta12 (R-4), which is what the rest of this mitigation was missing: the fallback was correct and silent, and silence is how this off-by-one went unnoticed in the first place — every client keyed on the proxy, one bucket for the whole deployment, and the symptom reads as \"the rate limit is mysteriously strict\", which an operator fixes by raising the limit. Both extractors now emit one `WARN` per process on the first discard, naming the hop count seen, the `trusted_hops` in force and the rule, and increment `axiam_rate_limit_xff_discarded_total{protocol=\"rest\"|\"grpc\"}` on every one; the boot log states the value and the rule together next to the rate-limit posture line. A request with no header is deliberately not counted — a client with no proxy is not a misconfiguration, and counting it would bury the signal — so the fault condition is the counter tracking total request volume, which a dashboard can show."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "76ca990a-d1c4-56fb-b323-38c6185a8aa0",
@@ -9439,7 +9747,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "d6917d9a-710b-50eb-82ff-1cb71c7fb7b4",
@@ -9467,7 +9776,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Metric labels are bounded to low-cardinality dimensions and carry no user or tenant identifiers; the metrics endpoint is not exposed through the ingress."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "c2101ddc-09ed-58e9-b978-160bf020d5f4",
@@ -9499,7 +9809,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "CLOSED (T-129). GET /health/jobs reports every background sweep: when it last succeeded, when it last failed, the error text, the consecutive-failure count, and a computed stalled flag. stalled is measured from the last success (falling back to process start, so a sweep that never ran once is still caught), not from the last error — a job that errors was already visible in the log, but a job that stops running produces no log line at all. Alert on status == \"degraded\", or on a named job's stalled. Returns 200 even when degraded, deliberately: this is not a readiness gate, and a stuck sweep must not pull a serving pod from the load balancer. Three missed intervals are tolerated before flagging, because a sweep that overruns its interval under load is normal and an alert that fires on that gets muted."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a57f6400-7f09-5560-8e08-3df64d296d56",
@@ -9535,7 +9846,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "The shipped deployments pin a persistent engine — all three compose files and k8s/surrealdb/statefulset.yml pass surrealkv: — and docs/deployment/README.md carries it as a MUST-level operator requirement. axiam-server attests the engine at startup and refuses a memory datastore unless AXIAM__DB__ALLOW_MEMORY_ENGINE=true; because SurrealDB 3.2.4 publishes no datastore identity over the wire, that attestation currently logs a WARN, and a unit test fails on the version bump that makes the name available. A CI gate re-runs tools/surreal-race-probe whenever Cargo.lock moves surrealdb, surrealdb-core or surrealkv, so a bump cannot remove the arbitration silently."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "289ece31-a7b9-5486-aec2-a84146f15695",
@@ -9562,7 +9874,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "CLOSED (T-131). The shipped manifests never carried guest/guest — broker credentials come from the rabbitmq-credentials Secret, supplied at deploy time — and now add RABBITMQ_DEFAULT_VHOST: axiam, so AXIAM gets its own authorization boundary rather than sharing the default / with anything else on the broker. Fixing this exposed a defect that mattered more: the server's AXIAM__AMQP__URL lived in the ConfigMap with no credentials at all, so the shipped manifests could never have authenticated to their own broker; the URL now lives in axiam-secrets (it embeds a password) with the /axiam vhost suffix. Splitting one credential per service still belongs to whoever deploys. Unchanged and still applying: HMAC verification on consumed messages, and the amqps://-only transport, so a broker credential never travels in the clear."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "8fbbc2a9-a70f-513d-a1e0-ea9fdce2783b",
@@ -9634,7 +9947,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "c38879a: refused at the bundle, naming the file. Two tests under `tests/` so no fixture is instrumented — an unreadable path and a bundle that parses to nothing — and the empty-bundle case asserts the message is *not* a downstream \"error sending request\", because failing later, against Vault, was the original symptom. Found while writing tests for `SecretProviderKind::build`, the one place in that change where the code did not do what its comment said. The neighbouring invariant is now asserted too: `SettingsLockoutPolicy` falls back to the deployment default when a tenant is unresolvable or the settings store is unreachable, so brute force is still metered while the store is down — failure must not mean \"no lockout\" (T-178's rule)."
       }
      ],
-     "open": 2
+     "open": 2,
+     "notApplicable": 0
     },
     {
      "id": "78160ffe-cb3f-5dbb-8852-1142ff0d92aa",
@@ -9661,7 +9975,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Not addressed by AXIAM. Encrypt backups at rest with a key separate from the cluster, restrict snapshot IAM, and include backup media in the same access review as the live data tier."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     }
    ],
    "edges": [
@@ -9681,7 +9996,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS / gRPC-TLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "39e44fbf-616d-5d6a-bef4-f851466a7e63",
@@ -9709,7 +10025,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta08. `docker/nginx.conf` becomes a template whose upstream is rendered from `AXIAM_BACKEND_ORIGIN` / `AXIAM_BACKEND_SNI` / `AXIAM_BACKEND_CA`, and the documented topology points the edge at `https://` with the server terminating TLS 1.3 itself. Certificate verification is unconditional in every rendering: there is no `proxy_ssl_verify off` anywhere in the change and no documented setting that produces one, because a backend certificate that does not verify is a misconfiguration to fix and an escape hatch here is the first thing reached for at 3am. Defaults are unchanged, so the dev stack and the E2E suite keep the plaintext behaviour they rely on and reaching the frontend container directly keeps working."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ebc32a13-8d62-5858-91fb-c43a47ac2323",
@@ -9728,7 +10045,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "K8s API (mTLS)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "2b5937c4-d87f-513d-b6a3-1d9e9039a463",
@@ -9746,7 +10064,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "WSS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "87f2c267-f787-585a-a667-f9c6b09c1455",
@@ -9764,7 +10083,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "AMQPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "7e70d2f8-a563-5998-be7f-a3ca300d887f",
@@ -9783,7 +10103,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "K8s API / mounted files",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "c04e31c5-a5d8-5fae-81a6-ea13b7828f92",
@@ -9811,7 +10132,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Deployment responsibility: use an encrypted transport and server-side encryption on the backup target."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "71aed01c-8609-5e16-b6f2-0b9951854344",
@@ -9829,7 +10151,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "HTTP (in-cluster)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "ec2f05ec-874a-5212-a811-524bafe15ee5",
@@ -9847,7 +10170,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "WSS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "957d8f25-dba8-535f-b7ec-0f0987f377e6",
@@ -9866,11 +10190,13 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS (mTLS)",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "total": 29,
    "open": 6,
+   "notApplicable": 0,
    "bySeverity": {
     "High": 17,
     "Critical": 2,
@@ -9952,7 +10278,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "`axiam_auth::token::verify_token_binding` refuses a `cnf` naming no method it can check, INCLUDING an empty object, and treats two confirmations as a conjunction rather than a disjunction. The narrower `verify_certificate_binding` is retained for validators that genuinely cannot verify a proof, and it REFUSES a jkt-bound token rather than passing it. SDK contract §10.1 rule 9 makes the same behaviour normative for all eleven SDKs and requires both the negative tests and a positive regression test that an UNBOUND token is still accepted with no evidence at all -- because the opposite failure, demanding a proof from every caller, would break every existing deployment."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "3a571b9d-2c58-5c8d-9ef9-dc00d6dc0c0b",
@@ -9979,7 +10306,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "React escapes interpolated output by default, the security-headers middleware sets a Content-Security-Policy, and auth cookies are HttpOnly so injected script cannot read them directly. Avoid dangerouslySetInnerHTML anywhere in the admin UI."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "57fbe487-02b7-5a57-89aa-c1d59c0508a6",
@@ -10043,7 +10371,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "2646add: the key is now word characters *ending* in a named secret, still followed by `\\s*[:=]`, so widening the key does not widen what counts as a match — \"password too short: minimum 12\" and the SCIM \"does not hold scim:provision\" message stay intact, both already pinned — and a secret word counts only when it ends the key, so `password_policy` is not mistaken for a credential and configuration errors are not mangled, the failure mode that makes people stop trusting the UI and read the network tab instead. Checked for catastrophic backtracking at 2000-character runs, near-miss prefixes and 300 keys in one message. 0ac3d46: all four handlers go through `getApiErrorMessage`, the existing test that asserted the broken generic fallback now asserts the server's sentence, and a new test pins that a server-echoed password is redacted rather than rendered. Frontend line coverage moved from 92.6% to 96.6% with the threshold ratcheted to the achieved number, which is what found both."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "478f32d2-ac93-5350-ade6-1f0a28f6401a",
@@ -10126,7 +10455,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Contract 1.40 adds §21.3 rule 2, normative for the §21 client role only: an SDK making a call over mTLS must prefer an alias over the top-level entry, must read an absent member as \"no separate host\" rather than \"unsupported\", must not synthesise aliases for the three excluded endpoints, and must keep validating `iss` against the unchanged issuer; the guard role (§10.1 rule 9) is untouched, and the change is additive and server-side — every existing SDK keeps working unchanged against every existing deployment, because none publishes the member until an operator configures it. Contract 1.41 keeps §5 rule 3's MUST NOT on Basic authentication verbatim and changes only its rationale, from \"the server documents no alternative\" to the reason that was always the better one: the two methods carry the identical credential and only the header channel is routinely logged. Contract 1.42 records the two RFC 8414 discovery members as informative; SDK decoders ignore unknown members, as they did for `dpop_signing_alg_values_supported` and `mtls_endpoint_aliases`. **The SDK half landed on 2026-09-12 (R-8, contract 1.43).** Rule 2 had been normative since 1.40 and was implemented by nobody, which is the residual this closes: the server published the member and every SDK ignored it. Three things were added here first. The clause that was implicit — **an alias's query component is preserved, not appended to**: AXIAM's aliases carry the tenant as a query component, so an SDK that appends its own `?tenant_id=` produces a duplicated parameter the server cannot resolve to one tenant, and one that rebuilds the URL from host and path strips whatever else the deployment put there. Displacing the `tenant_id` value with the caller's own is correct and is explicitly not what the clause forbids — the multi-tenant document names no tenant and the client supplies its own. Reading the Rust SDK, which had implemented rule 2 since contract 1.40, is what produced that distinction: a first draft of the clause said \"verbatim\" and would have forbidden the one behaviour a multi-tenant deployment requires. Either way the failure is one that shows up *only* on a two-listener deployment, which is the deployment the rule exists for. The **§21.3.1 test vectors** — present, absent, malformed — published inside `CONTRACT.md` itself rather than as a fourth vendored artifact, so eleven repositories pin the same bytes and the existing drift gate already covers them; vector C must be **refused** rather than fallen back from, because quietly presenting a certificate to the front-channel host authenticates nothing while appearing to work; its two defects are a non-absolute URL and a scheme **weaker than the top-level endpoint it replaces** — comparing like with like, because an alias substitutes for exactly one endpoint. Neither \"must be `https`\" nor \"weaker than the `issuer`\" survives contact with an implementation: the server accepts an `http` alias for local development, every SDK suite runs against a mock server speaking plain HTTP, and a test fixture (or a deployment behind a TLS-terminating proxy) routinely pairs a realistic `issuer` string with loopback endpoints. Both wordings were tried against the Rust SDK and both failed tests that were correct. The refusal sits at the point of use, so a client with no certificate never reads the member and a malformed alias cannot break the clients that never use it. And the **§21.10 per-SDK table**, in the §21.9 style, where an unrecorded row is not a supported answer and `declines` with a reason is. Server side, two tests pin what SDKs pin: the alias object has exactly the six meaningful endpoints and never the three front-channel ones, and an unusable base (relative, non-`https`, or carrying a query or fragment) fails discovery rather than being published — so no conformant deployment can serve vector C and an SDK's refusal is defence in depth. Conformance rows 161–164. **The eleven implementations landed on 2026-09-13** (the same PRs as the §10.4 poller: rust #104, typescript #103, python #80, java #92, kotlin #62, csharp #87, php #67, go #77, swift #60, c #59, cplusplus #60, each released at that SDK's 1.0.0-beta14): §21.10 now has `yes` in both columns for every SDK, none `declines`, and each carries the three §21.3.1 vectors as tests — vector C refused at the point of use, so a client with no certificate never reads the member and a malformed alias cannot break the clients that never use it. Three of the eleven were first reported as unreachable for toolchain reasons and two of those reports were wrong (the .NET SDK is in Ubuntu's apt repository and NuGet was reachable; PHPUnit installs from apt); the Swift SDK alone was verified by CI rather than locally, and its commit says so. The residual this entry carried — a normative rule implemented by nobody — is closed; what remains is the ordinary one, that an integrator has to be on an SDK release that carries it."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "9df9cb23-1a5d-5fdf-9697-7e276681aa52",
@@ -10174,7 +10504,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Contract 1.15 makes the check normative for all eleven SDKs (§10.1 rule 9): a token carrying cnf is not a bearer token and MUST NOT be accepted as one. The rule is a four-row table whose last row is the failure above — a cnf naming an unimplemented method MUST be refused, never read as unconstrained — and the thumbprint MUST come from the transport, never from a caller-supplied header. Server-side, axiam_auth::token::verify_certificate_binding implements exactly that table. Introspection exposes cnf (RFC 8705 §3.3) so an introspecting resource server cannot disagree with a locally-validating one. The contract also requires a positive regression test — an UNBOUND token is still accepted with or without a certificate — because the likeliest wrong implementation is one that starts demanding certificates from every caller."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "333133bc-1236-5f14-a917-732d86fea87f",
@@ -10213,7 +10544,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "§8b rule 7's second clause is the whole of their obligation and it is discharged in code, not documentation: each of the three ships the rule 1–5 guard as a public, tested function (amqpsEndpoint, axiam_amqps_endpoint, axiam::amqps_endpoint) — scheme refusal with no loopback exception, no plaintext fallback, no verification-skip switch, fail-closed on an unparseable URL — and calls it in its own example transport before anything opens a socket. The transport seam is deliberately no wider than deliver-inbound and publish-reply, so it cannot hand the integrator the topology tools §22.1 forbids; the protocol core itself is now library code, ending the hand-rolled-HMAC divergence. HMAC signing (§8/§22.2) remains mandatory on every message regardless of transport."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "32f40e4d-ad24-5e7a-ac23-1a63051e704d",
@@ -10242,7 +10574,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "T-145 closed: CONTRACT.md §13 is now normative and all eleven SDKs (Rust, TypeScript, Python, Java, C#, PHP, Go, Kotlin, Swift, C, C++) ship a webhook-signature verifier against one canonical spec — HMAC-SHA256 over <timestamp>.<raw_body>, constant-time comparison on decoded MAC bytes, a header carrying no v1 always fails, multiple v1 values accepted for secret rotation, and a two-sided freshness window (default 300 s) so future-dated timestamps are rejected like stale ones. Integrators must still call it."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "77bfaf8e-ccce-5d24-8ced-7452f475d5c0",
@@ -10270,7 +10603,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Outside AXIAM's control. Mitigate by preferring mTLS or short-lived workload identity over static secrets, rotating regularly through the client-rotation endpoint, and enabling secret scanning on integrator repositories."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "1369048e-72ee-5425-b6ea-a8dd53cfbd32",
@@ -10324,7 +10658,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Fixed in 1.0.0-beta11. `mass-tag.sh` runs each SDK's generator immediately after the re-vendor and stages exactly what it wrote: the dirty set is recorded as path-plus-checksum before and after the call and compared as a symmetric difference, so an operator's unrelated local edit is never staged and a file that was stale before and correct after is recognised as repaired rather than missed. The generator table names all eleven repositories even where the answer is the common one, so a missing repository is a visible hole; a missing generator or interpreter is fatal rather than a skip, because tagging a tree the repository's own CI rejects is the failure this closes. The regeneration is unconditional — a surface can also be stale from a merge that moved the artifacts without regenerating, which is how beta09 went out — and prints \"already current\" in the common case. Verified against the live clones with a deliberately reverted surface in the C SDK, which was detected and exactly its six files staged. The repository-side gate closed in 1.0.0-beta12 (R-2), in all eleven SDK repositories: the §27 drift-check runs on tag pushes as well as pull requests, and the publish/release job lists it in `needs:`, so a stale surface fails *before* a version number is spent. Three shapes were found and fixed in place — six repositories had a dedicated job carrying `if: github.event_name == 'pull_request'` (dropped); Rust and TypeScript had the check as a step inside a `pull_request`-only test job (split into its own job, with the toolchain each generator needs); C, C++ and Swift already ran it on tags but their release job did not depend on it (one entry added to one list). Every generator was verified to detect drift locally — clean, perturbed, restored — rather than by pushing a deliberately red commit to eleven pull requests. Nothing else in any workflow changed."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "4b405aae-8b0a-5fbd-a672-12ff80ee1b03",
@@ -10351,7 +10686,8 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Partially enacted, and narrowed at beta03. Nine of the eleven pipelines carry no long-lived registry credential: Rust, TypeScript, Python and C# and the shared axiam-opaque core publish via Trusted Publishing (OIDC); PHP through Packagist's webhook; Go, Swift, C and C++ from git tags. Every release workflow in the fleet now pins its actions by commit digest, and every published artifact — the server's binary tarballs and CycloneDX SBOMs, the container images, and each SDK's release artifacts — carries a GitHub build-provenance attestation, so an integrator can verify build origin with `gh attestation verify`. Maven Central (Java, Kotlin) still requires a stored Portal user token: Central has no trusted-publishing equivalent, and its OIDC surfaces are account sign-in and Sigstore signing, neither of which authorises an upload — see claude_dev/maven-central-publishing-decision.md. Those two are bounded by compensating controls instead: the credential is an environment secret behind a required-reviewer GitHub environment restricted to v* tags, every published file carries a Sigstore bundle (`.sigstore.json`) alongside its PGP signature — keyless, signed against the release workflow's GitHub OIDC identity and validated by the Central Publisher Portal, so the artifact set Central itself serves carries a statement of build origin the Portal token cannot forge — and the token rotates quarterly. A pull-request gate in each of those two repositories performs a real keyless signing run of the real artifact set on every change, so a release-path misconfiguration surfaces on a pull request rather than at a tag. Open because a stored bearer credential still exists for two of eleven registries."
       }
      ],
-     "open": 1
+     "open": 1,
+     "notApplicable": 0
     },
     {
      "id": "a9eff9ae-2e28-5e50-8efa-1e5915231a5c",
@@ -10370,7 +10706,8 @@ export const THREAT_MODEL: ThreatModel = {
      "description": "",
      "outOfScope": false,
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "edges": [
@@ -10390,7 +10727,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "8624ff2b-3e3c-56e6-b2cb-d54835051035",
@@ -10408,7 +10746,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b3b13cfe-f8c2-50b3-ad67-b4983ce58fab",
@@ -10426,7 +10765,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "config",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "a3a5d8b3-630d-5aa4-b743-5025c1ee1e88",
@@ -10444,7 +10784,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b2338c28-aa31-5741-b838-03b3a078b0fd",
@@ -10462,7 +10803,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "e36b5993-ab12-575b-91e4-5b81a518f961",
@@ -10480,7 +10822,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS / gRPC-TLS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "c6e828c4-3493-5cf9-9a21-a55e52d6a4f6",
@@ -10498,7 +10841,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "in-process",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "122b8796-fd82-5674-b53b-c5a492450ae6",
@@ -10516,7 +10860,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "861bc2db-6c49-5f80-91e3-3d57c46b3b4e",
@@ -10534,7 +10879,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "AMQPS",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "3f13a939-e45b-5880-a042-e9dfe430affc",
@@ -10553,7 +10899,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": true,
      "protocol": "HTTPS + HMAC-SHA256",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "b3937415-41d5-541f-a233-21c8e92aa387",
@@ -10572,7 +10919,8 @@ export const THREAT_MODEL: ThreatModel = {
      "publicNetwork": false,
      "protocol": "CI sync",
      "threats": [],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     },
     {
      "id": "1b945bb0-820e-5d08-83e4-88a78c6f8132",
@@ -10600,15 +10948,680 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Finding CI-03 flagged that SDK dependencies were unscanned. This repository runs cargo-audit, cargo-deny and npm audit with SARIF upload and Dependabot on cargo, frontend npm and GitHub Actions; each SDK repository must carry the equivalent for its own ecosystem, and integrators should commit lockfiles."
       }
      ],
-     "open": 0
+     "open": 0,
+     "notApplicable": 0
     }
    ],
    "total": 28,
    "open": 3,
+   "notApplicable": 0,
    "bySeverity": {
     "High": 14,
     "Medium": 12,
     "Critical": 2
+   }
+  },
+  {
+   "id": 9,
+   "title": "RADIUS front end — not built (G-11, declined 2026-10-06)",
+   "description": "A design-only diagram. G-11 asked whether AXIAM should speak RADIUS, with EAP-TLS validated against its own per-tenant PKI; the spike (T23.11.1, claude_dev/radius-eap-tls-spike-2026-10-06.md) declined a native front end on 2026-10-06 and recorded the FreeRADIUS-backend route for when an adopter asks. Nothing drawn here exists except the AuthService · DeviceAuthService · RBAC engine element, drawn as the callee a front end would reach. The W5 F4 review required the threat entries to exist anyway, so a build starts from them: every threat on this diagram is recorded Not applicable — neither Mitigated, because no control exists, nor Open, because nothing in AXIAM is exposed — and becomes Mitigated or Open, with its tests, in the commit that builds the element it sits on. The NAS ↔ AXIAM trust boundary separates the customer's network access devices from the front end.",
+   "width": 1338,
+   "height": 908,
+   "boundaries": [
+    {
+     "id": "3ef77340-3414-5674-9f16-7e5b5fa6c653",
+     "x": 24,
+     "y": 24,
+     "w": 260,
+     "h": 420,
+     "label": "Network access devices\n(customer equipment)"
+    },
+    {
+     "id": "13cb10e6-d629-5f07-a5d1-5e831747ac80",
+     "x": 24,
+     "y": 484,
+     "w": 260,
+     "h": 160,
+     "label": "Administrators"
+    },
+    {
+     "id": "3c86c436-6a3b-559e-b094-407cbf66edf1",
+     "x": 24,
+     "y": 684,
+     "w": 260,
+     "h": 200,
+     "label": "Operator-run FreeRADIUS\n(option B, not built)"
+    },
+    {
+     "id": "15b8c1ad-c3cc-5c9e-958e-a4b6aec88388",
+     "x": 324,
+     "y": 24,
+     "w": 640,
+     "h": 620,
+     "label": "AXIAM — RADIUS front end\n(not built · G-11 declined 2026-10-06)"
+    },
+    {
+     "id": "4d8af166-2164-5b0d-a9c4-e8e5553ceb0d",
+     "x": 324,
+     "y": 684,
+     "w": 640,
+     "h": 200,
+     "label": "AXIAM — core services and REST API"
+    },
+    {
+     "id": "dd3a88da-8c45-5ad1-b182-4d03b14e17e5",
+     "x": 1014,
+     "y": 84,
+     "w": 300,
+     "h": 560,
+     "label": "Data tier"
+    }
+   ],
+   "nodes": [
+    {
+     "id": "2208055f-d9f2-5ff4-9e22-f2aa0e8b9e85",
+     "kind": "actor",
+     "x": 49,
+     "y": 84,
+     "w": 150,
+     "h": 80,
+     "name": "Supplicant (device with an AXIAM certificate)",
+     "lines": [
+      "Supplicant",
+      "(device with an",
+      "AXIAM certificate)"
+     ],
+     "description": "An 802.1X supplicant — an IoT or OT device, a gateway, a workload host — holding an AXIAM-issued Device certificate bound to a service account. It reaches AXIAM only through the NAS.",
+     "outOfScope": true,
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "3f811f63-3d44-5405-be42-cb1021ed0506",
+     "kind": "actor",
+     "x": 49,
+     "y": 304,
+     "w": 150,
+     "h": 80,
+     "name": "NAS (switch, access point, VPN gateway)",
+     "lines": [
+      "NAS",
+      "(switch, access",
+      "point,",
+      "VPN gateway)"
+     ],
+     "description": "A network access server registered to one tenant: it relays EAP and asks AXIAM to decide. On UDP it is authenticated by its source address and shared secret; on RadSec and RADIUS/1.1 by its certificate pin and its address.",
+     "outOfScope": true,
+     "threats": [
+      {
+       "number": 448,
+       "title": "A host impersonates a registered NAS with its source address and a guessed or leaked shared secret",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "NotApplicable",
+       "description": "On RADIUS over UDP a network access server (a switch, an access point, a VPN gateway) is authenticated by its source address and a shared secret and nothing else. A host that can send from a registered address — spoofed on UDP, or on the same segment — and knows or guesses the secret is that NAS: its requests are decided in the NAS's tenant and the replies carry what the NAS would receive.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.3, §6.4, R1). Required of any build, from its first commit: `Message-Authenticator` verified with the NAS's own secret, in constant time, before any state, lookup or hash (T-449); secrets generated server-side at 128 bits or more, a supplied one refused below that floor (T-466); RadSec or, preferably, RADIUS/1.1 (RFC 9765), where the NAS is its certificate's SHA-256 pin **and** its registered address, verified against the tenant's own anchors; plain UDP served only to a NAS registered `legacy_udp`, marked as such in the API, the console and every audit row. If built as specified: Mitigated, with one accepted residual — a weak or leaked secret on a `legacy_udp` NAS."
+      }
+     ],
+     "open": 0,
+     "notApplicable": 1
+    },
+    {
+     "id": "587c5aac-7cd9-5d9d-9398-1a442cd16eb8",
+     "kind": "actor",
+     "x": 49,
+     "y": 534,
+     "w": 150,
+     "h": 80,
+     "name": "Tenant administrator (console / API)",
+     "lines": [
+      "Tenant administrator",
+      "(console / API)"
+     ],
+     "description": "Registers, rotates, moves and disables NASes through a tenant-scoped management API (not built).",
+     "outOfScope": true,
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "830f5d18-eef4-58e2-b313-7838ea024cf5",
+     "kind": "actor",
+     "x": 49,
+     "y": 744,
+     "w": 150,
+     "h": 80,
+     "name": "FreeRADIUS (operator-run)",
+     "lines": [
+      "FreeRADIUS",
+      "(operator-run)"
+     ],
+     "description": "Option B: the operator's FreeRADIUS terminates RADIUS and EAP-TLS itself, trusting a CA bundle exported from AXIAM, and may ask AXIAM for a decision through rlm_rest.",
+     "outOfScope": true,
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "8f4b56af-1137-5ea6-a3fa-8dcfb0cdb5e1",
+     "kind": "process",
+     "x": 374,
+     "y": 124,
+     "w": 140,
+     "h": 140,
+     "name": "RADIUS / RadSec listener (codec, Message-Authenticator, limiter)",
+     "lines": [
+      "RADIUS /",
+      "RadSec",
+      "listener",
+      "(codec,",
+      "Message-Authenticator,",
+      "limiter)"
+     ],
+     "description": "UDP and RadSec / RADIUS/1.1 sockets, the packet codec, Message-Authenticator verification and generation, the duplicate cache and the listener's own limiter. Outside the Actix middleware, so it carries every control itself.",
+     "outOfScope": true,
+     "threats": [
+      {
+       "number": 451,
+       "title": "Credentials are guessed through a second front door that no limiter or lockout covers (the Keycloak 26.7.x class)",
+       "type": "Spoofing",
+       "severity": "High",
+       "status": "NotApplicable",
+       "description": "A RADIUS listener is an authentication path beside the REST login, reaching the same `AuthService` and the same certificate path, but it is a UDP or TLS socket outside the Actix middleware where every existing limiter lives. A surface that authenticates a credential and is covered by neither the limiters nor the lockout is the class T-429 recorded for CIBA: an attacker routes password guessing through it. The human login limiter is keyed per IP and no preset moves it, so for a NAS — one source address for a whole site — it is also the wrong key.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.1, R6). The W5 F4 review's constraint (§15): **the brute-force lockout and the limiters cover it from the first commit**. Required of any build: the listener has its own limiter, with `radius_*` fields in `RateLimitConfig` and `MachineLimitPreset` for `internet`, `gateway` and `mesh` (the human endpoints untouched), sized from a measured power-restore storm; it meters per authenticated NAS and per tenant once `Message-Authenticator` verifies, per (NAS, supplied identity) as a rate that is never a lockout, and per source address before verification as a drop that never answers; PAP failures go through the tenant's `LockoutPolicy` by `AuthService::record_failed_login` — the console's own counter, not a second one — and a name that matches no account through `UnknownNameLockout` (T-332); and a test enumerates every accept path (UDP, RadSec, each EAP state) and fails the build if one reaches `AuthService`, the certificate path or the NAS registry without passing the limiter. If built as specified: Mitigated."
+      },
+      {
+       "number": 452,
+       "title": "Unauthenticated packets reach the hash path, and a PAP flood starves the console's sign-in",
+       "type": "Denial of service",
+       "severity": "High",
+       "status": "NotApplicable",
+       "description": "Argon2id is expensive by design and its permits are shared across every password path (CQ-B02 backpressure). A packet that reaches a password verify, a certificate lookup or a secret's decryption before it is authenticated makes a spoofed UDP flood cost AXIAM work per packet; and an authenticated NAS forwarding a PAP flood can take every hash permit, so console and API sign-ins queue behind it.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.1, §6.3, R7). Required of any build: `Message-Authenticator` verified first — before any state, any hash, any certificate lookup and any decryption beyond the one secret the verify needs; a packet that fails it dropped in a per-source bucket that never answers; what passes metered per NAS and per tenant (T-451); and RADIUS given a sub-limit of the shared hash permits, so it can never hold all of them. If built as specified: Mitigated."
+      },
+      {
+       "number": 453,
+       "title": "A replayed or retransmitted Access-Request is decided twice",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "NotApplicable",
+       "description": "RADIUS over UDP retransmits, and a captured request can be replayed. A server that treats each copy as new makes a second decision, counts a second failed sign-in toward a lockout, or advances an EAP conversation twice.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record R20). Required of any build: duplicates detected by (NAS, Identifier, Request Authenticator) in a short cache that returns the identical cached answer without deciding again (RFC 5080 — recalled in the spike, to be read against the RFC before building), and every EAP `State` value bound to the NAS and its conversation. If built as specified: Mitigated."
+      },
+      {
+       "number": 454,
+       "title": "An unreviewed RADIUS crate, or a GPL-licensed RADIUS image, enters the build",
+       "type": "Tampering",
+       "severity": "Medium",
+       "status": "NotApplicable",
+       "description": "The packet codec and the EAP-TLS state machine parse unauthenticated network input. A third-party RADIUS crate whose maintenance, licence and fuzzing are unknown, or a recipe that builds and ships a FreeRADIUS image, brings code nobody here reviewed — or a licence the project did not choose — into the supply chain.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §5.1, §5.2, R25). The first task of any build (A-1) evaluates the existing crates' licence, maintenance and fuzzing before one is adopted, and the preferred route is a small in-house codec with `cargo-fuzz` targets; option B's recipe references an upstream image and ships none. If built as specified: Mitigated."
+      }
+     ],
+     "open": 0,
+     "notApplicable": 4
+    },
+    {
+     "id": "d5377ed1-68a1-54e6-bb23-07a302aa7610",
+     "kind": "process",
+     "x": 374,
+     "y": 404,
+     "w": 140,
+     "h": 140,
+     "name": "EAP-TLS state machine (over rustls)",
+     "lines": [
+      "EAP-TLS",
+      "state",
+      "machine",
+      "(over",
+      "rustls)"
+     ],
+     "description": "Sans-IO rustls server inside EAP: fragmentation and reassembly, the conversation table, MSK / EMSK export, the EAP method allow-list (TLS only).",
+     "outOfScope": true,
+     "threats": [
+      {
+       "number": 455,
+       "title": "In-flight EAP conversations or fragment reassembly exhaust memory",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "NotApplicable",
+       "description": "An EAP-TLS handshake is larger than one RADIUS packet, so the server keeps a conversation per supplicant and reassembles fragmented TLS records. A compromised registered NAS, or a flood of conversation starts, fills the conversation table or grows a reassembly buffer without bound.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §4.4, R8). Required of any build: in-flight conversations capped per NAS and per tenant and expired on a TTL; the reassembled TLS record, the number of rounds and the certificate-chain size capped; `State` a server-generated random value bound to the NAS; the state machine fuzzed. If built as specified: Mitigated."
+      },
+      {
+       "number": 456,
+       "title": "A negotiation is downgraded: another EAP method, an older TLS version, or a RADIUS/1.1 NAS falling back to the shared-secret profile",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "NotApplicable",
+       "description": "Three negotiations precede every decision: the EAP method (a supplicant may NAK EAP-TLS and propose another), the TLS version inside EAP-TLS, and — on RadSec — the RADIUS/1.1 profile negotiated with ALPN. A server that negotiates down accepts EAP-MD5, TLS 1.2 where 1.3 was configured, or the MD5-keyed profile RFC 9765 exists to remove.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.3, §6.9, R15). Required of any build: refuse rather than negotiate. The EAP method allow-list is `TLS` and nothing else, and a NAK is a reject; TLS 1.3 is the default and 1.2 a per-NAS opt-in for supplicants that need it; a NAS registered `radius_1_1` that fails ALPN is refused, never served the secret-based profile, and the two profiles never mix on one connection. If built as specified: Mitigated."
+      }
+     ],
+     "open": 0,
+     "notApplicable": 2
+    },
+    {
+     "id": "8030e087-2b62-5307-b04f-b5027c8e6a4d",
+     "kind": "process",
+     "x": 654,
+     "y": 254,
+     "w": 140,
+     "h": 140,
+     "name": "RADIUS decision (tenant, authN, reply attributes)",
+     "lines": [
+      "RADIUS",
+      "decision",
+      "(tenant,",
+      "authN,",
+      "reply",
+      "attributes)"
+     ],
+     "description": "Resolves the tenant from the authenticated NAS, authenticates (EAP-TLS through DeviceAuthService, PAP through AuthService), authorizes through the RBAC engine, builds the one Access-Reject or the Access-Accept and its reply profile, and audits the decision.",
+     "outOfScope": true,
+     "threats": [
+      {
+       "number": 457,
+       "title": "Access-Reject is an oracle: unknown, locked or disabled users are told apart by content, silence or timing",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "NotApplicable",
+       "description": "A RADIUS server that answers an unknown user differently from a wrong password — a `Reply-Message`, an EAP step skipped, an attribute present or absent, a faster reply — lets anyone at a NAS enumerate a tenant's accounts and learn which are locked or disabled. D-63 recorded the same obligation for CIBA's `bc-authorize`.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.2, R4). The W5 F4 review's constraint (§15): **an unknown user is not an oracle** (D-63's decoy). RADIUS already has one negative answer, so a build gives exactly one: for an unknown, locked, disabled, wrong-credential, wrong-tenant, revoked-certificate or unbound-certificate request alike, an Access-Reject (EAP-Failure inside, for EAP) with no `Reply-Message`, no vendor error attribute and no optional attribute; the reason goes to the audit row only. The EAP-TLS Start answers an EAP-Identity whatever it names — the identity is never looked up before the handshake. On the password path every rejecting branch costs the same Argon2id work as a wrong password (SEC-026's equalising verify), so no branch answers faster. Unregistered or unauthenticated sources get silence, the same for each. Acceptance tests: the decoded packet byte-identical across every rejecting condition (only the Identifier and the authenticators excluded), and a response-time band rather than equal bytes alone. If built as specified: Mitigated."
+      },
+      {
+       "number": 458,
+       "title": "Anyone at a NAS locks a named user out by typing wrong passwords",
+       "type": "Denial of service",
+       "severity": "Medium",
+       "status": "NotApplicable",
+       "description": "An account lockout keyed on a user's failed verifications can be provoked by whoever can submit that user's name with a wrong password — at a network port, anyone with physical access. A lockout keyed on a value the caller supplies (a MAC address, an EAP identity, a NAS, a source address) is worse: a denial of service against whoever that value names.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.1, R5). Required of any build: the only lockout is the one keyed on the user's own failed verifications — the tenant's `LockoutPolicy`, with the console's counter and backoff — bounded by a per-(NAS, identity) rate bucket; nothing keyed on a caller-supplied value is ever a lockout (D-69); EAP-TLS has no password to guess and never locks a service account. If built as specified: Mitigated, with the residual the console already carries — whoever can type a name and a wrong password can start that account's lockout."
+      },
+      {
+       "number": 459,
+       "title": "A NAS of tenant A authenticates a user or device of tenant B",
+       "type": "Elevation of privilege",
+       "severity": "Critical",
+       "status": "NotApplicable",
+       "description": "Tenants of one organization share its CA, so a device certificate issued under tenant B's signing CA chains to the same root a tenant A NAS would trust: chain verification alone does not separate tenants. And a server that takes the tenant from the packet — a realm in `User-Name`, `Called-Station-Id`, `NAS-Identifier`, a vendor attribute, the EAP identity — lets the sender choose it.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.5, R9, R10). Required of any build: the tenant is the authenticated NAS's and nothing the packet says; a source address is registered once across all tenants (a unique index on the normalised address, a collision refused at write time); after the EAP-TLS handshake the certificate is resolved by `DeviceAuthService::authenticate_der` and refused unless its row's `tenant_id` equals the NAS's; the handshake's anchors are that tenant's own `mtls_trust_anchor` CAs, not the deployment-wide set; every repository call is scoped by the NAS's tenant. Acceptance test: a valid certificate issued under tenant B, presented through tenant A's NAS, is rejected. If built as specified: Mitigated."
+      },
+      {
+       "number": 460,
+       "title": "The RADIUS path is a weaker way in: a password alone on a tenant that enforces MFA, or a client's token approving a pending request",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "NotApplicable",
+       "description": "A second authentication path is only as strong as its weakest rule. PAP carries a password and nothing else, so a tenant with `mfa_enforced` that accepted a password-only RADIUS login would have an MFA policy any NAS bypasses. And a push approval later routed to a RADIUS user would reopen T-447 if an access token minted for a client — a RADIUS service account's — could approve it.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.8, §6.9, R16, R18). Required of any build: PAP refused for an `mfa_enforced` tenant, or followed by an Access-Challenge for the second factor (TOTP, deferred), never a password alone — the console's rule is the floor. No approval surface: if push approval is ever added it goes through CIBA's approval routes, which take a console sign-in only (P23W5-04, T-447). If built as specified: Mitigated."
+      },
+      {
+       "number": 461,
+       "title": "A reply profile assigns a VLAN or privilege level its writer could not grant",
+       "type": "Elevation of privilege",
+       "severity": "High",
+       "status": "NotApplicable",
+       "description": "An Access-Accept carries what the NAS enforces: a VLAN (`Tunnel-Private-Group-Id`), a session timeout, a vendor privilege level. Free-form reply profiles, or profiles writable under a broad permission, let an administrator who may not grant network administration write one that does, and make a vendor-specific attribute an escalation path.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §5.1, R17; the model is deferred item D5). Required of any build: `network:join` and `network:admin` checked on a network-segment resource through `check_access`; the reply profile hung off that resource, its attribute types taken from an allow-list and its values validated against the dictionary; profile writes behind their own permission and audit row; a profile that grants more than its writer holds refused; deny-override used to quarantine a subtree. If built as specified: Mitigated."
+      },
+      {
+       "number": 462,
+       "title": "A revoked certificate or disabled account keeps its network port until the session re-authenticates",
+       "type": "Elevation of privilege",
+       "severity": "Medium",
+       "status": "NotApplicable",
+       "description": "RADIUS decides at authentication time. Without dynamic authorization (RFC 5176 CoA / Disconnect) AXIAM cannot end a session a NAS has already admitted, so a device whose certificate is revoked, or an account that is disabled, keeps its port until the NAS re-authenticates it.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record R21). Required of any build: `Session-Timeout` capped per tenant and the bound stated in the product. Dynamic authorization is a separate, later item and inherits T-467's binding rule: AXIAM's own messages, carrying session and user identifiers, go to the registered NAS address only. If built as specified this entry stays **Open** — a residual bounded by the session timeout until dynamic authorization ships."
+      },
+      {
+       "number": 463,
+       "title": "A RADIUS decision goes unaudited, or an unauthenticated sender chooses the audit volume",
+       "type": "Repudiation",
+       "severity": "Medium",
+       "status": "NotApplicable",
+       "description": "Every Accept and Reject is an access decision a tenant must be able to account for. A decision with no row, or with a row that lacks the NAS, the subject or the method, cannot be attributed; a row per forged packet hands an attacker control of audit volume and buries the rows that matter.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.6, R13). Required of any build: one append-only row per authenticated decision, accept and reject, with the NAS, the tenant, the subject when one was resolved, the method, the transport profile, the outcome and an internal reason — never a password, a shared secret, an EAP payload, a private key or an MSK; unauthenticated packets aggregated, one row per source per window. If built as specified: Mitigated."
+      },
+      {
+       "number": 464,
+       "title": "MAC addresses and user names enter the audit trail and escape the erasure paths",
+       "type": "Information disclosure",
+       "severity": "Medium",
+       "status": "NotApplicable",
+       "description": "`Calling-Station-Id` is a device's MAC address and `User-Name` a person's login: personal data. Written into audit rows and registry fields by a new surface, they would sit outside the personal-data register and survive an erasure request.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.6, R14). Required of any build: both entered in the personal-data register (`crates/axiam-core/src/personal_data.rs`) and its erasure paths in the commit that first writes them. If built as specified: Mitigated."
+      },
+      {
+       "number": 465,
+       "title": "A reject flood becomes a notification flood",
+       "type": "Denial of service",
+       "severity": "Low",
+       "status": "NotApplicable",
+       "description": "If a RADIUS event can notify — a wrong secret from a registered address, a lockout, a NAS going silent — whoever can provoke rejects can send mail, and one notification per packet buries the alert that matters (T-117, D-73).",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.7, R19). Required of any build: RADIUS audit actions reach notification events only through a `NotificationGate` — at most one per NAS per hour, claimed in the datastore, `false` and logged once when it cannot decide — while every reject keeps its audit row. If built as specified: Mitigated."
+      }
+     ],
+     "open": 0,
+     "notApplicable": 9
+    },
+    {
+     "id": "06bc2885-6802-5e8d-969c-cdc139c499da",
+     "kind": "store",
+     "x": 1079,
+     "y": 304,
+     "w": 170,
+     "h": 80,
+     "name": "nas (NAS registry, sealed secret)",
+     "lines": [
+      "nas (NAS registry,",
+      "sealed secret)"
+     ],
+     "description": "One row per NAS: tenant, name, transport (radius_1_1 / radsec / legacy_udp), a source address unique across all tenants, the shared secret sealed under pki_encryption_key with its key version, the RadSec certificate pin, minimum TLS version, allowed EAP methods, enabled. Not built.",
+     "outOfScope": true,
+     "threats": [
+      {
+       "number": 466,
+       "title": "The per-NAS shared secret is stored readable or read back, where it must be sealed and write-only",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "NotApplicable",
+       "description": "The shared secret cannot be hashed: the server needs it to compute `Message-Authenticator` and, on UDP, the MD5 constructs, so it is stored in recoverable form. A plaintext column, a read that projects it, a log line or a weak operator-chosen value gives whoever reaches the API, the datastore or a backup the means to impersonate the NAS (T-448) and to undo what its traffic hides (T-450).",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.4 items 1–2, R11). The W5 F4 review's constraint (§15): **the per-NAS secret is a credential sealed under `pki_encryption_key`, and write-only**. Required of any build: AES-256-GCM, a fresh nonce per write, nonce and ciphertext in their own columns and a key version, as `scim_target` seals its credential; any write that sets a secret refused when the key is absent (the handler answers `503`); no read projects it (`secret_set: true` and the key version only); generated server-side at 128 bits or more and shown once, a supplied one accepted only at the same floor; the plaintext zeroized inside the verifier. Its binding to the NAS address is T-467. If built as specified: Mitigated, with the residual every sealed credential carries — a datastore dump together with the process's `pki_encryption_key`."
+      },
+      {
+       "number": 467,
+       "title": "A NAS is moved to another address without its secret, redirecting what the secret yields (the P23W5-01 class)",
+       "type": "Tampering",
+       "severity": "High",
+       "status": "NotApplicable",
+       "description": "The secret authenticates one address, and what it yields — the session key in an Accept's `MS-MPPE-*`, and AXIAM's own messages to the NAS if dynamic authorization is ever added — goes to that address. An administrator who can change a NAS's source address, transport or RadSec certificate pin without presenting the secret redirects all of it to a host they control, holding a credential they never saw: the shape of P23W5-01, where an outbound SCIM target's `base_url` moved without its secret.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §6.4 items 3–6, R12). The W5 F4 review's constraint (§15): **the secret is bound to the NAS address it was registered for**. Required of any build: a write that changes the source address, the transport or the certificate pin without the new secret in the same write refused with `400` naming the field — enforced in the repository against the very row its conditional write replaces, so a racing write cannot slip past (the `moves_credential` rule of T-409 and T-416); every reply sent to the packet's authenticated source and never to an address named in an attribute (`NAS-IP-Address`, `NAS-Identifier` and `Called-Station-Id` are audit fields, not routing); for RadSec both the pin and the address checked; a disable, delete or rotation applied on the next packet, with an open RadSec connection of a disabled NAS closed. If built as specified: Mitigated."
+      }
+     ],
+     "open": 0,
+     "notApplicable": 2
+    },
+    {
+     "id": "135a3dfe-73eb-570c-a055-9f10022ef81f",
+     "kind": "process",
+     "x": 374,
+     "y": 714,
+     "w": 140,
+     "h": 140,
+     "name": "Authorize endpoint for rlm_rest (option B)",
+     "lines": [
+      "Authorize",
+      "endpoint",
+      "for",
+      "rlm_rest",
+      "(option B)"
+     ],
+     "description": "Option B, deferred item D4: POST a certificate fingerprint and NAS identity, get allow and reply attributes. An ordinary authenticated REST route. Not built.",
+     "outOfScope": true,
+     "threats": [
+      {
+       "number": 468,
+       "title": "Option B's authorize endpoint answers “is this certificate good in this tenant” to whoever holds its caller credential",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "NotApplicable",
+       "description": "If AXIAM backs an operator's FreeRADIUS with a decision endpoint for `rlm_rest`, that endpoint is an authenticated oracle on certificate status and policy. A stolen caller credential lets its holder probe which certificates and devices exist and are allowed, and a verbose deny would say why.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §5.2 B-3, R23; deferred item D4). Required of any build: the caller holds a dedicated permission, its token is bound to its own certificate (`cnf`), it is metered on a machine preset keyed on the authenticated caller, each decision writes an audit row, and a deny carries no reason. It is an ordinary authenticated REST route, and enters the model with its code (plan §7 rule 2). If built as specified: Mitigated."
+      }
+     ],
+     "open": 0,
+     "notApplicable": 1
+    },
+    {
+     "id": "db19c1f9-1cbb-537c-8767-6f813254755d",
+     "kind": "process",
+     "x": 654,
+     "y": 714,
+     "w": 140,
+     "h": 140,
+     "name": "AuthService · DeviceAuthService · RBAC engine (built)",
+     "lines": [
+      "AuthService",
+      "·",
+      "DeviceAuthService",
+      "·",
+      "RBAC engine",
+      "(built)"
+     ],
+     "description": "The existing authentication, device-certificate and authorization services, modelled on the Authentication, PKI and Authorization diagrams. Drawn here only as the callee a RADIUS front end would reach; nothing on this diagram changes them.",
+     "outOfScope": false,
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    }
+   ],
+   "edges": [
+    {
+     "id": "4be70add-18b4-5e12-aeb8-26aff69a03d0",
+     "path": "M124,164 L124,304",
+     "name": "EAP over LAN",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "EAP over LAN (802.1X)",
+     "labelLines": [
+      "EAP over LAN (802.1X)"
+     ],
+     "lx": 124,
+     "ly": 234,
+     "bidirectional": true,
+     "encrypted": false,
+     "publicNetwork": false,
+     "protocol": "EAPOL",
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "a1ad58e6-ffa1-5ed7-8977-6ddf5f4842f2",
+     "path": "M199,308.8 L380.6,223.7",
+     "name": "Access-Request / Accept / Reject / Challenge",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "Access-Request / Accept / Reject / Challenge (UDP 1812, RadSec, RADIUS/1.1)",
+     "labelLines": [
+      "Access-Request / Accept / Reject /",
+      "Challenge (UDP 1812, RadSec,",
+      "RADIUS/1.1)"
+     ],
+     "lx": 289.8,
+     "ly": 266.3,
+     "bidirectional": true,
+     "encrypted": false,
+     "publicNetwork": true,
+     "protocol": "RADIUS",
+     "threats": [
+      {
+       "number": 449,
+       "title": "Blast-RADIUS: an on-path attacker turns an Access-Reject into an Access-Accept because `Message-Authenticator` is not required",
+       "type": "Tampering",
+       "severity": "Critical",
+       "status": "NotApplicable",
+       "description": "The RADIUS Response Authenticator is MD5 over the packet and the shared secret (RFC 2865). CVE-2024-3596 (“Blast-RADIUS”) showed that an on-path attacker can use an MD5 chosen-prefix collision, through attribute bytes it controls such as `Proxy-State`, to turn any valid response into any other — a Reject into an Accept — without the secret, in any exchange where `Message-Authenticator` (HMAC-MD5, RFC 2869) is absent or unchecked. RFC 2869 made that attribute mandatory only alongside EAP, so password exchanges were exposed.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §4.2, §6.3, R2). The W5 F4 review's constraint (§15): **`Message-Authenticator` required**. On every profile that has a shared secret (UDP, classic RadSec) every Access-Request must carry it and every response carries it, positioned as the Blast-RADIUS guidance asks (first, as the spike recalls it — re-verified against the advisory before building); a request without it, or with one that does not verify, is dropped silently and counted, never answered, with no “optional for non-EAP” path; `Proxy-State` in a request is refused (AXIAM is not a proxy); a NAS that cannot send the attribute is refused registration rather than served. Under RADIUS/1.1 (RFC 9765) the secret and every MD5 construct are gone and the attribute is ignored if received; a NAS registered for that profile that fails to negotiate it is refused, never downgraded (T-456). Acceptance tests: a request without the attribute, and one with a forged attribute, each draw no answer. If built as specified: Mitigated."
+      },
+      {
+       "number": 450,
+       "title": "MD5-only attribute hiding gives up the Wi-Fi session key or a password to whoever holds the shared secret",
+       "type": "Information disclosure",
+       "severity": "High",
+       "status": "NotApplicable",
+       "description": "`User-Password` is hidden by an MD5 stream keyed with the secret and the Request Authenticator, and `MS-MPPE-Send-Key` / `MS-MPPE-Recv-Key` — which carry the EAP-TLS MSK, from which the access point derives the Wi-Fi session key — by an MD5 salt construction over the same secret (RFC 2865, RFC 2548). A passive observer who learns the secret, or guesses a weak one, recovers the password or the session key from captured traffic; over classic RadSec those constructs are keyed with a fixed, public string and add nothing. CHAP, MS-CHAP(v2) and EAP-MD5 are worse still: MD5, or MD4 and DES, over a password the server would have to hold in reversible form.",
+       "mitigation": "Not built (G-11 declined 2026-10-06; spike record §4.2, §4.3, §6.3, R3). The W5 F4 review's constraint (§15): **MD5-only attributes treated as the weakness they are**. Required of any build: PAP and `MS-MPPE-*` carried only over RadSec or, preferably, RADIUS/1.1 over TLS 1.3, where the obfuscation is removed and TLS carries the confidentiality; on plain UDP only for a NAS registered `legacy_udp`, with a generated secret of at least 128 bits, flagged in the API, the console and each decision's audit row — never PAP over UDP without that flag; CHAP, MS-CHAP, MS-CHAPv2 and EAP-MD5 not implemented (an Argon2id store cannot verify them, and should not be able to); RADIUS accounting not implemented. If built as specified this entry stays **Open** for every `legacy_udp` NAS: the weakness is inherent in the legacy profile and is accepted only per NAS, by an explicit flag."
+      }
+     ],
+     "open": 0,
+     "notApplicable": 2
+    },
+    {
+     "id": "3d4cf496-da07-5f78-8678-62f26526622f",
+     "path": "M444,264 L444,404",
+     "name": "EAP-Message (reassembled)",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "EAP-Message (reassembled)",
+     "labelLines": [
+      "EAP-Message (reassembled)"
+     ],
+     "lx": 444,
+     "ly": 334,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "c19d4368-0a26-5f3e-b3b9-2c1191d90202",
+     "path": "M507.5,223.5 L660.5,294.5",
+     "name": "authenticated request (NAS, tenant)",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "authenticated request (NAS, tenant)",
+     "labelLines": [
+      "authenticated request (NAS, tenant)"
+     ],
+     "lx": 584,
+     "ly": 259,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "ef5e59d4-556e-59e3-8f69-56330818cacc",
+     "path": "M505.7,440.9 L662.3,357.1",
+     "name": "client certificate after the handshake",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "client certificate (DER) after the handshake",
+     "labelLines": [
+      "client certificate (DER) after the",
+      "handshake"
+     ],
+     "lx": 584,
+     "ly": 399,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "12768376-3ad4-56cc-b093-09779d2ab910",
+     "path": "M514,195.2 L988,203.7 Q1004,204 1016,214.5 L1118.3,304",
+     "name": "resolve NAS by source address; unseal secret",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "resolve NAS by source address; unseal secret (SurrealQL)",
+     "labelLines": [
+      "resolve NAS by source address;",
+      "unseal secret (SurrealQL)"
+     ],
+     "lx": 834.9,
+     "ly": 201,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "SurrealDB",
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "119c78ca-2161-5c62-8568-df1f78137e12",
+     "path": "M199,581.8 L978.1,662.4 Q994,664 1001.5,649.9 L1142.8,384",
+     "name": "register / rotate / move / disable a NAS",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "register / rotate / move / disable a NAS (HTTPS, not built)",
+     "labelLines": [
+      "register / rotate / move / disable a",
+      "NAS (HTTPS, not built)"
+     ],
+     "lx": 754.2,
+     "ly": 639.2,
+     "bidirectional": false,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "864f847c-2922-5143-83f9-0876d3abaf30",
+     "path": "M724,394 L724,714",
+     "name": "authenticate, authorize, audit",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "authenticate, authorize, audit",
+     "labelLines": [
+      "authenticate, authorize, audit"
+     ],
+     "lx": 724,
+     "ly": 554,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "f042ac97-146d-5dc1-a64c-2daef8c8d427",
+     "path": "M199,784 L374,784",
+     "name": "authorize (rlm_rest)",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "authorize (HTTPS, token bound to the caller's certificate)",
+     "labelLines": [
+      "authorize (HTTPS, token bound to the",
+      "caller's certificate)"
+     ],
+     "lx": 286.5,
+     "ly": 784,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": true,
+     "protocol": "HTTPS",
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    },
+    {
+     "id": "54f403af-723f-5221-b1c1-21f2f3dc718d",
+     "path": "M514,784 L654,784",
+     "name": "certificate status and policy",
+     "description": "Not built (G-11 declined 2026-10-06).",
+     "label": "certificate status and policy",
+     "labelLines": [
+      "certificate status and policy"
+     ],
+     "lx": 584,
+     "ly": 784,
+     "bidirectional": true,
+     "encrypted": true,
+     "publicNetwork": false,
+     "protocol": "in-process",
+     "threats": [],
+     "open": 0,
+     "notApplicable": 0
+    }
+   ],
+   "total": 21,
+   "open": 0,
+   "notApplicable": 21,
+   "bySeverity": {
+    "High": 9,
+    "Medium": 9,
+    "Critical": 2,
+    "Low": 1
    }
   }
  ]

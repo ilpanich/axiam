@@ -9,6 +9,8 @@ export interface ThreatModelArea {
   title: string;
   total: number;
   open: number;
+  /** Threats recorded `NotApplicable`: written for a surface that is not built. */
+  notApplicable: number;
 }
 
 /** One row of a coverage table — a STRIDE category, or a severity. */
@@ -16,6 +18,7 @@ export interface ThreatModelBucket {
   name: string;
   total: number;
   open: number;
+  notApplicable: number;
 }
 
 /** One entry of the open risk register. */
@@ -42,130 +45,162 @@ export interface ThreatModelSummary {
   total: number;
   open: number;
   mitigated: number;
+  /**
+   * Threats recorded `NotApplicable` — entries for a surface that is not
+   * built. Counted in `total`, in neither `open` nor `mitigated`.
+   */
+  notApplicable: number;
   /** Per-diagram counts, in model order. */
   areas: ThreatModelArea[];
   /** Counts per STRIDE category, in STRIDE order. */
   categories: ThreatModelBucket[];
   /** Counts per severity, most severe first. */
   severities: ThreatModelBucket[];
-  /** Every threat not recorded as mitigated, most severe first. */
+  /** Every threat recorded as open, most severe first. */
   openRisks: ThreatModelOpenRisk[];
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.35.0",
- "diagramCount": 9,
- "total": 447,
- "open": 21,
- "mitigated": 426,
+ "version": "2.36.1",
+ "diagramCount": 10,
+ "total": 469,
+ "open": 23,
+ "mitigated": 425,
+ "notApplicable": 21,
  "areas": [
   {
    "id": 0,
    "title": "System diagram",
    "total": 33,
-   "open": 2
+   "open": 2,
+   "notApplicable": 0
   },
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 35,
-   "open": 0
+   "total": 36,
+   "open": 1,
+   "notApplicable": 0
   },
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
    "total": 85,
-   "open": 1
+   "open": 1,
+   "notApplicable": 0
   },
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
    "total": 125,
-   "open": 3
+   "open": 3,
+   "notApplicable": 0
   },
   {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
    "total": 27,
-   "open": 0
+   "open": 0,
+   "notApplicable": 0
   },
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
    "total": 30,
-   "open": 1
+   "open": 2,
+   "notApplicable": 0
   },
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 55,
-   "open": 5
+   "open": 5,
+   "notApplicable": 0
   },
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
    "total": 29,
-   "open": 6
+   "open": 6,
+   "notApplicable": 0
   },
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
    "total": 28,
-   "open": 3
+   "open": 3,
+   "notApplicable": 0
+  },
+  {
+   "id": 9,
+   "title": "RADIUS front end — not built (G-11, declined 2026-10-06)",
+   "total": 21,
+   "open": 0,
+   "notApplicable": 21
   }
  ],
  "categories": [
   {
    "name": "Spoofing",
-   "total": 98,
-   "open": 4
+   "total": 101,
+   "open": 5,
+   "notApplicable": 3
   },
   {
    "name": "Tampering",
-   "total": 88,
-   "open": 2
+   "total": 93,
+   "open": 2,
+   "notApplicable": 5
   },
   {
    "name": "Repudiation",
-   "total": 15,
-   "open": 2
+   "total": 16,
+   "open": 2,
+   "notApplicable": 1
   },
   {
    "name": "Information disclosure",
-   "total": 105,
-   "open": 6
+   "total": 110,
+   "open": 7,
+   "notApplicable": 4
   },
   {
    "name": "Denial of service",
-   "total": 55,
-   "open": 4
+   "total": 59,
+   "open": 4,
+   "notApplicable": 4
   },
   {
    "name": "Elevation of privilege",
-   "total": 86,
-   "open": 3
+   "total": 90,
+   "open": 3,
+   "notApplicable": 4
   }
  ],
  "severities": [
   {
    "name": "Critical",
-   "total": 41,
-   "open": 2
+   "total": 43,
+   "open": 2,
+   "notApplicable": 2
   },
   {
    "name": "High",
-   "total": 187,
-   "open": 9
+   "total": 196,
+   "open": 10,
+   "notApplicable": 9
   },
   {
    "name": "Medium",
-   "total": 185,
-   "open": 9
+   "total": 195,
+   "open": 10,
+   "notApplicable": 9
   },
   {
    "name": "Low",
-   "total": 34,
-   "open": 1
+   "total": 35,
+   "open": 1,
+   "notApplicable": 1
   }
  ],
  "openRisks": [
@@ -208,6 +243,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "PKI, certificates & IoT device identity",
    "element": "IoT device",
    "residualRisk": "Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM limits the blast radius with per-device certificates, a maximum validity policy and immediate revocation."
+  },
+  {
+   "number": 102,
+   "title": "A revoked certificate stays valid to every relying party that does not terminate at AXIAM",
+   "category": "Spoofing",
+   "severity": "High",
+   "diagramId": 5,
+   "area": "PKI, certificates & IoT device identity",
+   "element": "Revocation (status in AXIAM's store; no CRL published)",
+   "residualRisk": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM authenticates a device by its certificate, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf. Nothing else AXIAM terminates reads it (corrected by the W6 F4 review, model 2.36.1): neither listener's TLS handshake checks revocation, and OAuth2 `tls_client_auth` matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by ilpanich/axiam#565 (spike record §8, D1); this entry closes with it, together with the listeners' verifiers loading that list or `tls_client_auth` reading the certificate's status."
   },
   {
    "number": 108,
@@ -368,6 +413,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "OAuth2 / OIDC authorization server",
    "element": "/oauth2/authorize (+ consent)",
    "residualRisk": "Narrowed by the W5 F4 review (P23W5-04 closed it for CIBA; P23W5-06 reports the device grant, where it is pre-existing since B2). CIBA: the approval routes refuse a token that carries a `client_id` — only a console sign-in decides (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `/api/v1/device/verify` and `/decide` still admit it; bounded by the token itself (a live session of a user of the tenant) and by the device client's registered scopes. Closes when `/api/v1/device/*` applies the same rule (issue body in the W5 F4 review, §14)."
+  },
+  {
+   "number": 469,
+   "title": "A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart",
+   "category": "Information disclosure",
+   "severity": "Medium",
+   "diagramId": 1,
+   "area": "Authentication & session management",
+   "element": "Login endpoints /auth/login + /auth/opaque/*",
+   "residualRisk": "Open (W6 F4 review, 2026-10-06, model 2.36.1; found by the T23.11.1 RADIUS spike, whose T-457 requires the same of any RADIUS build). Fix: run the equalising dummy verify, under the same bounded permit, on the lockout branch (still before the directory is contacted, T-302, and without verifying the real hash, so a correct password during a lockout neither succeeds nor shows) and on every refusal of `ValidateCredentials`. A timing-free test pins it: with no hash permit available, a locked account must answer the 503 an unknown name answers; today it answers 401 (ilpanich/axiam#564). Bounded meanwhile by the per-IP login limiter and by the lockout's exponential backoff, which makes every probe cost N failed attempts against a real user."
   },
   {
    "number": 161,

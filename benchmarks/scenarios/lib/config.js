@@ -43,9 +43,12 @@ export const cfg = {
   tenantSlug: str('BENCH_TENANT_SLUG', 'default'),
   realm: str('BENCH_REALM', 'bench'), // keycloak/zitadel realm name
   username: str('BENCH_USERNAME', 'benchuser'),
-  password: str('BENCH_PASSWORD', 'Bench@User123!'),
+  // Credentials have NO defaults: they are generated per run (runner/bench-creds.sh)
+  // and reach a scenario through the seed env the runner sources. By hand:
+  //   set -a; . .seed/<target>.seed.env; set +a; k6 run scenarios/<name>.js
+  password: str('BENCH_PASSWORD', ''),
   clientId: str('BENCH_CLIENT_ID', 'bench-client'),
-  clientSecret: str('BENCH_CLIENT_SECRET', 'bench-secret'),
+  clientSecret: str('BENCH_CLIENT_SECRET', ''),
   // AXIAM-only (oauth2_code_pkce.js): the PUBLIC client runner/seed.sh
   // registers in the shape an MCP client takes — `token_endpoint_auth_method:
   // none`, a loopback redirect URI, one RFC 8707 resource in
@@ -61,6 +64,20 @@ export const cfg = {
   projectId: str('BENCH_PROJECT_ID', ''),
   introspectClientId: str('BENCH_INTROSPECT_CLIENT_ID', ''),
   introspectClientSecret: str('BENCH_INTROSPECT_CLIENT_SECRET', ''),
+
+  // authentik-only (runner/seed.sh seed_authentik). authentik's OIDC endpoints
+  // are global (`/application/o/token/`, `/introspect/`, `/userinfo/`) except
+  // the JWKS, which lives under the application slug, so the slug is the one
+  // piece of routing the adapter needs. The flow slug names the authentication
+  // flow oauth2_password_login drives. The user token is the bench user's
+  // app-password token, which authentik's `grant_type=password` accepts in
+  // place of a password — used ONLY by setup() to mint a real user-subject
+  // token (never by a measured request; see the authentik adapter in
+  // targets.js for why that grant is not a password login). Empty for every
+  // other target, and the token is a generated per-run value, never a default.
+  authentikAppSlug: str('BENCH_AUTHENTIK_APP_SLUG', 'bench-app'),
+  authentikFlowSlug: str('BENCH_AUTHENTIK_FLOW_SLUG', 'default-authentication-flow'),
+  authentikUserToken: str('BENCH_AUTHENTIK_USER_TOKEN', ''),
 
   // --- TLS (from the security profile) ---
   // Default OFF: the bench TLS edge uses a throwaway private-CA cert
@@ -148,13 +165,13 @@ export const cfg = {
   setupTimeout: str('BENCH_SETUP_TIMEOUT', '900s'),
 
   // Bootstrap admin session used ONLY by the G5 keyspace provisioning in
-  // setup(). Defaults deliberately mirror runner/seed.sh's `admin` /
-  // BENCH_ADMIN_PASSWORD so no new secret has to be plumbed through: seed.sh
-  // bootstraps the org with username `admin` and password `Bench@Admin123!`
-  // unless BENCH_ADMIN_PASSWORD was overridden there. These are throwaway
-  // benchmark-fixture credentials for a disposable container; never log them.
+  // setup(). The user name mirrors runner/seed.sh's `admin`; the password is the
+  // per-run one `bench-up` generated and `bench-seed` wrote into the seed env as
+  // BENCH_ADMIN_PASSWORD (no default, so a scenario run without the seed env fails
+  // its admin login visibly instead of authenticating with a published string).
+  // Throwaway benchmark-fixture credentials for a disposable container; never log them.
   adminUsername: str('BENCH_ADMIN_USERNAME', 'admin'),
-  adminPassword: str('BENCH_ADMIN_PASSWORD', 'Bench@Admin123!'),
+  adminPassword: str('BENCH_ADMIN_PASSWORD', ''),
 
   // --- N1: nested-resource authorization depth sweep -----------------------
   // (authz_nested_rest.js / authz_nested_grpc.js, driven by `just bench-nested`)
@@ -209,12 +226,13 @@ export const cfg = {
   // Keycloak master-realm admin credentials, used ONLY by the nested-authz
   // setup() to provision the resource server (Keycloak's Authorization
   // Services config is not reachable through any non-admin API). Defaults
-  // mirror runner/seed.sh's KC_ADMIN / KC_ADMIN_PASSWORD, and the legacy
+  // mirror runner/seed.sh's KC_ADMIN / KC_ADMIN_PASSWORD (the password has no
+  // default: it is the per-run one the seed env carries), and the legacy
   // unprefixed names are still honoured so an operator who exported them for
   // seeding does not have to export them twice. Throwaway container
   // credentials; never logged.
   kcAdminUsername: str('BENCH_KC_ADMIN', str('KC_ADMIN', 'admin')),
-  kcAdminPassword: str('BENCH_KC_ADMIN_PASSWORD', str('KC_ADMIN_PASSWORD', 'admin')),
+  kcAdminPassword: str('BENCH_KC_ADMIN_PASSWORD', str('KC_ADMIN_PASSWORD', '')),
 
   // Name/URI prefix for every object the nested-authz setup provisions, on
   // every target. Deterministic so a re-run against a stack that was NOT torn
@@ -222,6 +240,14 @@ export const cfg = {
   // depth 0 -> 1 -> 2 -> … against one live stack).
   nestedPrefix: str('BENCH_NESTED_PREFIX', 'bench-nest'),
 };
+
+// Credentials have no defaults (see above), so a scenario run by hand without the
+// seed env would otherwise fail with nothing but a wall of 401s. Say why, once.
+if (__VU === 0 && !cfg.clientSecret && !cfg.password) {
+  console.warn(
+    '[bench] neither BENCH_CLIENT_SECRET nor BENCH_PASSWORD is set: credentials are generated per run, ' +
+      'so export the seed env first (set -a; . .seed/<target>.seed.env; set +a) — see benchmarks/README.md, "Credentials".');
+}
 
 export function baseUrl() {
   return `${cfg.scheme}://${cfg.host}:${cfg.port}`;

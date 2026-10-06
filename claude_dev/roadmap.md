@@ -1049,7 +1049,7 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
 
 ---
 
-## Phase 23: Competitor gap closure — IN PROGRESS (W1–W4 merged 2026-10-03/04, W5 in review)
+## Phase 23: Competitor gap closure — COMPLETE (W1–W5 merged 2026-10-03 … 06, W6a 2026-10-06; T23.10.2(b), the run-6 report, rides W6b — #561)
 
 Close the gaps the three competitor comparisons
 ([Keycloak](competitor-comparison-keycloak.md),
@@ -1059,7 +1059,8 @@ waves and model assignment of
 [`competitor-gap-remediation-plan-2026-10-02.md`](competitor-gap-remediation-plan-2026-10-02.md)
 (decisions D-1 … D-8 accepted as recommended; D-9 and D-10 taken during W1;
 D-11 taken by the maintainer on 2026-10-03, option 1, issue #516; D-12 and D-13
-accepted as recommended).
+accepted as recommended; D-75 and D-76, taken by the maintainer at W6's start,
+split W6 into W6a and W6b and pick `1.0.0-beta18` as run 6's build).
 Task ids are the plan's §6 ids, `T23.<item>.<step>`, where item *n* is gap
 G-*n*. Each wave is one branch `claude/phase23-w<N>` and one PR, and each ends
 with an F4 security review of the wave's diff against
@@ -1108,16 +1109,20 @@ with an F4 security review of the wave's diff against
 | T23.8.2 | Review of the direct audit-write path against T19.27 | Opus 5.5 | W5 |✓ |
 | T23.8.3 | `docker-compose.minimal.yml`, docs, resting-RSS measurement | Sonnet 5.5 | W5 |✓ |
 | T23.9.1 | [`verifiable-credentials-design.md`](verifiable-credentials-design.md), design only | Opus 5.5 | W1 | ✓ |
-| T23.10.1 | `benchmarks/targets/authentik/` profile | Sonnet 5.5 | W6 | |
-| T23.10.2 | Run 6, `PUBLIC_BENCH_ANALYSIS.md` seventh draft, comparison rows | Sonnet 5.5 | W6 | |
-| T23.11.1 | RADIUS / EAP-TLS spike, decision record | Sonnet 5.5 | W6 | |
+| T23.10.1 | `benchmarks/targets/authentik/` profile (authentik 2026.8.3, smoke-tested in the sandbox; D-79) | Sonnet 5.5 | W6 | ✓ |
+| T23.10.2(a) | Run-6 runbook ([`run6-runbook.md`](run6-runbook.md)), pins, per-run credentials, minimal-profile overlay (D-75, D-76) | Sonnet 5.5 | W6a | ✓ |
+| T23.10.2(b) | Run 6 on the G-box (maintainer), `PUBLIC_BENCH_ANALYSIS.md` seventh draft, comparison performance rows, website numbers | Sonnet 5.5 | W6b | |
+| T23.11.1 | RADIUS / EAP-TLS spike, decision record ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)); threat entries T-448 … T-468 on Opus 5.5; D-77, D-78 | Sonnet 5.5 | W6 | ✓ |
 | T23.12.1 | Front-channel logout declined and recorded (D-6) | Sonnet 5.5 | W1 | ✓ |
 | T23.15.1 | *Identity for agents* guide and website page | Sonnet 5.5 | W1 | ✓ |
-| F4 | Per-wave security review of the wave diff | Opus 5.5 | every wave | W1 ✓ |
+| F4 | Per-wave security review of the wave diff | Opus 5.5 | every wave | W1–W6a ✓ |
 
 G-13 (social presets, on demand) and G-14 (portal features, watch only) carry
 no scheduled task. Wave order follows the plan's §5; W2 waits for W1 to merge
 where §5 says it depends on it.
+
+The phase summary — G-1 … G-15, what shipped, what was declined and what stays
+open, with issue numbers — closes §5 of the plan.
 
 ---
 
@@ -1148,8 +1153,8 @@ where §5 says it depends on it.
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
 | Phase 22 | 20 | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates, gRPC client auth, service accounts on management, non-inheritable assignments, contracts 1.51/1.52 and the eleven SDK ports) |
-| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **in progress**, W1–W4 merged, W5 in review |
+| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **complete** with W6a; T23.10.2(b) (run 6, seventh benchmark draft) rides W6b, #561 |
 
-**Total: 132 tasks across 23 complete phases, plus Phase 23 (47 tasks) in progress**
+**Total: 179 tasks across 24 complete phases** (Phase 23's T23.10.2(b), the run-6 report, rides W6b — #561)
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

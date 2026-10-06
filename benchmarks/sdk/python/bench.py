@@ -102,7 +102,7 @@ CFG = {
     "tenant_slug": os.environ.get("BENCH_TENANT_SLUG", "default"),
     "org_slug": os.environ.get("BENCH_ORG_SLUG", "bench-org"),
     "username": os.environ.get("BENCH_USERNAME", "benchuser"),
-    "password": os.environ.get("BENCH_PASSWORD", "Bench@User123!"),
+    "password": os.environ.get("BENCH_PASSWORD", ""),
     "action": os.environ.get("BENCH_ACTION", "read"),
     "resource_id": os.environ.get("BENCH_RESOURCE_ID", "bench-resource"),
     "custom_ca": _read_custom_ca(),

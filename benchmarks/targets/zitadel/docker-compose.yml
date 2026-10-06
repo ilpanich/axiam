@@ -5,7 +5,7 @@
 # falls back to client_credentials (handled in scenarios/lib/targets.js). TLS mode
 # is controlled by ZITADEL_TLS_* set by the runner from the security profile.
 #
-# Pinned to Zitadel v4 (GA). The OIDC endpoints the adapter uses
+# Pinned to Zitadel v4.19.4 (see the image line). The OIDC endpoints the adapter uses
 # (/oauth/v2/token, /oauth/v2/introspect, /oauth/v2/keys, /oidc/v1/userinfo) are
 # standard discovery paths unchanged from v2; `start-from-init`, the masterkey
 # flag, and the ZITADEL_DATABASE_*/EXTERNAL* env are all still valid in v4. v4
@@ -15,20 +15,23 @@ name: bench-zitadel
 
 services:
   zitadel:
-    image: ghcr.io/zitadel/zitadel:v4.16.2
+    # Pinned to Zitadel v4.19.4 (run 6). Override with BENCH_ZITADEL_IMAGE.
+    image: ${BENCH_ZITADEL_IMAGE:-ghcr.io/zitadel/zitadel:v4.19.4}
     container_name: bench-zitadel
     cpus: ${BENCH_CPUS:-2}
     mem_limit: ${BENCH_MEM:-2048m}
-    command: 'start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode ${BENCH_ZITADEL_TLS_MODE:-disabled}'
+    # The masterkey is generated per run (BENCH_ZITADEL_MASTERKEY, exactly 32
+    # characters, by `just target=zitadel bench-up`); no literal lives here.
+    command: 'start-from-init --masterkey "${BENCH_ZITADEL_MASTERKEY:?generated per run by just target=zitadel bench-up}" --tlsMode ${BENCH_ZITADEL_TLS_MODE:-disabled}'
     environment:
       ZITADEL_DATABASE_POSTGRES_HOST: postgres
       ZITADEL_DATABASE_POSTGRES_PORT: "5432"
       ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
       ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
-      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: "${BENCH_ZITADEL_DB_USER_PASSWORD:?generated per run by just target=zitadel bench-up}"
       ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
       ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
-      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: "${BENCH_ZITADEL_DB_ADMIN_PASSWORD:?generated per run by just target=zitadel bench-up}"
       ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
       ZITADEL_EXTERNALSECURE: "${BENCH_ZITADEL_EXTERNAL_SECURE:-false}"
       # External port + published port follow the profile: 8090 plaintext, the TLS
@@ -136,7 +139,7 @@ services:
       - "max_connections=200"
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: "${BENCH_ZITADEL_DB_ADMIN_PASSWORD:?generated per run by just target=zitadel bench-up}"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s

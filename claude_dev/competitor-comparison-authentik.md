@@ -59,9 +59,9 @@ would turn it into an application-portal product.
 | Front-channel logout | No — declined by design (D-6); back-channel logout shipped | Yes | [A15] |
 | OpenID certification | Not yet (conformance suites run and published) | **OpenID Certified** for OP and logout profiles (2026.8) | [A5] |
 | SAML 2.0 | IdP (G-2, Phase 23) **and** SP | IdP **and** SP; WS-Federation (enterprise) | [A5][A16] |
-| SCIM 2.0 | Inbound endpoint (RFC 7643/7644) **and** outbound SCIM client (G-6, Phase 23: per-tenant targets, users and groups, reconciliation) | Inbound SCIM source **and** outbound SCIM provider | [A17][A18] |
+| SCIM 2.0 | Inbound endpoint (RFC 7643/7644) **and** outbound SCIM client (G-6, Phase 23: per-tenant targets, users and groups, reconciliation). *Limit: one delivery attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 is decided (item 4 below)* | Inbound SCIM source **and** outbound SCIM provider | [A17][A18] |
 | LDAP / Kerberos as user source | LDAP/AD yes (G-3, Phase 23; nested groups, sync); Kerberos no (D-1) | Yes | [A16] |
-| LDAP / RADIUS / proxy / RAC outposts | No | Yes (RADIUS EAP-TLS enterprise) | [A2] |
+| LDAP / RADIUS / proxy / RAC outposts | **No.** RADIUS is a gap AXIAM chooses not to close natively for now (G-11, D-77, 2026-10-06): no RADIUS front end today; a FreeRADIUS-backend route when a named adopter asks, per [the decision record](radius-eap-tls-spike-2026-10-06.md). No CRL is published either (T-102), so a RADIUS server trusting the AXIAM CA has no revocation channel today. No LDAP server, proxy or RAC outpost by design | Yes (RADIUS EAP-TLS enterprise) | [A2] |
 | MFA | TOTP, WebAuthn passkeys and security keys, attestation policy (FIDO MDS) | TOTP, WebAuthn (AAGUID allowlist via FIDO MDS), Duo, SMS, email OTP, recovery codes, device trust | [A19][A20] |
 | Augmented PAKE (OPAQUE, RFC 9807) | **Yes** (opt-in per org/tenant) | No | — |
 | X.509 / mTLS user and device authentication | **Yes**, open source, with an integrated per-org CA | mTLS stage, **enterprise-only**; no CA | [A21] |
@@ -102,14 +102,39 @@ not authentik's.
    (Phase 23, W5): AXIAM is a SCIM 2.0 client of the downstream service
    providers a tenant registers (bearer or OAuth 2.0 client credentials,
    users and groups, `deactivate` or `delete`, erasure always `DELETE`,
-   nightly and on-demand reconciliation, contract §31).*
+   nightly and on-demand reconciliation, contract §31).* **What it does not
+   do:** delivery is one attempt at a time per replica, for every tenant.
+   Each attempt waits up to 10 s (20 s when it first fetches a token), so a
+   downstream that is slow or never answers, or a reconciliation that queues a
+   large tenant, delays the SCIM pushes of every target on that replica until
+   the per-target circuit breaker proposed in
+   [#550](https://github.com/ilpanich/axiam/issues/550) (P23W5-07) is decided.
+   Webhooks, SSF events and sign-ins are not affected, and nothing reads a
+   downstream's own accounts back
+   (`crates/axiam-amqp/src/outbound/consumer.rs`,
+   [W5 security review §14](security-review-phase23-w5-2026-10-05.md)).
 5. **Shared Signals Framework (CAEP/RISC).** Offered by authentik (enterprise)
    and Keycloak (experimental). It fits AXIAM's event story (webhooks, AMQP)
    and would let relying parties revoke sessions in near real time. *Closed
    by G-5 (Phase 23, W4): AXIAM is an SSF 1.0 transmitter (CAEP and RISC
    events, push and poll, contract §32), with no licence gate.*
 6. **RADIUS interface.** Relevant to AXIAM's IoT and network-device audience;
-   authentik ships it as an outpost [A2].
+   authentik ships it as an outpost [A2]. **Decided (G-11, D-77, 2026-10-06):
+   AXIAM chooses not to close it natively for now.** The spike
+   ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md))
+   found the fit partial and unproven (802.1X for fleets of AXIAM-issued device
+   certificates; password protocols other than PAP cannot be served from an
+   Argon2id store) and no adopter has asked, while a native front end is a new
+   authentication path and trust boundary costing about 24–36 sessions. The
+   route that applies when a named adopter asks is FreeRADIUS as the RADIUS and
+   EAP-TLS implementation, with AXIAM as the CA and policy source (§5.2 of the
+   record). **Reopen** when an adopter needs 802.1X, VPN or network-device
+   login against AXIAM and will not run FreeRADIUS, or when that route has
+   shipped with a documented shortfall (§1.4). Today AXIAM has **no RADIUS
+   support** and **publishes no certificate revocation list** (T-102 is
+   reopened at threat model 2.36.0): a FreeRADIUS deployment trusting the
+   AXIAM CA has no revocation channel until publishing a CRL per issuing CA,
+   which the decision commits to regardless, ships.
 
 **P3 — watch, do not chase**
 
@@ -158,14 +183,18 @@ not authentik's.
    several security-relevant features (mTLS, RADIUS EAP-TLS, account lockdown,
    password history, SSF) sit behind the enterprise licence [A3].
 
-No performance claim is made here: authentik has not been benchmarked with
-`benchmarks/`, and its 2026.8 move to Rust entrypoints makes older intuitions
-unreliable. Adding it as a benchmark target is the honest way to settle that.
+No performance claim is made here, and none will be until the numbers exist.
+Authentik now has a benchmark target (`benchmarks/targets/authentik/`, G-10),
+and benchmark run 6 will measure it, alongside Keycloak 26.8.0 and Zitadel
+v4.19.4, against AXIAM `1.0.0-beta18` on the same G-box with the run-5 caps.
+Its 2026.8 move to Rust entrypoints makes older intuitions unreliable, so the
+measurement, not an expectation, will settle it. The numbers follow the run.
 
 ## 5. Change log
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-06 | W6 comparison refresh (G-10, G-11). **G-11 (RADIUS)** decided (D-77): the native RADIUS front end is declined for now, the FreeRADIUS-backend route applies when a named adopter asks, and a CRL is to be published regardless; the "outposts" row and gap item 6 now say that AXIAM has no RADIUS today, link the decision record and its reopen condition, and say that no CRL is published yet (T-102 reopened at threat model 2.36.0). **G-10 (benchmark currency)**: authentik now has a benchmark target (`benchmarks/targets/authentik/`) and run 6 will measure authentik 2026.8.3, Keycloak 26.8.0 and Zitadel v4.19.4 against AXIAM `1.0.0-beta18` on the same G-box with the run-5 caps; the no-performance-claim paragraph keeps its claim and gives the new reason, and no number is added before the run. **Not-do statement:** outbound SCIM delivers one attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 (P23W5-07) is decided. | [A2] |
 | 2026-10-05 | G-6 (outbound SCIM provisioning) complete on the Phase 23 W5 branch: a tenant registers downstream SCIM 2.0 service providers (bearer token or OAuth 2.0 client credentials, sealed and write-only, bound to its URL; scope of every user or the members of chosen groups; deactivate or delete on leaving scope), AXIAM pushes user and group lifecycle changes as `POST` / `PATCH` / `DELETE` through the outbound address guard with retry and dead-lettering, a GDPR erasure always deletes downstream, reconciliation repairs drift nightly and on demand and never touches an account the downstream's own application made, and a dead letter can notify the tenant's administrators; management API (contract §31) and console page. The authentik row and gap item 4 now read as closed. | [A18] |
 | 2026-10-04 | G-2 (SAML 2.0 identity provider) complete on the Phase 23 W4 branch: per-tenant IdP with SP- and IdP-initiated Web Browser SSO over HTTP-Redirect and HTTP-POST, always-signed assertions under a tenant credential issued by the tenant's own CA (issue / promote / retire), a pairwise persistent `NameID` by default, per-SP `SessionIndex` and single logout tied to session revocation and the revocation feed, IdP metadata, SP metadata import as a reviewed draft, the SP registry API (contract §29) and console page; round-tripped with samael as a reference SP and with a real Keycloak 26.7.0 brokering to AXIAM. Assertion encryption and the artifact binding stay out (D-2). | — |
 | 2026-10-04 | G-5 (Shared Signals Framework transmitter) complete on the Phase 23 W4 branch: SSF 1.0 with CAEP `session-revoked`, `credential-change`, `assurance-level-change` and RISC `account-disabled` / `account-enabled` / `account-purged` as EdDSA-signed SETs, push (RFC 8935) through the outbound address guard and poll (RFC 8936), the receiver's stream management API under an `ssf.manage` client credential, discovery, administrator-registered streams (contract §32). The optional SDK receiver helper follows the merge (D-35). | — |

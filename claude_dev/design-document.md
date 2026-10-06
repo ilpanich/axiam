@@ -479,8 +479,28 @@ Organization CA Certificate (root of trust)
 | **Upload CA** | Organization | Import an existing CA certificate (public cert only) |
 | **Generate Cert** | Tenant | Create a certificate signed by the organization CA; private key returned once |
 | **Upload Cert** | Tenant | Import an externally-issued certificate |
-| **Revoke** | Any | Mark a certificate as revoked; propagates to CRL |
+| **Revoke** | Any | Mark a certificate as revoked: its status in AXIAM's store, checked when AXIAM authenticates a device by its certificate (not at the TLS handshake, nor for OAuth2 `tls_client_auth`) |
 | **Rotate** | Any | Issue a new certificate and revoke the old one |
+
+**Revocation reaches only AXIAM's device sign-in.** AXIAM publishes no
+certificate revocation list and runs no OCSP responder: its CAs carry the
+`cRLSign` key-usage bit, and nothing serves a list. `DeviceAuthService`
+reads a certificate's status, and every CA's on its chain, on each
+authentication, so a revocation takes effect at once for device sign-in by
+certificate. Nothing else reads it: neither listener's TLS handshake checks
+revocation, and OAuth2 `tls_client_auth` matches the client's registered subject
+DN or SAN, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client
+until it expires or the registration changes (corrected by the W6 F4 review). A
+relying party that validates AXIAM-issued certificates itself — a
+FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its
+own mTLS — has no revocation channel, and honours a revoked certificate until it
+expires; the bound is the tenant's `max_cert_validity_days`. Earlier revisions of
+this table said revocation "propagates to CRL"; there has never been one.
+Publishing a CRL per issuing CA is tracked by
+[ilpanich/axiam#565](https://github.com/ilpanich/axiam/issues/565) (item D1 of
+[`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md));
+threat T-102 in [`threat-model-stride.md`](threat-model-stride.md) stays open
+until it is.
 
 ### 6.3 Private Key Handling
 
@@ -990,7 +1010,7 @@ Key configuration sections:
 - `auth` — JWT key paths, token lifetimes, password policy, MFA settings
 - `oauth2` — issuer URL, supported grant types, default scopes
 - `security` — rate limits, CORS origins, session settings
-- `pki` — CA key encryption settings, certificate defaults (validity, key size), CRL configuration
+- `pki` — CA signing-key custody (`AXIAM__PKI__CA_KEY_STORE`: `database`, `vault` or `vault_pki`, with the Vault address, token and mounts) and FIDO MDS3 metadata ingestion (`AXIAM__PKI__MDS_*`). The key that seals CA rows is a secret from the secret provider (`AXIAM__AUTH__PKI_ENCRYPTION_KEY`), not a `pki` setting; certificate validity defaults and ceilings are per-tenant settings (`default_cert_validity_days`, `max_cert_validity_days`); there is no CRL to configure (§6.2)
 - `webhooks` — delivery timeout, retry policy, max concurrent deliveries
 - `gnupg` — key storage settings, signing algorithm preferences
 - `email` — provider (smtp/sendgrid/postmark/resend/brevo), SMTP host/port/TLS, API keys, from address

@@ -1,9 +1,9 @@
 {
-  "version": "2.35.0",
+  "version": "2.36.1",
   "summary": {
     "title": "Axiam",
     "owner": "ilpanich",
-    "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment.",
+    "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment, and \u2014 as a design-only diagram whose entries are recorded Not applicable \u2014 a RADIUS front end that is not built.",
     "id": 0
   },
   "detail": {
@@ -2282,8 +2282,8 @@
                 "text": "Login endpoint\nPOST /auth/login"
               },
               "body": {
-                "stroke": "#333333",
-                "strokeWidth": 1.5,
+                "stroke": "red",
+                "strokeWidth": 3,
                 "strokeDasharray": null
               }
             },
@@ -2298,7 +2298,7 @@
               "isTrustBoundary": false,
               "outOfScope": false,
               "reasonOutOfScope": "",
-              "hasOpenThreats": false,
+              "hasOpenThreats": true,
               "handlesCardPayment": false,
               "handlesGoodsOrServices": false,
               "isWebApplication": true,
@@ -2311,7 +2311,7 @@
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "description": "Different status codes, error bodies or response times for existing versus non-existent accounts let an attacker enumerate valid usernames and email addresses.",
-                  "mitigation": "Login returns a uniform failure for unknown-user and bad-password alike, and password verification runs on a dummy hash when the user does not exist so timing does not distinguish the cases.",
+                  "mitigation": "Login returns a uniform failure for unknown-user and bad-password alike, and password verification runs on a dummy hash when the user does not exist so timing does not distinguish the cases. Residual (W6 F4 review, model 2.36.1): the temporary-lockout branch answers without the dummy verify, and gRPC `ValidateCredentials` runs none on any refusal; recorded open as T-469.",
                   "modelType": "STRIDE",
                   "number": 30
                 },
@@ -2358,6 +2358,17 @@
                   "mitigation": "SECHRD-09 applied to every new sink rather than to the one CodeQL named. `LoginOutput`, `BasicCredentials` (T-253) and `UserInfoPostForm` (T-243) hand-write redacting `Debug` impls; the tests name the variant or the cookie that was set, never the value \u2014 compare, then assert. The TRACE-capture tests grep for the secret, its encoding and the header value rather than trusting the absence of a `{:?}`. `axiam-core`'s three redacting certificate `Debug` impls, which reach `{:?}` in handler-level tracing spans where `#[serde(skip_serializing)]` cannot help, are now asserted \u2014 `Option`-aware on purpose, since a `vault_pki` CA has no key and printing `[REDACTED]` would claim one was withheld. One adjacent hygiene fix on 2026-09-13 (fcc976d): the two redaction tests R-5 added for `DbConfig` and `AmqpConfig` wrote a literal fake password into the source, which a secret scanner (GitGuardian, on the PR) cannot tell from a real one and neither can a reader six months later. They now mint the value through `axiam_test_support::test_password`, so the assertion holds for whatever the helper produces rather than for one string, and the seeder derives its credential field-name list from the environment table rather than repeating it. No scanner exemption was added: `.gitguardian.yaml` is for published RFC test vectors, and silencing a detector over a value one can simply stop writing is how an exemption list stops meaning anything.",
                   "modelType": "STRIDE",
                   "number": 260
+                },
+                {
+                  "id": "83274aba-b49a-5852-accc-1008706118cc",
+                  "title": "A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart",
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "`AuthService::login` refuses an account serving a temporary lockout, local or directory, before it asks for a hash permit or runs any Argon2id verify (`crates/axiam-auth/src/service.rs`, step 2), while an unknown name and a wrong password each cost one verify (SEC-026, T-30). Lockout is set by the attacker's own failures, so a name that answers fast after N wrong passwords exists and one that keeps costing a verify does not: an enumeration oracle at N + 1 requests per name, which also locks the real user out (T-35). Under hash-permit saturation the difference is in the status itself: the locked account answers 401 while every branch that verifies answers 503. gRPC `UserService/ValidateCredentials` answers an unknown name, and a locked, non-active or directory account, `valid: false` with no verify at all, an oracle for any caller holding a validated token of the tenant.",
+                  "mitigation": "Open (W6 F4 review, 2026-10-06, model 2.36.1; found by the T23.11.1 RADIUS spike, whose T-457 requires the same of any RADIUS build). Fix: run the equalising dummy verify, under the same bounded permit, on the lockout branch (still before the directory is contacted, T-302, and without verifying the real hash, so a correct password during a lockout neither succeeds nor shows) and on every refusal of `ValidateCredentials`. A timing-free test pins it: with no hash permit available, a locked account must answer the 503 an unknown name answers; today it answers 401 (ilpanich/axiam#564). Bounded meanwhile by the per-IP login limiter and by the lockout's exponential backoff, which makes every probe cost N failed attempts against a real user.",
+                  "modelType": "STRIDE",
+                  "number": 469
                 }
               ]
             }
@@ -14641,11 +14652,11 @@
       {
         "id": 5,
         "title": "PKI, certificates & IoT device identity",
-        "description": "Organization and tenant CA lifecycle with per-CA key custody (sealed database row or Vault), tenant signing CAs beneath the organization CA, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification against hot-reloadable trust anchors, revocation and CRL, and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.",
+        "description": "Organization and tenant CA lifecycle with per-CA key custody (sealed database row or Vault), tenant signing CAs beneath the organization CA, tenant certificate issuance with policy enforcement, mTLS device and workload authentication with full chain verification against hot-reloadable trust anchors, revocation by certificate status (AXIAM publishes no CRL and runs no OCSP responder, T-102), and the OpenPGP key service used for audit signing and GDPR export encryption. Extended for X3 with FIDO MDS3 metadata ingestion (BLOB trust-chain verification, rollback protection, staleness posture) feeding the WebAuthn attestation policy engine.",
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.12.0",
+        "version": "2.36.0",
         "cells": [
           {
             "position": {
@@ -15201,11 +15212,11 @@
             },
             "attrs": {
               "text": {
-                "text": "Revocation & CRL"
+                "text": "Revocation\n(status in AXIAM's store;\nno CRL published)"
               },
               "body": {
-                "stroke": "#333333",
-                "strokeWidth": 1.5,
+                "stroke": "red",
+                "strokeWidth": 3,
                 "strokeDasharray": null
               }
             },
@@ -15215,12 +15226,12 @@
             "id": "9a80f354-ab85-50c6-8405-8a91a50e9681",
             "data": {
               "type": "tm.Process",
-              "name": "Revocation & CRL",
-              "description": "",
+              "name": "Revocation\n(status in AXIAM's store;\nno CRL published)",
+              "description": "Revoke and rotate set the certificate row's status. AXIAM publishes no CRL and runs no OCSP responder: the CAs carry the cRLSign key-usage bit and nothing serves a list (T-102).",
               "isTrustBoundary": false,
               "outOfScope": false,
               "reasonOutOfScope": "",
-              "hasOpenThreats": false,
+              "hasOpenThreats": true,
               "handlesCardPayment": false,
               "handlesGoodsOrServices": false,
               "isWebApplication": false,
@@ -15228,12 +15239,12 @@
               "threats": [
                 {
                   "id": "0767aa3d-7962-5162-b008-367ae45fb73e",
-                  "title": "Revoked certificate honoured until the CRL refreshes",
-                  "status": "Mitigated",
+                  "title": "A revoked certificate stays valid to every relying party that does not terminate at AXIAM",
+                  "status": "Open",
                   "severity": "High",
                   "type": "Spoofing",
-                  "description": "If relying parties depend only on a periodically published CRL, a revoked device keeps authenticating for the refresh interval.",
-                  "mitigation": "AXIAM checks certificate status in its own store on every mTLS authentication, so revocation takes effect immediately for AXIAM-terminated connections. External relying parties consuming the CRL remain bound by its publication interval.",
+                  "description": "Revoking a certificate sets the status on its row in AXIAM's store. AXIAM publishes no CRL and runs no OCSP responder \u2014 its CAs carry the `cRLSign` key-usage bit and nothing serves a list \u2014 so a relying party that validates AXIAM-issued certificates itself (a FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its own mTLS) has no channel through which to learn of a revocation, and honours a revoked certificate until it expires. Until model 2.36.0 this entry described a CRL whose refresh interval bounded that window; the tree has never contained one.",
+                  "mitigation": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM authenticates a device by its certificate, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf. Nothing else AXIAM terminates reads it (corrected by the W6 F4 review, model 2.36.1): neither listener's TLS handshake checks revocation, and OAuth2 `tls_client_auth` matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by ilpanich/axiam#565 (spike record \u00a78, D1); this entry closes with it, together with the listeners' verifiers loading that list or `tls_client_auth` reading the certificate's status.",
                   "modelType": "STRIDE",
                   "number": 102
                 }
@@ -21669,10 +21680,1371 @@
             }
           }
         ]
+      },
+      {
+        "id": 9,
+        "title": "RADIUS front end \u2014 not built (G-11, declined 2026-10-06)",
+        "description": "A design-only diagram. G-11 asked whether AXIAM should speak RADIUS, with EAP-TLS validated against its own per-tenant PKI; the spike (T23.11.1, claude_dev/radius-eap-tls-spike-2026-10-06.md) declined a native front end on 2026-10-06 and recorded the FreeRADIUS-backend route for when an adopter asks. Nothing drawn here exists except the AuthService \u00b7 DeviceAuthService \u00b7 RBAC engine element, drawn as the callee a front end would reach. The W5 F4 review required the threat entries to exist anyway, so a build starts from them: every threat on this diagram is recorded Not applicable \u2014 neither Mitigated, because no control exists, nor Open, because nothing in AXIAM is exposed \u2014 and becomes Mitigated or Open, with its tests, in the commit that builds the element it sits on. The NAS \u2194 AXIAM trust boundary separates the customer's network access devices from the front end.",
+        "diagramType": "STRIDE",
+        "placeholder": "New STRIDE diagram description",
+        "thumbnail": "./public/content/images/thumbnail.stride.jpg",
+        "version": "2.36.0",
+        "cells": [
+          {
+            "position": {
+              "x": 20,
+              "y": 20
+            },
+            "size": {
+              "width": 260,
+              "height": 420
+            },
+            "attrs": {
+              "label": {
+                "text": "Network access devices\n(customer equipment)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 3,
+                "strokeDasharray": "10 5"
+              }
+            },
+            "visible": true,
+            "shape": "trust-boundary-box",
+            "zIndex": -50,
+            "id": "3ef77340-3414-5674-9f16-7e5b5fa6c653",
+            "data": {
+              "type": "tm.BoundaryBox",
+              "name": "Network access devices\n(customer equipment)",
+              "description": "The NAS \u2194 AXIAM trust boundary separates this box from the RADIUS front end. Not built.",
+              "isTrustBoundary": true,
+              "hasOpenThreats": false,
+              "crossingFlows": [],
+              "containedElements": []
+            }
+          },
+          {
+            "position": {
+              "x": 20,
+              "y": 480
+            },
+            "size": {
+              "width": 260,
+              "height": 160
+            },
+            "attrs": {
+              "label": {
+                "text": "Administrators"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 3,
+                "strokeDasharray": "10 5"
+              }
+            },
+            "visible": true,
+            "shape": "trust-boundary-box",
+            "zIndex": -50,
+            "id": "13cb10e6-d629-5f07-a5d1-5e831747ac80",
+            "data": {
+              "type": "tm.BoundaryBox",
+              "name": "Administrators",
+              "description": "",
+              "isTrustBoundary": true,
+              "hasOpenThreats": false,
+              "crossingFlows": [],
+              "containedElements": []
+            }
+          },
+          {
+            "position": {
+              "x": 20,
+              "y": 680
+            },
+            "size": {
+              "width": 260,
+              "height": 200
+            },
+            "attrs": {
+              "label": {
+                "text": "Operator-run FreeRADIUS\n(option B, not built)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 3,
+                "strokeDasharray": "10 5"
+              }
+            },
+            "visible": true,
+            "shape": "trust-boundary-box",
+            "zIndex": -50,
+            "id": "3c86c436-6a3b-559e-b094-407cbf66edf1",
+            "data": {
+              "type": "tm.BoundaryBox",
+              "name": "Operator-run FreeRADIUS\n(option B, not built)",
+              "description": "",
+              "isTrustBoundary": true,
+              "hasOpenThreats": false,
+              "crossingFlows": [],
+              "containedElements": []
+            }
+          },
+          {
+            "position": {
+              "x": 320,
+              "y": 20
+            },
+            "size": {
+              "width": 640,
+              "height": 620
+            },
+            "attrs": {
+              "label": {
+                "text": "AXIAM \u2014 RADIUS front end\n(not built \u00b7 G-11 declined 2026-10-06)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 3,
+                "strokeDasharray": "10 5"
+              }
+            },
+            "visible": true,
+            "shape": "trust-boundary-box",
+            "zIndex": -50,
+            "id": "15b8c1ad-c3cc-5c9e-958e-a4b6aec88388",
+            "data": {
+              "type": "tm.BoundaryBox",
+              "name": "AXIAM \u2014 RADIUS front end\n(not built \u00b7 G-11 declined 2026-10-06)",
+              "description": "Option A of the G-11 spike: a native RADIUS / RadSec / RADIUS/1.1 front end with EAP-TLS. Not built.",
+              "isTrustBoundary": true,
+              "hasOpenThreats": false,
+              "crossingFlows": [],
+              "containedElements": []
+            }
+          },
+          {
+            "position": {
+              "x": 320,
+              "y": 680
+            },
+            "size": {
+              "width": 640,
+              "height": 200
+            },
+            "attrs": {
+              "label": {
+                "text": "AXIAM \u2014 core services and REST API"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 3,
+                "strokeDasharray": "10 5"
+              }
+            },
+            "visible": true,
+            "shape": "trust-boundary-box",
+            "zIndex": -50,
+            "id": "4d8af166-2164-5b0d-a9c4-e8e5553ceb0d",
+            "data": {
+              "type": "tm.BoundaryBox",
+              "name": "AXIAM \u2014 core services and REST API",
+              "description": "The authorization endpoint of option B would be a REST route here (not built); the services beside it exist.",
+              "isTrustBoundary": true,
+              "hasOpenThreats": false,
+              "crossingFlows": [],
+              "containedElements": []
+            }
+          },
+          {
+            "position": {
+              "x": 1010,
+              "y": 80
+            },
+            "size": {
+              "width": 300,
+              "height": 560
+            },
+            "attrs": {
+              "label": {
+                "text": "Data tier"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 3,
+                "strokeDasharray": "10 5"
+              }
+            },
+            "visible": true,
+            "shape": "trust-boundary-box",
+            "zIndex": -50,
+            "id": "dd3a88da-8c45-5ad1-b182-4d03b14e17e5",
+            "data": {
+              "type": "tm.BoundaryBox",
+              "name": "Data tier",
+              "description": "",
+              "isTrustBoundary": true,
+              "hasOpenThreats": false,
+              "crossingFlows": [],
+              "containedElements": []
+            }
+          },
+          {
+            "position": {
+              "x": 45,
+              "y": 80
+            },
+            "size": {
+              "width": 150,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "Supplicant\n(device with an\nAXIAM certificate)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              }
+            },
+            "visible": true,
+            "shape": "actor",
+            "zIndex": 1,
+            "id": "2208055f-d9f2-5ff4-9e22-f2aa0e8b9e85",
+            "data": {
+              "type": "tm.Actor",
+              "name": "Supplicant\n(device with an\nAXIAM certificate)",
+              "description": "An 802.1X supplicant \u2014 an IoT or OT device, a gateway, a workload host \u2014 holding an AXIAM-issued Device certificate bound to a service account. It reaches AXIAM only through the NAS.",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "providesAuthentication": false,
+              "threats": []
+            }
+          },
+          {
+            "position": {
+              "x": 45,
+              "y": 300
+            },
+            "size": {
+              "width": 150,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "NAS\n(switch, access point,\nVPN gateway)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              }
+            },
+            "visible": true,
+            "shape": "actor",
+            "zIndex": 1,
+            "id": "3f811f63-3d44-5405-be42-cb1021ed0506",
+            "data": {
+              "type": "tm.Actor",
+              "name": "NAS\n(switch, access point,\nVPN gateway)",
+              "description": "A network access server registered to one tenant: it relays EAP and asks AXIAM to decide. On UDP it is authenticated by its source address and shared secret; on RadSec and RADIUS/1.1 by its certificate pin and its address.",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "providesAuthentication": false,
+              "threats": [
+                {
+                  "id": "8793266b-43fb-5965-ba1b-3e71e0919cc9",
+                  "title": "A host impersonates a registered NAS with its source address and a guessed or leaked shared secret",
+                  "status": "NotApplicable",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "On RADIUS over UDP a network access server (a switch, an access point, a VPN gateway) is authenticated by its source address and a shared secret and nothing else. A host that can send from a registered address \u2014 spoofed on UDP, or on the same segment \u2014 and knows or guesses the secret is that NAS: its requests are decided in the NAS's tenant and the replies carry what the NAS would receive.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.3, \u00a76.4, R1). Required of any build, from its first commit: `Message-Authenticator` verified with the NAS's own secret, in constant time, before any state, lookup or hash (T-449); secrets generated server-side at 128 bits or more, a supplied one refused below that floor (T-466); RadSec or, preferably, RADIUS/1.1 (RFC 9765), where the NAS is its certificate's SHA-256 pin **and** its registered address, verified against the tenant's own anchors; plain UDP served only to a NAS registered `legacy_udp`, marked as such in the API, the console and every audit row. If built as specified: Mitigated, with one accepted residual \u2014 a weak or leaked secret on a `legacy_udp` NAS.",
+                  "modelType": "STRIDE",
+                  "number": 448
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 45,
+              "y": 530
+            },
+            "size": {
+              "width": 150,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "Tenant administrator\n(console / API)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              }
+            },
+            "visible": true,
+            "shape": "actor",
+            "zIndex": 1,
+            "id": "587c5aac-7cd9-5d9d-9398-1a442cd16eb8",
+            "data": {
+              "type": "tm.Actor",
+              "name": "Tenant administrator\n(console / API)",
+              "description": "Registers, rotates, moves and disables NASes through a tenant-scoped management API (not built).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "providesAuthentication": false,
+              "threats": []
+            }
+          },
+          {
+            "position": {
+              "x": 45,
+              "y": 740
+            },
+            "size": {
+              "width": 150,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "FreeRADIUS\n(operator-run)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              }
+            },
+            "visible": true,
+            "shape": "actor",
+            "zIndex": 1,
+            "id": "830f5d18-eef4-58e2-b313-7838ea024cf5",
+            "data": {
+              "type": "tm.Actor",
+              "name": "FreeRADIUS\n(operator-run)",
+              "description": "Option B: the operator's FreeRADIUS terminates RADIUS and EAP-TLS itself, trusting a CA bundle exported from AXIAM, and may ask AXIAM for a decision through rlm_rest.",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "providesAuthentication": false,
+              "threats": []
+            }
+          },
+          {
+            "position": {
+              "x": 370,
+              "y": 120
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "RADIUS / RadSec\nlistener (codec,\nMessage-Authenticator,\nlimiter)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "8f4b56af-1137-5ea6-a3fa-8dcfb0cdb5e1",
+            "data": {
+              "type": "tm.Process",
+              "name": "RADIUS / RadSec\nlistener (codec,\nMessage-Authenticator,\nlimiter)",
+              "description": "UDP and RadSec / RADIUS/1.1 sockets, the packet codec, Message-Authenticator verification and generation, the duplicate cache and the listener's own limiter. Outside the Actix middleware, so it carries every control itself.",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "43086fbf-d74a-5a41-a3af-d9e107b030e8",
+                  "title": "Credentials are guessed through a second front door that no limiter or lockout covers (the Keycloak 26.7.x class)",
+                  "status": "NotApplicable",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "description": "A RADIUS listener is an authentication path beside the REST login, reaching the same `AuthService` and the same certificate path, but it is a UDP or TLS socket outside the Actix middleware where every existing limiter lives. A surface that authenticates a credential and is covered by neither the limiters nor the lockout is the class T-429 recorded for CIBA: an attacker routes password guessing through it. The human login limiter is keyed per IP and no preset moves it, so for a NAS \u2014 one source address for a whole site \u2014 it is also the wrong key.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.1, R6). The W5 F4 review's constraint (\u00a715): **the brute-force lockout and the limiters cover it from the first commit**. Required of any build: the listener has its own limiter, with `radius_*` fields in `RateLimitConfig` and `MachineLimitPreset` for `internet`, `gateway` and `mesh` (the human endpoints untouched), sized from a measured power-restore storm; it meters per authenticated NAS and per tenant once `Message-Authenticator` verifies, per (NAS, supplied identity) as a rate that is never a lockout, and per source address before verification as a drop that never answers; PAP failures go through the tenant's `LockoutPolicy` by `AuthService::record_failed_login` \u2014 the console's own counter, not a second one \u2014 and a name that matches no account through `UnknownNameLockout` (T-332); and a test enumerates every accept path (UDP, RadSec, each EAP state) and fails the build if one reaches `AuthService`, the certificate path or the NAS registry without passing the limiter. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 451
+                },
+                {
+                  "id": "2a295a4e-c6bc-55c8-9de2-b4f978603f66",
+                  "title": "Unauthenticated packets reach the hash path, and a PAP flood starves the console's sign-in",
+                  "status": "NotApplicable",
+                  "severity": "High",
+                  "type": "Denial of service",
+                  "description": "Argon2id is expensive by design and its permits are shared across every password path (CQ-B02 backpressure). A packet that reaches a password verify, a certificate lookup or a secret's decryption before it is authenticated makes a spoofed UDP flood cost AXIAM work per packet; and an authenticated NAS forwarding a PAP flood can take every hash permit, so console and API sign-ins queue behind it.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.1, \u00a76.3, R7). Required of any build: `Message-Authenticator` verified first \u2014 before any state, any hash, any certificate lookup and any decryption beyond the one secret the verify needs; a packet that fails it dropped in a per-source bucket that never answers; what passes metered per NAS and per tenant (T-451); and RADIUS given a sub-limit of the shared hash permits, so it can never hold all of them. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 452
+                },
+                {
+                  "id": "e4509cd0-8f93-58da-9768-218baa1c55d7",
+                  "title": "A replayed or retransmitted Access-Request is decided twice",
+                  "status": "NotApplicable",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "RADIUS over UDP retransmits, and a captured request can be replayed. A server that treats each copy as new makes a second decision, counts a second failed sign-in toward a lockout, or advances an EAP conversation twice.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record R20). Required of any build: duplicates detected by (NAS, Identifier, Request Authenticator) in a short cache that returns the identical cached answer without deciding again (RFC 5080 \u2014 recalled in the spike, to be read against the RFC before building), and every EAP `State` value bound to the NAS and its conversation. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 453
+                },
+                {
+                  "id": "096a8da8-d5c4-56f5-b041-a68ccfb2a0c4",
+                  "title": "An unreviewed RADIUS crate, or a GPL-licensed RADIUS image, enters the build",
+                  "status": "NotApplicable",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "description": "The packet codec and the EAP-TLS state machine parse unauthenticated network input. A third-party RADIUS crate whose maintenance, licence and fuzzing are unknown, or a recipe that builds and ships a FreeRADIUS image, brings code nobody here reviewed \u2014 or a licence the project did not choose \u2014 into the supply chain.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a75.1, \u00a75.2, R25). The first task of any build (A-1) evaluates the existing crates' licence, maintenance and fuzzing before one is adopted, and the preferred route is a small in-house codec with `cargo-fuzz` targets; option B's recipe references an upstream image and ships none. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 454
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 370,
+              "y": 400
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "EAP-TLS\nstate machine\n(over rustls)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "d5377ed1-68a1-54e6-bb23-07a302aa7610",
+            "data": {
+              "type": "tm.Process",
+              "name": "EAP-TLS\nstate machine\n(over rustls)",
+              "description": "Sans-IO rustls server inside EAP: fragmentation and reassembly, the conversation table, MSK / EMSK export, the EAP method allow-list (TLS only).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "853e7ea3-4e00-5546-ae92-0cf56a12e42b",
+                  "title": "In-flight EAP conversations or fragment reassembly exhaust memory",
+                  "status": "NotApplicable",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "An EAP-TLS handshake is larger than one RADIUS packet, so the server keeps a conversation per supplicant and reassembles fragmented TLS records. A compromised registered NAS, or a flood of conversation starts, fills the conversation table or grows a reassembly buffer without bound.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a74.4, R8). Required of any build: in-flight conversations capped per NAS and per tenant and expired on a TTL; the reassembled TLS record, the number of rounds and the certificate-chain size capped; `State` a server-generated random value bound to the NAS; the state machine fuzzed. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 455
+                },
+                {
+                  "id": "6611c864-83e5-5f3f-8e9e-e750ae327a0c",
+                  "title": "A negotiation is downgraded: another EAP method, an older TLS version, or a RADIUS/1.1 NAS falling back to the shared-secret profile",
+                  "status": "NotApplicable",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "Three negotiations precede every decision: the EAP method (a supplicant may NAK EAP-TLS and propose another), the TLS version inside EAP-TLS, and \u2014 on RadSec \u2014 the RADIUS/1.1 profile negotiated with ALPN. A server that negotiates down accepts EAP-MD5, TLS 1.2 where 1.3 was configured, or the MD5-keyed profile RFC 9765 exists to remove.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.3, \u00a76.9, R15). Required of any build: refuse rather than negotiate. The EAP method allow-list is `TLS` and nothing else, and a NAK is a reject; TLS 1.3 is the default and 1.2 a per-NAS opt-in for supplicants that need it; a NAS registered `radius_1_1` that fails ALPN is refused, never served the secret-based profile, and the two profiles never mix on one connection. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 456
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 650,
+              "y": 250
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "RADIUS decision\n(tenant, authN,\nreply attributes)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "8030e087-2b62-5307-b04f-b5027c8e6a4d",
+            "data": {
+              "type": "tm.Process",
+              "name": "RADIUS decision\n(tenant, authN,\nreply attributes)",
+              "description": "Resolves the tenant from the authenticated NAS, authenticates (EAP-TLS through DeviceAuthService, PAP through AuthService), authorizes through the RBAC engine, builds the one Access-Reject or the Access-Accept and its reply profile, and audits the decision.",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "00d489ae-d17a-5ffa-af65-6edcf0f4b6bf",
+                  "title": "Access-Reject is an oracle: unknown, locked or disabled users are told apart by content, silence or timing",
+                  "status": "NotApplicable",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "A RADIUS server that answers an unknown user differently from a wrong password \u2014 a `Reply-Message`, an EAP step skipped, an attribute present or absent, a faster reply \u2014 lets anyone at a NAS enumerate a tenant's accounts and learn which are locked or disabled. D-63 recorded the same obligation for CIBA's `bc-authorize`.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.2, R4). The W5 F4 review's constraint (\u00a715): **an unknown user is not an oracle** (D-63's decoy). RADIUS already has one negative answer, so a build gives exactly one: for an unknown, locked, disabled, wrong-credential, wrong-tenant, revoked-certificate or unbound-certificate request alike, an Access-Reject (EAP-Failure inside, for EAP) with no `Reply-Message`, no vendor error attribute and no optional attribute; the reason goes to the audit row only. The EAP-TLS Start answers an EAP-Identity whatever it names \u2014 the identity is never looked up before the handshake. On the password path every rejecting branch costs the same Argon2id work as a wrong password (SEC-026's equalising verify), so no branch answers faster. Unregistered or unauthenticated sources get silence, the same for each. Acceptance tests: the decoded packet byte-identical across every rejecting condition (only the Identifier and the authenticators excluded), and a response-time band rather than equal bytes alone. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 457
+                },
+                {
+                  "id": "45f0b34f-f475-5bb4-91e3-5a84b164536c",
+                  "title": "Anyone at a NAS locks a named user out by typing wrong passwords",
+                  "status": "NotApplicable",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "description": "An account lockout keyed on a user's failed verifications can be provoked by whoever can submit that user's name with a wrong password \u2014 at a network port, anyone with physical access. A lockout keyed on a value the caller supplies (a MAC address, an EAP identity, a NAS, a source address) is worse: a denial of service against whoever that value names.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.1, R5). Required of any build: the only lockout is the one keyed on the user's own failed verifications \u2014 the tenant's `LockoutPolicy`, with the console's counter and backoff \u2014 bounded by a per-(NAS, identity) rate bucket; nothing keyed on a caller-supplied value is ever a lockout (D-69); EAP-TLS has no password to guess and never locks a service account. If built as specified: Mitigated, with the residual the console already carries \u2014 whoever can type a name and a wrong password can start that account's lockout.",
+                  "modelType": "STRIDE",
+                  "number": 458
+                },
+                {
+                  "id": "714aa5ac-8dd8-53f0-a834-3a0a5d323a5a",
+                  "title": "A NAS of tenant A authenticates a user or device of tenant B",
+                  "status": "NotApplicable",
+                  "severity": "Critical",
+                  "type": "Elevation of privilege",
+                  "description": "Tenants of one organization share its CA, so a device certificate issued under tenant B's signing CA chains to the same root a tenant A NAS would trust: chain verification alone does not separate tenants. And a server that takes the tenant from the packet \u2014 a realm in `User-Name`, `Called-Station-Id`, `NAS-Identifier`, a vendor attribute, the EAP identity \u2014 lets the sender choose it.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.5, R9, R10). Required of any build: the tenant is the authenticated NAS's and nothing the packet says; a source address is registered once across all tenants (a unique index on the normalised address, a collision refused at write time); after the EAP-TLS handshake the certificate is resolved by `DeviceAuthService::authenticate_der` and refused unless its row's `tenant_id` equals the NAS's; the handshake's anchors are that tenant's own `mtls_trust_anchor` CAs, not the deployment-wide set; every repository call is scoped by the NAS's tenant. Acceptance test: a valid certificate issued under tenant B, presented through tenant A's NAS, is rejected. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 459
+                },
+                {
+                  "id": "022166a0-8bf7-5abc-a49a-2db8a35e0c81",
+                  "title": "The RADIUS path is a weaker way in: a password alone on a tenant that enforces MFA, or a client's token approving a pending request",
+                  "status": "NotApplicable",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "A second authentication path is only as strong as its weakest rule. PAP carries a password and nothing else, so a tenant with `mfa_enforced` that accepted a password-only RADIUS login would have an MFA policy any NAS bypasses. And a push approval later routed to a RADIUS user would reopen T-447 if an access token minted for a client \u2014 a RADIUS service account's \u2014 could approve it.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.8, \u00a76.9, R16, R18). Required of any build: PAP refused for an `mfa_enforced` tenant, or followed by an Access-Challenge for the second factor (TOTP, deferred), never a password alone \u2014 the console's rule is the floor. No approval surface: if push approval is ever added it goes through CIBA's approval routes, which take a console sign-in only (P23W5-04, T-447). If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 460
+                },
+                {
+                  "id": "f612b269-63b6-56a2-94bd-b2f387292aeb",
+                  "title": "A reply profile assigns a VLAN or privilege level its writer could not grant",
+                  "status": "NotApplicable",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "description": "An Access-Accept carries what the NAS enforces: a VLAN (`Tunnel-Private-Group-Id`), a session timeout, a vendor privilege level. Free-form reply profiles, or profiles writable under a broad permission, let an administrator who may not grant network administration write one that does, and make a vendor-specific attribute an escalation path.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a75.1, R17; the model is deferred item D5). Required of any build: `network:join` and `network:admin` checked on a network-segment resource through `check_access`; the reply profile hung off that resource, its attribute types taken from an allow-list and its values validated against the dictionary; profile writes behind their own permission and audit row; a profile that grants more than its writer holds refused; deny-override used to quarantine a subtree. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 461
+                },
+                {
+                  "id": "206b548a-8d2a-5385-b52b-9e1b5435f679",
+                  "title": "A revoked certificate or disabled account keeps its network port until the session re-authenticates",
+                  "status": "NotApplicable",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "description": "RADIUS decides at authentication time. Without dynamic authorization (RFC 5176 CoA / Disconnect) AXIAM cannot end a session a NAS has already admitted, so a device whose certificate is revoked, or an account that is disabled, keeps its port until the NAS re-authenticates it.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record R21). Required of any build: `Session-Timeout` capped per tenant and the bound stated in the product. Dynamic authorization is a separate, later item and inherits T-467's binding rule: AXIAM's own messages, carrying session and user identifiers, go to the registered NAS address only. If built as specified this entry stays **Open** \u2014 a residual bounded by the session timeout until dynamic authorization ships.",
+                  "modelType": "STRIDE",
+                  "number": 462
+                },
+                {
+                  "id": "3e29e920-e75b-58f6-b69c-119f273ea812",
+                  "title": "A RADIUS decision goes unaudited, or an unauthenticated sender chooses the audit volume",
+                  "status": "NotApplicable",
+                  "severity": "Medium",
+                  "type": "Repudiation",
+                  "description": "Every Accept and Reject is an access decision a tenant must be able to account for. A decision with no row, or with a row that lacks the NAS, the subject or the method, cannot be attributed; a row per forged packet hands an attacker control of audit volume and buries the rows that matter.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.6, R13). Required of any build: one append-only row per authenticated decision, accept and reject, with the NAS, the tenant, the subject when one was resolved, the method, the transport profile, the outcome and an internal reason \u2014 never a password, a shared secret, an EAP payload, a private key or an MSK; unauthenticated packets aggregated, one row per source per window. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 463
+                },
+                {
+                  "id": "a3b3ad71-048a-50a6-9962-6f8145952154",
+                  "title": "MAC addresses and user names enter the audit trail and escape the erasure paths",
+                  "status": "NotApplicable",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "description": "`Calling-Station-Id` is a device's MAC address and `User-Name` a person's login: personal data. Written into audit rows and registry fields by a new surface, they would sit outside the personal-data register and survive an erasure request.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.6, R14). Required of any build: both entered in the personal-data register (`crates/axiam-core/src/personal_data.rs`) and its erasure paths in the commit that first writes them. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 464
+                },
+                {
+                  "id": "624424d2-a9fc-54cd-b696-1bf5f2b5319d",
+                  "title": "A reject flood becomes a notification flood",
+                  "status": "NotApplicable",
+                  "severity": "Low",
+                  "type": "Denial of service",
+                  "description": "If a RADIUS event can notify \u2014 a wrong secret from a registered address, a lockout, a NAS going silent \u2014 whoever can provoke rejects can send mail, and one notification per packet buries the alert that matters (T-117, D-73).",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.7, R19). Required of any build: RADIUS audit actions reach notification events only through a `NotificationGate` \u2014 at most one per NAS per hour, claimed in the datastore, `false` and logged once when it cannot decide \u2014 while every reject keeps its audit row. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 465
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 1075,
+              "y": 300
+            },
+            "size": {
+              "width": 170,
+              "height": 80
+            },
+            "attrs": {
+              "text": {
+                "text": "nas (NAS registry,\nsealed secret)"
+              },
+              "topLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              },
+              "bottomLine": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              }
+            },
+            "visible": true,
+            "shape": "store",
+            "zIndex": 1,
+            "id": "06bc2885-6802-5e8d-969c-cdc139c499da",
+            "data": {
+              "type": "tm.Store",
+              "name": "nas (NAS registry,\nsealed secret)",
+              "description": "One row per NAS: tenant, name, transport (radius_1_1 / radsec / legacy_udp), a source address unique across all tenants, the shared secret sealed under pki_encryption_key with its key version, the RadSec certificate pin, minimum TLS version, allowed EAP methods, enabled. Not built.",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isALog": false,
+              "isEncrypted": true,
+              "isSigned": false,
+              "storesCredentials": true,
+              "storesInventory": false,
+              "threats": [
+                {
+                  "id": "d019a9eb-df4f-5ba9-97f2-47132f887d9a",
+                  "title": "The per-NAS shared secret is stored readable or read back, where it must be sealed and write-only",
+                  "status": "NotApplicable",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "The shared secret cannot be hashed: the server needs it to compute `Message-Authenticator` and, on UDP, the MD5 constructs, so it is stored in recoverable form. A plaintext column, a read that projects it, a log line or a weak operator-chosen value gives whoever reaches the API, the datastore or a backup the means to impersonate the NAS (T-448) and to undo what its traffic hides (T-450).",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.4 items 1\u20132, R11). The W5 F4 review's constraint (\u00a715): **the per-NAS secret is a credential sealed under `pki_encryption_key`, and write-only**. Required of any build: AES-256-GCM, a fresh nonce per write, nonce and ciphertext in their own columns and a key version, as `scim_target` seals its credential; any write that sets a secret refused when the key is absent (the handler answers `503`); no read projects it (`secret_set: true` and the key version only); generated server-side at 128 bits or more and shown once, a supplied one accepted only at the same floor; the plaintext zeroized inside the verifier. Its binding to the NAS address is T-467. If built as specified: Mitigated, with the residual every sealed credential carries \u2014 a datastore dump together with the process's `pki_encryption_key`.",
+                  "modelType": "STRIDE",
+                  "number": 466
+                },
+                {
+                  "id": "818636b6-dd01-5d2b-972b-fa53046f120d",
+                  "title": "A NAS is moved to another address without its secret, redirecting what the secret yields (the P23W5-01 class)",
+                  "status": "NotApplicable",
+                  "severity": "High",
+                  "type": "Tampering",
+                  "description": "The secret authenticates one address, and what it yields \u2014 the session key in an Accept's `MS-MPPE-*`, and AXIAM's own messages to the NAS if dynamic authorization is ever added \u2014 goes to that address. An administrator who can change a NAS's source address, transport or RadSec certificate pin without presenting the secret redirects all of it to a host they control, holding a credential they never saw: the shape of P23W5-01, where an outbound SCIM target's `base_url` moved without its secret.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a76.4 items 3\u20136, R12). The W5 F4 review's constraint (\u00a715): **the secret is bound to the NAS address it was registered for**. Required of any build: a write that changes the source address, the transport or the certificate pin without the new secret in the same write refused with `400` naming the field \u2014 enforced in the repository against the very row its conditional write replaces, so a racing write cannot slip past (the `moves_credential` rule of T-409 and T-416); every reply sent to the packet's authenticated source and never to an address named in an attribute (`NAS-IP-Address`, `NAS-Identifier` and `Called-Station-Id` are audit fields, not routing); for RadSec both the pin and the address checked; a disable, delete or rotation applied on the next packet, with an open RadSec connection of a disabled NAS closed. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 467
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 370,
+              "y": 710
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "Authorize endpoint\nfor rlm_rest\n(option B)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": "6 4"
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "135a3dfe-73eb-570c-a055-9f10022ef81f",
+            "data": {
+              "type": "tm.Process",
+              "name": "Authorize endpoint\nfor rlm_rest\n(option B)",
+              "description": "Option B, deferred item D4: POST a certificate fingerprint and NAS identity, get allow and reply attributes. An ordinary authenticated REST route. Not built.",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": [
+                {
+                  "id": "811b5ba2-2cde-5bcc-bb45-4b74bae1a143",
+                  "title": "Option B's authorize endpoint answers \u201cis this certificate good in this tenant\u201d to whoever holds its caller credential",
+                  "status": "NotApplicable",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "description": "If AXIAM backs an operator's FreeRADIUS with a decision endpoint for `rlm_rest`, that endpoint is an authenticated oracle on certificate status and policy. A stolen caller credential lets its holder probe which certificates and devices exist and are allowed, and a verbose deny would say why.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a75.2 B-3, R23; deferred item D4). Required of any build: the caller holds a dedicated permission, its token is bound to its own certificate (`cnf`), it is metered on a machine preset keyed on the authenticated caller, each decision writes an audit row, and a deny carries no reason. It is an ordinary authenticated REST route, and enters the model with its code (plan \u00a77 rule 2). If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 468
+                }
+              ]
+            }
+          },
+          {
+            "position": {
+              "x": 650,
+              "y": 710
+            },
+            "size": {
+              "width": 140,
+              "height": 140
+            },
+            "attrs": {
+              "text": {
+                "text": "AuthService \u00b7\nDeviceAuthService \u00b7\nRBAC engine (built)"
+              },
+              "body": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "strokeDasharray": null
+              }
+            },
+            "visible": true,
+            "shape": "process",
+            "zIndex": 1,
+            "id": "db19c1f9-1cbb-537c-8767-6f813254755d",
+            "data": {
+              "type": "tm.Process",
+              "name": "AuthService \u00b7\nDeviceAuthService \u00b7\nRBAC engine (built)",
+              "description": "The existing authentication, device-certificate and authorization services, modelled on the Authentication, PKI and Authorization diagrams. Drawn here only as the callee a RADIUS front end would reach; nothing on this diagram changes them.",
+              "isTrustBoundary": false,
+              "outOfScope": false,
+              "reasonOutOfScope": "",
+              "hasOpenThreats": false,
+              "handlesCardPayment": false,
+              "handlesGoodsOrServices": false,
+              "isWebApplication": false,
+              "privilegeLevel": "",
+              "threats": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "4be70add-18b4-5e12-aeb8-26aff69a03d0",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "EAP over LAN (802.1X)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "2208055f-d9f2-5ff4-9e22-f2aa0e8b9e85"
+            },
+            "target": {
+              "cell": "3f811f63-3d44-5405-be42-cb1021ed0506"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "EAP over LAN",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": true,
+              "isEncrypted": false,
+              "isPublicNetwork": false,
+              "protocol": "EAPOL",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "a1ad58e6-ffa1-5ed7-8977-6ddf5f4842f2",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "Access-Request / Accept / Reject / Challenge (UDP 1812, RadSec, RADIUS/1.1)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "3f811f63-3d44-5405-be42-cb1021ed0506"
+            },
+            "target": {
+              "cell": "8f4b56af-1137-5ea6-a3fa-8dcfb0cdb5e1"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "Access-Request / Accept / Reject / Challenge",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": true,
+              "isEncrypted": false,
+              "isPublicNetwork": true,
+              "protocol": "RADIUS",
+              "threats": [
+                {
+                  "id": "81af7c6d-a3fc-5bb3-a4d0-90457cd1ee44",
+                  "title": "Blast-RADIUS: an on-path attacker turns an Access-Reject into an Access-Accept because `Message-Authenticator` is not required",
+                  "status": "NotApplicable",
+                  "severity": "Critical",
+                  "type": "Tampering",
+                  "description": "The RADIUS Response Authenticator is MD5 over the packet and the shared secret (RFC 2865). CVE-2024-3596 (\u201cBlast-RADIUS\u201d) showed that an on-path attacker can use an MD5 chosen-prefix collision, through attribute bytes it controls such as `Proxy-State`, to turn any valid response into any other \u2014 a Reject into an Accept \u2014 without the secret, in any exchange where `Message-Authenticator` (HMAC-MD5, RFC 2869) is absent or unchecked. RFC 2869 made that attribute mandatory only alongside EAP, so password exchanges were exposed.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a74.2, \u00a76.3, R2). The W5 F4 review's constraint (\u00a715): **`Message-Authenticator` required**. On every profile that has a shared secret (UDP, classic RadSec) every Access-Request must carry it and every response carries it, positioned as the Blast-RADIUS guidance asks (first, as the spike recalls it \u2014 re-verified against the advisory before building); a request without it, or with one that does not verify, is dropped silently and counted, never answered, with no \u201coptional for non-EAP\u201d path; `Proxy-State` in a request is refused (AXIAM is not a proxy); a NAS that cannot send the attribute is refused registration rather than served. Under RADIUS/1.1 (RFC 9765) the secret and every MD5 construct are gone and the attribute is ignored if received; a NAS registered for that profile that fails to negotiate it is refused, never downgraded (T-456). Acceptance tests: a request without the attribute, and one with a forged attribute, each draw no answer. If built as specified: Mitigated.",
+                  "modelType": "STRIDE",
+                  "number": 449
+                },
+                {
+                  "id": "58bc1173-82ac-52e1-a234-10d3ca28a318",
+                  "title": "MD5-only attribute hiding gives up the Wi-Fi session key or a password to whoever holds the shared secret",
+                  "status": "NotApplicable",
+                  "severity": "High",
+                  "type": "Information disclosure",
+                  "description": "`User-Password` is hidden by an MD5 stream keyed with the secret and the Request Authenticator, and `MS-MPPE-Send-Key` / `MS-MPPE-Recv-Key` \u2014 which carry the EAP-TLS MSK, from which the access point derives the Wi-Fi session key \u2014 by an MD5 salt construction over the same secret (RFC 2865, RFC 2548). A passive observer who learns the secret, or guesses a weak one, recovers the password or the session key from captured traffic; over classic RadSec those constructs are keyed with a fixed, public string and add nothing. CHAP, MS-CHAP(v2) and EAP-MD5 are worse still: MD5, or MD4 and DES, over a password the server would have to hold in reversible form.",
+                  "mitigation": "Not built (G-11 declined 2026-10-06; spike record \u00a74.2, \u00a74.3, \u00a76.3, R3). The W5 F4 review's constraint (\u00a715): **MD5-only attributes treated as the weakness they are**. Required of any build: PAP and `MS-MPPE-*` carried only over RadSec or, preferably, RADIUS/1.1 over TLS 1.3, where the obfuscation is removed and TLS carries the confidentiality; on plain UDP only for a NAS registered `legacy_udp`, with a generated secret of at least 128 bits, flagged in the API, the console and each decision's audit row \u2014 never PAP over UDP without that flag; CHAP, MS-CHAP, MS-CHAPv2 and EAP-MD5 not implemented (an Argon2id store cannot verify them, and should not be able to); RADIUS accounting not implemented. If built as specified this entry stays **Open** for every `legacy_udp` NAS: the weakness is inherent in the legacy profile and is accepted only per NAS, by an explicit flag.",
+                  "modelType": "STRIDE",
+                  "number": 450
+                }
+              ],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "3d4cf496-da07-5f78-8678-62f26526622f",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "EAP-Message (reassembled)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "8f4b56af-1137-5ea6-a3fa-8dcfb0cdb5e1"
+            },
+            "target": {
+              "cell": "d5377ed1-68a1-54e6-bb23-07a302aa7610"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "EAP-Message (reassembled)",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": true,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "c19d4368-0a26-5f3e-b3b9-2c1191d90202",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "authenticated request (NAS, tenant)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "8f4b56af-1137-5ea6-a3fa-8dcfb0cdb5e1"
+            },
+            "target": {
+              "cell": "8030e087-2b62-5307-b04f-b5027c8e6a4d"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "authenticated request (NAS, tenant)",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "ef5e59d4-556e-59e3-8f69-56330818cacc",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "client certificate (DER) after the handshake"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "d5377ed1-68a1-54e6-bb23-07a302aa7610"
+            },
+            "target": {
+              "cell": "8030e087-2b62-5307-b04f-b5027c8e6a4d"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "client certificate after the handshake",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "12768376-3ad4-56cc-b093-09779d2ab910",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "resolve NAS by source address; unseal secret (SurrealQL)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "8f4b56af-1137-5ea6-a3fa-8dcfb0cdb5e1"
+            },
+            "target": {
+              "cell": "06bc2885-6802-5e8d-969c-cdc139c499da"
+            },
+            "vertices": [
+              {
+                "x": 1000,
+                "y": 200
+              }
+            ],
+            "data": {
+              "type": "tm.Flow",
+              "name": "resolve NAS by source address; unseal secret",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "SurrealDB",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": ""
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "119c78ca-2161-5c62-8568-df1f78137e12",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "register / rotate / move / disable a NAS (HTTPS, not built)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "587c5aac-7cd9-5d9d-9398-1a442cd16eb8"
+            },
+            "target": {
+              "cell": "06bc2885-6802-5e8d-969c-cdc139c499da"
+            },
+            "vertices": [
+              {
+                "x": 990,
+                "y": 660
+              }
+            ],
+            "data": {
+              "type": "tm.Flow",
+              "name": "register / rotate / move / disable a NAS",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": false,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "864f847c-2922-5143-83f9-0876d3abaf30",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "authenticate, authorize, audit"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "8030e087-2b62-5307-b04f-b5027c8e6a4d"
+            },
+            "target": {
+              "cell": "db19c1f9-1cbb-537c-8767-6f813254755d"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "authenticate, authorize, audit",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": true,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "f042ac97-146d-5dc1-a64c-2daef8c8d427",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "authorize (HTTPS, token bound to the caller's certificate)"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "830f5d18-eef4-58e2-b313-7838ea024cf5"
+            },
+            "target": {
+              "cell": "135a3dfe-73eb-570c-a055-9f10022ef81f"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "authorize (rlm_rest)",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": true,
+              "isEncrypted": true,
+              "isPublicNetwork": true,
+              "protocol": "HTTPS",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          },
+          {
+            "shape": "flow",
+            "attrs": {
+              "line": {
+                "stroke": "#333333",
+                "strokeWidth": 1.5,
+                "targetMarker": {
+                  "name": "block"
+                },
+                "sourceMarker": {
+                  "name": "block"
+                },
+                "strokeDasharray": "6 4"
+              }
+            },
+            "width": 200,
+            "height": 100,
+            "zIndex": 10,
+            "connector": "smooth",
+            "id": "54f403af-723f-5221-b1c1-21f2f3dc718d",
+            "labels": [
+              {
+                "position": 0.5,
+                "attrs": {
+                  "label": {
+                    "text": "certificate status and policy"
+                  }
+                }
+              }
+            ],
+            "source": {
+              "cell": "135a3dfe-73eb-570c-a055-9f10022ef81f"
+            },
+            "target": {
+              "cell": "db19c1f9-1cbb-537c-8767-6f813254755d"
+            },
+            "vertices": [],
+            "data": {
+              "type": "tm.Flow",
+              "name": "certificate status and policy",
+              "description": "Not built (G-11 declined 2026-10-06).",
+              "isTrustBoundary": false,
+              "outOfScope": true,
+              "reasonOutOfScope": "Not built. G-11 (RADIUS / EAP-TLS) was declined on 2026-10-06; this element and its threats are the specification any future build starts from (claude_dev/radius-eap-tls-spike-2026-10-06.md).",
+              "hasOpenThreats": false,
+              "isBidirectional": true,
+              "isEncrypted": true,
+              "isPublicNetwork": false,
+              "protocol": "in-process",
+              "threats": [],
+              "trustBoundaryIds": []
+            }
+          }
+        ]
       }
     ],
-    "diagramTop": 9,
+    "diagramTop": 10,
     "reviewer": "",
-    "threatTop": 447
+    "threatTop": 469
   }
 }

@@ -36,6 +36,22 @@ mkdir -p "$FIX/axiam/p2-tls13" "$FIX/dry-run/axiam/p2-tls13" "$FIX/section-12_4-
 : > "$FIX/section-12_4-B1/nsenter.log"
 : > "$FIX/section-12_4-B1/h5-revocation.log"
 
+# ... and the shapes run 6 adds (T23.10.2(a)): the pinned-image table, the at-rest
+# memory samples of each stack, the minimal-profile tree, and the investigation logs.
+mkdir -p "$FIX/provenance" "$FIX/resting/keycloak" "$FIX/resting/axiam-minimal" \
+         "$FIX/minimal-profile/run-1/axiam/p0-plaintext" "$FIX/investigations"
+: > "$FIX/provenance/images.txt"
+for stage in fresh fixture; do
+  : > "$FIX/resting/keycloak/$stage-samples.csv"
+  : > "$FIX/resting/keycloak/$stage-summary.txt"
+  : > "$FIX/resting/keycloak/$stage-meta.json"
+done
+: > "$FIX/resting/axiam-minimal/fixture-summary.txt"
+: > "$FIX/minimal-profile/run-1/axiam/p0-plaintext/jwks_fetch.meta.json"
+: > "$FIX/minimal-profile/run-1/axiam/p0-plaintext/jwks_fetch.k6.json"
+: > "$FIX/investigations/refresh-stage-timings.log"
+: > "$FIX/RUN6-NOTES.md"
+
 # --- must NOT survive
 : > "$FIX/dry-run/axiam/p2-tls13/authz_check_rest.k6.json"
 : > "$FIX/dry-run/axiam/p2-tls13/authz_check_rest.meta.json"
@@ -46,7 +62,9 @@ mkdir -p "$FIX/axiam/p2-tls13" "$FIX/dry-run/axiam/p2-tls13" "$FIX/section-12_4-
 LIST="$(bash "$HERE/pack-filelist.sh" "$FIX")"
 fail=0
 
-for want in rl-prod-summary.md sdk-report.md nsenter.log h5-revocation.log \
+for want in images.txt fresh-summary.txt fixture-summary.txt fixture-samples.csv fixture-meta.json \
+            refresh-stage-timings.log RUN6-NOTES.md \
+            rl-prod-summary.md sdk-report.md nsenter.log h5-revocation.log \
             report.md authz_check_rest.k6.json authz_check_rest.res.csv \
             authz_check_rest.host.csv authz_check_rest.meta.json; do
   printf '%s\n' "$LIST" | grep -q "/$want\$" || {

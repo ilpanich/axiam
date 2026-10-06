@@ -148,7 +148,7 @@ static void cfg_load(cfg_t *cfg) {
     snprintf(cfg->tenant_slug, sizeof(cfg->tenant_slug), "%s", getenv_or("BENCH_TENANT_SLUG", "default"));
     snprintf(cfg->org_slug, sizeof(cfg->org_slug), "%s", getenv_or("BENCH_ORG_SLUG", "bench-org"));
     snprintf(cfg->username, sizeof(cfg->username), "%s", getenv_or("BENCH_USERNAME", "benchuser"));
-    snprintf(cfg->password, sizeof(cfg->password), "%s", getenv_or("BENCH_PASSWORD", "Bench@User123!"));
+    snprintf(cfg->password, sizeof(cfg->password), "%s", getenv_or("BENCH_PASSWORD", ""));
     snprintf(cfg->action, sizeof(cfg->action), "%s", getenv_or("BENCH_ACTION", "read"));
     snprintf(cfg->resource_id, sizeof(cfg->resource_id), "%s", getenv_or("BENCH_RESOURCE_ID", "bench-resource"));
     snprintf(cfg->target, sizeof(cfg->target), "%s", getenv_or("BENCH_TARGET", "axiam"));

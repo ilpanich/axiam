@@ -15,7 +15,7 @@
 # Before committing hours to a matrix, rehearse it in minutes — same cells, same
 # bring-up/seed/run/tear-down path, measurement window collapsed to seconds:
 #
-#   just targets="axiam keycloak zitadel" profiles="p0-plaintext p2-tls13" bench-dry-run
+#   just targets="axiam keycloak zitadel authentik" profiles="p0-plaintext p2-tls13" bench-dry-run
 
 set shell := ["bash", "-uc"]
 
@@ -55,6 +55,16 @@ rl := "neutralized"
 #                       wires the two values through. An operator-supplied
 #                       BENCH_DB_CPUS/BENCH_DB_MEM still wins over either mode.
 dbcaps := "capped"
+# deploy selects AXIAM's DEPLOYMENT profile (axiam target only):
+#   full (default) — server + SurrealDB + RabbitMQ, the profile every earlier run
+#                    measured.
+#   minimal        — server + SurrealDB, AXIAM__AMQP__ENABLED=false (T23.8.1/T23.8.3;
+#                    targets/axiam/docker-compose.minimal.yml layered over the base).
+#                    SINGLE INSTANCE by definition; its outbound deliveries are lost
+#                    on restart (T-445), so its footprint is never the full profile's.
+#                    Write its cells to their own results tree (see claude_dev/
+#                    run6-runbook.md): they must not be medianed with full-profile cells.
+deploy := "full"
 # repeat controls how many times `bench-matrix` runs the whole target×profile
 # ×scenario matrix (C1: median-of-N). Each pass writes into its own
 # results/run-<i>/ subtree (same flat per-cell layout underneath), and
@@ -84,6 +94,11 @@ bench-up:
     set -euo pipefail
     source profiles/{{profile}}.env
     COMPOSE="targets/{{target}}/docker-compose.yml"
+    # Per-stack credentials (never literals): generated once per stack, required by
+    # every compose file, removed by bench-down. See runner/bench-creds.sh.
+    # shellcheck source=runner/bench-creds.sh
+    source runner/bench-creds.sh
+    case "{{target}}" in keycloak|zitadel) bench_creds_load "{{target}}" ;; esac
 
     # --- AXIAM target: secrets + image selection (competitors need neither) ---
     if [ "{{target}}" = "axiam" ]; then
@@ -136,9 +151,13 @@ bench-up:
       export AXIAM__AUTH__OPAQUE_SETUP_KEY="${AXIAM__AUTH__OPAQUE_SETUP_KEY:-$(genhex opaque_setup.hex)}"
       export AXIAM__AUTH__OAUTH2_ISSUER_URL="${AXIAM__AUTH__OAUTH2_ISSUER_URL:-${BENCH_ISSUER_URL:-http://localhost:${BENCH_APP_PORT:-8090}}}"
       export AXIAM__DB__USERNAME="${AXIAM__DB__USERNAME:-bench}"
-      export AXIAM__DB__PASSWORD="${AXIAM__DB__PASSWORD:-bench-local-only-pw}"
       export RABBITMQ_DEFAULT_USER="${RABBITMQ_DEFAULT_USER:-bench}"
-      export RABBITMQ_DEFAULT_PASS="${RABBITMQ_DEFAULT_PASS:-bench-local-only-pw}"
+      # The datastore and broker passwords, and the bootstrap admin's and the bench
+      # user's, are generated per stack (runner/bench-creds.sh) into
+      # .seed/axiam.stack.env, never literals; a value already exported (or in
+      # docker/.secrets/env, sourced above) wins. bench-down removes the file with
+      # the volumes it belongs to.
+      bench_creds_load axiam
       # A6: AMQP is TLS-only, so the bench broker needs a certificate before it
       # can serve the server. Idempotent and stable across runs, like the hex
       # secrets above — a rotated CA mid-matrix would only add a variable.
@@ -191,6 +210,24 @@ bench-up:
         export AXIAM__GRPC__GRPC_AUTHZ_PER_SEC=100
         export AXIAM__GRPC__GRPC_IDENTITY_PER_SEC=500
         export AXIAM__GRPC__GRPC_ADMIN_PER_SEC=10
+        # The seven REST families added since alpha24 that the compose file
+        # neutralizes but the exports above do not pin (device_authorization,
+        # token_exchange, uma_perm, uma_ticket, par, end_session, scim). Left out,
+        # they would keep their 1 000 000 under `rl=prod` and rl-prod-check would
+        # FAIL a posture the harness never applied. Values come from the Rust
+        # source, read-only, like everything rl-prod-check compares against.
+        # P23W6-02: fail CLOSED. `eval "$(…)"` alone discards the script's exit
+        # status, so a moved source left the families unpinned under an `rl=prod`
+        # label; the assignment carries the status to `set -e`, and every line must
+        # be a pin before any is applied (runner/rl-prod-posture-selftest.sh).
+        # rl-prod-pin: begin
+        RL_PIN_EXPORTS="$(python3 runner/rl_prod_check.py --print-exports)"
+        if [ -z "$RL_PIN_EXPORTS" ] || grep -qvE '^export AXIAM__RATE_LIMIT__[A-Z_]+_PER_MIN=[1-9][0-9]*$' <<<"$RL_PIN_EXPORTS"; then
+          echo "[bench-up] rl=prod: rl_prod_check.py --print-exports printed no usable pins — refusing to run a 'prod' posture with families left neutralized" >&2
+          exit 1
+        fi
+        eval "$RL_PIN_EXPORTS"
+        # rl-prod-pin: end
       elif [ "{{rl}}" != "neutralized" ]; then
         echo "[bench-up] unknown rl='{{rl}}' (use rl=neutralized or rl=prod)" >&2; exit 1
       else
@@ -222,6 +259,37 @@ bench-up:
       if [ -z "${BENCH_AXIAM_IMAGE:-}" ]; then
         VER="$(grep -m1 '^version' ../Cargo.toml | cut -d'"' -f2)"
         export BENCH_AXIAM_IMAGE="ghcr.io/ilpanich/axiam/server:${VER}"
+      fi
+    fi
+
+    # --- authentik target: per-run credentials + profile limits ---
+    #
+    # authentik needs four credentials (its signing/encryption secret key, the
+    # PostgreSQL password, the bootstrap admin password and the bootstrap API
+    # token runner/seed.sh provisions through). None is a literal anywhere in
+    # the repo: they are generated here, once per stack, into a mode-600 file
+    # under the gitignored .seed/ and exported for compose (targets/authentik/
+    # docker-compose.yml lists each as a REQUIRED variable). The file exists so
+    # a second `bench-up` against a still-running stack passes compose the SAME
+    # values — a fresh PostgreSQL password against the old data volume would
+    # lock authentik out of its own database. `bench-down` removes it together
+    # with the volumes it belongs to. Nothing here prints a credential; under
+    # GitHub Actions each is registered with the log scrubber first.
+    if [ "{{target}}" = "authentik" ]; then
+      if [ "{{profile}}" = "p3-mtls" ]; then
+        echo "[bench-up] authentik cannot run p3-mtls: its API listener has no client-certificate mode" >&2
+        echo "           (client certificates belong to its outposts and flow stages, not to the listener)." >&2
+        echo "           Refusing rather than measuring plain TLS under an mTLS label." >&2
+        exit 1
+      fi
+      # Generated into .seed/authentik.stack.env on the first bring-up of a stack and
+      # re-sourced on every later one (see runner/bench-creds.sh); masked under CI.
+      bench_creds_load authentik
+      if [ "{{profile}}" != "p0-plaintext" ]; then
+        echo "[bench-up] NOTE: authentik's built-in HTTPS listener (container :9443) serves its own self-signed" >&2
+        echo "           certificate, accepts TLS 1.2 AND 1.3 (k6 negotiates 1.3) and speaks HTTP/1.1 only." >&2
+        echo "           It cannot be pinned to TLS 1.3 or switched to HTTP/2, so {{profile}} is runnable but is not" >&2
+        echo "           the same transport as AXIAM's or Keycloak's {{profile}} — say so wherever a number is quoted." >&2
       fi
     fi
 
@@ -357,8 +425,9 @@ bench-up:
       check_port "${BENCH_TLS_PORT:-8443}" "TLS / BENCH_TLS_PORT" || port_conflict=1
     else
       check_port "${BENCH_APP_PORT:-8090}" "app / BENCH_APP_PORT" || port_conflict=1
-      # Targets that also publish the TLS port: keycloak always; axiam with its edge.
-      if [ "{{target}}" = "keycloak" ] || { [ "{{target}}" = "axiam" ] && [ -n "$PROFILE_ARG" ]; }; then
+      # Targets that also publish the TLS port: keycloak and authentik always;
+      # axiam with its edge.
+      if [ "{{target}}" = "keycloak" ] || [ "{{target}}" = "authentik" ] || { [ "{{target}}" = "axiam" ] && [ -n "$PROFILE_ARG" ]; }; then
         check_port "${BENCH_TLS_PORT:-8443}" "TLS / BENCH_TLS_PORT" || port_conflict=1
       fi
     fi
@@ -400,6 +469,17 @@ bench-up:
     if [ "{{target}}" = "axiam" ] && [ -n "${BENCH_COMPOSE_OVERLAYS:-}" ]; then
       for f in $BENCH_COMPOSE_OVERLAYS; do EXTRA_ARG="$EXTRA_ARG -f $f"; done
     fi
+    # deploy=minimal: AXIAM without the broker (see `deploy` at the top of this file).
+    if [ "{{deploy}}" = "minimal" ]; then
+      if [ "{{target}}" != "axiam" ]; then
+        echo "[bench-up] deploy=minimal is an AXIAM profile; target={{target}} has none" >&2; exit 1
+      fi
+      EXTRA_ARG="$EXTRA_ARG -f targets/axiam/docker-compose.minimal.yml"
+      echo "[bench-up] deploy=MINIMAL: AXIAM__AMQP__ENABLED=false, no RabbitMQ — a single instance; its outbound deliveries are lost on restart (T-445)." >&2
+      echo "           Label every figure from this stack 'minimal profile'; it is not the full profile's footprint or throughput." >&2
+    elif [ "{{deploy}}" != "full" ]; then
+      echo "[bench-up] unknown deploy='{{deploy}}' (use deploy=full or deploy=minimal)" >&2; exit 1
+    fi
     if ! docker compose -f "$COMPOSE" $OVERRIDE_ARG $EXTRA_ARG $PROFILE_ARG up -d $UP_WAIT $BUILD_ARG; then
       echo "[bench-up] FAILED: a container did not start (see its last lines below)" >&2
       docker compose -f "$COMPOSE" $PROFILE_ARG ps -a >&2 || true
@@ -436,6 +516,7 @@ bench-up:
     case "{{target}}" in
       zitadel)  READY_URL="$READY_BASE/debug/ready" ;;    # 200 only when fully initialized
       keycloak) READY_URL="$READY_BASE/realms/master" ;;  # 200 once the server serves
+      authentik) READY_URL="$READY_BASE/-/health/ready/" ;; # 200 once the server serves (its default blueprints land later; bench-seed waits for them)
       *)        READY_URL="$READY_BASE/health" ;;         # axiam liveness/readiness
     esac
     echo "[bench-up] waiting for {{target}} to serve at $READY_URL (timeout 180s)"
@@ -567,6 +648,18 @@ bench-down:
              | sed 's/^\${//; s/:?$//' | sort -u)
     docker compose -f "$COMPOSE" --profile tls down -v || \
       docker compose -f "$COMPOSE" down -v
+    # Every target: its per-run credentials (runner/bench-creds.sh, see bench-up)
+    # belong to the volumes just removed; a surviving file would hand the next
+    # stack a database password and bootstrap token for data that no longer
+    # exists, and keep secrets on disk for no reason. (The seed env,
+    # .seed/<target>.seed.env, is left: the scenarios and SDK benches read it.)
+    source runner/bench-creds.sh
+    bench_creds_remove "{{target}}"
+    # The bulk-seed record (.seed/axiam.bulk.env: fixture scale, deny ratio) describes
+    # the datastore volume just removed. Left behind, it labelled EVERY later cell as a
+    # 10x fixture (run-benchmark.sh sources it into meta.json) and exported its
+    # BENCH_SEED_DENY_RATIO into the next run's environment.
+    rm -f ".seed/{{target}}.bulk.env"
 
 # Dump a target's compose logs: every service, or only the ones named.
 #
@@ -640,6 +733,9 @@ bench-matrix:
     # BENCH_RESULTS_DIR unset do we fall back to the plain results/ root,
     # same as before.
     BASE_RESULTS_DIR="${BENCH_RESULTS_DIR:-$PWD/results}"
+    # T23.10.2(a): a `deploy=minimal` matrix asserts, per AXIAM cell, that the stack
+    # really is the minimal profile (run-benchmark.sh's expect_deploy_preflight).
+    export BENCH_EXPECT_DEPLOY="{{deploy}}"
     for i in $(seq 1 {{repeat}}); do
       RUN_DIR="$BASE_RESULTS_DIR/run-$i"
       echo "### repeat $i/{{repeat}} -> $RUN_DIR ###"
@@ -654,15 +750,21 @@ bench-matrix:
       export BENCH_RUN_INDEX="$i"
       for t in {{targets}}; do
         for p in {{profiles}}; do
+          # authentik has no client-certificate mode on its API listener, so
+          # there is no p3-mtls cell to run for it (bench-up refuses it too).
+          if [ "$t" = "authentik" ] && [ "$p" = "p3-mtls" ]; then
+            echo "=== run $i: $t / $p — SKIPPED: authentik has no mTLS listener mode ==="
+            continue
+          fi
           echo "=== run $i: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
-          just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up
+          just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} deploy={{deploy}} bench-up
           just target=$t profile=$p bench-seed
           just target=$t profile=$p bench-run
           just target=$t bench-down
         done
       done
     done
-    unset BENCH_RESULTS_DIR BENCH_RUN_INDEX
+    unset BENCH_RESULTS_DIR BENCH_RUN_INDEX BENCH_EXPECT_DEPLOY
     # H1 item 2 (same clobber family): aggregate from wherever this matrix
     # actually wrote (BASE_RESULTS_DIR), not the hardcoded "results" root —
     # a caller-redirected matrix (e.g. a task's results/tasks/<id>/ subtree)
@@ -721,8 +823,12 @@ bench-dry-run:
 
     for t in {{targets}}; do
       for p in {{profiles}}; do
+        if [ "$t" = "authentik" ] && [ "$p" = "p3-mtls" ]; then
+          note "$t" "$p" "(profile)" SKIP "authentik has no client-certificate mode on its API listener — no p3-mtls cell exists for it (expected)"
+          continue
+        fi
         echo "=== dry-run: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
-        if ! just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up; then
+        if ! just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} deploy={{deploy}} bench-up; then
           note "$t" "$p" "(bench-up)" FAIL "stack never came up / never became ready — see the compose ps+logs dumped above"
           teardown "$t" "$p"
           continue
@@ -732,7 +838,7 @@ bench-dry-run:
           teardown "$t" "$p"
           continue
         fi
-        just target=$t profile=$p dry=1 bench-run || true
+        BENCH_EXPECT_DEPLOY="{{deploy}}" just target=$t profile=$p dry=1 bench-run || true
         teardown "$t" "$p"
       done
     done
@@ -805,7 +911,7 @@ sdk-bench:
     else
       echo "[sdk-bench] WARN: no seed env at $SEED_ENV — run 'just target={{target}} bench-seed' first" >&2
     fi
-    for var in BENCH_RESOURCE_ID BENCH_SUBJECT_ID BENCH_TENANT_SLUG BENCH_CLIENT_ID BENCH_CLIENT_SECRET; do
+    for var in BENCH_RESOURCE_ID BENCH_SUBJECT_ID BENCH_TENANT_SLUG BENCH_CLIENT_ID BENCH_CLIENT_SECRET BENCH_PASSWORD; do
       if [ -z "${!var:-}" ]; then
         echo "[sdk-bench] FATAL: $var is empty after sourcing $SEED_ENV — re-run 'just target={{target}} bench-seed' (H8: seed env must reach the SDK bench)." >&2
         exit 1
@@ -1076,6 +1182,30 @@ bench-nested-report:
 bench-nested-selftest:
     bash runner/nested-selftest.sh
 
+# Hermetic guard for the authentik target's wiring (T23.10.1): no credential
+# literal in its compose file, the compose/runner/report container-name lists
+# agreeing, the report's server-only figure summing server + worker, and the
+# p3-mtls refusal still in place. No docker, no k6 — CI runs it on every PR.
+bench-authentik-selftest:
+    bash runner/authentik-selftest.sh
+
+# T23.10.2(a): no credential literal anywhere in the benchmark harness — every target's
+# compose file (generalising the authentik check above), the scripts, the k6 config and
+# the SDK benches — plus a functional test of runner/bench-creds.sh, the helper that
+# generates, persists, masks and removes the per-run credentials. No docker, no k6.
+bench-credential-selftest:
+    bash runner/credential-selftest.sh
+
+# T23.10.2(a): `rl=prod` pins every rate-limit family the compose file neutralizes.
+# No docker, no k6.
+bench-rl-posture-selftest:
+    bash runner/rl-prod-posture-selftest.sh
+
+# T23.10.2(a): the AXIAM deployment-profile guard (meta.json's axiam_deploy_profile,
+# BENCH_EXPECT_DEPLOY, the minimal overlay). A stub docker; no daemon, no stack.
+bench-deploy-profile-selftest:
+    bash runner/deploy-profile-selftest.sh
+
 # Verify every language bench presents its p3-mtls client certificate
 # (CONTRACT.md §6.1) — no AXIAM stack, no seed, no containers required: the
 # test stands up a stub HTTPS server that DEMANDS a client cert and asserts
@@ -1131,6 +1261,15 @@ bench-pack:
     # fully-redacted key names.
     if tar -xJOf "$OUT" | grep -vi '<redacted>' | grep -qiE 'SECRET|PASSWORD'; then
       echo "[bench-pack] ERROR: SECRET/PASSWORD text found in packed content — investigate before sharing" >&2
+      exit 1
+    fi
+    # P23W6-01: a generated credential is a hex string the scan above cannot see by
+    # name. The one shape that carries one under an innocent key is a URL with
+    # userinfo (AXIAM__AMQP__URL's `amqps://user:<password>@host`), which
+    # axiam_env_json() now renders as `scheme://<redacted>@host`; refuse any that
+    # still carries a user:password pair.
+    if tar -xJOf "$OUT" | grep -qE '[A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]"<>]+:[^/@[:space:]"<>]*@'; then
+      echo "[bench-pack] ERROR: a URL carrying userinfo (scheme://user:password@host) found in packed content — investigate before sharing" >&2
       exit 1
     fi
     echo "[bench-pack] OK — $OUT contains no secret material."
@@ -1213,7 +1352,8 @@ bench-quick:
     # fixture has no way to produce. The admin credential is the same one
     # `bench-seed` bootstrapped, so a machine that can seed can run this.
     JAR="$(mktemp)"; trap 'rm -f "$JAR"' EXIT
-    ADMIN_PW="${BENCH_ADMIN_PASSWORD:-Bench@Admin123!}"
+    # The seed env just sourced carries the per-run admin password; there is no default.
+    ADMIN_PW="${BENCH_ADMIN_PASSWORD:?no admin password in $SEED_ENV — re-run bench-seed}"
     curl -sSk --cert "$BENCH_CLIENT_CERT" --key "$BENCH_CLIENT_KEY" \
       -c "$JAR" -X POST "$BASE/api/v1/auth/login" -H "Content-Type: application/json" \
       -d "{\"org_slug\":\"${BENCH_ORG_SLUG:-bench-org}\",\"tenant_slug\":\"${BENCH_TENANT_SLUG:-default}\",\"username_or_email\":\"admin\",\"password\":\"$ADMIN_PW\"}" \

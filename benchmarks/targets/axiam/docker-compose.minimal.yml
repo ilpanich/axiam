@@ -1,0 +1,61 @@
+# Overlay: AXIAM's MINIMAL profile (no broker) as a benchmark configuration.
+#
+#   just deploy=minimal target=axiam profile=p0-plaintext bench-up
+#
+# Layered on targets/axiam/docker-compose.yml by `bench-up` when `deploy=minimal`
+# (axiam target only). It is the harness's form of docker/docker-compose.minimal.yml
+# (T23.8.3): the same server image with `AXIAM__AMQP__ENABLED=false`, SurrealDB and
+# nothing else — no RabbitMQ, no broker URL, no AMQP signing key, no broker CA —
+# under the SAME caps the other AXIAM cells use (server 2 CPU / 2048m, SurrealDB
+# 2 CPU / 1024m), so a minimal cell and a full cell differ in the broker and the
+# in-process dispatcher and in nothing else.
+#
+# WHAT THIS MEASURES, AND WHAT IT DOES NOT CLAIM
+#   * Single instance, always. The profile holds a singleton lease in SurrealDB
+#     (D-59: a second live instance is refused at boot after a wait), there is no
+#     replica count anywhere in the harness, and the fixed container_name in the
+#     base file makes Compose refuse `--scale axiam-server=2`.
+#   * The minimal profile's outbound deliveries (webhooks, SSF push, outbound SCIM,
+#     CIBA ping) and its transactional mail run on IN-PROCESS queues and are LOST ON
+#     RESTART (T-445, accepted under D-59). A footprint measured here is the
+#     footprint of a profile that gives up that durability; it is not the full
+#     profile's, and no report may present it as such.
+#   * Reactors, asynchronous authorization over AMQP, external audit ingestion over
+#     AMQP and the decision-cache broadcast are unavailable (`/health` lists them
+#     under `unavailable`). No default-matrix scenario uses any of them.
+#   * Outbound SCIM targets stay DISABLED: none is registered, so nothing is
+#     dispatched anywhere (P23W5-07, issue #550 — a tarpit downstream stalls every
+#     tenant's provisioning on a replica). A benchmark that enabled one against a
+#     dead host would reproduce that finding, not measure the server.
+#
+# The GDPR audit dead-letter file (T19.27) is configured, as the minimal profile's
+# guide asks, on a tmpfs owned by the image's non-root user (65532) rather than a
+# named volume: `bench-down` removes the project's own volumes only, and a bench
+# stack must leave nothing behind. No GDPR request is made during a benchmark, so
+# the file is never written.
+#
+# `!reset` / `!override` need Docker Compose >= 2.24 (Docker Engine 25 ships it).
+services:
+  axiam-server:
+    environment:
+      AXIAM__AMQP__ENABLED: "false"
+      # Not required with the broker off, and the minimal compose file sets none of
+      # them; removed so the container's environment is the profile's, not the full
+      # profile's with a switch flipped.
+      AXIAM__AMQP__URL: !reset null
+      AXIAM__AMQP__TLS__CA_CERT_PATH: !reset null
+      AXIAM__AMQP__SIGNING_KEY: !reset null
+      AXIAM__GDPR_AUDIT_DLQ_FILE: "/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl"
+    # The base file mounts the broker CA here; the profile has no broker.
+    volumes: !override []
+    tmpfs:
+      - /var/lib/axiam/audit-dlq:uid=65532,gid=65532,mode=0700
+    depends_on: !override
+      surrealdb: { condition: service_healthy }
+    # An orderly stop writes the audit rows the middleware still holds (up to 5 s)
+    # and releases the lease (docker/docker-compose.minimal.yml).
+    stop_grace_period: 30s
+
+  # Never started in this profile: it joins a Compose profile no run activates.
+  rabbitmq:
+    profiles: ["full-profile-only"]

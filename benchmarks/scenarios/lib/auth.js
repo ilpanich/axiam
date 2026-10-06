@@ -11,6 +11,7 @@ export function mintToken() {
   const a = adapter();
   for (const builder of [a.clientCredentials, a.login]) {
     const built = builder();
+    if (built.steps) continue; // a multi-step login yields a session, not a token
     const res = http.request(built.method, built.url, built.body || null, built.params || {});
     if (res.status === (built.expect || 200)) {
       let body;
@@ -97,7 +98,14 @@ export function loginSession() {
 export function mintUserToken() {
   const a = adapter();
   const jar = http.cookieJar();
-  const built = a.login();
+  let built = a.login();
+  // A multi-step login (`built.steps` — authentik's flow executor) establishes
+  // a session, not a token, and is not a single request this function can send.
+  // Use the adapter's own user-token path when it has one (authentik: the ROPC
+  // grant redeemed with the bench user's app-password token, a genuine
+  // user-subject token); otherwise fall through to client_credentials below,
+  // tagged exactly like a fallback login.
+  if (built.steps) built = a.userToken ? a.userToken() : { fallback: true };
   // Some adapters' login() IS client_credentials in disguise, tagged
   // `fallback: true` (see zitadel in targets.js) — skip straight to the
   // explicit client_credentials branch below rather than "succeeding" here

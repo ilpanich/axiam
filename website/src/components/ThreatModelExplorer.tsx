@@ -35,7 +35,20 @@ const SEVERITY_COLOR: Record<string, string> = {
 const STATUS_COLOR: Record<string, string> = {
   Mitigated: "#27c93f",
   Open: "#ffbd2e",
+  NotApplicable: SLATE,
 };
+
+/** How a status reads on a card; the model's own value where it reads fine. */
+const STATUS_LABEL: Record<string, string> = {
+  NotApplicable: "Not applicable · not built",
+};
+
+/**
+ * `NotApplicable` is an entry for a surface that is not built: it is neither a
+ * control nor a residual risk, so it is styled and filtered as neither.
+ */
+const isNotApplicable = (t: TmThreat) => t.status === "NotApplicable";
+const isOpen = (t: TmThreat) => t.status !== "Mitigated" && !isNotApplicable(t);
 
 const KIND_LABEL: Record<TmNode["kind"], string> = {
   actor: "External actor",
@@ -541,7 +554,7 @@ const filtersActive = (f: Filters) =>
   f.openOnly || f.query.trim() !== "" || f.severities.length > 0 || f.categories.length > 0;
 
 function matches(threat: TmThreat, f: Filters, query: string): boolean {
-  if (f.openOnly && threat.status === "Mitigated") return false;
+  if (f.openOnly && !isOpen(threat)) return false;
   if (f.severities.length > 0 && !f.severities.includes(threat.severity)) return false;
   if (f.categories.length > 0 && !f.categories.includes(threat.type)) return false;
   if (query && !(HAYSTACK.get(threat.number) ?? "").includes(query)) return false;
@@ -667,13 +680,10 @@ function ThreatCard({
         scrollMarginTop: 100,
         borderColor: focused
           ? "rgba(0,212,255,.75)"
-          : threat.status === "Mitigated"
-            ? "rgba(0,212,255,.14)"
-            : "rgba(255,189,46,.34)",
-        background:
-          threat.status === "Mitigated"
-            ? "rgba(255,255,255,.035)"
-            : "rgba(255,189,46,.05)",
+          : isOpen(threat)
+            ? "rgba(255,189,46,.34)"
+            : "rgba(0,212,255,.14)",
+        background: isOpen(threat) ? "rgba(255,189,46,.05)" : "rgba(255,255,255,.035)",
         boxShadow: focused ? "0 0 0 1px rgba(0,212,255,.35)" : undefined,
       }}
     >
@@ -696,7 +706,7 @@ function ThreatCard({
           color={SEVERITY_COLOR[threat.severity] ?? SLATE}
         />
         <Chip
-          text={threat.status}
+          text={STATUS_LABEL[threat.status] ?? threat.status}
           color={STATUS_COLOR[threat.status] ?? SLATE}
         />
       </div>
@@ -717,11 +727,15 @@ function ThreatCard({
       >
         <span
           style={{
-            color: threat.status === "Mitigated" ? "#27c93f" : AMBER,
+            color: threat.status === "Mitigated" ? "#27c93f" : isOpen(threat) ? AMBER : SLATE,
             fontWeight: 700,
           }}
         >
-          {threat.status === "Mitigated" ? "Mitigation · " : "Residual risk · "}
+          {threat.status === "Mitigated"
+            ? "Mitigation · "
+            : isOpen(threat)
+              ? "Residual risk · "
+              : "Required of a build · "}
         </span>
         {threat.mitigation}
       </p>
@@ -870,7 +884,11 @@ export default function ThreatModelExplorer() {
           >
             {d.title}
             <span style={{ opacity: 0.65, fontWeight: 500 }}>
-              {d.open > 0 ? `${d.total} · ${d.open} open` : `${d.total}`}
+              {d.open > 0
+                ? `${d.total} · ${d.open} open`
+                : d.notApplicable > 0
+                  ? `${d.total} · not built`
+                  : `${d.total}`}
             </span>
           </button>
         ))}

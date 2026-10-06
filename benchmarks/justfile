@@ -1252,6 +1252,15 @@ bench-pack:
       echo "[bench-pack] ERROR: SECRET/PASSWORD text found in packed content — investigate before sharing" >&2
       exit 1
     fi
+    # P23W6-01: a generated credential is a hex string the scan above cannot see by
+    # name. The one shape that carries one under an innocent key is a URL with
+    # userinfo (AXIAM__AMQP__URL's `amqps://user:<password>@host`), which
+    # axiam_env_json() now renders as `scheme://<redacted>@host`; refuse any that
+    # still carries a user:password pair.
+    if tar -xJOf "$OUT" | grep -qE '[A-Za-z][A-Za-z0-9+.-]*://[^/@[:space:]"<>]+:[^/@[:space:]"<>]*@'; then
+      echo "[bench-pack] ERROR: a URL carrying userinfo (scheme://user:password@host) found in packed content — investigate before sharing" >&2
+      exit 1
+    fi
     echo "[bench-pack] OK — $OUT contains no secret material."
 
 # J13/E2 regression guard for the bench-pack manifest: builds a fixture

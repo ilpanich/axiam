@@ -28,6 +28,10 @@
 #      its compose file REQUIRES (a name the helper forgot, or one the compose file
 #      renamed, would leave a stack that cannot start — or worse, one that starts
 #      with an empty password).
+#   6. No credential from the server container's environment reaches a cell's
+#      meta.json, a URL's userinfo included (P23W6-01: AXIAM__AMQP__URL carried the
+#      generated broker password into every full-profile cell), and bench-pack's
+#      leak scan refuses a URL that still carries a user:password pair.
 #
 # Usage: credential-selftest.sh          (from benchmarks/)
 set -euo pipefail
@@ -258,6 +262,53 @@ command -v openssl >/dev/null || { say "openssl is required"; exit 1; }
   done
 ) > "$T/names.out" 2>&1 || true
 if [ -s "$T/names.out" ]; then while IFS= read -r line; do say "$line"; done < "$T/names.out"; fi
+
+# --- 6: no generated credential reaches a cell's meta.json (P23W6-01) ---------------
+# meta.json's `axiam_env` copies the server container's AXIAM__* environment and redacts
+# a value by its KEY's name. AXIAM__AMQP__URL carries the broker password in its
+# userinfo (`amqps://user:<RABBITMQ_DEFAULT_PASS>@…`) under a key no name rule matches,
+# so the generated password was written in clear into every full-profile AXIAM cell and
+# from there into the `bench-pack` archive (whose SECRET/PASSWORD scan cannot see a
+# hex string either). The server's own Debug redacts exactly this (axiam-amqp
+# `redact_amqp_url`). A stub docker serves an environment holding a fresh value in the
+# URL and under a credential-named key; the value must appear nowhere in the cell.
+mkdir -p "$T/meta/bin"
+cat > "$T/meta/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  inspect)
+    for a in "$@"; do
+      case "$a" in
+        *Config.Env*) printf 'AXIAM__AMQP__ENABLED=true\nAXIAM__AMQP__URL=amqps://bench:%s@rabbitmq:5671\nAXIAM__DB__URL=surrealdb:8000\nAXIAM__DB__PASSWORD=%s\n' "$STUB_VALUE" "$STUB_VALUE"; exit 0 ;;
+      esac
+    done
+    exit 1 ;;
+  version) echo stub ;;
+  *) exit 0 ;;
+esac
+STUB
+printf '#!/usr/bin/env bash\n[ "${1:-}" = version ] && echo "k6 v0.0.0 (stub)"\nexit 1\n' > "$T/meta/bin/k6"
+chmod +x "$T/meta/bin/docker" "$T/meta/bin/k6"
+stub_value="$(openssl rand -hex 16)"
+PATH="$T/meta/bin:$PATH" STUB_VALUE="$stub_value" BENCH_SKIP_SEED_CHECK=1 BENCH_CLIENT_SECRET=1 \
+  BENCH_ALLOW_UNMERGED_BUILD_REF=1 BENCH_RESULTS_DIR="$T/meta/out" BENCH_SEED_DIR="$T/meta/seed" BENCH_CELL_PAUSE=0 \
+  bash "$HERE/run-benchmark.sh" --target axiam --profile p0-plaintext --scenario jwks_fetch --dry-run \
+  > "$T/meta/runner.log" 2>&1 || true
+meta_file="$(find "$T/meta/out" -name '*.meta.json' 2>/dev/null | head -1)"
+if [ -z "$meta_file" ]; then
+  say "the stubbed AXIAM cell wrote no meta.json (the runner died before recording it?)"
+else
+  if grep -rqF -- "$stub_value" "$T/meta/out"; then
+    say "a credential from the server container's environment reached the cell's results (AXIAM__AMQP__URL's userinfo, or a credential-named key)"
+  fi
+  grep -qF '"AXIAM__AMQP__URL": "amqps://<redacted>@rabbitmq:5671"' "$meta_file" \
+    || say "meta.json no longer records AXIAM__AMQP__URL with its host and its userinfo redacted"
+  grep -qF '"AXIAM__DB__URL": "surrealdb:8000"' "$meta_file" \
+    || say "meta.json lost a non-credential URL (AXIAM__DB__URL) — the redaction is too broad"
+fi
+# ... and bench-pack's leak scan must see a URL that carries userinfo, whatever its key.
+pack="$(awk '/^bench-pack:/{f=1} f&&/^# /{exit} f' "$BENCH/justfile")"
+grep -qF 'userinfo' <<<"$pack" || say "bench-pack's leak scan does not look for a URL carrying userinfo (scheme://user:password@host)"
 
 # bench-down removes what belongs to the volumes it removes: the per-run credentials AND the
 # bulk-seed record (a stale axiam.bulk.env mislabels every later cell as a scaled fixture)

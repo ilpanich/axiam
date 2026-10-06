@@ -828,6 +828,15 @@ settle_gate() {
 # packed content for SECRET/PASSWORD, specifically so these legitimately-named
 # (and fully redacted) keys don't trip it — see the comment there.
 AXIAM_ENV_REDACT_RE='PASSWORD|SECRET|KEY|PEPPER|PEM|TOKEN'
+# P23W6-01: a credential can also sit in a VALUE whose key no name rule matches —
+# AXIAM__AMQP__URL is `amqps://user:<broker password>@host`, and that password is a
+# generated per-run credential (runner/bench-creds.sh). Any `scheme://userinfo@`
+# value keeps its scheme and host and loses the userinfo, exactly as the server's
+# own Debug renders it (axiam-amqp `redact_amqp_url`). sed -E, so a value that
+# does not match passes through untouched.
+redact_url_userinfo() {
+  printf '%s' "${1-}" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@#\1<redacted>@#'
+}
 # J9/E1: the AXIAM__* prefix is not the whole story. `RUST_LOG` governs whether
 # the `axiam::perf` stage-timing events an investigation pass depends on are
 # emitted at all, and it carries NO prefix — so run 5's I5 pass recorded a
@@ -861,7 +870,7 @@ axiam_env_json() {
     if printf '%s' "$k" | grep -qiE "$AXIAM_ENV_REDACT_RE"; then
       printf '    "%s": "<redacted>"' "$(json_escape "$k")"
     else
-      printf '    "%s": "%s"' "$(json_escape "$k")" "$(json_escape "$v")"
+      printf '    "%s": "%s"' "$(json_escape "$k")" "$(json_escape "$(redact_url_userinfo "$v")")"
     fi
   done <<< "$env_dump"
   [ "$first" -eq 1 ] || echo

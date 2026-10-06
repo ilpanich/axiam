@@ -15,7 +15,10 @@
 > it; merged as PR #543 on 2026-10-04. G-2 and G-5 are complete. W5 (G-6
 > outbound SCIM, G-7 CIBA, G-8 AMQP-less profile) runs on `claude/phase23-w5`,
 > with D-56 taken at its start and D-57 … D-74 during it (D-60 by the
-> maintainer); its PR follows the F4 review. Written against AXIAM `1.0.0-beta17` from the three
+> maintainer); merged as PR #559 (merge commit `406a155`) on 2026-10-06. W6
+(G-10 benchmark currency, G-11 RADIUS spike, the comparison refresh; the last
+wave) runs on `claude/phase23-w6` as W6a, with D-75 and D-76 taken at its start;
+W6b (the run-6 report) follows the maintainer's run. Written against AXIAM `1.0.0-beta17` from the three
 > comparisons in this directory:
 > [`competitor-comparison-keycloak.md`](competitor-comparison-keycloak.md)
 > (Keycloak 26.8.0),
@@ -2096,6 +2099,31 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > through a `NotificationGate`; any approval surface takes a console sign-in only;
 > new ids start at T-448.
 
+> **W5 merged (PR #559, `406a155`), 2026-10-06; W6 kickoff, 2026-10-06.** `main`
+> at `406a155`; PR #559 closed #537, #544, #545 and #546. Open from W5 and **not
+> W6 scope**: the review findings #549 … #555, the SDK fan-outs #547 (contract
+> 1.57) and #548 (1.58), and #513 (G-1, the maintainer's conformance runs). §8 is
+> unchanged since W5. W6 is the phase's last wave and merges in two PRs (**D-76**):
+> **W6a** on `claude/phase23-w6` — T23.10.1 (the authentik target, Sonnet 5.5),
+> T23.10.2(a) (`run6-runbook.md`, Sonnet 5.5), T23.11.1 (the RADIUS / EAP-TLS
+> spike, Sonnet 5.5; its threat entries on Opus 5.5 per §6's rule (b)), the
+> comparison refresh that needs no run-6 number (Sonnet 5.5), F4 (Opus 5.5) and
+> the phase close-out; **W6b** on `claude/phase23-w6b`, cut from `main` after W6a
+> merges — T23.10.2(b), the seventh draft of `PUBLIC_BENCH_ANALYSIS.md` and the
+> comparisons' performance rows, once the maintainer has run run 6. Run 6
+> measures **`1.0.0-beta18`**, a release the maintainer cuts from `main` after
+> W6a merges (**D-75**). Competitor versions pinned at kickoff (latest patch of
+> each named line on 2026-10-06): **Keycloak 26.8.0** (the only 26.8.x tag on the
+> Docker Hub mirror; `quay.io` is unreachable from the sandbox, so the runbook
+> re-checks for a later patch before the run), **Zitadel v4.19.4** (latest
+> `v4.19.*` tag on `ghcr.io`), **authentik 2026.8.3** (latest `2026.8.*` tag;
+> pulled here from Docker Hub's `authentik/server`, because `ghcr.io` blob
+> downloads are blocked by the sandbox proxy). Docker runs in the sandbox, so the
+> authentik target is smoke-tested here. Numbering at kickoff: next decision
+> **D-75**, next threat **T-448** (model 2.35.0: 447 threats, 426 mitigated / 21
+> open), schema **v84** (W6 should need none), contract **1.58** (unchanged),
+> findings **P23W6-NN**.
+
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This
 plan does not edit `roadmap.md`; the phase is added when the maintainer
@@ -2305,6 +2333,8 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-72 | *Raised in T23.8.2 (Opus 5.5), 2026-10-05; taken by the orchestrator.* D-59 says an instance that loses its singleton lease "exits non-zero" but not how soon; the first build exited at once, wherever it was, losing queued audit rows (T23.8.2's A1) | **An orderly stop with a 15 s backstop.** A lost lease raises a flag; the instance stops accepting at once, finishes in-flight requests, drains the audit queue (bounded at 5 s), joins the cleanup task and exits non-zero; `std::process::exit(1)` remains only as the backstop after 15 s (`LeaseTiming::lost_stop_deadline`). The audit drain applies to every orderly stop, SIGTERM in the full profile included. Rejected: an immediate exit (the regression); waiting the 30 s lease TTL (two instances serve longer) |
 | D-73 | *Proposed by the W5 F4 review (Opus 5.5), 2026-10-05, P23W5-02; accepted by the orchestrator (implemented; the maintainer may override in the wave PR).* T-418: one `scim_delivery_failed` notification mail per SCIM dead letter floods a rule's recipients while a target is down | **At most one `scim_delivery_failed` notification per target per hour; every dead letter keeps its audit row and its count.** `NotifyingAuditLog` takes a `NotificationGate` (no constructor without one), asked only for a notifiable row after the append; the SCIM gate claims `scim_target_state.failure_notified_at` with a conditional write (schema **v84**), so replicas agree; a target of another tenant or a deleted one claims nothing; a gate that cannot decide stays silent and logs once. The console's `state` shows the outage's size. Rejected: notify only on the transition into failure (a flapping target floods again); an in-memory per-process window (N replicas, N mails); a digest mail; changing the generic dispatcher for every event (T-117's own issue, #551) |
 | D-74 | *Proposed by the W5 F4 review (Opus 5.5), 2026-10-05, P23W5-03; accepted by the orchestrator (implemented; the maintainer may override in the wave PR).* T23.7.2 mailed the CIBA approval prompt to whatever address an account carried, proven or not — a self-registered account with a stranger's address plus a client that can call `bc-authorize` makes AXIAM mail that stranger | **The approval mail goes only to an address D-25's rule vouches for** — `email_verified_at` set, or the account `Active` — the rule the SAML IdP applies to an email `NameID` and SSF to an email subject. An unvouched address is the same quiet no-op as an account that may not sign in; the request is stored, answered as before (T-422) and waits on the approval page. Consequence: a federated account (`PendingVerification` for life, T-160) gets no approval mail unless an address was verified. Rejected: mailing any address (a phishing relay quoting client-chosen text); verified-only (ends mail for administrator-created accounts) |
+| D-75 | **Decided by the maintainer, 2026-10-06, at the start of W6** (the recommended option). Which AXIAM build does benchmark run 6 measure? `1.0.0-beta17` (2026-09-25) predates every Phase 23 wave | **A new release, `v1.0.0-beta18`, cut by the maintainer from `main` after W6a merges**, so it contains W1–W5 and W6a's harness; run 6 measures the published image `ghcr.io/ilpanich/axiam/server:1.0.0-beta18`, as run 5 measured `1.0.0-alpha24`. The runbook names the tag and lets the provenance preflight check the image's `build_ref` against `origin/main`; the commit is recorded when the tag is cut. Rejected: the beta17 image (measures none of Phase 23 — no minimal profile, no CIBA, SCIM client or SAML IdP in the binary); a source build (loses the release-image parity with run 5 and the provenance preflight) |
+| D-76 | **Decided by the maintainer, 2026-10-06, at the start of W6** (the recommended option). Run 6 runs off the sandbox, on the maintainer's G-box: does W6 wait for it? | **Two PRs.** W6a now: T23.10.1, T23.10.2(a) (`run6-runbook.md`), T23.11.1 and its threat entries, the comparison refresh that needs no run-6 number, F4 and the phase close-out. W6b after the results: T23.10.2(b) — the seventh draft of `PUBLIC_BENCH_ANALYSIS.md`, the comparisons' performance rows and change-log lines, and the website where it quotes benchmark numbers — on `claude/phase23-w6b`, cut from `main` after W6a merges. The maintainer runs run 6 after W6a merges and beta18 is published. Phase 23 is recorded complete at W6a with T23.10.2(b) the one open task, tracked by G-10's issue and closed by W6b. Rejected: one PR held open until the results (a wave's reviewed work waits on an off-sandbox run with no date) |
 
 ---
 

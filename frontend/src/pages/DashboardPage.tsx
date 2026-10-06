@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate, Link } from "react-router";
 import { useQueries } from "@tanstack/react-query";
 import {
@@ -216,13 +217,15 @@ export function DashboardPage() {
 
   const [usersQ, groupsQ, rolesQ, certsQ, auditQ] = results;
 
-  // Derive expiring certs (active & expires within 30 days)
-  const now = new Date();
+  // Derive expiring certs (active & expires within 30 days). The clock is read
+  // once, on mount — reading it during render is impure (oxlint), and a
+  // 30-day window does not need re-evaluating on every render.
+  const [now] = useState(() => Date.now());
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
   const expiringCerts: Certificate[] = (certsQ.data ?? []).filter((c) => {
     if (c.status !== "Active") return false;
     const expiresAt = new Date(c.not_after);
-    return expiresAt.getTime() - now.getTime() < thirtyDaysMs;
+    return expiresAt.getTime() - now < thirtyDaysMs;
   });
 
   const activeCertsCount = (certsQ.data ?? []).filter(

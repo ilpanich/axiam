@@ -1049,7 +1049,7 @@ The evidence is `claude_dev/sdk-dogfooding-conformance-review.md`.
 
 ---
 
-## Phase 23: Competitor gap closure — IN PROGRESS (W1–W4 merged 2026-10-03/04, W5 merged 2026-10-06 as PR #559, `406a155`; W6 in progress)
+## Phase 23: Competitor gap closure — COMPLETE (W1–W5 merged 2026-10-03 … 06, W6a 2026-10-06; T23.10.2(b), the run-6 report, rides W6b — #561)
 
 Close the gaps the three competitor comparisons
 ([Keycloak](competitor-comparison-keycloak.md),
@@ -1115,11 +1115,14 @@ with an F4 security review of the wave's diff against
 | T23.11.1 | RADIUS / EAP-TLS spike, decision record ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)); threat entries T-448 … T-468 on Opus 5.5; D-77, D-78 | Sonnet 5.5 | W6 | ✓ |
 | T23.12.1 | Front-channel logout declined and recorded (D-6) | Sonnet 5.5 | W1 | ✓ |
 | T23.15.1 | *Identity for agents* guide and website page | Sonnet 5.5 | W1 | ✓ |
-| F4 | Per-wave security review of the wave diff | Opus 5.5 | every wave | W1–W5 ✓ |
+| F4 | Per-wave security review of the wave diff | Opus 5.5 | every wave | W1–W6a ✓ |
 
 G-13 (social presets, on demand) and G-14 (portal features, watch only) carry
 no scheduled task. Wave order follows the plan's §5; W2 waits for W1 to merge
 where §5 says it depends on it.
+
+The phase summary — G-1 … G-15, what shipped, what was declined and what stays
+open, with issue numbers — closes §5 of the plan.
 
 ---
 
@@ -1150,8 +1153,8 @@ where §5 says it depends on it.
 | Phase 20 | 2 | Public website and documentation site |
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
 | Phase 22 | 20 | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates, gRPC client auth, service accounts on management, non-inheritable assignments, contracts 1.51/1.52 and the eleven SDK ports) |
-| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **in progress**, W1–W5 merged, W6 in progress |
+| Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **complete** with W6a; T23.10.2(b) (run 6, seventh benchmark draft) rides W6b, #561 |
 
-**Total: 132 tasks across 23 complete phases, plus Phase 23 (47 tasks) in progress**
+**Total: 179 tasks across 24 complete phases** (Phase 23's T23.10.2(b), the run-6 report, rides W6b — #561)
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

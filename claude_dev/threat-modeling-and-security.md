@@ -40,7 +40,7 @@
 > it recorded a certificate revocation list the tree never published; AXIAM
 > checks a certificate's status when it authenticates a device by it, and a
 > relying party that validates AXIAM-issued certificates itself has no revocation
-> channel until one is published (tracked by an issue). The model was **468
+> channel until one is published (ilpanich/axiam#565). The model was **468
 > threats, 425 mitigated / 22 open / 21 not applicable**.
 >
 > **The W6 F4 security review (Phase 23, model 2.36.1 — T-469 enters, Open;
@@ -2204,7 +2204,7 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
   own mTLS — has no way to learn of a revocation and accepts a revoked
   certificate until it expires (T-102, open). Earlier revisions of the threat
   model and the design document described a CRL; there has never been one.
-  Publishing one per issuing CA is tracked by an issue.
+  Publishing one per issuing CA is tracked by ilpanich/axiam#565.
 - **A device's token is as strong as its handshake.** A device authenticates by
   a TLS handshake with a client certificate — the strongest thing it can prove —
   and until `1.0.0-beta17` got back a plain bearer token, so a token read off

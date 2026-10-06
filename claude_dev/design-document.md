@@ -496,7 +496,8 @@ FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its
 own mTLS — has no revocation channel, and honours a revoked certificate until it
 expires; the bound is the tenant's `max_cert_validity_days`. Earlier revisions of
 this table said revocation "propagates to CRL"; there has never been one.
-Publishing a CRL per issuing CA is tracked by an issue (item D1 of
+Publishing a CRL per issuing CA is tracked by
+[ilpanich/axiam#565](https://github.com/ilpanich/axiam/issues/565) (item D1 of
 [`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md));
 threat T-102 in [`threat-model-stride.md`](threat-model-stride.md) stays open
 until it is.

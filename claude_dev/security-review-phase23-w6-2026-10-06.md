@@ -82,13 +82,13 @@ sound, and the generator's change hides no open entry (§6).
 | **P23W6-03** | The seed env (now holding the bootstrap admin's and Keycloak's admin passwords) is written under the caller's umask, then `chmod 600`; the stack file keeps a pre-existing empty file's mode; `.seed/` is 0755. | Low | `seed.sh`, `bench-creds.sh` | wave | **Fixed** — `31106cb` |
 | **P23W6-04** | T-102 (2.36.0), the design document and the website said revocation takes effect wherever AXIAM terminates the connection; neither listener's handshake reads it, nor OAuth2 `tls_client_auth`. | Low | threat text → **T-102** | wave (text) | **Fixed** — `c83593a` (gap: P23W6-10) |
 | **P23W6-05** | "AXIAM's own request path … carries **three** open items" (write-up) / "**two**" (website), "and none is a defect": seven, three of them not trade-offs (T-447, T-102, T-469). | Informational | write-up, `security.ts` | pre-existing | **Fixed** — `c83593a` |
-| **P23W6-06** | Every benchmark target publishes its application, TLS and (AXIAM) gRPC ports on every interface, with AXIAM's limiters and lockout raised to 1 000 000; authentik's new target copies the shape. | Low | `targets/*/docker-compose.yml` | pre-existing | **Runbook fixed** (`37a3046`); compose **reported** (§14) |
-| **P23W6-07** | Under D-74 an unvouched account (every federated account without a verified address) gets no mail, and the console has no list of pending requests, so the request cannot be reached and expires; D-74 said it "waits on the approval page". | Low | CIBA approval surface; D-74 | pre-existing (W5) | **D-74 amended** (`37a3046`); **reported** (§14) |
+| **P23W6-06** | Every benchmark target publishes its application, TLS and (AXIAM) gRPC ports on every interface, with AXIAM's limiters and lockout raised to 1 000 000; authentik's new target copies the shape. | Low | `targets/*/docker-compose.yml` | pre-existing | **Runbook fixed** (`37a3046`); compose **reported** (§14); ilpanich/axiam#567 |
+| **P23W6-07** | Under D-74 an unvouched account (every federated account without a verified address) gets no mail, and the console has no list of pending requests, so the request cannot be reached and expires; D-74 said it "waits on the approval page". | Low | CIBA approval surface; D-74 | pre-existing (W5) | **D-74 amended** (`37a3046`); **reported** (§14); ilpanich/axiam#566 |
 | **P23W6-08** | `check-amqp-transport.py` (CI, every PR) read the minimal overlay's `AXIAM__AMQP__URL: !reset null` as the string `'null'` and failed. | Low | CI | wave | **Fixed** — `6fc3be0` |
-| **P23W6-09** | `AuthService::login` refuses a locked account before any hash permit or verify: faster than an unknown name, and `401` against `503` under saturation. gRPC `ValidateCredentials` runs no verify on any refusal. | Medium | login → **T-469** (new, Open) | pre-existing | **Reported** (§14) |
-| **P23W6-10** | No CRL or OCSP (T-102); and AXIAM's own `tls_client_auth` matches a registered DN/SAN without reading the certificate's status, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client. | Medium | PKI, token endpoint → **T-102** | pre-existing | **Reported** (§14) |
-| **P23W6-11** | `rl-prod-check` has no row for `bc_authorize`, `ciba_approval`, `device_login`, `ssf`, `ssf_admin`, `saml_admin`, `directory_admin`, `scim_target_admin`. | Low | `rl_prod_check.py` | pre-existing | **Reported** (§14) |
-| **P23W6-12** | (a) The minimal compose files' 30 s `stop_grace_period` is less than actix's default 30 s graceful shutdown plus the 5 s audit drain; (b) `bench-up`'s `genhex` writes `docker/.secrets/*.hex` then `chmod 600`. | Informational | minimal profile; harness | pre-existing | **Reported** (§14) |
+| **P23W6-09** | `AuthService::login` refuses a locked account before any hash permit or verify: faster than an unknown name, and `401` against `503` under saturation. gRPC `ValidateCredentials` runs no verify on any refusal. | Medium | login → **T-469** (new, Open) | pre-existing | **Reported** — ilpanich/axiam#564 |
+| **P23W6-10** | No CRL or OCSP (T-102); and AXIAM's own `tls_client_auth` matches a registered DN/SAN without reading the certificate's status, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client. | Medium | PKI, token endpoint → **T-102** | pre-existing | **Reported** — ilpanich/axiam#565 |
+| **P23W6-11** | `rl-prod-check` has no row for `bc_authorize`, `ciba_approval`, `device_login`, `ssf`, `ssf_admin`, `saml_admin`, `directory_admin`, `scim_target_admin`. | Low | `rl_prod_check.py` | pre-existing | **Reported** — ilpanich/axiam#568 |
+| **P23W6-12** | (a) The minimal compose files' 30 s `stop_grace_period` is less than actix's default 30 s graceful shutdown plus the 5 s audit drain; (b) `bench-up`'s `genhex` writes `docker/.secrets/*.hex` then `chmod 600`. | Informational | minimal profile; harness | pre-existing | **Reported** — ilpanich/axiam#569 |
 
 **Verdict on merge.** Nothing open blocks W6a. The eight fixes are in — the four
 in the harness and CI each with a self-test or check that failed before it, the
@@ -96,7 +96,7 @@ four in text checked against the code (§7, §9); the threat model is at **2.36.
 threats, 425 mitigated / 23 open / 21 not applicable** — in the three artifacts
 and the website, and a second generator run leaves no diff. No decision is
 proposed: D-74 is amended (its consequence was wrong, the decision stands). Six
-issue bodies go to the maintainer (§14), none filed here.
+issue bodies go to the maintainer (§14); the orchestrator filed them as #564 … #569.
 
 ---
 
@@ -489,9 +489,9 @@ Not passable here, as in W5: `check-remediation-evidence.py` (shallow clone),
 `check-website-links.py` (external links through the sandbox proxy). No clippy:
 no Rust changed on the branch.
 
-## 14. Issue bodies for the reported findings (not filed)
+## 14. Issue bodies for the reported findings (filed 2026-10-06 as ilpanich/axiam#564 … #569)
 
-### P23W6-09 (Medium) — a locked account is refused before any password verification (T-469)
+### P23W6-09 (Medium) — a locked account is refused before any password verification (T-469) — ilpanich/axiam#564
 
 `AuthService::login` refuses an account serving a temporary lockout
 (`locked_until > now`, local or directory) at step 2 of
@@ -551,7 +551,7 @@ plus the gRPC twin (a saturated gate: an unknown name, a locked account and a
 wrong password must all answer the status the gate gives when it cannot hash).
 Threat: T-469.
 
-### P23W6-10 (Medium) — publish a CRL per issuing CA; and AXIAM's own `tls_client_auth` reads no certificate status (T-102)
+### P23W6-10 (Medium) — publish a CRL per issuing CA; and AXIAM's own `tls_client_auth` reads no certificate status (T-102) — ilpanich/axiam#565
 
 AXIAM publishes no certificate revocation list and runs no OCSP responder: its CAs
 carry the `cRLSign` bit and nothing serves a list. A relying party that validates
@@ -577,7 +577,7 @@ revoked before the next CRL. Tests: a revoked leaf is refused at the token
 endpoint under `tls_client_auth`; the CRL lists it, verifies under the CA, and a
 `nextUpdate` is honoured. Contract and OpenAPI gain the route. Closes T-102.
 
-### P23W6-06 (Low) — benchmark stacks listen on every interface
+### P23W6-06 (Low) — benchmark stacks listen on every interface — ilpanich/axiam#567
 
 Every `benchmarks/targets/*/docker-compose.yml` publishes its ports without a
 host address (`"${BENCH_APP_PORT:-8090}:8090"`), so Docker binds `0.0.0.0` — past
@@ -594,7 +594,7 @@ cuts off. Self-test: every `ports:` entry in a target compose file carries the
 variable. The run-6 runbook already tells the maintainer to firewall the ports
 (§1.2).
 
-### P23W6-07 (Low) — an account with no vouched address cannot approve a CIBA request
+### P23W6-07 (Low) — an account with no vouched address cannot approve a CIBA request — ilpanich/axiam#566
 
 D-74 mails the CIBA approval prompt only to a vouched address. The console has no
 list of a signed-in user's pending requests — only
@@ -614,7 +614,7 @@ sees and approves their request; another user's request is not listed; a
 client-minted token is `403`. Contract §33 notes the route (console surface, not
 SDK surface).
 
-### P23W6-11 (Low) — `rl-prod-check` has no row for eight limiter families
+### P23W6-11 (Low) — `rl-prod-check` has no row for eight limiter families — ilpanich/axiam#568
 
 `benchmarks/runner/rl_prod_check.py` compares admitted against configured for 23
 families. Eight shipped REST families have no row:
@@ -629,7 +629,7 @@ every `*_per_min` field of `RateLimitConfig` has a row. Driving them needs
 scenarios that are a separate decision (an approval needs a console session; the
 admin families are human-only).
 
-### P23W6-12 (Informational) — two hygiene items
+### P23W6-12 (Informational) — two hygiene items — ilpanich/axiam#569
 
 (a) `docker/docker-compose.minimal.yml` and the harness overlay set
 `stop_grace_period: 30s`. On SIGTERM actix's graceful shutdown waits up to its
@@ -672,10 +672,12 @@ W6 is the phase's last wave. This section is for the project.
   #536, #538.
 * **G-10's W6b** — T23.10.2(b): the seventh draft of `PUBLIC_BENCH_ANALYSIS.md`,
   the comparisons' performance rows and the website's numbers, after the
-  maintainer runs run 6 against `1.0.0-beta18` (D-75, D-76). No G-10 issue exists
-  yet; D-76 says one tracks it.
-* **This review's six bodies** (§14): P23W6-09 (T-469), P23W6-10 (the CRL and
-  `tls_client_auth`, T-102), P23W6-06, P23W6-07, P23W6-11, P23W6-12.
+  maintainer runs run 6 against `1.0.0-beta18` (D-75, D-76). Tracked by **#561**
+  (G-10); G-11 is **#562** (closed by W6a), and what the spike defers, on an
+  adopter's request only, is **#563**.
+* **This review's six issues** (§14): **#564** P23W6-09 (T-469), **#565** P23W6-10
+  (the CRL and `tls_client_auth`, T-102), **#567** P23W6-06, **#566** P23W6-07,
+  **#568** P23W6-11, **#569** P23W6-12.
 
 ### Binding preconditions any future work inherits
 

@@ -1,6 +1,8 @@
 # Competitor gap remediation plan — 2026-10-02
 
-> **Status: ACCEPTED — in execution as Phase 23.** W1 (G-1 X7.1–X7.3, G-4,
+> **Status: ACCEPTED — Phase 23 complete with W6a (2026-10-06), but for
+> T23.10.2(b), the run-6 report, which rides W6b (#561); the phase summary closes
+> §5.** W1 (G-1 X7.1–X7.3, G-4,
 > G-9, G-12, G-15) executed 2026-10-02/03 on `claude/phase23-w1` and merged
 > (PR #521); D-9 and D-10 taken during it. W2 (G-1 X7.4–X7.9 and the
 > submission package, T23.1.8, G-3's crate and bind path) runs on
@@ -18,7 +20,9 @@
 > maintainer); merged as PR #559 (merge commit `406a155`) on 2026-10-06. W6
 (G-10 benchmark currency, G-11 RADIUS spike, the comparison refresh; the last
 wave) runs on `claude/phase23-w6` as W6a, with D-75 and D-76 taken at its start;
-W6b (the run-6 report) follows the maintainer's run. Written against AXIAM `1.0.0-beta17` from the three
+W6b (the run-6 report) follows the maintainer's run. W6a took D-77 … D-79
+during it and ended with the W6 F4 review; its PR closes #561's first half,
+#562 and nothing else open. Written against AXIAM `1.0.0-beta17` from the three
 > comparisons in this directory:
 > [`competitor-comparison-keycloak.md`](competitor-comparison-keycloak.md)
 > (Keycloak 26.8.0),
@@ -2231,21 +2235,61 @@ required, and with `cargo clean` between plan steps as `CLAUDE.md` requires.
 > the targets listen on every interface and the overlay is no deployment file
 > (P23W6-06); **D-74 amended** — an unvouched account's request cannot be reached,
 > nothing lists it, so a federated account cannot approve CIBA (P23W6-07; the
-> decision stands). Reported with issue bodies (not filed), all pre-existing: a
+> decision stands). Reported, all pre-existing, filed as ilpanich/axiam#564 … #569: a
 > locked account is refused before any password verify — faster than an unknown
 > name, and `401` against `503` under saturation, shown by a timing-free test;
 > gRPC `ValidateCredentials` verifies nothing on any refusal (**P23W6-09**, Medium,
-> new **T-469**, Open); the CRL, and `tls_client_auth`'s missing status check
-> (**P23W6-10**, Medium, T-102); loopback binding for the benchmark targets
-> (P23W6-06); a CIBA pending list on the console (P23W6-07); eight families with
-> no `rl-prod-check` row (P23W6-11); the stop grace against actix's shutdown, and
-> `genhex`'s write-then-chmod (P23W6-12). The harness otherwise held: no
+> new **T-469**, Open, #564); the CRL, and `tls_client_auth`'s missing status check
+> (**P23W6-10**, Medium, T-102, #565); loopback binding for the benchmark targets
+> (P23W6-06, #567); a CIBA pending list on the console (P23W6-07, #566); eight families with
+> no `rl-prod-check` row (P23W6-11, #568); the stop grace against actix's shutdown, and
+> `genhex`'s write-then-chmod (P23W6-12, #569). The harness otherwise held: no
 > credential literal, eight self-test mutations caught, CI masking right, and the
 > FAPI workflow's exported password wins through both `bench-up`s (traced). D-78
 > is sound and the generator hides no open entry. Threat model **2.36.1 — 469
 > threats, 425 mitigated / 23 open / 21 not applicable**. Its §15 is for the
 > project: what stays open, the preconditions future work inherits, and what to
 > schedule before 1.0 (#549, T-469, the CRL first). New ids start at **T-470**.
+
+### Phase 23 summary — 2026-10-06
+
+Six waves, W1 … W6a, merged or merging as PRs #521, #527, #534, #543, #559 and
+W6a's; one task, T23.10.2(b), rides W6b. Decisions **D-1 … D-79** (D-11, D-55,
+D-60, D-75 and D-76 by the maintainer); six F4 reviews, **79 findings**. The
+threat model went from **2.17.0 — 288 threats, 275 mitigated / 13 open** at the
+start of the phase to **2.36.1 — 469
+threats, 425 mitigated / 23 open / 21 not applicable**; contract **1.52 → 1.58**
+(§28.12, §29 … §33).
+
+| Gap | Outcome | Issue | What stays open |
+|---|---|---|---|
+| **G-1** Certification | **Shipped** the X7 work (gates and profile-confusion matrix, session evidence, OP cookie and `return_to` hop, honour lane, sensitive scopes, `client_secret_basic`, the per-tenant OP cookie D-11) and the Basic OP harness; `fapi-conformance.yml` runs end to end (D-60) | #513 (open) | The submissions themselves: the maintainer's browser-driven conformance runs |
+| **G-2** SAML 2.0 IdP | **Shipped** (W3–W4): SP- and IdP-initiated SSO, signed assertions under a tenant CA credential, pairwise `NameID`, SLO tied to session revocation, metadata, SP registry (§29), console; the Critical SP signature-confusion defect fixed on the way (D-23) | #528 (closed) | #536 (console switch), #538 (SLO against a real SP), #530, #531 (SP verifier). Assertion encryption and artifact binding declined (D-2) |
+| **G-3** LDAP / AD | **Shipped** (W2–W3): bind-as-user over TLS, JIT, group mapping, sync, address guard, §30, console, tested against OpenLDAP and Samba AD | #522 (closed) | Kerberos declined (D-1) |
+| **G-4** RFC 7592 | **Shipped** (W1, §28.12) | #514 (closed) | — |
+| **G-5** SSF transmitter | **Shipped** (W4): CAEP and RISC SETs, push and poll, stream management (§32), per-tenant issuers (D-55) | #542 (closed) | SDK receiver helper #541 (T-388); a receiver is later (D-4) |
+| **G-6** Outbound SCIM | **Shipped** (W5, §31) | #544 (closed) | #550 (a tarpit downstream stalls a replica) |
+| **G-7** CIBA | **Shipped** (W5, §33): poll and ping, FAPI-CIBA; no push, no `user_code` (D-64, D-65) | #545 (closed) | #566 (no pending list; federated accounts cannot approve, D-74 amended), #549 (the device grant's twin of T-447), SDK helper #548 |
+| **G-8** AMQP-less profile | **Shipped** (W5): the minimal profile and its resting footprint | #546 (closed) | #552, #553, #554 (audit durability and orderly exits); #569 |
+| **G-9** Verifiable credentials | **Design only**, as planned (W1) | #515 (closed) | Implementation waits for specification stability and an adopter |
+| **G-10** Benchmark currency | **Half shipped** (W6a): the authentik target, the run-6 runbook, Keycloak 26.8.0 and Zitadel v4.19.4 pins, per-run credentials | #561 (open) | Run 6 against `1.0.0-beta18` and the seventh draft (W6b) |
+| **G-11** RADIUS | **Spike done; native front end declined** (D-77) | #562 (closed by W6a) | #563 (FreeRADIUS route, on request); the CRL #565 |
+| **G-12** Front-channel logout | **Declined** and recorded (D-6) | #515 (closed) | Reopens only on an adopter request |
+| **G-13** Social presets | **On demand**; no task | — | — |
+| **G-14** Portal features | **Watch, do not chase**; no task | — | — |
+| **G-15** Agent identity | **Shipped** as documentation (W1) | #515 (closed) | — |
+
+**Declined or deferred by decision:** Kerberos (D-1), SAML assertion encryption
+(D-2), an SSF receiver (D-4), front-channel logout (D-6), CIBA push mode and
+`user_code` (D-64, D-65), a native RADIUS front end (D-77).
+
+**Open after Phase 23**, by kind (the W6 F4 review's §15 has the detail and the
+order to schedule them in — #549, T-469 #564 and the CRL #565 first):
+- *the phase's own remainder:* #513 (G-1 submissions), #561 (G-10's W6b);
+- *SDK fan-out (D-35):* #540, #541, #547, #548;
+- *review findings, W1–W6:* #517, #518, #519, #520 · #523, #524, #525, #526 ·
+  #529, #530, #531, #532, #533 · #535, #536, #538 · #549 … #555 · #564 … #569;
+- *on request only:* #563 (RADIUS).
 
 Proposed roadmap entry: **Phase 23 — Competitor gap closure**, tasks T23.1
 through T23.15 mapping one-to-one onto G-1 through G-15, in wave order. This

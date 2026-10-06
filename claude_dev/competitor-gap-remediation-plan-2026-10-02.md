@@ -1823,6 +1823,36 @@ logs dated.
 
 ### G-11 — RADIUS: spike — **P3**
 
+> **EXECUTED — G-11 (T23.11.1), 2026-10-06.** The decision record is
+> [`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)
+> (`ac88b00`, Sonnet 5.5); no product code. **Verdict: partial fit, unproven
+> demand** — 802.1X for fleets holding AXIAM-issued certificates fits;
+> password-based network login does not (MS-CHAPv2 and CHAP cannot run against
+> an Argon2id store) and no adopter has asked. **Decision (D-77): decline the
+> native front end now** (option A, XL, about 24–36 sessions, mostly Opus);
+> AXIAM as the CA and policy backend behind FreeRADIUS (option B, L) is the first
+> step when the reopen condition is met; publishing a CRL (item D1) is worth
+> doing regardless. The record carries every W5 F4 §15 constraint as a
+> requirement from a build's first commit: its own limiter in the machine
+> presets and the tenant lockout (T-429's class); one byte-identical Access-Reject
+> with an equalising verify, so no user oracle (D-63); the per-NAS secret
+> generated, sealed under `pki_encryption_key`, write-only and bound to its
+> address, transport and RadSec pin (P23W5-01's rule); `Message-Authenticator`
+> on every packet and `Proxy-State` refused (Blast-RADIUS); MD5-only attributes
+> only under an explicit per-NAS `legacy_udp` flag. **Threat entries T-448 …
+> T-468** (Opus 5.5, `5c29828`, model **2.36.0**) on a tenth, design-only
+> diagram with the NAS ↔ AXIAM boundary, recorded *Not applicable* (**D-78**):
+> no control exists to call them Mitigated, and nothing AXIAM runs is exposed.
+> The spike found two things about today's tree: **no CRL or OCSP is published**,
+> although T-102 and the design document described one — the text is repaired
+> and **T-102 reopened** (High, Open: a relying party that does not terminate at
+> AXIAM has no revocation channel), the CRL itself filed (D1); and the
+> locked-account branch of `AuthService::login` returns before any Argon2id work
+> (a timing difference), handed to the W6 F4 review. Model 2.36.0: 468 threats,
+> 425 mitigated / 22 open / 21 not applicable. RFC text could not be fetched in
+> the sandbox; the record's §9.2 lists eleven recalled claims to re-read before
+> anything is built on them.
+
 **Target.** A one-session spike answering whether a RADIUS front end with
 EAP-TLS over the integrated CA is a fit for AXIAM's network-device audience,
 and what it would cost. authentik gates EAP-TLS behind its enterprise licence;
@@ -2335,6 +2365,8 @@ all-Sonnet run and about **0.6×** an all-Opus run.
 | D-74 | *Proposed by the W5 F4 review (Opus 5.5), 2026-10-05, P23W5-03; accepted by the orchestrator (implemented; the maintainer may override in the wave PR).* T23.7.2 mailed the CIBA approval prompt to whatever address an account carried, proven or not — a self-registered account with a stranger's address plus a client that can call `bc-authorize` makes AXIAM mail that stranger | **The approval mail goes only to an address D-25's rule vouches for** — `email_verified_at` set, or the account `Active` — the rule the SAML IdP applies to an email `NameID` and SSF to an email subject. An unvouched address is the same quiet no-op as an account that may not sign in; the request is stored, answered as before (T-422) and waits on the approval page. Consequence: a federated account (`PendingVerification` for life, T-160) gets no approval mail unless an address was verified. Rejected: mailing any address (a phishing relay quoting client-chosen text); verified-only (ends mail for administrator-created accounts) |
 | D-75 | **Decided by the maintainer, 2026-10-06, at the start of W6** (the recommended option). Which AXIAM build does benchmark run 6 measure? `1.0.0-beta17` (2026-09-25) predates every Phase 23 wave | **A new release, `v1.0.0-beta18`, cut by the maintainer from `main` after W6a merges**, so it contains W1–W5 and W6a's harness; run 6 measures the published image `ghcr.io/ilpanich/axiam/server:1.0.0-beta18`, as run 5 measured `1.0.0-alpha24`. The runbook names the tag and lets the provenance preflight check the image's `build_ref` against `origin/main`; the commit is recorded when the tag is cut. Rejected: the beta17 image (measures none of Phase 23 — no minimal profile, no CIBA, SCIM client or SAML IdP in the binary); a source build (loses the release-image parity with run 5 and the provenance preflight) |
 | D-76 | **Decided by the maintainer, 2026-10-06, at the start of W6** (the recommended option). Run 6 runs off the sandbox, on the maintainer's G-box: does W6 wait for it? | **Two PRs.** W6a now: T23.10.1, T23.10.2(a) (`run6-runbook.md`), T23.11.1 and its threat entries, the comparison refresh that needs no run-6 number, F4 and the phase close-out. W6b after the results: T23.10.2(b) — the seventh draft of `PUBLIC_BENCH_ANALYSIS.md`, the comparisons' performance rows and change-log lines, and the website where it quotes benchmark numbers — on `claude/phase23-w6b`, cut from `main` after W6a merges. The maintainer runs run 6 after W6a merges and beta18 is published. Phase 23 is recorded complete at W6a with T23.10.2(b) the one open task, tracked by G-10's issue and closed by W6b. Rejected: one PR held open until the results (a wave's reviewed work waits on an off-sandbox run with no date) |
+| D-77 | *Taken by the orchestrator, 2026-10-06, on T23.11.1's record (the maintainer may override in the W6a PR).* G-11 asks whether a RADIUS front end with EAP-TLS over the integrated CA fits AXIAM and what it would cost | **Decline the native front end now; the FreeRADIUS-backend route when a named adopter asks; publish a CRL regardless.** Reopen condition: a named adopter needs 802.1X, VPN or network-device login and will not run FreeRADIUS, or option B has shipped with a documented shortfall. The record's §6 is the security baseline any build starts from. Rejected: building option A in Phase 23 (XL for an audience nobody has named, and a new authentication path and trust boundary); a guide alone for option B (the tree publishes no CRL, so FreeRADIUS would have no revocation channel) |
+| D-78 | *Taken in T23.11.1's threat entries (Opus 5.5), 2026-10-06, accepted by the orchestrator.* How do threat entries for a surface that ships nothing enter the model, given that the W5 F4 review requires them? | **Threat Dragon's `NotApplicable` status, on a design-only diagram whose elements are out of scope.** Such an entry counts in the total and in neither the mitigated nor the open count, never appears in the open-risk register, and says what any build must do from its first commit and the status it would take; the commit that builds an element moves its entries to Mitigated or Open with tests. `gen-threat-model.mjs` counts the status apart. Rejected: Mitigated (no control exists — the T-108/T-117 mistake); Open (nothing is exposed and no task is building it, so the register would nearly double with entries that may never close) |
 
 ---
 

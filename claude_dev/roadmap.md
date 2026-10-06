@@ -1111,7 +1111,7 @@ with an F4 security review of the wave's diff against
 | T23.9.1 | [`verifiable-credentials-design.md`](verifiable-credentials-design.md), design only | Opus 5.5 | W1 | ✓ |
 | T23.10.1 | `benchmarks/targets/authentik/` profile | Sonnet 5.5 | W6 | |
 | T23.10.2 | Run 6, `PUBLIC_BENCH_ANALYSIS.md` seventh draft, comparison rows | Sonnet 5.5 | W6 | |
-| T23.11.1 | RADIUS / EAP-TLS spike, decision record | Sonnet 5.5 | W6 | |
+| T23.11.1 | RADIUS / EAP-TLS spike, decision record ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)); threat entries T-448 … T-468 on Opus 5.5; D-77, D-78 | Sonnet 5.5 | W6 | ✓ |
 | T23.12.1 | Front-channel logout declined and recorded (D-6) | Sonnet 5.5 | W1 | ✓ |
 | T23.15.1 | *Identity for agents* guide and website page | Sonnet 5.5 | W1 | ✓ |
 | F4 | Per-wave security review of the wave diff | Opus 5.5 | every wave | W1–W5 ✓ |

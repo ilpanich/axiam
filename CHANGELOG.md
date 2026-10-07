@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta19] - 2026-10-07
+
+### Changed
+
+- Bump config from 0.15.26 to 0.15.27 in the minor-patch group
+
+- Bump the minor-patch group in /frontend with 7 updates
+
+- Bump the npm_and_yarn group across 2 directories with 2 updates
+
+- Bump rustls from 0.23.43 to 0.23.45 in /examples/b3-mesh-delegation-grpc
+
+- Bump dtolnay/rust-toolchain
+
+### Fixed
+
+- Retry a conflicted SAML participant record instead of assuming a winner
+
+- Read the dashboard's clock once, not during render
+
+- Time the dummy-verify floor against a bracketing reference
+
 ## [1.0.0-beta18] - 2026-10-06
 
 ### Added

@@ -61,11 +61,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.36.1",
+ "version": "2.37.0",
  "diagramCount": 10,
  "total": 469,
- "open": 23,
- "mitigated": 425,
+ "open": 22,
+ "mitigated": 426,
  "notApplicable": 21,
  "areas": [
   {
@@ -114,7 +114,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 55,
-   "open": 5,
+   "open": 4,
    "notApplicable": 0
   },
   {
@@ -149,7 +149,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Tampering",
    "total": 93,
-   "open": 2,
+   "open": 1,
    "notApplicable": 5
   },
   {
@@ -193,7 +193,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Medium",
    "total": 195,
-   "open": 10,
+   "open": 9,
    "notApplicable": 9
   },
   {
@@ -373,16 +373,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Federation — SAML SP & OIDC relying party",
    "element": "SAML SLO endpoint (/saml/v2/{tenant}/slo)",
    "residualRisk": "Accepted design trade-off (D-38, D-39). SAML has no back channel through the browser; the SOAP binding that would provide one is not implemented. What bounds it: SLO revokes the AXIAM session first, so a broken chain never keeps an AXIAM session alive; assertions are valid for five minutes and single-use; a revoked session or a suspended account obtains no new assertion (T-328), so the SP session cannot be renewed through AXIAM; and the SP's own session lifetime is the SP administrator's to set. A later decision may add SOAP back-channel logout or drive a chain from `end_session`."
-  },
-  {
-   "number": 388,
-   "title": "A captured SET is replayed to its receiver",
-   "category": "Tampering",
-   "severity": "Medium",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "SET push / poll response",
-   "residualRisk": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Open because the control is the receiver's: RFC 8417 §4.1 / contract §32.7 require it to remember the `jti`s it processed and refuse a repeat, and the receiver helper that does so ships in the SDKs only after the post-merge fan-out (D-35); a receiver that does not de-duplicate stays exposed for as long as it treats an old SET as news."
   },
   {
    "number": 405,

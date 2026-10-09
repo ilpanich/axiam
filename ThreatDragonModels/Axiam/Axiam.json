@@ -1,5 +1,5 @@
 {
-  "version": "2.36.1",
+  "version": "2.37.0",
   "summary": {
     "title": "Axiam",
     "owner": "ilpanich",
@@ -16353,7 +16353,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.35.0",
+        "version": "2.37.0",
         "cells": [
           {
             "position": {
@@ -18102,11 +18102,11 @@
                 {
                   "id": "70177ba6-628e-5682-abd7-d6bda2b1613e",
                   "title": "A captured SET is replayed to its receiver",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Tampering",
                   "description": "A SET carries no `exp` (SSF \u00a74.1.7 forbids it), so a SET captured in transit, from a receiver's logs or from a misrouted push stays valid forever. Replayed later, a session-revoked or account-disabled SET logs out or locks out its subject again.",
-                  "mitigation": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Open because the control is the receiver's: RFC 8417 \u00a74.1 / contract \u00a732.7 require it to remember the `jti`s it processed and refuse a repeat, and the receiver helper that does so ships in the SDKs only after the post-merge fan-out (D-35); a receiver that does not de-duplicate stays exposed for as long as it treats an old SET as news.",
+                  "mitigation": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Closed on 2026-10-09 (contract 1.58 fan-out, D-35): the receiver's half is the \u00a732.7 helper, which remembers every `jti` it accepted in a pluggable store over a replay window that defaults to seven days and cannot be configured below it, and refuses a repeat with `replayed`. It shipped in all eleven SDKs, the four REST-only ones included \u2014 rust #123, typescript #131, python #93, java #108, csharp #101, php #78, go #93, kotlin #72, swift #70, c #69, cplusplus #71, merged on each default branch on 2026-10-09 and not yet in a tagged release \u2014 each with contract \u00a732.8 helper test 6: Rust `tests/ssf_receiver_test.rs::a_replay_is_refused_and_a_short_window_is_refused_at_configuration`, TypeScript `test/node/ssfReceiver.test.ts` \"the second sighting is replayed\", Python `tests/test_ssf_receiver.py::test_a_replay_is_refused_and_a_short_window_is_refused_at_configuration`, Java `SsfReceiverTest#aReplayIsRefusedAndAShortWindowIsRefusedAtConfiguration`, C# `SsfReceiverTests#ASecondSightingIsReplayedAndAShortWindowIsRefused`, PHP `tests/Contract158/SsfReceiverTest.php::testAReplayIsRefusedAndAShortWindowIsRefusedAtConfiguration`, Go `ssf_receiver_test.go::TestSsfReceiver_AReplayIsRefusedAndAShortWindowIsRefusedAtConfiguration`, Kotlin `SsfReceiverTest` \"a replay is refused and a short window is refused at configuration\", Swift `SsfReceiverTests#testAReplayIsRefusedAndAShortWindowIsRefusedAtConfiguration`, C `tests/test_ssf_receiver.c::test_the_same_set_twice_is_replayed_and_the_window_has_a_floor`, C++ `tests/test_ssf_receiver.cpp` \"\u00a732.8 helper (6): the same SET twice is replayed; a window under seven days is refused\". A receiver written without the helper is still exposed for as long as it treats an old SET as news: de-duplicating `jti` is the duty RFC 8417 \u00a74.1 and contract \u00a732.7 place on every receiver, not a property of AXIAM.",
                   "modelType": "STRIDE",
                   "number": 388
                 },

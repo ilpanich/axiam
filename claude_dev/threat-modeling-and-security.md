@@ -14,13 +14,29 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-09-25 (`main` before `1.0.0-beta17`, model
-> 2.17.0 — the Phase 21 MCP wave of `1.0.0-beta16` and the Phase 22 dogfooding
-> wave, which ships in `1.0.0-beta17`). The body sections below now carry both
-> waves; the website's Security section is brought to them by
-> [`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md),
-> executed on 2026-09-25 in the same commit as this text. The beta15 plan
-> records the pass before it.**
+> **Status: source current as of 2026-10-09 (`main` at `1.0.0-beta19`, model
+> 2.37.0 — Phase 23, the competitor-gap closure of `1.0.0-beta18`, and the
+> contract 1.58 SDK fan-out).** The Phase 23 paragraphs below record the waves;
+> this plan
+> ([`phase23-closeout-threat-model-and-docs-plan-2026-10-09.md`](phase23-closeout-threat-model-and-docs-plan-2026-10-09.md))
+> records the close-out. The website's Security section mirrors this text and
+> carries the same stamp; the 2026-09-25 pass before it brought the source to
+> the Phase 21 MCP wave of `1.0.0-beta16` and the Phase 22 dogfooding wave of
+> `1.0.0-beta17`
+> ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
+>
+> **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
+> no `exp`, so refusing a replayed one was always the receiver's control, and
+> T-388 stayed open from model 2.27.0 until it existed for integrators. It does
+> now: the §32.7 receiver helper remembers every `jti` it accepted, in a
+> pluggable store over a replay window that defaults to seven days and cannot be
+> configured below it, and refuses a repeat as `replayed`. All eleven SDK
+> repositories merged contract 1.58 on 2026-10-09 — the four REST-only SDKs
+> taking the helper too — each with the replay test the contract requires (§32.8
+> helper test 6), and the entry names the eleven merges and tests. A receiver
+> written without the helper is still exposed, which is why the duty stays
+> written on every receiver. Nothing else in the model changed. The model is
+> **469 threats, 426 mitigated / 22 open / 21 not applicable**.
 >
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
@@ -1121,7 +1137,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 447 threats** and a
+The system is verified against a **STRIDE threat model of 469 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1145,7 +1161,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
 | Threats identified | 469 |
-| Mitigated / Open | 425 / 23 |
+| Mitigated / Open | 426 / 22 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1168,7 +1184,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 30 | 2 | 0 |
-| Audit, webhooks, email & notifications | 55 | 5 | 0 |
+| Audit, webhooks, email & notifications | 55 | 4 | 0 |
 | Deployment & platform (Kubernetes) | 29 | 6 | 0 |
 | Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
 | RADIUS front end (not built — G-11, declined) | 21 | 0 | 21 |
@@ -1225,7 +1241,9 @@ with their tests, and four open — the push endpoint at delivery time, event
 flooding and the poll buffer until the delivery task lands (T-392, T-394, T-395),
 and SET replay until the SDK receiver helper that de-duplicates `jti` ships
 (T-388). The delivery task has landed (T23.5.3, model 2.28.0): T-392, T-394 and
-T-395 are mitigated, leaving only T-388. The four delivery entries of model
+T-395 are mitigated, leaving only T-388 — which closed at model 2.37.0, when
+the receiver helper shipped in all eleven SDKs with its replay test (contract
+1.58, 2026-10-09). The four delivery entries of model
 2.29.0 (T-402 … T-405) add one open item, and it is accepted rather than
 deferred: an SSF event that cannot be produced or queued is lost with a log line
 and nothing else, because a logout must not fail when a receiver's queue is
@@ -1280,7 +1298,7 @@ the category recorded against it in the model.
 | Category | Threats | Open | Not built |
 |---|---|---|---|
 | Spoofing | 101 | 5 | 3 |
-| Tampering | 93 | 2 | 5 |
+| Tampering | 93 | 1 | 5 |
 | Repudiation | 16 | 2 | 1 |
 | Information disclosure | 110 | 7 | 4 |
 | Denial of service | 59 | 4 | 4 |
@@ -1292,12 +1310,12 @@ the category recorded against it in the model.
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
 | High | 196 | 10 | 9 |
-| Medium | 195 | 10 | 9 |
+| Medium | 195 | 9 | 9 |
 | Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 23 still-open items are listed one by one in
+the weight the control carries. The 22 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -1318,7 +1336,7 @@ have to be re-established — nothing is assumed across a boundary.
 | **Tenant ↔ tenant** | Every tenant's data from every other's | Tenant context derived from the verified session or JWT — never from request input — and enforced on every query and graph traversal; cross-tenant reach only as an explicit organization-scope claim — narrowable to named tenants per role assignment — verified to stay inside the caller's organization and reach |
 | **AXIAM ↔ third parties** | Outbound to IdPs, email providers, webhook receivers | SSRF guard with resolve-and-pin, HTTPS enforcement, response-size caps, HMAC signatures on deliveries |
 | **AXIAM ↔ tenant directory** | AXIAM ↔ a tenant's own LDAP or Active Directory server | TLS before any bind or search — `ldaps://`, or StartTLS that fails closed — verified against the tenant's own anchors and the URL's host; referrals never followed; login names enter filters only through RFC 4515 escaping; a bounded per-tenant pool; a read-only bind account; the host resolved once and held to the deployment's address rule, the connection pinned to the vetted address; every message from the directory measured and checked before it is parsed |
-| **AXIAM ↔ SAML service provider** | AXIAM's SAML identity provider ↔ the applications a tenant registered to receive assertions | Assertions always signed with the tenant's own credential, inside its validity window, under the `Issuer` of the tenant in the request path; delivered only to a registered ACS URL; five-minute validity; a pairwise `NameID` by default; failure responses never signed; once single logout lands (D-38), an SP's logout messages accepted only signed by its registered certificate and verified per node, and AXIAM's own signed only for a session holder or a verified SP |
+| **AXIAM ↔ SAML service provider** | AXIAM's SAML identity provider ↔ the applications a tenant registered to receive assertions | Assertions always signed with the tenant's own credential, inside its validity window, under the `Issuer` of the tenant in the request path; delivered only to a registered ACS URL; five-minute validity; a pairwise `NameID` by default; failure responses never signed; an SP's logout messages accepted only signed by its registered certificate and verified per node, and AXIAM's own signed only for a session holder or a verified SP (D-38) |
 | **AXIAM ↔ SSF receiver** | AXIAM's Shared Signals Framework transmitter ↔ the relying parties a tenant registered a stream for | Every SET signed with the deployment key, explicitly typed, under the tenant issuer and an audience unique across the deployment; signed only when delivered, for an enabled stream that carries the event; pushed only to an endpoint held to the outbound address policy, with a sealed credential that never follows the endpoint to another origin; stream management and polling only with the receiver's own client-credentials token carrying `ssf.manage`, for its own streams |
 | **AXIAM ↔ SCIM downstream** | AXIAM's outbound SCIM client ↔ the SCIM 2.0 service providers a tenant registered as targets | Every request — the OAuth2 token request too — only to an `https` host resolved fresh to public addresses and pinned, with no redirect followed; a sealed credential bound to the URL it was registered for and opened only after the target is read again unchanged; only references on the queue and a fixed attribute set on the wire; nothing a downstream answers written into AXIAM's directory, and no downstream account touched unless its `externalId` is an id of this tenant |
 | **CIBA consumption device ↔ authentication device** | The device a CIBA client runs on ↔ the user's own device, where AXIAM authenticates them | The client authenticated as at the token endpoint and never standing in for the user: only the request's own user, after a full sign-in, approves it; the hint resolves silently; the binding message bounded and printable; the request identifier stored hashed and redeemable once, by the client that started it; prompts throttled per user; a ping only to a registered `https` endpoint under the outbound address policy |
@@ -1966,18 +1984,22 @@ against the classic federation attacks:
   authentication context comes from the session's own evidence, never from the
   request; failure responses carry a status code and nothing else, and are never
   signed, so the key cannot be harvested as a wrapping gadget.
-- **Specified next for the identity provider: registry management, metadata and
-  single logout.** The rules are written (contract §29, D-37 … D-42) and the
-  threat model holds them open until the code lands. Service providers are
-  registered by a human administrator through validated writes; an SP's metadata
-  is imported as a draft the administrator reviews — fetched only through the
-  SSRF guard, refused if it declares a DTD, and never trusted because it was
-  signed or because it came from a URL; the IdP's metadata is unsigned and
-  publishes the next signing certificate before it is promoted; single logout
-  accepts only signed logout messages from a registered SP, revokes the AXIAM
-  session before telling the other service providers, and signs its own logout
-  messages only for the session's holder or a verified SP — detached from the XML
-  on the Redirect binding, so they cannot serve as a wrapping gadget.
+- **Registry management, metadata and single logout follow the same rules.**
+  They were specified before the code (contract §29, D-37 … D-42) and have
+  landed since (T23.2.5, T23.2.4), each control with its tests; this item said
+  "specified next" until the 2026-10-09 close-out corrected it. Service
+  providers are registered by a human administrator through validated writes; an
+  SP's metadata is imported as a draft the administrator reviews — fetched only
+  through the SSRF guard, refused if it declares a DTD, and never trusted
+  because it was signed or because it came from a URL; the IdP's metadata is
+  unsigned and publishes the next signing certificate before it is promoted;
+  single logout accepts only signed logout messages from a registered SP,
+  revokes the AXIAM session before telling the other service providers, and
+  signs its own logout messages only for the session's holder or a verified SP —
+  detached from the XML on the Redirect binding, so they cannot serve as a
+  wrapping gadget. A service provider's own session can still outlive the AXIAM
+  session, because SAML has no back channel through the browser; that is
+  accepted and recorded (T-380).
 - **Attribute-to-role mapping is an explicit, tenant-scoped allow-list** set by an
   AXIAM administrator; unmapped IdP attributes are discarded, so an IdP cannot
   self-assign privileged roles.
@@ -2449,7 +2471,21 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
   re-authentication, tenant identifiers compared as strings rather than as
   UUIDs, and a malformed `200` on the device login adopted as an empty
   credential. Each SDK fixed its own in one pull request before re-vendoring the
-  contract, and the drift check reports all eleven at 1.52.
+  contract. Contracts 1.53 to 1.58 carried Phase 23 to the SDKs: 1.53 adds RFC
+  7592's three client-configuration operations, with the registration access
+  token a redacting type; 1.54, 1.55, 1.56 and 1.57 add four management
+  namespaces — the directory, SAML service providers, SSF streams and outbound
+  SCIM targets, which bring the registry to 190 operations across 28 namespaces
+  — every write-only credential among them a redacting type from the first
+  version; 1.56 also adds the SSF receiver helper, which verifies a SET and
+  refuses one it has already seen within a replay window that cannot be set
+  below seven days; and 1.58 adds the CIBA client helper, with the signed
+  request form. All eleven repositories merged the six on 2026-10-09, the four
+  REST-only SDKs taking the receiver and CIBA helpers as well, each with the
+  replay test the contract requires; they are merged on each default branch, not
+  yet in a tagged SDK release. The drift check reports every repository at 1.58,
+  and the cross-SDK review of those ports — contract 1.59, the third such review
+  after 1.49 and 1.52 — is pending.
 - **The admin UI redacts what a gateway echoes.** An error body is not always
   written by AXIAM — a proxy or gateway can answer instead, and those echo the
   request — so the UI redacts credential-shaped keys before rendering, including
@@ -2582,7 +2618,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 23 of 469. The 21
+Every threat the model records as open, most severe first — 22 of 469. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -2609,7 +2645,6 @@ each.
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
-| T-388 — A captured SET is replayed to its receiver | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-445 — The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
 | T-447 — A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name | Medium | /oauth2/authorize (+ consent) · *OAuth2 / OIDC authorization server* |
@@ -2820,8 +2855,8 @@ by who does it.
   no internal review had, and the model records it as the Critical it was
   rather than as a conformance detail.
 
-Everything in this document was last re-derived from source at `main` before
-**`1.0.0-beta17`** (model 2.17.0) on 2026-09-25; the handoff block at the top of this file says
+Everything in this document was last re-derived from source at `main` at
+**`1.0.0-beta19`** (model 2.37.0) on 2026-10-09; the handoff block at the top of this file says
 what that pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.

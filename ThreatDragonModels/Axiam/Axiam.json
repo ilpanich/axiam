@@ -2062,7 +2062,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.12.0",
+        "version": "2.38.0",
         "cells": [
           {
             "position": {
@@ -2311,7 +2311,7 @@
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "description": "Different status codes, error bodies or response times for existing versus non-existent accounts let an attacker enumerate valid usernames and email addresses.",
-                  "mitigation": "Login returns a uniform failure for unknown-user and bad-password alike, and password verification runs on a dummy hash when the user does not exist so timing does not distinguish the cases. Residual (W6 F4 review, model 2.36.1): the temporary-lockout branch answers without the dummy verify, and gRPC `ValidateCredentials` runs none on any refusal; recorded open as T-469.",
+                  "mitigation": "Login returns a uniform failure for an unknown user, a bad password and an account serving a lockout alike, and each costs one Argon2id verify under the same bounded hash permit, on a dummy hash when there is no real one to check, so neither timing nor, under saturation, the `503` status distinguishes the cases; gRPC `ValidateCredentials` equalises every refusal the same way. The residual the W6 F4 review recorded at model 2.36.1 (the lockout branch, and every gRPC refusal, answered without a verify) closed with T-469 at model 2.38.0 (#564).",
                   "modelType": "STRIDE",
                   "number": 30
                 },
@@ -2362,11 +2362,11 @@
                 {
                   "id": "83274aba-b49a-5852-accc-1008706118cc",
                   "title": "A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart",
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "description": "`AuthService::login` refuses an account serving a temporary lockout, local or directory, before it asks for a hash permit or runs any Argon2id verify (`crates/axiam-auth/src/service.rs`, step 2), while an unknown name and a wrong password each cost one verify (SEC-026, T-30). Lockout is set by the attacker's own failures, so a name that answers fast after N wrong passwords exists and one that keeps costing a verify does not: an enumeration oracle at N + 1 requests per name, which also locks the real user out (T-35). Under hash-permit saturation the difference is in the status itself: the locked account answers 401 while every branch that verifies answers 503. gRPC `UserService/ValidateCredentials` answers an unknown name, and a locked, non-active or directory account, `valid: false` with no verify at all, an oracle for any caller holding a validated token of the tenant.",
-                  "mitigation": "Open (W6 F4 review, 2026-10-06, model 2.36.1; found by the T23.11.1 RADIUS spike, whose T-457 requires the same of any RADIUS build). Fix: run the equalising dummy verify, under the same bounded permit, on the lockout branch (still before the directory is contacted, T-302, and without verifying the real hash, so a correct password during a lockout neither succeeds nor shows) and on every refusal of `ValidateCredentials`. A timing-free test pins it: with no hash permit available, a locked account must answer the 503 an unknown name answers; today it answers 401 (ilpanich/axiam#564). Bounded meanwhile by the per-IP login limiter and by the lockout's exponential backoff, which makes every probe cost N failed attempts against a real user.",
+                  "mitigation": "Closed in the 1.0.0 release wave (model 2.38.0, #564). The lockout branch of `AuthService::login` now runs the equalising dummy verify under the same bounded hash permit and timeout before it refuses: still before the directory is contacted (T-302), and never against the account's own hash, so a correct password during a lockout neither succeeds nor shows. gRPC `UserService/ValidateCredentials` takes its hash permit before it branches and runs the same dummy verify, through `spawn_blocking`, on every refusal: an unknown name, a locked, non-active or directory account. Each refusal now costs one verify, and under saturation answers the gate's `503` / `UNAVAILABLE` as a wrong password does. Tests: `crates/axiam-auth/tests/directory_provisioning_test.rs` `a_locked_account_needs_the_hash_permit_an_unknown_name_needs` (with no permit, a locked account answers the `503` an unknown name answers; before the fix it answered `401`) and `crates/axiam-api-grpc/tests/grpc_units.rs` `every_refusal_needs_the_hash_permit_a_wrong_password_needs` (with no permit, an unknown name and a locked, non-active and directory account answer the `UNAVAILABLE` a wrong password answers; before the fix each answered `valid: false` at once). Found by the W6 F4 review (2026-10-06, model 2.36.1) after the T23.11.1 RADIUS spike, whose T-457 requires the same of any RADIUS build.",
                   "modelType": "STRIDE",
                   "number": 469
                 }
@@ -7672,7 +7672,7 @@
         "diagramType": "STRIDE",
         "placeholder": "New STRIDE diagram description",
         "thumbnail": "./public/content/images/thumbnail.stride.jpg",
-        "version": "2.30.0",
+        "version": "2.38.0",
         "cells": [
           {
             "position": {
@@ -9686,7 +9686,7 @@
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "description": "A directory account's password is checked by a network bind; a local one's by an Argon2id verify; an unknown name's by a dummy verify. If those take different time, or answer differently, the login endpoint tells an attacker which names exist and which are directory accounts \u2014 and whether the directory is up.",
-                  "mitigation": "The response is the same in every case: `InvalidCredentials`, the answer an unknown name and a wrong local password already get, for a wrong directory password, an entry that is not the account's, an unreachable, misconfigured or disabled directory, a restricted account, an empty password and a deployment without an authenticator alike. The work is equalised the way SEC-026 equalises unknown names: every directory branch runs the same dummy Argon2id verify, under the same hash permit and the same `503` backpressure rule \u2014 on the bind path concurrently with the bind, holding a permit acquired before the directory is contacted, so saturation answers `503` exactly where the local path would. The residual, stated plainly: a directory sign-in costs `max(Argon2id verify, bind)`, and a bind (two TLS handshakes and three round trips) usually costs more than one verify, so a directory account answers measurably later than a local or unknown name. The login endpoint's per-IP rate limit and the per-account lockout bound how fast that can be sampled. The same shape as T-30's lockout branch, which also answers without a verify. Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `there_is_no_fallback_to_a_local_hash`, `an_unknown_name_is_answered_as_today_without_the_directory` (`axiam-auth/tests/directory_account_test.rs`).",
+                  "mitigation": "The response is the same in every case: `InvalidCredentials`, the answer an unknown name and a wrong local password already get, for a wrong directory password, an entry that is not the account's, an unreachable, misconfigured or disabled directory, a restricted account, an empty password and a deployment without an authenticator alike. The work is equalised the way SEC-026 equalises unknown names: every directory branch runs the same dummy Argon2id verify, under the same hash permit and the same `503` backpressure rule \u2014 on the bind path concurrently with the bind, holding a permit acquired before the directory is contacted, so saturation answers `503` exactly where the local path would. The residual, stated plainly: a directory sign-in costs `max(Argon2id verify, bind)`, and a bind (two TLS handshakes and three round trips) usually costs more than one verify, so a directory account answers measurably later than a local or unknown name. The login endpoint's per-IP rate limit and the per-account lockout bound how fast that can be sampled. T-30's lockout branch, which answered without a verify, is no longer the same shape: since model 2.38.0 it costs the dummy verify too, still without a bind (T-469). Tests: `a_locked_account_is_refused_before_the_directory_is_called`, `there_is_no_fallback_to_a_local_hash`, `an_unknown_name_is_answered_as_today_without_the_directory` (`axiam-auth/tests/directory_account_test.rs`).",
                   "modelType": "STRIDE",
                   "number": 301
                 },

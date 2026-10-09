@@ -10,7 +10,6 @@ use axiam_auth::token::ValidatedClaims;
 use axiam_core::error::AxiamError;
 use axiam_core::models::user::UserStatus;
 use axiam_core::repository::UserRepository;
-use chrono::Utc;
 use secrecy::ExposeSecret;
 use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status};
@@ -190,47 +189,39 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         });
 
         // Look up user by username, then by email.
-        let user = match self
+        let found = match self
             .user_repo
             .get_by_username(claims_tenant_id, &req.username_or_email)
             .await
         {
-            Ok(u) => u,
+            Ok(u) => Some(u),
             Err(AxiamError::NotFound { .. }) => {
                 match self
                     .user_repo
                     .get_by_email(claims_tenant_id, &req.username_or_email)
                     .await
                 {
-                    Ok(u) => u,
-                    Err(AxiamError::NotFound { .. }) => return Ok(invalid),
+                    Ok(u) => Some(u),
+                    Err(AxiamError::NotFound { .. }) => None,
                     Err(e) => return Err(Status::internal(e.to_string())),
                 }
             }
             Err(e) => return Err(Status::internal(e.to_string())),
         };
 
-        // Enforce lockout (brute force protection).
-        if let Some(locked_until) = user.locked_until
-            && locked_until > Utc::now()
-        {
-            return Ok(invalid);
-        }
-
-        // Enforce account status (only Active accounts can authenticate).
-        if user.status != UserStatus::Active {
-            return Ok(invalid);
-        }
-
-        // G-3 (T23.3.2): a directory account's password is its directory's to
-        // check, and this RPC has no directory client. It answers `valid: false`
-        // without verifying the account's local hash — an unusable random one —
-        // and without counting a failure: the caller did not guess wrong, it
-        // asked a credential check that cannot answer for this account. Never a
-        // fallback to the local hash, exactly as `AuthService::login` refuses one.
-        if user.is_directory_account() {
-            return Ok(invalid);
-        }
+        // The refusals that need no password: an unknown name, an account
+        // serving a temporary lockout, one whose status is not `Active`, and a
+        // directory account (G-3, T23.3.2) — whose password is its directory's
+        // to check, and this RPC has no directory client. None verifies the
+        // account's local hash (a directory account's is an unusable random
+        // one) and none counts a failure: the caller did not guess wrong, or
+        // the account is already locked. Never a fallback to the local hash,
+        // exactly as `AuthService::login` refuses one.
+        let user = found.filter(|user| {
+            !axiam_auth::lockout::is_locked_out(user)
+                && user.status == UserStatus::Active
+                && !user.is_directory_account()
+        });
 
         // Verify password — CPU-bound Argon2id, gated and offloaded exactly as
         // `AuthService::login` does it (axiam-auth/src/service.rs, CQ-B02/B1).
@@ -255,6 +246,13 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         // bounds guessing *breadth* per IP, this gate bounds *concurrency* per
         // process. The benchmark neutralizes the former, which is precisely why
         // it could reach the missing latter.
+        //
+        // The permit is taken BEFORE the branch on the refusals above, and each
+        // of them runs one equalising verify against the dummy hash under it
+        // (SEC-026, T-469): an unknown, locked, non-active or directory account
+        // costs what a wrong password costs, and under saturation answers the
+        // same UNAVAILABLE — so neither the latency nor the status tells an
+        // existing account, or its state, to a caller holding a tenant token.
         let _permit = acquire_hash_permit(
             &self.crypto_semaphore,
             Duration::from_secs(self.auth_config.hash_acquire_timeout_secs),
@@ -270,9 +268,17 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
             AxiamError::ServiceUnavailable(msg) => Status::unavailable(msg),
             other => Status::internal(other.to_string()),
         })?;
+        let pepper_owned = self.auth_config.pepper.clone();
+        let Some(user) = user else {
+            tokio::task::spawn_blocking(move || {
+                password::equalising_dummy_verify(pepper_owned.as_ref().map(|p| p.expose_secret()))
+            })
+            .await
+            .map_err(|e| Status::internal(format!("spawn_blocking join error: {e}")))?;
+            return Ok(invalid);
+        };
         let pw_owned = req.password.clone();
         let hash_owned = user.password_hash.clone();
-        let pepper_owned = self.auth_config.pepper.clone();
         let valid = tokio::task::spawn_blocking(move || {
             password::verify_password(
                 &pw_owned,

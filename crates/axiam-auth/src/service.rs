@@ -368,9 +368,17 @@ impl<
         //    is refused without the directory hearing anything, so AXIAM cannot
         //    be used to run up the failed-bind count that locks the account in
         //    Active Directory (T-302).
+        //
+        //    It still costs one verify under the hash permit, against the dummy
+        //    hash and never the real one (T-469, SEC-026): a lockout the
+        //    attacker's own failures triggered must not answer faster than an
+        //    unknown name — an enumeration oracle — nor `401` where every
+        //    hashing branch answers `503` under saturation. A correct password
+        //    during the lockout neither succeeds nor shows.
         if let Some(locked_until) = user.locked_until
             && locked_until > Utc::now()
         {
+            self.equalising_dummy_verify().await?;
             return Err(AuthError::InvalidCredentials.into());
         }
 

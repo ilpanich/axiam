@@ -986,6 +986,56 @@ async fn validate_credentials_saturated_hash_gate_is_unavailable_not_internal() 
     );
 }
 
+/// **#564 (T-469)** — the gRPC twin of
+/// `a_locked_account_needs_the_hash_permit_an_unknown_name_needs`: every
+/// refusal runs the equalising dummy verify under the same gate, so with the
+/// gate saturated an unknown name, a locked account, a non-active account and
+/// a directory account all answer what a wrong password answers — the gate's
+/// UNAVAILABLE — instead of an instant `valid: false` that told an existing
+/// account, and its state, apart.
+#[tokio::test]
+async fn every_refusal_needs_the_hash_permit_a_wrong_password_needs() {
+    let tenant = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let active = active_user(tenant, hash);
+    let mut locked = active.clone();
+    locked.locked_until = Some(Utc::now() + chrono::Duration::minutes(15));
+    let mut inactive = active.clone();
+    inactive.status = UserStatus::Inactive;
+    let mut directory = active.clone();
+    directory.directory_external_id = Some("6f9619ff-8b86-d011-b42d-00c04fc964ff".into());
+
+    let cases = [
+        ("wrong password", Some(active)),
+        ("unknown name", None),
+        ("locked account", Some(locked)),
+        ("non-active account", Some(inactive)),
+        ("directory account", Some(directory)),
+    ];
+    for (case, user) in cases {
+        let mut cfg = auth_config();
+        cfg.hash_acquire_timeout_secs = 0;
+        let svc = UserServiceImpl::with_static_lockout_policy(
+            MockUserRepo { user },
+            cfg,
+            // Zero permits: the gate is saturated, nothing can be acquired.
+            std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+        );
+        let mut req = Request::new(ValidateCredentialsRequest {
+            tenant_id: tenant.to_string(),
+            username_or_email: "alice".into(),
+            password: "definitely-not-the-password".into(),
+        });
+        req.extensions_mut().insert(claims_for(tenant));
+        let err = svc.validate_credentials(req).await.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::Unavailable,
+            "{case}: a refusal must cost the verify a wrong password costs (SEC-026)"
+        );
+    }
+}
+
 /// The companion to the test above: with permits available the handler still
 /// completes normally, so the gate cannot be "passing" by rejecting everything.
 #[tokio::test]

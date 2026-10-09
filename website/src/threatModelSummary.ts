@@ -64,8 +64,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.38.0",
  "diagramCount": 10,
  "total": 469,
- "open": 21,
- "mitigated": 427,
+ "open": 20,
+ "mitigated": 428,
  "notApplicable": 21,
  "areas": [
   {
@@ -79,7 +79,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 1,
    "title": "Authentication & session management",
    "total": 36,
-   "open": 1,
+   "open": 0,
    "notApplicable": 0
   },
   {
@@ -161,7 +161,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Information disclosure",
    "total": 110,
-   "open": 7,
+   "open": 6,
    "notApplicable": 4
   },
   {
@@ -193,7 +193,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Medium",
    "total": 195,
-   "open": 8,
+   "open": 7,
    "notApplicable": 9
   },
   {
@@ -393,16 +393,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Deployment & platform (Kubernetes)",
    "element": "AXIAM deployment (N replicas, HPA)",
    "residualRisk": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
-  },
-  {
-   "number": 469,
-   "title": "A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart",
-   "category": "Information disclosure",
-   "severity": "Medium",
-   "diagramId": 1,
-   "area": "Authentication & session management",
-   "element": "Login endpoints /auth/login + /auth/opaque/*",
-   "residualRisk": "Open (W6 F4 review, 2026-10-06, model 2.36.1; found by the T23.11.1 RADIUS spike, whose T-457 requires the same of any RADIUS build). Fix: run the equalising dummy verify, under the same bounded permit, on the lockout branch (still before the directory is contacted, T-302, and without verifying the real hash, so a correct password during a lockout neither succeeds nor shows) and on every refusal of `ValidateCredentials`. A timing-free test pins it: with no hash permit available, a locked account must answer the 503 an unknown name answers; today it answers 401 (ilpanich/axiam#564). Bounded meanwhile by the per-IP login limiter and by the lockout's exponential backoff, which makes every probe cost N failed attempts against a real user."
   },
   {
    "number": 161,

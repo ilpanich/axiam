@@ -32,11 +32,14 @@ fn dummy_probe() -> &'static str {
 /// One full Argon2id verify against [`DUMMY_HASH`], result discarded.
 ///
 /// Called on branches that would otherwise skip the hash (unknown user,
-/// unknown address), so they cost what the real branch costs. The cost is
-/// fixed by the parameters baked into `DUMMY_HASH`, not by the probe, so the
+/// unknown address, an account serving a lockout, every refusal of gRPC
+/// `ValidateCredentials`), so they cost what the real branch costs. The cost
+/// is fixed by the parameters baked into `DUMMY_HASH`, not by the probe, so the
 /// probe is a runtime value rather than a literal. This is CPU-bound and
-/// blocking: callers run it under `spawn_blocking` and a crypto permit.
-pub(crate) fn equalising_dummy_verify(pepper: Option<&str>) {
+/// blocking: callers run it under `spawn_blocking` and a crypto permit — the
+/// same permit, acquired the same way, as the verify it stands in for, or the
+/// `503` it answers under saturation becomes the oracle (T-469).
+pub fn equalising_dummy_verify(pepper: Option<&str>) {
     let _ = verify_password(dummy_probe(), DUMMY_HASH, pepper);
 }
 

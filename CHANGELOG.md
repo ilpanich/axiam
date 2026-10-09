@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sign-in. The OpenAPI annotations of both routes list the `403`. Threat model
   2.38.0: T-447 Mitigated; 469 threats, 427 mitigated / 21 open / 21 not
   applicable.
+- **A locked account costs the password verify an unknown name costs** (#564,
+  P23W6-09, T-469). The password login refused an account serving a temporary
+  lockout before it took a hash permit or ran any Argon2id verify, while an
+  unknown name and a wrong password each cost one (SEC-026). Since the lockout
+  is triggered by the caller's own failures, a name that answered fast after N
+  wrong passwords was an existing account, and when the hash permits were
+  saturated it answered `401` where every other branch answered `503`. gRPC
+  `UserService/ValidateCredentials` answered an unknown name, and a locked,
+  non-active or directory account, `valid: false` with no verify at all. The
+  lockout branch now runs the equalising dummy verify under the same permit
+  and timeout before it refuses — still before the directory is contacted, and
+  never against the account's own hash, so a correct password during a lockout
+  neither succeeds nor shows — and `ValidateCredentials` takes its permit before
+  it branches and runs the dummy verify on every refusal. **Behaviour change:**
+  under hash-permit saturation a locked account now answers `503` on
+  `POST /api/v1/auth/login`, and every refused `ValidateCredentials` call
+  answers `UNAVAILABLE`, exactly as a wrong password does; a refusal also now
+  takes as long as one. Threat model 2.38.0: T-469 Mitigated and T-30's residual
+  removed; 469 threats, 428 mitigated / 20 open / 21 not applicable.
 
 ### Documentation
 

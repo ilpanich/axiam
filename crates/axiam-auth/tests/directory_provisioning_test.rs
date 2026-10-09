@@ -620,6 +620,39 @@ async fn saturation_answers_the_same_503_before_the_directory_is_contacted() {
     assert_eq!(account_count(&h).await, 1);
 }
 
+/// **#564 (P23W6-09, T-469)** — an account serving a temporary lockout is
+/// refused only after the same dummy verify, under the same hash permit, that
+/// an unknown name costs: under saturation both answer `503`, where a lockout
+/// that skipped the verify answered `401` (and, unsaturated, faster).
+#[tokio::test]
+async fn a_locked_account_needs_the_hash_permit_an_unknown_name_needs() {
+    let h = harness().await;
+    h.users
+        .update(
+            h.tenant_id,
+            h.local_user,
+            UpdateUser {
+                locked_until: Some(Some(Utc::now() + ChronoDuration::minutes(15))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // No permits at all and no patience: anything that would hash answers 503.
+    let saturated = service_with(&h, None, 0, 0);
+    let wrong = fresh_credential();
+    let unknown = saturated.login(input(&h, "nobody-here", &wrong)).await;
+    assert!(
+        matches!(unknown, Err(AxiamError::ServiceUnavailable(_))),
+        "an unknown name runs the equalising verify, so it needs a permit"
+    );
+    let locked = saturated.login(input(&h, "bob", &wrong)).await;
+    assert!(
+        matches!(locked, Err(AxiamError::ServiceUnavailable(_))),
+        "a locked account must cost what an unknown name costs (SEC-026)"
+    );
+}
+
 /// D-28: an entry that would collide with a local account is not provisioned
 /// over it — on username or email, in any case, and across the two columns —
 /// and the local account is untouched.

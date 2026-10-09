@@ -595,9 +595,13 @@ Argon2id cost parameters themselves are never weakened to gain throughput.
 | `AXIAM__AUTH__HASH_ACQUIRE_TIMEOUT_SECS` | Seconds a request waits for a hash permit before returning a `503 service_unavailable` backpressure error. Default `5`. Lower for faster load-shedding under attack; raise to tolerate longer queues before shedding. |
 
 The 503 path preserves the SEC-026 username-enumeration defence: the login
-"user not found" branch is subject to the same permit acquisition and timeout
-as the real password-verify branch, so the two remain timing- and
-status-indistinguishable under both normal and saturated load.
+"user not found" branch and the branch that refuses an account serving a
+temporary lockout each run one dummy verify under the same permit acquisition
+and timeout as the real password-verify branch, so all three remain timing- and
+status-indistinguishable under both normal and saturated load. gRPC
+`UserService/ValidateCredentials` does the same on every refusal (an unknown
+name, a locked, non-active or directory account), answering `UNAVAILABLE`
+where a wrong password would (T-469, #564).
 
 ## Memory allocator (jemalloc, H4)
 

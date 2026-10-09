@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447 closed).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447 and T-469 closed).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -34,8 +34,14 @@
 > approval routes call, so every approval surface takes a console sign-in only
 > (#549); the test redeems an authorization-code token and fails to read,
 > approve or refuse a device grant with it, while the user's console sign-in
-> approves it. The model is **469 threats, 427 mitigated / 21 open / 21 not
-> applicable**.
+> approves it. The same wave closes **T-469** (#564), and T-30's residual with
+> it: the temporary-lockout branch of the password login now runs the equalising
+> dummy verify under the same hash permit before it refuses — still before the
+> directory is contacted, and never against the account's own hash — and gRPC
+> `ValidateCredentials` runs it on every refusal, so with no permit to be had a
+> locked account answers the `503` an unknown name answers, and every gRPC
+> refusal the `UNAVAILABLE` a wrong password answers. The model is **469
+> threats, 428 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -1173,7 +1179,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
 | Threats identified | 469 |
-| Mitigated / Open | 427 / 21 |
+| Mitigated / Open | 428 / 20 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1191,7 +1197,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | Area | Threats | Open | Not built |
 |---|---|---|---|
 | System context | 33 | 2 | 0 |
-| Authentication & session management | 36 | 1 | 0 |
+| Authentication & session management | 36 | 0 | 0 |
 | OAuth2 / OIDC authorization server | 85 | 0 | 0 |
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
@@ -1205,15 +1211,15 @@ The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. The five diagrams of
 AXIAM's own request path — authentication, OAuth2 and tokens, federation,
-authorization, PKI — carry **six** open items at model 2.38.0. Four are
+authorization, PKI — carry **five** open items at model 2.38.0. Four are
 residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
 providers pinned (T-306) and a service provider's own session outliving the
-AXIAM session (T-380). Two are not, and each has a fix filed: no published
-certificate revocation list (T-102) and a locked account told apart from an
-unknown name (T-469). A third, a relying party's access token approving a
-device authorization (T-447), closed at model 2.38.0 (#549). The directory identity source carries none:
+AXIAM session (T-380). One is not, and has a fix filed: no published
+certificate revocation list (T-102). Two more closed at model 2.38.0: a
+relying party's access token approving a device authorization (T-447, #549)
+and a locked account told apart from an unknown name (T-469, #564). The directory identity source carries none:
 its last open item — with just-in-time provisioning on, a sign-in for a name
 AXIAM holds no account for reached the directory with no AXIAM counter in front
 of it (T-332) — closed with a failure counter per tenant and login name, as the
@@ -1298,7 +1304,9 @@ authentication by certificate reads a certificate's status (not the TLS
 handshake, nor OAuth2 `tls_client_auth`). The W6 F4 review (model 2.36.1)
 corrects that last point and adds T-469: the lockout branch of the password
 login answers without the equalising verify, so a locked account is told apart
-from an unknown name.
+from an unknown name — closed at model 2.38.0, when that branch and every gRPC
+`ValidateCredentials` refusal began costing one verify under the same permit
+(#564).
 
 ### Coverage by STRIDE category
 
@@ -1313,7 +1321,7 @@ the category recorded against it in the model.
 | Spoofing | 101 | 5 | 3 |
 | Tampering | 93 | 1 | 5 |
 | Repudiation | 16 | 2 | 1 |
-| Information disclosure | 110 | 7 | 4 |
+| Information disclosure | 110 | 6 | 4 |
 | Denial of service | 59 | 4 | 4 |
 | Elevation of privilege | 90 | 2 | 4 |
 
@@ -1323,12 +1331,12 @@ the category recorded against it in the model.
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
 | High | 196 | 10 | 9 |
-| Medium | 195 | 8 | 9 |
+| Medium | 195 | 7 | 9 |
 | Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 21 still-open items are listed one by one in
+the weight the control carries. The 20 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -1383,10 +1391,13 @@ have to be re-established — nothing is assumed across a boundary.
 - **Passwords** are hashed with **Argon2id** at OWASP-recommended parameters
   (~19 MiB memory cost, per-user salt, server-side pepper). Plaintext passwords are
   never stored or logged.
-- **Login is enumeration-safe and brute-force-resistant**: unknown-user and
-  bad-password return the same uniform failure, password verification runs on a
-  dummy hash when the user does not exist so timing does not distinguish the two,
-  and failed attempts drive an atomic, exponential-backoff lockout that is shared
+- **Login is enumeration-safe and brute-force-resistant**: an unknown user, a
+  bad password and an account serving a lockout return the same uniform failure,
+  and each costs one Argon2id verify under the same bounded hash permit — against
+  a dummy hash when there is no real one to check, never the locked account's own
+  — so neither timing nor, under load, the `503` status distinguishes them, and
+  gRPC `ValidateCredentials` equalises every refusal the same way; failed
+  attempts drive an atomic, exponential-backoff lockout that is shared
   by every credential-checking path — REST, OPAQUE and gRPC alike — and metered
   against the organization's own effective threshold (org baseline, tenant
   override), with the deployment default only as a fail-safe floor when settings
@@ -2637,7 +2648,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 21 of 469. The 21
+Every threat the model records as open, most severe first — 20 of 469. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -2666,7 +2677,6 @@ each.
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
 | T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-445 — The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
-| T-469 — A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart | Medium | Login endpoints /auth/login + /auth/opaque/* · *Authentication & session management* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 With two exceptions — T-108, request audit that drops a row with only a log

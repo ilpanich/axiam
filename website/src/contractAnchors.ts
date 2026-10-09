@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.58";
+export const CONTRACT_VERSION = "1.59";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -43,6 +43,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "31": "#§31-outbound-scim-targets-management-api-contract-157",
  "32": "#§32-ssf-stream-registration-and-the-receiver-helper-contract-156",
  "33": "#§33-ciba--client-initiated-backchannel-authentication-contract-158",
+ "34": "#§34-cross-sdk-conformance-review-of-the-phase-23-ports-contract-159",
  "1.1": "#§11-grpc-only-operations",
  "1.1.1": "#§111-validate_token-and-introspect_token-contract-151",
  "3a": "#§3a-resource-server-middleware-csrf-inbound",
@@ -256,7 +257,10 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "33.7": "#§337-retry-and-polling-normative",
  "33.8": "#§338-required-tests",
  "33.9": "#§339-what-an-sdk-does-not-do",
- "33.10": "#§3310-per-sdk-posture"
+ "33.10": "#§3310-per-sdk-posture",
+ "34.1": "#§341-what-was-read",
+ "34.2": "#§342-clarifications-normative-from-159",
+ "34.3": "#§343-divergences"
 };
 
 /**

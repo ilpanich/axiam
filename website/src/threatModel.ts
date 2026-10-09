@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment, and — as a design-only diagram whose entries are recorded Not applicable — a RADIUS front end that is not built.",
- "version": "2.36.1",
+ "version": "2.37.0",
  "diagramCount": 10,
  "total": 469,
- "open": 23,
- "mitigated": 425,
+ "open": 22,
+ "mitigated": 426,
  "notApplicable": 21,
  "diagrams": [
   {
@@ -9285,9 +9285,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A captured SET is replayed to its receiver",
        "type": "Tampering",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "A SET carries no `exp` (SSF §4.1.7 forbids it), so a SET captured in transit, from a receiver's logs or from a misrouted push stays valid forever. Replayed later, a session-revoked or account-disabled SET logs out or locks out its subject again.",
-       "mitigation": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Open because the control is the receiver's: RFC 8417 §4.1 / contract §32.7 require it to remember the `jti`s it processed and refuse a repeat, and the receiver helper that does so ships in the SDKs only after the post-merge fan-out (D-35); a receiver that does not de-duplicate stays exposed for as long as it treats an old SET as news."
+       "mitigation": "AXIAM's half is built: every SET has a fresh 128-bit `jti` from the OS CSPRNG, and a retried push or a repeated poll re-signs the same pending event to byte-identical SET (Ed25519 is deterministic), so one event is one `jti` (D-48). Tests: `crates/axiam-oauth2/src/ssf.rs` `every_jti_is_unique`, `signing_the_same_pending_event_twice_gives_the_same_set`. Push travels over TLS to an `https` endpoint only, and poll responses are `no-store`. Closed on 2026-10-09 (contract 1.58 fan-out, D-35): the receiver's half is the §32.7 helper, which remembers every `jti` it accepted in a pluggable store over a replay window that defaults to seven days and cannot be configured below it, and refuses a repeat with `replayed`. It shipped in all eleven SDKs, the four REST-only ones included — rust #123, typescript #131, python #93, java #108, csharp #101, php #78, go #93, kotlin #72, swift #70, c #69, cplusplus #71, merged on each default branch on 2026-10-09 and not yet in a tagged release — each with contract §32.8 helper test 6: Rust `tests/ssf_receiver_test.rs::a_replay_is_refused_and_a_short_window_is_refused_at_configuration`, TypeScript `test/node/ssfReceiver.test.ts` \"the second sighting is replayed\", Python `tests/test_ssf_receiver.py::test_a_replay_is_refused_and_a_short_window_is_refused_at_configuration`, Java `SsfReceiverTest#aReplayIsRefusedAndAShortWindowIsRefusedAtConfiguration`, C# `SsfReceiverTests#ASecondSightingIsReplayedAndAShortWindowIsRefused`, PHP `tests/Contract158/SsfReceiverTest.php::testAReplayIsRefusedAndAShortWindowIsRefusedAtConfiguration`, Go `ssf_receiver_test.go::TestSsfReceiver_AReplayIsRefusedAndAShortWindowIsRefusedAtConfiguration`, Kotlin `SsfReceiverTest` \"a replay is refused and a short window is refused at configuration\", Swift `SsfReceiverTests#testAReplayIsRefusedAndAShortWindowIsRefusedAtConfiguration`, C `tests/test_ssf_receiver.c::test_the_same_set_twice_is_replayed_and_the_window_has_a_floor`, C++ `tests/test_ssf_receiver.cpp` \"§32.8 helper (6): the same SET twice is replayed; a window under seven days is refused\". A receiver written without the helper is still exposed for as long as it treats an old SET as news: de-duplicating `jti` is the duty RFC 8417 §4.1 and contract §32.7 place on every receiver, not a property of AXIAM."
       },
       {
        "number": 390,
@@ -9335,7 +9335,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Accepted design trade-off (D-52, the webhook precedent): failing a logout, a password reset or an erasure because a receiver's queue is unavailable would trade a security action for the notice of it. Where an event can be lost, and what records it: a failure to read the streams, the tenant's settings or the subject, to prepare the event, to publish it to `axiam.ssf_push` or to write it to the buffer, and a step-up record that could not be written, each log a `WARN` on `axiam::ssf` and nothing else: no audit row, no counter. The buffer drops its oldest event at 1 000 (T-395) and the dead-letter queue its messages after seven days (T-402), both by design. What is not lost, in the full profile: once queued, push is at-least-once and a failed attempt retries on the dispatcher's schedule; every dead-lettered push writes an `ssf_push.delivery_failed` audit row with its reason; and a held event a poll cannot sign (the deployment key unusable) is logged at `ERROR` once per poll request (W4 F4, P23W4-03: a long poll used to log it on every half-second look) and stays in the buffer for the next poll, which answers an empty `sets` meanwhile. What bounds the consequence: a signal is a hint, never the only record. The website's SSF page (*Shared Signals (SSF) transmitter*, `#/docs/ssf`) tells receivers that production is best effort and to read the account's current state from AXIAM when they need certainty about it; an AXIAM access token still lives at most fifteen minutes; and where the revocation feed is on (T-39) the same session revocations reach SDK verifiers without SSF. Open because the loss is real and silent. A later decision could make it visible (a counter, or an audit row per event that was not queued) without making it fail the operation. In the minimal profile (`AXIAM__AMQP__ENABLED=false`, D-59) a queued push waits in an in-process queue and is lost on restart, and a dead letter is its audit row alone (T-445)."
       }
      ],
-     "open": 2,
+     "open": 1,
      "notApplicable": 0
     },
     {
@@ -9477,7 +9477,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 55,
-   "open": 5,
+   "open": 4,
    "notApplicable": 0,
    "bySeverity": {
     "Medium": 34,

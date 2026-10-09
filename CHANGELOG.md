@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **SDK contract 1.59: the cross-SDK review of the Phase 23 ports (contracts 1.53 –
+  1.58).** The review read the eleven SDK repositories at their 2026-10-09
+  `claude/contract-1.58-sync` merges rather than the ports' reports; the evidence,
+  file and line, is `claude_dev/sdk-phase23-ports-conformance-review.md`. Every SDK
+  implements §28.12, §29, §30, §31, §32, the §32.7 receiver helper and §33 — the four
+  REST-only SDKs took the helpers' MAYs — and PHP signs §33.2 with ES256 and EdDSA only.
+  `sdks/CONTRACT.md` fills §28.12.7 and §29.10 … §33.10 from the code and adds **§34**:
+  - **Twelve clarifications, P1 … P12**, among them: `poll` never keeps a `jti` it does
+    not return (a batch interrupted by a failed key fetch lost its events in all
+    eleven SDKs); a `5xx` on `ciba_poll` is transient whatever its body (the server's
+    own `500 {"error":"server_error"}` ended the loop in five); anything that fails
+    after a `2xx` ends `ciba_await`; the §9 exemption covers the tenant-path OAuth2
+    endpoints; "never retried" includes an HTTP library's transparent re-send.
+  - **Forty-two divergences**, each contract fixed, forced by the language, or an SDK
+    fix named as one of eleven follow-ups, F-59-01 … F-59-11 (#576 … #586). The most
+    serious SDK-side ones: TypeScript printed a write-only secret from a failed
+    write's error (#577); Swift's `Sensitive` is printed by `dump` (#584); Java and
+    Kotlin re-sent a management write after a dropped connection (#579, #583).
+  - §32.8 helper test 8 and §33.8 test 8 are tightened so that the two most common
+    defects fail a required test. No wire change; `CONTRACT.md` is the only artefact
+    to re-sync, from the merge commit.
+
 ## [1.0.0-beta19] - 2026-10-07
 
 ### Changed

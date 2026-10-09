@@ -377,7 +377,7 @@ export const OPERATE_PAGES: DocPage[] = [
           [
             "amqp_signing_key",
             "32-byte hex",
-            "AMQP message signing is mandatory and has no unsigned path, so a release build **refuses to start** without it. Rotating it needs producers and consumers moved together.",
+            "AMQP message signing is mandatory and has no unsigned path, so a release build **refuses to start** without it — unless the broker is off (`AXIAM__AMQP__ENABLED=false`, the minimal profile), which needs no signing key. Rotating it needs producers and consumers moved together.",
           ],
           [
             "jwt_public_key_pem",
@@ -849,7 +849,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "A fingerprint match is never enough on its own. Device authentication verifies the full chain, checks the issuing CA is Active and inside its validity window, and enforces the certificate's own validity and live revocation status on every connection. On top of that, the chain must reach a CA an administrator has **enabled as an mTLS trust anchor**.",
+        text: "A fingerprint match is never enough on its own. Device authentication verifies the full chain, checks the issuing CA is Active and inside its validity window, and enforces the certificate's own validity and live revocation status on every device sign-in. On top of that, the chain must reach a CA an administrator has **enabled as an mTLS trust anchor**.",
       },
       {
         type: "p",
@@ -907,7 +907,7 @@ export const OPERATE_PAGES: DocPage[] = [
           },
           {
             title: "Issue the device certificate",
-            body: "Leaf certificates are tenant-scoped. Set `cert_type` to `Device`. The device login finds a certificate by its fingerprint whatever its type, and refuses only a `Server` one. The private key comes back once and is never stored. `issuer_ca_id` is the tenant's own signing CA; naming the organization CA directly works only for a principal in the organization scope — see [Which CA a caller may issue under](#issuing-ca).",
+            body: "Leaf certificates are tenant-scoped. Set `cert_type` to `Device`. The device login finds a certificate by its fingerprint whatever its type, and refuses a `Server` or a `SamlSigning` one. The private key comes back once and is never stored. `issuer_ca_id` is the tenant's own signing CA; naming the organization CA directly works only for a principal in the organization scope — see [Which CA a caller may issue under](#issuing-ca).",
             code: 'POST /api/v1/certificates\n{\n  "issuer_ca_id": "<ca-certificate-uuid>",\n  "subject": "sensor-0421.acme.dev",\n  "cert_type": "Device",\n  "key_algorithm": "Ed25519",\n  "validity_days": 365\n}',
           },
           {
@@ -1170,7 +1170,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Six sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export` and `audit_retention`. Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
+        text: "Fourteen sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `saml_authn_request`, `saml_sp_session`, `saml_logout_run`, `directory_sync`, `scim_reconcile`, `ssf_event_buffer`, `ssf_step_up`, `ciba_request`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export` and `audit_retention`. Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
       },
       {
         type: "table",

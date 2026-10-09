@@ -84,9 +84,9 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Two ways to authenticate.** A machine client sends `Authorization: Bearer <access_token>`, obtained from the OAuth2 token endpoint — and which routes accept a machine's token is decided per route; see [Who may call which route](#/docs/rest#who-may-call). An interactive login sets `httpOnly` cookies instead — `POST /auth/login` returns no token in its body — and state-changing requests must then echo the `axiam_csrf` cookie in an `X-CSRF-Token` header. The SDKs handle the second case for you.",
           "**CSRF applies to the credential the browser attaches by itself.** A request authenticated *only* by a bearer token needs no CSRF token: a cross-site page cannot set an `Authorization` header on a victim's behalf, so the requirement would be unsatisfiable rather than protective. A request carrying a bearer header **and** a session cookie is still checked, deliberately — that is precisely the shape where the browser supplies the cookie and an attacker supplies the header, so the exemption cannot itself become the bypass.",
           "**Tenancy is explicit.** Entity routes are tenant-scoped through the authenticated principal; OAuth2 endpoints take `tenant_id` as a query parameter. Nothing is inferred from a default.",
-          "**Every route is permission-guarded.** A caller needs an explicit grant for the action behind the route — the same 116-permission registry the admin console uses.",
+          "**Every route is permission-guarded.** A caller needs an explicit grant for the action behind the route — the same 126-permission registry the admin console uses.",
           "**Collections paginate** with `offset` and `limit`, and return the items plus a total.",
-          "**Collections search** with `?search=`, on all twenty-one list endpoints. Each matches its own identifying columns plus the record's id, so a UUID copied out of a log line goes in the same box as a name. It is a substring match rather than tokenised full-text search, precisely so that pasting a fragment of an id finds the row. The filter applies to the `total` as well as to the page — a total describing the unfiltered set would hand the pager page numbers the filtered set cannot fill.",
+          "**Collections search** with `?search=`, on all twenty-four list endpoints. Each matches its own identifying columns plus the record's id, so a UUID copied out of a log line goes in the same box as a name. It is a substring match rather than tokenised full-text search, precisely so that pasting a fragment of an id finds the row. The filter applies to the `total` as well as to the page — a total describing the unfiltered set would hand the pager page numbers the filtered set cannot fill.",
           "**Mutations are audited.** Every write lands in the append-only audit log with the acting principal.",
         ],
       },
@@ -189,7 +189,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "management", text: "Managing AXIAM from an SDK" },
       {
         type: "p",
-        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **24 namespaces** and names the **162** that make up the surface, and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
+        text: "Everything in the index above is reachable from any of the eleven SDKs as ordinary library code, not as hand-rolled HTTP. CONTRACT §27 defines that management surface, and it is generated rather than written: `sdks/management-registry.json` — the third artifact the SDKs vendor alongside `openapi.json` and the contract — classifies every operation in the spec into **28 namespaces** and names the **190** that make up the surface, and each SDK ships a generator over it plus a CI job that regenerates and diffs. So a new endpoint reaches every SDK by regeneration, and an SDK that has not regenerated fails its own build rather than quietly lagging.",
       },
       {
         type: "p",
@@ -199,7 +199,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**Namespaced, not flat.** Operations hang off a namespace handle — `client.service_accounts().rotate_secret(id)` — with a `client.management()` accessor beside it rather than instead of it. C is the one exception: it has no handle to hang operations on, so it gets the flat-symbol form.",
-          "`search` **is applied server-side**, before `offset` and `limit`. On all twenty-one paginated operations. Filtering a page client-side is forbidden by the contract, because it silently changes what pagination means: page 2 of a filtered set is not the filtered part of page 2.",
+          "`search` **is applied server-side**, before `offset` and `limit`. On all twenty-four paginated operations. Filtering a page client-side is forbidden by the contract, because it silently changes what pagination means: page 2 of a filtered set is not the filtered part of page 2.",
           "**Sparse update or full replacement is classified per operation**, not guessed. A `PUT` that replaces and a `PATCH`-shaped `PUT` that merges are different things to a caller who omits a field, and the registry records which each one is.",
           "**Declarative management is the second half.** §27.6 defines a manifest form — describe the desired state, apply it — which the SDKs expose in whatever their language calls idiomatic.",
         ],
@@ -465,6 +465,10 @@ export const INTEGRATE_PAGES: DocPage[] = [
         text: "Some work should not happen on a request thread. Audit ingestion must not slow down the operation being audited; webhook delivery must survive a receiver being down; a mail send must not fail a signup. AXIAM puts all of it on RabbitMQ, and exposes the same authorization engine there for callers that want a decision without holding a connection open.",
       },
       {
+        type: "note",
+        text: "All of this page is the **full profile**. With `AXIAM__AMQP__ENABLED=false` — the [minimal profile](#/docs/deploy#minimal) — there is no broker: webhooks, SSF push, outbound SCIM, CIBA ping and mail run on in-process queues that a restart loses, and Reactors, asynchronous authorization and external audit ingestion over AMQP are not available.",
+      },
+      {
         type: "table",
         proseFirstCol: true,
         headers: ["Queue", "Purpose", "Dead-letters to"],
@@ -480,11 +484,14 @@ export const INTEGRATE_PAGES: DocPage[] = [
             "Delay queue for webhook backoff. Nothing consumes it — a message published here with a per-message TTL dead-letters back to `axiam.webhook` when the TTL expires, which is how the retry delay happens without a consumer sleeping.",
             "`axiam.webhook` (by design)",
           ],
+          ["axiam.ssf_push", "Shared Signals push — one Security Event Token to a registered receiver (RFC 8935). Retries through `axiam.ssf_push.retry`, as webhooks do.", "`axiam.ssf_push.dlq`"],
+          ["axiam.scim_push", "Outbound SCIM provisioning to a registered downstream service provider. Retries through `axiam.scim_push.retry`.", "`axiam.scim_push.dlq`"],
+          ["axiam.ciba_ping", "CIBA ping-mode notifications of a decided request. Retries through `axiam.ciba_ping.retry`.", "`axiam.ciba_ping.dlq`"],
         ],
       },
       {
         type: "note",
-        text: "Dead-lettering is per queue, not universal. Four queues have a DLQ; `axiam.authz.response` and `axiam.notifications` do not, and `axiam.webhook.retry` dead-letters *forward* into the primary queue as its delay mechanism rather than as a failure path. Messages that reach a `.dlq` are real and replayable — they are not dropped.",
+        text: "Dead-lettering is per queue, not universal. Seven queues have a DLQ; `axiam.authz.response` and `axiam.notifications` do not, and each `.retry` queue dead-letters *forward* into its primary queue as its delay mechanism rather than as a failure path. Messages that reach a `.dlq` are real and replayable — they are not silently dropped. The three newer ones — `axiam.ssf_push.dlq`, `axiam.scim_push.dlq` and `axiam.ciba_ping.dlq` — are bounded: a message there can identify a person, so the broker discards it after seven days, and it is replayable until then.",
       },
       { type: "h", id: "exchanges", text: "Exchanges" },
       {
@@ -1778,7 +1785,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "sdks", text: "From the SDKs" },
       {
         type: "p",
-        text: "The registry is the SDKs' `ssf` management namespace (five operations; the `authorization_header` is a `Sensitive` value in every SDK). Verifying a SET and polling are the **optional receiver helper** of the Rust, TypeScript, Python, Java, C#, PHP and Go SDKs: it verifies the signature against the JWKS, checks `typ`, `alg`, `aud` and `iss`, and de-duplicates the `jti`. An SDK never transmits. The SDK ports follow the server's release; until they ship, verify a SET with any JWT library, applying the same checks, and de-duplicate on `jti` yourself.",
+        text: "The registry is the SDKs' `ssf` management namespace (five operations; the `authorization_header` is a `Sensitive` value in every SDK). Verifying a SET and polling are the **optional receiver helper** — a SHOULD in the Rust, TypeScript, Python, Java, C#, PHP and Go SDKs, which Kotlin, Swift, C and C++ took as well: it verifies the signature against the JWKS, checks `typ`, `alg`, `aud` and `iss`, and de-duplicates the `jti`. An SDK never transmits. All eleven SDK repositories merged the helper on 2026-10-09; it is on each default branch but not yet in a tagged SDK release, so until one carries it, verify a SET with any JWT library, applying the same checks, and de-duplicate on `jti` yourself.",
       },
       { type: "h", id: "api", text: "Management endpoints" },
       {
@@ -1864,7 +1871,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Two modes.** In **poll** mode the client asks the token endpoint at the request's `interval` until the request is decided. In **ping** mode AXIAM first calls the client's notification endpoint once the user has decided, and the client then asks the token endpoint once. **Push mode is not offered.**",
           "**The user approves on the console**, at `/ciba/approve`, after a full sign-in, including any multi-factor step the request asked for. The client never sees the user's credentials, and a client or a service account **cannot approve its own request**.",
           "**Tokens carry the approval.** The ID token's `auth_time`, `amr` and `acr` come from the session the user approved with, and the access token's `sid` names that session: ending the session ends the tokens.",
-          "**The SDKs' helper follows the merge.** Contract §33 states the client's half (initiate, poll, wait, handle a ping); the language libraries pick it up from the release that carries it.",
+          "**The SDKs' helper is merged, not yet released.** Contract §33 states the client's half (initiate, poll, wait, handle a ping); all eleven SDK repositories merged it on 2026-10-09, the four REST-only SDKs included, and it is on each default branch but not yet in a tagged SDK release.",
         ],
       },
       { type: "h", id: "register", text: "Register a CIBA client" },

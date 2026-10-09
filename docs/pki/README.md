@@ -1,7 +1,7 @@
 # AXIAM PKI / Certificate Guide
 
 **Milestone:** v1.2 (MVP Release Hardening) — Beta
-**Last verified:** 2026-07-06
+**Last verified:** 2026-10-09
 
 Task-oriented walkthrough of the certificate lifecycle: issuing an
 organization CA certificate, issuing leaf certificates for users, services,
@@ -765,7 +765,7 @@ The order, once:
    the service account must belong to the caller's tenant, the certificate
    must not be a `Server` certificate (refused with `400`: it names a host and
    cannot authenticate a client), and it must be **`Active`** and **not expired** — a revoked or expired certificate
-   binds happily and then fails every handshake, so the bind refuses it with
+   binds happily and then fails every device sign-in, so the bind refuses it with
    `400` rather than leaving a service account that is configured for mTLS and
    cannot connect.
 4. **Then the device authenticates**, over mTLS.
@@ -996,3 +996,34 @@ untrusted once its issuing CA is revoked, so plan a migration to a new CA
 (issue the new CA, re-issue leaf certificates under it, then revoke the old
 CA) rather than revoking a CA that still has active leaf certificates
 depending on it.
+
+### Revocation reach
+
+Revoking sets the status on the certificate's row in AXIAM's store. Whether a
+revocation stops a certificate depends on who validates it, and today only one
+place reads that status:
+
+| Where the certificate is validated | Does a revocation reach it? |
+|---|---|
+| AXIAM's device sign-in by certificate (`POST /api/v1/auth/device`) | **Yes, at once.** `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf |
+| The TLS handshake, on either listener | **No.** Neither listener's TLS handshake checks a certificate's revocation status |
+| OAuth2 `tls_client_auth` | **No.** It matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Revoke such a client by changing its registration |
+| A relying party that validates AXIAM-issued certificates itself — a FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its own mTLS | **No channel at all.** AXIAM publishes no CRL and runs no OCSP responder: its CAs carry the `cRLSign` key-usage bit, and nothing serves a list. The relying party honours a revoked certificate until it expires |
+
+Outside AXIAM the only bound is the leaf's own validity, capped per tenant by
+`max_cert_validity_days`. A relying party that needs revocation today must
+either let the connection terminate at AXIAM — the device authenticates there
+and presents the certificate-bound token it receives (see
+[above](#the-token-a-device-gets-back-is-bound-to-its-certificate)) — or rely
+on short-lived leaves.
+
+This is threat **T-102**, Open, High, in
+[`threat-model-stride.md`](../../claude_dev/threat-model-stride.md). Publishing
+a CRL per issuing CA, and deciding on OCSP, is tracked by
+[ilpanich/axiam#565](https://github.com/ilpanich/axiam/issues/565); the entry
+closes with it, together with the listeners' verifiers loading that list or
+`tls_client_auth` reading the certificate's status. AXIAM does not speak RADIUS
+either: the G-11 spike declined a native front end for now and keeps a
+FreeRADIUS-backend route for when a named adopter asks, with publishing a CRL
+as the step that stands on its own
+([decision record](../../claude_dev/radius-eap-tls-spike-2026-10-06.md)).

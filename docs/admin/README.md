@@ -632,3 +632,34 @@ database), a stale allow can persist for **at most
 re-evaluated. The short default (5 s) keeps that worst case small. Operators who
 want a tighter bound can lower the TTL; those who never mutate roles out-of-band
 can safely raise it.
+
+## Phase 23 console pages
+
+The Phase 23 surfaces are administered from the console's **Identity** group of
+the sidebar, each acting on the caller's own tenant. This guide does not repeat
+them: the website's pages are the task-oriented guides, and the deployment
+guide holds what an operator sets.
+
+| Console page | Path | Seen with | Guide | Deployment guide |
+|---|---|---|---|---|
+| **Directory** | `/directory` | `directory:read` | [LDAP and Active Directory](https://ilpanich.github.io/axiam/#/docs/directory) | [What a tenant's directory needs](../deployment/README.md#what-a-tenants-directory-needs-ldap--active-directory) |
+| **SAML Service Providers** | `/saml` | `saml_sp:read` | [AXIAM as a SAML identity provider](https://ilpanich.github.io/axiam/#/docs/saml-idp) | `AXIAM__AUTH__SAML_PAIRWISE_KEY` in [Required secrets & environment](../deployment/README.md#required-secrets--environment) |
+| **SCIM Targets** | `/scim-targets` | `scim_targets:read` | [Outbound SCIM provisioning](https://ilpanich.github.io/axiam/#/docs/scim-outbound) | — |
+| **Approve a sign-in** (CIBA) | `/ciba/approve` | a signed-in session, no permission: the user decides a request addressed to them, reached from the link in the notification mail | [CIBA (backchannel authentication)](https://ilpanich.github.io/axiam/#/docs/ciba) | — |
+
+Three things the console does not do yet, each said on the website page it
+belongs to:
+
+- **SSF streams have no console page.** A tenant administrator registers them
+  through `/api/v1/tenants/{tenant_id}/ssf/streams` or the SDKs' `ssf`
+  namespace; see [Shared Signals (SSF) transmitter](https://ilpanich.github.io/axiam/#/docs/ssf).
+  A deployment of more than one tenant must serve per-tenant issuers for SSF to
+  run ([Two ways to name a tenant](../deployment/README.md#two-ways-to-name-a-tenant)).
+- **`saml_idp_enabled` and `ssf_enabled` have no control.** Both are layered
+  settings, off by default, set through the settings API; the console explains
+  them.
+- **The OAuth2 client form does not carry the CIBA fields.** A CIBA client is
+  registered over the admin API, or by RFC 7591/7592 with an initial access
+  token.
+
+The routes behind each page are listed in [API docs](../api/README.md).

@@ -491,6 +491,97 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "competitor-gap-closure-and-the-open-register",
+    date: "October 9, 2026",
+    dateShort: "Oct 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "The enterprise gaps closed, and why the open register grew",
+    excerpt:
+      "`1.0.0-beta18` closes the gaps three competitor comparisons agreed on: AXIAM is now a SAML identity provider, signs users in against LDAP and Active Directory, transmits shared signals, serves CIBA, provisions outward over SCIM and runs without a broker. `1.0.0-beta19` fixes three things CI found.",
+    body: [
+      {
+        type: "p",
+        text: "This post covers two releases. `1.0.0-beta18`, tagged on 6 October, is Phase 23, the competitor-gap closure, and shipped without a post of its own; `1.0.0-beta19` followed on 7 October. Between them the threat model went from 2.17.0 to **2.37.0: 469 threats, 426 mitigated, 22 open and 21 not applicable**. The open register grew from 13 to 22, and this post says why rather than rounding it off.",
+      },
+      { type: "h", text: "1.0.0-beta18 — eight gaps closed" },
+      {
+        type: "p",
+        text: "The comparisons with Keycloak, Zitadel and authentik agreed that AXIAM wins on authorization depth, high-assurance OAuth and PKI, and loses on enterprise integration, certification and a handful of newer protocol surfaces. Phase 23 closed eight of the gaps they named. Each new surface waits for an operator or a tenant administrator to switch it on or configure it:",
+      },
+      {
+        type: "p",
+        text: "**A SAML 2.0 identity provider.** A tenant can now be the identity provider for SAML service providers: SP- and IdP-initiated sign-on on the Redirect and POST bindings, assertions signed by an RSA-4096 credential issued under the tenant's own CA, a pairwise persistent `NameID` by default, so one user looks different to two service providers, and single logout tied to session revocation. It sits behind the `saml` build feature and the layered `saml_idp_enabled` setting, off by default, with a service-provider registry (contract §29) and a console page. The work also found a Critical defect on AXIAM's SAML *service-provider* side: the assertion consumer verified only the first signature in a response, so a document the upstream identity provider had signed for another purpose could vouch for a forged assertion. It is fixed, and it was present in every release that shipped SAML federation ([T-67](#/security/diagram/3/T-67)).",
+      },
+      {
+        type: "p",
+        text: "**LDAP and Active Directory as an identity source.** Users sign in with their directory password, bound as themselves over LDAPS or StartTLS and never in plaintext; they are provisioned just in time, and gain AXIAM group memberships only through an explicit mapping table, so a directory group called `admins` gains nothing unless an administrator mapped it. A sync job marks an account whose entry vanished or was disabled `Inactive` and revokes its sessions; it cannot grant anything. AXIAM is read-only against the directory, and the path is tested against a real OpenLDAP and a real Samba AD domain controller (contract §30).",
+      },
+      {
+        type: "p",
+        text: "**RFC 7592 client configuration.** A dynamically registered client can read, replace and delete its own registration at `/oauth2/register/{client_id}` with the registration access token it was handed once; a delete revokes its refresh tokens and frees its quota slot (contract §28.12, [T-289](#/security/diagram/2/T-289)).",
+      },
+      {
+        type: "p",
+        text: "**A Shared Signals Framework transmitter.** AXIAM emits the CAEP events `session-revoked`, `credential-change` and `assurance-level-change` and the RISC events `account-disabled`, `account-enabled` and `account-purged` as signed SETs, pushed (RFC 8935) or polled (RFC 8936), to receivers a tenant administrator registers (contract §32). `ssf_enabled` is off by default, and in a multi-tenant deployment the transmitter stays inactive unless per-tenant issuers are on, so two tenants never share an issuer ([T-390](#/security/diagram/6/T-390)). Producing an event is best effort: treat a signal as a hint, and read the account's state from AXIAM when you need certainty ([T-405](#/security/diagram/6/T-405)).",
+      },
+      {
+        type: "p",
+        text: "**Outbound SCIM provisioning.** Register downstream SCIM 2.0 service providers and AXIAM pushes the tenant's user and group lifecycle to them, reconciles nightly and on demand, notifies on a dead letter and propagates GDPR erasure (contract §31). The credential is sealed and bound to the URL it is sent to. Deleting a target deprovisions nothing downstream, and delivery is one attempt at a time per replica, so an unresponsive downstream holds the others back until [ilpanich/axiam#550](https://github.com/ilpanich/axiam/issues/550) is decided.",
+      },
+      {
+        type: "p",
+        text: "**CIBA.** OpenID Connect CIBA Core 1.0 in poll and ping modes: a client that knows whom it wants authenticated calls `POST /oauth2/bc-authorize`, and the user approves on the console after a full sign-in, stepping up where the request asks for more; an approval mail links to that page. Signed requests and the FAPI-CIBA client are supported. A hint that names nobody is answered exactly like a real one and simply expires, so the endpoint is not a user oracle (contract §33).",
+      },
+      {
+        type: "p",
+        text: "**A minimal profile without the broker.** `AXIAM__AMQP__ENABLED=false` runs AXIAM on SurrealDB alone, as one instance by design, enforced by a lease in the datastore; a restart loses queued deliveries and mail, and the audit rows they would have written ([T-445](#/security/diagram/7/T-445)). Measured at rest rather than under load, the minimal stack holds **207.3 MiB** against **330.9 MiB** for the full one, about 124 MiB, or 37 %, for the broker.",
+      },
+      {
+        type: "p",
+        text: "**The groundwork for certification.** The changes the Basic OP and FAPI 2.0 plans needed, the written judgement of every `REVIEW` and `WARNING` module, and the submission package for both. No final run has been made and nothing has been sent to the OpenID Foundation: AXIAM is not certified, and the published conformance receipts are a self-run, not a certification.",
+      },
+      {
+        type: "p",
+        text: "Alongside the eight: an *Identity for agents* guide, a design for verifiable credentials with no code behind it yet, authentik as a fourth benchmark target, and the harness and runbook for benchmark run 6.",
+      },
+      { type: "h", text: "The threat model, 2.17.0 to 2.37.0" },
+      {
+        type: "p",
+        text: "Phase 23 entered **181 threats**, T-289 to T-469, taking the model from 288 to 469; 154 of them are mitigated. Twenty-one are *not applicable*: the RADIUS front end the phase decided not to build is drawn as a design-only diagram so its threats stay on record, and they count as neither mitigated nor open. Every entry written ahead of its code, Open until the task building its control landed, has closed. Open went from 13 to 22, and the nine added are of three kinds. Three are corrections, older entries reopened because the control they recorded was never built: request audit is best effort ([T-108](#/security/diagram/6/T-108)), the batched alert mail never existed ([T-117](#/security/diagram/6/T-117)), and AXIAM has never published a certificate revocation list, so a relying party outside AXIAM has no revocation channel ([T-102](#/security/diagram/5/T-102)). Two are defects the W5 and W6 security reviews found, each with a fix filed: a relying party's access token can approve a device authorization in its user's name — the W5 review closed the same hole for CIBA, and the device grant's twin waits on its fix ([T-447](#/security/diagram/2/T-447)), and a locked account is told apart by timing ([T-469](#/security/diagram/1/T-469)). Four are trade-offs of the new surfaces, accepted and stated: a leaked SAML signing key keeps forging assertions after its credential is retired, because SAML gives a service provider no revocation channel to consult ([T-306](#/security/diagram/3/T-306)), service-provider sessions outlive the AXIAM session ([T-380](#/security/diagram/3/T-380)), a security event can be lost silently (T-405), and the minimal profile's losses on restart (T-445). The 13 open at 2.17.0 are all still open. By kind, the 22 are five defects with a fix filed, five accepted trade-offs, eight deployment responsibilities and four on the integrator, device or distribution side.",
+      },
+      { type: "h", text: "What Phase 23 declined" },
+      {
+        type: "p",
+        text: "Five things were decided against, and are recorded so that nobody rediscovers them. **Kerberos / SPNEGO** for the directory: it needs a browser-facing negotiate handshake and a keytab on the server, and LDAP bind covers the directory case. **SAML assertion encryption**: a service provider registered asking for it is refused; signed assertions over TLS are what the three competitors default to. **Front-channel logout**. **CIBA push mode**, and `user_code` with it: poll and ping only. And **a native RADIUS front end**: the spike recommends the FreeRADIUS-backend route when a named adopter asks, and its finding that AXIAM publishes no CRL is now T-102.",
+      },
+      { type: "h", text: "1.0.0-beta19 — three fixes" },
+      {
+        type: "p",
+        text: "A SAML sign-on could fail under concurrency: a write conflict on the per-service-provider participant record was taken as proof that another sign-on held it, which on SurrealKV it is not, and the write is now retried. The admin dashboard read the clock during render, which the newer linter refuses; it reads it once. And a timing test of the directory path's dummy verify failed under load; it now measures its reference on both sides of each case. All three were found by CI; the rest of `1.0.0-beta19` is dependency updates.",
+      },
+      { type: "h", text: "The SDKs: contract 1.58 in all eleven" },
+      {
+        type: "p",
+        text: "Contracts 1.53 to 1.58 carried Phase 23 to the SDKs: RFC 7592's three operations in 1.53; management namespaces for the directory, SAML service providers, SSF streams and outbound SCIM targets in 1.54 to 1.57, which take the registry to 190 operations across 28 namespaces; the SSF receiver helper in 1.56, which verifies a SET and refuses one it has already seen within a replay window that cannot be set below seven days; and the CIBA client helper, with the signed request form, in 1.58. All eleven repositories merged them on 9 October, the four REST-only SDKs, Kotlin, Swift, C and C++, taking the receiver and CIBA helpers as well. They are merged on each default branch, **not yet in a tagged SDK release**. With the receiver helper and its replay test in every SDK, a captured SET replayed to its receiver closed at model 2.37.0 ([T-388](#/security/diagram/6/T-388)). The cross-SDK review of those ports, contract 1.59, read them the same day: every section is implemented in all eleven, and every port has defects its required tests had let through — the worst a `poll` that can lose security events in every SDK, and, in TypeScript, a write-only secret printed from a failed write's error. The contract gained twelve clarifications, and each SDK has a follow-up issue ([ilpanich/axiam#576](https://github.com/ilpanich/axiam/issues/576) … [#586](https://github.com/ilpanich/axiam/issues/586)).",
+      },
+      { type: "h", text: "Still to come" },
+      {
+        type: "p",
+        text: "**Benchmark run 6.** The harness, the runbook and the pins shipped in `1.0.0-beta18`: Keycloak 26.8.0, Zitadel v4.19.4 and authentik 2026.8.3. The maintainer runs it against `1.0.0-beta18`, and **no run-6 number exists yet**; the Benchmarks page cites run 5 until it does.",
+      },
+      {
+        type: "p",
+        text: "**The OpenID Foundation submissions** for Basic OP and FAPI 2.0 ([ilpanich/axiam#513](https://github.com/ilpanich/axiam/issues/513)) wait on the maintainer's final runs. Until the Foundation lists AXIAM, every conformance figure on this site is a self-run, not a certification.",
+      },
+      { type: "h", text: "The caution, unchanged" },
+      {
+        type: "p",
+        text: "AXIAM is beta software. It has had no independent third-party penetration test and no security certification, and the compliance posture is a self-assessment rather than a certified audit. Do not put it in front of production identity traffic yet.",
+      },
+    ],
+  },
+  {
     slug: "mcp-surfaces-and-the-dogfooding-remediation",
     date: "September 25, 2026",
     dateShort: "Sep 2026",
@@ -1108,7 +1199,7 @@ export const PHASES: Phase[] = [
     n: 20,
     title: "Beta line — stabilisation toward 1.0",
     focus:
-      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories, the first-login enrolment residuals and end-entity certificates from a CSR, and the authorization endpoint refusing a request that cannot succeed before anyone signs in for it — then the MCP authorization surfaces — public clients, resource indicators, dynamic registration, client ID metadata documents and per-tenant issuers — and the remediation of what the first external integration found: a signing CA bound to its tenant, certificate-bound device tokens, server certificates behind a name fence, client certificates on gRPC, and service accounts on the management API",
+      "End-to-end-driven hardening, SDK contract fan-out, and the deeper testing federation, SAML, OIDC and SCIM still need before 1.0 — plus the beta08…beta11 wave: the backend on the public origin terminating its own TLS, a public login-provider surface, the authorization-reach fixes, and Vault run as a production secret store — and then the OpenID Connect Basic OP surface, the first OpenID Foundation conformance runs, and the residual pass that made the model's remaining caveats structural, with the SDK half of every contract addition landed in all eleven repositories, the first-login enrolment residuals and end-entity certificates from a CSR, and the authorization endpoint refusing a request that cannot succeed before anyone signs in for it — then the MCP authorization surfaces — public clients, resource indicators, dynamic registration, client ID metadata documents and per-tenant issuers — and the remediation of what the first external integration found: a signing CA bound to its tenant, certificate-bound device tokens, server certificates behind a name fence, client certificates on gRPC, and service accounts on the management API — then Phase 23, the competitor-gap closure: a SAML 2.0 identity provider, LDAP and Active Directory as an identity source, RFC 7592 client configuration, a Shared Signals Framework transmitter, outbound SCIM provisioning, CIBA, a minimal profile without the broker and the groundwork for the OpenID certification submissions, carried into all eleven SDKs at contract 1.58",
     start: "Aug 26, 2026",
     end: "Ongoing",
     status: "ongoing",

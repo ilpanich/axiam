@@ -30,7 +30,8 @@ use axiam_core::repository::{
     TenantRepository,
 };
 use axiam_db::{
-    SurrealAuditLogRepository, SurrealNotificationRuleRepository, SurrealOrganizationRepository,
+    SurrealAuditLogRepository, SurrealNotificationRuleRepository,
+    SurrealNotificationWindowRepository, SurrealOrganizationRepository,
     SurrealScimTargetRepository, SurrealScimTargetStateRepository, SurrealTenantRepository,
     run_migrations,
 };
@@ -111,6 +112,7 @@ async fn rules(db: &Surreal<Db>, tenant_id: Uuid) -> SurrealNotificationRuleRepo
             description: String::new(),
             events: vec![NotificationEventType::ScimDeliveryFailed],
             recipient_emails: vec!["soc@example.com".into(), "oncall@example.com".into()],
+            window_minutes: None,
         })
         .await
         .unwrap();
@@ -121,6 +123,7 @@ async fn rules(db: &Surreal<Db>, tenant_id: Uuid) -> SurrealNotificationRuleRepo
             description: String::new(),
             events: vec![NotificationEventType::LoginFailure],
             recipient_emails: vec!["other@example.com".into()],
+            window_minutes: None,
         })
         .await
         .unwrap();
@@ -161,7 +164,11 @@ async fn a_scim_dead_letter_row_mails_every_recipient_of_a_matching_rule() {
     let mail = RecordedMail::default();
     let audit = scim_dead_letter_audit(
         SurrealAuditLogRepository::new(db.clone()),
-        Arc::new(NotificationSink::new(rules, mail.clone())),
+        Arc::new(NotificationSink::new(
+            rules,
+            SurrealNotificationWindowRepository::new(db.clone()),
+            mail.clone(),
+        )),
         SurrealTenantRepository::new(db.clone()),
         SurrealScimTargetStateRepository::new(db.clone()),
     );
@@ -243,7 +250,11 @@ async fn a_targets_dead_letters_mail_each_recipient_once_an_hour_not_once_each()
     let mail = RecordedMail::default();
     let audit = scim_dead_letter_audit(
         SurrealAuditLogRepository::new(db.clone()),
-        Arc::new(NotificationSink::new(rules, mail.clone())),
+        Arc::new(NotificationSink::new(
+            rules,
+            SurrealNotificationWindowRepository::new(db.clone()),
+            mail.clone(),
+        )),
         SurrealTenantRepository::new(db.clone()),
         SurrealScimTargetStateRepository::new(db.clone()),
     );

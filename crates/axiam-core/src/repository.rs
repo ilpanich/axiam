@@ -30,7 +30,9 @@ use crate::models::{
     },
     group::{CreateGroup, DirectoryMembershipWrite, Group, UpdateGroup},
     mds::{MdsBlobMeta, MdsEntry},
-    notification_rule::{CreateNotificationRule, NotificationRule, UpdateNotificationRule},
+    notification_rule::{
+        CreateNotificationRule, NotificationRule, NotificationWindowClaim, UpdateNotificationRule,
+    },
     oauth2_client::{
         AuthorizationCode, CreateAuthorizationCode, CreateDeviceGrant, CreateOAuth2Client,
         CreatePushedAuthRequest, CreateRefreshToken, CreateSessionClient,
@@ -3014,6 +3016,29 @@ pub trait NotificationRuleRepository: Send + Sync {
         tenant_id: Uuid,
         event_types: &[String],
     ) -> impl Future<Output = AxiamResult<Vec<NotificationRule>>> + Send;
+}
+
+/// The notification windows of the rules (#551, T-117): one row per
+/// `(tenant, rule, event)`, so that a rule mails each recipient once per
+/// window for an event an attacker can raise at will, on any replica.
+pub trait NotificationWindowRepository: Send + Sync {
+    /// Claim the window of `(tenant_id, rule_id, event)` at `now`, atomically.
+    ///
+    /// When no window is open — none yet, or the last was opened at least
+    /// `window_secs` before `now` — this event opens one:
+    /// [`NotificationWindowClaim::Opened`], carrying how many events the
+    /// previous window counted. Otherwise the event is counted in the open
+    /// window: [`NotificationWindowClaim::Counted`]. The window's start is the
+    /// precondition of the write (the `claim_failure_notification` pattern,
+    /// D-73), so of two concurrent claimants exactly one opens it.
+    fn claim(
+        &self,
+        tenant_id: Uuid,
+        rule_id: Uuid,
+        event: &str,
+        now: DateTime<Utc>,
+        window_secs: i64,
+    ) -> impl Future<Output = AxiamResult<NotificationWindowClaim>> + Send;
 }
 
 // ---------------------------------------------------------------------------

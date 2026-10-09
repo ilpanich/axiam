@@ -2046,9 +2046,16 @@ where
     // T23.6.3 (D-58), the SCIM consumer below feeds it the dispatcher's own rows
     // — a dead letter is not an HTTP request, so without that second path a rule
     // for `scim_delivery_failed` would match nothing in a running server.
+    //
+    // A rule mails each recipient once per (rule, event, window) — the rule's
+    // `window_minutes` — and counts the rest, the next mail saying how many
+    // (#551, T-117). The window is claimed in the datastore, so every replica
+    // sees the same one. The SCIM consumer's dead letters keep their own gate
+    // (one per target per hour, D-73) and are not windowed again.
     let notification_sink: Arc<dyn axiam_audit::AuditEventSink> =
         Arc::new(axiam_audit::NotificationSink::new(
             notification_rule_repo.clone(),
+            axiam_db::SurrealNotificationWindowRepository::new(pool.handle_for_repo()),
             mail_outbound_publisher.clone(),
         ));
 

@@ -288,6 +288,44 @@ impl std::str::FromStr for NotificationEventType {
 }
 
 // -----------------------------------------------------------------------
+// Notification window (#551, T-117)
+// -----------------------------------------------------------------------
+
+/// The window a rule gets when none is given: of the events of one kind that
+/// match one rule, the first in fifteen minutes is mailed and the rest are
+/// counted (#551, T-117).
+pub const DEFAULT_NOTIFICATION_WINDOW_MINUTES: u32 = 15;
+
+/// The shortest window a rule may ask for. There is no "mail every event":
+/// that is the flood T-117 is about, and an attacker chooses its rate.
+pub const MIN_NOTIFICATION_WINDOW_MINUTES: u32 = 1;
+
+/// The longest window a rule may ask for: a day. Past that, the count of what
+/// was not mailed arrives too late to be an alert.
+pub const MAX_NOTIFICATION_WINDOW_MINUTES: u32 = 1440;
+
+fn default_window_minutes() -> u32 {
+    DEFAULT_NOTIFICATION_WINDOW_MINUTES
+}
+
+/// What claiming a rule's notification window for one event decided (#551).
+///
+/// The window is per `(tenant, rule, event)` and lives in the datastore, so
+/// every replica sees the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationWindowClaim {
+    /// This event opens a new window: mail it. `suppressed` is how many events
+    /// of the window before it were counted and not mailed (zero for the first
+    /// window, or a quiet one).
+    Opened {
+        /// Events of the previous window that were not mailed.
+        suppressed: u64,
+    },
+    /// A window is open: the event was counted, not mailed.
+    Counted,
+}
+
+// -----------------------------------------------------------------------
 // Domain types
 // -----------------------------------------------------------------------
 
@@ -301,6 +339,15 @@ pub struct NotificationRule {
     pub events: Vec<NotificationEventType>,
     pub recipient_emails: Vec<String>,
     pub enabled: bool,
+    /// Minutes in which one event type mails each recipient at most once
+    /// (#551, T-117): the first event of a window is mailed, the rest are
+    /// counted, and the next mail says how many were not sent. Between
+    /// [`MIN_NOTIFICATION_WINDOW_MINUTES`] and
+    /// [`MAX_NOTIFICATION_WINDOW_MINUTES`]; a rule stored before the field
+    /// existed reads [`DEFAULT_NOTIFICATION_WINDOW_MINUTES`].
+    #[serde(default = "default_window_minutes")]
+    #[schema(minimum = 1, maximum = 1440, default = 15)]
+    pub window_minutes: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -313,6 +360,9 @@ pub struct CreateNotificationRule {
     pub description: String,
     pub events: Vec<NotificationEventType>,
     pub recipient_emails: Vec<String>,
+    /// The rule's window; `None` stores [`DEFAULT_NOTIFICATION_WINDOW_MINUTES`].
+    #[serde(default)]
+    pub window_minutes: Option<u32>,
 }
 
 /// Input for updating a notification rule. All fields are optional.
@@ -323,6 +373,14 @@ pub struct UpdateNotificationRule {
     pub events: Option<Vec<NotificationEventType>>,
     pub recipient_emails: Option<Vec<String>>,
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub window_minutes: Option<u32>,
+}
+
+/// Whether `minutes` is a window a rule may ask for.
+#[must_use]
+pub const fn is_valid_window_minutes(minutes: u32) -> bool {
+    minutes >= MIN_NOTIFICATION_WINDOW_MINUTES && minutes <= MAX_NOTIFICATION_WINDOW_MINUTES
 }
 
 // -----------------------------------------------------------------------
@@ -340,6 +398,34 @@ mod tests {
             let parsed: NotificationEventType = s.parse().unwrap();
             assert_eq!(*kind, parsed);
         }
+    }
+
+    #[test]
+    fn the_window_bounds_admit_the_default_and_refuse_zero_and_past_a_day() {
+        assert!(is_valid_window_minutes(DEFAULT_NOTIFICATION_WINDOW_MINUTES));
+        assert!(is_valid_window_minutes(MIN_NOTIFICATION_WINDOW_MINUTES));
+        assert!(is_valid_window_minutes(MAX_NOTIFICATION_WINDOW_MINUTES));
+        assert!(!is_valid_window_minutes(0));
+        assert!(!is_valid_window_minutes(
+            MAX_NOTIFICATION_WINDOW_MINUTES + 1
+        ));
+    }
+
+    #[test]
+    fn a_rule_serialized_before_the_window_existed_reads_the_default() {
+        let rule: NotificationRule = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(),
+            "tenant_id": Uuid::nil(),
+            "name": "n",
+            "description": "",
+            "events": ["login_failure"],
+            "recipient_emails": ["soc@example.com"],
+            "enabled": true,
+            "created_at": "2026-10-09T00:00:00Z",
+            "updated_at": "2026-10-09T00:00:00Z",
+        }))
+        .unwrap();
+        assert_eq!(rule.window_minutes, DEFAULT_NOTIFICATION_WINDOW_MINUTES);
     }
 
     #[test]

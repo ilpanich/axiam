@@ -28,6 +28,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`MAX_GROUP_MEMBERS`) is now pinned by a test. The issue's second option, a
   per-target concurrency budget with more than one delivery in flight per
   consumer, is **deferred to 1.0.x**.
+- **A notification rule mails each recipient once per event type and window, not
+  once per event (#551, P23W5-13, T-117).** A rule for an event an attacker can
+  raise in volume — failed sign-ins spread over addresses and accounts — mailed
+  every recipient once per audit row; the batching the threat model recorded
+  never existed. Each rule now has a **window**, `window_minutes` on
+  `/api/v1/notification-rules` (an additive, optional field: 1 to 1440, **15 by
+  default**, `400` outside those bounds; the console's rule form edits it). Of
+  the events of one type that match one rule, the first in a window is mailed and
+  the rest are counted; the first mail after the window says how many were not
+  sent (`suppressed_count` and `window_note` in the built-in notification
+  template; a tenant's or organization's custom template shows them only if it
+  uses those placeholders). The window of (tenant, rule, event) is claimed in the
+  datastore (schema **v85**, the `notification_window` table), so several
+  replicas still mail once; if the claim cannot be made, nobody is mailed and the
+  audit row stands. Upgraders should know that existing rules take the 15-minute
+  default, so a second incident of the same event type within 15 minutes of the
+  first now arrives as a count in the next mail rather than as a mail of its own;
+  lower a rule's window (to 1 minute at least) where that matters.
+  `scim_delivery_failed` keeps its own limit of one notification per SCIM target
+  per hour and is not windowed again.
 
 ### Documentation
 

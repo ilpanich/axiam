@@ -733,6 +733,8 @@ Organizations and tenant admins can subscribe to email notifications for critica
 
 Notification rules are configurable per org/tenant. Notifications are delivered via the email service (Section 8b).
 
+**One mail per rule, event and window** (`1.0.0`, #551, T-117). Each rule has a window, `window_minutes` (1 to 1440, 15 by default; the API refuses a value outside the bounds). `NotificationDispatcher` claims the window of (tenant, rule, event) before it publishes: the first event of a window mails each of the rule's recipients, every later one inside it is counted and not mailed, and the first mail after the window carries the count (`suppressed_count`, with a sentence in `window_note`, both rendered by the built-in template). The claim is one conditional `UPSERT` on `notification_window` (schema v85; one row per triple, deleted with its rule), retried on a write conflict, so every replica sees the same window; a claim that fails mails nobody. A background process's event — today `scim_delivery_failed` — keeps the `NotificationGate` its producer applies (one per target per hour, D-73) and is not windowed again. The count of a burst is reported when that event next occurs; the audit log keeps every row.
+
 ---
 
 ## Federation, Provisioning and Signals (Phase 23)

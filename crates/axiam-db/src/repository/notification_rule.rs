@@ -3,7 +3,9 @@
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::notification_rule::{
-    CreateNotificationRule, NotificationEventType, NotificationRule, UpdateNotificationRule,
+    CreateNotificationRule, DEFAULT_NOTIFICATION_WINDOW_MINUTES, MAX_NOTIFICATION_WINDOW_MINUTES,
+    MIN_NOTIFICATION_WINDOW_MINUTES, NotificationEventType, NotificationRule,
+    UpdateNotificationRule,
 };
 use axiam_core::repository::{NotificationRuleRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -27,6 +29,7 @@ struct NotificationRuleRow {
     events: Vec<String>,
     recipient_emails: Vec<String>,
     enabled: bool,
+    window_minutes: Option<i64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -40,6 +43,7 @@ struct NotificationRuleRowWithId {
     events: Vec<String>,
     recipient_emails: Vec<String>,
     enabled: bool,
+    window_minutes: Option<i64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -57,6 +61,18 @@ fn parse_events(raw: Vec<String>) -> Result<Vec<NotificationEventType>, DbError>
         .collect()
 }
 
+/// A rule's window as stored: NONE (a rule written before schema v85) is the
+/// default, and a value outside the bounds — only a hand edit can store one —
+/// is brought inside them, never trusted to be zero.
+fn window_minutes(stored: Option<i64>) -> u32 {
+    stored.map_or(DEFAULT_NOTIFICATION_WINDOW_MINUTES, |m| {
+        m.clamp(
+            i64::from(MIN_NOTIFICATION_WINDOW_MINUTES),
+            i64::from(MAX_NOTIFICATION_WINDOW_MINUTES),
+        ) as u32
+    })
+}
+
 impl NotificationRuleRow {
     fn try_into_entry(self, id: Uuid) -> Result<NotificationRule, DbError> {
         Ok(NotificationRule {
@@ -68,6 +84,7 @@ impl NotificationRuleRow {
             events: parse_events(self.events)?,
             recipient_emails: self.recipient_emails,
             enabled: self.enabled,
+            window_minutes: window_minutes(self.window_minutes),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -86,6 +103,7 @@ impl NotificationRuleRowWithId {
             events: parse_events(self.events)?,
             recipient_emails: self.recipient_emails,
             enabled: self.enabled,
+            window_minutes: window_minutes(self.window_minutes),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -132,6 +150,7 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
                  events = $events, \
                  recipient_emails = $recipient_emails, \
                  enabled = true, \
+                 window_minutes = $window_minutes, \
                  created_at = time::now(), \
                  updated_at = time::now()",
             )
@@ -141,6 +160,14 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
             .bind(("description", input.description))
             .bind(("events", events_str))
             .bind(("recipient_emails", input.recipient_emails))
+            .bind((
+                "window_minutes",
+                i64::from(
+                    input
+                        .window_minutes
+                        .unwrap_or(DEFAULT_NOTIFICATION_WINDOW_MINUTES),
+                ),
+            ))
             .await
             .map_err(DbError::from)?;
 
@@ -205,6 +232,10 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
             set_clauses.push("enabled = $enabled".into());
             binds.push(("enabled".into(), serde_json::json!(enabled)));
         }
+        if let Some(minutes) = input.window_minutes {
+            set_clauses.push("window_minutes = $window_minutes".into());
+            binds.push(("window_minutes".into(), serde_json::json!(minutes)));
+        }
 
         let sql = format!(
             "UPDATE type::record('notification_rule', $id) SET {} \
@@ -255,6 +286,20 @@ impl<C: Connection> NotificationRuleRepository for SurrealNotificationRuleReposi
             }
             .into());
         }
+        // The rule's windows (#551) go with it: nothing reads them again, and a
+        // rule id is never reused.
+        self.db
+            .current()
+            .query(
+                "DELETE notification_window \
+                 WHERE tenant_id = $tenant_id AND rule_id = $rule_id",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("rule_id", id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
         Ok(())
     }
 

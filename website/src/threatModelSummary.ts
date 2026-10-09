@@ -64,8 +64,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.37.0",
  "diagramCount": 10,
  "total": 469,
- "open": 22,
- "mitigated": 426,
+ "open": 21,
+ "mitigated": 427,
  "notApplicable": 21,
  "areas": [
   {
@@ -114,7 +114,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 55,
-   "open": 4,
+   "open": 3,
    "notApplicable": 0
   },
   {
@@ -167,7 +167,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Denial of service",
    "total": 59,
-   "open": 4,
+   "open": 3,
    "notApplicable": 4
   },
   {
@@ -193,7 +193,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Medium",
    "total": 195,
-   "open": 9,
+   "open": 8,
    "notApplicable": 9
   },
   {
@@ -333,16 +333,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "System diagram",
    "element": "Ingress / TLS 1.3 termination",
    "residualRisk": "Partly outside the application boundary: AXIAM enforces per-IP and per-user rate limits and Argon2 backpressure, but edge-level protection (WAF, connection limits, autoscaling) is a deployment responsibility and is not shipped with AXIAM."
-  },
-  {
-   "number": 117,
-   "title": "Alert flooding buries a real incident",
-   "category": "Denial of service",
-   "severity": "Medium",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "Notification rules (admin alerts)",
-   "residualRisk": "Reopened at model 2.35.0 by the W5 F4 review (P23W5-13). Until then this entry read “notifications are delivered in configurable batches through the mail queue, and rules are per-category so a noisy category can be tuned without disabling the rest”; nothing batches them. What is built: rules are per event, so a noisy event can be taken out of a rule without disabling the rest; a mail is fixed text; the events a caller can provoke ride rate-limited routes (sign-in per address and per account, with brute-force lockout, T-27); and the one event a background process raises, `scim_delivery_failed`, is coalesced to one notification per target per hour (T-418, D-73). What is not: `NotificationDispatcher::dispatch` enqueues one mail per matched recipient per audit row, so a request-path event an attacker can produce in volume — failed sign-ins spread over addresses and accounts — mails each recipient of a rule for it once per event, with no coalescing, cool-down or digest. Open until per-rule coalescing exists (issue body in the W5 F4 review, §14)."
   },
   {
    "number": 123,

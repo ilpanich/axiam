@@ -18,8 +18,8 @@ export const THREAT_MODEL: ThreatModel = {
  "version": "2.37.0",
  "diagramCount": 10,
  "total": 469,
- "open": 22,
- "mitigated": 426,
+ "open": 21,
+ "mitigated": 427,
  "notApplicable": 21,
  "diagrams": [
   {
@@ -8573,12 +8573,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Alert flooding buries a real incident",
        "type": "Denial of service",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "An attacker triggers thousands of notifiable events so the genuine signal is lost among them, and burns the mail quota along the way.",
-       "mitigation": "Reopened at model 2.35.0 by the W5 F4 review (P23W5-13). Until then this entry read “notifications are delivered in configurable batches through the mail queue, and rules are per-category so a noisy category can be tuned without disabling the rest”; nothing batches them. What is built: rules are per event, so a noisy event can be taken out of a rule without disabling the rest; a mail is fixed text; the events a caller can provoke ride rate-limited routes (sign-in per address and per account, with brute-force lockout, T-27); and the one event a background process raises, `scim_delivery_failed`, is coalesced to one notification per target per hour (T-418, D-73). What is not: `NotificationDispatcher::dispatch` enqueues one mail per matched recipient per audit row, so a request-path event an attacker can produce in volume — failed sign-ins spread over addresses and accounts — mails each recipient of a rule for it once per event, with no coalescing, cool-down or digest. Open until per-rule coalescing exists (issue body in the W5 F4 review, §14)."
+       "mitigation": "Built in the 1.0.0 release wave (#551). A correction first: the W5 F4 review (P23W5-13) reopened this entry at model 2.35.0 because it claimed “notifications are delivered in configurable batches through the mail queue”, and nothing batched them. Each notification rule now has a window, `window_minutes` (1 to 1440, 15 by default, refused outside those bounds by the API), and `NotificationDispatcher::dispatch` claims the window of (tenant, rule, event) before it publishes. The first event of a window mails each recipient once. Every later event inside the window is counted, not mailed, and the first mail after the window carries the count (`suppressed_count`, rendered by the built-in template). The window is claimed in the datastore by one conditional write on `notification_window` (schema v85; the D-73 pattern, retried on a write conflict), so replicas agree, and a claim that fails mails nobody. The one event a background process raises, `scim_delivery_failed`, keeps its own gate of one notification per target per hour (T-418, D-73) and is not windowed again. Rules are per event, a mail is fixed text, and the events a caller can provoke ride rate-limited routes (T-27). Tests: `notification_window_test.rs` `a_burst_of_a_hundred_login_failures_mails_each_recipient_once` (a hundred `LoginFailure` rows mail each recipient once, and the next window's mail carries 99), `two_replicas_sharing_one_datastore_mail_each_recipient_once`, `a_different_rule_or_event_has_its_own_window` and `the_rules_own_window_is_honoured`; `notification_rules_test.rs` `the_notification_window_defaults_and_is_bounded`; `notification_rule_repository_test.rs` `concurrent_claims_open_a_window_once`. Residual: a second, unrelated incident of the same event type inside an open window reaches the recipients only as part of the next mail's count, and the count of a burst that ends is mailed only when that event next occurs. The audit log keeps every row."
       }
      ],
-     "open": 1,
+     "open": 0,
      "notApplicable": 0
     },
     {
@@ -9477,7 +9477,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 55,
-   "open": 4,
+   "open": 3,
    "notApplicable": 0,
    "bySeverity": {
     "Medium": 34,

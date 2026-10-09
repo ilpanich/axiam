@@ -1,31 +1,43 @@
 //! Notification dispatcher — matches audit events to notification rules
 //! and enqueues outbound mail messages for each matched recipient (T19.13).
 //!
-//! The dispatcher calls `mail_publisher.publish(...)` once per matched
-//! (event, recipient) pair.  On publish error the error is logged and
-//! execution continues — fire-and-forget (D-14).
+//! The dispatcher calls `mail_publisher.publish(...)` once per recipient of a
+//! matched rule whose **window** the event opens (#551, T-117): of the events
+//! of one kind that match one rule, the first in the rule's `window_minutes`
+//! is mailed and the rest are counted, and the next mail says how many were
+//! not sent. The window is claimed in the datastore, so replicas agree. On
+//! publish error the error is logged and execution continues —
+//! fire-and-forget (D-14).
 
 use axiam_core::error::AxiamResult;
 use axiam_core::models::mail::{MailType, OutboundMailMessage};
-use axiam_core::models::notification_rule::NotificationEventType;
-use axiam_core::repository::{MailPublisher, NotificationRuleRepository};
+use axiam_core::models::notification_rule::{NotificationEventType, NotificationWindowClaim};
+use axiam_core::repository::{
+    MailPublisher, NotificationRuleRepository, NotificationWindowRepository,
+};
 use chrono::Utc;
 use uuid::Uuid;
 
 /// Dispatches audit events to matching notification rules by enqueuing
-/// one `OutboundMailMessage(Notification)` per matched recipient.
-pub struct NotificationDispatcher<N: NotificationRuleRepository> {
+/// one `OutboundMailMessage(Notification)` per matched recipient, at most
+/// once per rule, event and window.
+pub struct NotificationDispatcher<N: NotificationRuleRepository, W: NotificationWindowRepository> {
     rule_repo: N,
+    windows: W,
 }
 
-impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
-    /// Create a new dispatcher backed by the given rule repository.
-    pub fn new(rule_repo: N) -> Self {
-        Self { rule_repo }
+impl<N: NotificationRuleRepository, W: NotificationWindowRepository> NotificationDispatcher<N, W> {
+    /// Create a new dispatcher backed by the given rule repository and the
+    /// rules' notification windows. There is deliberately no constructor
+    /// without the windows: a rule for an event an attacker can raise at will
+    /// would mail its recipients once per event (T-117).
+    pub fn new(rule_repo: N, windows: W) -> Self {
+        Self { rule_repo, windows }
     }
 
     /// Match an audit event against notification rules and enqueue one
-    /// `OutboundMailMessage` per matched recipient.
+    /// `OutboundMailMessage` per recipient of each matched rule whose window
+    /// this event opens.
     ///
     /// `tenant_id` and `org_id` are used to populate the mail message
     /// context so the consumer can resolve the correct email config.
@@ -35,8 +47,25 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
     /// and do **not** propagate — callers get a successful result even if
     /// some (or all) enqueue calls fail.
     ///
-    /// Returns `Ok(0)` if no rules match or the action/outcome does not map
-    /// to any known notification event type.
+    /// Returns `Ok(0)` if no rules match, the action/outcome does not map
+    /// to any known notification event type, or every matched rule's window
+    /// was already open (the event was counted instead).
+    ///
+    /// # The window (#551, T-117)
+    ///
+    /// For each matched rule the window of `(tenant, rule, event)` is claimed
+    /// before anything is published. An event that opens it is mailed, and
+    /// the mail carries `suppressed_count`: the events the window before it
+    /// counted and did not mail. An event inside an open window is counted
+    /// and not mailed. A claim that fails is not mailed either — silence, not
+    /// a flood, as the background gate decides (D-73); the audit row exists
+    /// either way.
+    ///
+    /// An event raised by an AXIAM background process
+    /// ([`NotificationEventType::is_system_event`]) is not windowed here: its
+    /// producer's [`NotificationGate`] already coalesced it (one
+    /// `scim_delivery_failed` per target per hour, D-73), and windowing it again
+    /// per rule would fold a second target's outage into the first's.
     pub async fn dispatch(
         &self,
         tenant_id: Uuid,
@@ -75,8 +104,8 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
         // "unknown" on the events an administrator most wants alerting on — a
         // failed login, a lockout — which have no authenticated actor by
         // definition.
-        // `event` is not here: it is the one key that varies per rule, and is
-        // inserted into the clone below.
+        // `event` and the window's two keys are not here: they vary per rule,
+        // and are inserted into the clone below.
         let mut context = serde_json::Map::new();
         context.insert("details".into(), details.into());
         context.insert("action".into(), action.into());
@@ -99,18 +128,57 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
                 continue;
             }
             // Find the first matching event type for this rule.
-            let matched_event = event_types
+            let Some(matched) = event_types
                 .iter()
-                .find(|et| rule.events.contains(*et))
-                .map(|et| et.to_db_string());
+                .copied()
+                .find(|et| rule.events.contains(et))
+            else {
+                continue;
+            };
+            let event_name = matched.to_db_string();
 
-            let event_name = match matched_event {
-                Some(name) => name,
-                None => continue,
+            let (suppressed, window_note) = if matched.is_system_event() {
+                (
+                    0,
+                    "Raised by an AXIAM background process, which limits how often it \
+                     alerts on its own; the audit log has every row."
+                        .to_string(),
+                )
+            } else {
+                let window_secs = i64::from(rule.window_minutes) * 60;
+                match self
+                    .windows
+                    .claim(tenant_id, rule.id, &event_name, Utc::now(), window_secs)
+                    .await
+                {
+                    Ok(NotificationWindowClaim::Opened { suppressed }) => (
+                        suppressed,
+                        window_note(&event_name, rule.window_minutes, suppressed),
+                    ),
+                    Ok(NotificationWindowClaim::Counted) => {
+                        tracing::debug!(
+                            event = %event_name,
+                            rule_id = %rule.id,
+                            "notification window open; event counted, not mailed"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            event = %event_name,
+                            rule_id = %rule.id,
+                            "the notification window could not be claimed; not notifying"
+                        );
+                        continue;
+                    }
+                }
             };
 
             let mut context = context.clone();
             context.insert("event".into(), event_name.clone().into());
+            context.insert("suppressed_count".into(), suppressed.to_string().into());
+            context.insert("window_note".into(), window_note.into());
             let template_context = serde_json::Value::Object(context);
 
             // Enqueue one OutboundMailMessage per recipient.
@@ -151,6 +219,28 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
     }
 }
 
+/// The sentence a windowed mail carries about its window (#551): how often the
+/// rule mails this event and, when the window before this one counted any, how
+/// many were not mailed.
+fn window_note(event: &str, window_minutes: u32, suppressed: u64) -> String {
+    let every = if window_minutes == 1 {
+        "minute".to_string()
+    } else {
+        format!("{window_minutes} minutes")
+    };
+    let mut note = format!(
+        "This rule mails {event} at most once every {every}; further {event} events \
+         in that time are counted, not mailed, and the next alert reports them."
+    );
+    if suppressed > 0 {
+        note.push_str(&format!(
+            " Not mailed in the previous window: {suppressed} {event} event{}.",
+            if suppressed == 1 { "" } else { "s" }
+        ));
+    }
+    note
+}
+
 // ---------------------------------------------------------------------------
 // Audit-stream adapter
 // ---------------------------------------------------------------------------
@@ -166,24 +256,32 @@ impl<N: NotificationRuleRepository> NotificationDispatcher<N> {
 /// Implements [`crate::middleware::AuditEventSink`] so
 /// `AuditMiddleware::spawn_with_sink` can drive it on the audit worker's task,
 /// off the request path.
-pub struct NotificationSink<N: NotificationRuleRepository, P: MailPublisher> {
-    dispatcher: NotificationDispatcher<N>,
+pub struct NotificationSink<
+    N: NotificationRuleRepository,
+    W: NotificationWindowRepository,
+    P: MailPublisher,
+> {
+    dispatcher: NotificationDispatcher<N, W>,
     mail_publisher: P,
 }
 
-impl<N: NotificationRuleRepository, P: MailPublisher> NotificationSink<N, P> {
-    /// Build a sink over a rule repository and a mail publisher.
-    pub fn new(rule_repo: N, mail_publisher: P) -> Self {
+impl<N: NotificationRuleRepository, W: NotificationWindowRepository, P: MailPublisher>
+    NotificationSink<N, W, P>
+{
+    /// Build a sink over a rule repository, the rules' notification windows
+    /// (#551) and a mail publisher.
+    pub fn new(rule_repo: N, windows: W, mail_publisher: P) -> Self {
         Self {
-            dispatcher: NotificationDispatcher::new(rule_repo),
+            dispatcher: NotificationDispatcher::new(rule_repo, windows),
             mail_publisher,
         }
     }
 }
 
-impl<N, P> crate::middleware::AuditEventSink for NotificationSink<N, P>
+impl<N, W, P> crate::middleware::AuditEventSink for NotificationSink<N, W, P>
 where
     N: NotificationRuleRepository + 'static,
+    W: NotificationWindowRepository + 'static,
     P: MailPublisher + 'static,
 {
     fn on_event<'a>(
@@ -413,8 +511,10 @@ mod tests {
         CreateNotificationRule, NotificationEventType, NotificationRule, UpdateNotificationRule,
     };
     use axiam_core::repository::{
-        MailPublisher, NotificationRuleRepository, PaginatedResult, Pagination,
+        MailPublisher, NotificationRuleRepository, NotificationWindowRepository, PaginatedResult,
+        Pagination,
     };
+    use chrono::DateTime;
     use std::sync::{Arc, Mutex};
 
     // -----------------------------------------------------------------------
@@ -487,6 +587,67 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // In-memory notification windows (the datastore's are tested in
+    // `axiam-db` and, end to end, in `axiam-server`'s
+    // `notification_window_test`)
+    // -----------------------------------------------------------------------
+
+    /// `(tenant, rule, event)` → when the window opened, events counted in it.
+    type Windows = std::collections::HashMap<(Uuid, Uuid, String), (DateTime<Utc>, u64)>;
+
+    #[derive(Clone, Default)]
+    struct MemWindows {
+        open: Arc<Mutex<Windows>>,
+    }
+
+    impl NotificationWindowRepository for MemWindows {
+        async fn claim(
+            &self,
+            tenant_id: Uuid,
+            rule_id: Uuid,
+            event: &str,
+            now: DateTime<Utc>,
+            window_secs: i64,
+        ) -> AxiamResult<NotificationWindowClaim> {
+            let mut open = self.open.lock().unwrap();
+            let key = (tenant_id, rule_id, event.to_string());
+            match open.get_mut(&key) {
+                Some((opened_at, suppressed))
+                    if *opened_at > now - chrono::Duration::seconds(window_secs) =>
+                {
+                    *suppressed += 1;
+                    Ok(NotificationWindowClaim::Counted)
+                }
+                other => {
+                    let carried = other.map_or(0, |(_, suppressed)| *suppressed);
+                    open.insert(key, (now, 0));
+                    Ok(NotificationWindowClaim::Opened {
+                        suppressed: carried,
+                    })
+                }
+            }
+        }
+    }
+
+    /// A datastore that cannot be reached.
+    struct FailingWindows;
+
+    impl NotificationWindowRepository for FailingWindows {
+        async fn claim(
+            &self,
+            _tenant_id: Uuid,
+            _rule_id: Uuid,
+            _event: &str,
+            _now: DateTime<Utc>,
+            _window_secs: i64,
+        ) -> AxiamResult<NotificationWindowClaim> {
+            Err(axiam_core::error::AxiamError::Internal(
+                "datastore unavailable".into(),
+            ))
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Mock mail publisher
     // -----------------------------------------------------------------------
 
@@ -539,6 +700,7 @@ mod tests {
             events: vec![NotificationEventType::LoginFailure],
             recipient_emails: recipients.into_iter().map(|s| s.to_string()).collect(),
             enabled: true,
+            window_minutes: 15,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -552,7 +714,7 @@ mod tests {
     #[tokio::test]
     async fn notification_no_match_returns_zero() {
         let repo = MockRuleRepo::new(vec![make_rule(vec!["admin@example.com"])]);
-        let dispatcher = NotificationDispatcher::new(repo);
+        let dispatcher = NotificationDispatcher::new(repo, MemWindows::default());
         let publisher = RecordingPublisher::new();
 
         // "user.updated" with "success" does not map to LoginFailure.
@@ -578,7 +740,7 @@ mod tests {
     async fn notification_enqueues_per_recipient() {
         let rule = make_rule(vec!["alice@example.com", "bob@example.com"]);
         let repo = MockRuleRepo::new(vec![rule]);
-        let dispatcher = NotificationDispatcher::new(repo);
+        let dispatcher = NotificationDispatcher::new(repo, MemWindows::default());
         let publisher = RecordingPublisher::new();
 
         // "POST /api/v1/auth/login" + "Failure" → LoginFailure event type
@@ -613,7 +775,7 @@ mod tests {
     async fn notification_empty_recipients_skipped() {
         let rule = make_rule(vec![]);
         let repo = MockRuleRepo::new(vec![rule]);
-        let dispatcher = NotificationDispatcher::new(repo);
+        let dispatcher = NotificationDispatcher::new(repo, MemWindows::default());
         let publisher = RecordingPublisher::new();
 
         let count = dispatcher
@@ -637,7 +799,7 @@ mod tests {
     #[tokio::test]
     async fn notification_no_rules_returns_zero() {
         let repo = MockRuleRepo::empty();
-        let dispatcher = NotificationDispatcher::new(repo);
+        let dispatcher = NotificationDispatcher::new(repo, MemWindows::default());
         let publisher = RecordingPublisher::new();
 
         let count = dispatcher
@@ -671,11 +833,12 @@ mod tests {
             events: vec![NotificationEventType::PasswordChanged],
             recipient_emails: vec!["nobody@example.com".into()],
             enabled: true,
+            window_minutes: 15,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
         let repo = MockRuleRepo::new(vec![rule]);
-        let dispatcher = NotificationDispatcher::new(repo);
+        let dispatcher = NotificationDispatcher::new(repo, MemWindows::default());
         let publisher = RecordingPublisher::new();
 
         let count = dispatcher
@@ -702,7 +865,7 @@ mod tests {
     async fn notification_publish_error_is_swallowed() {
         let rule = make_rule(vec!["alice@example.com", "bob@example.com"]);
         let repo = MockRuleRepo::new(vec![rule]);
-        let dispatcher = NotificationDispatcher::new(repo);
+        let dispatcher = NotificationDispatcher::new(repo, MemWindows::default());
         let publisher = FailingPublisher;
 
         let count = dispatcher
@@ -754,7 +917,7 @@ mod tests {
             "oncall@example.com",
         ])]);
         let publisher = RecordingPublisher::new();
-        let sink = NotificationSink::new(repo, publisher.clone());
+        let sink = NotificationSink::new(repo, MemWindows::default(), publisher.clone());
 
         sink.on_event(&AuditEvent {
             entry: entry(tenant_id, "POST /api/v1/auth/login", AuditOutcome::Failure),
@@ -784,7 +947,7 @@ mod tests {
     async fn the_outcome_is_formatted_the_way_the_event_table_matches_on() {
         let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
         let publisher = RecordingPublisher::new();
-        let sink = NotificationSink::new(repo, publisher.clone());
+        let sink = NotificationSink::new(repo, MemWindows::default(), publisher.clone());
 
         // Success on the same path maps to no event; only Failure does.
         sink.on_event(&AuditEvent {
@@ -817,7 +980,7 @@ mod tests {
     async fn an_unattributed_event_is_skipped_without_touching_the_repository() {
         let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
         let publisher = RecordingPublisher::new();
-        let sink = NotificationSink::new(repo, publisher.clone());
+        let sink = NotificationSink::new(repo, MemWindows::default(), publisher.clone());
 
         sink.on_event(&AuditEvent {
             entry: entry(
@@ -839,7 +1002,7 @@ mod tests {
     #[tokio::test]
     async fn a_publisher_failure_is_swallowed() {
         let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
-        let sink = NotificationSink::new(repo, FailingPublisher);
+        let sink = NotificationSink::new(repo, MemWindows::default(), FailingPublisher);
 
         sink.on_event(&AuditEvent {
             entry: entry(
@@ -859,7 +1022,7 @@ mod tests {
     async fn the_details_carry_the_action_and_outcome_only() {
         let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
         let publisher = RecordingPublisher::new();
-        let sink = NotificationSink::new(repo, publisher.clone());
+        let sink = NotificationSink::new(repo, MemWindows::default(), publisher.clone());
 
         sink.on_event(&AuditEvent {
             entry: entry(
@@ -889,7 +1052,7 @@ mod tests {
         // actually happened is more use to the reader.
         let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
         let publisher = RecordingPublisher::new();
-        let dispatcher = NotificationDispatcher::new(repo);
+        let dispatcher = NotificationDispatcher::new(repo, MemWindows::default());
 
         dispatcher
             .dispatch(
@@ -919,7 +1082,7 @@ mod tests {
         // actor, or it would win and the alert would name nobody.
         let repo = MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]);
         let publisher = RecordingPublisher::new();
-        let dispatcher = NotificationDispatcher::new(repo);
+        let dispatcher = NotificationDispatcher::new(repo, MemWindows::default());
 
         let actor = Uuid::new_v4();
         dispatcher
@@ -959,7 +1122,8 @@ mod tests {
         let mut rule = make_rule(vec!["soc@example.com", "oncall@example.com"]);
         rule.events = vec![NotificationEventType::ScimDeliveryFailed];
         let publisher = RecordingPublisher::new();
-        let dispatcher = NotificationDispatcher::new(MockRuleRepo::new(vec![rule]));
+        let dispatcher =
+            NotificationDispatcher::new(MockRuleRepo::new(vec![rule]), MemWindows::default());
 
         let count = dispatcher
             .dispatch(
@@ -986,9 +1150,10 @@ mod tests {
         assert_eq!(context["username"], "AXIAM (an automated process)");
 
         // A rule that did not ask for the event is not mailed.
-        let other = NotificationDispatcher::new(MockRuleRepo::new(vec![make_rule(vec![
-            "soc@example.com",
-        ])]));
+        let other = NotificationDispatcher::new(
+            MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]),
+            MemWindows::default(),
+        );
         let quiet = RecordingPublisher::new();
         other
             .dispatch(
@@ -1004,5 +1169,122 @@ mod tests {
             .unwrap();
         // The mock returns every rule; the dispatcher's own match drops it.
         assert_eq!(quiet.count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // The notification window (#551, T-117)
+    // -----------------------------------------------------------------------
+
+    async fn login_failure(
+        dispatcher: &NotificationDispatcher<MockRuleRepo, impl NotificationWindowRepository>,
+        tenant_id: Uuid,
+        publisher: &RecordingPublisher,
+    ) -> usize {
+        dispatcher
+            .dispatch(
+                tenant_id,
+                Uuid::new_v4(),
+                "POST /api/v1/auth/login",
+                "Failure",
+                None,
+                "POST /api/v1/auth/login (Failure)",
+                publisher,
+            )
+            .await
+            .unwrap()
+    }
+
+    /// The first event of a window is mailed, with a count of zero and the
+    /// sentence that says how the rule batches; the rest of the window is
+    /// counted, not mailed.
+    #[tokio::test]
+    async fn the_first_event_of_a_window_is_mailed_and_the_rest_are_counted() {
+        let dispatcher = NotificationDispatcher::new(
+            MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]),
+            MemWindows::default(),
+        );
+        let publisher = RecordingPublisher::new();
+        let tenant_id = Uuid::new_v4();
+
+        assert_eq!(login_failure(&dispatcher, tenant_id, &publisher).await, 1);
+        for _ in 0..9 {
+            assert_eq!(login_failure(&dispatcher, tenant_id, &publisher).await, 0);
+        }
+        assert_eq!(publisher.count(), 1);
+        let context = publisher.messages()[0].template_context.clone();
+        assert_eq!(context["suppressed_count"], "0");
+        assert!(
+            context["window_note"]
+                .as_str()
+                .unwrap()
+                .contains("at most once every 15 minutes")
+        );
+    }
+
+    /// A window that cannot be claimed mails nobody: silence, not a flood
+    /// (the D-73 rule). The audit row was written before the sink ran.
+    #[tokio::test]
+    async fn a_window_that_cannot_be_claimed_mails_nobody() {
+        let dispatcher = NotificationDispatcher::new(
+            MockRuleRepo::new(vec![make_rule(vec!["soc@example.com"])]),
+            FailingWindows,
+        );
+        let publisher = RecordingPublisher::new();
+        assert_eq!(
+            login_failure(&dispatcher, Uuid::new_v4(), &publisher).await,
+            0
+        );
+        assert_eq!(publisher.count(), 0);
+    }
+
+    /// A background process's event is not windowed again: its producer's
+    /// gate coalesced it per target (D-73), and a rule window would fold a
+    /// second target's outage into the first's. Even a store that cannot be
+    /// reached does not stop it.
+    #[tokio::test]
+    async fn a_system_event_keeps_its_own_gate_and_is_not_windowed() {
+        let mut rule = make_rule(vec!["soc@example.com"]);
+        rule.events = vec![NotificationEventType::ScimDeliveryFailed];
+        let dispatcher = NotificationDispatcher::new(MockRuleRepo::new(vec![rule]), FailingWindows);
+        let publisher = RecordingPublisher::new();
+        for _ in 0..2 {
+            dispatcher
+                .dispatch(
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    "scim_push.delivery_failed",
+                    "Failure",
+                    None,
+                    "scim_push.delivery_failed (Failure)",
+                    &publisher,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(publisher.count(), 2);
+        let context = publisher.messages()[0].template_context.clone();
+        assert_eq!(context["suppressed_count"], "0");
+        assert!(
+            context["window_note"]
+                .as_str()
+                .unwrap()
+                .contains("background process")
+        );
+    }
+
+    #[test]
+    fn the_window_note_names_the_count_only_when_there_is_one() {
+        let quiet = window_note("login_failure", 15, 0);
+        assert!(quiet.contains("at most once every 15 minutes"));
+        assert!(!quiet.contains("previous window"));
+        assert!(
+            window_note("login_failure", 1, 1)
+                .ends_with("Not mailed in the previous window: 1 login_failure event.")
+        );
+        assert!(
+            window_note("login_failure", 60, 99)
+                .ends_with("Not mailed in the previous window: 99 login_failure events.")
+        );
+        assert!(window_note("login_failure", 1, 0).contains("at most once every minute"));
     }
 }

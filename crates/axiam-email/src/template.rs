@@ -219,6 +219,11 @@ pub fn builtin_template(kind: TemplateKind) -> EmailTemplate {
         // pre-existing behaviour and worth keeping: an alert about a failed
         // login is not actionable without knowing whose account it was, and the
         // recipients are a tenant administrator's own choice of who may see it.
+        //
+        // `suppressed_count` and `window_note` are the rule's window (#551,
+        // T-117): a rule mails one event type once per window and counts the
+        // rest, so this mail says how many of the previous window's events were
+        // not mailed — otherwise the one mail of a burst would read as one event.
         TemplateKind::AdminNotification => (
             "[{{org_name}}] {{event}} in {{tenant_name}}",
             r#"<!DOCTYPE html>
@@ -230,16 +235,20 @@ pub fn builtin_template(kind: TemplateKind) -> EmailTemplate {
   <tr><td>Request</td><td>{{action}}</td></tr>
   <tr><td>Outcome</td><td>{{outcome}}</td></tr>
   <tr><td>Actor</td><td>{{username}} ({{email}})</td></tr>
+  <tr><td>Not mailed (previous window)</td><td>{{suppressed_count}}</td></tr>
 </table>
 <p>{{details}}</p>
+<p>{{window_note}}</p>
 <p>Review the tenant's audit log for the full record.</p>
 </body></html>"#,
             "{{event}} — {{tenant_name}} ({{org_name}})\n\n\
              Event:   {{event}}\n\
              Request: {{action}}\n\
              Outcome: {{outcome}}\n\
-             Actor:   {{username}} ({{email}})\n\n\
+             Actor:   {{username}} ({{email}})\n\
+             Not mailed (previous window): {{suppressed_count}}\n\n\
              {{details}}\n\n\
+             {{window_note}}\n\n\
              Review the tenant's audit log for the full record.",
         ),
         // D-09: deletion-cancel link email.
@@ -480,6 +489,35 @@ mod tests {
         let text = render(&t.text_body, &ctx);
         assert!(text.contains("Acme Org"));
         assert!(text.contains("alice@example.com"));
+    }
+
+    /// #551, T-117: the one mail of a window says how many events of the
+    /// window before it were counted and not mailed, in both bodies.
+    #[test]
+    fn builtin_admin_renders_the_suppressed_count() {
+        let t = builtin_template(TemplateKind::AdminNotification);
+        let mut ctx = full_context();
+        for (key, value) in [
+            ("event", "login_failure"),
+            ("action", "POST /api/v1/auth/login"),
+            ("outcome", "Failure"),
+            ("details", "POST /api/v1/auth/login (Failure)"),
+            ("suppressed_count", "99"),
+            (
+                "window_note",
+                "Not mailed in the previous window: 99 login_failure events.",
+            ),
+        ] {
+            ctx.insert(key.into(), value.into());
+        }
+        let text = render(&t.text_body, &ctx);
+        assert!(text.contains("Not mailed (previous window): 99"));
+        assert!(text.contains("99 login_failure events"));
+        assert!(!text.contains("{{"));
+        let html = render_html(&t.html_body, &ctx);
+        assert!(html.contains("<td>Not mailed (previous window)</td><td>99</td>"));
+        assert!(html.contains("99 login_failure events"));
+        assert!(!html.contains("{{"));
     }
 
     #[test]

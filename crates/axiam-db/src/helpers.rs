@@ -136,6 +136,34 @@ where
     }
 }
 
+/// How many attempts a write to a row that is hot by design gets before its
+/// conflict surfaces. [`MAX_WRITE_ATTEMPTS`]' four are sized for an occasional
+/// collision; a SCIM target's delivery state (every delivery of every message
+/// of one target, on every replica, increments it) and a notification window
+/// (every matching event of a burst, on every replica, counts in it) need more
+/// patience. A conflicted transaction commits nothing, so replaying an
+/// increment cannot double-count.
+pub const HOT_ROW_MAX_WRITE_ATTEMPTS: u32 = 32;
+
+/// [`retry_on_write_conflict`] for a hot row: up to
+/// [`HOT_ROW_MAX_WRITE_ATTEMPTS`] attempts with the shared backoff.
+pub async fn retry_hot_row<T, F, Fut>(mut op: F) -> Result<T, DbError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, DbError>>,
+{
+    let mut attempt = 1;
+    loop {
+        match op().await {
+            Err(e) if attempt < HOT_ROW_MAX_WRITE_ATTEMPTS && is_write_conflict(&e.to_string()) => {
+                tokio::time::sleep(write_conflict_backoff(attempt)).await;
+                attempt += 1;
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The unique-violation marker set — one definition, three classifiers (F5)
 // ---------------------------------------------------------------------------

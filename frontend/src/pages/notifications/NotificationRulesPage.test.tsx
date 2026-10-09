@@ -17,6 +17,7 @@ const rules = [
     events: ["login_failure", "account_locked"],
     recipient_emails: ["sec@example.com", "ops@example.com"],
     enabled: true,
+    window_minutes: 30,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   },
@@ -160,7 +161,43 @@ describe("NotificationRulesPage", () => {
         description: "desc",
         events: ["login_failure"],
         recipient_emails: ["a@example.com", "b@example.com"],
+        window_minutes: 15,
       }),
+    );
+  });
+
+  it("sends the alert window and refuses one outside 1 to 1440 minutes", async () => {
+    apiMock.get.mockResolvedValue(res(rules));
+    apiMock.post.mockResolvedValue(res({ ...rules[0], id: "r4" }));
+    renderWithProviders(<NotificationRulesPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Rule/ }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Name *"), "Windowed");
+    await userEvent.click(within(dialog).getByLabelText("Login failure"));
+    await userEvent.type(
+      within(dialog).getByLabelText("Recipient Emails (one per line)"),
+      "a@example.com",
+    );
+    const window = within(dialog).getByLabelText("Alert window (minutes)");
+    expect(window).toHaveValue(15);
+
+    // Out of bounds: the field is invalid and nothing is sent.
+    for (const bad of ["0", "1441"]) {
+      await userEvent.clear(window);
+      await userEvent.type(window, bad);
+      expect(window).toBeInvalid();
+      await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    }
+    expect(apiMock.post).not.toHaveBeenCalled();
+
+    await userEvent.clear(window);
+    await userEvent.type(window, "60");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/notification-rules",
+        expect.objectContaining({ window_minutes: 60 }),
+      ),
     );
   });
 
@@ -218,6 +255,7 @@ describe("NotificationRulesPage", () => {
       within(dialog).getByLabelText("Recipient Emails (one per line)"),
     ).toHaveValue("sec@example.com\nops@example.com");
     expect(within(dialog).getByLabelText("Enabled")).toBeChecked();
+    expect(within(dialog).getByLabelText("Alert window (minutes)")).toHaveValue(30);
 
     const nameField = within(dialog).getByLabelText("Name *");
     await userEvent.clear(nameField);
@@ -231,6 +269,7 @@ describe("NotificationRulesPage", () => {
         events: ["login_failure", "account_locked"],
         recipient_emails: ["sec@example.com", "ops@example.com"],
         enabled: true,
+        window_minutes: 30,
       }),
     );
   });

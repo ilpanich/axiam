@@ -53,6 +53,25 @@
 > succeeds now and then never opens it, and the per-target concurrency budget is
 > deferred to `1.0.x`. Status and totals are unchanged.
 >
+> **Notification windows (`1.0.0`, #551, P23W5-13 — T-117 closed).** A
+> notification rule mailed each recipient once per matching audit row, so a
+> request-path event an attacker can produce in volume — failed sign-ins spread
+> over addresses and accounts — mailed them once per attempt; the batching this
+> entry recorded until model 2.35.0 never existed. Each rule now has a window,
+> `window_minutes` (1 to 1440, 15 by default): of the events of one type that
+> match one rule, the first in a window mails each recipient, the rest are
+> counted, and the next mail says how many were not sent. The window of
+> (tenant, rule, event) is claimed in the datastore with a conditional write,
+> as T-418's gate is (schema v85), so two replicas still mail once; that gate
+> keeps `scim_delivery_failed` at one notification per target per hour and the
+> window does not apply to it again. The entry cites the issue's test — a
+> hundred `LoginFailure` rows mail each recipient once and the next window's
+> mail carries the count — and the two-replica, per-rule and per-event tests.
+> What stays is named there: a second incident of the same event type inside a
+> window reaches the recipients only as a count. The model is **469 threats,
+> 427 mitigated / 21 open / 21 not applicable**; its version is unchanged until
+> the wave's last item.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):
@@ -1176,7 +1195,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
 | Threats identified | 469 |
-| Mitigated / Open | 426 / 22 |
+| Mitigated / Open | 427 / 21 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1199,7 +1218,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 30 | 2 | 0 |
-| Audit, webhooks, email & notifications | 55 | 4 | 0 |
+| Audit, webhooks, email & notifications | 55 | 3 | 0 |
 | Deployment & platform (Kubernetes) | 29 | 6 | 0 |
 | Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
 | RADIUS front end (not built — G-11, declined) | 21 | 0 | 21 |
@@ -1300,7 +1319,9 @@ authentication by certificate reads a certificate's status (not the TLS
 handshake, nor OAuth2 `tls_client_auth`). The W6 F4 review (model 2.36.1)
 corrects that last point and adds T-469: the lockout branch of the password
 login answers without the equalising verify, so a locked account is told apart
-from an unknown name.
+from an unknown name. The 1.0.0 release wave closes T-117 (#551): each rule
+mails one event type at most once per window and counts the rest, the next mail
+carrying the count.
 
 ### Coverage by STRIDE category
 
@@ -1316,7 +1337,7 @@ the category recorded against it in the model.
 | Tampering | 93 | 1 | 5 |
 | Repudiation | 16 | 2 | 1 |
 | Information disclosure | 110 | 7 | 4 |
-| Denial of service | 59 | 4 | 4 |
+| Denial of service | 59 | 3 | 4 |
 | Elevation of privilege | 90 | 3 | 4 |
 
 ### Coverage by severity
@@ -1325,12 +1346,12 @@ the category recorded against it in the model.
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
 | High | 196 | 10 | 9 |
-| Medium | 195 | 9 | 9 |
+| Medium | 195 | 8 | 9 |
 | Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 22 still-open items are listed one by one in
+the weight the control carries. The 21 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -2639,7 +2660,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 22 of 469. The 21
+Every threat the model records as open, most severe first — 21 of 469. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -2662,7 +2683,6 @@ each.
 | T-180 — Vault concentrates every long-lived secret behind one credential | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-216 — The unseal key sits on the same disk as the sealed data | High | Secrets (Vault / K8s Secrets / ConfigMap) · *Deployment & platform (Kubernetes)* |
 | T-9 — Connection flood exhausts ingress capacity | Medium | Ingress / TLS 1.3 termination · *System diagram* |
-| T-117 — Alert flooding buries a real incident | Medium | Notification rules (admin alerts) · *Audit, webhooks, email & notifications* |
 | T-123 — Final mail hop is not confidential | Medium | deliver mail · *Audit, webhooks, email & notifications* |
 | T-134 — Backup stream unencrypted in transit | Medium | scheduled backup · *Deployment & platform (Kubernetes)* |
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
@@ -2672,10 +2692,10 @@ each.
 | T-469 — A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart | Medium | Login endpoints /auth/login + /auth/opaque/* · *Authentication & session management* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
-With three exceptions — T-108, request audit that drops a row with only a log
-line to say so; T-117, notification mail that is not coalesced on the request
-path; and T-447, a relying party's access token that can approve a device
-authorization in its user's name, each with an issue body in the W5 F4 review —
+With two exceptions — T-108, request audit that drops a row with only a log
+line to say so; and T-447, a relying party's access token that can approve a
+device authorization in its user's name, each with an issue body in the W5 F4
+review —
 none of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
 and gaps on the SDK and distribution side — and one on the PKI's publication

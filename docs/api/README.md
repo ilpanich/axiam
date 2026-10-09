@@ -53,7 +53,7 @@ is the `aud` claim, and the OpenAPI document says it per operation:
 |---|---|---|
 | `bearer` | a user's (`aud` = `axiam:user`) | every guarded route |
 | `service_account` | a service account's (`aud` = `axiam:m2m`, `sub_kind` = `service_account`), from client credentials or the mTLS device login | only the operations that list it |
-| `session` | a user's, from a console sign-in with a live session behind it; a token AXIAM minted for an OAuth2 client is refused with `403` even though it names the user (T-447) | only the CIBA approval routes |
+| `session` | a user's, from a console sign-in with a live session behind it; a token AXIAM minted for an OAuth2 client is refused with `403` even though it names the user (T-447) | only the approval routes: CIBA's and the device grant's (`/api/v1/device/verify`, `/decide`) |
 
 An operation that lists both admits either. Since T22.13 (S-9, after 1.0.0-beta16)
 those are the **management families** — resources, scopes, permissions, roles

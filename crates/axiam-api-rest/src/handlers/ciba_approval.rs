@@ -163,7 +163,7 @@ async fn session_evidence<C: Connection + Clone>(
     state: &AppState<C>,
     user: &AuthenticatedUser,
 ) -> Result<Option<(DateTime<Utc>, Vec<Amr>)>, ()> {
-    if user.claims.0.client_id.is_some() {
+    if user.minted_for_client() {
         return Ok(None);
     }
     match state

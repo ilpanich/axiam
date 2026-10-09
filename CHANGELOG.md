@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Device grant: only a console sign-in reads or decides a device
+  authorization** (#549, P23W5-06, T-447). `GET /api/v1/device/verify` and
+  `POST /api/v1/device/decide` admitted any live user access token, including
+  one AXIAM minted for an OAuth2 client through the code, refresh, CIBA or
+  device grant — and CSRF does not apply to a bearer token. A relying party
+  holding one of its user's tokens could start a device authorization for a
+  device client it controls, so it knew the `user_code`, and approve it in the
+  user's name: the device client then redeemed that client's registered scopes
+  and a refresh token without the user ever seeing the page. Both routes now
+  answer such a token `403` (`authorization_denied`) before the code is looked
+  up — the rule the CIBA approval routes have applied since 1.0.0-beta18, now
+  one check both surfaces call. **Behaviour change:** an integrator that
+  approved or inspected device flows with a token from its own OAuth2 client
+  gets `403`; the user must approve on the verification page with a console
+  sign-in. The OpenAPI annotations of both routes list the `403`. Threat model
+  2.38.0: T-447 Mitigated; 469 threats, 427 mitigated / 21 open / 21 not
+  applicable.
+
 ### Documentation
 
 - **SDK contract 1.59: the cross-SDK review of the Phase 23 ports (contracts 1.53 –

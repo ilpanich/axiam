@@ -22,6 +22,14 @@
 //!   an attacker's page from silently POSTing an approval using the victim's
 //!   session — the exact "device code phishing" shape RFC 8628 §5.4 warns
 //!   about, from the other direction.
+//! * **Approval takes a console sign-in only.** The user extractor also admits
+//!   an access token AXIAM minted for an OAuth2 client (code, refresh, CIBA or
+//!   device grant), and CSRF does not apply to a bearer token. A relying party
+//!   holding one of its user's tokens could otherwise start a device
+//!   authorization for a device client it controls — so it knows the user
+//!   code — and approve it in the user's name, without the user ever seeing
+//!   this page. Both endpoints answer such a token `403` before reading the
+//!   code (T-447, the rule the CIBA approval routes apply).
 //!
 //! # Why both endpoints answer the same way for three different failures
 //!
@@ -80,6 +88,13 @@ pub struct DecideResponse {
     pub ok: bool,
 }
 
+fn console_sign_in_required() -> HttpResponse {
+    HttpResponse::Forbidden().json(serde_json::json!({
+        "error": "authorization_denied",
+        "message": "A console sign-in is required to approve a device.",
+    }))
+}
+
 /// Look up a pending grant by the code the user typed.
 #[utoipa::path(
     get,
@@ -89,6 +104,7 @@ pub struct DecideResponse {
     responses(
         (status = 200, description = "Grant details, or found=false", body = VerifyResponse),
         (status = 401, description = "Not authenticated"),
+        (status = 403, description = "The token is not a console sign-in's: AXIAM minted it for an OAuth2 client"),
     ),
     security(("session" = [])),
 )]
@@ -97,6 +113,9 @@ pub async fn verify<C: Connection + Clone>(
     query: web::Query<VerifyQuery>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
+    if user.minted_for_client() {
+        return console_sign_in_required();
+    }
     match state
         .oauth2
         .device_authorization_service
@@ -129,6 +148,7 @@ pub async fn verify<C: Connection + Clone>(
     responses(
         (status = 200, description = "Decision recorded, or ok=false", body = DecideResponse),
         (status = 401, description = "Not authenticated"),
+        (status = 403, description = "The token is not a console sign-in's: AXIAM minted it for an OAuth2 client"),
     ),
     security(("session" = [])),
 )]
@@ -137,6 +157,9 @@ pub async fn decide<C: Connection + Clone>(
     body: web::Json<DecideRequest>,
     state: web::Data<AppState<C>>,
 ) -> HttpResponse {
+    if user.minted_for_client() {
+        return console_sign_in_required();
+    }
     let body = body.into_inner();
     match state
         .oauth2

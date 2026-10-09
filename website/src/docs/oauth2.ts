@@ -614,7 +614,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "These two back the verification page. The user is authenticated at AXIAM in the ordinary way before deciding — the page shows *which application* is asking and *what for*, because a code typed from a screen carries no context on its own.",
+        text: "These two back the verification page. The user is authenticated at AXIAM in the ordinary way before deciding — the page shows *which application* is asking and *what for*, because a code typed from a screen carries no context on its own. Only a console sign-in may call them: an access token AXIAM minted for an OAuth2 client names the user too, and is refused with `403`, so a relying party cannot approve a device flow in its user's name.",
       },
       { type: "h", id: "poll", text: "3. The device polls" },
       {

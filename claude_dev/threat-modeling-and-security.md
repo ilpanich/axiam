@@ -15,8 +15,8 @@
 > ## Handoff — this document and the website section
 >
 > **Status: source current as of 2026-10-09 (`main` at `1.0.0-beta19`, model
-> 2.37.0 — Phase 23, the competitor-gap closure of `1.0.0-beta18`, and the
-> contract 1.58 SDK fan-out).** The Phase 23 paragraphs below record the waves;
+> 2.38.0 — Phase 23, the competitor-gap closure of `1.0.0-beta18`, the
+> contract 1.58 SDK fan-out, and the 1.0.0 release wave's fixes).** The Phase 23 paragraphs below record the waves;
 > this plan
 > ([`phase23-closeout-threat-model-and-docs-plan-2026-10-09.md`](phase23-closeout-threat-model-and-docs-plan-2026-10-09.md))
 > records the close-out. The website's Security section mirrors this text and
@@ -24,6 +24,18 @@
 > the Phase 21 MCP wave of `1.0.0-beta16` and the Phase 22 dogfooding wave of
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
+>
+> **The 1.0.0 release wave (model 2.38.0 — T-447 closed).** The W5 F4 review
+> had closed T-447 for CIBA and reported the device grant, where it was true
+> since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
+> minted for an OAuth2 client, so a relying party holding one of its user's
+> tokens could approve, in the user's name, a device authorization it started
+> itself. Both routes now refuse such a token with `403`, by the check the CIBA
+> approval routes call, so every approval surface takes a console sign-in only
+> (#549); the test redeems an authorization-code token and fails to read,
+> approve or refuse a device grant with it, while the user's console sign-in
+> approves it. The model is **469 threats, 427 mitigated / 21 open / 21 not
+> applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -1161,7 +1173,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
 | Threats identified | 469 |
-| Mitigated / Open | 426 / 22 |
+| Mitigated / Open | 427 / 21 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1180,7 +1192,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 |---|---|---|---|
 | System context | 33 | 2 | 0 |
 | Authentication & session management | 36 | 1 | 0 |
-| OAuth2 / OIDC authorization server | 85 | 1 | 0 |
+| OAuth2 / OIDC authorization server | 85 | 0 | 0 |
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 30 | 2 | 0 |
@@ -1193,15 +1205,15 @@ The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. The five diagrams of
 AXIAM's own request path — authentication, OAuth2 and tokens, federation,
-authorization, PKI — carry **seven** open items at model 2.36.1. Four are
+authorization, PKI — carry **six** open items at model 2.38.0. Four are
 residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
 providers pinned (T-306) and a service provider's own session outliving the
-AXIAM session (T-380). Three are not, and each has a fix drafted or filed: a
-relying party's access token approving a device authorization (T-447, issue
-#549), no published certificate revocation list (T-102) and a locked account
-told apart from an unknown name (T-469). The directory identity source carries none:
+AXIAM session (T-380). Two are not, and each has a fix filed: no published
+certificate revocation list (T-102) and a locked account told apart from an
+unknown name (T-469). A third, a relying party's access token approving a
+device authorization (T-447), closed at model 2.38.0 (#549). The directory identity source carries none:
 its last open item — with just-in-time provisioning on, a sign-in for a name
 AXIAM holds no account for reached the directory with no AXIAM counter in front
 of it (T-332) — closed with a failure counter per tenant and login name, as the
@@ -1270,7 +1282,8 @@ two open items — T-117, reopened because the batched notifications it describe
 do not exist, so a request-path event an attacker can produce in volume mails
 each recipient of a rule once per event; and T-447, an access token minted for
 an OAuth2 client that can approve a device authorization in its user's name,
-which the review closed for CIBA — and one mitigated entry, T-446. Model 2.36.0
+which the review closed for CIBA, and the 1.0.0 release wave for the device
+grant (model 2.38.0) — and one mitigated entry, T-446. Model 2.36.0
 adds a tenth diagram of a different kind: the RADIUS front end the G-11 spike
 declined, drawn so that a future build starts from its twenty-one entries
 (T-448 … T-468) — among them the limiter and lockout it must carry from its
@@ -1302,7 +1315,7 @@ the category recorded against it in the model.
 | Repudiation | 16 | 2 | 1 |
 | Information disclosure | 110 | 7 | 4 |
 | Denial of service | 59 | 4 | 4 |
-| Elevation of privilege | 90 | 3 | 4 |
+| Elevation of privilege | 90 | 2 | 4 |
 
 ### Coverage by severity
 
@@ -1310,12 +1323,12 @@ the category recorded against it in the model.
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
 | High | 196 | 10 | 9 |
-| Medium | 195 | 9 | 9 |
+| Medium | 195 | 8 | 9 |
 | Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 22 still-open items are listed one by one in
+the weight the control carries. The 21 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -2624,7 +2637,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 22 of 469. The 21
+Every threat the model records as open, most severe first — 21 of 469. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -2653,14 +2666,12 @@ each.
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
 | T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-445 — The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
-| T-447 — A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name | Medium | /oauth2/authorize (+ consent) · *OAuth2 / OIDC authorization server* |
 | T-469 — A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart | Medium | Login endpoints /auth/login + /auth/opaque/* · *Authentication & session management* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
-With three exceptions — T-108, request audit that drops a row with only a log
-line to say so; T-117, notification mail that is not coalesced on the request
-path; and T-447, a relying party's access token that can approve a device
-authorization in its user's name, each with an issue body in the W5 F4 review —
+With two exceptions — T-108, request audit that drops a row with only a log
+line to say so; and T-117, notification mail that is not coalesced on the
+request path, each with an issue body in the W5 F4 review —
 none of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
 and gaps on the SDK and distribution side — and one on the PKI's publication

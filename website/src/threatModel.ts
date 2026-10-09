@@ -15,11 +15,11 @@ export const THREAT_MODEL: ThreatModel = {
  "title": "Axiam",
  "owner": "ilpanich",
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment, and — as a design-only diagram whose entries are recorded Not applicable — a RADIUS front end that is not built.",
- "version": "2.37.0",
+ "version": "2.38.0",
  "diagramCount": 10,
  "total": 469,
- "open": 22,
- "mitigated": 426,
+ "open": 21,
+ "mitigated": 427,
  "notApplicable": 21,
  "diagrams": [
   {
@@ -2231,12 +2231,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name",
        "type": "Elevation of privilege",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "The routes on which a person approves a pending grant — the device grant's `POST /api/v1/device/decide` and CIBA's `POST /api/v1/ciba/requests/{id}/approve` and `/deny` — authenticate an `AuthenticatedUser`, which admits any `axiam:user` access token whose session is live: a console sign-in's, and equally one AXIAM minted for any OAuth2 client of the tenant through the code, refresh or CIBA grant. CSRF does not apply to a bearer token. A relying party holding such a token — even one granted only `openid` — can therefore approve on its user's behalf: a device authorization it started itself, since it chose the `user_code`, which mints for its device client that client's registered scopes and a refresh token without the user; and a CIBA request whose record id it knows.",
-       "mitigation": "Narrowed by the W5 F4 review (P23W5-04 closed it for CIBA; P23W5-06 reports the device grant, where it is pre-existing since B2). CIBA: the approval routes refuse a token that carries a `client_id` — only a console sign-in decides (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `/api/v1/device/verify` and `/decide` still admit it; bounded by the token itself (a live session of a user of the tenant) and by the device client's registered scopes. Closes when `/api/v1/device/*` applies the same rule (issue body in the W5 F4 review, §14)."
+       "mitigation": "Closed in the 1.0.0 release wave (model 2.38.0): the W5 F4 review closed it for CIBA (P23W5-04), and #549 (P23W5-06) for the device grant, where it was pre-existing since B2. Every approval surface takes a console sign-in only: a token that carries a `client_id` is refused with `403` before the request or the grant is read, by the one check both surfaces call (`AuthenticatedUser::minted_for_client`). CIBA: `GET /api/v1/ciba/requests/{id}` and its `approve` and `deny` routes (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `GET /api/v1/device/verify` and `POST /api/v1/device/decide`; test `crates/axiam-api-rest/tests/device_flow_test.rs` `a_token_minted_for_a_client_cannot_verify_or_approve_a_device` (a relying party's access token from the authorization-code grant read a pending device grant before the fix, `200` where it is now `403`; it is refused on both routes, approving and refusing alike, while the user's console sign-in still finds the grant pending and approves it). Scope: the rule covers the approval surfaces; whether other `/api/v1` routes that act as the person (consent, credential changes) take it too is a separate decision (#549)."
       }
      ],
-     "open": 1,
+     "open": 0,
      "notApplicable": 0
     },
     {
@@ -3857,7 +3857,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 85,
-   "open": 1,
+   "open": 0,
    "notApplicable": 0,
    "bySeverity": {
     "High": 35,

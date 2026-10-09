@@ -61,11 +61,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.37.0",
+ "version": "2.38.0",
  "diagramCount": 10,
  "total": 469,
- "open": 22,
- "mitigated": 426,
+ "open": 21,
+ "mitigated": 427,
  "notApplicable": 21,
  "areas": [
   {
@@ -86,7 +86,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
    "total": 85,
-   "open": 1,
+   "open": 0,
    "notApplicable": 0
   },
   {
@@ -173,7 +173,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Elevation of privilege",
    "total": 90,
-   "open": 3,
+   "open": 2,
    "notApplicable": 4
   }
  ],
@@ -193,7 +193,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Medium",
    "total": 195,
-   "open": 9,
+   "open": 8,
    "notApplicable": 9
   },
   {
@@ -393,16 +393,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Deployment & platform (Kubernetes)",
    "element": "AXIAM deployment (N replicas, HPA)",
    "residualRisk": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
-  },
-  {
-   "number": 447,
-   "title": "A user access token minted for an OAuth2 client approves a device or CIBA request in its user's name",
-   "category": "Elevation of privilege",
-   "severity": "Medium",
-   "diagramId": 2,
-   "area": "OAuth2 / OIDC authorization server",
-   "element": "/oauth2/authorize (+ consent)",
-   "residualRisk": "Narrowed by the W5 F4 review (P23W5-04 closed it for CIBA; P23W5-06 reports the device grant, where it is pre-existing since B2). CIBA: the approval routes refuse a token that carries a `client_id` — only a console sign-in decides (contract 1.58 §33 amended in place); test `crates/axiam-api-rest/tests/ciba_approval_test.rs` `a_token_minted_for_a_client_cannot_decide_a_request` (a CIBA client's own token, from an earlier redemption, opened and approved the next request before the fix); the record id travels only in the mail to the user, and every decision is audited with its session (T-435). The device grant: `/api/v1/device/verify` and `/decide` still admit it; bounded by the token itself (a live session of a user of the tenant) and by the device client's registered scopes. Closes when `/api/v1/device/*` applies the same rule (issue body in the W5 F4 review, §14)."
   },
   {
    "number": 469,

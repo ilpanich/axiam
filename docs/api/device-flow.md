@@ -108,6 +108,22 @@ They are **authenticated and CSRF-protected**, which is why they live under
   Double-submit CSRF is what stops an attacker's page silently POSTing an
   approval on a victim's session — the device-code phishing shape RFC 8628
   §5.4 warns about, seen from the other side.
+- **Only a console sign-in may call them.** An access token AXIAM minted for
+  an OAuth2 client — through the code, refresh, CIBA or device grant — names
+  the user too, but it is answered `403` on both endpoints, before the code is
+  looked up:
+
+  ```json
+  {"error": "authorization_denied", "message": "A console sign-in is required to approve a device."}
+  ```
+
+  Without this rule a relying party holding one of its user's tokens could
+  start a device authorization for a device client it controls — so it knows
+  the user code — and approve it in the user's name, without the user ever
+  seeing the page (T-447, #549; CSRF does not apply to a bearer token). It is
+  the rule the CIBA approval routes apply. The page therefore runs on the
+  console's own sign-in; an integrator who called these endpoints with a token
+  from its own OAuth2 client must send the user to the page instead.
 
 Codes are normalized before lookup: `WXYZ-1234`, `wxyz 1234` and `WXYZ1234`
 are the same code.

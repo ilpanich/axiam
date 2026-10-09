@@ -109,6 +109,11 @@ export const REFERENCE_PAGES: DocPage[] = [
             `[Same matrix](${COMPLIANCE}/oauth2-rfc-compliance.md).`,
           ],
           [
+            "RFC 7592 — Dynamic client registration management",
+            "The client configuration endpoint: a self-registered client reads, replaces and deletes its registration with its registration access token.",
+            `[Same matrix](${COMPLIANCE}/oauth2-rfc-compliance.md).`,
+          ],
+          [
             "RFC 8628 — Device authorization grant",
             "The full non-interactive path.",
             `[Device flow reference](${API_DOCS}/device-flow.md).`,
@@ -124,6 +129,11 @@ export const REFERENCE_PAGES: DocPage[] = [
             `[Integration test suite](${GH_BLOB}/crates/axiam-api-rest/tests/par_test.rs), over [the PAR implementation](${GH_BLOB}/crates/axiam-oauth2/src/par.rs).`,
           ],
           [
+            "RFC 8417 / 8935 / 8936 — Security Event Tokens, push and poll",
+            "AXIAM as a Shared Signals Framework transmitter: signed SETs, delivered by push or by poll. The rows cover what the transmitter owes; the receiver's obligations are the SDKs' helper's, tested in the SDK repositories.",
+            `[OAuth2 RFC compliance matrix](${COMPLIANCE}/oauth2-rfc-compliance.md).`,
+          ],
+          [
             "OpenID Connect Core 1.0 & Discovery 1.0",
             "ID tokens, userinfo, discovery. `alg: none` is excluded from the discovery document and rejected at verification.",
             `[OIDC Core conformance matrix](${COMPLIANCE}/oidc-conformance.md).`,
@@ -132,6 +142,11 @@ export const REFERENCE_PAGES: DocPage[] = [
             "OIDC RP-Initiated & Back-Channel Logout 1.0",
             "Session-scoped logout in both directions.",
             `[Logout reference](${API_DOCS}/logout.md).`,
+          ],
+          [
+            "OpenID Connect CIBA Core 1.0",
+            "Poll and ping modes; push and `user_code` are not offered. `unknown_user_id` is never sent — a deliberate deviation, so a client cannot enumerate users — and one MUST is enforced but not yet tested, so it is recorded as Partial. No FAPI-CIBA conformance is claimed.",
+            `[OAuth2 RFC compliance matrix](${COMPLIANCE}/oauth2-rfc-compliance.md), and [CONTRACT §33](${contractLink("33")}).`,
           ],
           [
             "UMA 2.0",
@@ -167,7 +182,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "table",
-        headers: ["Plan (2026-09-18)", "Modules", "PASSED", "REVIEW", "SKIPPED", "WARNING", "FAILED"],
+        headers: ["Plan (2026-09-25)", "Modules", "PASSED", "REVIEW", "SKIPPED", "WARNING", "FAILED"],
         rows: [
           ["`oidcc-basic-static`", "35", "30", "4", "1", "0", "0"],
           ["`fapi2-security-profile-final-mtls`", "37", "34", "2", "0", "1", "0"],
@@ -181,7 +196,11 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: `The table is the 2026-09-18 sweep — the latest full run of all four plans, against a build carrying the \`1.0.0-beta16\` MCP authorization surfaces. Each of the ten \`REVIEW\` modules uploaded one screenshot, and all ten are [published and matched to the condition they answer](${GH_BLOB}/docs/conformance/evidence/2026-09-18/README.md). The eight modules that passed only when run individually after 2026-09-14 are passes in this sweep. The 2026-09-11 run stands in the archive beside it.`,
+        text: `The table is the 2026-09-25 sweep — the latest full run of all four plans, against a host build of \`1.0.0-beta16\` with a lockfile-wide dependency update. Its counts are the 2026-09-18 sweep's: the same ten modules end \`REVIEW\`, and the one \`WARNING\` per FAPI plan is the same module. Each of the ten \`REVIEW\` modules uploaded one screenshot, and all ten are [published and matched to the condition they answer](${GH_BLOB}/docs/conformance/evidence/2026-09-25/README.md). The eight modules that passed only when run individually after 2026-09-14 are passes in this sweep. The 2026-09-18 and 2026-09-11 runs stand in the archive beside it.`,
+      },
+      {
+        type: "p",
+        text: `On 2026-10-05 the [\`fapi-conformance.yml\`](${GH_BLOB}/.github/workflows/fapi-conformance.yml) workflow — dispatched by hand, never on a pull request — ran the three FAPI plans end to end in CI for the first time. Every module that finishes without a browser passed, matching the 2026-09-25 baseline with nothing \`FAILED\`; the rest, the \`REVIEW\` and \`WARNING\` modules among them, waited for a browser an unattended runner does not have and gave no verdict. That run is a **smoke run** built from the checkout, not evidence: the reports above remain the 2026-09-25 sweep.`,
       },
       {
         type: "p",
@@ -281,7 +300,7 @@ export const REFERENCE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: `The last of those is generated rather than written. \`management-registry.json\` classifies the spec's operations into 24 namespaces and names the 162 that make up the administrative surface, deliberately excluding the protocol endpoints that have their own hand-written sections; each SDK ships a generator over it and a CI job that regenerates and diffs, so a new endpoint reaches all eleven by regeneration rather than by eleven people remembering. See [CONTRACT §27](${contractLink("27")}) and [Managing AXIAM from an SDK](#/docs/rest).`,
+        text: `The last of those is generated rather than written. \`management-registry.json\` classifies the spec's operations into 28 namespaces and names the 190 that make up the administrative surface, deliberately excluding the protocol endpoints that have their own hand-written sections; each SDK ships a generator over it and a CI job that regenerates and diffs, so a new endpoint reaches all eleven by regeneration rather than by eleven people remembering. See [CONTRACT §27](${contractLink("27")}) and [Managing AXIAM from an SDK](#/docs/rest).`,
       },
       { type: "h", id: "matrix", text: "What each SDK ships" },
       {
@@ -318,10 +337,10 @@ export const REFERENCE_PAGES: DocPage[] = [
         type: "p",
         text: "A release ships the surface it derives from the spec it vendors: tagging an SDK re-vendors the contract, the OpenAPI document and the management registry, then regenerates that SDK's §27 management surface from them and stages exactly what the generator wrote. A missing generator stops the release rather than tagging a tree the SDK's own drift-check would reject.",
       },
-      { type: "h", id: "recent", text: "What moved in contract 1.40–1.52" },
+      { type: "h", id: "recent", text: "What moved in contract 1.40–1.58" },
       {
         type: "p",
-        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been thirteen amendments since 1.39. Six of them changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently; each SDK's C-12 fix PR brought that SDK to it, and a follow-up PR per SDK re-vendored the contract. All of them are merged, and the drift check reports every repository at 1.52.`,
+        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been nineteen amendments since 1.39. Of the thirteen up to 1.52, six changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently; each SDK's C-12 fix PR brought that SDK to it, and a follow-up PR per SDK re-vendored the contract. All of those are merged. The six Phase 23 contracts, 1.53 to 1.58, carried four management namespaces — the directory, SAML service providers, SSF streams and outbound SCIM targets, which bring the registry to 190 operations across 28 namespaces — the SSF receiver helper and the CIBA client helper into all eleven repositories on 2026-10-09, the four REST-only SDKs (Kotlin, Swift, C and C++) taking the receiver and CIBA helpers as well. They are merged on each default branch, not yet in a tagged SDK release. The drift check reports every repository at 1.58, and the cross-SDK review of those ports — contract 1.59 — is pending.`,
       },
       {
         type: "table",
@@ -392,6 +411,36 @@ export const REFERENCE_PAGES: DocPage[] = [
             "1.52",
             `The C-12 cross-SDK review of the eleven 1.51 ports, recorded in [§27.14](${contractLink("27.14")}) with no open row. Six clarifications, no wire change. [§10.1](${contractLink("10.1")}): every public entry point that turns a token into an identity is a rule 9 guard. [§17.1](${contractLink("17.1")}): the acting tenant is part of the decision-memo key. [§27.13](${contractLink("27.13")}): a \`SubjectAltName\` with neither branch or both is refused client-side. [§6.1](${contractLink("6.1")}) rule 11 covers the device credential's lifecycle: it is used for every request, held until replaced, and never refreshed. [§5.2](${contractLink("5.2")}) says where the acting-tenant header goes, which responses set the gate, and that tenant ids compare as UUIDs. [§27.6.1](${contractLink("27.6.1")}) covers manifest bindings: stated values, rebind outcomes as data, and \`plan\` reporting an Update. Every SDK had at least one defect against those rules, and four recurred across unrelated codebases: a device credential that outlived a later login, a refresh guard that reached the device token on gRPC or on re-authentication, tenant ids compared as strings, and a malformed \`200\` on the device login adopted as an empty credential.`,
             "**yes** — one C-12 fix PR per SDK",
+          ],
+          [
+            "1.53",
+            `[§28.12](${contractLink("28.12")}) — RFC 7592's client configuration endpoint reaches the SDKs as three SHOULD-level operations, \`read_client_registration\`, \`update_client_registration\` and \`delete_client_registration\`, with \`registration_access_token\` \`Sensitive\` from the first version.`,
+            "**yes** — merged in all eleven repositories on 2026-10-09",
+          ],
+          [
+            "1.54",
+            `[§30](${contractLink("30")}) — the \`directory\` management namespace for a tenant's LDAP / Active Directory identity source: six operations (\`get\`, \`set\`, \`update\`, \`delete\`, \`link_account\`, \`get_sync_status\`), with the write-only \`bind_secret\` \`Sensitive\` from the first version.`,
+            "**yes** — merged in all eleven repositories on 2026-10-09",
+          ],
+          [
+            "1.55",
+            `[§29](${contractLink("29")}) — the \`saml\` management namespace for AXIAM as a SAML 2.0 identity provider: eleven operations over the identity provider, its registered service providers, SP metadata import and the tenant's signing credential, none of them \`Sensitive\`, because the registry holds no secret and \`SamlIdpCredential\` has no key member.`,
+            "**yes** — merged in all eleven repositories on 2026-10-09",
+          ],
+          [
+            "1.56",
+            `[§32](${contractLink("32")}) — AXIAM as a Shared Signals Framework transmitter: the \`ssf\` management namespace (five stream operations, with \`authorization_header\` \`Sensitive\` from the first version) and the [§32.7](${contractLink("32.7")}) receiver helper (\`verify_set\`, \`poll\`), SHOULD in the seven full-surface SDKs, with its verification order, reason codes and replay window.`,
+            "**yes** — merged in all eleven repositories on 2026-10-09",
+          ],
+          [
+            "1.57",
+            `[§31](${contractLink("31")}) — AXIAM as a SCIM 2.0 client of downstream service providers: the \`scim_targets\` management namespace (\`list\`, \`create\`, \`get\`, \`update\`, \`delete\`, \`reconcile\`), with \`ScimTargetInput.credential\` \`Sensitive\` from the first version, bringing the registry to 190 operations across 28 namespaces.`,
+            "**yes** — merged in all eleven repositories on 2026-10-09",
+          ],
+          [
+            "1.58",
+            `[§33](${contractLink("33")}) — the client's half of CIBA Core 1.0, poll and ping with no push: \`ciba_initiate\`, \`ciba_poll\`, \`ciba_await\` and \`ciba_handle_ping\`, SHOULD in the seven full-surface SDKs and MAY in the other four, with the signed request as [§33.2](${contractLink("33.2")})'s optional form, \`ciba_initiate\` never retried, and [§21.3.1](${contractLink("21.3.1")})'s alias vectors amended in place to seven members.`,
+            "**yes** — merged in all eleven repositories on 2026-10-09",
           ],
         ],
       },

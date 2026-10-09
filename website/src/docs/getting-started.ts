@@ -367,7 +367,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
           },
           {
             title: "Seeds the permission registry into that scope",
-            body: "All 116 built-in permissions across 26 families — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `audit_logs:*`, `reactors:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against.",
+            body: "All 126 built-in permissions across 31 families — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `audit_logs:*`, `reactors:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against.",
           },
           {
             title: "Seeds three default roles",

@@ -245,7 +245,7 @@ export const AUTHORIZATION_PAGES: DocPage[] = [
       { type: "h", id: "permissions", text: "Permissions" },
       {
         type: "p",
-        text: "A permission is an action name; whether a grant of it allows or denies is the `effect` on the grant that attaches it to a role. AXIAM seeds **116 built-in permissions across 26 families** into every tenant at bootstrap — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `ca_certificates:*`, `audit_logs:*`, `federation:*`, `webhooks:*`, `reactors:*`, `scim_tokens:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against, so an administrator's authority over AXIAM is expressed in the same model as an application's authority over its own resources.",
+        text: "A permission is an action name; whether a grant of it allows or denies is the `effect` on the grant that attaches it to a role. AXIAM seeds **126 built-in permissions across 31 families** into every tenant at bootstrap — `users:*`, `roles:*`, `resources:*`, `oauth2_clients:*`, `certificates:*`, `ca_certificates:*`, `audit_logs:*`, `federation:*`, `webhooks:*`, `reactors:*`, `scim_tokens:*`, `gdpr:*` and the rest. These are the actions the REST API's own route guards check against, so an administrator's authority over AXIAM is expressed in the same model as an application's authority over its own resources.",
       },
       {
         type: "p",

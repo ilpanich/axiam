@@ -6,7 +6,8 @@ Resilience Act (CRA) essential requirements — see §4 for the framework choice
 **Milestone:** v1.2 (MVP Release Hardening) — Beta
 **Date:** 2026-07-06
 **Commit reviewed:** `c79b66e`
-**Last verified:** 2026-07-06
+**Last verified:** 2026-07-06 for the audit below; 2026-10-09 for the scope of the
+[Phase 23 addendum](#addendum--2026-10-09-phase-23-surfaces-in-scope) only
 **Scope:** Authentication, session management, access control, cryptography, and PKI
 controls across `crates/axiam-auth`, `crates/axiam-authz`, `crates/axiam-pki`,
 `crates/axiam-federation`, `crates/axiam-api-rest`, `crates/axiam-api-grpc`,
@@ -22,6 +23,76 @@ carries one of these plus an evidence pointer.
 
 **Compliance assertion:** All in-scope control families and themes below have an
 explicit status. No High or Critical severity item is open (see §7).
+
+---
+
+## Addendum — 2026-10-09: Phase 23 surfaces in scope
+
+**Dated addendum; the 2026-07-06 audit below is unchanged.** *Last verified* moves to
+2026-10-09 **for this addendum's scope only** — the crates, surfaces and documents named
+here. Every other section below remains as verified on 2026-07-06 at `c79b66e`, and §5's
+"30 tracked MUST requirements" sentence describes the OAuth2 matrix as it stood then.
+
+**Against:** `main` at `234663c` (`1.0.0-beta19`, the `version` in the workspace
+`Cargo.toml`, plus the threat-model commit for model 2.37.0).
+**Method:** the same citation-index method as §1. Each test named in the Phase 23
+additions to `docs/compliance/` was checked to exist, by name, in the tree on 2026-10-09;
+none was re-run for this addendum.
+
+**Surfaces now in scope** (Phase 23, the competitor-gap closure released as
+`1.0.0-beta18`; located in the tree, not taken from the plan):
+
+| Surface | Where it lives |
+|---|---|
+| LDAP / Active Directory identity source (G-3) | the new crate `crates/axiam-directory` (client, TLS, address guard, frame relay, mapping, sync); the login integration in `crates/axiam-auth/src/service/directory.rs`; the management routes in `crates/axiam-api-rest/src/handlers/directory.rs` |
+| SAML 2.0 identity provider (G-2) | `crates/axiam-federation/src/saml_idp/` (behind the `saml` feature), with `saml_idp_urls.rs` outside it; the SSO and SLO routes in `crates/axiam-api-rest/src/handlers/saml_idp.rs` and `saml_idp_slo.rs` |
+| RFC 7592 client configuration (G-4) | `crates/axiam-oauth2/src/dcr.rs`; `crates/axiam-api-rest/src/handlers/dcr.rs` |
+| Shared Signals Framework transmitter (G-5) | `crates/axiam-oauth2/src/ssf.rs`, `ssf_delivery.rs`; `crates/axiam-api-rest/src/handlers/ssf.rs`, `ssf_admin.rs`; the shared outbound dispatcher in `crates/axiam-amqp/src/outbound/` |
+| CIBA (G-7) | `crates/axiam-oauth2/src/ciba.rs`, `ciba_signed_request.rs`, `ciba_notifier.rs`, `ciba_ping.rs`, `token_ciba.rs`; `crates/axiam-api-rest/src/handlers/ciba.rs`, `ciba_approval.rs` |
+| Outbound SCIM provisioning (G-6) | `crates/axiam-scim/src/outbound/` (provisioner, deliverer, reconciliation); `crates/axiam-api-rest/src/handlers/scim_targets.rs` |
+
+The plan that commissioned this addendum placed SSF, CIBA and outbound SCIM "in
+`axiam-oauth2` / `axiam-scim`". That holds for the protocol logic; their HTTP surfaces are in
+`axiam-api-rest`, and SSF push and outbound SCIM delivery run on the dispatcher in
+`axiam-amqp`. `axiam-directory` is not listed in this document's original scope line, which
+predates it.
+
+**Review trail.** Each Phase 23 wave ended in an adversarial F4 security review, and these
+six documents are the review trail for the surfaces above — 79 findings between them,
+counted from their finding identifiers:
+
+- [`security-review-phase23-w1-2026-10-03.md`](security-review-phase23-w1-2026-10-03.md) — W1: the G-1 audits and RFC 7592
+- [`security-review-phase23-w2-2026-10-03.md`](security-review-phase23-w2-2026-10-03.md) — W2: the per-tenant OP cookie and logout hop, `axiam-directory` and the directory login path
+- [`security-review-phase23-w3-2026-10-04.md`](security-review-phase23-w3-2026-10-04.md) — W3: the SAML IdP's registry, issuer and SSO endpoint; the directory's provisioning, mapping, sync and guards
+- [`security-review-phase23-w4-2026-10-04.md`](security-review-phase23-w4-2026-10-04.md) — W4: SAML single logout and metadata; the SSF transmitter and the shared outbound dispatcher
+- [`security-review-phase23-w5-2026-10-05.md`](security-review-phase23-w5-2026-10-05.md) — W5: outbound SCIM, CIBA, the minimal (broker-less) profile
+- [`security-review-phase23-w6-2026-10-06.md`](security-review-phase23-w6-2026-10-06.md) — W6a: the benchmark harness, the RADIUS / EAP-TLS spike, the comparison refresh
+
+**Threat model.** [`threat-model-stride.md`](threat-model-stride.md) at **model 2.37.0**:
+469 threats, **426 Mitigated / 22 Open / 21 Not applicable** (the same totals in
+`ThreatDragonModels/Axiam/Axiam.json`). The Phase 23 entries are T-289 (RFC 7592),
+T-291 … T-356 (the directory, and the SAML IdP's issuer and SSO endpoint), T-357 … T-384
+(the SAML IdP's registry, metadata and single logout), T-385 … T-406 (SSF), T-407 … T-420 (outbound SCIM), T-421 … T-447 (CIBA) and
+T-444 … T-445 (the minimal profile). Of the 22 open entries, those entered or reopened during
+Phase 23 are T-306, T-380, T-405 and T-445 (accepted trade-offs), T-447 and T-469 (defects
+with a fix filed), and T-102 and T-108 (reopened when their recorded controls were found
+not to exist); §6 of the model gives each its reason.
+
+**Compliance matrices updated with this addendum.**
+[`docs/compliance/oauth2-rfc-compliance.md`](../docs/compliance/oauth2-rfc-compliance.md)
+gains rows 31–65 — RFC 7592 (31–38), RFC 8417 / 8935 / 8936 for the SSF transmitter
+(39–52) and CIBA Core 1.0 (53–65): 34 Pass and one **Partial** (row 59, CIBA ping mode's
+`client_notification_token` requirement, enforced in code with no test that drives it).
+[`docs/compliance/oidc-conformance.md`](../docs/compliance/oidc-conformance.md) points at
+the CIBA rows and records FAPI-CIBA as the next certification target, unsubmitted.
+[`docs/compliance/asvs-l2-checklist.md`](../docs/compliance/asvs-l2-checklist.md) cites the
+Phase 23 controls in the evidence of V2.2.1, V2.2.2, V3.5.1 and V9.1.1; no status and no
+count changed, so §2's table below stands.
+
+**Not covered by this addendum:** matrix rows for the SAML 2.0 IdP profiles and for the
+directory's RFC 4511 / 4513 / 4515 obligations (the threat entries above carry their
+controls and tests, but no MUST-matrix exists for them yet), and any re-verification of
+the 2026-07-06 sections.
 
 ---
 

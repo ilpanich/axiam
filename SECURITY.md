@@ -12,16 +12,18 @@ checklist — is published in the **Security** section of the website:
 ## Supported versions
 
 AXIAM has not reached a stable release. Security fixes land on `main` and ship in
-the next `1.0.0-alpha*` release; older pre-release tags are not patched.
+the next `1.0.0-beta*` release; older pre-release tags are not patched.
 
 | Version | Supported |
 |---|---|
-| `main` / latest `1.0.0-alpha*` | ✅ |
+| `main` / latest `1.0.0-beta*` | ✅ |
 | Any earlier pre-release tag | ❌ |
 
-> **This is alpha software.** It has not undergone an independent third-party
-> penetration test or security certification. Do not use it to protect
-> production systems until it reaches a stable, audited release.
+> **This is beta software.** It has not undergone an independent third-party
+> penetration test or security certification — the OpenID Foundation
+> conformance runs the project publishes are self-runs, not certifications. Do
+> not use it to protect production systems until it reaches a stable, audited
+> release.
 
 ## Reporting a vulnerability
 

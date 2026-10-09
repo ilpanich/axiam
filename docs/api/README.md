@@ -1,7 +1,7 @@
 # AXIAM API Documentation
 
-**Milestone:** v1.2 (MVP Release Hardening) — Beta
-**Last verified:** 2026-07-06
+**Milestone:** `1.0.0-beta19` — Beta
+**Last verified:** 2026-10-09
 
 AXIAM exposes three API protocols. This page is the single landing point for
 all three contract specs and how to view them.
@@ -53,6 +53,7 @@ is the `aud` claim, and the OpenAPI document says it per operation:
 |---|---|---|
 | `bearer` | a user's (`aud` = `axiam:user`) | every guarded route |
 | `service_account` | a service account's (`aud` = `axiam:m2m`, `sub_kind` = `service_account`), from client credentials or the mTLS device login | only the operations that list it |
+| `session` | a user's, from a console sign-in with a live session behind it; a token AXIAM minted for an OAuth2 client is refused with `403` even though it names the user (T-447) | only the CIBA approval routes |
 
 An operation that lists both admits either. Since T22.13 (S-9, after 1.0.0-beta16)
 those are the **management families** — resources, scopes, permissions, roles
@@ -66,6 +67,17 @@ settings, CA certificates, PGP keys, SCIM tokens, federation configuration,
 OAuth2 clients and the rest. Each of those keeps a human audience until it is
 argued on its own (decision D-5 in
 [`dogfooding-findings-fix-plan.md`](../../claude_dev/dogfooding-findings-fix-plan.md)).
+
+**Every Phase 23 management family is human-only.** The directory
+(`/api/v1/tenants/{tenant_id}/directory`), the SAML service-provider registry
+and IdP credential (`/api/v1/tenants/{tenant_id}/saml`), the SSF stream
+registry (`/api/v1/tenants/{tenant_id}/ssf/streams`) and the outbound SCIM
+targets (`/api/v1/scim-targets`) list only `bearer`, and a service-account
+token is `401` on each (contract §29.3 rule 9, §30.3 rule 8, §31.3 rule 9,
+§32.3 rule 10). **CIBA approval is narrower still**:
+`GET /api/v1/ciba/requests/{request_id}` and its `approve` / `deny` take the
+`session` scheme above plus a CSRF token, so neither a service principal nor a
+client credential can approve a request (§33, §33.3 rule 16).
 
 What a service account may **do** on an admitted route is decided by the roles
 assigned to it (`POST /api/v1/roles/{role_id}/service-accounts`), exactly as for
@@ -189,6 +201,14 @@ screen such a client always gets, and the ceiling, rate limit and sweeper that
 bound it are in
 [`../admin/dynamic-client-registration.md`](../admin/dynamic-client-registration.md).
 
+A client registered there also receives, once, a `registration_client_uri` and
+a `registration_access_token` (RFC 7592). The token authorizes
+`GET`, `PUT` and `DELETE /oauth2/register/{client_id}` for that one
+registration and nothing else, is accepted only in the `Authorization` header
+(the spec's `registration_access_token` scheme), and is rotated by every `PUT`.
+The SDK rules are [contract §28.12](../../sdks/CONTRACT.md#§2812-rfc-7592-client-configuration-operations-contract-153);
+the walkthrough is [the client configuration endpoint](../admin/dynamic-client-registration.md#the-client-configuration-endpoint-rfc-7592).
+
 ## OAuth2 device flow
 
 Input-constrained clients (televisions, CLIs, headless commissioning) use the
@@ -245,6 +265,84 @@ Ending a session at AXIAM and telling every relying party that shared it.
 The redirect allow-list, why an unverifiable `id_token_hint` ends nothing,
 the logout-token shape and the delivery model are in
 [`logout.md`](logout.md).
+
+## CIBA — client-initiated backchannel authentication
+
+A client that already knows whom it wants to authenticate asks AXIAM to do it
+on another device (CIBA Core 1.0, poll and ping modes; no push mode).
+
+- `POST /oauth2/bc-authorize` — the client, authenticated as at the token
+  endpoint (a CIBA client is never public), starts a request
+- `POST /oauth2/token` with `grant_type=urn:openid:params:grant-type:ciba` and
+  the `auth_req_id` — the client polls, or polls once after AXIAM pings it
+- `GET /api/v1/ciba/requests/{request_id}`, `POST …/approve`, `POST …/deny`
+  (tag `ciba`) — the console page `/ciba/approve` the user decides on; not SDK
+  surface
+
+Contract [§33](../../sdks/CONTRACT.md#§33-ciba--client-initiated-backchannel-authentication-contract-158);
+website [CIBA (backchannel authentication)](https://ilpanich.github.io/axiam/#/docs/ciba).
+
+## Shared Signals Framework
+
+AXIAM transmits CAEP and RISC events as Security Event Tokens (RFC 8417), by
+push (RFC 8935) or poll (RFC 8936). Two tags:
+
+- `ssf` — the stream registry a tenant administrator manages:
+  `GET`/`POST /api/v1/tenants/{tenant_id}/ssf/streams`,
+  `GET`/`PUT`/`DELETE …/ssf/streams/{stream_id}`
+- `ssf-receiver` — what a receiver calls with its client-credentials token:
+  `GET /.well-known/ssf-configuration` (and `/.well-known/ssf-configuration/t/{tenant_id}`),
+  `/ssf/v1/stream` (`GET`, `PUT`, `PATCH`; `POST` and `DELETE` are `403`),
+  `/ssf/v1/status` (`GET`, `POST`), `POST /ssf/v1/verify` and
+  `POST /ssf/v1/poll/{stream_id}`. These are not management surface: an SDK
+  generates no client for them beyond the receiver helper's `poll`
+  ([§32.6](../../sdks/CONTRACT.md#§326-the-receiver-protocol-informative-for-sdks-normative-for-the-server),
+  §32.9)
+
+Contract [§32](../../sdks/CONTRACT.md#§32-ssf-stream-registration-and-the-receiver-helper-contract-156);
+website [Shared Signals (SSF) transmitter](https://ilpanich.github.io/axiam/#/docs/ssf).
+
+## SAML identity provider
+
+The protocol routes are under `/saml/v2/{tenant_id}`: `GET`/`POST /sso`,
+`GET /sso/continue`, `GET /sso/idp-initiated`, `GET`/`HEAD /metadata`,
+`GET`/`POST /slo` and `GET /sso/logout`. They are compiled only with the `saml`
+Cargo feature (on by default), and the committed `openapi.json` is exported
+with `--no-default-features`, so **it does not contain them** — see the
+contract's [OpenAPI Export Feature Flag](../../sdks/CONTRACT.md#openapi-export-feature-flag)
+note. The management routes (tag `saml`) are in every build and in the spec:
+`…/saml/idp`, `…/saml/service-providers[/{sp_id}]`, `…/saml/parse-sp-metadata`
+and `…/saml/idp-credentials[/{credential_id}/promote|retire]`, all under
+`/api/v1/tenants/{tenant_id}`. Contract [§29](../../sdks/CONTRACT.md#§29-saml-service-provider-registration-management-api-contract-155);
+website [AXIAM as a SAML identity provider](https://ilpanich.github.io/axiam/#/docs/saml-idp).
+
+## Outbound SCIM targets
+
+AXIAM as a SCIM 2.0 client, pushing the tenant's users and groups to downstream
+service providers. The registry (tag `scim-targets`) carries no `{tenant_id}`:
+the tenant is the token's.
+
+- `GET`/`POST /api/v1/scim-targets`
+- `GET`/`PUT`/`DELETE /api/v1/scim-targets/{id}`
+- `POST /api/v1/scim-targets/{id}/reconcile` — reconcile now (`202`)
+
+Contract [§31](../../sdks/CONTRACT.md#§31-outbound-scim-targets-management-api-contract-157);
+website [Outbound SCIM provisioning](https://ilpanich.github.io/axiam/#/docs/scim-outbound).
+
+## Directory
+
+A tenant's LDAP or Active Directory identity source. Signing in needs no new
+route — a directory account uses the same login. The configuration (tag
+`directory`) is one per tenant:
+
+- `GET`/`PUT`/`PATCH`/`DELETE /api/v1/tenants/{tenant_id}/directory`
+- `POST /api/v1/tenants/{tenant_id}/directory/links` — link an existing local
+  account to its directory entry
+- `GET /api/v1/tenants/{tenant_id}/directory/sync-status`
+
+Contract [§30](../../sdks/CONTRACT.md#§30-directory-configuration-management-api-contract-154);
+website [LDAP and Active Directory](https://ilpanich.github.io/axiam/#/docs/directory); operations in
+[the deployment guide](../deployment/README.md#what-a-tenants-directory-needs-ldap--active-directory).
 
 ## AMQP — AsyncAPI
 

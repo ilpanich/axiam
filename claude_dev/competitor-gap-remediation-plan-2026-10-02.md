@@ -34,6 +34,12 @@ during it and ended with the W6 F4 review; its PR closes #561's first half,
 > recorded under *Today*. As items land, each section gets an `EXECUTED` block
 > at its head, in the form [`remediation-plan-2026-09-12.md`](remediation-plan-2026-09-12.md)
 > uses.
+>
+> **SDK fan-out complete, 2026-10-09:** all eleven repositories merged contract
+> 1.58 (§0.2 of
+> [`phase23-closeout-threat-model-and-docs-plan-2026-10-09.md`](phase23-closeout-threat-model-and-docs-plan-2026-10-09.md));
+> #540, #541, #547, #548 close with contract 1.59; T-388 closes at model
+> 2.37.0.
 
 The three comparisons agree on one thesis: AXIAM wins on **authorization depth,
 high-assurance OAuth, PKI, efficiency and safe defaults**, and loses on
@@ -2267,9 +2273,9 @@ threats, 425 mitigated / 23 open / 21 not applicable**; contract **1.52 → 1.58
 | **G-2** SAML 2.0 IdP | **Shipped** (W3–W4): SP- and IdP-initiated SSO, signed assertions under a tenant CA credential, pairwise `NameID`, SLO tied to session revocation, metadata, SP registry (§29), console; the Critical SP signature-confusion defect fixed on the way (D-23) | #528 (closed) | #536 (console switch), #538 (SLO against a real SP), #530, #531 (SP verifier). Assertion encryption and artifact binding declined (D-2) |
 | **G-3** LDAP / AD | **Shipped** (W2–W3): bind-as-user over TLS, JIT, group mapping, sync, address guard, §30, console, tested against OpenLDAP and Samba AD | #522 (closed) | Kerberos declined (D-1) |
 | **G-4** RFC 7592 | **Shipped** (W1, §28.12) | #514 (closed) | — |
-| **G-5** SSF transmitter | **Shipped** (W4): CAEP and RISC SETs, push and poll, stream management (§32), per-tenant issuers (D-55) | #542 (closed) | SDK receiver helper #541 (T-388); a receiver is later (D-4) |
+| **G-5** SSF transmitter | **Shipped** (W4): CAEP and RISC SETs, push and poll, stream management (§32), per-tenant issuers (D-55) | #542 (closed) | A receiver is later (D-4) |
 | **G-6** Outbound SCIM | **Shipped** (W5, §31) | #544 (closed) | #550 (a tarpit downstream stalls a replica) |
-| **G-7** CIBA | **Shipped** (W5, §33): poll and ping, FAPI-CIBA; no push, no `user_code` (D-64, D-65) | #545 (closed) | #566 (no pending list; federated accounts cannot approve, D-74 amended), #549 (the device grant's twin of T-447), SDK helper #548 |
+| **G-7** CIBA | **Shipped** (W5, §33): poll and ping, FAPI-CIBA; no push, no `user_code` (D-64, D-65) | #545 (closed) | #566 (no pending list; federated accounts cannot approve, D-74 amended), #549 (the device grant's twin of T-447) |
 | **G-8** AMQP-less profile | **Shipped** (W5): the minimal profile and its resting footprint | #546 (closed) | #552, #553, #554 (audit durability and orderly exits); #569 |
 | **G-9** Verifiable credentials | **Design only**, as planned (W1) | #515 (closed) | Implementation waits for specification stability and an adopter |
 | **G-10** Benchmark currency | **Half shipped** (W6a): the authentik target, the run-6 runbook, Keycloak 26.8.0 and Zitadel v4.19.4 pins, per-run credentials | #561 (open) | Run 6 against `1.0.0-beta18` and the seventh draft (W6b) |

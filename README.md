@@ -29,10 +29,11 @@ While the aim is to build a fully functional IAM system, the deeper goal is to e
 - **Multi-tenant architecture** — Organizations contain tenants; tenants provide full data isolation
 - **RBAC with deny-override** — Roles, permissions, groups and scoped access cascading through resource trees, with explicit `deny` grants that beat every allow at any depth
 - **Multiple auth protocols** — REST, gRPC and AMQP for sync and async authorization
-- **OAuth2 & OpenID Connect** — Authorization code + PKCE, client credentials, refresh rotation, device grant (RFC 8628), token exchange (RFC 8693), PAR (RFC 9126), introspection and revocation
+- **OAuth2 & OpenID Connect** — Authorization code + PKCE, client credentials, refresh rotation, device grant (RFC 8628), token exchange (RFC 8693), PAR (RFC 9126), introspection and revocation, dynamic registration with client configuration (RFC 7591 / 7592), and CIBA (poll and ping) for sign-in approved on the user's own device
 - **OPAQUE (RFC 9807)** — Optional augmented PAKE: the password never reaches the server, and a stolen credential database is not offline-crackable on its own
 - **Passkeys & WebAuthn** — Phishing-resistant sign-in, with an MDS3-backed per-tenant attestation policy
-- **Federation & provisioning** — SAML and OIDC for cross-domain SSO; SCIM 2.0 for IdP-driven user and group lifecycle
+- **Federation & provisioning** — SAML and OIDC for cross-domain SSO, with AXIAM as a SAML 2.0 identity provider as well as a service provider; LDAP / Active Directory as a read-only identity source; SCIM 2.0 inbound for IdP-driven user and group lifecycle, and outbound to the downstream applications a tenant registers
+- **Shared Signals Framework** — AXIAM as an SSF transmitter: signed security events (session revoked, credential changed, account disabled …) pushed or polled by the relying parties a tenant registers
 - **Logout that means something** — OIDC RP-initiated *and* back-channel logout, scoped to a session rather than a user
 - **FAPI 2.0 profile** — An opt-in constraint bundle a client cannot half-apply, with mTLS client auth and certificate-bound access tokens
 - **UMA 2.0** — Permission tickets and the ticket grant, so a resource server can describe what a request needs without becoming the authority
@@ -41,6 +42,7 @@ While the aim is to build a fully functional IAM system, the deeper goal is to e
 - **Webhooks & Reactors** — HMAC-signed event delivery, plus external hook actors that can allow, deny or narrowly mutate an operation *without running third-party code inside the authorization server*
 - **Comprehensive audit trail** — Append-only, tamper-evident logging, with GDPR-compatible actor pseudonymisation
 - **Pluggable secret providers** — Environment, mounted files, or HashiCorp Vault
+- **A broker-less minimal profile** — `AXIAM__AMQP__ENABLED=false` runs a single instance without RabbitMQ, the broker's work done in-process
 
 ## Tech Stack
 
@@ -151,7 +153,7 @@ volume would weaken rather than strengthen the separation.
 
 ## Development Progress
 
-The project follows a structured roadmap of **64 tasks across 19 phases**:
+The project follows a structured roadmap of **179 tasks across 24 phases** ([`claude_dev/roadmap.md`](claude_dev/roadmap.md) carries the per-task record):
 
 | Phase | Focus | Status |
 |-------|-------|--------|
@@ -174,6 +176,11 @@ The project follows a structured roadmap of **64 tasks across 19 phases**:
 | Phase 16 | Docker & Kubernetes | Done |
 | Phase 17 | SDKs (Rust, TS, Python, Java, Kotlin, C#, PHP, Go, Swift, C, C++) | Done |
 | Phase 18 | Security audit, compliance, docs | Done |
+| Phase 19 | Deferred improvements & optimizations from PR reviews | Done |
+| Phase 20 | Public website and documentation site | Done |
+| Phase 21 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) | Done |
+| Phase 22 | Dogfooding remediation from `axiam-domo-demo` | Done |
+| Phase 23 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) | Done — the run-6 benchmark report is pending ([#561](https://github.com/ilpanich/axiam/issues/561)) |
 
 ## Documentation
 

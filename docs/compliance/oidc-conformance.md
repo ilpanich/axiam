@@ -554,6 +554,29 @@ costs a round trip per request, which is why integrators do not adopt it.
 | 38 | `id_token_signing_alg_values_supported` remains exactly `["EdDSA"]` — escalation B was answered **no**, so no RSA key enters the JWKS | Discovery §3 | Pass | `oidc.rs::the_id_token_algorithm_list_is_still_eddsa_only` + row 8 |
 | 39 | Every signed token names its verifying key in the header `kid`, and that `kid` is the one the JWKS publishes | RFC 7515 §4.1.4 | Pass | `token.rs::every_signed_token_names_its_verifying_key`; `oidc.rs::the_published_kid_is_the_one_the_signer_stamps` |
 
+## OpenID Connect CIBA Core 1.0 (Phase 23, G-7)
+
+CIBA's MUSTs are tracked in the OAuth2 matrix, rows 53–65 of
+[`oauth2-rfc-compliance.md`](oauth2-rfc-compliance.md#openid-connect-ciba-core-10--client-initiated-backchannel-authentication),
+beside the other grants of the token endpoint; this file does not repeat them. Row 53
+there is the discovery half (`backchannel_authentication_endpoint`,
+`backchannel_token_delivery_modes_supported`, `backchannel_user_code_parameter_supported`,
+the request-signing algorithms), and row 64 the ID token the grant returns. The one
+deliberate deviation — `unknown_user_id` is never sent (D-63, T-422) — is stated under that
+matrix rather than counted as a pass.
+
+**FAPI-CIBA is the next certification target, and it is unsubmitted.** Decision D-5 of
+[`competitor-gap-remediation-plan-2026-10-02.md`](../../claude_dev/competitor-gap-remediation-plan-2026-10-02.md)
+built CIBA in wave W5 "because FAPI-CIBA is the natural next certification after FAPI
+2.0". The `fapi2` CIBA client exists (D-61; [`../admin/fapi2-profile.md`](../admin/fapi2-profile.md),
+*CIBA under the `fapi2` profile*; T-434), but `conformance/plans/` holds no FAPI-CIBA plan —
+only the Basic OP plan and the three FAPI 2.0 plans — no FAPI-CIBA module has been run, and
+nothing has been submitted to the OpenID Foundation. T-434 records why no unit test stands in
+for that: certification is a run of the Foundation's suite. Nothing in this file or in the
+OAuth2 matrix claims FAPI-CIBA conformance.
+
+---
+
 ---
 
 ## Notes
@@ -693,3 +716,4 @@ costs a round trip per request, which is why integrators do not adopt it.
 *Rows 170–174 added: X7.9 final-run preparation (T23.1.6) — 2026-10-03*
 *Row 175 added: the FAPI 2.0 judgements (T23.1.7) — 2026-10-03*
 *Rows 176–184 added: the X7.7/X7.8 audit (T23.1.5) — 2026-10-03*
+*CIBA section added (pointer to the OAuth2 matrix, rows 53–65; FAPI-CIBA unsubmitted): Phase 23 close-out — 2026-10-09*

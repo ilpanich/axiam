@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A tarpit SCIM downstream no longer stalls every tenant's outbound provisioning
+  on a replica (#550, P23W5-07, T-414).** Each replica's `scim_push` consumer
+  makes one delivery at a time, so a target that accepted connections and never
+  answered held every tenant's SCIM pushes for ten seconds (twenty with a token
+  request) per queued reference. The deliverer now has a **per-target breaker**:
+  a target with five or more consecutive failures whose last failure is inside
+  its window is not called — the attempt is a retry, reason `target is failing;
+  backing off`, with no request and no write to the target's delivery state. The
+  window is the consumer's own backoff (`AXIAM__SCIM_PUSH__BACKOFF_BASE_MS` and
+  `__BACKOFF_CEILING_MS`) applied to the failures past five: 5 s, then doubling
+  with each further failure, up to an hour by default. Once it has passed, the
+  next reference is tried; a success closes the breaker. Upgraders should know
+  that references queued for a failing target while its breaker is open use up
+  their `AXIAM__SCIM_PUSH__MAX_ATTEMPTS` without a request and dead-letter as
+  before (counted once in `dead_lettered_total`, notified at most once an hour);
+  reconciliation queues them again. The 10 000-member group bound
+  (`MAX_GROUP_MEMBERS`) is now pinned by a test. The issue's second option, a
+  per-target concurrency budget with more than one delivery in flight per
+  consumer, is **deferred to 1.0.x**.
+
 ### Documentation
 
 - **SDK contract 1.59: the cross-SDK review of the Phase 23 ports (contracts 1.53 –

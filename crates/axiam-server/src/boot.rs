@@ -2079,7 +2079,8 @@ where
         debug_assert!(bound, "the provisioning sink is bound exactly once");
         // The attempt ceiling is told to the deliverer so that the dead letter
         // the consumer makes of a last failed attempt is counted on the target
-        // once.
+        // once; the backoff, so that the per-target breaker's window follows
+        // the schedule the operator set (#550, T-414).
         let scim_deliverer = Arc::new(
             axiam_scim::outbound::ScimPushDeliverer::new(
                 scim_target_repo,
@@ -2089,7 +2090,11 @@ where
                 group_repo.clone(),
                 Arc::clone(&scim_publisher),
             )
-            .with_max_attempts(scim_retry.max_attempts),
+            .with_max_attempts(scim_retry.max_attempts)
+            .with_backoff(
+                Duration::from_millis(scim_retry.backoff_base_ms),
+                Duration::from_millis(scim_retry.backoff_ceiling_ms),
+            ),
         );
         let mut scim_deliverers = OutboundDeliverers::new();
         scim_deliverers

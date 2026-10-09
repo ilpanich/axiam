@@ -1211,6 +1211,11 @@ impl<C: Connection> ScimTargetStateRepository for SurrealScimTargetStateReposito
         .await
     }
 
+    async fn count_dead_letter(&self, tenant_id: Uuid, target_id: Uuid) -> AxiamResult<()> {
+        self.write_or_not_found(tenant_id, target_id, "dead_lettered_total += 1", None)
+            .await
+    }
+
     async fn claim_reconciliation(
         &self,
         tenant_id: Uuid,

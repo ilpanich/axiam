@@ -324,7 +324,10 @@ channels:
       target, any other `4xx` but `404`/`408`/`429`, a disabled or deleted target,
       or `attempt` exhausted against `AXIAM__SCIM_PUSH__MAX_ATTEMPTS`) dead-letters
       to `axiam.scim_push.dlq`; a retryable one republishes to
-      `axiam.scim_push.retry` with an incremented `attempt`.
+      `axiam.scim_push.retry` with an incremented `attempt`. A target whose
+      per-target breaker is open (five or more consecutive failures, the last
+      within its backoff window; #550) is not called: the attempt is a retry,
+      reason `target is failing; backing off`, with no request.
     bindings:
       amqp:
         is: queue

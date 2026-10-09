@@ -3857,6 +3857,17 @@ pub trait ScimTargetStateRepository: Send + Sync {
         reason: &str,
     ) -> impl Future<Output = AxiamResult<()>> + Send;
 
+    /// A delivery for which **no request was made** was dead-lettered (the
+    /// target's breaker was open on the message's last attempt, #550): increment
+    /// `dead_lettered_total` only. `last_failure_at` and the reason stay those
+    /// of the last request that failed, so that deliveries the breaker refuses
+    /// cannot keep it open.
+    fn count_dead_letter(
+        &self,
+        tenant_id: Uuid,
+        target_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
     /// Claim a reconciliation run at `now` **if** the last claim was at least
     /// `min_interval_secs` ago (or there was none), atomically: two concurrent
     /// callers cannot both succeed. `false` means too soon or already claimed.

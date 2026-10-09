@@ -38,6 +38,21 @@
 > written on every receiver. Nothing else in the model changed. The model is
 > **469 threats, 426 mitigated / 22 open / 21 not applicable**.
 >
+> **The SCIM per-target breaker (`1.0.0`, #550, P23W5-07 — T-414 amended, still
+> Mitigated).** A downstream that accepts connections and never answers held
+> each replica's one `scim_push` consumer for ten seconds per queued reference,
+> for every tenant. The deliverer now reads a target's delivery state before it
+> calls it, and a target with five or more consecutive failures whose last
+> failure is inside its window — the consumer's own backoff, doubling with each
+> further failure up to the ceiling — is answered with a retry, `target is
+> failing; backing off`, without a request. The loopback tarpit test (ten
+> references ahead of one for a healthy target, the healthy delivery inside one
+> request timeout) and the 10 001-member dead-letter test the issue asked for
+> are cited in the entry. What stays is named there: the five attempts that open
+> a breaker and one per window still wait a full timeout, a slow downstream that
+> succeeds now and then never opens it, and the per-target concurrency budget is
+> deferred to `1.0.x`. Status and totals are unchanged.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):

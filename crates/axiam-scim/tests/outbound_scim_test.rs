@@ -1334,3 +1334,345 @@ async fn no_attribute_of_a_person_is_ever_enqueued() {
         assert!(["scim.user", "scim.group"].contains(&message.event_type.as_str()));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The per-target breaker and the group bound (#550, T-414)
+// ---------------------------------------------------------------------------
+
+/// A downstream that accepts every connection and never answers: the tarpit of
+/// #550. Counts the connections it was offered and holds each one open.
+struct Tarpit {
+    port: u16,
+    accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Tarpit {
+    fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = accepted.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(stream);
+            }
+        });
+        Self { port, accepted }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}/scim/v2", self.port)
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The deliverer's per-request timeout (`client::REQUEST_TIMEOUT`).
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Put the target's breaker where `BREAKER_THRESHOLD` timed-out attempts would
+/// leave it: the failures are recorded the way the deliverer records them, now.
+async fn trip(w: &World, target: &ScimTarget) {
+    for _ in 0..axiam_scim::outbound::BREAKER_THRESHOLD {
+        w.states
+            .record_failure(
+                w.tenant_id,
+                target.id,
+                "the receiver could not be reached or did not answer in time",
+            )
+            .await
+            .unwrap();
+    }
+}
+
+#[actix_rt::test]
+async fn a_healthy_target_is_served_within_one_timeout_behind_ten_references_to_a_tarpit() {
+    let w = World::new().await;
+    let mut users = Vec::new();
+    for i in 0..10 {
+        users.push(w.active_user(&format!("user{i}")).await);
+    }
+    let tarpit = Tarpit::start();
+    let failing = w.add_target(|t| t.base_url = tarpit.base_url()).await;
+    let healthy = w.add_target(|_| {}).await;
+    trip(&w, &failing).await;
+    w.queue.clear();
+
+    // Ten references for the tarpit ahead of one for the healthy target, on
+    // the replica's one consumer.
+    use axiam_core::outbound::OutboundPublisher;
+    for user in &users {
+        let message = reference_message(w.tenant_id, failing.id, ScimResourceType::User, user.id);
+        w.queue.enqueue(&message).await.unwrap();
+    }
+    let message = reference_message(w.tenant_id, healthy.id, ScimResourceType::User, users[0].id);
+    w.queue.enqueue(&message).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let outcomes = w.sync().await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(outcomes.len(), 11);
+    for outcome in &outcomes[..10] {
+        assert_eq!(retry_reason(outcome), "target is failing; backing off");
+    }
+    assert!(matches!(outcomes[10], DeliveryOutcome::Delivered { .. }));
+    assert!(
+        elapsed < REQUEST_TIMEOUT,
+        "the healthy delivery waited behind the tarpit for {elapsed:?}"
+    );
+    assert_eq!(tarpit.accepted(), 0, "the open breaker made no connection");
+    assert_eq!(w.server.users().len(), 1);
+    assert!(
+        link(&w, &healthy, ScimResourceType::User, users[0].id)
+            .await
+            .is_some()
+    );
+}
+
+#[actix_rt::test]
+async fn an_open_breaker_makes_no_network_call_and_records_no_failure() {
+    let w = World::new().await;
+    let target = w.add_target(|_| {}).await;
+    let user = w.active_user("alice").await;
+    w.queue.clear();
+    trip(&w, &target).await;
+    let before = w.states.get(w.tenant_id, target.id).await.unwrap();
+
+    use axiam_core::outbound::OutboundPublisher;
+    let message = reference_message(w.tenant_id, target.id, ScimResourceType::User, user.id);
+    for _ in 0..3 {
+        w.queue.enqueue(&message).await.unwrap();
+        let outcome = only(w.sync().await);
+        assert_eq!(retry_reason(&outcome), "target is failing; backing off");
+    }
+    assert!(
+        w.server.requests().is_empty(),
+        "no request, not even a token"
+    );
+    let after = w.states.get(w.tenant_id, target.id).await.unwrap();
+    assert_eq!(
+        after, before,
+        "a refused delivery neither counts a failure nor moves the window"
+    );
+    assert!(
+        link(&w, &target, ScimResourceType::User, user.id)
+            .await
+            .is_none()
+    );
+}
+
+#[actix_rt::test]
+async fn a_breaker_below_the_threshold_or_past_its_window_lets_the_attempt_through() {
+    use axiam_core::outbound::OutboundDeliverer;
+    use axiam_scim::outbound::ScimPushDeliverer;
+    let w = World::new().await;
+    let target = w.add_target(|_| {}).await;
+    let user = w.active_user("alice").await;
+    w.queue.clear();
+    let message = reference_message(w.tenant_id, target.id, ScimResourceType::User, user.id);
+
+    // One failure short of the threshold: attempted, and failing again.
+    for _ in 1..axiam_scim::outbound::BREAKER_THRESHOLD {
+        w.server.fail_next(1, 503);
+        let outcome = support::outcome(w.deliverer.deliver_attempt(&message).await);
+        assert!(retry_reason(&outcome).contains("503"));
+    }
+    assert_eq!(w.server.requests().len(), 4);
+    // The fifth failure opens it.
+    w.server.fail_next(1, 503);
+    let outcome = support::outcome(w.deliverer.deliver_attempt(&message).await);
+    assert!(retry_reason(&outcome).contains("503"));
+    let outcome = support::outcome(w.deliverer.deliver_attempt(&message).await);
+    assert_eq!(retry_reason(&outcome), "target is failing; backing off");
+    assert_eq!(w.server.requests().len(), 5);
+
+    // With a window already passed (a schedule of a millisecond), the next
+    // reference is attempted, and its success closes the breaker.
+    let deliverer = ScimPushDeliverer::new(
+        w.targets.clone(),
+        w.links.clone(),
+        w.states.clone(),
+        w.users.clone(),
+        w.groups.clone(),
+        w.queue.clone(),
+    )
+    .admitting_private_networks_for_tests()
+    .with_backoff(
+        std::time::Duration::from_millis(1),
+        std::time::Duration::from_millis(1),
+    );
+    actix_rt::time::sleep(std::time::Duration::from_millis(5)).await;
+    let outcome = support::outcome(deliverer.deliver_attempt(&message).await);
+    assert!(matches!(outcome, DeliveryOutcome::Delivered { .. }));
+    let state = w.states.get(w.tenant_id, target.id).await.unwrap();
+    assert_eq!(state.consecutive_failures, 0);
+}
+
+#[actix_rt::test]
+async fn a_refused_delivery_on_the_last_attempt_is_counted_without_extending_the_window() {
+    use axiam_core::outbound::OutboundDeliverer;
+    use axiam_scim::outbound::ScimPushDeliverer;
+    let w = World::new().await;
+    let target = w.add_target(|_| {}).await;
+    let user = w.active_user("alice").await;
+    w.queue.clear();
+    trip(&w, &target).await;
+    let before = w.states.get(w.tenant_id, target.id).await.unwrap();
+    let deliverer = ScimPushDeliverer::new(
+        w.targets.clone(),
+        w.links.clone(),
+        w.states.clone(),
+        w.users.clone(),
+        w.groups.clone(),
+        w.queue.clone(),
+    )
+    .admitting_private_networks_for_tests()
+    .with_max_attempts(3);
+
+    let mut message = reference_message(w.tenant_id, target.id, ScimResourceType::User, user.id);
+    message.attempt = 2;
+    let outcome = support::outcome(deliverer.deliver_attempt(&message).await);
+    assert_eq!(retry_reason(&outcome), "target is failing; backing off");
+    let after = w.states.get(w.tenant_id, target.id).await.unwrap();
+    assert_eq!(after.dead_lettered_total, before.dead_lettered_total + 1);
+    assert_eq!(after.consecutive_failures, before.consecutive_failures);
+    assert_eq!(after.last_failure_at, before.last_failure_at);
+    assert_eq!(after.last_failure_reason, before.last_failure_reason);
+    assert!(w.server.requests().is_empty());
+}
+
+/// A group repository that reports one more member than a push carries.
+mod crowded {
+    use super::*;
+    use axiam_core::error::AxiamResult;
+    use axiam_core::models::group::{CreateGroup, Group};
+    use axiam_core::models::user::User;
+    use axiam_core::repository::{PaginatedResult, Pagination};
+    use axiam_db::repository::SurrealGroupRepository;
+    use std::future::Future;
+    use surrealdb::engine::local::Db;
+
+    pub const REPORTED_MEMBERS: u64 = 10_001;
+
+    pub struct CrowdedGroups {
+        pub inner: SurrealGroupRepository<Db>,
+    }
+
+    impl GroupRepository for CrowdedGroups {
+        fn create(&self, input: CreateGroup) -> impl Future<Output = AxiamResult<Group>> + Send {
+            self.inner.create(input)
+        }
+        fn get_by_id(
+            &self,
+            tenant_id: Uuid,
+            id: Uuid,
+        ) -> impl Future<Output = AxiamResult<Group>> + Send {
+            self.inner.get_by_id(tenant_id, id)
+        }
+        fn update(
+            &self,
+            tenant_id: Uuid,
+            id: Uuid,
+            input: UpdateGroup,
+        ) -> impl Future<Output = AxiamResult<Group>> + Send {
+            self.inner.update(tenant_id, id, input)
+        }
+        fn delete(
+            &self,
+            tenant_id: Uuid,
+            id: Uuid,
+        ) -> impl Future<Output = AxiamResult<()>> + Send {
+            self.inner.delete(tenant_id, id)
+        }
+        fn list(
+            &self,
+            tenant_id: Uuid,
+            pagination: Pagination,
+        ) -> impl Future<Output = AxiamResult<PaginatedResult<Group>>> + Send {
+            self.inner.list(tenant_id, pagination)
+        }
+        fn add_member(
+            &self,
+            tenant_id: Uuid,
+            user_id: Uuid,
+            group_id: Uuid,
+        ) -> impl Future<Output = AxiamResult<()>> + Send {
+            self.inner.add_member(tenant_id, user_id, group_id)
+        }
+        fn remove_member(
+            &self,
+            tenant_id: Uuid,
+            user_id: Uuid,
+            group_id: Uuid,
+        ) -> impl Future<Output = AxiamResult<()>> + Send {
+            self.inner.remove_member(tenant_id, user_id, group_id)
+        }
+        async fn get_members(
+            &self,
+            tenant_id: Uuid,
+            group_id: Uuid,
+            pagination: Pagination,
+        ) -> AxiamResult<PaginatedResult<User>> {
+            let mut page = self
+                .inner
+                .get_members(tenant_id, group_id, pagination)
+                .await?;
+            page.total = REPORTED_MEMBERS;
+            Ok(page)
+        }
+        fn get_user_groups(
+            &self,
+            tenant_id: Uuid,
+            user_id: Uuid,
+        ) -> impl Future<Output = AxiamResult<Vec<Group>>> + Send {
+            self.inner.get_user_groups(tenant_id, user_id)
+        }
+    }
+}
+
+#[actix_rt::test]
+async fn a_group_reporting_ten_thousand_and_one_members_dead_letters_with_the_fixed_reason() {
+    use axiam_core::outbound::OutboundDeliverer;
+    use axiam_scim::outbound::ScimPushDeliverer;
+    let w = World::new().await;
+    let target = w.add_target(|t| t.push_groups = true).await;
+    let alice = w.active_user("alice").await;
+    let staff = w.group("staff").await;
+    w.groups
+        .add_member(w.tenant_id, alice.id, staff)
+        .await
+        .unwrap();
+    assert!(all_delivered(&w.sync().await));
+    w.server.clear_requests();
+    w.queue.clear();
+
+    let deliverer = ScimPushDeliverer::new(
+        w.targets.clone(),
+        w.links.clone(),
+        w.states.clone(),
+        w.users.clone(),
+        crowded::CrowdedGroups {
+            inner: w.groups.clone(),
+        },
+        w.queue.clone(),
+    )
+    .admitting_private_networks_for_tests();
+    let message = reference_message(w.tenant_id, target.id, ScimResourceType::Group, staff);
+    let outcome = support::outcome(deliverer.deliver_attempt(&message).await);
+    assert_eq!(
+        dead_reason(&outcome),
+        "the group has more members than a push carries"
+    );
+    assert!(w.server.requests().is_empty(), "nothing was sent for it");
+    let state = w.states.get(w.tenant_id, target.id).await.unwrap();
+    assert_eq!(state.dead_lettered_total, 1);
+    assert_eq!(
+        state.last_failure_reason.as_deref(),
+        Some("the group has more members than a push carries")
+    );
+}

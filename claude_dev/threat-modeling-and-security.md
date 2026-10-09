@@ -2483,9 +2483,15 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
   request form. All eleven repositories merged the six on 2026-10-09, the four
   REST-only SDKs taking the receiver and CIBA helpers as well, each with the
   replay test the contract requires; they are merged on each default branch, not
-  yet in a tagged SDK release. The drift check reports every repository at 1.58,
-  and the cross-SDK review of those ports — contract 1.59, the third such review
-  after 1.49 and 1.52 — is pending.
+  yet in a tagged SDK release. The drift check reports every repository at 1.58.
+  The cross-SDK review of those ports, contract 1.59 — the third such review
+  after 1.49 and 1.52 — found every section implemented in all eleven and
+  defects in every port that the required tests had let through: in all eleven,
+  a `poll` interrupted mid-batch could lose security events; in five, the CIBA
+  loop ended on the server's own `500`; and in TypeScript, a failed management
+  write printed its write-only secret from the error. It writes twelve
+  clarifications into the contract and names one follow-up per SDK, and each SDK
+  re-vendors 1.59 with its fixes.
 - **The admin UI redacts what a gateway echoes.** An error body is not always
   written by AXIAM — a proxy or gateway can answer instead, and those echo the
   request — so the UI redacts credential-shaped keys before rendering, including

@@ -337,10 +337,10 @@ export const REFERENCE_PAGES: DocPage[] = [
         type: "p",
         text: "A release ships the surface it derives from the spec it vendors: tagging an SDK re-vendors the contract, the OpenAPI document and the management registry, then regenerates that SDK's §27 management surface from them and stages exactly what the generator wrote. A missing generator stops the release rather than tagging a tree the SDK's own drift-check would reject.",
       },
-      { type: "h", id: "recent", text: "What moved in contract 1.40–1.58" },
+      { type: "h", id: "recent", text: "What moved in contract 1.40–1.59" },
       {
         type: "p",
-        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been nineteen amendments since 1.39. Of the thirteen up to 1.52, six changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently; each SDK's C-12 fix PR brought that SDK to it, and a follow-up PR per SDK re-vendored the contract. All of those are merged. The six Phase 23 contracts, 1.53 to 1.58, carried four management namespaces — the directory, SAML service providers, SSF streams and outbound SCIM targets, which bring the registry to 190 operations across 28 namespaces — the SSF receiver helper and the CIBA client helper into all eleven repositories on 2026-10-09, the four REST-only SDKs (Kotlin, Swift, C and C++) taking the receiver and CIBA helpers as well. They are merged on each default branch, not yet in a tagged SDK release. The drift check reports every repository at 1.58, and the cross-SDK review of those ports — contract 1.59 — is pending.`,
+        text: `This repository's contract is at **${CONTRACT_VERSION}**. There have been twenty amendments since 1.39. Of the thirteen up to 1.52, six changed SDK code: 1.43 and 1.44, each released at that SDK's \`1.0.0-beta14\`; 1.45, whose fan-out merged in all eleven repositories on 2026-09-13; 1.48, which all eleven now implement; 1.50, a one-field type change; and 1.51, the dogfooding remediation, ported in all eleven. 1.52 changes no wire behaviour. It writes one answer to each question the 1.51 ports had answered differently; each SDK's C-12 fix PR brought that SDK to it, and a follow-up PR per SDK re-vendored the contract. All of those are merged. The six Phase 23 contracts, 1.53 to 1.58, carried four management namespaces — the directory, SAML service providers, SSF streams and outbound SCIM targets, which bring the registry to 190 operations across 28 namespaces — the SSF receiver helper and the CIBA client helper into all eleven repositories on 2026-10-09, the four REST-only SDKs (Kotlin, Swift, C and C++) taking the receiver and CIBA helpers as well. They are merged on each default branch, not yet in a tagged SDK release. The drift check reports every repository at 1.58. 1.59 is the cross-SDK review of those ports: every section is implemented in all eleven, and every port has defects its required tests had let through, recorded with one follow-up per SDK; each SDK re-vendors 1.59 with its fixes.`,
       },
       {
         type: "table",
@@ -441,6 +441,11 @@ export const REFERENCE_PAGES: DocPage[] = [
             "1.58",
             `[§33](${contractLink("33")}) — the client's half of CIBA Core 1.0, poll and ping with no push: \`ciba_initiate\`, \`ciba_poll\`, \`ciba_await\` and \`ciba_handle_ping\`, SHOULD in the seven full-surface SDKs and MAY in the other four, with the signed request as [§33.2](${contractLink("33.2")})'s optional form, \`ciba_initiate\` never retried, and [§21.3.1](${contractLink("21.3.1")})'s alias vectors amended in place to seven members.`,
             "**yes** — merged in all eleven repositories on 2026-10-09",
+          ],
+          [
+            "1.59",
+            `[§34](${contractLink("34")}) — the cross-SDK review of the 1.53 – 1.58 ports: the posture tables filled from the merged code, twelve clarifications (among them: \`poll\` never keeps a \`jti\` it does not return; a \`5xx\` on \`ciba_poll\` is transient whatever its body; "never retried" includes an HTTP library's transparent re-send), and forty-two divergences with one follow-up per SDK. No wire change.`,
+            "**yes** — the eleven follow-ups (ilpanich/axiam#576 … #586)",
           ],
         ],
       },

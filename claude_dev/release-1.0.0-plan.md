@@ -14,12 +14,16 @@
 > merge. Every commit is signed; every pull request lists the issues it closes on
 > a `Closes` line, and the issues are closed by the merge, never by hand.
 >
-> **Waves.** W1 (security findings, Opus 5.5) and W2 (durability, operations,
-> the CIBA gap) start from `main` and are independent. W3 (contract 1.60 and the
-> eleven SDK ports) needs the fields W1 and W2 add; W4 (release readiness) needs
-> everything. Because the agent cannot merge, W3 and W4 are **stacked**: their
-> branches merge W1 and W2 in, and their pull requests say so; the maintainer
-> merges W1, W2, W3, W4 in that order. Each section below gets an `EXECUTED`
+> **Waves, and one pull request.** W1 (security findings, Opus 5.5) and W2
+> (durability, operations, the CIBA gap) are developed on
+> `claude/release-1.0.0-w1` and `claude/release-1.0.0-w2` from `main` and are
+> independent; W3 (contract 1.60 and the eleven SDK ports) needs the fields W1
+> and W2 add; W4 (release readiness) needs everything. **On 2026-10-09 the
+> maintainer asked for a single pull request at the end** (the per-wave PRs'
+> CI was failing on Docker Hub's pull limit, not on the change): W1 and W2 are
+> merged into this plan's branch, W3 and W4 are committed on top, and the one
+> pull request (#589) closes every issue the waves close. The eleven SDK
+> repositories get one pull request each. Each section below gets an `EXECUTED`
 > block as its wave lands, in the form the Phase 23 plan used.
 
 ---
@@ -285,20 +289,20 @@ Sonnet 5.5.
 
 ## 8. Decisions requested from the maintainer
 
-Answer before W4; W1 … W3 do not wait and proceed on the recommendation.
+**Taken 2026-10-09: the maintainer accepted every recommendation (D-1 … D-10).** D-2's date stays a placeholder until the tag; D-8 is still decided at the end of W2 by its own rule; D-11 is the one action left to the maintainer.
 
 | # | Question | Recommendation | Status |
 |---|---|---|---|
-| D-1 | What `1.0.0` claims in `README.md`, `SECURITY.md` and the website | "First stable release. REST, gRPC, AMQP and the SDK contract are under semantic versioning from here; security fixes ship in `1.0.x`. No independent third-party audit has been performed; the shared-responsibility checklist applies." No "production-ready" sentence the security page would contradict | open — W4 drafts on the recommendation |
-| D-2 | The release date on the 1.0.0 post and in the sign-off table | The day of the tag; W4 leaves a placeholder | open |
-| D-3 | #531: refuse SHA-1 in 1.0.0 with an audited per-federation escape hatch | Yes | proceeding on the recommendation (W1.11) |
-| D-4 | #523: hard cascade or tombstone-and-purge | Tombstone, revoke in the request, purge from the cleanup job in erasure order | proceeding (W1.7) |
-| D-5 | #518: option 1 (`azp` must be the authenticated client) | Yes; `may_act` later | proceeding (W1.5) |
-| D-6 | #565: fingerprint lookup in `tls_client_auth` now; CRLs in the rustls verifiers and OCSP in `1.0.x` | Yes | proceeding (W1.3) |
-| D-7 | #588 B1: a fallible `ReplayStore` across the SDKs, breaking Rust's trait at 1.0.0 | Yes; a 1.0 is the last cheap moment | proceeding (W3) |
-| D-8 | #536 in 1.0.0 or `1.0.x` | 1.0.0 if W2 is otherwise ready, else `1.0.x` | decided at the end of W2 |
-| D-9 | All eleven SDKs tagged `v1.0.0` in the same run as the platform | Yes, `--repos all`; the website SDK page says "released" only after | open |
-| D-10 | W1 and W2 split into more than one PR each past ~4 000 lines | Yes, by item boundary, each PR with its own issue list | proceeding |
+| D-1 | What `1.0.0` claims in `README.md`, `SECURITY.md` and the website | "First stable release. REST, gRPC, AMQP and the SDK contract are under semantic versioning from here; security fixes ship in `1.0.x`. No independent third-party audit has been performed; the shared-responsibility checklist applies." No "production-ready" sentence the security page would contradict | accepted |
+| D-2 | The release date on the 1.0.0 post and in the sign-off table | The day of the tag; W4 leaves a placeholder | accepted |
+| D-3 | #531: refuse SHA-1 in 1.0.0 with an audited per-federation escape hatch | Yes | accepted |
+| D-4 | #523: hard cascade or tombstone-and-purge | Tombstone, revoke in the request, purge from the cleanup job in erasure order | accepted |
+| D-5 | #518: option 1 (`azp` must be the authenticated client) | Yes; `may_act` later | accepted |
+| D-6 | #565: fingerprint lookup in `tls_client_auth` now; CRLs in the rustls verifiers and OCSP in `1.0.x` | Yes | accepted |
+| D-7 | #588 B1: a fallible `ReplayStore` across the SDKs, breaking Rust's trait at 1.0.0 | Yes; a 1.0 is the last cheap moment | accepted |
+| D-8 | #536 in 1.0.0 or `1.0.x` | 1.0.0 if W2 is otherwise ready, else `1.0.x` | accepted; applied at the end of W2 |
+| D-9 | All eleven SDKs tagged `v1.0.0` in the same run as the platform | Yes, `--repos all`; the website SDK page says "released" only after | accepted |
+| D-10 | W1 and W2 split into more than one PR each past ~4 000 lines | Yes, by item boundary, each PR with its own issue list | superseded: one pull request for all waves (maintainer, 2026-10-09) |
 | D-11 | Create the milestones `1.0.0` and `1.0.x` and apply §1's column (the session cannot) | Yes | **maintainer action** |
 
 ## 9. Verification

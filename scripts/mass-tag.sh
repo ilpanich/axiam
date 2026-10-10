@@ -1102,7 +1102,10 @@ sub canon_idx {
 }
 
 # Split a section body into `### Name` subsections, keeping anything before the
-# first one as a preamble.
+# first one as a preamble -- VERBATIM, blank lines included. It is hand-written
+# prose (the 1.0.0 block opens with four `####` chapters of it), and dropping its
+# blank lines, as an earlier revision did, ran its paragraphs together and turned
+# its loose lists tight.
 sub subsections {
     my @lines = split /\n/, shift, -1;
     my (@pre, @subs, $cur);
@@ -1112,24 +1115,33 @@ sub subsections {
             push @subs, $cur;
         } elsif ($cur) {
             push @{ $cur->{body} }, $line;
-        } elsif ($line =~ /\S/) {
+        } else {
             push @pre, $line;
         }
     }
+    shift @pre while @pre && $pre[0]  !~ /\S/;
+    pop   @pre while @pre && $pre[-1] !~ /\S/;
     return (\@pre, \@subs);
 }
 
 # Split a subsection body into bullet blocks: a `- ` line plus the lines that
-# continue it, so a wrapped multi-paragraph entry moves as one unit.
+# continue it, so a wrapped multi-paragraph entry moves as one unit. A block is
+# `tight` when the next bullet followed it with no blank line, which is how the
+# author wrote a tight list; rendering keeps it that way.
 sub blocks {
     my @lines = @{ +shift };
-    my (@out, $cur);
+    my (@out, $cur, $prev);
     for my $line (@lines) {
-        if    ($line =~ /^[-*][ \t]/) { $cur = [$line]; push @out, $cur }
-        elsif ($cur)                  { push @$cur, $line }
-        elsif ($line =~ /\S/)         { $cur = [$line]; push @out, $cur }
+        if ($line =~ /^[-*][ \t]/) {
+            $cur->{tight} = 1 if $cur && defined $prev && $prev =~ /\S/;
+            $cur = { lines => [$line], tight => 0 };
+            push @out, $cur;
+        }
+        elsif ($cur)          { push @{ $cur->{lines} }, $line }
+        elsif ($line =~ /\S/) { $cur = { lines => [$line], tight => 0 }; push @out, $cur }
+        $prev = $line;
     }
-    for my $b (@out) { pop @$b while @$b && $b->[-1] !~ /\S/ }
+    for my $b (@out) { pop @{ $b->{lines} } while @{ $b->{lines} } && $b->{lines}[-1] !~ /\S/ }
     return @out;
 }
 
@@ -1141,33 +1153,70 @@ sub fingerprint {
 }
 
 # Merge the pending body into the entry body; render the result as lines.
+#
+# The pending block is hand-written and the entry is mechanical, so the pending
+# block leads on both axes:
+#
+#   * ORDER OF SUBSECTIONS is the author's. A subsection only the generated
+#     entry has (always one of Added / Changed / Fixed) is slotted in at its
+#     Keep-a-Changelog position among the author's canonical ones. Sorting
+#     everything, as an earlier revision did, sent the subsections Keep a
+#     Changelog does not name to the end in alphabetical order -- every SDK's
+#     `### Breaking changes` below `### Security`, and the platform's
+#     `### Deferred to 1.0.x` above its `### Documentation`.
+#   * WITHIN A SUBSECTION the hand-written blocks come first and the commit
+#     one-liners after them. When the author structured the subsection with
+#     `####` headings, the one-liners get a `#### Commit summaries` heading of
+#     their own; appended bare they would read as part of the last chapter.
 sub merge_bodies {
     my ($entry_body, $pending_body) = @_;
     my ($e_pre, $e_subs) = subsections($entry_body);
     my ($p_pre, $p_subs) = subsections($pending_body);
 
-    my (%by, @order);
-    for my $s (@$e_subs, @$p_subs) {
-        my $k = lc $s->{name};
-        unless (exists $by{$k}) {
-            $by{$k} = { name => $s->{name}, blocks => [], seen => {} };
-            push @order, $k;
-        }
-        for my $b (blocks($s->{body})) {
-            my $f = fingerprint($b);
-            next if !length $f || $by{$k}{seen}{$f}++;
-            push @{ $by{$k}{blocks} }, $b;
+    my (%by, @order, @generated_only);
+    for my $src ([$p_subs, 'hand'], [$e_subs, 'gen']) {
+        my ($subs, $kind) = @$src;
+        for my $s (@$subs) {
+            my $k = lc $s->{name};
+            unless (exists $by{$k}) {
+                $by{$k} = { name => $s->{name}, hand => [], gen => [], seen => {} };
+                if ($kind eq 'hand') { push @order, $k } else { push @generated_only, $k }
+            }
+            for my $b (blocks($s->{body})) {
+                my $f = fingerprint($b->{lines});
+                next if !length $f || $by{$k}{seen}{$f}++;
+                push @{ $by{$k}{$kind} }, $b;
+            }
         }
     }
-    @order = sort {
-        canon_idx($by{$a}{name}) <=> canon_idx($by{$b}{name}) or $a cmp $b
-    } @order;
+    for my $k (sort { canon_idx($a) <=> canon_idx($b) } @generated_only) {
+        my $i  = canon_idx($k);
+        my $at = scalar @order;
+        my $after_last_canon;
+        for my $j (0 .. $#order) {
+            my $c = canon_idx($order[$j]);
+            next if $c >= @CANON;
+            if ($c > $i) { $at = $j; undef $after_last_canon; last }
+            $after_last_canon = $j + 1;
+        }
+        $at = $after_last_canon if defined $after_last_canon;
+        splice @order, $at, 0, $k;
+    }
 
-    my @out = (@$e_pre, @$p_pre);
+    my @out;
+    push @out, '', @$p_pre if @$p_pre;
+    push @out, '', @$e_pre if @$e_pre;
     for my $k (@order) {
-        next unless @{ $by{$k}{blocks} };
-        push @out, '', "### $by{$k}{name}", '';
-        push @out, @$_, '' for @{ $by{$k}{blocks} };
+        my $s = $by{$k};
+        next unless @{ $s->{hand} } || @{ $s->{gen} };
+        push @out, '', "### $s->{name}", '';
+        push @out, @{ $_->{lines} }, ($_->{tight} ? () : '') for @{ $s->{hand} };
+        if (@{ $s->{hand} } && @{ $s->{gen} }) {
+            push @out, '' if $out[-1] =~ /\S/;
+            push @out, '#### Commit summaries', ''
+                if grep { /^####[ \t]/ } map { @{ $_->{lines} } } @{ $s->{hand} };
+        }
+        push @out, @{ $_->{lines} }, '' for @{ $s->{gen} };
         pop @out while @out && $out[-1] !~ /\S/;
     }
     return @out;
@@ -1213,6 +1262,40 @@ close $fh;
 PERL
 )"
 
+# Print the outline of a folded CHANGELOG $1: every heading of the
+# `[Unreleased]` block and of the new section, each with the number of bullets
+# directly under it, then the invariant the fold must hold -- exactly one
+# `## [Unreleased]`, the first `## ` heading, and empty.
+changelog_outline() {
+  perl -e '
+    my ($file) = @ARGV;
+    open my $in, "<", $file or die "cannot read $file: $!\n";
+    my ($sec, $head, $n, @rows) = (0, undef, 0);
+    my ($unrel, $first_is_unrel, $unrel_body) = (0, 0, 0);
+    while (my $l = <$in>) {
+      chomp $l;
+      if ($l =~ /^##[ \t]/ && $l !~ /^###/) {
+        $sec++;
+        if ($l =~ /^##[ \t]+\[?[ \t]*unreleased/i) { $unrel++; $first_is_unrel = 1 if $sec == 1 }
+      }
+      next if $sec < 1;
+      $unrel_body++ if $sec == 1 && $l =~ /\S/ && $l !~ /^##[ \t]/;
+      last if $sec > 2;
+      if ($l =~ /^#{2,4}[ \t]/) { push @rows, [$head, $n] if defined $head; ($head, $n) = ($l, 0) }
+      elsif ($l =~ /^[-*][ \t]/) { $n++ }
+    }
+    while (my $l = <$in>) {
+      $unrel++ if $l =~ /^##[ \t]+\[?[ \t]*unreleased/i;
+    }
+    push @rows, [$head, $n] if defined $head;
+    for my $r (@rows) { printf "%s%s\n", $r->[0], $r->[1] ? "  ($r->[1])" : "" }
+    my $ok = $unrel == 1 && $first_is_unrel && !$unrel_body;
+    printf "invariant: %d [Unreleased] heading(s), %s, %s -> %s\n", $unrel,
+      ($first_is_unrel ? "first" : "NOT first"), ($unrel_body ? "NOT empty" : "empty"),
+      ($ok ? "ok" : "BROKEN");
+  ' -- "$1"
+}
+
 # Write a new section for version $1 into CHANGELOG.md (creating the file with a
 # standard header if absent), folding any pending [Unreleased] block into it and
 # leaving an empty one at the top. Sets CHANGELOG_TOUCHED=true when the file was
@@ -1230,9 +1313,19 @@ write_changelog() {
     return 0
   fi
 
+  # A dry run folds on a scratch copy and shows the RESULT, not the generated
+  # entry alone: the fold is the part that has gone wrong before (the orphaned
+  # [Unreleased] blocks, the reordered subsections), and the stray-[Unreleased]
+  # warning is raised by the rewriter itself, so a dry run that never ran it
+  # could not show it.
   if $DRY_RUN; then
-    printf '      [dry-run] new CHANGELOG.md section (any pending [Unreleased] block folded in):\n'
-    printf '%s\n' "$CHANGELOG_ENTRY" | sed 's/^/        | /'
+    local tmp
+    tmp="$(mktemp)"
+    if [[ -f "$file" ]]; then cp "$file" "$tmp"; else printf '%s\n' "$CHANGELOG_HEADER" > "$tmp"; fi
+    printf '      [dry-run] CHANGELOG.md, folded on a scratch copy (headings, with the bullets under each):\n'
+    ENTRY="$CHANGELOG_ENTRY" perl -e "$CHANGELOG_REWRITE_PL" -- "$tmp" 2>&1 | sed 's/^/        ! /'
+    changelog_outline "$tmp" | sed 's/^/        | /'
+    rm -f "$tmp"
     return 0
   fi
 

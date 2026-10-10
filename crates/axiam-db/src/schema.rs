@@ -472,6 +472,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "tenant_tombstone",
         sql: SCHEMA_V91,
     },
+    Migration {
+        version: 92,
+        name: "federation_allow_sha1_signatures",
+        sql: SCHEMA_V92,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4605,6 +4610,18 @@ DEFINE FIELD IF NOT EXISTS deleted_at ON TABLE tenant TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS idx_tenant_deleted_at ON TABLE tenant FIELDS deleted_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v92 — SAML SHA-1 escape hatch (#531, P23W3-08, D-3)
+// -----------------------------------------------------------------------
+//
+// Since 1.0.0 the SAML SP verifier accepts only SHA-2 signatures. A federation
+// config whose IdP still signs with SHA-1 sets `allow_sha1_signatures` to keep
+// signing in. Additive: one column, `false` by default, so every existing
+// config takes the new rule; no row is rewritten.
+const SCHEMA_V92: &str = "\
+DEFINE FIELD IF NOT EXISTS allow_sha1_signatures ON TABLE federation_config TYPE bool DEFAULT false;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4686,6 +4703,29 @@ mod tests {
                 seen.contains(table.as_str()),
                 "{table} is tenant-scoped but not in TENANT_PURGE_ORDER: a deleted \
                  tenant's rows would survive the purge (#523)"
+            );
+        }
+    }
+
+    /// #531 (D-3) — v92 adds the SAML SHA-1 escape hatch, `false` by default,
+    /// and rewrites no row: every existing config refuses SHA-1.
+    #[test]
+    fn v92_adds_only_the_sha1_escape_hatch() {
+        let statements: Vec<&str> = SCHEMA_V92
+            .lines()
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS allow_sha1_signatures ON TABLE federation_config \
+              TYPE bool DEFAULT false;"
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V92.contains(forbidden),
+                "v92 must not contain {forbidden}: it is additive DDL only"
             );
         }
     }
@@ -6014,9 +6054,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&91),
-            "v91 is the newest migration (#523, D-4 — `tenant.deleted_at`, the tombstone a \
-             tenant deletion stamps before the cleanup job purges the tenant's rows; v90 was \
+            Some(&92),
+            "v92 is the newest migration (#531, D-3 — `federation_config.allow_sha1_signatures`, \
+             the SAML SP verifier's SHA-1 escape hatch; v91 was #523, D-4 — `tenant.deleted_at`, \
+             the tombstone a tenant deletion stamps before the cleanup job purges the tenant's \
+             rows; v90 was \
              #565, T-102 — `revoked_at` on `certificate` and \
              `ca_certificate`, the date a certificate revocation list entry carries; v84 was \
              the W5 F4 review, T-418 / D-73 — \

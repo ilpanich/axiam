@@ -524,6 +524,7 @@ mod tests {
             button_icon: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            allow_sha1_signatures: false,
         }
     }
 

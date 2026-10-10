@@ -58,6 +58,8 @@ struct FederationConfigRow {
     apple_key_id: Option<String>,
     require_pkce: Option<bool>,
     button_icon: Option<String>,
+    // #531 (schema v92) — absent on a pre-v92 row, which reads as `false`.
+    allow_sha1_signatures: Option<bool>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -101,6 +103,8 @@ struct FederationConfigRowWithId {
     apple_key_id: Option<String>,
     require_pkce: Option<bool>,
     button_icon: Option<String>,
+    // #531 (schema v92) — absent on a pre-v92 row, which reads as `false`.
+    allow_sha1_signatures: Option<bool>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -144,6 +148,8 @@ struct FederationConfigListRow {
     apple_key_id: Option<String>,
     require_pkce: Option<bool>,
     button_icon: Option<String>,
+    // #531 (schema v92) — absent on a pre-v92 row, which reads as `false`.
+    allow_sha1_signatures: Option<bool>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -342,6 +348,7 @@ impl FederationConfigRow {
             apple_key_id: lp.apple_key_id,
             require_pkce: lp.require_pkce,
             button_icon: lp.button_icon,
+            allow_sha1_signatures: self.allow_sha1_signatures.unwrap_or(false),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -409,6 +416,7 @@ impl FederationConfigListRow {
             apple_key_id: lp.apple_key_id,
             require_pkce: lp.require_pkce,
             button_icon: lp.button_icon,
+            allow_sha1_signatures: self.allow_sha1_signatures.unwrap_or(false),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -472,6 +480,7 @@ impl FederationConfigRowWithId {
             apple_key_id: lp.apple_key_id,
             require_pkce: lp.require_pkce,
             button_icon: lp.button_icon,
+            allow_sha1_signatures: self.allow_sha1_signatures.unwrap_or(false),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -518,7 +527,7 @@ impl<C: Connection> SurrealFederationConfigRepository<C> {
              allow_tenant_inheritance, scopes, authorization_endpoint, \
              token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
              apple_team_id, apple_key_id, require_pkce, button_icon, \
-             created_at, updated_at \
+             allow_sha1_signatures, created_at, updated_at \
              FROM federation_config \
              WHERE tenant_id = $tenant_id \
              ORDER BY created_at ASC";
@@ -597,6 +606,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  apple_key_id = $apple_key_id, \
                  require_pkce = $require_pkce, \
                  button_icon = $button_icon, \
+                 allow_sha1_signatures = $allow_sha1_signatures, \
                  enabled = true, \
                  created_at = time::now(), \
                  updated_at = time::now()",
@@ -640,6 +650,10 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .bind(("apple_key_id", input.apple_key_id))
             .bind(("require_pkce", input.require_pkce.unwrap_or(false)))
             .bind(("button_icon", input.button_icon))
+            .bind((
+                "allow_sha1_signatures",
+                input.allow_sha1_signatures.unwrap_or(false),
+            ))
             .await
             .map_err(DbError::from)?;
 
@@ -803,6 +817,10 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             set_clauses.push("button_icon = $button_icon".into());
             binds.push(("button_icon".into(), serde_json::json!(v)));
         }
+        if let Some(v) = input.allow_sha1_signatures {
+            set_clauses.push("allow_sha1_signatures = $allow_sha1_signatures".into());
+            binds.push(("allow_sha1_signatures".into(), serde_json::json!(v)));
+        }
 
         let sql = format!(
             "UPDATE type::record('federation_config', $id) SET {} \
@@ -895,7 +913,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  allow_tenant_inheritance, scopes, authorization_endpoint, \
                  token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
                  apple_team_id, apple_key_id, require_pkce, button_icon, \
-             created_at, updated_at \
+             allow_sha1_signatures, created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  ORDER BY created_at DESC \
@@ -941,7 +959,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  allow_tenant_inheritance, scopes, authorization_endpoint, \
                  token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
                  apple_team_id, apple_key_id, require_pkce, button_icon, \
-             created_at, updated_at \
+             allow_sha1_signatures, created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  AND token_exchange_enabled = true \

@@ -606,6 +606,7 @@ mod tests {
                 apple_key_id: None,
                 require_pkce: None,
                 button_icon: None,
+                allow_sha1_signatures: None,
             })
             .await
             .unwrap();
@@ -1296,6 +1297,7 @@ mod tests {
                 apple_key_id: None,
                 require_pkce: None,
                 button_icon: None,
+                allow_sha1_signatures: None,
             })
             .await
             .unwrap();
@@ -1472,6 +1474,7 @@ mod tests {
                 apple_key_id: None,
                 require_pkce: None,
                 button_icon: None,
+                allow_sha1_signatures: None,
             })
             .await
             .unwrap();

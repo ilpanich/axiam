@@ -195,6 +195,7 @@ fn make_config(plaintext: &str) -> FederationConfig {
         apple_key_id: None,
         require_pkce: false,
         button_icon: None,
+        allow_sha1_signatures: false,
     }
 }
 

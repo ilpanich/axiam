@@ -28,6 +28,9 @@ use uuid::Uuid;
 
 use crate::error::FederationError;
 use crate::oidc::FederationCallbackResult;
+use crate::saml_idp::request::{
+    ALLOWED_XML_SIGNATURE_ALGORITHMS, refuse_markup_declarations, refuse_other_encodings,
+};
 use crate::validate_metadata_url;
 
 /// SAML success status URI.
@@ -454,6 +457,20 @@ where
             FederationError::SamlResponseFailed(format!("Invalid UTF-8 in SAML response: {e}"))
         })?;
 
+        // #531 (P23W3-08): the IdP receiver's rule, on the decoded bytes and
+        // before either parser sees them. A response needs no markup
+        // declaration (`<!DOCTYPE`, `<!ENTITY`, `<!ELEMENT`, `<!ATTLIST`), so
+        // one is refused rather than handed to libxml's or quick-xml's DTD
+        // handling; and a NUL or a declared encoding other than UTF-8 — the
+        // two ways to hide a declaration from that scan — is refused first.
+        // Neither depends on `allow_sha1_signatures`.
+        refuse_other_encodings(&xml).map_err(|_| {
+            FederationError::SamlResponseFailed("SAML response is not plain UTF-8".into())
+        })?;
+        refuse_markup_declarations(&xml).map_err(|_| {
+            FederationError::SamlResponseFailed("SAML response declares a DTD or an entity".into())
+        })?;
+
         let response: samael::schema::Response = xml.parse().map_err(|e| {
             FederationError::SamlResponseFailed(format!("Failed to parse SAML Response XML: {e}"))
         })?;
@@ -720,9 +737,11 @@ where
     ///   XSW).
     /// - If no signature is present → `SamlSignatureInvalid`.
     /// - **Every** signature is verified on its own node with xmlsec
-    ///   (`reduce_xml_to_signed`, which walks each `ds:Signature` and
-    ///   verifies it individually); any one that does not verify →
-    ///   `SamlSignatureInvalid`. IDs must be unique `NCName`s.
+    ///   (`reduce_xml_to_signed_with_allowed_algorithms`, which walks each
+    ///   `ds:Signature` and verifies it individually); any one that does not
+    ///   verify → `SamlSignatureInvalid`. IDs must be unique `NCName`s.
+    /// - Since #531 only the SHA-2 RSA and ECDSA algorithms verify, unless the
+    ///   config sets `allow_sha1_signatures`.
     ///
     /// Before D-23 this called `verify_signed_xml`, which verifies only the
     /// **first** `ds:Signature` in document order: a document the IdP signed
@@ -765,10 +784,18 @@ where
         // PreDigest is the strictest reduce mode: it also refuses a document
         // whose verified references are not one element, or one assertion
         // inside one response.
-        <samael::crypto::XmlSec as samael::crypto::CryptoProvider>::reduce_xml_to_signed(
+        //
+        // #531 (D-3): only the SHA-2 algorithms the IdP receiver accepts, for
+        // the signature and its digests. `allow_sha1_signatures` is the
+        // per-federation escape hatch for an IdP that still signs with SHA-1;
+        // it restores the earlier rule (no list: whatever xmlsec verifies).
+        let allowed =
+            (!config.allow_sha1_signatures).then_some(&ALLOWED_XML_SIGNATURE_ALGORITHMS[..]);
+        <samael::crypto::XmlSec as samael::crypto::CryptoProvider>::reduce_xml_to_signed_with_allowed_algorithms(
             xml,
             &[cert],
             samael::crypto::ReduceMode::PreDigest,
+            allowed,
         )
         .map(|_| ())
         .map_err(|e| FederationError::SamlSignatureInvalid(e.to_string()))
@@ -1500,6 +1527,7 @@ pub(crate) mod tests {
             apple_key_id: None,
             require_pkce: false,
             button_icon: None,
+            allow_sha1_signatures: false,
         }
     }
 

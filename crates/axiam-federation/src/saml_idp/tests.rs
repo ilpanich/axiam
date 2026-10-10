@@ -410,7 +410,24 @@ async fn sp_accepts(
     expected_destination: Option<&str>,
     require_in_response_to: bool,
 ) -> Result<crate::oidc::FederationCallbackResult, crate::error::FederationError> {
-    let config = sp_config();
+    sp_accepts_with(
+        sp_config(),
+        xml,
+        expected_request_id,
+        expected_destination,
+        require_in_response_to,
+    )
+    .await
+}
+
+/// [`sp_accepts`] against a config the test has bent.
+async fn sp_accepts_with(
+    config: axiam_core::models::federation::FederationConfig,
+    xml: &str,
+    expected_request_id: Option<&str>,
+    expected_destination: Option<&str>,
+    require_in_response_to: bool,
+) -> Result<crate::oidc::FederationCallbackResult, crate::error::FederationError> {
     let service = make_acs_service(
         Some(config.clone()),
         RecordingLinkRepo::provisioning(),
@@ -509,6 +526,157 @@ async fn an_idp_initiated_response_is_accepted_without_in_response_to() {
     // AXIAM's own SP refuses unsolicited responses by policy, which is the
     // right answer for a response that has no InResponseTo.
     assert!(sp_accepts(&xml, None, Some(ACS), true).await.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// #531 (P23W3-08, D-3): the SP verifier takes the receiver's SHA-2 list and
+// refuses markup declarations before parsing
+// ---------------------------------------------------------------------------
+
+/// `xml` re-signed with RSA-SHA1 over a SHA-1 digest: the same key, the same
+/// certificate, the same content, a valid signature — only the algorithms
+/// differ. `xml` must carry one signature (`sign_responses` off).
+fn resigned_with_sha1(xml: &str) -> String {
+    fn blank(doc: &str, open: &str, close: &str) -> String {
+        let start = doc.find(open).expect(open) + open.len();
+        let end = start + doc[start..].find(close).expect(close);
+        format!("{}{}", &doc[..start], &doc[end..])
+    }
+    let doc = xml
+        .replace(
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+            "http://www.w3.org/2000/09/xmldsig#rsa-sha1",
+        )
+        .replace(
+            "http://www.w3.org/2001/04/xmlenc#sha256",
+            "http://www.w3.org/2000/09/xmldsig#sha1",
+        );
+    let doc = blank(&doc, "<ds:DigestValue>", "</ds:DigestValue>");
+    let doc = blank(&doc, "<ds:SignatureValue>", "</ds:SignatureValue>");
+    signed(&doc)
+}
+
+fn sha1_allowed_config() -> axiam_core::models::federation::FederationConfig {
+    let mut config = sp_config();
+    config.allow_sha1_signatures = true;
+    config
+}
+
+#[tokio::test]
+async fn p23w3_08_a_sha1_signed_response_is_refused_unless_the_federation_allows_sha1() {
+    let xml = resigned_with_sha1(&decode(&Case::new().issue_ok()));
+    assert_eq!(
+        xpath(&xml, "//*[local-name()='SignatureMethod']/@Algorithm"),
+        ["http://www.w3.org/2000/09/xmldsig#rsa-sha1"]
+    );
+    // A valid signature: xmlsec with no algorithm list verifies it.
+    <XmlSec as CryptoProvider>::reduce_xml_to_signed(
+        &xml,
+        &[cert_der(material())],
+        ReduceMode::PreDigest,
+    )
+    .expect("the SHA-1 signature is valid");
+
+    let refused = sp_accepts(&xml, Some(REQUEST_ID), Some(ACS), true).await;
+    assert!(
+        matches!(
+            refused,
+            Err(crate::error::FederationError::SamlSignatureInvalid(_))
+        ),
+        "SHA-1 is refused by default: {refused:?}"
+    );
+
+    // The escape hatch restores the earlier rule for this federation only.
+    let accepted = sp_accepts_with(
+        sha1_allowed_config(),
+        &xml,
+        Some(REQUEST_ID),
+        Some(ACS),
+        true,
+    )
+    .await
+    .expect("allow_sha1_signatures admits the SHA-1 signature");
+    assert!(accepted.newly_provisioned);
+
+    // SHA-2 is unaffected either way.
+    let sha2 = decode(&Case::new().issue_ok());
+    sp_accepts(&sha2, Some(REQUEST_ID), Some(ACS), true)
+        .await
+        .expect("SHA-256 verifies by default");
+    sp_accepts_with(
+        sha1_allowed_config(),
+        &sha2,
+        Some(REQUEST_ID),
+        Some(ACS),
+        true,
+    )
+    .await
+    .expect("SHA-256 verifies with the escape hatch set");
+}
+
+#[tokio::test]
+async fn p23w3_08_a_response_carrying_a_dtd_is_refused_before_parsing() {
+    let valid = decode(&Case::new().issue_ok());
+    let declarations = [
+        r#"<!DOCTYPE samlp:Response [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>"#,
+        "<!DOCTYPE samlp:Response>",
+        r#"<!ENTITY e "v">"#,
+        "<!ELEMENT e ANY>",
+        "<!ATTLIST e a CDATA #IMPLIED>",
+        "<!doctype samlp:Response>",
+    ];
+    for config in [sp_config(), sha1_allowed_config()] {
+        let allow = config.allow_sha1_signatures;
+        for declaration in declarations {
+            // Prepended to a validly signed response, and in front of a
+            // document no parser would read: both answer the declaration, so
+            // the refusal comes before either parser runs.
+            for xml in [
+                format!("{declaration}{valid}"),
+                format!("{declaration}<samlp:Response"),
+            ] {
+                let result =
+                    sp_accepts_with(config.clone(), &xml, Some(REQUEST_ID), Some(ACS), true).await;
+                assert!(
+                    matches!(
+                        &result,
+                        Err(crate::error::FederationError::SamlResponseFailed(m))
+                            if m.contains("DTD")
+                    ),
+                    "allow_sha1_signatures={allow}, {declaration}: {result:?}"
+                );
+            }
+        }
+        // A declaration hidden from the scan behind NULs (UTF-16 spells ASCII
+        // that way) or behind another declared encoding is refused too.
+        for xml in [
+            "<!DOCTYPE x [<!ENTITY e SYSTEM 'file:///etc/passwd'>]><x>&e;</x>"
+                .chars()
+                .flat_map(|c| [c, '\0'])
+                .collect::<String>(),
+            format!(r#"<?xml version="1.0" encoding="UTF-16"?>{valid}"#),
+        ] {
+            let result =
+                sp_accepts_with(config.clone(), &xml, Some(REQUEST_ID), Some(ACS), true).await;
+            assert!(
+                matches!(
+                    &result,
+                    Err(crate::error::FederationError::SamlResponseFailed(m))
+                        if m.contains("UTF-8")
+                ),
+                "allow_sha1_signatures={allow}: {result:?}"
+            );
+        }
+        // Comments and CDATA are not declarations.
+        let commented = valid.replacen("<saml:Issuer", "<!-- a comment --><saml:Issuer", 1);
+        assert!(
+            !matches!(
+                sp_accepts_with(config.clone(), &commented, Some(REQUEST_ID), Some(ACS), true).await,
+                Err(crate::error::FederationError::SamlResponseFailed(ref m)) if m.contains("DTD")
+            ),
+            "a comment is not refused as a declaration"
+        );
+    }
 }
 
 #[test]

@@ -2303,6 +2303,7 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
             apple_key_id: None,
             require_pkce: false,
             button_icon: None,
+            allow_sha1_signatures: false,
         }
     }
 

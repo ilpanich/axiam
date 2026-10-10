@@ -619,6 +619,152 @@ async fn create_saml_federation_config_returns_201() {
     );
 }
 
+/// #531 (P23W3-08, D-3): `allow_sha1_signatures` — the SAML SP verifier's
+/// SHA-1 escape hatch — defaults to `false`, is refused on a non-SAML config,
+/// and writes a `federation.sha1_signatures_allowed` audit row naming the
+/// config and the administrator whenever it is turned on: at creation, and on
+/// an update from `false` to `true`, but not on a re-save that leaves it on.
+#[actix_rt::test]
+async fn p23w3_08_allow_sha1_signatures_is_saml_only_and_audited_when_turned_on() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let send = |method: test::TestRequest, uri: String, body: serde_json::Value| {
+        method
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(body)
+            .to_request()
+    };
+    let audit_rows = |db: Surreal<TestDb>| async move {
+        db.query("SELECT * FROM audit_log WHERE action = 'federation.sha1_signatures_allowed'")
+            .await
+            .expect("query")
+            .take::<Vec<serde_json::Value>>(0)
+            .expect("rows")
+    };
+
+    // Default: off, and no audit row.
+    let saml = create_saml_config(&app, &token).await;
+    assert_eq!(saml["allow_sha1_signatures"], false);
+    let saml_id = saml["id"].as_str().unwrap().to_owned();
+    assert!(audit_rows(db.clone()).await.is_empty());
+
+    // Refused on a non-SAML config, at creation and by an update.
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::post(),
+            "/api/v1/federation-configs".into(),
+            serde_json::json!({
+                "provider": "Google",
+                "protocol": "OidcConnect",
+                "metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+                "client_id": "google-client-id",
+                "client_secret": "google-secret",
+                "allow_sha1_signatures": true
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let oidc = create_test_config(&app, &token).await;
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::put(),
+            format!(
+                "/api/v1/federation-configs/{}",
+                oidc["id"].as_str().unwrap()
+            ),
+            serde_json::json!({ "allow_sha1_signatures": true }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(audit_rows(db.clone()).await.is_empty());
+
+    // Turned on by an update: one row naming the config and the actor.
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::put(),
+            format!("/api/v1/federation-configs/{saml_id}"),
+            serde_json::json!({ "allow_sha1_signatures": true }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["allow_sha1_signatures"], true);
+    let rows = audit_rows(db.clone()).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["actor_id"], user_id.to_string(), "{rows:?}");
+    assert_eq!(rows[0]["resource_id"], saml_id, "{rows:?}");
+    assert_eq!(rows[0]["metadata"]["federation_config_id"], saml_id);
+    assert_eq!(rows[0]["metadata"]["provider"], "Test SAML IdP");
+
+    // A re-save that leaves it on changes nothing and writes nothing.
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::put(),
+            format!("/api/v1/federation-configs/{saml_id}"),
+            serde_json::json!({ "allow_sha1_signatures": true, "provider": "Test SAML IdP" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(audit_rows(db.clone()).await.len(), 1);
+
+    // Turned on at creation: audited too.
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::post(),
+            "/api/v1/federation-configs".into(),
+            serde_json::json!({
+                "provider": "Legacy SAML IdP",
+                "protocol": "Saml",
+                "metadata_url": "https://legacy.example.com/metadata",
+                "client_id": "https://axiam.example.com/saml/sp-legacy",
+                "client_secret": "saml-dummy-secret",
+                "allow_sha1_signatures": true
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let created: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(created["allow_sha1_signatures"], true);
+    let rows = audit_rows(db.clone()).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let row = rows
+        .iter()
+        .find(|r| r["resource_id"] == created["id"])
+        .unwrap_or_else(|| panic!("no row for the created config: {rows:?}"));
+    assert_eq!(row["actor_id"], user_id.to_string(), "{rows:?}");
+
+    // Turned off again: the stored value follows, and the GET reports it.
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::put(),
+            format!("/api/v1/federation-configs/{saml_id}"),
+            serde_json::json!({ "allow_sha1_signatures": false }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["allow_sha1_signatures"], false);
+}
+
 #[actix_rt::test]
 async fn saml_authn_request_rejects_empty_acs_url() {
     let (db, org_id, tenant_id) = setup_db().await;
@@ -840,6 +986,7 @@ async fn seed_config_row(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
             apple_key_id: None,
             require_pkce: None,
             button_icon: None,
+            allow_sha1_signatures: None,
         })
         .await
         .unwrap()

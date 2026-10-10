@@ -985,6 +985,10 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
       },
       {
         type: "note",
+        text: "**SHA-1 is refused since 1.0.0.** A response is verified with the SHA-2 RSA and ECDSA algorithms only — the rule AXIAM's own SAML identity provider applies to the requests it receives — and one that declares a DTD or an entity (`<!DOCTYPE`, `<!ENTITY`, `<!ELEMENT`, `<!ATTLIST`), or is not plain UTF-8, is refused before it is parsed. An identity provider that still signs with SHA-1 fails at the signature check until it moves to SHA-256. If it cannot yet, set `allow_sha1_signatures: true` on that federation configuration (the console's *Accept SHA-1 signatures* switch): it restores the earlier rule for that provider alone, is recorded in the audit log as `federation.sha1_signatures_allowed` with the configuration and the administrator, and should be turned off once the provider signs with SHA-2. The DTD refusal has no switch.",
+      },
+      {
+        type: "note",
         text: "SAML support is behind a default-on `saml` build feature that links `libxml`. A build made with `--no-default-features` — which is what CI's *Build (SAML off)* job produces — has every other capability and neither the SAML service provider nor the [SAML identity provider](#/docs/saml-idp) (whose service-provider registry API is the one part compiled into every build).",
       },
       {
@@ -1029,7 +1033,7 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
           },
           {
             title: "For SAML, supply the IdP signing certificate",
-            body: "`idp_signing_cert_pem` is the X.509 certificate assertions are verified against. Without it there is nothing to check a signature with.",
+            body: "`idp_signing_cert_pem` is the X.509 certificate assertions are verified against. Without it there is nothing to check a signature with. Signatures must use SHA-2; `allow_sha1_signatures` (default `false`, SAML only, audited when turned on) is the escape hatch for an IdP that still signs with SHA-1.",
             code: '"idp_signing_cert_pem": "-----BEGIN CERTIFICATE-----\\n..."',
           },
           {

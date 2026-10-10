@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118, T-300, T-239, T-39 and T-55 amended).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118, T-300, T-239, T-39, T-55, T-67 and T-69 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -134,7 +134,15 @@
 > wider scope list, copied forward at each rotation; the refresh grant now
 > keeps only the scopes the client is still registered for and rotates to
 > that set, and the test narrows a live grant, refreshes twice and finds the
-> narrowing permanent. The model is
+> narrowing permanent. It amends **T-69** and **T-67** (#531, P23W3-08,
+> D-3): the SAML SP verifier accepted `rsa-sha1` signatures and handed a
+> DTD-bearing response to both its parsers, where the IdP's own request
+> receiver refused both. The verifier now takes the receiver's SHA-2 list, with
+> a per-federation `allow_sha1_signatures` escape hatch — off by default,
+> audited when turned on — and refuses a markup declaration, or a document that
+> is not plainly UTF-8, before parsing; the tests refuse a valid SHA-1-signed
+> response by default and accept it with the flag, and refuse each declaration
+> in front of a valid response and of a document no parser would read. The model is
 > **473 threats, 432 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries

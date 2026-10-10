@@ -93,7 +93,8 @@ pub const NAME_ID_FORMAT_UNSPECIFIED: &str =
 const NAME_ID_FORMAT_ENTITY: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:entity";
 
 /// The signature algorithms an enveloped request signature may use: no SHA-1.
-const ALLOWED_XML_SIGNATURE_ALGORITHMS: [AllowedSignatureAlgorithm; 6] = [
+/// The SAML SP verifier takes the same list (#531).
+pub(crate) const ALLOWED_XML_SIGNATURE_ALGORITHMS: [AllowedSignatureAlgorithm; 6] = [
     AllowedSignatureAlgorithm::RsaSha256,
     AllowedSignatureAlgorithm::RsaSha384,
     AllowedSignatureAlgorithm::RsaSha512,

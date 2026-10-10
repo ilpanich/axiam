@@ -32,6 +32,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid `AXIAM__PKI__CRL_BASE_URL` or `AXIAM__PKI__CRL_NEXT_UPDATE_SECS` stops
   startup. The OpenAPI document gains the route under a new `pki` tag.
 
+### Changed
+
+- **SAML: identity-provider responses signed with SHA-1 are refused**
+  (#531, P23W3-08, decision D-3). AXIAM's SAML service provider now verifies an
+  IdP's response with the SHA-2 RSA and ECDSA algorithms only (RSA- and
+  ECDSA-SHA-256, -384 and -512, for the signature and its digests), as its own
+  SAML identity provider already did for the requests it receives. **Behaviour
+  change / upgrade notes:** sign-in through an IdP that still signs with
+  `rsa-sha1` fails at the signature check after upgrading. Move the IdP to
+  SHA-256; if it cannot yet, set the new per-federation escape hatch
+  `allow_sha1_signatures: true` on that configuration
+  (`POST`/`PUT /api/v1/federation-configs`, or *Accept SHA-1 signatures* in the
+  console), which restores the earlier rule for that provider alone and is
+  recorded in the audit log (`federation.sha1_signatures_allowed`, naming the
+  configuration and the administrator). The field defaults to `false`, is
+  refused (`400`) on an OIDC or OAuth2 configuration, and arrives with schema
+  migration v92, which rewrites no row.
+
 ### Fixed
 
 - **Federated users' sessions keep refreshing after the email-verification
@@ -263,6 +281,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or load rig drives authorizations from one host, raise that knob. It also
   sizes `/oauth2/end_session` and the SAML browser routes, each in its own
   bucket.
+- **SAML: the service provider refuses a response carrying a DTD, and SHA-1
+  signatures** (#531, P23W3-08). The SP verifier parsed a `SAMLResponse` with
+  libxml and quick-xml, neither refusing a document type declaration, and
+  accepted `rsa-sha1` signatures; AXIAM's own IdP receiver refused both.
+  Neither was exploitable (entities are not substituted, canonicalisation
+  refuses entity references, and a SHA-1 collision needs the IdP to sign
+  attacker-prepared content), so this is hardening. A response that contains a
+  markup declaration (`<!DOCTYPE`, `<!ENTITY`, `<!ELEMENT`, `<!ATTLIST`) or is
+  not plainly UTF-8 is now refused before either parser reads it, whatever the
+  configuration; SHA-1 is refused as described under *Changed*. Threat model
+  2.38.0: T-67 and T-69 amended; totals unchanged.
 
 ### Documentation
 

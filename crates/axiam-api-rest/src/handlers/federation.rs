@@ -3,15 +3,16 @@
 //! Provides CRUD for federation configurations, the OIDC authorization
 //! and callback flow, and federation link management.
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::federation::{
     CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol, ProviderKind,
     SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
 };
 use axiam_core::models::session::{Amr, AuthenticationEvidence};
 use axiam_core::repository::{
-    FederationConfigRepository, FederationLinkRepository, PaginatedResult, Pagination,
-    UserRepository,
+    AuditLogRepository, FederationConfigRepository, FederationLinkRepository, PaginatedResult,
+    Pagination, UserRepository,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::client_info::client_ip;
 use crate::state::AppState;
+
+/// Audit action: a SAML federation config was set to accept SHA-1-signed IdP
+/// responses (#531, D-3) — at creation, or by an update that turned it on.
+pub const AUDIT_SHA1_SIGNATURES_ALLOWED: &str = "federation.sha1_signatures_allowed";
 
 // ---------------------------------------------------------------------------
 // Request / response DTOs
@@ -188,6 +194,12 @@ pub struct CreateFederationConfigRequest {
     /// picture would produce a button that breaks the guidelines it exists to
     /// follow.
     pub button_icon: Option<String>,
+    /// SAML only: accept IdP responses signed with SHA-1 (`rsa-sha1`). Default
+    /// `false` — since 1.0.0 the SP verifier accepts only SHA-2 signatures.
+    /// The escape hatch for an IdP that cannot sign with SHA-2 yet; refused on
+    /// a non-SAML config, and audited (`federation.sha1_signatures_allowed`)
+    /// when set to `true`.
+    pub allow_sha1_signatures: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -234,6 +246,10 @@ pub struct UpdateFederationConfigRequest {
     pub require_pkce: Option<bool>,
     /// Sign-in-button icon for a generic provider. `Some(None)` clears it.
     pub button_icon: Option<Option<String>>,
+    /// SAML only: accept IdP responses signed with SHA-1. Refused on a
+    /// non-SAML config; turning it on is audited
+    /// (`federation.sha1_signatures_allowed`).
+    pub allow_sha1_signatures: Option<bool>,
 }
 
 /// Federation config response -- omits client_secret.
@@ -292,6 +308,9 @@ pub struct FederationConfigResponse {
     /// it and `button_icon` is refused; when false the button reads
     /// "Sign in with <provider>" and may carry a custom icon.
     pub has_bundled_mark: bool,
+    /// SAML only: whether IdP responses signed with SHA-1 are accepted
+    /// (default `false`; #531).
+    pub allow_sha1_signatures: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -328,6 +347,7 @@ impl From<FederationConfig> for FederationConfigResponse {
             pkce_required,
             has_bundled_mark: c.provider_kind.has_bundled_mark(),
             button_icon: c.button_icon.clone(),
+            allow_sha1_signatures: c.allow_sha1_signatures,
             token_exchange: c.token_exchange.into(),
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -614,6 +634,57 @@ fn require_https_endpoint(name: &str, url: &str) -> Result<(), AxiamApiError> {
     }
 }
 
+/// #531: `allow_sha1_signatures` means something only to the SAML verifier. On
+/// any other protocol `true` would claim a relaxation that nothing applies.
+fn validate_allow_sha1(
+    protocol: FederationProtocol,
+    allow_sha1_signatures: Option<bool>,
+) -> Result<(), AxiamApiError> {
+    if allow_sha1_signatures == Some(true) && protocol != FederationProtocol::Saml {
+        return Err(validation_err(
+            "allow_sha1_signatures is only supported for Saml providers",
+        ));
+    }
+    Ok(())
+}
+
+/// #531 (D-3): the audit row for a federation config that now accepts SHA-1
+/// signatures — which config, and who. Never fails the request: the write it
+/// describes has been done.
+async fn audit_sha1_allowed<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+    user: &AuthenticatedUser,
+    config: &FederationConfig,
+) {
+    if let Err(error) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id: user.tenant_id,
+            actor_id: user.user_id,
+            actor_type: ActorType::User,
+            action: AUDIT_SHA1_SIGNATURES_ALLOWED.to_string(),
+            resource_id: Some(config.id),
+            outcome: AuditOutcome::Success,
+            ip_address: client_ip(http_req),
+            metadata: Some(serde_json::json!({
+                "federation_config_id": config.id,
+                "provider": config.provider,
+                "provider_kind": config.provider_kind.as_str(),
+                "allow_sha1_signatures": true,
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            tenant_id = %user.tenant_id,
+            config_id = %config.id,
+            %error,
+            "a federation SHA-1 audit row could not be written"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Federation Config CRUD
 // ---------------------------------------------------------------------------
@@ -631,6 +702,7 @@ fn require_https_endpoint(name: &str, url: &str) -> Result<(), AxiamApiError> {
     security(("bearer" = []))
 )]
 pub async fn create<C: Connection + Clone>(
+    http_req: HttpRequest,
     user: AuthenticatedUser,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
@@ -684,6 +756,7 @@ pub async fn create<C: Connection + Clone>(
         button_icon: req.button_icon.clone(),
     };
     validate_login_provider_fields(protocol, &login_fields)?;
+    validate_allow_sha1(protocol, req.allow_sha1_signatures)?;
 
     // The attribute map is validated now that something reads it. Before this
     // change it was stored unchecked and consulted by nothing, so a typo was
@@ -757,6 +830,7 @@ pub async fn create<C: Connection + Clone>(
             apple_key_id: req.apple_key_id,
             require_pkce: req.require_pkce,
             button_icon: req.button_icon,
+            allow_sha1_signatures: req.allow_sha1_signatures,
         })
         .await?;
 
@@ -779,6 +853,10 @@ pub async fn create<C: Connection + Clone>(
         .federation_config_repo
         .get_by_id(user.tenant_id, config.id)
         .await?;
+
+    if config.allow_sha1_signatures {
+        audit_sha1_allowed(&state, &http_req, &user, &config).await;
+    }
 
     Ok(HttpResponse::Created().json(FederationConfigResponse::from(config)))
 }
@@ -868,6 +946,7 @@ pub async fn get<C: Connection + Clone>(
     security(("bearer" = []))
 )]
 pub async fn update<C: Connection + Clone>(
+    http_req: HttpRequest,
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
@@ -963,6 +1042,10 @@ pub async fn update<C: Connection + Clone>(
         button_icon: patched(&req.button_icon, &existing.button_icon),
     };
     validate_login_provider_fields(existing.protocol, &login_fields)?;
+    validate_allow_sha1(existing.protocol, req.allow_sha1_signatures)?;
+    // Audited on the transition only: re-saving a form that already allows
+    // SHA-1 changes nothing and writes no row.
+    let sha1_turned_on = req.allow_sha1_signatures == Some(true) && !existing.allow_sha1_signatures;
 
     // If the caller is rotating the client_secret, encrypt it before storage
     // (SEC-045). Plaintext never reaches the DB layer.
@@ -997,6 +1080,7 @@ pub async fn update<C: Connection + Clone>(
                 apple_key_id: req.apple_key_id,
                 require_pkce: req.require_pkce,
                 button_icon: req.button_icon,
+                allow_sha1_signatures: req.allow_sha1_signatures,
             },
         )
         .await?;
@@ -1033,6 +1117,9 @@ pub async fn update<C: Connection + Clone>(
         .federation_config_repo
         .get_by_id(user.tenant_id, config.id)
         .await?;
+    if sha1_turned_on {
+        audit_sha1_allowed(&state, &http_req, &user, &config).await;
+    }
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
 }
 

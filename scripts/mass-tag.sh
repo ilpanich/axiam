@@ -920,8 +920,16 @@ bump_versions() {
       # coords — kept in lockstep. (project() carries the plain MAJOR.MINOR.PATCH
       # triple by design, since CMake rejects pre-release suffixes, so a
       # prerelease bump only rewrites the full-version literals below.)
-      local mf; mf="$(vcpkg_manifest_path "$repo")"
-      [[ -n "$mf" ]] && sub_literal "$mf"  "$old" "$version"
+      # Every vcpkg manifest is bumped, not only the one vcpkg_manifest_path
+      # resolves: the C++ SDK keeps BOTH a root vcpkg.json and an overlay port
+      # whose directory is not named after the repo (ports/axiam-cpp-sdk/), and
+      # that port sat at 1.0.0-alpha8 for nine releases because only the root
+      # manifest was rewritten. sub_literal is a no-op on a missing file, so an
+      # unmatched glob costs nothing.
+      local mf
+      for mf in vcpkg.json ports/*/vcpkg.json; do
+        sub_literal "$mf"                  "$old" "$version"
+      done
       sub_literal include/axiam/axiam.h    "$old" "$version"
       sub_literal CMakeLists.txt           "$old" "$version"
       sub_literal conanfile.py             "$old" "$version"

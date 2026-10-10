@@ -396,6 +396,13 @@ esac
 # Set by bump_versions and read by the action loop; declared here for clarity.
 BUMP_FILES=()
 
+# Set in a DRY run once the platform target has been through it, with the
+# version its spec carried before the (simulated) bump. A dry run writes
+# nothing, so without these the SDKs that follow would find the platform's spec
+# still at the old version and refuse to re-vendor (see revendor_spec_artifacts).
+PLATFORM_DRY_BUMPED=false
+PLATFORM_DRY_FROM=""
+
 # Resolve a repo's vcpkg manifest path, run from inside the repo's dir. The C /
 # C++ SDKs ship it as an overlay port at ports/<repo>/vcpkg.json, but a repo may
 # instead keep it at the root; echo whichever exists (empty if neither).
@@ -599,8 +606,19 @@ restamp_openapi_digest() {
 
   # --write is idempotent (the digest is taken over the document with the
   # digest field absent), so the dry-run path can ask the same question by
-  # checking instead of writing.
+  # checking instead of writing -- except that a dry run has NOT rewritten
+  # info.version, so the file it checks still carries the old version and its
+  # matching digest. When the version rewrite above was recorded for this file,
+  # the digest moves with it, and saying "already current" would be a lie about
+  # exactly the step this function exists for.
   if $DRY_RUN; then
+    local f
+    for f in "${BUMP_FILES[@]}"; do
+      if [[ "$f" == "$file" ]]; then
+        printf '      [dry-run] %s: spec digest would be re-stamped (info.version moves)\n' "$file"
+        return 0
+      fi
+    done
     if python3 "$gate" >/dev/null 2>&1; then
       printf '      [dry-run] %s: spec digest already current\n' "$file"
       return 0
@@ -671,7 +689,21 @@ revendor_spec_artifacts() {
   local spec_version
   spec_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["info"]["version"])' \
     "$src/openapi.json" 2>/dev/null)" || die "cannot read $src/openapi.json"
-  if [[ "$spec_version" != "$1" ]]; then
+
+  # A dry run bumps nothing, so in a dry run of the whole fleet the platform's
+  # spec still carries the version the platform is being bumped FROM, and the
+  # guard below would refuse every SDK -- the one run whose job is to show what
+  # the SDKs will get would show nothing at all. When the platform was dry-run
+  # earlier in this same run, its spec is known to be the version the real run
+  # will have re-stamped by now; the copies are then compared with the platform's
+  # pre-bump files, and openapi.json and management-registry.json are reported as
+  # re-vendored regardless, because the re-stamp alone moves both.
+  local simulated=false
+  if $DRY_RUN && $PLATFORM_DRY_BUMPED && [[ "$spec_version" == "$PLATFORM_DRY_FROM" ]]; then
+    simulated=true
+    printf '      [dry-run] (the platform spec says %s; this run bumps it to %s first)\n' \
+      "$spec_version" "$1"
+  elif [[ "$spec_version" != "$1" ]]; then
     die "refusing to re-vendor: $PLATFORM_REPO's spec says $spec_version, but this is the $1 release.
      Tag the platform repo first (it re-stamps sdks/openapi.json), then the SDKs."
   fi
@@ -683,6 +715,18 @@ revendor_spec_artifacts() {
     # axiam-cplusplus-sdk vendor no protos but do vendor these three; a repo
     # that has never carried one is not given one by a release.
     [[ -f "$to" ]] || continue
+    if $simulated && [[ "$f" != CONTRACT.md ]]; then
+      if cmp -s "$from" "$to"; then
+        printf '      [dry-run] %s: re-vendor from %s/sdks/ (the version re-stamp only; otherwise current)\n' \
+          "$f" "$PLATFORM_REPO"
+      else
+        printf '      [dry-run] %s: re-vendor from %s/sdks/ (the re-stamp, AND the copy differs from the platform'"'"'s)\n' \
+          "$f" "$PLATFORM_REPO"
+      fi
+      BUMP_FILES+=("$f")
+      changed=1
+      continue
+    fi
     if cmp -s "$from" "$to"; then
       continue
     fi
@@ -1342,6 +1386,11 @@ for repo in "${REPOS[@]}"; do
     run git push origin "refs/tags/$TAG_FOR_REPO"
   ) || { echo "    [FAILED] $repo"; FAIL_COUNT=$((FAIL_COUNT + 1)); FAILED_REPOS="$FAILED_REPOS $repo"; continue; }
   echo "    [done] $repo"
+  if $DRY_RUN && $BUMP && [[ "$repo" == "$PLATFORM_REPO" || "$repo" == "$OPAQUE_TARGET" ]] \
+     && ! $PLATFORM_DRY_BUMPED; then
+    PLATFORM_DRY_BUMPED=true
+    PLATFORM_DRY_FROM="$(cd "$dir" && current_version "$repo")"
+  fi
 done
 echo ""
 
@@ -1352,4 +1401,8 @@ if [[ $FAIL_COUNT -gt 0 ]]; then
   echo "==> Completed with failures:$FAILED_REPOS"
   exit 1
 fi
-echo "==> All ${#REPOS[@]} target(s) released at version $RELEASE_VERSION and pushed."
+if $DRY_RUN; then
+  echo "==> Dry run: all ${#REPOS[@]} target(s) would be released at version $RELEASE_VERSION; nothing was changed."
+else
+  echo "==> All ${#REPOS[@]} target(s) released at version $RELEASE_VERSION and pushed."
+fi

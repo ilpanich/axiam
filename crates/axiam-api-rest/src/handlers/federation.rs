@@ -214,13 +214,20 @@ pub struct CreateFederationConfigRequest {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateFederationConfigRequest {
     pub provider: Option<String>,
+    /// OIDC discovery or SAML metadata URL. Explicit `null` clears it;
+    /// omitted leaves it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub metadata_url: Option<Option<String>>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub attribute_map: Option<serde_json::Value>,
     pub enabled: Option<bool>,
     /// PEM-encoded X.509 certificate for verifying SAML assertions
-    /// (CQ-B40/REQ-14 AC-5).  `Some(None)` clears the stored cert.
+    /// (CQ-B40/REQ-14 AC-5). Explicit `null` clears the stored cert;
+    /// omitted leaves it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub idp_signing_cert_pem: Option<Option<String>>,
     /// Accepted signature algorithms (CQ-B40/REQ-14 AC-5).
     pub allowed_algorithms: Option<Vec<String>>,
@@ -233,27 +240,42 @@ pub struct UpdateFederationConfigRequest {
     // `provider_kind` is deliberately absent: it selects the protocol and the
     // override key, and changing it on a live config would silently re-point
     // which inherited provider a tenant is shadowing. Delete and recreate.
-    /// Operator-chosen identifier for a `generic_*` kind. `Some(None)` clears it.
+    /// Operator-chosen identifier for a `generic_*` kind. Explicit `null`
+    /// clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub provider_slug: Option<Option<String>>,
     /// Whether tenants may inherit this organization-level provider.
     pub allow_tenant_inheritance: Option<bool>,
     /// Scopes to request. Replaced wholesale; empty restores the per-kind default.
     pub scopes: Option<Vec<String>>,
-    /// OAuth2-variant authorization endpoint. `Some(None)` clears it.
+    /// OAuth2-variant authorization endpoint. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub authorization_endpoint: Option<Option<String>>,
-    /// OAuth2-variant token endpoint. `Some(None)` clears it.
+    /// OAuth2-variant token endpoint. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub token_endpoint: Option<Option<String>>,
-    /// OAuth2-variant userinfo endpoint. `Some(None)` clears it.
+    /// OAuth2-variant userinfo endpoint. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub userinfo_endpoint: Option<Option<String>>,
     /// Accepted external IdP tenants for a templated issuer. Replaced wholesale.
     pub allowed_issuer_tenants: Option<Vec<String>>,
-    /// Apple Team ID. `Some(None)` clears it.
+    /// Apple Team ID. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub apple_team_id: Option<Option<String>>,
-    /// Apple Key ID. `Some(None)` clears it.
+    /// Apple Key ID. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub apple_key_id: Option<Option<String>>,
     /// Send PKCE on the authorization request.
     pub require_pkce: Option<bool>,
-    /// Sign-in-button icon for a generic provider. `Some(None)` clears it.
+    /// Sign-in-button icon for a generic provider. Explicit `null` clears it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
     pub button_icon: Option<Option<String>>,
     /// SAML only: accept IdP responses signed with SHA-1. Refused on a
     /// non-SAML config; turning it on is audited

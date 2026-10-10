@@ -708,6 +708,26 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         id: Uuid,
         input: UpdateFederationConfig,
     ) -> AxiamResult<FederationConfig> {
+        /// One nullable `option<string>` column of the patch: `Some(Some(v))`
+        /// sets it, `Some(None)` clears it — written as `NONE`, the absent
+        /// value a fresh row has, not as a bound JSON `null` (#530) — and
+        /// `None` leaves it.
+        fn set_nullable(
+            set_clauses: &mut Vec<String>,
+            binds: &mut Vec<(String, serde_json::Value)>,
+            column: &'static str,
+            patch: &Option<Option<String>>,
+        ) {
+            match patch {
+                Some(Some(value)) => {
+                    set_clauses.push(format!("{column} = ${column}"));
+                    binds.push((column.into(), serde_json::json!(value)));
+                }
+                Some(None) => set_clauses.push(format!("{column} = NONE")),
+                None => {}
+            }
+        }
+
         let mut set_clauses = vec!["updated_at = time::now()".to_string()];
         let mut binds: Vec<(String, serde_json::Value)> = Vec::new();
 
@@ -715,10 +735,12 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             set_clauses.push("provider = $provider".into());
             binds.push(("provider".into(), serde_json::json!(provider)));
         }
-        if let Some(ref metadata_url) = input.metadata_url {
-            set_clauses.push("metadata_url = $metadata_url".into());
-            binds.push(("metadata_url".into(), serde_json::json!(metadata_url)));
-        }
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "metadata_url",
+            &input.metadata_url,
+        );
         if let Some(ref client_id) = input.client_id {
             set_clauses.push("client_id = $client_id".into());
             binds.push(("client_id".into(), serde_json::json!(client_id)));
@@ -736,13 +758,12 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             set_clauses.push("enabled = $enabled".into());
             binds.push(("enabled".into(), serde_json::json!(enabled)));
         }
-        if let Some(ref idp_signing_cert_pem) = input.idp_signing_cert_pem {
-            set_clauses.push("idp_signing_cert_pem = $idp_signing_cert_pem".into());
-            binds.push((
-                "idp_signing_cert_pem".into(),
-                serde_json::json!(idp_signing_cert_pem),
-            ));
-        }
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "idp_signing_cert_pem",
+            &input.idp_signing_cert_pem,
+        );
         if let Some(ref allowed_algorithms) = input.allowed_algorithms {
             set_clauses.push("allowed_algorithms = $allowed_algorithms".into());
             binds.push((
@@ -787,10 +808,12 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         // absent: it selects the protocol and the override key, and changing it
         // on a live config would silently re-point which inherited provider a
         // tenant is shadowing.
-        if let Some(ref provider_slug) = input.provider_slug {
-            set_clauses.push("provider_slug = $provider_slug".into());
-            binds.push(("provider_slug".into(), serde_json::json!(provider_slug)));
-        }
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "provider_slug",
+            &input.provider_slug,
+        );
         if let Some(allow) = input.allow_tenant_inheritance {
             set_clauses.push("allow_tenant_inheritance = $allow_inherit".into());
             binds.push(("allow_inherit".into(), serde_json::json!(allow)));
@@ -799,56 +822,60 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             set_clauses.push("scopes = $scopes".into());
             binds.push(("scopes".into(), serde_json::json!(scopes)));
         }
-        if let Some(ref v) = input.authorization_endpoint {
-            set_clauses.push("authorization_endpoint = $authorization_endpoint".into());
-            binds.push(("authorization_endpoint".into(), serde_json::json!(v)));
-        }
-        if let Some(ref v) = input.token_endpoint {
-            set_clauses.push("token_endpoint = $token_endpoint".into());
-            binds.push(("token_endpoint".into(), serde_json::json!(v)));
-        }
-        if let Some(ref v) = input.userinfo_endpoint {
-            set_clauses.push("userinfo_endpoint = $userinfo_endpoint".into());
-            binds.push(("userinfo_endpoint".into(), serde_json::json!(v)));
-        }
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "authorization_endpoint",
+            &input.authorization_endpoint,
+        );
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "token_endpoint",
+            &input.token_endpoint,
+        );
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "userinfo_endpoint",
+            &input.userinfo_endpoint,
+        );
         if let Some(ref v) = input.allowed_issuer_tenants {
             set_clauses.push("allowed_issuer_tenants = $allowed_issuer_tenants".into());
             binds.push(("allowed_issuer_tenants".into(), serde_json::json!(v)));
         }
-        if let Some(ref v) = input.apple_team_id {
-            set_clauses.push("apple_team_id = $apple_team_id".into());
-            binds.push(("apple_team_id".into(), serde_json::json!(v)));
-        }
-        if let Some(ref v) = input.apple_key_id {
-            set_clauses.push("apple_key_id = $apple_key_id".into());
-            binds.push(("apple_key_id".into(), serde_json::json!(v)));
-        }
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "apple_team_id",
+            &input.apple_team_id,
+        );
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "apple_key_id",
+            &input.apple_key_id,
+        );
         if let Some(v) = input.require_pkce {
             set_clauses.push("require_pkce = $require_pkce".into());
             binds.push(("require_pkce".into(), serde_json::json!(v)));
         }
-        if let Some(ref v) = input.button_icon {
-            set_clauses.push("button_icon = $button_icon".into());
-            binds.push(("button_icon".into(), serde_json::json!(v)));
-        }
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "button_icon",
+            &input.button_icon,
+        );
         if let Some(v) = input.allow_sha1_signatures {
             set_clauses.push("allow_sha1_signatures = $allow_sha1_signatures".into());
             binds.push(("allow_sha1_signatures".into(), serde_json::json!(v)));
         }
-        // #530: `Some(None)` clears the certificate — written as `NONE`, the
-        // absent value a fresh row has, not as a bound JSON `null`.
-        match input.idp_metadata_signing_cert_pem {
-            Some(Some(ref pem)) => {
-                set_clauses
-                    .push("idp_metadata_signing_cert_pem = $idp_metadata_signing_cert_pem".into());
-                binds.push((
-                    "idp_metadata_signing_cert_pem".into(),
-                    serde_json::json!(pem),
-                ));
-            }
-            Some(None) => set_clauses.push("idp_metadata_signing_cert_pem = NONE".into()),
-            None => {}
-        }
+        set_nullable(
+            &mut set_clauses,
+            &mut binds,
+            "idp_metadata_signing_cert_pem",
+            &input.idp_metadata_signing_cert_pem,
+        );
 
         let sql = format!(
             "UPDATE type::record('federation_config', $id) SET {} \

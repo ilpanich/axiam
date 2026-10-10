@@ -110,6 +110,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newly seen address the whole preset whenever it arrives; the sliding window
   still carries the previous minute. Machine buckets of 20 or more keep the
   seed. `docs/deployment/rate-limit-sizing.md` is corrected.
+- **An explicit `null` clears a federation configuration's nullable fields.**
+  `PUT /api/v1/federation-configs/{id}` documented `null` as clearing
+  `idp_signing_cert_pem`, `provider_slug`, the three OAuth2 endpoints, the two
+  Apple identifiers and `button_icon`, but read `null` as absent and left each
+  as it was; `metadata_url` behaved the same. Each is now cleared by an explicit
+  `null` and kept when omitted, as contract §27 requires of a sparse update
+  (only `idp_metadata_signing_cert_pem` already did). A `null` still meets the
+  relational rules: an OAuth2 configuration's endpoints are required, so
+  clearing one is `400`, and the Apple identifiers clear only together.
+  **Behaviour change:** a client that sends these fields as `null` — a
+  serializer that emits every member, for instance — now clears them; send
+  only the fields you mean to change.
 
 ### Security
 

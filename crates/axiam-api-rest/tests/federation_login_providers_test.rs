@@ -2063,3 +2063,248 @@ async fn an_oauth2_login_may_not_name_a_foreign_redirect_target() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+// ---------------------------------------------------------------------------
+// Explicit `null` on an update (contract §27)
+// ---------------------------------------------------------------------------
+//
+// Each login-provider member below is documented as cleared by `null`, but was
+// declared without `double_option`, so serde read an explicit `null` as absent
+// and the update left the member as it was. Each test shows the `null` is now
+// read: it clears the member, or — where the member may not be empty — it is
+// refused, where before it answered `200` and changed nothing.
+
+/// `PUT` `body` to config `id` as a fresh administrator of `tenant_id`.
+macro_rules! update_config {
+    ($app:expr, $auth:expr, $db:expr, $org_id:expr, $tenant_id:expr, $username:expr, $id:expr, $body:expr) => {{
+        let admin = admin_in(&$db, $tenant_id, $username).await;
+        let token = mint_token(&$auth, admin, $tenant_id, $org_id);
+        let req = test::TestRequest::put()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/api/v1/federation-configs/{}", $id))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json($body)
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let body: Value = test::read_body_json(resp).await;
+        (status, body)
+    }};
+}
+
+#[actix_rt::test]
+async fn an_explicit_null_clears_the_provider_slug() {
+    let f = setup("null-slug").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        json!({
+            "provider": "Acme SSO",
+            "provider_kind": "generic_oidc",
+            "provider_slug": "acme",
+            "protocol": "OidcConnect",
+            "metadata_url": "https://idp.example.com/.well-known/openid-configuration",
+            "client_id": "cid",
+            "client_secret": "secret",
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+    let id = created["id"].as_str().unwrap();
+
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-1",
+        id,
+        json!({ "enabled": true })
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["provider_slug"], "acme", "omitted leaves it");
+
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-2",
+        id,
+        json!({ "provider_slug": null })
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body["provider_slug"].is_null(), "null clears it: {body}");
+}
+
+#[actix_rt::test]
+async fn an_explicit_null_clears_the_button_icon() {
+    let f = setup("null-icon").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        json!({
+            "provider": "Acme SSO",
+            "provider_kind": "generic_oidc",
+            "provider_slug": "acme",
+            "protocol": "OidcConnect",
+            "metadata_url": "https://idp.example.com/.well-known/openid-configuration",
+            "client_id": "cid",
+            "client_secret": "secret",
+            "button_icon": TEST_ICON,
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+    let id = created["id"].as_str().unwrap();
+
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor",
+        id,
+        json!({ "button_icon": null })
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body["button_icon"].is_null(), "null clears it: {body}");
+}
+
+#[actix_rt::test]
+async fn an_explicit_null_clears_the_apple_identifiers_as_a_pair() {
+    let f = setup("null-apple").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        json!({
+            "provider": "Apple",
+            "provider_kind": "apple",
+            "protocol": "OidcConnect",
+            "metadata_url": "https://appleid.apple.com/.well-known/openid-configuration",
+            "client_id": "com.example.web",
+            "client_secret": "p8-key-stand-in",
+            "apple_team_id": "TEAM123456",
+            "apple_key_id": "KEY1234567",
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["mints_client_secret"], true, "{created}");
+    let id = created["id"].as_str().unwrap();
+
+    // One alone is the half-configured state the pair rule refuses — which
+    // shows the `null` is read: ignored, it would have answered 200.
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-1",
+        id,
+        json!({ "apple_key_id": null })
+    );
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-2",
+        id,
+        json!({ "apple_team_id": null })
+    );
+    assert_eq!(status, 400, "{body}");
+
+    let (status, body) = update_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-editor-3",
+        id,
+        json!({ "apple_team_id": null, "apple_key_id": null })
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body["apple_team_id"].is_null(), "{body}");
+    assert!(body["apple_key_id"].is_null(), "{body}");
+    assert_eq!(body["mints_client_secret"], false, "{body}");
+}
+
+#[actix_rt::test]
+async fn an_explicit_null_oauth2_endpoint_is_read_and_refused() {
+    let f = setup("null-endpoints").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        json!({
+            "provider": "GitHub",
+            "provider_kind": "github",
+            "protocol": "OAuth2",
+            "client_id": "cid",
+            "client_secret": "secret",
+            "authorization_endpoint": "https://github.com/login/oauth/authorize",
+            "token_endpoint": "https://github.com/login/oauth/access_token",
+            "userinfo_endpoint": "https://api.github.com/user",
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+    let id = created["id"].as_str().unwrap();
+
+    // The OAuth2 variant has no discovery document, so each endpoint is
+    // required: clearing one is refused. Before, the `null` was dropped and the
+    // update answered 200 with the endpoint unchanged.
+    for (i, name) in [
+        "authorization_endpoint",
+        "token_endpoint",
+        "userinfo_endpoint",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, body) = update_config!(
+            app,
+            auth,
+            f.db,
+            f.org_id,
+            f.tenant_id,
+            &format!("t-editor-{i}"),
+            id,
+            json!({ name: null })
+        );
+        assert_eq!(status, 400, "{name}: {body}");
+        assert!(
+            serde_json::to_string(&body).unwrap().contains(name),
+            "the refusal names {name}: {body}"
+        );
+    }
+}

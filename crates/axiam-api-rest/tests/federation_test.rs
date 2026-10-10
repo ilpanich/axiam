@@ -2831,3 +2831,112 @@ async fn p23w3_07_a_cached_sign_in_fetches_once_and_a_moved_sso_host_is_audited(
     assert_eq!(fetches.load(Ordering::SeqCst), 3);
     assert_eq!(host_changes(db.clone()).await.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Explicit `null` clears a nullable member of an update (contract §27)
+// ---------------------------------------------------------------------------
+//
+// `metadata_url` and `idp_signing_cert_pem` are `Option<Option<String>>` on
+// `UpdateFederationConfigRequest`, documented as cleared by `null`, but serde
+// reads a bare `Option<Option<_>>` `null` as absent, so an explicit `null` left
+// them as they were. The login-provider members have their own tests in
+// `federation_login_providers_test.rs`.
+
+/// `PUT` `body` to config `id` and return the status and the body.
+async fn put_config(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+    id: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/v1/federation-configs/{id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .set_json(body)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    (status, test::read_body_json(resp).await)
+}
+
+#[actix_rt::test]
+async fn an_explicit_null_clears_the_metadata_url() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+    let saml = create_saml_config(&app, &token).await;
+    let id = saml["id"].as_str().unwrap();
+
+    let (status, body) = put_config(&app, &token, id, serde_json::json!({ "enabled": true })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["metadata_url"], "https://idp.example.com/metadata",
+        "omitted leaves it"
+    );
+
+    let (status, body) = put_config(
+        &app,
+        &token,
+        id,
+        serde_json::json!({ "metadata_url": null }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["metadata_url"].is_null(), "null clears it: {body}");
+}
+
+#[actix_rt::test]
+async fn an_explicit_null_clears_the_idp_signing_cert() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+    let saml = create_saml_config(&app, &token).await;
+    let id = saml["id"].as_str().unwrap();
+    let config_id: Uuid = id.parse().unwrap();
+    let stored = |db: Surreal<TestDb>| async move {
+        SurrealFederationConfigRepository::new(db)
+            .get_by_id(tenant_id, config_id)
+            .await
+            .unwrap()
+            .idp_signing_cert_pem
+    };
+
+    let cert = generated_cert_pem();
+    let (status, body) = put_config(
+        &app,
+        &token,
+        id,
+        serde_json::json!({ "idp_signing_cert_pem": cert }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(stored(db.clone()).await.as_deref(), Some(cert.as_str()));
+
+    let (status, body) = put_config(&app, &token, id, serde_json::json!({ "enabled": true })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        stored(db.clone()).await.as_deref(),
+        Some(cert.as_str()),
+        "omitted leaves it"
+    );
+
+    let (status, body) = put_config(
+        &app,
+        &token,
+        id,
+        serde_json::json!({ "idp_signing_cert_pem": null }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(stored(db.clone()).await, None, "null clears it");
+}

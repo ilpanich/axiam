@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["authenticate_mtls_client","thumbprint_s256"],"struct":["CertificateIdentity","PresentedCertificate"]};
+window.SIDEBAR_ITEMS = {"enum":["IssuedCertificateStanding"],"fn":["authenticate_mtls_client","refuse_a_certificate_axiam_revoked","refuse_a_certificate_from_outside_the_clients_organization","thumbprint_s256"],"struct":["CertificateIdentity","InventoryCertificateLookup","PresentedCertificate"],"trait":["IssuedCertificateLookup"]};

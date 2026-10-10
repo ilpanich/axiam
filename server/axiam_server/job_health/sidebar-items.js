@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["SWEEP_JOBS"],"struct":["JobHealth"]};
+window.SIDEBAR_ITEMS = {"constant":["REVOCATION_FEED_JOB","SWEEP_JOBS"],"fn":["sweep_jobs"],"struct":["JobHealth"]};

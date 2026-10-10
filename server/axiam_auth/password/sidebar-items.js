@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["hash_password","verify_password"]};
+window.SIDEBAR_ITEMS = {"fn":["equalising_dummy_verify","hash_password","verify_password"]};

@@ -522,5 +522,23 @@
 <a href=#522 id=522 data-nosnippet>522</a>
 <a href=#523 id=523 data-nosnippet>523</a>        <span class="prelude-val">Ok</span>(count)
 <a href=#524 id=524 data-nosnippet>524</a>    }
-<a href=#525 id=525 data-nosnippet>525</a>}
+<a href=#525 id=525 data-nosnippet>525</a>
+<a href=#526 id=526 data-nosnippet>526</a>    <span class="kw">async fn </span>delete_all_for_client(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, client_id: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#527 id=527 data-nosnippet>527</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#528 id=528 data-nosnippet>528</a>            </span>.db
+<a href=#529 id=529 data-nosnippet>529</a>            .current()
+<a href=#530 id=530 data-nosnippet>530</a>            .query(
+<a href=#531 id=531 data-nosnippet>531</a>                <span class="string">"SELECT count() AS total FROM (DELETE oauth2_auth_code \
+<a href=#532 id=532 data-nosnippet>532</a>                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+<a href=#533 id=533 data-nosnippet>533</a>                 RETURN BEFORE) GROUP ALL"</span>,
+<a href=#534 id=534 data-nosnippet>534</a>            )
+<a href=#535 id=535 data-nosnippet>535</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#536 id=536 data-nosnippet>536</a>            .bind((<span class="string">"client_id"</span>, client_id.to_string()))
+<a href=#537 id=537 data-nosnippet>537</a>            .<span class="kw">await
+<a href=#538 id=538 data-nosnippet>538</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#539 id=539 data-nosnippet>539</a>
+<a href=#540 id=540 data-nosnippet>540</a>        <span class="kw">let </span>rows: Vec&lt;CountRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#541 id=541 data-nosnippet>541</a>        <span class="prelude-val">Ok</span>(rows.first().map(|r| r.total).unwrap_or(<span class="number">0</span>))
+<a href=#542 id=542 data-nosnippet>542</a>    }
+<a href=#543 id=543 data-nosnippet>543</a>}
 </code></pre></div></section></main></body></html>

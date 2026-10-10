@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["NotificationEventType"],"struct":["CreateNotificationRule","NotificationRule","UpdateNotificationRule"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_NOTIFICATION_WINDOW_MINUTES","MAX_NOTIFICATION_WINDOW_MINUTES","MIN_NOTIFICATION_WINDOW_MINUTES"],"enum":["NotificationEventType","NotificationWindowClaim"],"fn":["is_valid_window_minutes"],"struct":["CreateNotificationRule","NotificationRule","UpdateNotificationRule"]};

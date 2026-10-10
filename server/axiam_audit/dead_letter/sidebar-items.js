@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEAD_LETTER_FILE_ENV","DEFAULT_MAX_BYTES","MAX_ACTION_BYTES","MAX_ADDRESS_BYTES","MAX_BYTES_ENV","MIN_MAX_BYTES"],"enum":["Submitted"],"fn":["append_blocking","bound_fields","encode_line","max_bytes_from_env","request_row_limit"],"struct":["DeadLetterWriter"]};

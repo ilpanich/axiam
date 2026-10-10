@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["message","provider","providers","service","template"]};
+window.SIDEBAR_ITEMS = {"mod":["egress","message","provider","providers","service","template"]};

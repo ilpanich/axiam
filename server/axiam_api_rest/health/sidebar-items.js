@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["health","jobs","ready"],"struct":["AlwaysHealthy","HealthResponse","JobStatus","JobsHealthResponse","NoJobs","ReadyResponse"],"trait":["HealthChecker","JobHealthReporter"]};
+window.SIDEBAR_ITEMS = {"fn":["health","jobs","ready"],"struct":["AlwaysHealthy","HealthResponse","JobStatus","JobsHealthResponse","NoJobs","ReadyResponse","RequestAuditHealth"],"trait":["HealthChecker","JobHealthReporter"]};

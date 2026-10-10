@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["MailTransportPublisher","OutboundTransport"]};
+window.SIDEBAR_ITEMS = {"enum":["MailTransportPublisher","OutboundShutdown","OutboundTransport"]};

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["apple","cert","discovery_cache","error","issuer","jwks_cache","oauth2","oidc","pkce","saml","saml_idp","saml_idp_urls","saml_sp","secrets","ssrf","token_exchange"]};
+window.SIDEBAR_ITEMS = {"mod":["apple","cert","discovery_cache","error","issuer","jwks_cache","oauth2","oidc","pkce","saml","saml_idp","saml_idp_urls","saml_metadata","saml_sp","secrets","ssrf","token_exchange"]};

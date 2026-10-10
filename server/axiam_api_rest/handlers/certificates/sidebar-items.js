@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["bind","generate","get","list","revoke","sign_csr"],"struct":["CertificateWithBinding","CreateCertificateRequest","SignCertificateCsrRequest"]};
+window.SIDEBAR_ITEMS = {"constant":["AUDIT_VAULT_REVOCATION_PENDING"],"fn":["bind","generate","get","list","revoke","sign_csr"],"struct":["CertificateWithBinding","CreateCertificateRequest","SignCertificateCsrRequest"]};

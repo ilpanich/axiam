@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["AuthorizeOutcome","RequestObject"],"fn":["hash_code"],"struct":["AuthorizeRequest","AuthorizeResponse","AuthorizeService","SessionEvidence"]};
+window.SIDEBAR_ITEMS = {"constant":["PAR_REQUIRED_DESCRIPTION"],"enum":["AuthorizeOutcome","RequestObject"],"fn":["hash_code"],"struct":["AuthorizeRequest","AuthorizeResponse","AuthorizeService","SessionEvidence"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RECENT_LOSS_WINDOW","REPORT_INTERVAL"],"struct":["RequestAuditLoss","RequestAuditLossSnapshot"]};

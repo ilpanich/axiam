@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["directory_client","serve"],"struct":["AppConfig","AuditCollectionConfig","ServeOptions"]};
+window.SIDEBAR_ITEMS = {"fn":["directory_client","email_egress","serve"],"struct":["AppConfig","AuditCollectionConfig","ServeOptions"]};

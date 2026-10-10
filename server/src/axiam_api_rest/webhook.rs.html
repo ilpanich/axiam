@@ -14,696 +14,727 @@
 <a href=#14 id=14 data-nosnippet>14</a>//! not by an in-process sleep (D-07).
 <a href=#15 id=15 data-nosnippet>15</a>//!
 <a href=#16 id=16 data-nosnippet>16</a>//! SEC-019/SECHRD-02: Delivery is routed through the shared
-<a href=#17 id=17 data-nosnippet>17</a>//! `axiam_federation::ssrf::guarded_fetch` guard, which resolves the host
-<a href=#18 id=18 data-nosnippet>18</a>//! fresh on every attempt, rejects private/loopback/link-local resolved
-<a href=#19 id=19 data-nosnippet>19</a>//! addresses (DNS-rebinding defence), and — critically — pins the exact
-<a href=#20 id=20 data-nosnippet>20</a>//! validated `IpAddr` into the connection via a fresh single-use client, so
-<a href=#21 id=21 data-nosnippet>21</a>//! `reqwest` cannot independently re-resolve DNS between the SSRF check and
+<a href=#17 id=17 data-nosnippet>17</a>//! `axiam_federation::ssrf::guarded_fetch_no_redirect` guard, which resolves
+<a href=#18 id=18 data-nosnippet>18</a>//! the host fresh on every attempt, rejects private/loopback/link-local
+<a href=#19 id=19 data-nosnippet>19</a>//! resolved addresses (DNS-rebinding defence), and — critically — pins the
+<a href=#20 id=20 data-nosnippet>20</a>//! exact validated `IpAddr` into the connection via a fresh single-use client,
+<a href=#21 id=21 data-nosnippet>21</a>//! so `reqwest` cannot independently re-resolve DNS between the SSRF check and
 <a href=#22 id=22 data-nosnippet>22</a>//! the actual send (D-01c; this closes the pin gap the previous
 <a href=#23 id=23 data-nosnippet>23</a>//! `resolve_and_validate_host` + separate `client.post()` pair left open).
-<a href=#24 id=24 data-nosnippet>24</a>//! SEC-031: The webhook secret is stored AES-256-GCM encrypted; it is decrypted
-<a href=#25 id=25 data-nosnippet>25</a>//! in memory for HMAC computation and never serialised in API responses.
-<a href=#26 id=26 data-nosnippet>26</a>//!
-<a href=#27 id=27 data-nosnippet>27</a>//! D-10: signatures use the Stripe-style signed-timestamp scheme
-<a href=#28 id=28 data-nosnippet>28</a>//! (`X-Axiam-Timestamp` + `X-Axiam-Signature: t=&lt;unix&gt;,v1=&lt;hex&gt;`) rather
-<a href=#29 id=29 data-nosnippet>29</a>//! than a body-only HMAC, so a receiver can enforce a replay window and a
-<a href=#30 id=30 data-nosnippet>30</a>//! forged signature can't be produced from the body alone (T-26-03-01). No
-<a href=#31 id=31 data-nosnippet>31</a>//! SDK (Rust/TS/Go/Python/Java/C#/PHP) implements a webhook-signature
-<a href=#32 id=32 data-nosnippet>32</a>//! verification helper today (confirmed via `grep -rn` across `sdks/` for
-<a href=#33 id=33 data-nosnippet>33</a>//! `X-Axiam-Signature`/`WebhookSignature`/`verify_webhook` — only hits are
-<a href=#34 id=34 data-nosnippet>34</a>//! the CRUD schema in `sdks/openapi.json`), so there is nothing downstream
-<a href=#35 id=35 data-nosnippet>35</a>//! to update for this format change.
-<a href=#36 id=36 data-nosnippet>36</a>
-<a href=#37 id=37 data-nosnippet>37</a></span><span class="kw">use </span>axiam_auth::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
-<a href=#38 id=38 data-nosnippet>38</a><span class="kw">use </span>axiam_core::id::new_id;
-<a href=#39 id=39 data-nosnippet>39</a><span class="kw">use </span>axiam_core::outbound::{
-<a href=#40 id=40 data-nosnippet>40</a>    DeliveryOutcome, OutboundDeliverer, OutboundError, OutboundFuture, OutboundKind,
-<a href=#41 id=41 data-nosnippet>41</a>    OutboundMessage, OutboundPublisher,
-<a href=#42 id=42 data-nosnippet>42</a>};
-<a href=#43 id=43 data-nosnippet>43</a><span class="kw">use </span>axiam_core::repository::WebhookRepository;
-<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span>axiam_federation::ssrf::{<span class="self">self</span>, SsrfError};
-<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span>chrono::Utc;
-<a href=#46 id=46 data-nosnippet>46</a><span class="kw">use </span>hmac::{Hmac, Mac};
-<a href=#47 id=47 data-nosnippet>47</a><span class="kw">use </span>reqwest::StatusCode;
-<a href=#48 id=48 data-nosnippet>48</a><span class="kw">use </span>sha2::Sha256;
-<a href=#49 id=49 data-nosnippet>49</a><span class="kw">use </span>uuid::Uuid;
-<a href=#50 id=50 data-nosnippet>50</a>
-<a href=#51 id=51 data-nosnippet>51</a><span class="kw">type </span>HmacSha256 = Hmac&lt;Sha256&gt;;
-<a href=#52 id=52 data-nosnippet>52</a>
-<a href=#53 id=53 data-nosnippet>53</a><span class="doccomment">/// Error type for webhook delivery helper operations.
-<a href=#54 id=54 data-nosnippet>54</a></span><span class="attr">#[derive(Debug, thiserror::Error)]
-<a href=#55 id=55 data-nosnippet>55</a></span><span class="kw">pub enum </span>WebhookError {
-<a href=#56 id=56 data-nosnippet>56</a>    <span class="attr">#[error(<span class="string">"invalid URL"</span>)]
-<a href=#57 id=57 data-nosnippet>57</a>    </span>InvalidUrl,
-<a href=#58 id=58 data-nosnippet>58</a>    <span class="attr">#[error(<span class="string">"failed to resolve host"</span>)]
-<a href=#59 id=59 data-nosnippet>59</a>    </span>ResolveFailed,
-<a href=#60 id=60 data-nosnippet>60</a>    <span class="attr">#[error(<span class="string">"SSRF blocked: resolved IP is private/loopback/link-local"</span>)]
-<a href=#61 id=61 data-nosnippet>61</a>    </span>SsrfBlocked,
-<a href=#62 id=62 data-nosnippet>62</a>    <span class="attr">#[error(<span class="string">"secret decrypt failed: {0}"</span>)]
-<a href=#63 id=63 data-nosnippet>63</a>    </span>SecretDecrypt(String),
-<a href=#64 id=64 data-nosnippet>64</a>    <span class="attr">#[error(<span class="string">"secret encrypt failed: {0}"</span>)]
-<a href=#65 id=65 data-nosnippet>65</a>    </span>SecretEncrypt(String),
-<a href=#66 id=66 data-nosnippet>66</a>    <span class="attr">#[error(<span class="string">"webhook encryption key is not configured (AXIAM__AUTH__PKI_ENCRYPTION_KEY unset)"</span>)]
-<a href=#67 id=67 data-nosnippet>67</a>    </span>EncryptionKeyMissing,
-<a href=#68 id=68 data-nosnippet>68</a>    <span class="doccomment">/// The webhook row could not be fetched (not found, or a repository
-<a href=#69 id=69 data-nosnippet>69</a>    /// error) when `deliver_once` tried to resolve it by ID. Distinct from
-<a href=#70 id=70 data-nosnippet>70</a>    /// the crypto-flavored variants above so a consumer (26-07) can tell a
-<a href=#71 id=71 data-nosnippet>71</a>    /// missing/deleted webhook apart from a decrypt failure.
-<a href=#72 id=72 data-nosnippet>72</a>    </span><span class="attr">#[error(<span class="string">"webhook lookup failed: {0}"</span>)]
-<a href=#73 id=73 data-nosnippet>73</a>    </span>WebhookLookupFailed(String),
-<a href=#74 id=74 data-nosnippet>74</a>}
-<a href=#75 id=75 data-nosnippet>75</a>
-<a href=#76 id=76 data-nosnippet>76</a><span class="kw">impl </span>From&lt;WebhookError&gt; <span class="kw">for </span><span class="kw">crate</span>::error::AxiamApiError {
-<a href=#77 id=77 data-nosnippet>77</a>    <span class="kw">fn </span>from(err: WebhookError) -&gt; <span class="self">Self </span>{
-<a href=#78 id=78 data-nosnippet>78</a>        <span class="kw">match </span>err {
-<a href=#79 id=79 data-nosnippet>79</a>            <span class="comment">// D-01/SEC-059: fail-closed, not an internal 500 — the caller can
-<a href=#80 id=80 data-nosnippet>80</a>            // retry once an operator configures the key. Never leaks crypto
-<a href=#81 id=81 data-nosnippet>81</a>            // internals, just states the subsystem is unavailable.
-<a href=#82 id=82 data-nosnippet>82</a>            </span>WebhookError::EncryptionKeyMissing =&gt; {
-<a href=#83 id=83 data-nosnippet>83</a>                axiam_core::error::AxiamError::ServiceUnavailable(
-<a href=#84 id=84 data-nosnippet>84</a>                    <span class="string">"webhook subsystem unavailable: encryption key not configured"</span>.to_string(),
-<a href=#85 id=85 data-nosnippet>85</a>                )
-<a href=#86 id=86 data-nosnippet>86</a>                .into()
-<a href=#87 id=87 data-nosnippet>87</a>            }
-<a href=#88 id=88 data-nosnippet>88</a>            WebhookError::WebhookLookupFailed(msg) =&gt; {
-<a href=#89 id=89 data-nosnippet>89</a>                axiam_core::error::AxiamError::WebhookDelivery(msg).into()
-<a href=#90 id=90 data-nosnippet>90</a>            }
-<a href=#91 id=91 data-nosnippet>91</a>            other =&gt; axiam_core::error::AxiamError::Crypto(other.to_string()).into(),
-<a href=#92 id=92 data-nosnippet>92</a>        }
-<a href=#93 id=93 data-nosnippet>93</a>    }
-<a href=#94 id=94 data-nosnippet>94</a>}
-<a href=#95 id=95 data-nosnippet>95</a>
-<a href=#96 id=96 data-nosnippet>96</a><span class="doccomment">/// Maps the shared guard's error type onto `WebhookError` so a blocked or
-<a href=#97 id=97 data-nosnippet>97</a>/// unresolvable delivery target flows through the existing fail-closed
-<a href=#98 id=98 data-nosnippet>98</a>/// `From&lt;WebhookError&gt; for AxiamApiError` mapping — never a panic or a raw
-<a href=#99 id=99 data-nosnippet>99</a>/// 500 (D-01a: single shared guard, single error-mapping style).
-<a href=#100 id=100 data-nosnippet>100</a></span><span class="kw">impl </span>From&lt;SsrfError&gt; <span class="kw">for </span>WebhookError {
-<a href=#101 id=101 data-nosnippet>101</a>    <span class="kw">fn </span>from(err: SsrfError) -&gt; <span class="self">Self </span>{
-<a href=#102 id=102 data-nosnippet>102</a>        <span class="kw">match </span>err {
-<a href=#103 id=103 data-nosnippet>103</a>            SsrfError::InvalidUrl =&gt; WebhookError::InvalidUrl,
-<a href=#104 id=104 data-nosnippet>104</a>            SsrfError::ResolveFailed =&gt; WebhookError::ResolveFailed,
-<a href=#105 id=105 data-nosnippet>105</a>            SsrfError::Blocked =&gt; WebhookError::SsrfBlocked,
-<a href=#106 id=106 data-nosnippet>106</a>            <span class="comment">// SEC-069: a non-HTTPS target is treated as a blocked delivery
-<a href=#107 id=107 data-nosnippet>107</a>            // (webhooks must be HTTPS); an over-large response is also a
-<a href=#108 id=108 data-nosnippet>108</a>            // fail-closed rejection.
-<a href=#109 id=109 data-nosnippet>109</a>            </span>SsrfError::InsecureScheme =&gt; WebhookError::SsrfBlocked,
-<a href=#110 id=110 data-nosnippet>110</a>            <span class="comment">// A request/client-build/redirect/oversize failure at send time is
-<a href=#111 id=111 data-nosnippet>111</a>            // not itself an SSRF verdict — surface it as a resolve failure so it
-<a href=#112 id=112 data-nosnippet>112</a>            // still fails closed rather than panicking or leaking internals.
-<a href=#113 id=113 data-nosnippet>113</a>            </span>SsrfError::ClientBuildFailed
-<a href=#114 id=114 data-nosnippet>114</a>            | SsrfError::RequestFailed(<span class="kw">_</span>)
-<a href=#115 id=115 data-nosnippet>115</a>            | SsrfError::TooManyRedirects
-<a href=#116 id=116 data-nosnippet>116</a>            | SsrfError::ResponseTooLarge(<span class="kw">_</span>) =&gt; WebhookError::ResolveFailed,
-<a href=#117 id=117 data-nosnippet>117</a>        }
-<a href=#118 id=118 data-nosnippet>118</a>    }
-<a href=#119 id=119 data-nosnippet>119</a>}
-<a href=#120 id=120 data-nosnippet>120</a>
-<a href=#121 id=121 data-nosnippet>121</a><span class="doccomment">/// Webhook delivery service.
-<a href=#122 id=122 data-nosnippet>122</a>///
-<a href=#123 id=123 data-nosnippet>123</a>/// `emit()` publishes matching-webhook delivery messages onto the durable
-<a href=#124 id=124 data-nosnippet>124</a>/// `axiam.webhook` AMQP topology; `deliver_once()` performs a single
-<a href=#125 id=125 data-nosnippet>125</a>/// SSRF-guarded HTTP attempt for the AMQP consumer (26-07) to drive per
-<a href=#126 id=126 data-nosnippet>126</a>/// (re)delivery.
-<a href=#127 id=127 data-nosnippet>127</a></span><span class="attr">#[derive(Clone)]
-<a href=#128 id=128 data-nosnippet>128</a></span><span class="kw">pub struct </span>WebhookDeliveryService&lt;W&gt; {
-<a href=#129 id=129 data-nosnippet>129</a>    repo: W,
-<a href=#130 id=130 data-nosnippet>130</a>    <span class="doccomment">/// AES-256-GCM key used to encrypt/decrypt webhook secrets stored at
-<a href=#131 id=131 data-nosnippet>131</a>    /// rest. Corresponds to `AXIAM__AUTH__PKI_ENCRYPTION_KEY` (SEC-031/SEC-059).
-<a href=#132 id=132 data-nosnippet>132</a>    /// `None` when the env var is unset — the server still boots (this is
-<a href=#133 id=133 data-nosnippet>133</a>    /// an optional subsystem), but registration (`encrypt_secret`) and
-<a href=#134 id=134 data-nosnippet>134</a>    /// delivery (`deliver_once`) both refuse to operate rather than falling
-<a href=#135 id=135 data-nosnippet>135</a>    /// back to an all-zero/constant key.
-<a href=#136 id=136 data-nosnippet>136</a>    </span>encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
-<a href=#137 id=137 data-nosnippet>137</a>    <span class="doccomment">/// The guarded fetch's `allow_private`. **Always `false`** except for the
-<a href=#138 id=138 data-nosnippet>138</a>    /// integration tests' loopback receiver, which turn it on through
-<a href=#139 id=139 data-nosnippet>139</a>    /// [`Self::admitting_private_networks_for_tests`] and nothing else — the
-<a href=#140 id=140 data-nosnippet>140</a>    /// same seam, with the same name, as the SSF push deliverer's.
-<a href=#141 id=141 data-nosnippet>141</a>    </span>allow_private: bool,
-<a href=#142 id=142 data-nosnippet>142</a>}
-<a href=#143 id=143 data-nosnippet>143</a>
-<a href=#144 id=144 data-nosnippet>144</a><span class="kw">impl</span>&lt;W: WebhookRepository + Clone + <span class="lifetime">'static</span>&gt; WebhookDeliveryService&lt;W&gt; {
-<a href=#145 id=145 data-nosnippet>145</a>    <span class="kw">pub fn </span>new(repo: W, encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;) -&gt; <span class="self">Self </span>{
-<a href=#146 id=146 data-nosnippet>146</a>        <span class="comment">// No `reqwest::Client` is stored here any more: `ssrf::guarded_fetch`
-<a href=#147 id=147 data-nosnippet>147</a>        // (D-01c) builds a fresh, single-use, IP-pinned client per delivery
-<a href=#148 id=148 data-nosnippet>148</a>        // attempt, so a long-lived pooled client here would sit unused for
-<a href=#149 id=149 data-nosnippet>149</a>        // sends and only invite drift back toward the un-pinned pre-25-02
-<a href=#150 id=150 data-nosnippet>150</a>        // behavior.
-<a href=#151 id=151 data-nosnippet>151</a>        </span><span class="self">Self </span>{
-<a href=#152 id=152 data-nosnippet>152</a>            repo,
-<a href=#153 id=153 data-nosnippet>153</a>            encryption_key,
-<a href=#154 id=154 data-nosnippet>154</a>            allow_private: <span class="bool-val">false</span>,
-<a href=#155 id=155 data-nosnippet>155</a>        }
-<a href=#156 id=156 data-nosnippet>156</a>    }
-<a href=#157 id=157 data-nosnippet>157</a>
-<a href=#158 id=158 data-nosnippet>158</a>    <span class="doccomment">/// Let a delivery reach a loopback / private-network `http://` receiver.
-<a href=#159 id=159 data-nosnippet>159</a>    ///
-<a href=#160 id=160 data-nosnippet>160</a>    /// Test-only: turns the first hop's address rule and the HTTPS requirement
-<a href=#161 id=161 data-nosnippet>161</a>    /// off, exactly like the guarded fetch's own `allow_private` seam. The
-<a href=#162 id=162 data-nosnippet>162</a>    /// composition root's tests that deliver to a loopback receiver call it
-<a href=#163 id=163 data-nosnippet>163</a>    /// (through `ServeOptions`); production never does.
-<a href=#164 id=164 data-nosnippet>164</a>    </span><span class="attr">#[doc(hidden)]
-<a href=#165 id=165 data-nosnippet>165</a>    #[must_use]
-<a href=#166 id=166 data-nosnippet>166</a>    </span><span class="kw">pub fn </span>admitting_private_networks_for_tests(<span class="kw-2">mut </span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
-<a href=#167 id=167 data-nosnippet>167</a>        <span class="self">self</span>.allow_private = <span class="bool-val">true</span>;
-<a href=#168 id=168 data-nosnippet>168</a>        <span class="self">self
-<a href=#169 id=169 data-nosnippet>169</a>    </span>}
-<a href=#170 id=170 data-nosnippet>170</a>
-<a href=#171 id=171 data-nosnippet>171</a>    <span class="doccomment">/// Encrypt a plaintext webhook secret with AES-256-GCM for storage
-<a href=#172 id=172 data-nosnippet>172</a>    /// (SEC-031/D-02). Fail-closed: returns `WebhookError::EncryptionKeyMissing`
-<a href=#173 id=173 data-nosnippet>173</a>    /// when no encryption key is configured, rather than storing the secret
-<a href=#174 id=174 data-nosnippet>174</a>    /// in plaintext or falling back to a constant key.
-<a href=#175 id=175 data-nosnippet>175</a>    </span><span class="kw">pub fn </span>encrypt_secret(<span class="kw-2">&amp;</span><span class="self">self</span>, plaintext: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;String, WebhookError&gt; {
-<a href=#176 id=176 data-nosnippet>176</a>        <span class="kw">let </span>key = <span class="self">self
-<a href=#177 id=177 data-nosnippet>177</a>            </span>.encryption_key
-<a href=#178 id=178 data-nosnippet>178</a>            .ok_or(WebhookError::EncryptionKeyMissing)<span class="question-mark">?</span>;
-<a href=#179 id=179 data-nosnippet>179</a>        encrypt_webhook_secret(<span class="kw-2">&amp;</span>key, plaintext)
-<a href=#180 id=180 data-nosnippet>180</a>            .map_err(|e| WebhookError::SecretEncrypt(e.to_string()))
-<a href=#181 id=181 data-nosnippet>181</a>    }
-<a href=#182 id=182 data-nosnippet>182</a>
-<a href=#183 id=183 data-nosnippet>183</a>    <span class="doccomment">/// Publish-only replacement for the old `deliver()` (D-06): fetches the
-<a href=#184 id=184 data-nosnippet>184</a>    /// webhooks matching `event_type` for `tenant_id` and enqueues ONE
-<a href=#185 id=185 data-nosnippet>185</a>    /// webhook-kind `OutboundMessage` per webhook via the injected
-<a href=#186 id=186 data-nosnippet>186</a>    /// `OutboundPublisher` (on the wire: the same `WebhookMessage` JSON on
-<a href=#187 id=187 data-nosnippet>187</a>    /// `axiam.webhook` as before). Performs no HTTP call and does not spawn a
-<a href=#188 id=188 data-nosnippet>188</a>    /// detached task; the AMQP consumer drives `deliver_once` per
-<a href=#189 id=189 data-nosnippet>189</a>    /// (re)delivery.
-<a href=#190 id=190 data-nosnippet>190</a>    </span><span class="kw">pub async fn </span>emit(
-<a href=#191 id=191 data-nosnippet>191</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#192 id=192 data-nosnippet>192</a>        publisher: <span class="kw-2">&amp;</span><span class="kw">dyn </span>OutboundPublisher,
-<a href=#193 id=193 data-nosnippet>193</a>        tenant_id: Uuid,
-<a href=#194 id=194 data-nosnippet>194</a>        event_type: String,
-<a href=#195 id=195 data-nosnippet>195</a>        payload: serde_json::Value,
-<a href=#196 id=196 data-nosnippet>196</a>    ) {
-<a href=#197 id=197 data-nosnippet>197</a>        <span class="kw">let </span>webhooks = <span class="kw">match </span><span class="self">self</span>.repo.get_by_event(tenant_id, <span class="kw-2">&amp;</span>event_type).<span class="kw">await </span>{
-<a href=#198 id=198 data-nosnippet>198</a>            <span class="prelude-val">Ok</span>(w) =&gt; w,
-<a href=#199 id=199 data-nosnippet>199</a>            <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#200 id=200 data-nosnippet>200</a>                <span class="macro">tracing::error!</span>(
-<a href=#201 id=201 data-nosnippet>201</a>                    %tenant_id, %event_type,
-<a href=#202 id=202 data-nosnippet>202</a>                    <span class="string">"failed to fetch webhooks for emit: {e}"
-<a href=#203 id=203 data-nosnippet>203</a>                </span>);
-<a href=#204 id=204 data-nosnippet>204</a>                <span class="kw">return</span>;
-<a href=#205 id=205 data-nosnippet>205</a>            }
-<a href=#206 id=206 data-nosnippet>206</a>        };
-<a href=#207 id=207 data-nosnippet>207</a>
-<a href=#208 id=208 data-nosnippet>208</a>        <span class="kw">for </span>webhook <span class="kw">in </span>webhooks {
-<a href=#209 id=209 data-nosnippet>209</a>            <span class="kw">let </span>msg = OutboundMessage {
-<a href=#210 id=210 data-nosnippet>210</a>                kind: OutboundKind::Webhook,
-<a href=#211 id=211 data-nosnippet>211</a>                tenant_id,
-<a href=#212 id=212 data-nosnippet>212</a>                target_id: webhook.id,
-<a href=#213 id=213 data-nosnippet>213</a>                delivery_id: new_id(),
-<a href=#214 id=214 data-nosnippet>214</a>                event_type: event_type.clone(),
-<a href=#215 id=215 data-nosnippet>215</a>                payload: payload.clone(),
-<a href=#216 id=216 data-nosnippet>216</a>                attempt: <span class="number">0</span>,
-<a href=#217 id=217 data-nosnippet>217</a>            };
-<a href=#218 id=218 data-nosnippet>218</a>
-<a href=#219 id=219 data-nosnippet>219</a>            <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = publisher.enqueue(<span class="kw-2">&amp;</span>msg).<span class="kw">await </span>{
-<a href=#220 id=220 data-nosnippet>220</a>                <span class="macro">tracing::error!</span>(
-<a href=#221 id=221 data-nosnippet>221</a>                    webhook_id = %webhook.id,
-<a href=#222 id=222 data-nosnippet>222</a>                    %tenant_id, %event_type,
-<a href=#223 id=223 data-nosnippet>223</a>                    <span class="string">"failed to publish webhook delivery message: {e}"
-<a href=#224 id=224 data-nosnippet>224</a>                </span>);
-<a href=#225 id=225 data-nosnippet>225</a>            }
-<a href=#226 id=226 data-nosnippet>226</a>        }
-<a href=#227 id=227 data-nosnippet>227</a>    }
-<a href=#228 id=228 data-nosnippet>228</a>
-<a href=#229 id=229 data-nosnippet>229</a>    <span class="doccomment">/// Single-attempt webhook delivery (D-06/D-07). Decrypts the stored
-<a href=#230 id=230 data-nosnippet>230</a>    /// secret, computes the Stripe-style signed-timestamp signature (D-10),
-<a href=#231 id=231 data-nosnippet>231</a>    /// and performs exactly one `ssrf::guarded_fetch` POST. Contains NO
-<a href=#232 id=232 data-nosnippet>232</a>    /// retry loop and NO in-process delay — AMQP TTL+DLX (declared via
-<a href=#233 id=233 data-nosnippet>233</a>    /// `axiam_amqp::connection::AmqpManager::declare_webhook_topology`) now
-<a href=#234 id=234 data-nosnippet>234</a>    /// owns retry scheduling. Returns `Ok(StatusCode)` (which may be a
-<a href=#235 id=235 data-nosnippet>235</a>    /// non-2xx status) or `Err(WebhookError)` and leaves the ack/nack/
-<a href=#236 id=236 data-nosnippet>236</a>    /// republish-to-retry-queue decision to the caller (the AMQP consumer,
-<a href=#237 id=237 data-nosnippet>237</a>    /// wired in 26-07).
-<a href=#238 id=238 data-nosnippet>238</a>    ///
-<a href=#239 id=239 data-nosnippet>239</a>    /// `tenant_id` scopes the webhook lookup — `WebhookRepository::get_by_id`
-<a href=#240 id=240 data-nosnippet>240</a>    /// is tenant-scoped per AXIAM's multi-tenant data-isolation model. The
-<a href=#241 id=241 data-nosnippet>241</a>    /// caller resolves it from the `WebhookMessage.tenant_id` field this
-<a href=#242 id=242 data-nosnippet>242</a>    /// plan adds to the DTO (not present in the original plan sketch, which
-<a href=#243 id=243 data-nosnippet>243</a>    /// omitted it — added here because tenant-scoping the lookup is a
-<a href=#244 id=244 data-nosnippet>244</a>    /// correctness/data-isolation requirement, not optional).
-<a href=#245 id=245 data-nosnippet>245</a>    </span><span class="kw">pub async fn </span>deliver_once(
-<a href=#246 id=246 data-nosnippet>246</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#247 id=247 data-nosnippet>247</a>        tenant_id: Uuid,
-<a href=#248 id=248 data-nosnippet>248</a>        webhook_id: Uuid,
-<a href=#249 id=249 data-nosnippet>249</a>        delivery_id: Uuid,
-<a href=#250 id=250 data-nosnippet>250</a>        event_type: <span class="kw-2">&amp;</span>str,
-<a href=#251 id=251 data-nosnippet>251</a>        payload: <span class="kw-2">&amp;</span>serde_json::Value,
-<a href=#252 id=252 data-nosnippet>252</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;StatusCode, WebhookError&gt; {
-<a href=#253 id=253 data-nosnippet>253</a>        <span class="comment">// D-01/SEC-059: refuse delivery (fail-closed) when no encryption key
-<a href=#254 id=254 data-nosnippet>254</a>        // is configured — never decrypt stored secrets with a
-<a href=#255 id=255 data-nosnippet>255</a>        // placeholder/all-zero key.
-<a href=#256 id=256 data-nosnippet>256</a>        </span><span class="kw">let </span>encryption_key = <span class="self">self
-<a href=#257 id=257 data-nosnippet>257</a>            </span>.encryption_key
-<a href=#258 id=258 data-nosnippet>258</a>            .ok_or(WebhookError::EncryptionKeyMissing)<span class="question-mark">?</span>;
-<a href=#259 id=259 data-nosnippet>259</a>
-<a href=#260 id=260 data-nosnippet>260</a>        <span class="kw">let </span>webhook = <span class="self">self
-<a href=#261 id=261 data-nosnippet>261</a>            </span>.repo
-<a href=#262 id=262 data-nosnippet>262</a>            .get_by_id(tenant_id, webhook_id)
-<a href=#263 id=263 data-nosnippet>263</a>            .<span class="kw">await
-<a href=#264 id=264 data-nosnippet>264</a>            </span>.map_err(|e| WebhookError::WebhookLookupFailed(e.to_string()))<span class="question-mark">?</span>;
-<a href=#265 id=265 data-nosnippet>265</a>
-<a href=#266 id=266 data-nosnippet>266</a>        <span class="kw">let </span>body = serde_json::to_string(payload).unwrap_or_default();
+<a href=#24 id=24 data-nosnippet>24</a>//!
+<a href=#25 id=25 data-nosnippet>25</a>//! P23W5-10 (T-112): **a redirect is never followed.** The guard used to be
+<a href=#26 id=26 data-nosnippet>26</a>//! `guarded_fetch`, which follows a `3xx` (each hop SSRF-checked) and re-sends
+<a href=#27 id=27 data-nosnippet>27</a>//! the HMAC-signed request and its body — personal data in an event — to the
+<a href=#28 id=28 data-nosnippet>28</a>//! `Location`, so a receiver's operator could forward deliveries to a host the
+<a href=#29 id=29 data-nosnippet>29</a>//! tenant never registered. A `3xx` is now returned as a response and is a
+<a href=#30 id=30 data-nosnippet>30</a>//! retry, as for the SSF, SCIM and CIBA ping deliverers; a receiver behind a
+<a href=#31 id=31 data-nosnippet>31</a>//! redirect must be registered with its final URL.
+<a href=#32 id=32 data-nosnippet>32</a>//! SEC-031: The webhook secret is stored AES-256-GCM encrypted; it is decrypted
+<a href=#33 id=33 data-nosnippet>33</a>//! in memory for HMAC computation and never serialised in API responses.
+<a href=#34 id=34 data-nosnippet>34</a>//!
+<a href=#35 id=35 data-nosnippet>35</a>//! D-10: signatures use the Stripe-style signed-timestamp scheme
+<a href=#36 id=36 data-nosnippet>36</a>//! (`X-Axiam-Timestamp` + `X-Axiam-Signature: t=&lt;unix&gt;,v1=&lt;hex&gt;`) rather
+<a href=#37 id=37 data-nosnippet>37</a>//! than a body-only HMAC, so a receiver can enforce a replay window and a
+<a href=#38 id=38 data-nosnippet>38</a>//! forged signature can't be produced from the body alone (T-26-03-01). No
+<a href=#39 id=39 data-nosnippet>39</a>//! SDK (Rust/TS/Go/Python/Java/C#/PHP) implements a webhook-signature
+<a href=#40 id=40 data-nosnippet>40</a>//! verification helper today (confirmed via `grep -rn` across `sdks/` for
+<a href=#41 id=41 data-nosnippet>41</a>//! `X-Axiam-Signature`/`WebhookSignature`/`verify_webhook` — only hits are
+<a href=#42 id=42 data-nosnippet>42</a>//! the CRUD schema in `sdks/openapi.json`), so there is nothing downstream
+<a href=#43 id=43 data-nosnippet>43</a>//! to update for this format change.
+<a href=#44 id=44 data-nosnippet>44</a>
+<a href=#45 id=45 data-nosnippet>45</a></span><span class="kw">use </span>axiam_auth::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
+<a href=#46 id=46 data-nosnippet>46</a><span class="kw">use </span>axiam_core::id::new_id;
+<a href=#47 id=47 data-nosnippet>47</a><span class="kw">use </span>axiam_core::outbound::{
+<a href=#48 id=48 data-nosnippet>48</a>    DeliveryOutcome, OutboundDeliverer, OutboundError, OutboundFuture, OutboundKind,
+<a href=#49 id=49 data-nosnippet>49</a>    OutboundMessage, OutboundPublisher,
+<a href=#50 id=50 data-nosnippet>50</a>};
+<a href=#51 id=51 data-nosnippet>51</a><span class="kw">use </span>axiam_core::repository::WebhookRepository;
+<a href=#52 id=52 data-nosnippet>52</a><span class="kw">use </span>axiam_federation::ssrf::{<span class="self">self</span>, SsrfError};
+<a href=#53 id=53 data-nosnippet>53</a><span class="kw">use </span>chrono::Utc;
+<a href=#54 id=54 data-nosnippet>54</a><span class="kw">use </span>hmac::{Hmac, Mac};
+<a href=#55 id=55 data-nosnippet>55</a><span class="kw">use </span>reqwest::StatusCode;
+<a href=#56 id=56 data-nosnippet>56</a><span class="kw">use </span>sha2::Sha256;
+<a href=#57 id=57 data-nosnippet>57</a><span class="kw">use </span>uuid::Uuid;
+<a href=#58 id=58 data-nosnippet>58</a>
+<a href=#59 id=59 data-nosnippet>59</a><span class="kw">type </span>HmacSha256 = Hmac&lt;Sha256&gt;;
+<a href=#60 id=60 data-nosnippet>60</a>
+<a href=#61 id=61 data-nosnippet>61</a><span class="doccomment">/// Error type for webhook delivery helper operations.
+<a href=#62 id=62 data-nosnippet>62</a></span><span class="attr">#[derive(Debug, thiserror::Error)]
+<a href=#63 id=63 data-nosnippet>63</a></span><span class="kw">pub enum </span>WebhookError {
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="attr">#[error(<span class="string">"invalid URL"</span>)]
+<a href=#65 id=65 data-nosnippet>65</a>    </span>InvalidUrl,
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="attr">#[error(<span class="string">"failed to resolve host"</span>)]
+<a href=#67 id=67 data-nosnippet>67</a>    </span>ResolveFailed,
+<a href=#68 id=68 data-nosnippet>68</a>    <span class="attr">#[error(<span class="string">"SSRF blocked: resolved IP is private/loopback/link-local"</span>)]
+<a href=#69 id=69 data-nosnippet>69</a>    </span>SsrfBlocked,
+<a href=#70 id=70 data-nosnippet>70</a>    <span class="attr">#[error(<span class="string">"secret decrypt failed: {0}"</span>)]
+<a href=#71 id=71 data-nosnippet>71</a>    </span>SecretDecrypt(String),
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="attr">#[error(<span class="string">"secret encrypt failed: {0}"</span>)]
+<a href=#73 id=73 data-nosnippet>73</a>    </span>SecretEncrypt(String),
+<a href=#74 id=74 data-nosnippet>74</a>    <span class="attr">#[error(<span class="string">"webhook encryption key is not configured (AXIAM__AUTH__PKI_ENCRYPTION_KEY unset)"</span>)]
+<a href=#75 id=75 data-nosnippet>75</a>    </span>EncryptionKeyMissing,
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="doccomment">/// The webhook row could not be fetched (not found, or a repository
+<a href=#77 id=77 data-nosnippet>77</a>    /// error) when `deliver_once` tried to resolve it by ID. Distinct from
+<a href=#78 id=78 data-nosnippet>78</a>    /// the crypto-flavored variants above so a consumer (26-07) can tell a
+<a href=#79 id=79 data-nosnippet>79</a>    /// missing/deleted webhook apart from a decrypt failure.
+<a href=#80 id=80 data-nosnippet>80</a>    </span><span class="attr">#[error(<span class="string">"webhook lookup failed: {0}"</span>)]
+<a href=#81 id=81 data-nosnippet>81</a>    </span>WebhookLookupFailed(String),
+<a href=#82 id=82 data-nosnippet>82</a>}
+<a href=#83 id=83 data-nosnippet>83</a>
+<a href=#84 id=84 data-nosnippet>84</a><span class="kw">impl </span>From&lt;WebhookError&gt; <span class="kw">for </span><span class="kw">crate</span>::error::AxiamApiError {
+<a href=#85 id=85 data-nosnippet>85</a>    <span class="kw">fn </span>from(err: WebhookError) -&gt; <span class="self">Self </span>{
+<a href=#86 id=86 data-nosnippet>86</a>        <span class="kw">match </span>err {
+<a href=#87 id=87 data-nosnippet>87</a>            <span class="comment">// D-01/SEC-059: fail-closed, not an internal 500 — the caller can
+<a href=#88 id=88 data-nosnippet>88</a>            // retry once an operator configures the key. Never leaks crypto
+<a href=#89 id=89 data-nosnippet>89</a>            // internals, just states the subsystem is unavailable.
+<a href=#90 id=90 data-nosnippet>90</a>            </span>WebhookError::EncryptionKeyMissing =&gt; {
+<a href=#91 id=91 data-nosnippet>91</a>                axiam_core::error::AxiamError::ServiceUnavailable(
+<a href=#92 id=92 data-nosnippet>92</a>                    <span class="string">"webhook subsystem unavailable: encryption key not configured"</span>.to_string(),
+<a href=#93 id=93 data-nosnippet>93</a>                )
+<a href=#94 id=94 data-nosnippet>94</a>                .into()
+<a href=#95 id=95 data-nosnippet>95</a>            }
+<a href=#96 id=96 data-nosnippet>96</a>            WebhookError::WebhookLookupFailed(msg) =&gt; {
+<a href=#97 id=97 data-nosnippet>97</a>                axiam_core::error::AxiamError::WebhookDelivery(msg).into()
+<a href=#98 id=98 data-nosnippet>98</a>            }
+<a href=#99 id=99 data-nosnippet>99</a>            other =&gt; axiam_core::error::AxiamError::Crypto(other.to_string()).into(),
+<a href=#100 id=100 data-nosnippet>100</a>        }
+<a href=#101 id=101 data-nosnippet>101</a>    }
+<a href=#102 id=102 data-nosnippet>102</a>}
+<a href=#103 id=103 data-nosnippet>103</a>
+<a href=#104 id=104 data-nosnippet>104</a><span class="doccomment">/// Maps the shared guard's error type onto `WebhookError` so a blocked or
+<a href=#105 id=105 data-nosnippet>105</a>/// unresolvable delivery target flows through the existing fail-closed
+<a href=#106 id=106 data-nosnippet>106</a>/// `From&lt;WebhookError&gt; for AxiamApiError` mapping — never a panic or a raw
+<a href=#107 id=107 data-nosnippet>107</a>/// 500 (D-01a: single shared guard, single error-mapping style).
+<a href=#108 id=108 data-nosnippet>108</a></span><span class="kw">impl </span>From&lt;SsrfError&gt; <span class="kw">for </span>WebhookError {
+<a href=#109 id=109 data-nosnippet>109</a>    <span class="kw">fn </span>from(err: SsrfError) -&gt; <span class="self">Self </span>{
+<a href=#110 id=110 data-nosnippet>110</a>        <span class="kw">match </span>err {
+<a href=#111 id=111 data-nosnippet>111</a>            SsrfError::InvalidUrl =&gt; WebhookError::InvalidUrl,
+<a href=#112 id=112 data-nosnippet>112</a>            SsrfError::ResolveFailed =&gt; WebhookError::ResolveFailed,
+<a href=#113 id=113 data-nosnippet>113</a>            SsrfError::Blocked =&gt; WebhookError::SsrfBlocked,
+<a href=#114 id=114 data-nosnippet>114</a>            <span class="comment">// SEC-069: a non-HTTPS target is treated as a blocked delivery
+<a href=#115 id=115 data-nosnippet>115</a>            // (webhooks must be HTTPS); an over-large response is also a
+<a href=#116 id=116 data-nosnippet>116</a>            // fail-closed rejection.
+<a href=#117 id=117 data-nosnippet>117</a>            </span>SsrfError::InsecureScheme =&gt; WebhookError::SsrfBlocked,
+<a href=#118 id=118 data-nosnippet>118</a>            <span class="comment">// A request/client-build/redirect/oversize failure at send time is
+<a href=#119 id=119 data-nosnippet>119</a>            // not itself an SSRF verdict — surface it as a resolve failure so it
+<a href=#120 id=120 data-nosnippet>120</a>            // still fails closed rather than panicking or leaking internals.
+<a href=#121 id=121 data-nosnippet>121</a>            </span>SsrfError::ClientBuildFailed
+<a href=#122 id=122 data-nosnippet>122</a>            | SsrfError::RequestFailed(<span class="kw">_</span>)
+<a href=#123 id=123 data-nosnippet>123</a>            | SsrfError::TooManyRedirects
+<a href=#124 id=124 data-nosnippet>124</a>            | SsrfError::ResponseTooLarge(<span class="kw">_</span>) =&gt; WebhookError::ResolveFailed,
+<a href=#125 id=125 data-nosnippet>125</a>        }
+<a href=#126 id=126 data-nosnippet>126</a>    }
+<a href=#127 id=127 data-nosnippet>127</a>}
+<a href=#128 id=128 data-nosnippet>128</a>
+<a href=#129 id=129 data-nosnippet>129</a><span class="doccomment">/// Webhook delivery service.
+<a href=#130 id=130 data-nosnippet>130</a>///
+<a href=#131 id=131 data-nosnippet>131</a>/// `emit()` publishes matching-webhook delivery messages onto the durable
+<a href=#132 id=132 data-nosnippet>132</a>/// `axiam.webhook` AMQP topology; `deliver_once()` performs a single
+<a href=#133 id=133 data-nosnippet>133</a>/// SSRF-guarded HTTP attempt for the AMQP consumer (26-07) to drive per
+<a href=#134 id=134 data-nosnippet>134</a>/// (re)delivery.
+<a href=#135 id=135 data-nosnippet>135</a></span><span class="attr">#[derive(Clone)]
+<a href=#136 id=136 data-nosnippet>136</a></span><span class="kw">pub struct </span>WebhookDeliveryService&lt;W&gt; {
+<a href=#137 id=137 data-nosnippet>137</a>    repo: W,
+<a href=#138 id=138 data-nosnippet>138</a>    <span class="doccomment">/// AES-256-GCM key used to encrypt/decrypt webhook secrets stored at
+<a href=#139 id=139 data-nosnippet>139</a>    /// rest. Corresponds to `AXIAM__AUTH__PKI_ENCRYPTION_KEY` (SEC-031/SEC-059).
+<a href=#140 id=140 data-nosnippet>140</a>    /// `None` when the env var is unset — the server still boots (this is
+<a href=#141 id=141 data-nosnippet>141</a>    /// an optional subsystem), but registration (`encrypt_secret`) and
+<a href=#142 id=142 data-nosnippet>142</a>    /// delivery (`deliver_once`) both refuse to operate rather than falling
+<a href=#143 id=143 data-nosnippet>143</a>    /// back to an all-zero/constant key.
+<a href=#144 id=144 data-nosnippet>144</a>    </span>encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;,
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="doccomment">/// The guarded fetch's `allow_private`. **Always `false`** except for the
+<a href=#146 id=146 data-nosnippet>146</a>    /// integration tests' loopback receiver, which turn it on through
+<a href=#147 id=147 data-nosnippet>147</a>    /// [`Self::admitting_private_networks_for_tests`] and nothing else — the
+<a href=#148 id=148 data-nosnippet>148</a>    /// same seam, with the same name, as the SSF push deliverer's.
+<a href=#149 id=149 data-nosnippet>149</a>    </span>allow_private: bool,
+<a href=#150 id=150 data-nosnippet>150</a>}
+<a href=#151 id=151 data-nosnippet>151</a>
+<a href=#152 id=152 data-nosnippet>152</a><span class="kw">impl</span>&lt;W: WebhookRepository + Clone + <span class="lifetime">'static</span>&gt; WebhookDeliveryService&lt;W&gt; {
+<a href=#153 id=153 data-nosnippet>153</a>    <span class="kw">pub fn </span>new(repo: W, encryption_key: <span class="prelude-ty">Option</span>&lt;[u8; <span class="number">32</span>]&gt;) -&gt; <span class="self">Self </span>{
+<a href=#154 id=154 data-nosnippet>154</a>        <span class="comment">// No `reqwest::Client` is stored here any more: `ssrf::guarded_fetch_no_redirect`
+<a href=#155 id=155 data-nosnippet>155</a>        // (D-01c) builds a fresh, single-use, IP-pinned client per delivery
+<a href=#156 id=156 data-nosnippet>156</a>        // attempt, so a long-lived pooled client here would sit unused for
+<a href=#157 id=157 data-nosnippet>157</a>        // sends and only invite drift back toward the un-pinned pre-25-02
+<a href=#158 id=158 data-nosnippet>158</a>        // behavior.
+<a href=#159 id=159 data-nosnippet>159</a>        </span><span class="self">Self </span>{
+<a href=#160 id=160 data-nosnippet>160</a>            repo,
+<a href=#161 id=161 data-nosnippet>161</a>            encryption_key,
+<a href=#162 id=162 data-nosnippet>162</a>            allow_private: <span class="bool-val">false</span>,
+<a href=#163 id=163 data-nosnippet>163</a>        }
+<a href=#164 id=164 data-nosnippet>164</a>    }
+<a href=#165 id=165 data-nosnippet>165</a>
+<a href=#166 id=166 data-nosnippet>166</a>    <span class="doccomment">/// Let a delivery reach a loopback / private-network `http://` receiver.
+<a href=#167 id=167 data-nosnippet>167</a>    ///
+<a href=#168 id=168 data-nosnippet>168</a>    /// Test-only: turns the first hop's address rule and the HTTPS requirement
+<a href=#169 id=169 data-nosnippet>169</a>    /// off, exactly like the guarded fetch's own `allow_private` seam. The
+<a href=#170 id=170 data-nosnippet>170</a>    /// composition root's tests that deliver to a loopback receiver call it
+<a href=#171 id=171 data-nosnippet>171</a>    /// (through `ServeOptions`); production never does.
+<a href=#172 id=172 data-nosnippet>172</a>    </span><span class="attr">#[doc(hidden)]
+<a href=#173 id=173 data-nosnippet>173</a>    #[must_use]
+<a href=#174 id=174 data-nosnippet>174</a>    </span><span class="kw">pub fn </span>admitting_private_networks_for_tests(<span class="kw-2">mut </span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="self">self</span>.allow_private = <span class="bool-val">true</span>;
+<a href=#176 id=176 data-nosnippet>176</a>        <span class="self">self
+<a href=#177 id=177 data-nosnippet>177</a>    </span>}
+<a href=#178 id=178 data-nosnippet>178</a>
+<a href=#179 id=179 data-nosnippet>179</a>    <span class="doccomment">/// Encrypt a plaintext webhook secret with AES-256-GCM for storage
+<a href=#180 id=180 data-nosnippet>180</a>    /// (SEC-031/D-02). Fail-closed: returns `WebhookError::EncryptionKeyMissing`
+<a href=#181 id=181 data-nosnippet>181</a>    /// when no encryption key is configured, rather than storing the secret
+<a href=#182 id=182 data-nosnippet>182</a>    /// in plaintext or falling back to a constant key.
+<a href=#183 id=183 data-nosnippet>183</a>    </span><span class="kw">pub fn </span>encrypt_secret(<span class="kw-2">&amp;</span><span class="self">self</span>, plaintext: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;String, WebhookError&gt; {
+<a href=#184 id=184 data-nosnippet>184</a>        <span class="kw">let </span>key = <span class="self">self
+<a href=#185 id=185 data-nosnippet>185</a>            </span>.encryption_key
+<a href=#186 id=186 data-nosnippet>186</a>            .ok_or(WebhookError::EncryptionKeyMissing)<span class="question-mark">?</span>;
+<a href=#187 id=187 data-nosnippet>187</a>        encrypt_webhook_secret(<span class="kw-2">&amp;</span>key, plaintext)
+<a href=#188 id=188 data-nosnippet>188</a>            .map_err(|e| WebhookError::SecretEncrypt(e.to_string()))
+<a href=#189 id=189 data-nosnippet>189</a>    }
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a>    <span class="doccomment">/// Publish-only replacement for the old `deliver()` (D-06): fetches the
+<a href=#192 id=192 data-nosnippet>192</a>    /// webhooks matching `event_type` for `tenant_id` and enqueues ONE
+<a href=#193 id=193 data-nosnippet>193</a>    /// webhook-kind `OutboundMessage` per webhook via the injected
+<a href=#194 id=194 data-nosnippet>194</a>    /// `OutboundPublisher` (on the wire: the same `WebhookMessage` JSON on
+<a href=#195 id=195 data-nosnippet>195</a>    /// `axiam.webhook` as before). Performs no HTTP call and does not spawn a
+<a href=#196 id=196 data-nosnippet>196</a>    /// detached task; the AMQP consumer drives `deliver_once` per
+<a href=#197 id=197 data-nosnippet>197</a>    /// (re)delivery.
+<a href=#198 id=198 data-nosnippet>198</a>    </span><span class="kw">pub async fn </span>emit(
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#200 id=200 data-nosnippet>200</a>        publisher: <span class="kw-2">&amp;</span><span class="kw">dyn </span>OutboundPublisher,
+<a href=#201 id=201 data-nosnippet>201</a>        tenant_id: Uuid,
+<a href=#202 id=202 data-nosnippet>202</a>        event_type: String,
+<a href=#203 id=203 data-nosnippet>203</a>        payload: serde_json::Value,
+<a href=#204 id=204 data-nosnippet>204</a>    ) {
+<a href=#205 id=205 data-nosnippet>205</a>        <span class="kw">let </span>webhooks = <span class="kw">match </span><span class="self">self</span>.repo.get_by_event(tenant_id, <span class="kw-2">&amp;</span>event_type).<span class="kw">await </span>{
+<a href=#206 id=206 data-nosnippet>206</a>            <span class="prelude-val">Ok</span>(w) =&gt; w,
+<a href=#207 id=207 data-nosnippet>207</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#208 id=208 data-nosnippet>208</a>                <span class="macro">tracing::error!</span>(
+<a href=#209 id=209 data-nosnippet>209</a>                    %tenant_id, %event_type,
+<a href=#210 id=210 data-nosnippet>210</a>                    <span class="string">"failed to fetch webhooks for emit: {e}"
+<a href=#211 id=211 data-nosnippet>211</a>                </span>);
+<a href=#212 id=212 data-nosnippet>212</a>                <span class="kw">return</span>;
+<a href=#213 id=213 data-nosnippet>213</a>            }
+<a href=#214 id=214 data-nosnippet>214</a>        };
+<a href=#215 id=215 data-nosnippet>215</a>
+<a href=#216 id=216 data-nosnippet>216</a>        <span class="kw">for </span>webhook <span class="kw">in </span>webhooks {
+<a href=#217 id=217 data-nosnippet>217</a>            <span class="kw">let </span>msg = OutboundMessage {
+<a href=#218 id=218 data-nosnippet>218</a>                kind: OutboundKind::Webhook,
+<a href=#219 id=219 data-nosnippet>219</a>                tenant_id,
+<a href=#220 id=220 data-nosnippet>220</a>                target_id: webhook.id,
+<a href=#221 id=221 data-nosnippet>221</a>                delivery_id: new_id(),
+<a href=#222 id=222 data-nosnippet>222</a>                event_type: event_type.clone(),
+<a href=#223 id=223 data-nosnippet>223</a>                payload: payload.clone(),
+<a href=#224 id=224 data-nosnippet>224</a>                attempt: <span class="number">0</span>,
+<a href=#225 id=225 data-nosnippet>225</a>            };
+<a href=#226 id=226 data-nosnippet>226</a>
+<a href=#227 id=227 data-nosnippet>227</a>            <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = publisher.enqueue(<span class="kw-2">&amp;</span>msg).<span class="kw">await </span>{
+<a href=#228 id=228 data-nosnippet>228</a>                <span class="macro">tracing::error!</span>(
+<a href=#229 id=229 data-nosnippet>229</a>                    webhook_id = %webhook.id,
+<a href=#230 id=230 data-nosnippet>230</a>                    %tenant_id, %event_type,
+<a href=#231 id=231 data-nosnippet>231</a>                    <span class="string">"failed to publish webhook delivery message: {e}"
+<a href=#232 id=232 data-nosnippet>232</a>                </span>);
+<a href=#233 id=233 data-nosnippet>233</a>            }
+<a href=#234 id=234 data-nosnippet>234</a>        }
+<a href=#235 id=235 data-nosnippet>235</a>    }
+<a href=#236 id=236 data-nosnippet>236</a>
+<a href=#237 id=237 data-nosnippet>237</a>    <span class="doccomment">/// Single-attempt webhook delivery (D-06/D-07). Decrypts the stored
+<a href=#238 id=238 data-nosnippet>238</a>    /// secret, computes the Stripe-style signed-timestamp signature (D-10),
+<a href=#239 id=239 data-nosnippet>239</a>    /// and performs exactly one `ssrf::guarded_fetch_no_redirect` POST. Contains NO
+<a href=#240 id=240 data-nosnippet>240</a>    /// retry loop and NO in-process delay — AMQP TTL+DLX (declared via
+<a href=#241 id=241 data-nosnippet>241</a>    /// `axiam_amqp::connection::AmqpManager::declare_webhook_topology`) now
+<a href=#242 id=242 data-nosnippet>242</a>    /// owns retry scheduling. Returns `Ok(StatusCode)` (which may be a
+<a href=#243 id=243 data-nosnippet>243</a>    /// non-2xx status) or `Err(WebhookError)` and leaves the ack/nack/
+<a href=#244 id=244 data-nosnippet>244</a>    /// republish-to-retry-queue decision to the caller (the AMQP consumer,
+<a href=#245 id=245 data-nosnippet>245</a>    /// wired in 26-07).
+<a href=#246 id=246 data-nosnippet>246</a>    ///
+<a href=#247 id=247 data-nosnippet>247</a>    /// `tenant_id` scopes the webhook lookup — `WebhookRepository::get_by_id`
+<a href=#248 id=248 data-nosnippet>248</a>    /// is tenant-scoped per AXIAM's multi-tenant data-isolation model. The
+<a href=#249 id=249 data-nosnippet>249</a>    /// caller resolves it from the `WebhookMessage.tenant_id` field this
+<a href=#250 id=250 data-nosnippet>250</a>    /// plan adds to the DTO (not present in the original plan sketch, which
+<a href=#251 id=251 data-nosnippet>251</a>    /// omitted it — added here because tenant-scoping the lookup is a
+<a href=#252 id=252 data-nosnippet>252</a>    /// correctness/data-isolation requirement, not optional).
+<a href=#253 id=253 data-nosnippet>253</a>    </span><span class="kw">pub async fn </span>deliver_once(
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#255 id=255 data-nosnippet>255</a>        tenant_id: Uuid,
+<a href=#256 id=256 data-nosnippet>256</a>        webhook_id: Uuid,
+<a href=#257 id=257 data-nosnippet>257</a>        delivery_id: Uuid,
+<a href=#258 id=258 data-nosnippet>258</a>        event_type: <span class="kw-2">&amp;</span>str,
+<a href=#259 id=259 data-nosnippet>259</a>        payload: <span class="kw-2">&amp;</span>serde_json::Value,
+<a href=#260 id=260 data-nosnippet>260</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;StatusCode, WebhookError&gt; {
+<a href=#261 id=261 data-nosnippet>261</a>        <span class="comment">// D-01/SEC-059: refuse delivery (fail-closed) when no encryption key
+<a href=#262 id=262 data-nosnippet>262</a>        // is configured — never decrypt stored secrets with a
+<a href=#263 id=263 data-nosnippet>263</a>        // placeholder/all-zero key.
+<a href=#264 id=264 data-nosnippet>264</a>        </span><span class="kw">let </span>encryption_key = <span class="self">self
+<a href=#265 id=265 data-nosnippet>265</a>            </span>.encryption_key
+<a href=#266 id=266 data-nosnippet>266</a>            .ok_or(WebhookError::EncryptionKeyMissing)<span class="question-mark">?</span>;
 <a href=#267 id=267 data-nosnippet>267</a>
-<a href=#268 id=268 data-nosnippet>268</a>        <span class="comment">// SEC-031: Decrypt the stored secret before HMAC computation.
-<a href=#269 id=269 data-nosnippet>269</a>        </span><span class="kw">let </span>plaintext_secret = <span class="kw">match </span>aes256gcm_decrypt(<span class="kw-2">&amp;</span>encryption_key, <span class="kw-2">&amp;</span>webhook.secret) {
-<a href=#270 id=270 data-nosnippet>270</a>            <span class="prelude-val">Ok</span>(bytes) =&gt; String::from_utf8(bytes)
-<a href=#271 id=271 data-nosnippet>271</a>                .map_err(|e| WebhookError::SecretDecrypt(<span class="macro">format!</span>(<span class="string">"secret not valid UTF-8: {e}"</span>)))<span class="question-mark">?</span>,
-<a href=#272 id=272 data-nosnippet>272</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(WebhookError::SecretDecrypt(e.to_string())),
-<a href=#273 id=273 data-nosnippet>273</a>        };
-<a href=#274 id=274 data-nosnippet>274</a>
-<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">let </span>timestamp = Utc::now().timestamp();
-<a href=#276 id=276 data-nosnippet>276</a>        <span class="kw">let </span>signature = compute_signature_v2(<span class="kw-2">&amp;</span>plaintext_secret, timestamp, <span class="kw-2">&amp;</span>body);
-<a href=#277 id=277 data-nosnippet>277</a>
-<a href=#278 id=278 data-nosnippet>278</a>        <span class="comment">// SEC-019/SECHRD-02: `guarded_fetch` resolves the host fresh on this
-<a href=#279 id=279 data-nosnippet>279</a>        // attempt, rejects a private/loopback/link-local resolved address,
-<a href=#280 id=280 data-nosnippet>280</a>        // and pins the exact validated IpAddr into a fresh single-use client
-<a href=#281 id=281 data-nosnippet>281</a>        // for the POST — no separate, independently-resolving `client.post()`
-<a href=#282 id=282 data-nosnippet>282</a>        // call remains, so `reqwest` cannot re-resolve DNS between the check
-<a href=#283 id=283 data-nosnippet>283</a>        // and the send (D-01c). `allow_private=false`: this is the
-<a href=#284 id=284 data-nosnippet>284</a>        // production delivery path, never the test seam (`self.allow_private`
-<a href=#285 id=285 data-nosnippet>285</a>        // is `false` unless a test turned it on).
-<a href=#286 id=286 data-nosnippet>286</a>        </span><span class="kw">let </span>body_for_send = body.clone();
-<a href=#287 id=287 data-nosnippet>287</a>        <span class="kw">let </span>timestamp_header = timestamp.to_string();
-<a href=#288 id=288 data-nosnippet>288</a>        <span class="kw">let </span>signature_header = signature.clone();
-<a href=#289 id=289 data-nosnippet>289</a>        <span class="kw">let </span>event_type_header = event_type.to_string();
-<a href=#290 id=290 data-nosnippet>290</a>        <span class="kw">let </span>delivery_id_header = delivery_id.to_string();
-<a href=#291 id=291 data-nosnippet>291</a>        <span class="kw">let </span>result = ssrf::guarded_fetch(<span class="kw-2">&amp;</span>webhook.url, <span class="self">self</span>.allow_private, <span class="kw">move </span>|c, u| {
-<a href=#292 id=292 data-nosnippet>292</a>            c.post(u)
-<a href=#293 id=293 data-nosnippet>293</a>                .header(<span class="string">"Content-Type"</span>, <span class="string">"application/json"</span>)
-<a href=#294 id=294 data-nosnippet>294</a>                .header(<span class="string">"X-Axiam-Timestamp"</span>, <span class="kw-2">&amp;</span>timestamp_header)
-<a href=#295 id=295 data-nosnippet>295</a>                .header(<span class="string">"X-Axiam-Signature"</span>, <span class="kw-2">&amp;</span>signature_header)
-<a href=#296 id=296 data-nosnippet>296</a>                .header(<span class="string">"X-Axiam-Event"</span>, <span class="kw-2">&amp;</span>event_type_header)
-<a href=#297 id=297 data-nosnippet>297</a>                .header(<span class="string">"X-Axiam-Delivery"</span>, <span class="kw-2">&amp;</span>delivery_id_header)
-<a href=#298 id=298 data-nosnippet>298</a>                .body(body_for_send.clone())
-<a href=#299 id=299 data-nosnippet>299</a>        })
-<a href=#300 id=300 data-nosnippet>300</a>        .<span class="kw">await</span>;
-<a href=#301 id=301 data-nosnippet>301</a>
-<a href=#302 id=302 data-nosnippet>302</a>        <span class="kw">match </span>result {
-<a href=#303 id=303 data-nosnippet>303</a>            <span class="prelude-val">Ok</span>(resp) =&gt; {
-<a href=#304 id=304 data-nosnippet>304</a>                <span class="kw">let </span>status = resp.status();
-<a href=#305 id=305 data-nosnippet>305</a>                <span class="macro">tracing::info!</span>(
-<a href=#306 id=306 data-nosnippet>306</a>                    webhook_id = %webhook_id,
-<a href=#307 id=307 data-nosnippet>307</a>                    %delivery_id,
-<a href=#308 id=308 data-nosnippet>308</a>                    %event_type,
-<a href=#309 id=309 data-nosnippet>309</a>                    %status,
-<a href=#310 id=310 data-nosnippet>310</a>                    <span class="string">"webhook delivery attempt completed"
-<a href=#311 id=311 data-nosnippet>311</a>                </span>);
-<a href=#312 id=312 data-nosnippet>312</a>                <span class="prelude-val">Ok</span>(status)
-<a href=#313 id=313 data-nosnippet>313</a>            }
-<a href=#314 id=314 data-nosnippet>314</a>            <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#315 id=315 data-nosnippet>315</a>                <span class="kw">let </span>webhook_err: WebhookError = e.into();
-<a href=#316 id=316 data-nosnippet>316</a>                <span class="macro">tracing::warn!</span>(
-<a href=#317 id=317 data-nosnippet>317</a>                    webhook_id = %webhook_id,
-<a href=#318 id=318 data-nosnippet>318</a>                    %delivery_id,
-<a href=#319 id=319 data-nosnippet>319</a>                    %event_type,
-<a href=#320 id=320 data-nosnippet>320</a>                    error = %webhook_err,
-<a href=#321 id=321 data-nosnippet>321</a>                    <span class="string">"webhook delivery attempt failed"
-<a href=#322 id=322 data-nosnippet>322</a>                </span>);
-<a href=#323 id=323 data-nosnippet>323</a>                <span class="prelude-val">Err</span>(webhook_err)
-<a href=#324 id=324 data-nosnippet>324</a>            }
-<a href=#325 id=325 data-nosnippet>325</a>        }
-<a href=#326 id=326 data-nosnippet>326</a>    }
-<a href=#327 id=327 data-nosnippet>327</a>}
-<a href=#328 id=328 data-nosnippet>328</a>
-<a href=#329 id=329 data-nosnippet>329</a><span class="doccomment">/// The webhook kind's deliverer (D-36): one `deliver_once` attempt, classified
-<a href=#330 id=330 data-nosnippet>330</a>/// for the generic consume loop.
-<a href=#331 id=331 data-nosnippet>331</a>///
-<a href=#332 id=332 data-nosnippet>332</a>/// * 2xx: `Delivered`, carrying the status for the success audit record.
-<a href=#333 id=333 data-nosnippet>333</a>/// * any other status: `Retry` with reason `non-2xx status: &lt;code&gt;`.
-<a href=#334 id=334 data-nosnippet>334</a>/// * `WebhookError` (SSRF-blocked, secret-decrypt failure, lookup failure, ...):
-<a href=#335 id=335 data-nosnippet>335</a>///   `Retry` with the error's text. Today's behaviour retries every failure up to
-<a href=#336 id=336 data-nosnippet>336</a>///   `AXIAM__WEBHOOK__MAX_ATTEMPTS`; this classification keeps that.
-<a href=#337 id=337 data-nosnippet>337</a></span><span class="kw">impl</span>&lt;W: WebhookRepository + Clone + <span class="lifetime">'static</span>&gt; OutboundDeliverer <span class="kw">for </span>WebhookDeliveryService&lt;W&gt; {
-<a href=#338 id=338 data-nosnippet>338</a>    <span class="kw">fn </span>kind(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; OutboundKind {
-<a href=#339 id=339 data-nosnippet>339</a>        OutboundKind::Webhook
-<a href=#340 id=340 data-nosnippet>340</a>    }
-<a href=#341 id=341 data-nosnippet>341</a>
-<a href=#342 id=342 data-nosnippet>342</a>    <span class="kw">fn </span>deliver_attempt&lt;<span class="lifetime">'a</span>&gt;(
-<a href=#343 id=343 data-nosnippet>343</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
-<a href=#344 id=344 data-nosnippet>344</a>        msg: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>OutboundMessage,
-<a href=#345 id=345 data-nosnippet>345</a>    ) -&gt; OutboundFuture&lt;<span class="lifetime">'a</span>, <span class="prelude-ty">Result</span>&lt;DeliveryOutcome, OutboundError&gt;&gt; {
-<a href=#346 id=346 data-nosnippet>346</a>        Box::pin(<span class="kw">async move </span>{
-<a href=#347 id=347 data-nosnippet>347</a>            <span class="kw">if </span>msg.kind != OutboundKind::Webhook {
-<a href=#348 id=348 data-nosnippet>348</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(DeliveryOutcome::DeadLetter {
-<a href=#349 id=349 data-nosnippet>349</a>                    reason: <span class="macro">format!</span>(<span class="string">"not a webhook message: {}"</span>, msg.kind),
-<a href=#350 id=350 data-nosnippet>350</a>                });
-<a href=#351 id=351 data-nosnippet>351</a>            }
-<a href=#352 id=352 data-nosnippet>352</a>            <span class="kw">let </span>result = <span class="self">self
-<a href=#353 id=353 data-nosnippet>353</a>                </span>.deliver_once(
-<a href=#354 id=354 data-nosnippet>354</a>                    msg.tenant_id,
-<a href=#355 id=355 data-nosnippet>355</a>                    msg.target_id,
-<a href=#356 id=356 data-nosnippet>356</a>                    msg.delivery_id,
-<a href=#357 id=357 data-nosnippet>357</a>                    <span class="kw-2">&amp;</span>msg.event_type,
-<a href=#358 id=358 data-nosnippet>358</a>                    <span class="kw-2">&amp;</span>msg.payload,
-<a href=#359 id=359 data-nosnippet>359</a>                )
-<a href=#360 id=360 data-nosnippet>360</a>                .<span class="kw">await</span>;
-<a href=#361 id=361 data-nosnippet>361</a>            <span class="prelude-val">Ok</span>(<span class="kw">match </span>result {
-<a href=#362 id=362 data-nosnippet>362</a>                <span class="prelude-val">Ok</span>(status) <span class="kw">if </span>status.is_success() =&gt; DeliveryOutcome::Delivered {
-<a href=#363 id=363 data-nosnippet>363</a>                    response_status: <span class="prelude-val">Some</span>(status.as_u16()),
-<a href=#364 id=364 data-nosnippet>364</a>                },
-<a href=#365 id=365 data-nosnippet>365</a>                <span class="prelude-val">Ok</span>(status) =&gt; DeliveryOutcome::Retry {
-<a href=#366 id=366 data-nosnippet>366</a>                    reason: <span class="macro">format!</span>(<span class="string">"non-2xx status: {}"</span>, status.as_u16()),
-<a href=#367 id=367 data-nosnippet>367</a>                },
-<a href=#368 id=368 data-nosnippet>368</a>                <span class="prelude-val">Err</span>(e) =&gt; DeliveryOutcome::Retry {
-<a href=#369 id=369 data-nosnippet>369</a>                    reason: e.to_string(),
-<a href=#370 id=370 data-nosnippet>370</a>                },
-<a href=#371 id=371 data-nosnippet>371</a>            })
-<a href=#372 id=372 data-nosnippet>372</a>        })
-<a href=#373 id=373 data-nosnippet>373</a>    }
-<a href=#374 id=374 data-nosnippet>374</a>}
-<a href=#375 id=375 data-nosnippet>375</a>
-<a href=#376 id=376 data-nosnippet>376</a><span class="doccomment">/// Compute the Stripe-style signed-timestamp signature (D-10): HMAC-SHA256
-<a href=#377 id=377 data-nosnippet>377</a>/// over the ASCII string `&lt;timestamp&gt;.&lt;body&gt;` using the per-webhook secret,
-<a href=#378 id=378 data-nosnippet>378</a>/// returned as `t=&lt;unix_seconds&gt;,v1=&lt;hex&gt;`. Binding the timestamp into the
-<a href=#379 id=379 data-nosnippet>379</a>/// signed payload (not just the body) lets a receiver enforce a replay
-<a href=#380 id=380 data-nosnippet>380</a>/// window, and prevents a body-only forgery that doesn't need to also guess
-<a href=#381 id=381 data-nosnippet>381</a>/// a valid timestamp (T-26-03-01).
-<a href=#382 id=382 data-nosnippet>382</a></span><span class="kw">fn </span>compute_signature_v2(secret: <span class="kw-2">&amp;</span>str, timestamp: i64, body: <span class="kw-2">&amp;</span>str) -&gt; String {
-<a href=#383 id=383 data-nosnippet>383</a>    <span class="kw">let </span>signed_payload = <span class="macro">format!</span>(<span class="string">"{timestamp}.{body}"</span>);
-<a href=#384 id=384 data-nosnippet>384</a>    <span class="kw">let </span><span class="kw-2">mut </span>mac =
-<a href=#385 id=385 data-nosnippet>385</a>        &lt;HmacSha256 <span class="kw">as </span>hmac::KeyInit&gt;::new_from_slice(secret.as_bytes()).expect(<span class="string">"HMAC key"</span>);
-<a href=#386 id=386 data-nosnippet>386</a>    mac.update(signed_payload.as_bytes());
-<a href=#387 id=387 data-nosnippet>387</a>    <span class="macro">format!</span>(
-<a href=#388 id=388 data-nosnippet>388</a>        <span class="string">"t={timestamp},v1={}"</span>,
-<a href=#389 id=389 data-nosnippet>389</a>        hex::encode(mac.finalize().into_bytes())
-<a href=#390 id=390 data-nosnippet>390</a>    )
-<a href=#391 id=391 data-nosnippet>391</a>}
-<a href=#392 id=392 data-nosnippet>392</a>
-<a href=#393 id=393 data-nosnippet>393</a><span class="doccomment">/// Encrypt a webhook secret with AES-256-GCM for storage (SEC-031).
-<a href=#394 id=394 data-nosnippet>394</a></span><span class="kw">pub fn </span>encrypt_webhook_secret(
-<a href=#395 id=395 data-nosnippet>395</a>    key: <span class="kw-2">&amp;</span>[u8; <span class="number">32</span>],
-<a href=#396 id=396 data-nosnippet>396</a>    plaintext_secret: <span class="kw-2">&amp;</span>str,
-<a href=#397 id=397 data-nosnippet>397</a>) -&gt; <span class="prelude-ty">Result</span>&lt;String, axiam_auth::error::AuthError&gt; {
-<a href=#398 id=398 data-nosnippet>398</a>    aes256gcm_encrypt(key, plaintext_secret.as_bytes())
-<a href=#399 id=399 data-nosnippet>399</a>}
-<a href=#400 id=400 data-nosnippet>400</a>
-<a href=#401 id=401 data-nosnippet>401</a><span class="attr">#[cfg(test)]
-<a href=#402 id=402 data-nosnippet>402</a></span><span class="kw">mod </span>tests {
-<a href=#403 id=403 data-nosnippet>403</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#404 id=404 data-nosnippet>404</a>    <span class="kw">use </span>std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-<a href=#405 id=405 data-nosnippet>405</a>
-<a href=#406 id=406 data-nosnippet>406</a>    <span class="attr">#[test]
-<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="kw">fn </span>signature_v2_is_deterministic() {
-<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw">let </span>sig1 = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
-<a href=#409 id=409 data-nosnippet>409</a>        <span class="kw">let </span>sig2 = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
-<a href=#410 id=410 data-nosnippet>410</a>        <span class="macro">assert_eq!</span>(sig1, sig2);
-<a href=#411 id=411 data-nosnippet>411</a>    }
-<a href=#412 id=412 data-nosnippet>412</a>
-<a href=#413 id=413 data-nosnippet>413</a>    <span class="attr">#[test]
-<a href=#414 id=414 data-nosnippet>414</a>    </span><span class="kw">fn </span>signature_v2_different_secrets_produce_different_signatures() {
-<a href=#415 id=415 data-nosnippet>415</a>        <span class="kw">let </span>sig1 = compute_signature_v2(<span class="string">"secret1"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
-<a href=#416 id=416 data-nosnippet>416</a>        <span class="kw">let </span>sig2 = compute_signature_v2(<span class="string">"secret2"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
-<a href=#417 id=417 data-nosnippet>417</a>        <span class="macro">assert_ne!</span>(sig1, sig2);
-<a href=#418 id=418 data-nosnippet>418</a>    }
-<a href=#419 id=419 data-nosnippet>419</a>
-<a href=#420 id=420 data-nosnippet>420</a>    <span class="attr">#[test]
-<a href=#421 id=421 data-nosnippet>421</a>    </span><span class="kw">fn </span>signature_v2_matches_stripe_style_format() {
-<a href=#422 id=422 data-nosnippet>422</a>        <span class="kw">let </span>sig = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
-<a href=#423 id=423 data-nosnippet>423</a>        <span class="kw">let </span>re = regex_lite_match_t_v1(<span class="kw-2">&amp;</span>sig);
-<a href=#424 id=424 data-nosnippet>424</a>        <span class="macro">assert!</span>(
-<a href=#425 id=425 data-nosnippet>425</a>            re,
-<a href=#426 id=426 data-nosnippet>426</a>            <span class="string">"signature must match ^t=\\d+,v1=[0-9a-f]{{64}}$, got: {sig}"
-<a href=#427 id=427 data-nosnippet>427</a>        </span>);
-<a href=#428 id=428 data-nosnippet>428</a>    }
-<a href=#429 id=429 data-nosnippet>429</a>
-<a href=#430 id=430 data-nosnippet>430</a>    <span class="attr">#[test]
-<a href=#431 id=431 data-nosnippet>431</a>    </span><span class="kw">fn </span>signature_v2_different_timestamps_produce_different_signatures() {
-<a href=#432 id=432 data-nosnippet>432</a>        <span class="kw">let </span>sig1 = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
-<a href=#433 id=433 data-nosnippet>433</a>        <span class="kw">let </span>sig2 = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_001</span>, <span class="string">"hello"</span>);
-<a href=#434 id=434 data-nosnippet>434</a>        <span class="macro">assert_ne!</span>(
-<a href=#435 id=435 data-nosnippet>435</a>            sig1, sig2,
-<a href=#436 id=436 data-nosnippet>436</a>            <span class="string">"binding the timestamp into the signed payload must change the signature"
-<a href=#437 id=437 data-nosnippet>437</a>        </span>);
-<a href=#438 id=438 data-nosnippet>438</a>    }
-<a href=#439 id=439 data-nosnippet>439</a>
-<a href=#440 id=440 data-nosnippet>440</a>    <span class="attr">#[test]
-<a href=#441 id=441 data-nosnippet>441</a>    </span><span class="kw">fn </span>regex_lite_match_t_v1_rejects_malformed_strings() {
-<a href=#442 id=442 data-nosnippet>442</a>        <span class="macro">assert!</span>(
-<a href=#443 id=443 data-nosnippet>443</a>            !regex_lite_match_t_v1(<span class="string">"no-t-prefix,v1=abc"</span>),
-<a href=#444 id=444 data-nosnippet>444</a>            <span class="string">"missing `t=` prefix must be rejected"
-<a href=#445 id=445 data-nosnippet>445</a>        </span>);
-<a href=#446 id=446 data-nosnippet>446</a>        <span class="macro">assert!</span>(
-<a href=#447 id=447 data-nosnippet>447</a>            !regex_lite_match_t_v1(<span class="string">"t=1700000000-no-v1-marker"</span>),
-<a href=#448 id=448 data-nosnippet>448</a>            <span class="string">"missing `,v1=` marker must be rejected"
-<a href=#449 id=449 data-nosnippet>449</a>        </span>);
-<a href=#450 id=450 data-nosnippet>450</a>    }
-<a href=#451 id=451 data-nosnippet>451</a>
-<a href=#452 id=452 data-nosnippet>452</a>    <span class="doccomment">/// Minimal hand-rolled matcher for `^t=\d+,v1=[0-9a-f]{64}$` — avoids
-<a href=#453 id=453 data-nosnippet>453</a>    /// pulling in a `regex` dependency for a single test assertion.
-<a href=#454 id=454 data-nosnippet>454</a>    </span><span class="kw">fn </span>regex_lite_match_t_v1(s: <span class="kw-2">&amp;</span>str) -&gt; bool {
-<a href=#455 id=455 data-nosnippet>455</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(rest) = s.strip_prefix(<span class="string">"t="</span>) <span class="kw">else </span>{
-<a href=#456 id=456 data-nosnippet>456</a>            <span class="kw">return </span><span class="bool-val">false</span>;
-<a href=#457 id=457 data-nosnippet>457</a>        };
-<a href=#458 id=458 data-nosnippet>458</a>        <span class="kw">let </span><span class="prelude-val">Some</span>((digits, rest)) = rest.split_once(<span class="string">",v1="</span>) <span class="kw">else </span>{
-<a href=#459 id=459 data-nosnippet>459</a>            <span class="kw">return </span><span class="bool-val">false</span>;
-<a href=#460 id=460 data-nosnippet>460</a>        };
-<a href=#461 id=461 data-nosnippet>461</a>        !digits.is_empty()
-<a href=#462 id=462 data-nosnippet>462</a>            &amp;&amp; digits.chars().all(|c| c.is_ascii_digit())
-<a href=#463 id=463 data-nosnippet>463</a>            &amp;&amp; rest.len() == <span class="number">64
-<a href=#464 id=464 data-nosnippet>464</a>            </span>&amp;&amp; rest.chars().all(|c| c.is_ascii_hexdigit())
-<a href=#465 id=465 data-nosnippet>465</a>    }
-<a href=#466 id=466 data-nosnippet>466</a>
-<a href=#467 id=467 data-nosnippet>467</a>    <span class="comment">// ---- SSRF protection tests (SEC-019/SECHRD-02) ----
-<a href=#468 id=468 data-nosnippet>468</a>    //
-<a href=#469 id=469 data-nosnippet>469</a>    // These exercise the shared `axiam_federation::ssrf` guard directly
-<a href=#470 id=470 data-nosnippet>470</a>    // (rather than a local duplicate) to prove webhook.rs genuinely forwards
-<a href=#471 id=471 data-nosnippet>471</a>    // to it and no byte-identical copy of the classification logic remains
-<a href=#472 id=472 data-nosnippet>472</a>    // (D-01a). Guard-internal edge cases already have their own coverage in
-<a href=#473 id=473 data-nosnippet>473</a>    // `axiam_federation::ssrf`'s test module (25-01).
-<a href=#474 id=474 data-nosnippet>474</a>
-<a href=#475 id=475 data-nosnippet>475</a>    </span><span class="attr">#[test]
-<a href=#476 id=476 data-nosnippet>476</a>    </span><span class="kw">fn </span>webhook_ssrf_loopback_v4_blocked() {
-<a href=#477 id=477 data-nosnippet>477</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">127</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>));
-<a href=#478 id=478 data-nosnippet>478</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"127.0.0.1 must be blocked"</span>);
-<a href=#479 id=479 data-nosnippet>479</a>    }
-<a href=#480 id=480 data-nosnippet>480</a>
-<a href=#481 id=481 data-nosnippet>481</a>    <span class="attr">#[test]
-<a href=#482 id=482 data-nosnippet>482</a>    </span><span class="kw">fn </span>webhook_ssrf_rfc1918_10x_blocked() {
-<a href=#483 id=483 data-nosnippet>483</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>));
-<a href=#484 id=484 data-nosnippet>484</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"10.x must be blocked"</span>);
-<a href=#485 id=485 data-nosnippet>485</a>    }
-<a href=#486 id=486 data-nosnippet>486</a>
-<a href=#487 id=487 data-nosnippet>487</a>    <span class="attr">#[test]
-<a href=#488 id=488 data-nosnippet>488</a>    </span><span class="kw">fn </span>webhook_ssrf_rfc1918_172_blocked() {
-<a href=#489 id=489 data-nosnippet>489</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">172</span>, <span class="number">16</span>, <span class="number">0</span>, <span class="number">1</span>));
-<a href=#490 id=490 data-nosnippet>490</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"172.16.x must be blocked"</span>);
-<a href=#491 id=491 data-nosnippet>491</a>    }
-<a href=#492 id=492 data-nosnippet>492</a>
-<a href=#493 id=493 data-nosnippet>493</a>    <span class="attr">#[test]
-<a href=#494 id=494 data-nosnippet>494</a>    </span><span class="kw">fn </span>webhook_ssrf_rfc1918_192168_blocked() {
-<a href=#495 id=495 data-nosnippet>495</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">192</span>, <span class="number">168</span>, <span class="number">1</span>, <span class="number">1</span>));
-<a href=#496 id=496 data-nosnippet>496</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"192.168.x must be blocked"</span>);
-<a href=#497 id=497 data-nosnippet>497</a>    }
-<a href=#498 id=498 data-nosnippet>498</a>
-<a href=#499 id=499 data-nosnippet>499</a>    <span class="attr">#[test]
-<a href=#500 id=500 data-nosnippet>500</a>    </span><span class="kw">fn </span>webhook_ssrf_link_local_blocked() {
-<a href=#501 id=501 data-nosnippet>501</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">169</span>, <span class="number">254</span>, <span class="number">0</span>, <span class="number">1</span>));
-<a href=#502 id=502 data-nosnippet>502</a>        <span class="macro">assert!</span>(
-<a href=#503 id=503 data-nosnippet>503</a>            ssrf::is_disallowed_ip(ip),
-<a href=#504 id=504 data-nosnippet>504</a>            <span class="string">"169.254.x link-local must be blocked"
-<a href=#505 id=505 data-nosnippet>505</a>        </span>);
-<a href=#506 id=506 data-nosnippet>506</a>    }
-<a href=#507 id=507 data-nosnippet>507</a>
-<a href=#508 id=508 data-nosnippet>508</a>    <span class="attr">#[test]
-<a href=#509 id=509 data-nosnippet>509</a>    </span><span class="kw">fn </span>webhook_ssrf_broadcast_blocked() {
-<a href=#510 id=510 data-nosnippet>510</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">255</span>, <span class="number">255</span>, <span class="number">255</span>, <span class="number">255</span>));
-<a href=#511 id=511 data-nosnippet>511</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"broadcast must be blocked"</span>);
-<a href=#512 id=512 data-nosnippet>512</a>    }
-<a href=#513 id=513 data-nosnippet>513</a>
-<a href=#514 id=514 data-nosnippet>514</a>    <span class="attr">#[test]
-<a href=#515 id=515 data-nosnippet>515</a>    </span><span class="kw">fn </span>webhook_ssrf_loopback_v6_blocked() {
-<a href=#516 id=516 data-nosnippet>516</a>        <span class="kw">let </span>ip = IpAddr::V6(Ipv6Addr::new(<span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>));
-<a href=#517 id=517 data-nosnippet>517</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"::1 must be blocked"</span>);
-<a href=#518 id=518 data-nosnippet>518</a>    }
-<a href=#519 id=519 data-nosnippet>519</a>
-<a href=#520 id=520 data-nosnippet>520</a>    <span class="attr">#[test]
-<a href=#521 id=521 data-nosnippet>521</a>    </span><span class="kw">fn </span>webhook_ssrf_link_local_v6_blocked() {
-<a href=#522 id=522 data-nosnippet>522</a>        <span class="comment">// fe80::1
-<a href=#523 id=523 data-nosnippet>523</a>        </span><span class="kw">let </span>ip = IpAddr::V6(Ipv6Addr::new(<span class="number">0xfe80</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>));
-<a href=#524 id=524 data-nosnippet>524</a>        <span class="macro">assert!</span>(
-<a href=#525 id=525 data-nosnippet>525</a>            ssrf::is_disallowed_ip(ip),
-<a href=#526 id=526 data-nosnippet>526</a>            <span class="string">"fe80:: link-local must be blocked"
-<a href=#527 id=527 data-nosnippet>527</a>        </span>);
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="kw">let </span>webhook = <span class="self">self
+<a href=#269 id=269 data-nosnippet>269</a>            </span>.repo
+<a href=#270 id=270 data-nosnippet>270</a>            .get_by_id(tenant_id, webhook_id)
+<a href=#271 id=271 data-nosnippet>271</a>            .<span class="kw">await
+<a href=#272 id=272 data-nosnippet>272</a>            </span>.map_err(|e| WebhookError::WebhookLookupFailed(e.to_string()))<span class="question-mark">?</span>;
+<a href=#273 id=273 data-nosnippet>273</a>
+<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">let </span>body = serde_json::to_string(payload).unwrap_or_default();
+<a href=#275 id=275 data-nosnippet>275</a>
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="comment">// SEC-031: Decrypt the stored secret before HMAC computation.
+<a href=#277 id=277 data-nosnippet>277</a>        </span><span class="kw">let </span>plaintext_secret = <span class="kw">match </span>aes256gcm_decrypt(<span class="kw-2">&amp;</span>encryption_key, <span class="kw-2">&amp;</span>webhook.secret) {
+<a href=#278 id=278 data-nosnippet>278</a>            <span class="prelude-val">Ok</span>(bytes) =&gt; String::from_utf8(bytes)
+<a href=#279 id=279 data-nosnippet>279</a>                .map_err(|e| WebhookError::SecretDecrypt(<span class="macro">format!</span>(<span class="string">"secret not valid UTF-8: {e}"</span>)))<span class="question-mark">?</span>,
+<a href=#280 id=280 data-nosnippet>280</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(WebhookError::SecretDecrypt(e.to_string())),
+<a href=#281 id=281 data-nosnippet>281</a>        };
+<a href=#282 id=282 data-nosnippet>282</a>
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="kw">let </span>timestamp = Utc::now().timestamp();
+<a href=#284 id=284 data-nosnippet>284</a>        <span class="kw">let </span>signature = compute_signature_v2(<span class="kw-2">&amp;</span>plaintext_secret, timestamp, <span class="kw-2">&amp;</span>body);
+<a href=#285 id=285 data-nosnippet>285</a>
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="comment">// SEC-019/SECHRD-02: `guarded_fetch_no_redirect` resolves the host fresh
+<a href=#287 id=287 data-nosnippet>287</a>        // on this attempt, rejects a private/loopback/link-local resolved address,
+<a href=#288 id=288 data-nosnippet>288</a>        // and pins the exact validated IpAddr into a fresh single-use client
+<a href=#289 id=289 data-nosnippet>289</a>        // for the POST — no separate, independently-resolving `client.post()`
+<a href=#290 id=290 data-nosnippet>290</a>        // call remains, so `reqwest` cannot re-resolve DNS between the check
+<a href=#291 id=291 data-nosnippet>291</a>        // and the send (D-01c). One hop: a `3xx` comes back as a response and
+<a href=#292 id=292 data-nosnippet>292</a>        // is never followed (P23W5-10, T-112). `allow_private=false`: this is
+<a href=#293 id=293 data-nosnippet>293</a>        // the production delivery path, never the test seam
+<a href=#294 id=294 data-nosnippet>294</a>        // (`self.allow_private` is `false` unless a test turned it on).
+<a href=#295 id=295 data-nosnippet>295</a>        </span><span class="kw">let </span>body_for_send = body.clone();
+<a href=#296 id=296 data-nosnippet>296</a>        <span class="kw">let </span>timestamp_header = timestamp.to_string();
+<a href=#297 id=297 data-nosnippet>297</a>        <span class="kw">let </span>signature_header = signature.clone();
+<a href=#298 id=298 data-nosnippet>298</a>        <span class="kw">let </span>event_type_header = event_type.to_string();
+<a href=#299 id=299 data-nosnippet>299</a>        <span class="kw">let </span>delivery_id_header = delivery_id.to_string();
+<a href=#300 id=300 data-nosnippet>300</a>        <span class="kw">let </span>result =
+<a href=#301 id=301 data-nosnippet>301</a>            ssrf::guarded_fetch_no_redirect(<span class="kw-2">&amp;</span>webhook.url, <span class="self">self</span>.allow_private, <span class="kw">move </span>|c, u| {
+<a href=#302 id=302 data-nosnippet>302</a>                c.post(u)
+<a href=#303 id=303 data-nosnippet>303</a>                    .header(<span class="string">"Content-Type"</span>, <span class="string">"application/json"</span>)
+<a href=#304 id=304 data-nosnippet>304</a>                    .header(<span class="string">"X-Axiam-Timestamp"</span>, <span class="kw-2">&amp;</span>timestamp_header)
+<a href=#305 id=305 data-nosnippet>305</a>                    .header(<span class="string">"X-Axiam-Signature"</span>, <span class="kw-2">&amp;</span>signature_header)
+<a href=#306 id=306 data-nosnippet>306</a>                    .header(<span class="string">"X-Axiam-Event"</span>, <span class="kw-2">&amp;</span>event_type_header)
+<a href=#307 id=307 data-nosnippet>307</a>                    .header(<span class="string">"X-Axiam-Delivery"</span>, <span class="kw-2">&amp;</span>delivery_id_header)
+<a href=#308 id=308 data-nosnippet>308</a>                    .body(body_for_send.clone())
+<a href=#309 id=309 data-nosnippet>309</a>            })
+<a href=#310 id=310 data-nosnippet>310</a>            .<span class="kw">await</span>;
+<a href=#311 id=311 data-nosnippet>311</a>
+<a href=#312 id=312 data-nosnippet>312</a>        <span class="kw">match </span>result {
+<a href=#313 id=313 data-nosnippet>313</a>            <span class="prelude-val">Ok</span>(resp) =&gt; {
+<a href=#314 id=314 data-nosnippet>314</a>                <span class="kw">let </span>status = resp.status();
+<a href=#315 id=315 data-nosnippet>315</a>                <span class="macro">tracing::info!</span>(
+<a href=#316 id=316 data-nosnippet>316</a>                    webhook_id = %webhook_id,
+<a href=#317 id=317 data-nosnippet>317</a>                    %delivery_id,
+<a href=#318 id=318 data-nosnippet>318</a>                    %event_type,
+<a href=#319 id=319 data-nosnippet>319</a>                    %status,
+<a href=#320 id=320 data-nosnippet>320</a>                    <span class="string">"webhook delivery attempt completed"
+<a href=#321 id=321 data-nosnippet>321</a>                </span>);
+<a href=#322 id=322 data-nosnippet>322</a>                <span class="prelude-val">Ok</span>(status)
+<a href=#323 id=323 data-nosnippet>323</a>            }
+<a href=#324 id=324 data-nosnippet>324</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#325 id=325 data-nosnippet>325</a>                <span class="kw">let </span>webhook_err: WebhookError = e.into();
+<a href=#326 id=326 data-nosnippet>326</a>                <span class="macro">tracing::warn!</span>(
+<a href=#327 id=327 data-nosnippet>327</a>                    webhook_id = %webhook_id,
+<a href=#328 id=328 data-nosnippet>328</a>                    %delivery_id,
+<a href=#329 id=329 data-nosnippet>329</a>                    %event_type,
+<a href=#330 id=330 data-nosnippet>330</a>                    error = %webhook_err,
+<a href=#331 id=331 data-nosnippet>331</a>                    <span class="string">"webhook delivery attempt failed"
+<a href=#332 id=332 data-nosnippet>332</a>                </span>);
+<a href=#333 id=333 data-nosnippet>333</a>                <span class="prelude-val">Err</span>(webhook_err)
+<a href=#334 id=334 data-nosnippet>334</a>            }
+<a href=#335 id=335 data-nosnippet>335</a>        }
+<a href=#336 id=336 data-nosnippet>336</a>    }
+<a href=#337 id=337 data-nosnippet>337</a>}
+<a href=#338 id=338 data-nosnippet>338</a>
+<a href=#339 id=339 data-nosnippet>339</a><span class="doccomment">/// The webhook kind's deliverer (D-36): one `deliver_once` attempt, classified
+<a href=#340 id=340 data-nosnippet>340</a>/// for the generic consume loop.
+<a href=#341 id=341 data-nosnippet>341</a>///
+<a href=#342 id=342 data-nosnippet>342</a>/// * 2xx: `Delivered`, carrying the status for the success audit record.
+<a href=#343 id=343 data-nosnippet>343</a>/// * a `3xx`: `Retry` with a fixed reason; the `Location` is never followed
+<a href=#344 id=344 data-nosnippet>344</a>///   (P23W5-10, T-112), so the receiver's operator can fix the registered URL.
+<a href=#345 id=345 data-nosnippet>345</a>/// * any other status: `Retry` with reason `non-2xx status: &lt;code&gt;`.
+<a href=#346 id=346 data-nosnippet>346</a>/// * `WebhookError` (SSRF-blocked, secret-decrypt failure, lookup failure, ...):
+<a href=#347 id=347 data-nosnippet>347</a>///   `Retry` with the error's text. Today's behaviour retries every failure up to
+<a href=#348 id=348 data-nosnippet>348</a>///   `AXIAM__WEBHOOK__MAX_ATTEMPTS`; this classification keeps that.
+<a href=#349 id=349 data-nosnippet>349</a></span><span class="kw">impl</span>&lt;W: WebhookRepository + Clone + <span class="lifetime">'static</span>&gt; OutboundDeliverer <span class="kw">for </span>WebhookDeliveryService&lt;W&gt; {
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="kw">fn </span>kind(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; OutboundKind {
+<a href=#351 id=351 data-nosnippet>351</a>        OutboundKind::Webhook
+<a href=#352 id=352 data-nosnippet>352</a>    }
+<a href=#353 id=353 data-nosnippet>353</a>
+<a href=#354 id=354 data-nosnippet>354</a>    <span class="kw">fn </span>deliver_attempt&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
+<a href=#356 id=356 data-nosnippet>356</a>        msg: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>OutboundMessage,
+<a href=#357 id=357 data-nosnippet>357</a>    ) -&gt; OutboundFuture&lt;<span class="lifetime">'a</span>, <span class="prelude-ty">Result</span>&lt;DeliveryOutcome, OutboundError&gt;&gt; {
+<a href=#358 id=358 data-nosnippet>358</a>        Box::pin(<span class="kw">async move </span>{
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="kw">if </span>msg.kind != OutboundKind::Webhook {
+<a href=#360 id=360 data-nosnippet>360</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(DeliveryOutcome::DeadLetter {
+<a href=#361 id=361 data-nosnippet>361</a>                    reason: <span class="macro">format!</span>(<span class="string">"not a webhook message: {}"</span>, msg.kind),
+<a href=#362 id=362 data-nosnippet>362</a>                });
+<a href=#363 id=363 data-nosnippet>363</a>            }
+<a href=#364 id=364 data-nosnippet>364</a>            <span class="kw">let </span>result = <span class="self">self
+<a href=#365 id=365 data-nosnippet>365</a>                </span>.deliver_once(
+<a href=#366 id=366 data-nosnippet>366</a>                    msg.tenant_id,
+<a href=#367 id=367 data-nosnippet>367</a>                    msg.target_id,
+<a href=#368 id=368 data-nosnippet>368</a>                    msg.delivery_id,
+<a href=#369 id=369 data-nosnippet>369</a>                    <span class="kw-2">&amp;</span>msg.event_type,
+<a href=#370 id=370 data-nosnippet>370</a>                    <span class="kw-2">&amp;</span>msg.payload,
+<a href=#371 id=371 data-nosnippet>371</a>                )
+<a href=#372 id=372 data-nosnippet>372</a>                .<span class="kw">await</span>;
+<a href=#373 id=373 data-nosnippet>373</a>            <span class="prelude-val">Ok</span>(<span class="kw">match </span>result {
+<a href=#374 id=374 data-nosnippet>374</a>                <span class="prelude-val">Ok</span>(status) <span class="kw">if </span>status.is_success() =&gt; DeliveryOutcome::Delivered {
+<a href=#375 id=375 data-nosnippet>375</a>                    response_status: <span class="prelude-val">Some</span>(status.as_u16()),
+<a href=#376 id=376 data-nosnippet>376</a>                },
+<a href=#377 id=377 data-nosnippet>377</a>                <span class="comment">// Never followed: the body is signed for the registered URL.
+<a href=#378 id=378 data-nosnippet>378</a>                </span><span class="prelude-val">Ok</span>(status) <span class="kw">if </span>status.is_redirection() =&gt; DeliveryOutcome::Retry {
+<a href=#379 id=379 data-nosnippet>379</a>                    reason: <span class="string">"the receiver answered with a redirect, which is not followed"</span>.into(),
+<a href=#380 id=380 data-nosnippet>380</a>                },
+<a href=#381 id=381 data-nosnippet>381</a>                <span class="prelude-val">Ok</span>(status) =&gt; DeliveryOutcome::Retry {
+<a href=#382 id=382 data-nosnippet>382</a>                    reason: <span class="macro">format!</span>(<span class="string">"non-2xx status: {}"</span>, status.as_u16()),
+<a href=#383 id=383 data-nosnippet>383</a>                },
+<a href=#384 id=384 data-nosnippet>384</a>                <span class="prelude-val">Err</span>(e) =&gt; DeliveryOutcome::Retry {
+<a href=#385 id=385 data-nosnippet>385</a>                    reason: e.to_string(),
+<a href=#386 id=386 data-nosnippet>386</a>                },
+<a href=#387 id=387 data-nosnippet>387</a>            })
+<a href=#388 id=388 data-nosnippet>388</a>        })
+<a href=#389 id=389 data-nosnippet>389</a>    }
+<a href=#390 id=390 data-nosnippet>390</a>}
+<a href=#391 id=391 data-nosnippet>391</a>
+<a href=#392 id=392 data-nosnippet>392</a><span class="doccomment">/// Compute the Stripe-style signed-timestamp signature (D-10): HMAC-SHA256
+<a href=#393 id=393 data-nosnippet>393</a>/// over the ASCII string `&lt;timestamp&gt;.&lt;body&gt;` using the per-webhook secret,
+<a href=#394 id=394 data-nosnippet>394</a>/// returned as `t=&lt;unix_seconds&gt;,v1=&lt;hex&gt;`. Binding the timestamp into the
+<a href=#395 id=395 data-nosnippet>395</a>/// signed payload (not just the body) lets a receiver enforce a replay
+<a href=#396 id=396 data-nosnippet>396</a>/// window, and prevents a body-only forgery that doesn't need to also guess
+<a href=#397 id=397 data-nosnippet>397</a>/// a valid timestamp (T-26-03-01).
+<a href=#398 id=398 data-nosnippet>398</a></span><span class="kw">fn </span>compute_signature_v2(secret: <span class="kw-2">&amp;</span>str, timestamp: i64, body: <span class="kw-2">&amp;</span>str) -&gt; String {
+<a href=#399 id=399 data-nosnippet>399</a>    <span class="kw">let </span>signed_payload = <span class="macro">format!</span>(<span class="string">"{timestamp}.{body}"</span>);
+<a href=#400 id=400 data-nosnippet>400</a>    <span class="kw">let </span><span class="kw-2">mut </span>mac =
+<a href=#401 id=401 data-nosnippet>401</a>        &lt;HmacSha256 <span class="kw">as </span>hmac::KeyInit&gt;::new_from_slice(secret.as_bytes()).expect(<span class="string">"HMAC key"</span>);
+<a href=#402 id=402 data-nosnippet>402</a>    mac.update(signed_payload.as_bytes());
+<a href=#403 id=403 data-nosnippet>403</a>    <span class="macro">format!</span>(
+<a href=#404 id=404 data-nosnippet>404</a>        <span class="string">"t={timestamp},v1={}"</span>,
+<a href=#405 id=405 data-nosnippet>405</a>        hex::encode(mac.finalize().into_bytes())
+<a href=#406 id=406 data-nosnippet>406</a>    )
+<a href=#407 id=407 data-nosnippet>407</a>}
+<a href=#408 id=408 data-nosnippet>408</a>
+<a href=#409 id=409 data-nosnippet>409</a><span class="doccomment">/// Encrypt a webhook secret with AES-256-GCM for storage (SEC-031).
+<a href=#410 id=410 data-nosnippet>410</a></span><span class="kw">pub fn </span>encrypt_webhook_secret(
+<a href=#411 id=411 data-nosnippet>411</a>    key: <span class="kw-2">&amp;</span>[u8; <span class="number">32</span>],
+<a href=#412 id=412 data-nosnippet>412</a>    plaintext_secret: <span class="kw-2">&amp;</span>str,
+<a href=#413 id=413 data-nosnippet>413</a>) -&gt; <span class="prelude-ty">Result</span>&lt;String, axiam_auth::error::AuthError&gt; {
+<a href=#414 id=414 data-nosnippet>414</a>    aes256gcm_encrypt(key, plaintext_secret.as_bytes())
+<a href=#415 id=415 data-nosnippet>415</a>}
+<a href=#416 id=416 data-nosnippet>416</a>
+<a href=#417 id=417 data-nosnippet>417</a><span class="attr">#[cfg(test)]
+<a href=#418 id=418 data-nosnippet>418</a></span><span class="kw">mod </span>tests {
+<a href=#419 id=419 data-nosnippet>419</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#420 id=420 data-nosnippet>420</a>    <span class="kw">use </span>std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+<a href=#421 id=421 data-nosnippet>421</a>
+<a href=#422 id=422 data-nosnippet>422</a>    <span class="doccomment">/// The delivery's only way out is the one-hop guard (P23W5-10, T-112):
+<a href=#423 id=423 data-nosnippet>423</a>    /// pinned against the source so a redirect-following `guarded_fetch` cannot
+<a href=#424 id=424 data-nosnippet>424</a>    /// come back beside it without this test saying so.
+<a href=#425 id=425 data-nosnippet>425</a>    </span><span class="attr">#[test]
+<a href=#426 id=426 data-nosnippet>426</a>    </span><span class="kw">fn </span>delivery_goes_through_the_no_redirect_guarded_fetch_and_nothing_else() {
+<a href=#427 id=427 data-nosnippet>427</a>        <span class="kw">let </span>source = <span class="macro">include_str!</span>(<span class="string">"webhook.rs"</span>);
+<a href=#428 id=428 data-nosnippet>428</a>        <span class="kw">let </span>production = source
+<a href=#429 id=429 data-nosnippet>429</a>            .split(<span class="string">"#[cfg(test)]"</span>)
+<a href=#430 id=430 data-nosnippet>430</a>            .next()
+<a href=#431 id=431 data-nosnippet>431</a>            .expect(<span class="string">"the production half of the file"</span>);
+<a href=#432 id=432 data-nosnippet>432</a>        <span class="macro">assert_eq!</span>(production.matches(<span class="string">"guarded_fetch_no_redirect("</span>).count(), <span class="number">1</span>);
+<a href=#433 id=433 data-nosnippet>433</a>        <span class="macro">assert_eq!</span>(production.matches(<span class="string">"guarded_fetch("</span>).count(), <span class="number">0</span>);
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="macro">assert_eq!</span>(production.matches(<span class="string">"guarded_fetch_with_cap("</span>).count(), <span class="number">0</span>);
+<a href=#435 id=435 data-nosnippet>435</a>    }
+<a href=#436 id=436 data-nosnippet>436</a>
+<a href=#437 id=437 data-nosnippet>437</a>    <span class="attr">#[test]
+<a href=#438 id=438 data-nosnippet>438</a>    </span><span class="kw">fn </span>signature_v2_is_deterministic() {
+<a href=#439 id=439 data-nosnippet>439</a>        <span class="kw">let </span>sig1 = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="kw">let </span>sig2 = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="macro">assert_eq!</span>(sig1, sig2);
+<a href=#442 id=442 data-nosnippet>442</a>    }
+<a href=#443 id=443 data-nosnippet>443</a>
+<a href=#444 id=444 data-nosnippet>444</a>    <span class="attr">#[test]
+<a href=#445 id=445 data-nosnippet>445</a>    </span><span class="kw">fn </span>signature_v2_different_secrets_produce_different_signatures() {
+<a href=#446 id=446 data-nosnippet>446</a>        <span class="kw">let </span>sig1 = compute_signature_v2(<span class="string">"secret1"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
+<a href=#447 id=447 data-nosnippet>447</a>        <span class="kw">let </span>sig2 = compute_signature_v2(<span class="string">"secret2"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
+<a href=#448 id=448 data-nosnippet>448</a>        <span class="macro">assert_ne!</span>(sig1, sig2);
+<a href=#449 id=449 data-nosnippet>449</a>    }
+<a href=#450 id=450 data-nosnippet>450</a>
+<a href=#451 id=451 data-nosnippet>451</a>    <span class="attr">#[test]
+<a href=#452 id=452 data-nosnippet>452</a>    </span><span class="kw">fn </span>signature_v2_matches_stripe_style_format() {
+<a href=#453 id=453 data-nosnippet>453</a>        <span class="kw">let </span>sig = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
+<a href=#454 id=454 data-nosnippet>454</a>        <span class="kw">let </span>re = regex_lite_match_t_v1(<span class="kw-2">&amp;</span>sig);
+<a href=#455 id=455 data-nosnippet>455</a>        <span class="macro">assert!</span>(
+<a href=#456 id=456 data-nosnippet>456</a>            re,
+<a href=#457 id=457 data-nosnippet>457</a>            <span class="string">"signature must match ^t=\\d+,v1=[0-9a-f]{{64}}$, got: {sig}"
+<a href=#458 id=458 data-nosnippet>458</a>        </span>);
+<a href=#459 id=459 data-nosnippet>459</a>    }
+<a href=#460 id=460 data-nosnippet>460</a>
+<a href=#461 id=461 data-nosnippet>461</a>    <span class="attr">#[test]
+<a href=#462 id=462 data-nosnippet>462</a>    </span><span class="kw">fn </span>signature_v2_different_timestamps_produce_different_signatures() {
+<a href=#463 id=463 data-nosnippet>463</a>        <span class="kw">let </span>sig1 = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_000</span>, <span class="string">"hello"</span>);
+<a href=#464 id=464 data-nosnippet>464</a>        <span class="kw">let </span>sig2 = compute_signature_v2(<span class="string">"secret"</span>, <span class="number">1_700_000_001</span>, <span class="string">"hello"</span>);
+<a href=#465 id=465 data-nosnippet>465</a>        <span class="macro">assert_ne!</span>(
+<a href=#466 id=466 data-nosnippet>466</a>            sig1, sig2,
+<a href=#467 id=467 data-nosnippet>467</a>            <span class="string">"binding the timestamp into the signed payload must change the signature"
+<a href=#468 id=468 data-nosnippet>468</a>        </span>);
+<a href=#469 id=469 data-nosnippet>469</a>    }
+<a href=#470 id=470 data-nosnippet>470</a>
+<a href=#471 id=471 data-nosnippet>471</a>    <span class="attr">#[test]
+<a href=#472 id=472 data-nosnippet>472</a>    </span><span class="kw">fn </span>regex_lite_match_t_v1_rejects_malformed_strings() {
+<a href=#473 id=473 data-nosnippet>473</a>        <span class="macro">assert!</span>(
+<a href=#474 id=474 data-nosnippet>474</a>            !regex_lite_match_t_v1(<span class="string">"no-t-prefix,v1=abc"</span>),
+<a href=#475 id=475 data-nosnippet>475</a>            <span class="string">"missing `t=` prefix must be rejected"
+<a href=#476 id=476 data-nosnippet>476</a>        </span>);
+<a href=#477 id=477 data-nosnippet>477</a>        <span class="macro">assert!</span>(
+<a href=#478 id=478 data-nosnippet>478</a>            !regex_lite_match_t_v1(<span class="string">"t=1700000000-no-v1-marker"</span>),
+<a href=#479 id=479 data-nosnippet>479</a>            <span class="string">"missing `,v1=` marker must be rejected"
+<a href=#480 id=480 data-nosnippet>480</a>        </span>);
+<a href=#481 id=481 data-nosnippet>481</a>    }
+<a href=#482 id=482 data-nosnippet>482</a>
+<a href=#483 id=483 data-nosnippet>483</a>    <span class="doccomment">/// Minimal hand-rolled matcher for `^t=\d+,v1=[0-9a-f]{64}$` — avoids
+<a href=#484 id=484 data-nosnippet>484</a>    /// pulling in a `regex` dependency for a single test assertion.
+<a href=#485 id=485 data-nosnippet>485</a>    </span><span class="kw">fn </span>regex_lite_match_t_v1(s: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#486 id=486 data-nosnippet>486</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(rest) = s.strip_prefix(<span class="string">"t="</span>) <span class="kw">else </span>{
+<a href=#487 id=487 data-nosnippet>487</a>            <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#488 id=488 data-nosnippet>488</a>        };
+<a href=#489 id=489 data-nosnippet>489</a>        <span class="kw">let </span><span class="prelude-val">Some</span>((digits, rest)) = rest.split_once(<span class="string">",v1="</span>) <span class="kw">else </span>{
+<a href=#490 id=490 data-nosnippet>490</a>            <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#491 id=491 data-nosnippet>491</a>        };
+<a href=#492 id=492 data-nosnippet>492</a>        !digits.is_empty()
+<a href=#493 id=493 data-nosnippet>493</a>            &amp;&amp; digits.chars().all(|c| c.is_ascii_digit())
+<a href=#494 id=494 data-nosnippet>494</a>            &amp;&amp; rest.len() == <span class="number">64
+<a href=#495 id=495 data-nosnippet>495</a>            </span>&amp;&amp; rest.chars().all(|c| c.is_ascii_hexdigit())
+<a href=#496 id=496 data-nosnippet>496</a>    }
+<a href=#497 id=497 data-nosnippet>497</a>
+<a href=#498 id=498 data-nosnippet>498</a>    <span class="comment">// ---- SSRF protection tests (SEC-019/SECHRD-02) ----
+<a href=#499 id=499 data-nosnippet>499</a>    //
+<a href=#500 id=500 data-nosnippet>500</a>    // These exercise the shared `axiam_federation::ssrf` guard directly
+<a href=#501 id=501 data-nosnippet>501</a>    // (rather than a local duplicate) to prove webhook.rs genuinely forwards
+<a href=#502 id=502 data-nosnippet>502</a>    // to it and no byte-identical copy of the classification logic remains
+<a href=#503 id=503 data-nosnippet>503</a>    // (D-01a). Guard-internal edge cases already have their own coverage in
+<a href=#504 id=504 data-nosnippet>504</a>    // `axiam_federation::ssrf`'s test module (25-01).
+<a href=#505 id=505 data-nosnippet>505</a>
+<a href=#506 id=506 data-nosnippet>506</a>    </span><span class="attr">#[test]
+<a href=#507 id=507 data-nosnippet>507</a>    </span><span class="kw">fn </span>webhook_ssrf_loopback_v4_blocked() {
+<a href=#508 id=508 data-nosnippet>508</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">127</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>));
+<a href=#509 id=509 data-nosnippet>509</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"127.0.0.1 must be blocked"</span>);
+<a href=#510 id=510 data-nosnippet>510</a>    }
+<a href=#511 id=511 data-nosnippet>511</a>
+<a href=#512 id=512 data-nosnippet>512</a>    <span class="attr">#[test]
+<a href=#513 id=513 data-nosnippet>513</a>    </span><span class="kw">fn </span>webhook_ssrf_rfc1918_10x_blocked() {
+<a href=#514 id=514 data-nosnippet>514</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">10</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>));
+<a href=#515 id=515 data-nosnippet>515</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"10.x must be blocked"</span>);
+<a href=#516 id=516 data-nosnippet>516</a>    }
+<a href=#517 id=517 data-nosnippet>517</a>
+<a href=#518 id=518 data-nosnippet>518</a>    <span class="attr">#[test]
+<a href=#519 id=519 data-nosnippet>519</a>    </span><span class="kw">fn </span>webhook_ssrf_rfc1918_172_blocked() {
+<a href=#520 id=520 data-nosnippet>520</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">172</span>, <span class="number">16</span>, <span class="number">0</span>, <span class="number">1</span>));
+<a href=#521 id=521 data-nosnippet>521</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"172.16.x must be blocked"</span>);
+<a href=#522 id=522 data-nosnippet>522</a>    }
+<a href=#523 id=523 data-nosnippet>523</a>
+<a href=#524 id=524 data-nosnippet>524</a>    <span class="attr">#[test]
+<a href=#525 id=525 data-nosnippet>525</a>    </span><span class="kw">fn </span>webhook_ssrf_rfc1918_192168_blocked() {
+<a href=#526 id=526 data-nosnippet>526</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">192</span>, <span class="number">168</span>, <span class="number">1</span>, <span class="number">1</span>));
+<a href=#527 id=527 data-nosnippet>527</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"192.168.x must be blocked"</span>);
 <a href=#528 id=528 data-nosnippet>528</a>    }
 <a href=#529 id=529 data-nosnippet>529</a>
-<a href=#530 id=530 data-nosnippet>530</a>    <span class="doccomment">/// SEC-094: the four blocked-v4 assertions above all passed while
-<a href=#531 id=531 data-nosnippet>531</a>    /// `::ffff:10.0.0.1` sailed through — which is exactly why the bypass
-<a href=#532 id=532 data-nosnippet>532</a>    /// survived review. A tenant admin's webhook host only has to publish an
-<a href=#533 id=533 data-nosnippet>533</a>    /// `AAAA` record for the mapped form. These are the same four addresses,
-<a href=#534 id=534 data-nosnippet>534</a>    /// in the encoding the old predicate missed.
-<a href=#535 id=535 data-nosnippet>535</a>    </span><span class="attr">#[test]
-<a href=#536 id=536 data-nosnippet>536</a>    </span><span class="kw">fn </span>webhook_ssrf_ipv4_mapped_ipv6_blocked() {
-<a href=#537 id=537 data-nosnippet>537</a>        <span class="kw">for </span>literal <span class="kw">in </span>[
-<a href=#538 id=538 data-nosnippet>538</a>            <span class="string">"::ffff:127.0.0.1"</span>,
-<a href=#539 id=539 data-nosnippet>539</a>            <span class="string">"::ffff:10.0.0.1"</span>,
-<a href=#540 id=540 data-nosnippet>540</a>            <span class="string">"::ffff:172.16.0.1"</span>,
-<a href=#541 id=541 data-nosnippet>541</a>            <span class="string">"::ffff:192.168.1.1"</span>,
-<a href=#542 id=542 data-nosnippet>542</a>            <span class="string">"::ffff:169.254.169.254"</span>,
-<a href=#543 id=543 data-nosnippet>543</a>            <span class="string">"::ffff:100.64.0.1"</span>,
-<a href=#544 id=544 data-nosnippet>544</a>        ] {
-<a href=#545 id=545 data-nosnippet>545</a>            <span class="kw">let </span>ip: IpAddr = literal.parse().expect(<span class="string">"literal parses"</span>);
-<a href=#546 id=546 data-nosnippet>546</a>            <span class="macro">assert!</span>(
-<a href=#547 id=547 data-nosnippet>547</a>                ssrf::is_disallowed_ip(ip),
-<a href=#548 id=548 data-nosnippet>548</a>                <span class="string">"{literal} must be blocked (SEC-094)"
-<a href=#549 id=549 data-nosnippet>549</a>            </span>);
-<a href=#550 id=550 data-nosnippet>550</a>        }
-<a href=#551 id=551 data-nosnippet>551</a>    }
-<a href=#552 id=552 data-nosnippet>552</a>
-<a href=#553 id=553 data-nosnippet>553</a>    <span class="attr">#[test]
-<a href=#554 id=554 data-nosnippet>554</a>    </span><span class="kw">fn </span>webhook_ssrf_public_ipv4_allowed() {
-<a href=#555 id=555 data-nosnippet>555</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">93</span>, <span class="number">184</span>, <span class="number">216</span>, <span class="number">34</span>)); <span class="comment">// example.com
-<a href=#556 id=556 data-nosnippet>556</a>        </span><span class="macro">assert!</span>(!ssrf::is_disallowed_ip(ip), <span class="string">"public IP must be allowed"</span>);
-<a href=#557 id=557 data-nosnippet>557</a>    }
-<a href=#558 id=558 data-nosnippet>558</a>
-<a href=#559 id=559 data-nosnippet>559</a>    <span class="attr">#[test]
-<a href=#560 id=560 data-nosnippet>560</a>    </span><span class="kw">fn </span>webhook_ssrf_invalid_url_rejected() {
-<a href=#561 id=561 data-nosnippet>561</a>        <span class="comment">// Synchronous check — just verify parsing fails
-<a href=#562 id=562 data-nosnippet>562</a>        </span><span class="kw">let </span>result = url::Url::parse(<span class="string">"not-a-url"</span>);
-<a href=#563 id=563 data-nosnippet>563</a>        <span class="macro">assert!</span>(result.is_err());
-<a href=#564 id=564 data-nosnippet>564</a>    }
-<a href=#565 id=565 data-nosnippet>565</a>
-<a href=#566 id=566 data-nosnippet>566</a>    <span class="attr">#[tokio::test]
-<a href=#567 id=567 data-nosnippet>567</a>    </span><span class="kw">async fn </span>webhook_ssrf_resolve_loopback_url_blocked() {
-<a href=#568 id=568 data-nosnippet>568</a>        <span class="comment">// 127.0.0.1 resolves directly to loopback
-<a href=#569 id=569 data-nosnippet>569</a>        </span><span class="kw">let </span>result = ssrf::resolve_and_pick(<span class="string">"127.0.0.1"</span>, <span class="number">443</span>, <span class="bool-val">false</span>).<span class="kw">await</span>;
-<a href=#570 id=570 data-nosnippet>570</a>        <span class="macro">assert!</span>(
-<a href=#571 id=571 data-nosnippet>571</a>            <span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(SsrfError::Blocked)),
-<a href=#572 id=572 data-nosnippet>572</a>            <span class="string">"127.0.0.1 must be SSRF-blocked, got: {:?}"</span>,
-<a href=#573 id=573 data-nosnippet>573</a>            result
-<a href=#574 id=574 data-nosnippet>574</a>        );
-<a href=#575 id=575 data-nosnippet>575</a>    }
-<a href=#576 id=576 data-nosnippet>576</a>
-<a href=#577 id=577 data-nosnippet>577</a>    <span class="attr">#[tokio::test]
-<a href=#578 id=578 data-nosnippet>578</a>    </span><span class="kw">async fn </span>webhook_ssrf_resolve_rfc1918_url_blocked() {
-<a href=#579 id=579 data-nosnippet>579</a>        <span class="kw">let </span>result = ssrf::resolve_and_pick(<span class="string">"10.0.0.1"</span>, <span class="number">443</span>, <span class="bool-val">false</span>).<span class="kw">await</span>;
-<a href=#580 id=580 data-nosnippet>580</a>        <span class="macro">assert!</span>(
-<a href=#581 id=581 data-nosnippet>581</a>            <span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(SsrfError::Blocked)),
-<a href=#582 id=582 data-nosnippet>582</a>            <span class="string">"10.x must be SSRF-blocked, got: {:?}"</span>,
-<a href=#583 id=583 data-nosnippet>583</a>            result
-<a href=#584 id=584 data-nosnippet>584</a>        );
-<a href=#585 id=585 data-nosnippet>585</a>    }
-<a href=#586 id=586 data-nosnippet>586</a>
-<a href=#587 id=587 data-nosnippet>587</a>    <span class="attr">#[tokio::test]
-<a href=#588 id=588 data-nosnippet>588</a>    </span><span class="kw">async fn </span>webhook_ssrf_resolve_192168_blocked() {
-<a href=#589 id=589 data-nosnippet>589</a>        <span class="kw">let </span>result = ssrf::resolve_and_pick(<span class="string">"192.168.1.1"</span>, <span class="number">443</span>, <span class="bool-val">false</span>).<span class="kw">await</span>;
-<a href=#590 id=590 data-nosnippet>590</a>        <span class="macro">assert!</span>(
-<a href=#591 id=591 data-nosnippet>591</a>            <span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(SsrfError::Blocked)),
-<a href=#592 id=592 data-nosnippet>592</a>            <span class="string">"192.168.x must be blocked"
-<a href=#593 id=593 data-nosnippet>593</a>        </span>);
-<a href=#594 id=594 data-nosnippet>594</a>    }
-<a href=#595 id=595 data-nosnippet>595</a>
-<a href=#596 id=596 data-nosnippet>596</a>    <span class="doccomment">/// SECHRD-02: a blocked target must map through `WebhookError::SsrfBlocked`
-<a href=#597 id=597 data-nosnippet>597</a>    /// (and therefore the existing fail-closed `AxiamApiError` mapping), not a
-<a href=#598 id=598 data-nosnippet>598</a>    /// panic or a generic error — proving the `From&lt;SsrfError&gt; for WebhookError`
-<a href=#599 id=599 data-nosnippet>599</a>    /// bridge added in this plan.
-<a href=#600 id=600 data-nosnippet>600</a>    </span><span class="attr">#[test]
-<a href=#601 id=601 data-nosnippet>601</a>    </span><span class="kw">fn </span>ssrf_error_blocked_maps_to_webhook_error_ssrf_blocked() {
-<a href=#602 id=602 data-nosnippet>602</a>        <span class="kw">let </span>err: WebhookError = SsrfError::Blocked.into();
-<a href=#603 id=603 data-nosnippet>603</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::SsrfBlocked));
-<a href=#604 id=604 data-nosnippet>604</a>    }
-<a href=#605 id=605 data-nosnippet>605</a>
-<a href=#606 id=606 data-nosnippet>606</a>    <span class="comment">// ---- Remaining `From&lt;SsrfError&gt; for WebhookError` arms (D-01a) ----
+<a href=#530 id=530 data-nosnippet>530</a>    <span class="attr">#[test]
+<a href=#531 id=531 data-nosnippet>531</a>    </span><span class="kw">fn </span>webhook_ssrf_link_local_blocked() {
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">169</span>, <span class="number">254</span>, <span class="number">0</span>, <span class="number">1</span>));
+<a href=#533 id=533 data-nosnippet>533</a>        <span class="macro">assert!</span>(
+<a href=#534 id=534 data-nosnippet>534</a>            ssrf::is_disallowed_ip(ip),
+<a href=#535 id=535 data-nosnippet>535</a>            <span class="string">"169.254.x link-local must be blocked"
+<a href=#536 id=536 data-nosnippet>536</a>        </span>);
+<a href=#537 id=537 data-nosnippet>537</a>    }
+<a href=#538 id=538 data-nosnippet>538</a>
+<a href=#539 id=539 data-nosnippet>539</a>    <span class="attr">#[test]
+<a href=#540 id=540 data-nosnippet>540</a>    </span><span class="kw">fn </span>webhook_ssrf_broadcast_blocked() {
+<a href=#541 id=541 data-nosnippet>541</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">255</span>, <span class="number">255</span>, <span class="number">255</span>, <span class="number">255</span>));
+<a href=#542 id=542 data-nosnippet>542</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"broadcast must be blocked"</span>);
+<a href=#543 id=543 data-nosnippet>543</a>    }
+<a href=#544 id=544 data-nosnippet>544</a>
+<a href=#545 id=545 data-nosnippet>545</a>    <span class="attr">#[test]
+<a href=#546 id=546 data-nosnippet>546</a>    </span><span class="kw">fn </span>webhook_ssrf_loopback_v6_blocked() {
+<a href=#547 id=547 data-nosnippet>547</a>        <span class="kw">let </span>ip = IpAddr::V6(Ipv6Addr::new(<span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>));
+<a href=#548 id=548 data-nosnippet>548</a>        <span class="macro">assert!</span>(ssrf::is_disallowed_ip(ip), <span class="string">"::1 must be blocked"</span>);
+<a href=#549 id=549 data-nosnippet>549</a>    }
+<a href=#550 id=550 data-nosnippet>550</a>
+<a href=#551 id=551 data-nosnippet>551</a>    <span class="attr">#[test]
+<a href=#552 id=552 data-nosnippet>552</a>    </span><span class="kw">fn </span>webhook_ssrf_link_local_v6_blocked() {
+<a href=#553 id=553 data-nosnippet>553</a>        <span class="comment">// fe80::1
+<a href=#554 id=554 data-nosnippet>554</a>        </span><span class="kw">let </span>ip = IpAddr::V6(Ipv6Addr::new(<span class="number">0xfe80</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>));
+<a href=#555 id=555 data-nosnippet>555</a>        <span class="macro">assert!</span>(
+<a href=#556 id=556 data-nosnippet>556</a>            ssrf::is_disallowed_ip(ip),
+<a href=#557 id=557 data-nosnippet>557</a>            <span class="string">"fe80:: link-local must be blocked"
+<a href=#558 id=558 data-nosnippet>558</a>        </span>);
+<a href=#559 id=559 data-nosnippet>559</a>    }
+<a href=#560 id=560 data-nosnippet>560</a>
+<a href=#561 id=561 data-nosnippet>561</a>    <span class="doccomment">/// SEC-094: the four blocked-v4 assertions above all passed while
+<a href=#562 id=562 data-nosnippet>562</a>    /// `::ffff:10.0.0.1` sailed through — which is exactly why the bypass
+<a href=#563 id=563 data-nosnippet>563</a>    /// survived review. A tenant admin's webhook host only has to publish an
+<a href=#564 id=564 data-nosnippet>564</a>    /// `AAAA` record for the mapped form. These are the same four addresses,
+<a href=#565 id=565 data-nosnippet>565</a>    /// in the encoding the old predicate missed.
+<a href=#566 id=566 data-nosnippet>566</a>    </span><span class="attr">#[test]
+<a href=#567 id=567 data-nosnippet>567</a>    </span><span class="kw">fn </span>webhook_ssrf_ipv4_mapped_ipv6_blocked() {
+<a href=#568 id=568 data-nosnippet>568</a>        <span class="kw">for </span>literal <span class="kw">in </span>[
+<a href=#569 id=569 data-nosnippet>569</a>            <span class="string">"::ffff:127.0.0.1"</span>,
+<a href=#570 id=570 data-nosnippet>570</a>            <span class="string">"::ffff:10.0.0.1"</span>,
+<a href=#571 id=571 data-nosnippet>571</a>            <span class="string">"::ffff:172.16.0.1"</span>,
+<a href=#572 id=572 data-nosnippet>572</a>            <span class="string">"::ffff:192.168.1.1"</span>,
+<a href=#573 id=573 data-nosnippet>573</a>            <span class="string">"::ffff:169.254.169.254"</span>,
+<a href=#574 id=574 data-nosnippet>574</a>            <span class="string">"::ffff:100.64.0.1"</span>,
+<a href=#575 id=575 data-nosnippet>575</a>        ] {
+<a href=#576 id=576 data-nosnippet>576</a>            <span class="kw">let </span>ip: IpAddr = literal.parse().expect(<span class="string">"literal parses"</span>);
+<a href=#577 id=577 data-nosnippet>577</a>            <span class="macro">assert!</span>(
+<a href=#578 id=578 data-nosnippet>578</a>                ssrf::is_disallowed_ip(ip),
+<a href=#579 id=579 data-nosnippet>579</a>                <span class="string">"{literal} must be blocked (SEC-094)"
+<a href=#580 id=580 data-nosnippet>580</a>            </span>);
+<a href=#581 id=581 data-nosnippet>581</a>        }
+<a href=#582 id=582 data-nosnippet>582</a>    }
+<a href=#583 id=583 data-nosnippet>583</a>
+<a href=#584 id=584 data-nosnippet>584</a>    <span class="attr">#[test]
+<a href=#585 id=585 data-nosnippet>585</a>    </span><span class="kw">fn </span>webhook_ssrf_public_ipv4_allowed() {
+<a href=#586 id=586 data-nosnippet>586</a>        <span class="kw">let </span>ip = IpAddr::V4(Ipv4Addr::new(<span class="number">93</span>, <span class="number">184</span>, <span class="number">216</span>, <span class="number">34</span>)); <span class="comment">// example.com
+<a href=#587 id=587 data-nosnippet>587</a>        </span><span class="macro">assert!</span>(!ssrf::is_disallowed_ip(ip), <span class="string">"public IP must be allowed"</span>);
+<a href=#588 id=588 data-nosnippet>588</a>    }
+<a href=#589 id=589 data-nosnippet>589</a>
+<a href=#590 id=590 data-nosnippet>590</a>    <span class="attr">#[test]
+<a href=#591 id=591 data-nosnippet>591</a>    </span><span class="kw">fn </span>webhook_ssrf_invalid_url_rejected() {
+<a href=#592 id=592 data-nosnippet>592</a>        <span class="comment">// Synchronous check — just verify parsing fails
+<a href=#593 id=593 data-nosnippet>593</a>        </span><span class="kw">let </span>result = url::Url::parse(<span class="string">"not-a-url"</span>);
+<a href=#594 id=594 data-nosnippet>594</a>        <span class="macro">assert!</span>(result.is_err());
+<a href=#595 id=595 data-nosnippet>595</a>    }
+<a href=#596 id=596 data-nosnippet>596</a>
+<a href=#597 id=597 data-nosnippet>597</a>    <span class="attr">#[tokio::test]
+<a href=#598 id=598 data-nosnippet>598</a>    </span><span class="kw">async fn </span>webhook_ssrf_resolve_loopback_url_blocked() {
+<a href=#599 id=599 data-nosnippet>599</a>        <span class="comment">// 127.0.0.1 resolves directly to loopback
+<a href=#600 id=600 data-nosnippet>600</a>        </span><span class="kw">let </span>result = ssrf::resolve_and_pick(<span class="string">"127.0.0.1"</span>, <span class="number">443</span>, <span class="bool-val">false</span>).<span class="kw">await</span>;
+<a href=#601 id=601 data-nosnippet>601</a>        <span class="macro">assert!</span>(
+<a href=#602 id=602 data-nosnippet>602</a>            <span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(SsrfError::Blocked)),
+<a href=#603 id=603 data-nosnippet>603</a>            <span class="string">"127.0.0.1 must be SSRF-blocked, got: {:?}"</span>,
+<a href=#604 id=604 data-nosnippet>604</a>            result
+<a href=#605 id=605 data-nosnippet>605</a>        );
+<a href=#606 id=606 data-nosnippet>606</a>    }
 <a href=#607 id=607 data-nosnippet>607</a>
-<a href=#608 id=608 data-nosnippet>608</a>    </span><span class="attr">#[test]
-<a href=#609 id=609 data-nosnippet>609</a>    </span><span class="kw">fn </span>ssrf_error_invalid_url_maps_to_webhook_error_invalid_url() {
-<a href=#610 id=610 data-nosnippet>610</a>        <span class="kw">let </span>err: WebhookError = SsrfError::InvalidUrl.into();
-<a href=#611 id=611 data-nosnippet>611</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::InvalidUrl));
-<a href=#612 id=612 data-nosnippet>612</a>    }
-<a href=#613 id=613 data-nosnippet>613</a>
-<a href=#614 id=614 data-nosnippet>614</a>    <span class="attr">#[test]
-<a href=#615 id=615 data-nosnippet>615</a>    </span><span class="kw">fn </span>ssrf_error_resolve_failed_maps_to_webhook_error_resolve_failed() {
-<a href=#616 id=616 data-nosnippet>616</a>        <span class="kw">let </span>err: WebhookError = SsrfError::ResolveFailed.into();
-<a href=#617 id=617 data-nosnippet>617</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::ResolveFailed));
-<a href=#618 id=618 data-nosnippet>618</a>    }
-<a href=#619 id=619 data-nosnippet>619</a>
-<a href=#620 id=620 data-nosnippet>620</a>    <span class="attr">#[test]
-<a href=#621 id=621 data-nosnippet>621</a>    </span><span class="kw">fn </span>ssrf_error_insecure_scheme_maps_to_webhook_error_ssrf_blocked() {
-<a href=#622 id=622 data-nosnippet>622</a>        <span class="comment">// SEC-069: a non-HTTPS target is treated as a blocked delivery.
-<a href=#623 id=623 data-nosnippet>623</a>        </span><span class="kw">let </span>err: WebhookError = SsrfError::InsecureScheme.into();
-<a href=#624 id=624 data-nosnippet>624</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::SsrfBlocked));
+<a href=#608 id=608 data-nosnippet>608</a>    <span class="attr">#[tokio::test]
+<a href=#609 id=609 data-nosnippet>609</a>    </span><span class="kw">async fn </span>webhook_ssrf_resolve_rfc1918_url_blocked() {
+<a href=#610 id=610 data-nosnippet>610</a>        <span class="kw">let </span>result = ssrf::resolve_and_pick(<span class="string">"10.0.0.1"</span>, <span class="number">443</span>, <span class="bool-val">false</span>).<span class="kw">await</span>;
+<a href=#611 id=611 data-nosnippet>611</a>        <span class="macro">assert!</span>(
+<a href=#612 id=612 data-nosnippet>612</a>            <span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(SsrfError::Blocked)),
+<a href=#613 id=613 data-nosnippet>613</a>            <span class="string">"10.x must be SSRF-blocked, got: {:?}"</span>,
+<a href=#614 id=614 data-nosnippet>614</a>            result
+<a href=#615 id=615 data-nosnippet>615</a>        );
+<a href=#616 id=616 data-nosnippet>616</a>    }
+<a href=#617 id=617 data-nosnippet>617</a>
+<a href=#618 id=618 data-nosnippet>618</a>    <span class="attr">#[tokio::test]
+<a href=#619 id=619 data-nosnippet>619</a>    </span><span class="kw">async fn </span>webhook_ssrf_resolve_192168_blocked() {
+<a href=#620 id=620 data-nosnippet>620</a>        <span class="kw">let </span>result = ssrf::resolve_and_pick(<span class="string">"192.168.1.1"</span>, <span class="number">443</span>, <span class="bool-val">false</span>).<span class="kw">await</span>;
+<a href=#621 id=621 data-nosnippet>621</a>        <span class="macro">assert!</span>(
+<a href=#622 id=622 data-nosnippet>622</a>            <span class="macro">matches!</span>(result, <span class="prelude-val">Err</span>(SsrfError::Blocked)),
+<a href=#623 id=623 data-nosnippet>623</a>            <span class="string">"192.168.x must be blocked"
+<a href=#624 id=624 data-nosnippet>624</a>        </span>);
 <a href=#625 id=625 data-nosnippet>625</a>    }
 <a href=#626 id=626 data-nosnippet>626</a>
-<a href=#627 id=627 data-nosnippet>627</a>    <span class="attr">#[test]
-<a href=#628 id=628 data-nosnippet>628</a>    </span><span class="kw">fn </span>ssrf_error_client_build_failed_maps_to_webhook_error_resolve_failed() {
-<a href=#629 id=629 data-nosnippet>629</a>        <span class="kw">let </span>err: WebhookError = SsrfError::ClientBuildFailed.into();
-<a href=#630 id=630 data-nosnippet>630</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::ResolveFailed));
-<a href=#631 id=631 data-nosnippet>631</a>    }
-<a href=#632 id=632 data-nosnippet>632</a>
-<a href=#633 id=633 data-nosnippet>633</a>    <span class="attr">#[test]
-<a href=#634 id=634 data-nosnippet>634</a>    </span><span class="kw">fn </span>ssrf_error_request_failed_maps_to_webhook_error_resolve_failed() {
-<a href=#635 id=635 data-nosnippet>635</a>        <span class="kw">let </span>err: WebhookError = SsrfError::RequestFailed(<span class="string">"connection reset"</span>.into()).into();
-<a href=#636 id=636 data-nosnippet>636</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::ResolveFailed));
-<a href=#637 id=637 data-nosnippet>637</a>    }
+<a href=#627 id=627 data-nosnippet>627</a>    <span class="doccomment">/// SECHRD-02: a blocked target must map through `WebhookError::SsrfBlocked`
+<a href=#628 id=628 data-nosnippet>628</a>    /// (and therefore the existing fail-closed `AxiamApiError` mapping), not a
+<a href=#629 id=629 data-nosnippet>629</a>    /// panic or a generic error — proving the `From&lt;SsrfError&gt; for WebhookError`
+<a href=#630 id=630 data-nosnippet>630</a>    /// bridge added in this plan.
+<a href=#631 id=631 data-nosnippet>631</a>    </span><span class="attr">#[test]
+<a href=#632 id=632 data-nosnippet>632</a>    </span><span class="kw">fn </span>ssrf_error_blocked_maps_to_webhook_error_ssrf_blocked() {
+<a href=#633 id=633 data-nosnippet>633</a>        <span class="kw">let </span>err: WebhookError = SsrfError::Blocked.into();
+<a href=#634 id=634 data-nosnippet>634</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::SsrfBlocked));
+<a href=#635 id=635 data-nosnippet>635</a>    }
+<a href=#636 id=636 data-nosnippet>636</a>
+<a href=#637 id=637 data-nosnippet>637</a>    <span class="comment">// ---- Remaining `From&lt;SsrfError&gt; for WebhookError` arms (D-01a) ----
 <a href=#638 id=638 data-nosnippet>638</a>
-<a href=#639 id=639 data-nosnippet>639</a>    <span class="attr">#[test]
-<a href=#640 id=640 data-nosnippet>640</a>    </span><span class="kw">fn </span>ssrf_error_too_many_redirects_maps_to_webhook_error_resolve_failed() {
-<a href=#641 id=641 data-nosnippet>641</a>        <span class="kw">let </span>err: WebhookError = SsrfError::TooManyRedirects.into();
-<a href=#642 id=642 data-nosnippet>642</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::ResolveFailed));
+<a href=#639 id=639 data-nosnippet>639</a>    </span><span class="attr">#[test]
+<a href=#640 id=640 data-nosnippet>640</a>    </span><span class="kw">fn </span>ssrf_error_invalid_url_maps_to_webhook_error_invalid_url() {
+<a href=#641 id=641 data-nosnippet>641</a>        <span class="kw">let </span>err: WebhookError = SsrfError::InvalidUrl.into();
+<a href=#642 id=642 data-nosnippet>642</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::InvalidUrl));
 <a href=#643 id=643 data-nosnippet>643</a>    }
 <a href=#644 id=644 data-nosnippet>644</a>
 <a href=#645 id=645 data-nosnippet>645</a>    <span class="attr">#[test]
-<a href=#646 id=646 data-nosnippet>646</a>    </span><span class="kw">fn </span>ssrf_error_response_too_large_maps_to_webhook_error_resolve_failed() {
-<a href=#647 id=647 data-nosnippet>647</a>        <span class="kw">let </span>err: WebhookError = SsrfError::ResponseTooLarge(<span class="number">65536</span>).into();
+<a href=#646 id=646 data-nosnippet>646</a>    </span><span class="kw">fn </span>ssrf_error_resolve_failed_maps_to_webhook_error_resolve_failed() {
+<a href=#647 id=647 data-nosnippet>647</a>        <span class="kw">let </span>err: WebhookError = SsrfError::ResolveFailed.into();
 <a href=#648 id=648 data-nosnippet>648</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::ResolveFailed));
 <a href=#649 id=649 data-nosnippet>649</a>    }
 <a href=#650 id=650 data-nosnippet>650</a>
-<a href=#651 id=651 data-nosnippet>651</a>    <span class="comment">// ---- `From&lt;WebhookError&gt; for AxiamApiError` status-code mapping ----
-<a href=#652 id=652 data-nosnippet>652</a>    //
-<a href=#653 id=653 data-nosnippet>653</a>    // `deliver_once`'s `Err(WebhookError)` is only ever converted through
-<a href=#654 id=654 data-nosnippet>654</a>    // this `From` impl by a caller that turns it into an HTTP response (no
-<a href=#655 id=655 data-nosnippet>655</a>    // existing test does so directly — the AMQP consumer only calls
-<a href=#656 id=656 data-nosnippet>656</a>    // `.to_string()` on it, and the direct `deliver_once` tests just assert
-<a href=#657 id=657 data-nosnippet>657</a>    // `is_err()`). These prove the mapping itself, independent of any
-<a href=#658 id=658 data-nosnippet>658</a>    // particular caller.
-<a href=#659 id=659 data-nosnippet>659</a>
-<a href=#660 id=660 data-nosnippet>660</a>    </span><span class="attr">#[test]
-<a href=#661 id=661 data-nosnippet>661</a>    </span><span class="kw">fn </span>webhook_error_encryption_key_missing_maps_to_503() {
-<a href=#662 id=662 data-nosnippet>662</a>        <span class="kw">use </span>actix_web::ResponseError;
-<a href=#663 id=663 data-nosnippet>663</a>        <span class="kw">use </span>actix_web::http::StatusCode;
-<a href=#664 id=664 data-nosnippet>664</a>        <span class="kw">let </span>api_err: <span class="kw">crate</span>::error::AxiamApiError = WebhookError::EncryptionKeyMissing.into();
-<a href=#665 id=665 data-nosnippet>665</a>        <span class="macro">assert_eq!</span>(api_err.status_code(), StatusCode::SERVICE_UNAVAILABLE);
-<a href=#666 id=666 data-nosnippet>666</a>    }
-<a href=#667 id=667 data-nosnippet>667</a>
-<a href=#668 id=668 data-nosnippet>668</a>    <span class="attr">#[test]
-<a href=#669 id=669 data-nosnippet>669</a>    </span><span class="kw">fn </span>webhook_error_lookup_failed_maps_to_500() {
-<a href=#670 id=670 data-nosnippet>670</a>        <span class="kw">use </span>actix_web::ResponseError;
-<a href=#671 id=671 data-nosnippet>671</a>        <span class="kw">use </span>actix_web::http::StatusCode;
-<a href=#672 id=672 data-nosnippet>672</a>        <span class="kw">let </span>api_err: <span class="kw">crate</span>::error::AxiamApiError =
-<a href=#673 id=673 data-nosnippet>673</a>            WebhookError::WebhookLookupFailed(<span class="string">"not found"</span>.into()).into();
-<a href=#674 id=674 data-nosnippet>674</a>        <span class="macro">assert_eq!</span>(api_err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-<a href=#675 id=675 data-nosnippet>675</a>    }
-<a href=#676 id=676 data-nosnippet>676</a>
-<a href=#677 id=677 data-nosnippet>677</a>    <span class="attr">#[test]
-<a href=#678 id=678 data-nosnippet>678</a>    </span><span class="kw">fn </span>webhook_error_other_variants_map_to_500() {
-<a href=#679 id=679 data-nosnippet>679</a>        <span class="kw">use </span>actix_web::ResponseError;
-<a href=#680 id=680 data-nosnippet>680</a>        <span class="kw">use </span>actix_web::http::StatusCode;
-<a href=#681 id=681 data-nosnippet>681</a>        <span class="kw">for </span>err <span class="kw">in </span>[
-<a href=#682 id=682 data-nosnippet>682</a>            WebhookError::InvalidUrl,
-<a href=#683 id=683 data-nosnippet>683</a>            WebhookError::ResolveFailed,
-<a href=#684 id=684 data-nosnippet>684</a>            WebhookError::SsrfBlocked,
-<a href=#685 id=685 data-nosnippet>685</a>            WebhookError::SecretDecrypt(<span class="string">"bad ciphertext"</span>.into()),
-<a href=#686 id=686 data-nosnippet>686</a>            WebhookError::SecretEncrypt(<span class="string">"key rejected"</span>.into()),
-<a href=#687 id=687 data-nosnippet>687</a>        ] {
-<a href=#688 id=688 data-nosnippet>688</a>            <span class="kw">let </span>api_err: <span class="kw">crate</span>::error::AxiamApiError = err.into();
-<a href=#689 id=689 data-nosnippet>689</a>            <span class="macro">assert_eq!</span>(api_err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-<a href=#690 id=690 data-nosnippet>690</a>        }
-<a href=#691 id=691 data-nosnippet>691</a>    }
-<a href=#692 id=692 data-nosnippet>692</a>
-<a href=#693 id=693 data-nosnippet>693</a>    <span class="comment">// SEC-031: round-trip encrypt/decrypt of webhook secret
-<a href=#694 id=694 data-nosnippet>694</a>    </span><span class="attr">#[test]
-<a href=#695 id=695 data-nosnippet>695</a>    </span><span class="kw">fn </span>webhook_secret_encrypt_decrypt_round_trip() {
-<a href=#696 id=696 data-nosnippet>696</a>        <span class="kw">let </span>key = [<span class="number">0x42u8</span>; <span class="number">32</span>];
-<a href=#697 id=697 data-nosnippet>697</a>        <span class="kw">let </span>secret = <span class="string">"super-secret-hmac-key"</span>;
-<a href=#698 id=698 data-nosnippet>698</a>        <span class="kw">let </span>encrypted = encrypt_webhook_secret(<span class="kw-2">&amp;</span>key, secret).expect(<span class="string">"encrypt"</span>);
-<a href=#699 id=699 data-nosnippet>699</a>        <span class="macro">assert_ne!</span>(
-<a href=#700 id=700 data-nosnippet>700</a>            encrypted, secret,
-<a href=#701 id=701 data-nosnippet>701</a>            <span class="string">"encrypted value must differ from plaintext"
-<a href=#702 id=702 data-nosnippet>702</a>        </span>);
-<a href=#703 id=703 data-nosnippet>703</a>
-<a href=#704 id=704 data-nosnippet>704</a>        <span class="kw">let </span>decrypted_bytes = aes256gcm_decrypt(<span class="kw-2">&amp;</span>key, <span class="kw-2">&amp;</span>encrypted).expect(<span class="string">"decrypt"</span>);
-<a href=#705 id=705 data-nosnippet>705</a>        <span class="kw">let </span>decrypted = String::from_utf8(decrypted_bytes).expect(<span class="string">"utf8"</span>);
-<a href=#706 id=706 data-nosnippet>706</a>        <span class="macro">assert_eq!</span>(decrypted, secret);
-<a href=#707 id=707 data-nosnippet>707</a>    }
-<a href=#708 id=708 data-nosnippet>708</a>}
+<a href=#651 id=651 data-nosnippet>651</a>    <span class="attr">#[test]
+<a href=#652 id=652 data-nosnippet>652</a>    </span><span class="kw">fn </span>ssrf_error_insecure_scheme_maps_to_webhook_error_ssrf_blocked() {
+<a href=#653 id=653 data-nosnippet>653</a>        <span class="comment">// SEC-069: a non-HTTPS target is treated as a blocked delivery.
+<a href=#654 id=654 data-nosnippet>654</a>        </span><span class="kw">let </span>err: WebhookError = SsrfError::InsecureScheme.into();
+<a href=#655 id=655 data-nosnippet>655</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::SsrfBlocked));
+<a href=#656 id=656 data-nosnippet>656</a>    }
+<a href=#657 id=657 data-nosnippet>657</a>
+<a href=#658 id=658 data-nosnippet>658</a>    <span class="attr">#[test]
+<a href=#659 id=659 data-nosnippet>659</a>    </span><span class="kw">fn </span>ssrf_error_client_build_failed_maps_to_webhook_error_resolve_failed() {
+<a href=#660 id=660 data-nosnippet>660</a>        <span class="kw">let </span>err: WebhookError = SsrfError::ClientBuildFailed.into();
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::ResolveFailed));
+<a href=#662 id=662 data-nosnippet>662</a>    }
+<a href=#663 id=663 data-nosnippet>663</a>
+<a href=#664 id=664 data-nosnippet>664</a>    <span class="attr">#[test]
+<a href=#665 id=665 data-nosnippet>665</a>    </span><span class="kw">fn </span>ssrf_error_request_failed_maps_to_webhook_error_resolve_failed() {
+<a href=#666 id=666 data-nosnippet>666</a>        <span class="kw">let </span>err: WebhookError = SsrfError::RequestFailed(<span class="string">"connection reset"</span>.into()).into();
+<a href=#667 id=667 data-nosnippet>667</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::ResolveFailed));
+<a href=#668 id=668 data-nosnippet>668</a>    }
+<a href=#669 id=669 data-nosnippet>669</a>
+<a href=#670 id=670 data-nosnippet>670</a>    <span class="attr">#[test]
+<a href=#671 id=671 data-nosnippet>671</a>    </span><span class="kw">fn </span>ssrf_error_too_many_redirects_maps_to_webhook_error_resolve_failed() {
+<a href=#672 id=672 data-nosnippet>672</a>        <span class="kw">let </span>err: WebhookError = SsrfError::TooManyRedirects.into();
+<a href=#673 id=673 data-nosnippet>673</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::ResolveFailed));
+<a href=#674 id=674 data-nosnippet>674</a>    }
+<a href=#675 id=675 data-nosnippet>675</a>
+<a href=#676 id=676 data-nosnippet>676</a>    <span class="attr">#[test]
+<a href=#677 id=677 data-nosnippet>677</a>    </span><span class="kw">fn </span>ssrf_error_response_too_large_maps_to_webhook_error_resolve_failed() {
+<a href=#678 id=678 data-nosnippet>678</a>        <span class="kw">let </span>err: WebhookError = SsrfError::ResponseTooLarge(<span class="number">65536</span>).into();
+<a href=#679 id=679 data-nosnippet>679</a>        <span class="macro">assert!</span>(<span class="macro">matches!</span>(err, WebhookError::ResolveFailed));
+<a href=#680 id=680 data-nosnippet>680</a>    }
+<a href=#681 id=681 data-nosnippet>681</a>
+<a href=#682 id=682 data-nosnippet>682</a>    <span class="comment">// ---- `From&lt;WebhookError&gt; for AxiamApiError` status-code mapping ----
+<a href=#683 id=683 data-nosnippet>683</a>    //
+<a href=#684 id=684 data-nosnippet>684</a>    // `deliver_once`'s `Err(WebhookError)` is only ever converted through
+<a href=#685 id=685 data-nosnippet>685</a>    // this `From` impl by a caller that turns it into an HTTP response (no
+<a href=#686 id=686 data-nosnippet>686</a>    // existing test does so directly — the AMQP consumer only calls
+<a href=#687 id=687 data-nosnippet>687</a>    // `.to_string()` on it, and the direct `deliver_once` tests just assert
+<a href=#688 id=688 data-nosnippet>688</a>    // `is_err()`). These prove the mapping itself, independent of any
+<a href=#689 id=689 data-nosnippet>689</a>    // particular caller.
+<a href=#690 id=690 data-nosnippet>690</a>
+<a href=#691 id=691 data-nosnippet>691</a>    </span><span class="attr">#[test]
+<a href=#692 id=692 data-nosnippet>692</a>    </span><span class="kw">fn </span>webhook_error_encryption_key_missing_maps_to_503() {
+<a href=#693 id=693 data-nosnippet>693</a>        <span class="kw">use </span>actix_web::ResponseError;
+<a href=#694 id=694 data-nosnippet>694</a>        <span class="kw">use </span>actix_web::http::StatusCode;
+<a href=#695 id=695 data-nosnippet>695</a>        <span class="kw">let </span>api_err: <span class="kw">crate</span>::error::AxiamApiError = WebhookError::EncryptionKeyMissing.into();
+<a href=#696 id=696 data-nosnippet>696</a>        <span class="macro">assert_eq!</span>(api_err.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+<a href=#697 id=697 data-nosnippet>697</a>    }
+<a href=#698 id=698 data-nosnippet>698</a>
+<a href=#699 id=699 data-nosnippet>699</a>    <span class="attr">#[test]
+<a href=#700 id=700 data-nosnippet>700</a>    </span><span class="kw">fn </span>webhook_error_lookup_failed_maps_to_500() {
+<a href=#701 id=701 data-nosnippet>701</a>        <span class="kw">use </span>actix_web::ResponseError;
+<a href=#702 id=702 data-nosnippet>702</a>        <span class="kw">use </span>actix_web::http::StatusCode;
+<a href=#703 id=703 data-nosnippet>703</a>        <span class="kw">let </span>api_err: <span class="kw">crate</span>::error::AxiamApiError =
+<a href=#704 id=704 data-nosnippet>704</a>            WebhookError::WebhookLookupFailed(<span class="string">"not found"</span>.into()).into();
+<a href=#705 id=705 data-nosnippet>705</a>        <span class="macro">assert_eq!</span>(api_err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+<a href=#706 id=706 data-nosnippet>706</a>    }
+<a href=#707 id=707 data-nosnippet>707</a>
+<a href=#708 id=708 data-nosnippet>708</a>    <span class="attr">#[test]
+<a href=#709 id=709 data-nosnippet>709</a>    </span><span class="kw">fn </span>webhook_error_other_variants_map_to_500() {
+<a href=#710 id=710 data-nosnippet>710</a>        <span class="kw">use </span>actix_web::ResponseError;
+<a href=#711 id=711 data-nosnippet>711</a>        <span class="kw">use </span>actix_web::http::StatusCode;
+<a href=#712 id=712 data-nosnippet>712</a>        <span class="kw">for </span>err <span class="kw">in </span>[
+<a href=#713 id=713 data-nosnippet>713</a>            WebhookError::InvalidUrl,
+<a href=#714 id=714 data-nosnippet>714</a>            WebhookError::ResolveFailed,
+<a href=#715 id=715 data-nosnippet>715</a>            WebhookError::SsrfBlocked,
+<a href=#716 id=716 data-nosnippet>716</a>            WebhookError::SecretDecrypt(<span class="string">"bad ciphertext"</span>.into()),
+<a href=#717 id=717 data-nosnippet>717</a>            WebhookError::SecretEncrypt(<span class="string">"key rejected"</span>.into()),
+<a href=#718 id=718 data-nosnippet>718</a>        ] {
+<a href=#719 id=719 data-nosnippet>719</a>            <span class="kw">let </span>api_err: <span class="kw">crate</span>::error::AxiamApiError = err.into();
+<a href=#720 id=720 data-nosnippet>720</a>            <span class="macro">assert_eq!</span>(api_err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+<a href=#721 id=721 data-nosnippet>721</a>        }
+<a href=#722 id=722 data-nosnippet>722</a>    }
+<a href=#723 id=723 data-nosnippet>723</a>
+<a href=#724 id=724 data-nosnippet>724</a>    <span class="comment">// SEC-031: round-trip encrypt/decrypt of webhook secret
+<a href=#725 id=725 data-nosnippet>725</a>    </span><span class="attr">#[test]
+<a href=#726 id=726 data-nosnippet>726</a>    </span><span class="kw">fn </span>webhook_secret_encrypt_decrypt_round_trip() {
+<a href=#727 id=727 data-nosnippet>727</a>        <span class="kw">let </span>key = [<span class="number">0x42u8</span>; <span class="number">32</span>];
+<a href=#728 id=728 data-nosnippet>728</a>        <span class="kw">let </span>secret = <span class="string">"super-secret-hmac-key"</span>;
+<a href=#729 id=729 data-nosnippet>729</a>        <span class="kw">let </span>encrypted = encrypt_webhook_secret(<span class="kw-2">&amp;</span>key, secret).expect(<span class="string">"encrypt"</span>);
+<a href=#730 id=730 data-nosnippet>730</a>        <span class="macro">assert_ne!</span>(
+<a href=#731 id=731 data-nosnippet>731</a>            encrypted, secret,
+<a href=#732 id=732 data-nosnippet>732</a>            <span class="string">"encrypted value must differ from plaintext"
+<a href=#733 id=733 data-nosnippet>733</a>        </span>);
+<a href=#734 id=734 data-nosnippet>734</a>
+<a href=#735 id=735 data-nosnippet>735</a>        <span class="kw">let </span>decrypted_bytes = aes256gcm_decrypt(<span class="kw-2">&amp;</span>key, <span class="kw-2">&amp;</span>encrypted).expect(<span class="string">"decrypt"</span>);
+<a href=#736 id=736 data-nosnippet>736</a>        <span class="kw">let </span>decrypted = String::from_utf8(decrypted_bytes).expect(<span class="string">"utf8"</span>);
+<a href=#737 id=737 data-nosnippet>737</a>        <span class="macro">assert_eq!</span>(decrypted, secret);
+<a href=#738 id=738 data-nosnippet>738</a>    }
+<a href=#739 id=739 data-nosnippet>739</a>}
 </code></pre></div></section></main></body></html>

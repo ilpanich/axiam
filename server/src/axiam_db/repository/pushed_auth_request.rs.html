@@ -390,5 +390,27 @@
 <a href=#390 id=390 data-nosnippet>390</a>        <span class="kw">let </span>rows: Vec&lt;CountRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
 <a href=#391 id=391 data-nosnippet>391</a>        <span class="prelude-val">Ok</span>(rows.first().map(|r| r.c.max(<span class="number">0</span>) <span class="kw">as </span>u64).unwrap_or(<span class="number">0</span>))
 <a href=#392 id=392 data-nosnippet>392</a>    }
-<a href=#393 id=393 data-nosnippet>393</a>}
+<a href=#393 id=393 data-nosnippet>393</a>
+<a href=#394 id=394 data-nosnippet>394</a>    <span class="kw">async fn </span>delete_all_for_client(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, client_id: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#395 id=395 data-nosnippet>395</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#396 id=396 data-nosnippet>396</a>            </span>.db
+<a href=#397 id=397 data-nosnippet>397</a>            .current()
+<a href=#398 id=398 data-nosnippet>398</a>            .query(
+<a href=#399 id=399 data-nosnippet>399</a>                <span class="string">"SELECT count() AS c FROM (DELETE pushed_auth_request \
+<a href=#400 id=400 data-nosnippet>400</a>                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+<a href=#401 id=401 data-nosnippet>401</a>                 RETURN BEFORE) GROUP ALL"</span>,
+<a href=#402 id=402 data-nosnippet>402</a>            )
+<a href=#403 id=403 data-nosnippet>403</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#404 id=404 data-nosnippet>404</a>            .bind((<span class="string">"client_id"</span>, client_id.to_string()))
+<a href=#405 id=405 data-nosnippet>405</a>            .<span class="kw">await
+<a href=#406 id=406 data-nosnippet>406</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#407 id=407 data-nosnippet>407</a>
+<a href=#408 id=408 data-nosnippet>408</a>        <span class="attr">#[derive(Debug, SurrealValue)]
+<a href=#409 id=409 data-nosnippet>409</a>        </span><span class="kw">struct </span>CountRow {
+<a href=#410 id=410 data-nosnippet>410</a>            c: i64,
+<a href=#411 id=411 data-nosnippet>411</a>        }
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="kw">let </span>rows: Vec&lt;CountRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#413 id=413 data-nosnippet>413</a>        <span class="prelude-val">Ok</span>(rows.first().map(|r| r.c.max(<span class="number">0</span>) <span class="kw">as </span>u64).unwrap_or(<span class="number">0</span>))
+<a href=#414 id=414 data-nosnippet>414</a>    }
+<a href=#415 id=415 data-nosnippet>415</a>}
 </code></pre></div></section></main></body></html>

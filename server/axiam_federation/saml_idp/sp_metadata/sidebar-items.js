@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["MAX_SP_METADATA_BYTES"],"enum":["MetadataError"],"fn":["fetch_sp_metadata","parse_sp_metadata"],"struct":["SpMetadataDraft"]};
+window.SIDEBAR_ITEMS = {"constant":["MAX_SP_METADATA_BYTES"],"enum":["MetadataError"],"fn":["fetch_sp_metadata","parse_sp_metadata","vet_sp_metadata_url"],"struct":["SpMetadataDraft"]};

@@ -635,162 +635,165 @@
 <a href=#635 id=635 data-nosnippet>635</a>            <span class="kw">async fn </span>cleanup_expired(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="kw">_</span>: Uuid) -&gt; AxiamResult&lt;u64&gt; {
 <a href=#636 id=636 data-nosnippet>636</a>                <span class="macro">unreachable!</span>(<span class="string">"peek does not clean up"</span>)
 <a href=#637 id=637 data-nosnippet>637</a>            }
-<a href=#638 id=638 data-nosnippet>638</a>        }
-<a href=#639 id=639 data-nosnippet>639</a>    }
-<a href=#640 id=640 data-nosnippet>640</a>
-<a href=#641 id=641 data-nosnippet>641</a>    <span class="kw">use </span>std::sync::atomic::Ordering;
-<a href=#642 id=642 data-nosnippet>642</a>
-<a href=#643 id=643 data-nosnippet>643</a>    <span class="kw">use </span>doubles::{NoClients, OneRow};
-<a href=#644 id=644 data-nosnippet>644</a>
-<a href=#645 id=645 data-nosnippet>645</a>    <span class="kw">fn </span>service(repo: OneRow) -&gt; ParService&lt;NoClients, OneRow&gt; {
-<a href=#646 id=646 data-nosnippet>646</a>        ParService::new(NoClients, repo)
-<a href=#647 id=647 data-nosnippet>647</a>    }
-<a href=#648 id=648 data-nosnippet>648</a>
-<a href=#649 id=649 data-nosnippet>649</a>    <span class="doccomment">/// A live handle is spendable, and **stays** spendable.
-<a href=#650 id=650 data-nosnippet>650</a>    ///
-<a href=#651 id=651 data-nosnippet>651</a>    /// The second assertion is the one that matters. `peek` exists so that a
-<a href=#652 id=652 data-nosnippet>652</a>    /// dead `request_uri` can be refused before a person is asked to sign in
-<a href=#653 id=653 data-nosnippet>653</a>    /// for it; if it spent the handle on the way past, it would break the
-<a href=#654 id=654 data-nosnippet>654</a>    /// opposite case — the OIDF module
-<a href=#655 id=655 data-nosnippet>655</a>    /// `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds`
-<a href=#656 id=656 data-nosnippet>656</a>    /// presents one `request_uri` twice before any authorization completes and
-<a href=#657 id=657 data-nosnippet>657</a>    /// requires the login page both times.
-<a href=#658 id=658 data-nosnippet>658</a>    </span><span class="attr">#[tokio::test]
-<a href=#659 id=659 data-nosnippet>659</a>    </span><span class="kw">async fn </span>a_live_handle_passes_and_is_not_spent() {
-<a href=#660 id=660 data-nosnippet>660</a>        <span class="kw">let </span>tenant = Uuid::now_v7();
-<a href=#661 id=661 data-nosnippet>661</a>        <span class="kw">let </span>svc = service(OneRow::live(tenant, <span class="string">"client-a"</span>));
-<a href=#662 id=662 data-nosnippet>662</a>        <span class="kw">let </span>uri = generate_request_uri();
-<a href=#663 id=663 data-nosnippet>663</a>
-<a href=#664 id=664 data-nosnippet>664</a>        <span class="macro">assert!</span>(svc.peek(tenant, <span class="string">"client-a"</span>, <span class="kw-2">&amp;</span>uri).<span class="kw">await</span>.is_ok());
-<a href=#665 id=665 data-nosnippet>665</a>        <span class="macro">assert_eq!</span>(
-<a href=#666 id=666 data-nosnippet>666</a>            svc.par_repo.consumes.load(Ordering::SeqCst),
-<a href=#667 id=667 data-nosnippet>667</a>            <span class="number">0</span>,
-<a href=#668 id=668 data-nosnippet>668</a>            <span class="string">"peek must never call consume — the single-use decision belongs in \
-<a href=#669 id=669 data-nosnippet>669</a>             the handler, after a principal exists"
-<a href=#670 id=670 data-nosnippet>670</a>        </span>);
-<a href=#671 id=671 data-nosnippet>671</a>        <span class="macro">assert_eq!</span>(svc.par_repo.reads.load(Ordering::SeqCst), <span class="number">1</span>);
-<a href=#672 id=672 data-nosnippet>672</a>    }
-<a href=#673 id=673 data-nosnippet>673</a>
-<a href=#674 id=674 data-nosnippet>674</a>    <span class="doccomment">/// Unknown, expired and already-used are one answer, and it is the same
-<a href=#675 id=675 data-nosnippet>675</a>    /// sentence `consume` produces — so a refusal does not change its wording
-<a href=#676 id=676 data-nosnippet>676</a>    /// depending on how far the request got.
-<a href=#677 id=677 data-nosnippet>677</a>    </span><span class="attr">#[tokio::test]
-<a href=#678 id=678 data-nosnippet>678</a>    </span><span class="kw">async fn </span>a_gone_handle_is_refused_with_the_shared_sentence() {
-<a href=#679 id=679 data-nosnippet>679</a>        <span class="kw">let </span>tenant = Uuid::now_v7();
-<a href=#680 id=680 data-nosnippet>680</a>        <span class="kw">let </span>svc = service(OneRow::gone());
-<a href=#681 id=681 data-nosnippet>681</a>        <span class="kw">let </span>err = svc
-<a href=#682 id=682 data-nosnippet>682</a>            .peek(tenant, <span class="string">"client-a"</span>, <span class="kw-2">&amp;</span>generate_request_uri())
-<a href=#683 id=683 data-nosnippet>683</a>            .<span class="kw">await
-<a href=#684 id=684 data-nosnippet>684</a>            </span>.expect_err(<span class="string">"a handle that matched nothing must be refused"</span>);
-<a href=#685 id=685 data-nosnippet>685</a>        <span class="macro">assert!</span>(
-<a href=#686 id=686 data-nosnippet>686</a>            is_request_uri_gone(<span class="kw-2">&amp;</span>err),
-<a href=#687 id=687 data-nosnippet>687</a>            <span class="string">"the recogniser the authorization endpoint matches on must accept \
-<a href=#688 id=688 data-nosnippet>688</a>             this refusal: {err}"
-<a href=#689 id=689 data-nosnippet>689</a>        </span>);
-<a href=#690 id=690 data-nosnippet>690</a>        <span class="macro">assert_eq!</span>(svc.par_repo.consumes.load(Ordering::SeqCst), <span class="number">0</span>);
-<a href=#691 id=691 data-nosnippet>691</a>    }
-<a href=#692 id=692 data-nosnippet>692</a>
-<a href=#693 id=693 data-nosnippet>693</a>    <span class="doccomment">/// A handle belongs to the client that pushed it, and this is a **different**
-<a href=#694 id=694 data-nosnippet>694</a>    /// refusal from "gone" — deliberately, and the recogniser says so.
-<a href=#695 id=695 data-nosnippet>695</a>    </span><span class="attr">#[tokio::test]
-<a href=#696 id=696 data-nosnippet>696</a>    </span><span class="kw">async fn </span>another_clients_handle_is_refused_by_name() {
-<a href=#697 id=697 data-nosnippet>697</a>        <span class="kw">let </span>tenant = Uuid::now_v7();
-<a href=#698 id=698 data-nosnippet>698</a>        <span class="kw">let </span>svc = service(OneRow::live(tenant, <span class="string">"client-a"</span>));
-<a href=#699 id=699 data-nosnippet>699</a>        <span class="kw">let </span>err = svc
-<a href=#700 id=700 data-nosnippet>700</a>            .peek(tenant, <span class="string">"client-b"</span>, <span class="kw-2">&amp;</span>generate_request_uri())
-<a href=#701 id=701 data-nosnippet>701</a>            .<span class="kw">await
-<a href=#702 id=702 data-nosnippet>702</a>            </span>.expect_err(<span class="string">"a handle issued to another client must be refused"</span>);
-<a href=#703 id=703 data-nosnippet>703</a>        <span class="macro">assert!</span>(
-<a href=#704 id=704 data-nosnippet>704</a>            !is_request_uri_gone(<span class="kw-2">&amp;</span>err),
-<a href=#705 id=705 data-nosnippet>705</a>            <span class="string">"a wrong-client refusal must keep its own answer: {err}"
-<a href=#706 id=706 data-nosnippet>706</a>        </span>);
-<a href=#707 id=707 data-nosnippet>707</a>        <span class="macro">assert!</span>(
-<a href=#708 id=708 data-nosnippet>708</a>            err.to_string().contains(<span class="string">"not issued to this client"</span>),
-<a href=#709 id=709 data-nosnippet>709</a>            <span class="string">"{err}"
-<a href=#710 id=710 data-nosnippet>710</a>        </span>);
-<a href=#711 id=711 data-nosnippet>711</a>        <span class="macro">assert_eq!</span>(svc.par_repo.consumes.load(Ordering::SeqCst), <span class="number">0</span>);
-<a href=#712 id=712 data-nosnippet>712</a>    }
-<a href=#713 id=713 data-nosnippet>713</a>
-<a href=#714 id=714 data-nosnippet>714</a>    <span class="doccomment">/// A value that is not a PAR handle is refused before the datastore is
-<a href=#715 id=715 data-nosnippet>715</a>    /// asked, exactly as `consume` refuses it — the authorization endpoint
-<a href=#716 id=716 data-nosnippet>716</a>    /// classifies a request object by reference separately and must keep the
-<a href=#717 id=717 data-nosnippet>717</a>    /// OIDC code that goes with it.
-<a href=#718 id=718 data-nosnippet>718</a>    </span><span class="attr">#[tokio::test]
-<a href=#719 id=719 data-nosnippet>719</a>    </span><span class="kw">async fn </span>a_value_without_the_urn_prefix_never_reaches_the_datastore() {
-<a href=#720 id=720 data-nosnippet>720</a>        <span class="kw">let </span>tenant = Uuid::now_v7();
-<a href=#721 id=721 data-nosnippet>721</a>        <span class="kw">let </span>svc = service(OneRow::live(tenant, <span class="string">"client-a"</span>));
-<a href=#722 id=722 data-nosnippet>722</a>        <span class="kw">let </span>err = svc
-<a href=#723 id=723 data-nosnippet>723</a>            .peek(tenant, <span class="string">"client-a"</span>, <span class="string">"https://attacker.example/request.jwt"</span>)
-<a href=#724 id=724 data-nosnippet>724</a>            .<span class="kw">await
-<a href=#725 id=725 data-nosnippet>725</a>            </span>.expect_err(<span class="string">"a non-PAR request_uri is not a handle"</span>);
-<a href=#726 id=726 data-nosnippet>726</a>        <span class="macro">assert!</span>(
-<a href=#727 id=727 data-nosnippet>727</a>            err.to_string()
-<a href=#728 id=728 data-nosnippet>728</a>                .contains(<span class="string">"not a pushed authorization request URI"</span>),
-<a href=#729 id=729 data-nosnippet>729</a>            <span class="string">"{err}"
-<a href=#730 id=730 data-nosnippet>730</a>        </span>);
-<a href=#731 id=731 data-nosnippet>731</a>        <span class="macro">assert_eq!</span>(
-<a href=#732 id=732 data-nosnippet>732</a>            svc.par_repo.reads.load(Ordering::SeqCst),
-<a href=#733 id=733 data-nosnippet>733</a>            <span class="number">0</span>,
-<a href=#734 id=734 data-nosnippet>734</a>            <span class="string">"the prefix check must come first, as it does in consume"
-<a href=#735 id=735 data-nosnippet>735</a>        </span>);
-<a href=#736 id=736 data-nosnippet>736</a>    }
-<a href=#737 id=737 data-nosnippet>737</a>
-<a href=#738 id=738 data-nosnippet>738</a>    <span class="attr">#[test]
-<a href=#739 id=739 data-nosnippet>739</a>    </span><span class="kw">fn </span>generated_request_uri_carries_the_rfc_prefix() {
-<a href=#740 id=740 data-nosnippet>740</a>        <span class="macro">assert!</span>(generate_request_uri().starts_with(REQUEST_URI_PREFIX));
-<a href=#741 id=741 data-nosnippet>741</a>    }
-<a href=#742 id=742 data-nosnippet>742</a>
-<a href=#743 id=743 data-nosnippet>743</a>    <span class="attr">#[test]
-<a href=#744 id=744 data-nosnippet>744</a>    </span><span class="kw">fn </span>generated_request_uris_are_distinct() {
-<a href=#745 id=745 data-nosnippet>745</a>        <span class="kw">let </span>a = generate_request_uri();
-<a href=#746 id=746 data-nosnippet>746</a>        <span class="kw">let </span>b = generate_request_uri();
-<a href=#747 id=747 data-nosnippet>747</a>        <span class="macro">assert_ne!</span>(a, b, <span class="string">"request_uri must be CSPRNG, not a counter"</span>);
-<a href=#748 id=748 data-nosnippet>748</a>    }
-<a href=#749 id=749 data-nosnippet>749</a>
-<a href=#750 id=750 data-nosnippet>750</a>    <span class="attr">#[test]
-<a href=#751 id=751 data-nosnippet>751</a>    </span><span class="kw">fn </span>hash_ignores_the_prefix() {
-<a href=#752 id=752 data-nosnippet>752</a>        <span class="comment">// The prefix is constant, so hashing it adds nothing; what matters is
-<a href=#753 id=753 data-nosnippet>753</a>        // that a caller passing the full URI and one passing the bare
-<a href=#754 id=754 data-nosnippet>754</a>        // component resolve to the same stored row.
-<a href=#755 id=755 data-nosnippet>755</a>        </span><span class="kw">let </span>uri = generate_request_uri();
-<a href=#756 id=756 data-nosnippet>756</a>        <span class="kw">let </span>bare = uri.strip_prefix(REQUEST_URI_PREFIX).unwrap();
-<a href=#757 id=757 data-nosnippet>757</a>        <span class="macro">assert_eq!</span>(hash_request_uri(<span class="kw-2">&amp;</span>uri), hash_request_uri(bare));
-<a href=#758 id=758 data-nosnippet>758</a>    }
-<a href=#759 id=759 data-nosnippet>759</a>
-<a href=#760 id=760 data-nosnippet>760</a>    <span class="attr">#[test]
-<a href=#761 id=761 data-nosnippet>761</a>    </span><span class="kw">fn </span>hash_is_not_the_plaintext() {
-<a href=#762 id=762 data-nosnippet>762</a>        <span class="kw">let </span>uri = generate_request_uri();
-<a href=#763 id=763 data-nosnippet>763</a>        <span class="kw">let </span>h = hash_request_uri(<span class="kw-2">&amp;</span>uri);
-<a href=#764 id=764 data-nosnippet>764</a>        <span class="macro">assert!</span>(!uri.contains(<span class="kw-2">&amp;</span>h));
-<a href=#765 id=765 data-nosnippet>765</a>        <span class="macro">assert_eq!</span>(h.len(), <span class="number">64</span>, <span class="string">"hex-encoded SHA-256"</span>);
-<a href=#766 id=766 data-nosnippet>766</a>    }
-<a href=#767 id=767 data-nosnippet>767</a>
-<a href=#768 id=768 data-nosnippet>768</a>    <span class="attr">#[test]
-<a href=#769 id=769 data-nosnippet>769</a>    </span><span class="kw">fn </span>the_fapi_opaque_cap_admits_entropy_and_refuses_the_suite_probes() {
-<a href=#770 id=770 data-nosnippet>770</a>        <span class="comment">// The boundary is not a taste question, so it is asserted rather than
-<a href=#771 id=771 data-nosnippet>771</a>        // commented. Below: what a conformant client actually sends — 32 bytes
-<a href=#772 id=772 data-nosnippet>772</a>        // base64url is 43 characters, and doubling the entropy is still 86.
-<a href=#773 id=773 data-nosnippet>773</a>        // Above: the two values the OpenID Foundation's FAPI 2.0 suite pushes
-<a href=#774 id=774 data-nosnippet>774</a>        // and requires to be refused. A future edit that "relaxes" the cap
-<a href=#775 id=775 data-nosnippet>775</a>        // past either of them breaks certification, and this fails to compile
-<a href=#776 id=776 data-nosnippet>776</a>        // rather than waiting for a 56-module plan to say so.
-<a href=#777 id=777 data-nosnippet>777</a>        </span><span class="kw">const </span>{
-<a href=#778 id=778 data-nosnippet>778</a>            <span class="macro">assert!</span>(MAX_FAPI_OPAQUE_PARAM_CHARS &gt;= <span class="number">86</span>);
-<a href=#779 id=779 data-nosnippet>779</a>            <span class="macro">assert!</span>(MAX_FAPI_OPAQUE_PARAM_CHARS &lt; <span class="number">384</span>); <span class="comment">// -with-long-nonce
-<a href=#780 id=780 data-nosnippet>780</a>            </span><span class="macro">assert!</span>(MAX_FAPI_OPAQUE_PARAM_CHARS &lt; <span class="number">1000</span>); <span class="comment">// -with-long-state
-<a href=#781 id=781 data-nosnippet>781</a>        </span>}
-<a href=#782 id=782 data-nosnippet>782</a>    }
-<a href=#783 id=783 data-nosnippet>783</a>
-<a href=#784 id=784 data-nosnippet>784</a>    <span class="attr">#[test]
-<a href=#785 id=785 data-nosnippet>785</a>    </span><span class="kw">fn </span>lifetime_is_short_enough_to_bound_replay() {
-<a href=#786 id=786 data-nosnippet>786</a>        <span class="comment">// Guards the constant against a well-meaning future edit: RFC 9126
-<a href=#787 id=787 data-nosnippet>787</a>        // §2.2 wants seconds-to-minutes, and the window only has to cover one
-<a href=#788 id=788 data-nosnippet>788</a>        // browser redirect. In a `const` block so a bad edit fails to compile
-<a href=#789 id=789 data-nosnippet>789</a>        // rather than waiting for someone to run the suite.
-<a href=#790 id=790 data-nosnippet>790</a>        </span><span class="kw">const </span>{
-<a href=#791 id=791 data-nosnippet>791</a>            <span class="macro">assert!</span>(REQUEST_URI_LIFETIME_SECS &lt;= <span class="number">120</span>);
-<a href=#792 id=792 data-nosnippet>792</a>            <span class="macro">assert!</span>(REQUEST_URI_LIFETIME_SECS &gt;= <span class="number">30</span>);
-<a href=#793 id=793 data-nosnippet>793</a>        }
-<a href=#794 id=794 data-nosnippet>794</a>    }
-<a href=#795 id=795 data-nosnippet>795</a>}
+<a href=#638 id=638 data-nosnippet>638</a>            <span class="kw">async fn </span>delete_all_for_client(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="kw">_</span>: Uuid, <span class="kw">_</span>: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#639 id=639 data-nosnippet>639</a>                <span class="macro">unreachable!</span>(<span class="string">"peek deletes nothing"</span>)
+<a href=#640 id=640 data-nosnippet>640</a>            }
+<a href=#641 id=641 data-nosnippet>641</a>        }
+<a href=#642 id=642 data-nosnippet>642</a>    }
+<a href=#643 id=643 data-nosnippet>643</a>
+<a href=#644 id=644 data-nosnippet>644</a>    <span class="kw">use </span>std::sync::atomic::Ordering;
+<a href=#645 id=645 data-nosnippet>645</a>
+<a href=#646 id=646 data-nosnippet>646</a>    <span class="kw">use </span>doubles::{NoClients, OneRow};
+<a href=#647 id=647 data-nosnippet>647</a>
+<a href=#648 id=648 data-nosnippet>648</a>    <span class="kw">fn </span>service(repo: OneRow) -&gt; ParService&lt;NoClients, OneRow&gt; {
+<a href=#649 id=649 data-nosnippet>649</a>        ParService::new(NoClients, repo)
+<a href=#650 id=650 data-nosnippet>650</a>    }
+<a href=#651 id=651 data-nosnippet>651</a>
+<a href=#652 id=652 data-nosnippet>652</a>    <span class="doccomment">/// A live handle is spendable, and **stays** spendable.
+<a href=#653 id=653 data-nosnippet>653</a>    ///
+<a href=#654 id=654 data-nosnippet>654</a>    /// The second assertion is the one that matters. `peek` exists so that a
+<a href=#655 id=655 data-nosnippet>655</a>    /// dead `request_uri` can be refused before a person is asked to sign in
+<a href=#656 id=656 data-nosnippet>656</a>    /// for it; if it spent the handle on the way past, it would break the
+<a href=#657 id=657 data-nosnippet>657</a>    /// opposite case — the OIDF module
+<a href=#658 id=658 data-nosnippet>658</a>    /// `par-ensure-reused-request-uri-prior-to-auth-completion-succeeds`
+<a href=#659 id=659 data-nosnippet>659</a>    /// presents one `request_uri` twice before any authorization completes and
+<a href=#660 id=660 data-nosnippet>660</a>    /// requires the login page both times.
+<a href=#661 id=661 data-nosnippet>661</a>    </span><span class="attr">#[tokio::test]
+<a href=#662 id=662 data-nosnippet>662</a>    </span><span class="kw">async fn </span>a_live_handle_passes_and_is_not_spent() {
+<a href=#663 id=663 data-nosnippet>663</a>        <span class="kw">let </span>tenant = Uuid::now_v7();
+<a href=#664 id=664 data-nosnippet>664</a>        <span class="kw">let </span>svc = service(OneRow::live(tenant, <span class="string">"client-a"</span>));
+<a href=#665 id=665 data-nosnippet>665</a>        <span class="kw">let </span>uri = generate_request_uri();
+<a href=#666 id=666 data-nosnippet>666</a>
+<a href=#667 id=667 data-nosnippet>667</a>        <span class="macro">assert!</span>(svc.peek(tenant, <span class="string">"client-a"</span>, <span class="kw-2">&amp;</span>uri).<span class="kw">await</span>.is_ok());
+<a href=#668 id=668 data-nosnippet>668</a>        <span class="macro">assert_eq!</span>(
+<a href=#669 id=669 data-nosnippet>669</a>            svc.par_repo.consumes.load(Ordering::SeqCst),
+<a href=#670 id=670 data-nosnippet>670</a>            <span class="number">0</span>,
+<a href=#671 id=671 data-nosnippet>671</a>            <span class="string">"peek must never call consume — the single-use decision belongs in \
+<a href=#672 id=672 data-nosnippet>672</a>             the handler, after a principal exists"
+<a href=#673 id=673 data-nosnippet>673</a>        </span>);
+<a href=#674 id=674 data-nosnippet>674</a>        <span class="macro">assert_eq!</span>(svc.par_repo.reads.load(Ordering::SeqCst), <span class="number">1</span>);
+<a href=#675 id=675 data-nosnippet>675</a>    }
+<a href=#676 id=676 data-nosnippet>676</a>
+<a href=#677 id=677 data-nosnippet>677</a>    <span class="doccomment">/// Unknown, expired and already-used are one answer, and it is the same
+<a href=#678 id=678 data-nosnippet>678</a>    /// sentence `consume` produces — so a refusal does not change its wording
+<a href=#679 id=679 data-nosnippet>679</a>    /// depending on how far the request got.
+<a href=#680 id=680 data-nosnippet>680</a>    </span><span class="attr">#[tokio::test]
+<a href=#681 id=681 data-nosnippet>681</a>    </span><span class="kw">async fn </span>a_gone_handle_is_refused_with_the_shared_sentence() {
+<a href=#682 id=682 data-nosnippet>682</a>        <span class="kw">let </span>tenant = Uuid::now_v7();
+<a href=#683 id=683 data-nosnippet>683</a>        <span class="kw">let </span>svc = service(OneRow::gone());
+<a href=#684 id=684 data-nosnippet>684</a>        <span class="kw">let </span>err = svc
+<a href=#685 id=685 data-nosnippet>685</a>            .peek(tenant, <span class="string">"client-a"</span>, <span class="kw-2">&amp;</span>generate_request_uri())
+<a href=#686 id=686 data-nosnippet>686</a>            .<span class="kw">await
+<a href=#687 id=687 data-nosnippet>687</a>            </span>.expect_err(<span class="string">"a handle that matched nothing must be refused"</span>);
+<a href=#688 id=688 data-nosnippet>688</a>        <span class="macro">assert!</span>(
+<a href=#689 id=689 data-nosnippet>689</a>            is_request_uri_gone(<span class="kw-2">&amp;</span>err),
+<a href=#690 id=690 data-nosnippet>690</a>            <span class="string">"the recogniser the authorization endpoint matches on must accept \
+<a href=#691 id=691 data-nosnippet>691</a>             this refusal: {err}"
+<a href=#692 id=692 data-nosnippet>692</a>        </span>);
+<a href=#693 id=693 data-nosnippet>693</a>        <span class="macro">assert_eq!</span>(svc.par_repo.consumes.load(Ordering::SeqCst), <span class="number">0</span>);
+<a href=#694 id=694 data-nosnippet>694</a>    }
+<a href=#695 id=695 data-nosnippet>695</a>
+<a href=#696 id=696 data-nosnippet>696</a>    <span class="doccomment">/// A handle belongs to the client that pushed it, and this is a **different**
+<a href=#697 id=697 data-nosnippet>697</a>    /// refusal from "gone" — deliberately, and the recogniser says so.
+<a href=#698 id=698 data-nosnippet>698</a>    </span><span class="attr">#[tokio::test]
+<a href=#699 id=699 data-nosnippet>699</a>    </span><span class="kw">async fn </span>another_clients_handle_is_refused_by_name() {
+<a href=#700 id=700 data-nosnippet>700</a>        <span class="kw">let </span>tenant = Uuid::now_v7();
+<a href=#701 id=701 data-nosnippet>701</a>        <span class="kw">let </span>svc = service(OneRow::live(tenant, <span class="string">"client-a"</span>));
+<a href=#702 id=702 data-nosnippet>702</a>        <span class="kw">let </span>err = svc
+<a href=#703 id=703 data-nosnippet>703</a>            .peek(tenant, <span class="string">"client-b"</span>, <span class="kw-2">&amp;</span>generate_request_uri())
+<a href=#704 id=704 data-nosnippet>704</a>            .<span class="kw">await
+<a href=#705 id=705 data-nosnippet>705</a>            </span>.expect_err(<span class="string">"a handle issued to another client must be refused"</span>);
+<a href=#706 id=706 data-nosnippet>706</a>        <span class="macro">assert!</span>(
+<a href=#707 id=707 data-nosnippet>707</a>            !is_request_uri_gone(<span class="kw-2">&amp;</span>err),
+<a href=#708 id=708 data-nosnippet>708</a>            <span class="string">"a wrong-client refusal must keep its own answer: {err}"
+<a href=#709 id=709 data-nosnippet>709</a>        </span>);
+<a href=#710 id=710 data-nosnippet>710</a>        <span class="macro">assert!</span>(
+<a href=#711 id=711 data-nosnippet>711</a>            err.to_string().contains(<span class="string">"not issued to this client"</span>),
+<a href=#712 id=712 data-nosnippet>712</a>            <span class="string">"{err}"
+<a href=#713 id=713 data-nosnippet>713</a>        </span>);
+<a href=#714 id=714 data-nosnippet>714</a>        <span class="macro">assert_eq!</span>(svc.par_repo.consumes.load(Ordering::SeqCst), <span class="number">0</span>);
+<a href=#715 id=715 data-nosnippet>715</a>    }
+<a href=#716 id=716 data-nosnippet>716</a>
+<a href=#717 id=717 data-nosnippet>717</a>    <span class="doccomment">/// A value that is not a PAR handle is refused before the datastore is
+<a href=#718 id=718 data-nosnippet>718</a>    /// asked, exactly as `consume` refuses it — the authorization endpoint
+<a href=#719 id=719 data-nosnippet>719</a>    /// classifies a request object by reference separately and must keep the
+<a href=#720 id=720 data-nosnippet>720</a>    /// OIDC code that goes with it.
+<a href=#721 id=721 data-nosnippet>721</a>    </span><span class="attr">#[tokio::test]
+<a href=#722 id=722 data-nosnippet>722</a>    </span><span class="kw">async fn </span>a_value_without_the_urn_prefix_never_reaches_the_datastore() {
+<a href=#723 id=723 data-nosnippet>723</a>        <span class="kw">let </span>tenant = Uuid::now_v7();
+<a href=#724 id=724 data-nosnippet>724</a>        <span class="kw">let </span>svc = service(OneRow::live(tenant, <span class="string">"client-a"</span>));
+<a href=#725 id=725 data-nosnippet>725</a>        <span class="kw">let </span>err = svc
+<a href=#726 id=726 data-nosnippet>726</a>            .peek(tenant, <span class="string">"client-a"</span>, <span class="string">"https://attacker.example/request.jwt"</span>)
+<a href=#727 id=727 data-nosnippet>727</a>            .<span class="kw">await
+<a href=#728 id=728 data-nosnippet>728</a>            </span>.expect_err(<span class="string">"a non-PAR request_uri is not a handle"</span>);
+<a href=#729 id=729 data-nosnippet>729</a>        <span class="macro">assert!</span>(
+<a href=#730 id=730 data-nosnippet>730</a>            err.to_string()
+<a href=#731 id=731 data-nosnippet>731</a>                .contains(<span class="string">"not a pushed authorization request URI"</span>),
+<a href=#732 id=732 data-nosnippet>732</a>            <span class="string">"{err}"
+<a href=#733 id=733 data-nosnippet>733</a>        </span>);
+<a href=#734 id=734 data-nosnippet>734</a>        <span class="macro">assert_eq!</span>(
+<a href=#735 id=735 data-nosnippet>735</a>            svc.par_repo.reads.load(Ordering::SeqCst),
+<a href=#736 id=736 data-nosnippet>736</a>            <span class="number">0</span>,
+<a href=#737 id=737 data-nosnippet>737</a>            <span class="string">"the prefix check must come first, as it does in consume"
+<a href=#738 id=738 data-nosnippet>738</a>        </span>);
+<a href=#739 id=739 data-nosnippet>739</a>    }
+<a href=#740 id=740 data-nosnippet>740</a>
+<a href=#741 id=741 data-nosnippet>741</a>    <span class="attr">#[test]
+<a href=#742 id=742 data-nosnippet>742</a>    </span><span class="kw">fn </span>generated_request_uri_carries_the_rfc_prefix() {
+<a href=#743 id=743 data-nosnippet>743</a>        <span class="macro">assert!</span>(generate_request_uri().starts_with(REQUEST_URI_PREFIX));
+<a href=#744 id=744 data-nosnippet>744</a>    }
+<a href=#745 id=745 data-nosnippet>745</a>
+<a href=#746 id=746 data-nosnippet>746</a>    <span class="attr">#[test]
+<a href=#747 id=747 data-nosnippet>747</a>    </span><span class="kw">fn </span>generated_request_uris_are_distinct() {
+<a href=#748 id=748 data-nosnippet>748</a>        <span class="kw">let </span>a = generate_request_uri();
+<a href=#749 id=749 data-nosnippet>749</a>        <span class="kw">let </span>b = generate_request_uri();
+<a href=#750 id=750 data-nosnippet>750</a>        <span class="macro">assert_ne!</span>(a, b, <span class="string">"request_uri must be CSPRNG, not a counter"</span>);
+<a href=#751 id=751 data-nosnippet>751</a>    }
+<a href=#752 id=752 data-nosnippet>752</a>
+<a href=#753 id=753 data-nosnippet>753</a>    <span class="attr">#[test]
+<a href=#754 id=754 data-nosnippet>754</a>    </span><span class="kw">fn </span>hash_ignores_the_prefix() {
+<a href=#755 id=755 data-nosnippet>755</a>        <span class="comment">// The prefix is constant, so hashing it adds nothing; what matters is
+<a href=#756 id=756 data-nosnippet>756</a>        // that a caller passing the full URI and one passing the bare
+<a href=#757 id=757 data-nosnippet>757</a>        // component resolve to the same stored row.
+<a href=#758 id=758 data-nosnippet>758</a>        </span><span class="kw">let </span>uri = generate_request_uri();
+<a href=#759 id=759 data-nosnippet>759</a>        <span class="kw">let </span>bare = uri.strip_prefix(REQUEST_URI_PREFIX).unwrap();
+<a href=#760 id=760 data-nosnippet>760</a>        <span class="macro">assert_eq!</span>(hash_request_uri(<span class="kw-2">&amp;</span>uri), hash_request_uri(bare));
+<a href=#761 id=761 data-nosnippet>761</a>    }
+<a href=#762 id=762 data-nosnippet>762</a>
+<a href=#763 id=763 data-nosnippet>763</a>    <span class="attr">#[test]
+<a href=#764 id=764 data-nosnippet>764</a>    </span><span class="kw">fn </span>hash_is_not_the_plaintext() {
+<a href=#765 id=765 data-nosnippet>765</a>        <span class="kw">let </span>uri = generate_request_uri();
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="kw">let </span>h = hash_request_uri(<span class="kw-2">&amp;</span>uri);
+<a href=#767 id=767 data-nosnippet>767</a>        <span class="macro">assert!</span>(!uri.contains(<span class="kw-2">&amp;</span>h));
+<a href=#768 id=768 data-nosnippet>768</a>        <span class="macro">assert_eq!</span>(h.len(), <span class="number">64</span>, <span class="string">"hex-encoded SHA-256"</span>);
+<a href=#769 id=769 data-nosnippet>769</a>    }
+<a href=#770 id=770 data-nosnippet>770</a>
+<a href=#771 id=771 data-nosnippet>771</a>    <span class="attr">#[test]
+<a href=#772 id=772 data-nosnippet>772</a>    </span><span class="kw">fn </span>the_fapi_opaque_cap_admits_entropy_and_refuses_the_suite_probes() {
+<a href=#773 id=773 data-nosnippet>773</a>        <span class="comment">// The boundary is not a taste question, so it is asserted rather than
+<a href=#774 id=774 data-nosnippet>774</a>        // commented. Below: what a conformant client actually sends — 32 bytes
+<a href=#775 id=775 data-nosnippet>775</a>        // base64url is 43 characters, and doubling the entropy is still 86.
+<a href=#776 id=776 data-nosnippet>776</a>        // Above: the two values the OpenID Foundation's FAPI 2.0 suite pushes
+<a href=#777 id=777 data-nosnippet>777</a>        // and requires to be refused. A future edit that "relaxes" the cap
+<a href=#778 id=778 data-nosnippet>778</a>        // past either of them breaks certification, and this fails to compile
+<a href=#779 id=779 data-nosnippet>779</a>        // rather than waiting for a 56-module plan to say so.
+<a href=#780 id=780 data-nosnippet>780</a>        </span><span class="kw">const </span>{
+<a href=#781 id=781 data-nosnippet>781</a>            <span class="macro">assert!</span>(MAX_FAPI_OPAQUE_PARAM_CHARS &gt;= <span class="number">86</span>);
+<a href=#782 id=782 data-nosnippet>782</a>            <span class="macro">assert!</span>(MAX_FAPI_OPAQUE_PARAM_CHARS &lt; <span class="number">384</span>); <span class="comment">// -with-long-nonce
+<a href=#783 id=783 data-nosnippet>783</a>            </span><span class="macro">assert!</span>(MAX_FAPI_OPAQUE_PARAM_CHARS &lt; <span class="number">1000</span>); <span class="comment">// -with-long-state
+<a href=#784 id=784 data-nosnippet>784</a>        </span>}
+<a href=#785 id=785 data-nosnippet>785</a>    }
+<a href=#786 id=786 data-nosnippet>786</a>
+<a href=#787 id=787 data-nosnippet>787</a>    <span class="attr">#[test]
+<a href=#788 id=788 data-nosnippet>788</a>    </span><span class="kw">fn </span>lifetime_is_short_enough_to_bound_replay() {
+<a href=#789 id=789 data-nosnippet>789</a>        <span class="comment">// Guards the constant against a well-meaning future edit: RFC 9126
+<a href=#790 id=790 data-nosnippet>790</a>        // §2.2 wants seconds-to-minutes, and the window only has to cover one
+<a href=#791 id=791 data-nosnippet>791</a>        // browser redirect. In a `const` block so a bad edit fails to compile
+<a href=#792 id=792 data-nosnippet>792</a>        // rather than waiting for someone to run the suite.
+<a href=#793 id=793 data-nosnippet>793</a>        </span><span class="kw">const </span>{
+<a href=#794 id=794 data-nosnippet>794</a>            <span class="macro">assert!</span>(REQUEST_URI_LIFETIME_SECS &lt;= <span class="number">120</span>);
+<a href=#795 id=795 data-nosnippet>795</a>            <span class="macro">assert!</span>(REQUEST_URI_LIFETIME_SECS &gt;= <span class="number">30</span>);
+<a href=#796 id=796 data-nosnippet>796</a>        }
+<a href=#797 id=797 data-nosnippet>797</a>    }
+<a href=#798 id=798 data-nosnippet>798</a>}
 </code></pre></div></section></main></body></html>

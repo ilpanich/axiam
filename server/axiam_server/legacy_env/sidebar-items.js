@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["legacy_secret_env_warnings"],"struct":["LegacyEnvWarning"]};
+window.SIDEBAR_ITEMS = {"constant":["PEPPER_CONFIG_VAR"],"enum":["PepperSource"],"fn":["legacy_secret_env_warnings","pepper_unset_message"],"struct":["LegacyEnvWarning"]};

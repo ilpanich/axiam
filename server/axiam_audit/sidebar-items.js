@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["middleware","notification","service"]};
+window.SIDEBAR_ITEMS = {"mod":["dead_letter","loss","middleware","notification","service"]};

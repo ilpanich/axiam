@@ -1,0 +1,579 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-pki/src/crl.rs`."><title>crl.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_pki" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.0 (b940084d7 2026-09-28)" data-channel="1.99.0" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_pki/</div>crl.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Certificate revocation lists — one per issuing CA (RFC 5280 §5; #565,
+<a href=#2 id=2 data-nosnippet>2</a>//! T-102).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! Revoking a certificate sets the status on its row. Until this module that
+<a href=#5 id=5 data-nosnippet>5</a>//! status reached exactly the places that read the row — device sign-in, and
+<a href=#6 id=6 data-nosnippet>6</a>//! since the same change OAuth2 `tls_client_auth` — and nowhere else: a
+<a href=#7 id=7 data-nosnippet>7</a>//! relying party that validates AXIAM-issued certificates itself, a FreeRADIUS
+<a href=#8 id=8 data-nosnippet>8</a>//! server doing EAP-TLS or a VPN gateway, had no channel through which to learn
+<a href=#9 id=9 data-nosnippet>9</a>//! of a revocation, although every AXIAM CA carries the `cRLSign` bit.
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! # What is published
+<a href=#12 id=12 data-nosnippet>12</a>//!
+<a href=#13 id=13 data-nosnippet>13</a>//! A complete, version 2 CRL per issuing CA, DER-encoded, at
+<a href=#14 id=14 data-nosnippet>14</a>//! `GET /pki/v1/{org_id}/ca/{ca_id}/crl` ([`crl_path`]), unauthenticated:
+<a href=#15 id=15 data-nosnippet>15</a>//!
+<a href=#16 id=16 data-nosnippet>16</a>//! - **signed with the CA's own key, fetched from the CA's own custodian** —
+<a href=#17 id=17 data-nosnippet>17</a>//!   the custodian the CA row names, through the same `load` the leaf path
+<a href=#18 id=18 data-nosnippet>18</a>//!   uses, so an RSA-4096 CA and an Ed25519 CA sign their lists exactly as they
+<a href=#19 id=19 data-nosnippet>19</a>//!   sign certificates;
+<a href=#20 id=20 data-nosnippet>20</a>//! - `thisUpdate` the moment it was signed, `nextUpdate` a configurable
+<a href=#21 id=21 data-nosnippet>21</a>//!   interval later ([`DEFAULT_CRL_NEXT_UPDATE_SECS`]) and never past the CA's
+<a href=#22 id=22 data-nosnippet>22</a>//!   own `notAfter`;
+<a href=#23 id=23 data-nosnippet>23</a>//! - a CRL number and an authority key identifier equal to the CA's subject key
+<a href=#24 id=24 data-nosnippet>24</a>//!   identifier — the two extensions RFC 5280 §5.2 requires of every CRL;
+<a href=#25 id=25 data-nosnippet>25</a>//! - an entry for every certificate the CA signed and revoked that has not yet
+<a href=#26 id=26 data-nosnippet>26</a>//!   expired: its leaves in every tenant, and the subordinate CAs it signed, so
+<a href=#27 id=27 data-nosnippet>27</a>//!   an organization CA's list names a revoked tenant signing CA. Each entry
+<a href=#28 id=28 data-nosnippet>28</a>//!   carries the serial read out of the certificate and the date AXIAM recorded
+<a href=#29 id=29 data-nosnippet>29</a>//!   the revocation. No reason code: AXIAM does not record one, and RFC 5280
+<a href=#30 id=30 data-nosnippet>30</a>//!   §5.3.1 prefers an absent reason to `unspecified`.
+<a href=#31 id=31 data-nosnippet>31</a>//!
+<a href=#32 id=32 data-nosnippet>32</a>//! # Which CAs publish one
+<a href=#33 id=33 data-nosnippet>33</a>//!
+<a href=#34 id=34 data-nosnippet>34</a>//! A CA AXIAM can sign with, while it is active and in date. Three kinds
+<a href=#35 id=35 data-nosnippet>35</a>//! answer `404` instead, the same `404` as a CA that does not exist:
+<a href=#36 id=36 data-nosnippet>36</a>//!
+<a href=#37 id=37 data-nosnippet>37</a>//! - **a revoked or expired CA.** AXIAM signs nothing with one; its own status
+<a href=#38 id=38 data-nosnippet>38</a>//!   is on its parent's list;
+<a href=#39 id=39 data-nosnippet>39</a>//! - **an imported trust anchor with no key** (`external` custody): it cannot
+<a href=#40 id=40 data-nosnippet>40</a>//!   sign anything, a list included;
+<a href=#41 id=41 data-nosnippet>41</a>//! - **a CA whose key Vault's PKI engine holds** (`vault_pki`). Vault signs on
+<a href=#42 id=42 data-nosnippet>42</a>//!   AXIAM's behalf only certificate requests; it has no operation that signs a
+<a href=#43 id=43 data-nosnippet>43</a>//!   list AXIAM composed, and AXIAM never holds the key. Vault publishes that
+<a href=#44 id=44 data-nosnippet>44</a>//!   CA's list itself, and AXIAM revokes each leaf there too
+<a href=#45 id=45 data-nosnippet>45</a>//!   ([`crate::CertService::revoke`], T-470), so Vault's list names it. Leaves of
+<a href=#46 id=46 data-nosnippet>46</a>//!   such a CA carry no AXIAM distribution point — Vault issues them with its
+<a href=#47 id=47 data-nosnippet>47</a>//!   own profile, naming whatever the operator configured on the mount
+<a href=#48 id=48 data-nosnippet>48</a>//!   (`config/urls`) — so nothing points at a route that cannot answer, and
+<a href=#49 id=49 data-nosnippet>49</a>//!   relying parties read Vault's list (`/v1/&lt;mount&gt;/issuer/&lt;issuer&gt;/crl/der`).
+<a href=#50 id=50 data-nosnippet>50</a>//!
+<a href=#51 id=51 data-nosnippet>51</a>//! # Signing on request, and the cache in front of it
+<a href=#52 id=52 data-nosnippet>52</a>//!
+<a href=#53 id=53 data-nosnippet>53</a>//! A list is signed when it is first asked for and kept, per CA, until either
+<a href=#54 id=54 data-nosnippet>54</a>//! the set of revoked certificates changes or half of its validity has passed;
+<a href=#55 id=55 data-nosnippet>55</a>//! every request still reads the set, so a revocation is in the next response.
+<a href=#56 id=56 data-nosnippet>56</a>//! Two things follow. A relying party revalidating with `If-None-Match` gets a
+<a href=#57 id=57 data-nosnippet>57</a>//! `304` until the list really changes, because an unchanged list is the same
+<a href=#58 id=58 data-nosnippet>58</a>//! bytes. And a flood of requests costs one database read each and no
+<a href=#59 id=59 data-nosnippet>59</a>//! signature, which matters on an unauthenticated route whose custodian may be
+<a href=#60 id=60 data-nosnippet>60</a>//! a Vault round trip away.
+<a href=#61 id=61 data-nosnippet>61</a>//!
+<a href=#62 id=62 data-nosnippet>62</a>//! The CRL number is the signing time in milliseconds since the Unix epoch,
+<a href=#63 id=63 data-nosnippet>63</a>//! and strictly greater than the last number this process issued for the CA.
+<a href=#64 id=64 data-nosnippet>64</a>//! Monotonic across replicas and restarts for as long as the clocks are, which
+<a href=#65 id=65 data-nosnippet>65</a>//! is what RFC 5280 §5.2.3 asks of it, without a counter every replica would
+<a href=#66 id=66 data-nosnippet>66</a>//! have to agree on.
+<a href=#67 id=67 data-nosnippet>67</a>//!
+<a href=#68 id=68 data-nosnippet>68</a>//! # The distribution point
+<a href=#69 id=69 data-nosnippet>69</a>//!
+<a href=#70 id=70 data-nosnippet>70</a>//! [`CrlDistribution`] is the absolute URL of the route, built from the
+<a href=#71 id=71 data-nosnippet>71</a>//! deployment's public base URL. `CertService` and `CaService` write it into
+<a href=#72 id=72 data-nosnippet>72</a>//! every certificate they sign in-process from then on — leaves on both paths,
+<a href=#73 id=73 data-nosnippet>73</a>//! and subordinate CAs — so a relying party that follows distribution points
+<a href=#74 id=74 data-nosnippet>74</a>//! finds the list without being told. With no public base URL there is no
+<a href=#75 id=75 data-nosnippet>75</a>//! absolute URL to write, and the extension is omitted; the composition root
+<a href=#76 id=76 data-nosnippet>76</a>//! says so at boot.
+<a href=#77 id=77 data-nosnippet>77</a>
+<a href=#78 id=78 data-nosnippet>78</a></span><span class="kw">use </span>std::collections::HashMap;
+<a href=#79 id=79 data-nosnippet>79</a><span class="kw">use </span>std::sync::Arc;
+<a href=#80 id=80 data-nosnippet>80</a>
+<a href=#81 id=81 data-nosnippet>81</a><span class="kw">use </span>axiam_core::ca_keys::CaKeyCustody;
+<a href=#82 id=82 data-nosnippet>82</a><span class="kw">use </span>axiam_core::error::{AxiamError, AxiamResult};
+<a href=#83 id=83 data-nosnippet>83</a><span class="kw">use </span>axiam_core::models::certificate::{CaCertificate, CertificateStatus, RevokedCertificate};
+<a href=#84 id=84 data-nosnippet>84</a><span class="kw">use </span>axiam_core::repository::{CaCertificateRepository, CertificateRepository};
+<a href=#85 id=85 data-nosnippet>85</a><span class="kw">use </span>chrono::{DateTime, Duration, Utc};
+<a href=#86 id=86 data-nosnippet>86</a><span class="kw">use </span>rcgen::{
+<a href=#87 id=87 data-nosnippet>87</a>    CertificateRevocationListParams, CrlDistributionPoint, Issuer, KeyIdMethod, KeyPair,
+<a href=#88 id=88 data-nosnippet>88</a>    RevokedCertParams, SerialNumber,
+<a href=#89 id=89 data-nosnippet>89</a>};
+<a href=#90 id=90 data-nosnippet>90</a><span class="kw">use </span>sha2::{Digest, Sha256};
+<a href=#91 id=91 data-nosnippet>91</a><span class="kw">use </span>tokio::sync::{Mutex, Semaphore};
+<a href=#92 id=92 data-nosnippet>92</a><span class="kw">use </span>uuid::Uuid;
+<a href=#93 id=93 data-nosnippet>93</a><span class="kw">use </span>x509_parser::extensions::ParsedExtension;
+<a href=#94 id=94 data-nosnippet>94</a><span class="kw">use </span>x509_parser::prelude::{FromDer, X509Certificate};
+<a href=#95 id=95 data-nosnippet>95</a><span class="kw">use </span>zeroize::Zeroize;
+<a href=#96 id=96 data-nosnippet>96</a>
+<a href=#97 id=97 data-nosnippet>97</a><span class="kw">use </span><span class="kw">crate</span>::ca::CaService;
+<a href=#98 id=98 data-nosnippet>98</a><span class="kw">use </span><span class="kw">crate</span>::ca_key_store::CaKeyCustodians;
+<a href=#99 id=99 data-nosnippet>99</a>
+<a href=#100 id=100 data-nosnippet>100</a><span class="doccomment">/// The media type a DER CRL is served as (RFC 5280 §4.2.1.13).
+<a href=#101 id=101 data-nosnippet>101</a></span><span class="kw">pub const </span>CRL_MEDIA_TYPE: <span class="kw-2">&amp;</span>str = <span class="string">"application/pkix-crl"</span>;
+<a href=#102 id=102 data-nosnippet>102</a>
+<a href=#103 id=103 data-nosnippet>103</a><span class="doccomment">/// Default interval between a list's `thisUpdate` and its `nextUpdate`: one
+<a href=#104 id=104 data-nosnippet>104</a>/// day. Env: `AXIAM__PKI__CRL_NEXT_UPDATE_SECS`.
+<a href=#105 id=105 data-nosnippet>105</a>///
+<a href=#106 id=106 data-nosnippet>106</a>/// It bounds how long a relying party that caches a list honours a certificate
+<a href=#107 id=107 data-nosnippet>107</a>/// revoked after the list was fetched, which is the revocation window this
+<a href=#108 id=108 data-nosnippet>108</a>/// whole module exists to shorten. A day is the common choice for a CA whose
+<a href=#109 id=109 data-nosnippet>109</a>/// relying parties fetch on schedule; a deployment that needs a shorter window
+<a href=#110 id=110 data-nosnippet>110</a>/// sets a shorter interval and pays for it in fetches.
+<a href=#111 id=111 data-nosnippet>111</a></span><span class="kw">pub const </span>DEFAULT_CRL_NEXT_UPDATE_SECS: u64 = <span class="number">86_400</span>;
+<a href=#112 id=112 data-nosnippet>112</a>
+<a href=#113 id=113 data-nosnippet>113</a><span class="doccomment">/// Shortest accepted interval: five minutes. Below it a relying party would
+<a href=#114 id=114 data-nosnippet>114</a>/// spend more time fetching the list than trusting it.
+<a href=#115 id=115 data-nosnippet>115</a></span><span class="kw">pub const </span>MIN_CRL_NEXT_UPDATE_SECS: u64 = <span class="number">300</span>;
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a><span class="doccomment">/// Longest accepted interval: seven days. Past it the list stops being a
+<a href=#118 id=118 data-nosnippet>118</a>/// revocation channel anybody should rely on.
+<a href=#119 id=119 data-nosnippet>119</a></span><span class="kw">pub const </span>MAX_CRL_NEXT_UPDATE_SECS: u64 = <span class="number">604_800</span>;
+<a href=#120 id=120 data-nosnippet>120</a>
+<a href=#121 id=121 data-nosnippet>121</a><span class="doccomment">/// The route a CA's list is published at, relative to the deployment's public
+<a href=#122 id=122 data-nosnippet>122</a>/// base URL.
+<a href=#123 id=123 data-nosnippet>123</a></span><span class="kw">pub fn </span>crl_path(organization_id: Uuid, ca_id: Uuid) -&gt; String {
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="macro">format!</span>(<span class="string">"/pki/v1/{organization_id}/ca/{ca_id}/crl"</span>)
+<a href=#125 id=125 data-nosnippet>125</a>}
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a><span class="doccomment">/// Check an operator's `nextUpdate` interval against
+<a href=#128 id=128 data-nosnippet>128</a>/// [`MIN_CRL_NEXT_UPDATE_SECS`] and [`MAX_CRL_NEXT_UPDATE_SECS`].
+<a href=#129 id=129 data-nosnippet>129</a></span><span class="kw">pub fn </span>validate_next_update_secs(secs: u64) -&gt; <span class="prelude-ty">Result</span>&lt;u64, String&gt; {
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="kw">if </span>(MIN_CRL_NEXT_UPDATE_SECS..=MAX_CRL_NEXT_UPDATE_SECS).contains(<span class="kw-2">&amp;</span>secs) {
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="prelude-val">Ok</span>(secs)
+<a href=#132 id=132 data-nosnippet>132</a>    } <span class="kw">else </span>{
+<a href=#133 id=133 data-nosnippet>133</a>        <span class="prelude-val">Err</span>(<span class="macro">format!</span>(
+<a href=#134 id=134 data-nosnippet>134</a>            <span class="string">"the CRL nextUpdate interval must be between {MIN_CRL_NEXT_UPDATE_SECS} and \
+<a href=#135 id=135 data-nosnippet>135</a>             {MAX_CRL_NEXT_UPDATE_SECS} seconds, not {secs}"
+<a href=#136 id=136 data-nosnippet>136</a>        </span>))
+<a href=#137 id=137 data-nosnippet>137</a>    }
+<a href=#138 id=138 data-nosnippet>138</a>}
+<a href=#139 id=139 data-nosnippet>139</a>
+<a href=#140 id=140 data-nosnippet>140</a><span class="doccomment">/// Where a relying party finds a CA's list: the absolute URL written into the
+<a href=#141 id=141 data-nosnippet>141</a>/// CRL distribution points extension of every certificate signed after it is
+<a href=#142 id=142 data-nosnippet>142</a>/// configured.
+<a href=#143 id=143 data-nosnippet>143</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#144 id=144 data-nosnippet>144</a></span><span class="kw">pub struct </span>CrlDistribution {
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="doccomment">/// `scheme://host[:port][/path]`, with no trailing slash.
+<a href=#146 id=146 data-nosnippet>146</a>    </span>base: String,
+<a href=#147 id=147 data-nosnippet>147</a>}
+<a href=#148 id=148 data-nosnippet>148</a>
+<a href=#149 id=149 data-nosnippet>149</a><span class="kw">impl </span>CrlDistribution {
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="doccomment">/// Validate a public base URL: absolute, `http` or `https`, with a host and
+<a href=#151 id=151 data-nosnippet>151</a>    /// no query or fragment.
+<a href=#152 id=152 data-nosnippet>152</a>    ///
+<a href=#153 id=153 data-nosnippet>153</a>    /// `http` is accepted on purpose. A CRL is signed, so the transport adds no
+<a href=#154 id=154 data-nosnippet>154</a>    /// integrity, and RFC 5280 §4.2.1.13 expects distribution points that a
+<a href=#155 id=155 data-nosnippet>155</a>    /// relying party can fetch before it can validate anything — some cannot
+<a href=#156 id=156 data-nosnippet>156</a>    /// follow an `https` one without the chain they are trying to check.
+<a href=#157 id=157 data-nosnippet>157</a>    </span><span class="kw">pub fn </span>new(base_url: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, String&gt; {
+<a href=#158 id=158 data-nosnippet>158</a>        <span class="kw">let </span>trimmed = base_url.trim();
+<a href=#159 id=159 data-nosnippet>159</a>        <span class="kw">let </span>parsed = url::Url::parse(trimmed)
+<a href=#160 id=160 data-nosnippet>160</a>            .map_err(|e| <span class="macro">format!</span>(<span class="string">"the CRL base URL is not an absolute URL: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="kw">if </span>!<span class="macro">matches!</span>(parsed.scheme(), <span class="string">"http" </span>| <span class="string">"https"</span>) {
+<a href=#162 id=162 data-nosnippet>162</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="macro">format!</span>(
+<a href=#163 id=163 data-nosnippet>163</a>                <span class="string">"the CRL base URL must be http or https, not {}"</span>,
+<a href=#164 id=164 data-nosnippet>164</a>                parsed.scheme()
+<a href=#165 id=165 data-nosnippet>165</a>            ));
+<a href=#166 id=166 data-nosnippet>166</a>        }
+<a href=#167 id=167 data-nosnippet>167</a>        <span class="kw">if </span>parsed.host_str().is_none_or(str::is_empty) {
+<a href=#168 id=168 data-nosnippet>168</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="string">"the CRL base URL has no host"</span>.into());
+<a href=#169 id=169 data-nosnippet>169</a>        }
+<a href=#170 id=170 data-nosnippet>170</a>        <span class="kw">if </span>parsed.query().is_some() || parsed.fragment().is_some() {
+<a href=#171 id=171 data-nosnippet>171</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="string">"the CRL base URL must carry no query or fragment"</span>.into());
+<a href=#172 id=172 data-nosnippet>172</a>        }
+<a href=#173 id=173 data-nosnippet>173</a>        <span class="prelude-val">Ok</span>(<span class="self">Self </span>{
+<a href=#174 id=174 data-nosnippet>174</a>            base: trimmed.trim_end_matches(<span class="string">'/'</span>).to_owned(),
+<a href=#175 id=175 data-nosnippet>175</a>        })
+<a href=#176 id=176 data-nosnippet>176</a>    }
+<a href=#177 id=177 data-nosnippet>177</a>
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="doccomment">/// The distribution point configured explicitly, or else the one derived
+<a href=#179 id=179 data-nosnippet>179</a>    /// from the deployment's issuer URL — `None` when neither is an absolute
+<a href=#180 id=180 data-nosnippet>180</a>    /// `http(s)` URL.
+<a href=#181 id=181 data-nosnippet>181</a>    ///
+<a href=#182 id=182 data-nosnippet>182</a>    /// An explicit value that does not parse is an error rather than a
+<a href=#183 id=183 data-nosnippet>183</a>    /// fallback: an operator who set one meant it, and certificates naming the
+<a href=#184 id=184 data-nosnippet>184</a>    /// issuer instead would point somewhere they did not choose. An issuer that
+<a href=#185 id=185 data-nosnippet>185</a>    /// is not a URL (the JWT `iss` fallback is often a bare name) yields `None`.
+<a href=#186 id=186 data-nosnippet>186</a>    </span><span class="kw">pub fn </span>resolve(explicit: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;, issuer_url: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;<span class="self">Self</span>&gt;, String&gt; {
+<a href=#187 id=187 data-nosnippet>187</a>        <span class="kw">match </span>explicit.map(str::trim).filter(|v| !v.is_empty()) {
+<a href=#188 id=188 data-nosnippet>188</a>            <span class="prelude-val">Some</span>(value) =&gt; <span class="self">Self</span>::new(value).map(<span class="prelude-val">Some</span>),
+<a href=#189 id=189 data-nosnippet>189</a>            <span class="prelude-val">None </span>=&gt; <span class="prelude-val">Ok</span>(<span class="self">Self</span>::new(issuer_url).ok()),
+<a href=#190 id=190 data-nosnippet>190</a>        }
+<a href=#191 id=191 data-nosnippet>191</a>    }
+<a href=#192 id=192 data-nosnippet>192</a>
+<a href=#193 id=193 data-nosnippet>193</a>    <span class="doccomment">/// The absolute URL of a CA's list.
+<a href=#194 id=194 data-nosnippet>194</a>    </span><span class="kw">pub fn </span>uri_for(<span class="kw-2">&amp;</span><span class="self">self</span>, organization_id: Uuid, ca_id: Uuid) -&gt; String {
+<a href=#195 id=195 data-nosnippet>195</a>        <span class="macro">format!</span>(<span class="string">"{}{}"</span>, <span class="self">self</span>.base, crl_path(organization_id, ca_id))
+<a href=#196 id=196 data-nosnippet>196</a>    }
+<a href=#197 id=197 data-nosnippet>197</a>
+<a href=#198 id=198 data-nosnippet>198</a>    <span class="doccomment">/// The extension value for a certificate `issuer` signs.
+<a href=#199 id=199 data-nosnippet>199</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>point_for(<span class="kw-2">&amp;</span><span class="self">self</span>, issuer: <span class="kw-2">&amp;</span>CaCertificate) -&gt; CrlDistributionPoint {
+<a href=#200 id=200 data-nosnippet>200</a>        CrlDistributionPoint {
+<a href=#201 id=201 data-nosnippet>201</a>            uris: <span class="macro">vec!</span>[<span class="self">self</span>.uri_for(issuer.organization_id, issuer.id)],
+<a href=#202 id=202 data-nosnippet>202</a>        }
+<a href=#203 id=203 data-nosnippet>203</a>    }
+<a href=#204 id=204 data-nosnippet>204</a>}
+<a href=#205 id=205 data-nosnippet>205</a>
+<a href=#206 id=206 data-nosnippet>206</a><span class="doccomment">/// A signed list, as the route serves it.
+<a href=#207 id=207 data-nosnippet>207</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#208 id=208 data-nosnippet>208</a></span><span class="kw">pub struct </span>PublishedCrl {
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="doccomment">/// The DER encoding.
+<a href=#210 id=210 data-nosnippet>210</a>    </span><span class="kw">pub </span>der: Arc&lt;[u8]&gt;,
+<a href=#211 id=211 data-nosnippet>211</a>    <span class="doccomment">/// The list's `thisUpdate`.
+<a href=#212 id=212 data-nosnippet>212</a>    </span><span class="kw">pub </span>this_update: DateTime&lt;Utc&gt;,
+<a href=#213 id=213 data-nosnippet>213</a>    <span class="doccomment">/// The list's `nextUpdate`.
+<a href=#214 id=214 data-nosnippet>214</a>    </span><span class="kw">pub </span>next_update: DateTime&lt;Utc&gt;,
+<a href=#215 id=215 data-nosnippet>215</a>    <span class="doccomment">/// The list's CRL number.
+<a href=#216 id=216 data-nosnippet>216</a>    </span><span class="kw">pub </span>crl_number: u64,
+<a href=#217 id=217 data-nosnippet>217</a>    <span class="doccomment">/// A strong entity tag over the DER, quoted.
+<a href=#218 id=218 data-nosnippet>218</a>    </span><span class="kw">pub </span>etag: String,
+<a href=#219 id=219 data-nosnippet>219</a>}
+<a href=#220 id=220 data-nosnippet>220</a>
+<a href=#221 id=221 data-nosnippet>221</a><span class="kw">impl </span>PublishedCrl {
+<a href=#222 id=222 data-nosnippet>222</a>    <span class="doccomment">/// Seconds a cache may keep this list: until its `nextUpdate`, never
+<a href=#223 id=223 data-nosnippet>223</a>    /// negative.
+<a href=#224 id=224 data-nosnippet>224</a>    </span><span class="kw">pub fn </span>max_age_secs(<span class="kw-2">&amp;</span><span class="self">self</span>, now: DateTime&lt;Utc&gt;) -&gt; u64 {
+<a href=#225 id=225 data-nosnippet>225</a>        u64::try_from((<span class="self">self</span>.next_update - now).num_seconds().max(<span class="number">0</span>)).unwrap_or(<span class="number">0</span>)
+<a href=#226 id=226 data-nosnippet>226</a>    }
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="doccomment">/// Whether an `If-None-Match` header names this list (RFC 9110 §13.1.2):
+<a href=#229 id=229 data-nosnippet>229</a>    /// `*`, or any listed tag equal to [`Self::etag`], weak or strong.
+<a href=#230 id=230 data-nosnippet>230</a>    </span><span class="kw">pub fn </span>matches_if_none_match(<span class="kw-2">&amp;</span><span class="self">self</span>, header: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#231 id=231 data-nosnippet>231</a>        <span class="kw">let </span>wanted = <span class="self">self</span>.etag.trim_start_matches(<span class="string">"W/"</span>);
+<a href=#232 id=232 data-nosnippet>232</a>        header
+<a href=#233 id=233 data-nosnippet>233</a>            .split(<span class="string">','</span>)
+<a href=#234 id=234 data-nosnippet>234</a>            .map(str::trim)
+<a href=#235 id=235 data-nosnippet>235</a>            .any(|candidate| candidate == <span class="string">"*" </span>|| candidate.trim_start_matches(<span class="string">"W/"</span>) == wanted)
+<a href=#236 id=236 data-nosnippet>236</a>    }
+<a href=#237 id=237 data-nosnippet>237</a>}
+<a href=#238 id=238 data-nosnippet>238</a>
+<a href=#239 id=239 data-nosnippet>239</a><span class="doccomment">/// What the cache keeps per CA.
+<a href=#240 id=240 data-nosnippet>240</a></span><span class="kw">struct </span>CachedCrl {
+<a href=#241 id=241 data-nosnippet>241</a>    crl: PublishedCrl,
+<a href=#242 id=242 data-nosnippet>242</a>    <span class="doccomment">/// Digest of the entries the list was signed over.
+<a href=#243 id=243 data-nosnippet>243</a>    </span>entries_digest: [u8; <span class="number">32</span>],
+<a href=#244 id=244 data-nosnippet>244</a>    <span class="doccomment">/// When the list is re-signed even if nothing was revoked: half-way to its
+<a href=#245 id=245 data-nosnippet>245</a>    /// `nextUpdate`, so a cached response always has half its life left.
+<a href=#246 id=246 data-nosnippet>246</a>    </span>refresh_at: DateTime&lt;Utc&gt;,
+<a href=#247 id=247 data-nosnippet>247</a>}
+<a href=#248 id=248 data-nosnippet>248</a>
+<a href=#249 id=249 data-nosnippet>249</a><span class="doccomment">/// Signs and caches each issuing CA's certificate revocation list.
+<a href=#250 id=250 data-nosnippet>250</a></span><span class="attr">#[derive(Clone)]
+<a href=#251 id=251 data-nosnippet>251</a></span><span class="kw">pub struct </span>CrlService&lt;CA, CR&gt; {
+<a href=#252 id=252 data-nosnippet>252</a>    ca_repo: CA,
+<a href=#253 id=253 data-nosnippet>253</a>    cert_repo: CR,
+<a href=#254 id=254 data-nosnippet>254</a>    <span class="doccomment">/// Shared bounding semaphore for CPU-bound crypto (CQ-B02).
+<a href=#255 id=255 data-nosnippet>255</a>    </span>crypto_semaphore: Arc&lt;Semaphore&gt;,
+<a href=#256 id=256 data-nosnippet>256</a>    <span class="doccomment">/// Who holds the CA signing keys. See [`crate::ca_key_store`].
+<a href=#257 id=257 data-nosnippet>257</a>    </span>custodians: Arc&lt;CaKeyCustodians&gt;,
+<a href=#258 id=258 data-nosnippet>258</a>    next_update: Duration,
+<a href=#259 id=259 data-nosnippet>259</a>    cache: Arc&lt;Mutex&lt;HashMap&lt;Uuid, CachedCrl&gt;&gt;&gt;,
+<a href=#260 id=260 data-nosnippet>260</a>}
+<a href=#261 id=261 data-nosnippet>261</a>
+<a href=#262 id=262 data-nosnippet>262</a><span class="kw">impl</span>&lt;CA: CaCertificateRepository, CR: CertificateRepository&gt; CrlService&lt;CA, CR&gt; {
+<a href=#263 id=263 data-nosnippet>263</a>    <span class="doccomment">/// `next_update_secs` is the `thisUpdate` → `nextUpdate` interval; the
+<a href=#264 id=264 data-nosnippet>264</a>    /// composition root validates it with [`validate_next_update_secs`].
+<a href=#265 id=265 data-nosnippet>265</a>    </span><span class="kw">pub fn </span>new(
+<a href=#266 id=266 data-nosnippet>266</a>        ca_repo: CA,
+<a href=#267 id=267 data-nosnippet>267</a>        cert_repo: CR,
+<a href=#268 id=268 data-nosnippet>268</a>        crypto_semaphore: Arc&lt;Semaphore&gt;,
+<a href=#269 id=269 data-nosnippet>269</a>        custodians: Arc&lt;CaKeyCustodians&gt;,
+<a href=#270 id=270 data-nosnippet>270</a>        next_update_secs: u64,
+<a href=#271 id=271 data-nosnippet>271</a>    ) -&gt; <span class="self">Self </span>{
+<a href=#272 id=272 data-nosnippet>272</a>        <span class="self">Self </span>{
+<a href=#273 id=273 data-nosnippet>273</a>            ca_repo,
+<a href=#274 id=274 data-nosnippet>274</a>            cert_repo,
+<a href=#275 id=275 data-nosnippet>275</a>            crypto_semaphore,
+<a href=#276 id=276 data-nosnippet>276</a>            custodians,
+<a href=#277 id=277 data-nosnippet>277</a>            next_update: Duration::seconds(i64::try_from(next_update_secs).unwrap_or(i64::MAX)),
+<a href=#278 id=278 data-nosnippet>278</a>            cache: Arc::default(),
+<a href=#279 id=279 data-nosnippet>279</a>        }
+<a href=#280 id=280 data-nosnippet>280</a>    }
+<a href=#281 id=281 data-nosnippet>281</a>
+<a href=#282 id=282 data-nosnippet>282</a>    <span class="doccomment">/// The current list of CA `ca_id` of organization `organization_id`.
+<a href=#283 id=283 data-nosnippet>283</a>    ///
+<a href=#284 id=284 data-nosnippet>284</a>    /// `NotFound` for a CA that does not exist in that organization **and** for
+<a href=#285 id=285 data-nosnippet>285</a>    /// one that publishes no list (see the module docs): the route is
+<a href=#286 id=286 data-nosnippet>286</a>    /// unauthenticated, and which of the two it is — or which custodian holds a
+<a href=#287 id=287 data-nosnippet>287</a>    /// key — is not an outsider's business. The reason is logged.
+<a href=#288 id=288 data-nosnippet>288</a>    </span><span class="kw">pub async fn </span>current(<span class="kw-2">&amp;</span><span class="self">self</span>, organization_id: Uuid, ca_id: Uuid) -&gt; AxiamResult&lt;PublishedCrl&gt; {
+<a href=#289 id=289 data-nosnippet>289</a>        <span class="kw">let </span>not_published = || AxiamError::NotFound {
+<a href=#290 id=290 data-nosnippet>290</a>            entity: <span class="string">"certificate revocation list"</span>.into(),
+<a href=#291 id=291 data-nosnippet>291</a>            id: ca_id.to_string(),
+<a href=#292 id=292 data-nosnippet>292</a>        };
+<a href=#293 id=293 data-nosnippet>293</a>
+<a href=#294 id=294 data-nosnippet>294</a>        <span class="comment">// Organization-scoped, as every CA lookup is (T-98): a CA id under the
+<a href=#295 id=295 data-nosnippet>295</a>        // wrong organization is not found, not served.
+<a href=#296 id=296 data-nosnippet>296</a>        </span><span class="kw">let </span>ca = <span class="kw">match </span><span class="self">self</span>.ca_repo.get_by_id(organization_id, ca_id).<span class="kw">await </span>{
+<a href=#297 id=297 data-nosnippet>297</a>            <span class="prelude-val">Ok</span>(ca) =&gt; ca,
+<a href=#298 id=298 data-nosnippet>298</a>            <span class="prelude-val">Err</span>(AxiamError::NotFound { .. }) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(not_published()),
+<a href=#299 id=299 data-nosnippet>299</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(e),
+<a href=#300 id=300 data-nosnippet>300</a>        };
+<a href=#301 id=301 data-nosnippet>301</a>        <span class="kw">let </span>now = Utc::now();
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(reason) = <span class="self">Self</span>::why_unpublished(<span class="kw-2">&amp;</span>ca, now) {
+<a href=#303 id=303 data-nosnippet>303</a>            <span class="macro">tracing::debug!</span>(%organization_id, %ca_id, reason, <span class="string">"no CRL is published for this CA"</span>);
+<a href=#304 id=304 data-nosnippet>304</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(not_published());
+<a href=#305 id=305 data-nosnippet>305</a>        }
+<a href=#306 id=306 data-nosnippet>306</a>        <span class="kw">let </span>store = <span class="self">self</span>.custodians.store_for(ca.key_custody)<span class="question-mark">?</span>;
+<a href=#307 id=307 data-nosnippet>307</a>        <span class="kw">if </span>store.signs_remotely() {
+<a href=#308 id=308 data-nosnippet>308</a>            <span class="macro">tracing::debug!</span>(
+<a href=#309 id=309 data-nosnippet>309</a>                %organization_id,
+<a href=#310 id=310 data-nosnippet>310</a>                %ca_id,
+<a href=#311 id=311 data-nosnippet>311</a>                <span class="string">"no CRL is published for this CA: its key is held by a custodian that signs \
+<a href=#312 id=312 data-nosnippet>312</a>                 certificate requests only (vault_pki), and publishes the CA's list itself"
+<a href=#313 id=313 data-nosnippet>313</a>            </span>);
+<a href=#314 id=314 data-nosnippet>314</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(not_published());
+<a href=#315 id=315 data-nosnippet>315</a>        }
+<a href=#316 id=316 data-nosnippet>316</a>
+<a href=#317 id=317 data-nosnippet>317</a>        <span class="comment">// Read on every request, outside the lock: a revocation is in the very
+<a href=#318 id=318 data-nosnippet>318</a>        // next response, and a slow read does not hold up other CAs' lists.
+<a href=#319 id=319 data-nosnippet>319</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>entries = <span class="self">self</span>.cert_repo.list_revoked_by_issuer(ca.id).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#320 id=320 data-nosnippet>320</a>        entries.extend(<span class="self">self</span>.ca_repo.list_revoked_children(ca.id).<span class="kw">await</span><span class="question-mark">?</span>);
+<a href=#321 id=321 data-nosnippet>321</a>        entries.sort_by(|a, b| a.fingerprint.cmp(<span class="kw-2">&amp;</span>b.fingerprint));
+<a href=#322 id=322 data-nosnippet>322</a>        <span class="kw">let </span>digest = entries_digest(<span class="kw-2">&amp;</span>entries);
+<a href=#323 id=323 data-nosnippet>323</a>
+<a href=#324 id=324 data-nosnippet>324</a>        <span class="kw">let </span><span class="kw-2">mut </span>cache = <span class="self">self</span>.cache.lock().<span class="kw">await</span>;
+<a href=#325 id=325 data-nosnippet>325</a>        <span class="kw">let </span>last_number = <span class="kw">match </span>cache.get(<span class="kw-2">&amp;</span>ca.id) {
+<a href=#326 id=326 data-nosnippet>326</a>            <span class="prelude-val">Some</span>(cached) <span class="kw">if </span>cached.entries_digest == digest &amp;&amp; now &lt; cached.refresh_at =&gt; {
+<a href=#327 id=327 data-nosnippet>327</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(cached.crl.clone());
+<a href=#328 id=328 data-nosnippet>328</a>            }
+<a href=#329 id=329 data-nosnippet>329</a>            <span class="prelude-val">Some</span>(cached) =&gt; <span class="prelude-val">Some</span>(cached.crl.crl_number),
+<a href=#330 id=330 data-nosnippet>330</a>            <span class="prelude-val">None </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#331 id=331 data-nosnippet>331</a>        };
+<a href=#332 id=332 data-nosnippet>332</a>
+<a href=#333 id=333 data-nosnippet>333</a>        <span class="comment">// Whole seconds: a CRL's times are encoded to the second, and the
+<a href=#334 id=334 data-nosnippet>334</a>        // `Last-Modified` header and the list must say the same thing.
+<a href=#335 id=335 data-nosnippet>335</a>        </span><span class="kw">let </span>this_update = DateTime::from_timestamp(now.timestamp(), <span class="number">0</span>).unwrap_or(now);
+<a href=#336 id=336 data-nosnippet>336</a>        <span class="kw">let </span>next_update = (this_update + <span class="self">self</span>.next_update).min(ca.not_after);
+<a href=#337 id=337 data-nosnippet>337</a>        <span class="kw">if </span>next_update &lt;= this_update {
+<a href=#338 id=338 data-nosnippet>338</a>            <span class="macro">tracing::debug!</span>(%organization_id, %ca_id, <span class="string">"no CRL is published: the CA expires now"</span>);
+<a href=#339 id=339 data-nosnippet>339</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(not_published());
+<a href=#340 id=340 data-nosnippet>340</a>        }
+<a href=#341 id=341 data-nosnippet>341</a>        <span class="kw">let </span>crl_number = u64::try_from(now.timestamp_millis())
+<a href=#342 id=342 data-nosnippet>342</a>            .unwrap_or(<span class="number">0</span>)
+<a href=#343 id=343 data-nosnippet>343</a>            .max(last_number.map_or(<span class="number">0</span>, |n| n.saturating_add(<span class="number">1</span>)));
+<a href=#344 id=344 data-nosnippet>344</a>
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="kw">let </span>key_ref = CaService::&lt;CA&gt;::key_ref(<span class="kw-2">&amp;</span>ca);
+<a href=#346 id=346 data-nosnippet>346</a>        <span class="kw">let </span>ca_key_pem = store
+<a href=#347 id=347 data-nosnippet>347</a>            .load(<span class="kw-2">&amp;</span>key_ref, ca.encrypted_private_key.as_deref())
+<a href=#348 id=348 data-nosnippet>348</a>            .<span class="kw">await</span><span class="question-mark">?
+<a href=#349 id=349 data-nosnippet>349</a>            </span>.to_string();
+<a href=#350 id=350 data-nosnippet>350</a>        <span class="kw">let </span>_permit = <span class="self">self
+<a href=#351 id=351 data-nosnippet>351</a>            </span>.crypto_semaphore
+<a href=#352 id=352 data-nosnippet>352</a>            .acquire()
+<a href=#353 id=353 data-nosnippet>353</a>            .<span class="kw">await
+<a href=#354 id=354 data-nosnippet>354</a>            </span>.map_err(|<span class="kw">_</span>| AxiamError::Internal(<span class="string">"crypto semaphore closed"</span>.into()))<span class="question-mark">?</span>;
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="kw">let </span>ca_cert_pem = ca.public_cert_pem.clone();
+<a href=#356 id=356 data-nosnippet>356</a>        <span class="kw">let </span>der = tokio::task::spawn_blocking(<span class="kw">move </span>|| {
+<a href=#357 id=357 data-nosnippet>357</a>            sign_crl(
+<a href=#358 id=358 data-nosnippet>358</a>                <span class="kw-2">&amp;</span>ca_cert_pem,
+<a href=#359 id=359 data-nosnippet>359</a>                ca_key_pem,
+<a href=#360 id=360 data-nosnippet>360</a>                <span class="kw-2">&amp;</span>entries,
+<a href=#361 id=361 data-nosnippet>361</a>                this_update,
+<a href=#362 id=362 data-nosnippet>362</a>                next_update,
+<a href=#363 id=363 data-nosnippet>363</a>                crl_number,
+<a href=#364 id=364 data-nosnippet>364</a>            )
+<a href=#365 id=365 data-nosnippet>365</a>        })
+<a href=#366 id=366 data-nosnippet>366</a>        .<span class="kw">await
+<a href=#367 id=367 data-nosnippet>367</a>        </span>.map_err(|e| AxiamError::Internal(<span class="macro">format!</span>(<span class="string">"spawn_blocking join error: {e}"</span>)))<span class="question-mark">??</span>;
+<a href=#368 id=368 data-nosnippet>368</a>
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="kw">let </span>etag = <span class="macro">format!</span>(<span class="string">"\"{}\""</span>, hex::encode(<span class="kw-2">&amp;</span>Sha256::digest(<span class="kw-2">&amp;</span>der)[..<span class="number">16</span>]));
+<a href=#370 id=370 data-nosnippet>370</a>        <span class="kw">let </span>crl = PublishedCrl {
+<a href=#371 id=371 data-nosnippet>371</a>            der: Arc::from(der),
+<a href=#372 id=372 data-nosnippet>372</a>            this_update,
+<a href=#373 id=373 data-nosnippet>373</a>            next_update,
+<a href=#374 id=374 data-nosnippet>374</a>            crl_number,
+<a href=#375 id=375 data-nosnippet>375</a>            etag,
+<a href=#376 id=376 data-nosnippet>376</a>        };
+<a href=#377 id=377 data-nosnippet>377</a>        cache.insert(
+<a href=#378 id=378 data-nosnippet>378</a>            ca.id,
+<a href=#379 id=379 data-nosnippet>379</a>            CachedCrl {
+<a href=#380 id=380 data-nosnippet>380</a>                crl: crl.clone(),
+<a href=#381 id=381 data-nosnippet>381</a>                entries_digest: digest,
+<a href=#382 id=382 data-nosnippet>382</a>                refresh_at: this_update + (next_update - this_update) / <span class="number">2</span>,
+<a href=#383 id=383 data-nosnippet>383</a>            },
+<a href=#384 id=384 data-nosnippet>384</a>        );
+<a href=#385 id=385 data-nosnippet>385</a>        <span class="prelude-val">Ok</span>(crl)
+<a href=#386 id=386 data-nosnippet>386</a>    }
+<a href=#387 id=387 data-nosnippet>387</a>
+<a href=#388 id=388 data-nosnippet>388</a>    <span class="doccomment">/// Why `ca` publishes no list, if it does not — the reasons that need no
+<a href=#389 id=389 data-nosnippet>389</a>    /// custodian to answer.
+<a href=#390 id=390 data-nosnippet>390</a>    </span><span class="kw">fn </span>why_unpublished(ca: <span class="kw-2">&amp;</span>CaCertificate, now: DateTime&lt;Utc&gt;) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str&gt; {
+<a href=#391 id=391 data-nosnippet>391</a>        <span class="kw">if </span>ca.status != CertificateStatus::Active {
+<a href=#392 id=392 data-nosnippet>392</a>            <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="string">"the CA is not active; its own status is on its parent's list"</span>);
+<a href=#393 id=393 data-nosnippet>393</a>        }
+<a href=#394 id=394 data-nosnippet>394</a>        <span class="kw">if </span>now &lt; ca.not_before || now &gt;= ca.not_after {
+<a href=#395 id=395 data-nosnippet>395</a>            <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="string">"the CA is outside its validity window"</span>);
+<a href=#396 id=396 data-nosnippet>396</a>        }
+<a href=#397 id=397 data-nosnippet>397</a>        <span class="kw">if </span>ca.key_custody == CaKeyCustody::External {
+<a href=#398 id=398 data-nosnippet>398</a>            <span class="kw">return </span><span class="prelude-val">Some</span>(<span class="string">"AXIAM holds no key for this CA: it was imported as a trust anchor"</span>);
+<a href=#399 id=399 data-nosnippet>399</a>        }
+<a href=#400 id=400 data-nosnippet>400</a>        <span class="prelude-val">None
+<a href=#401 id=401 data-nosnippet>401</a>    </span>}
+<a href=#402 id=402 data-nosnippet>402</a>}
+<a href=#403 id=403 data-nosnippet>403</a>
+<a href=#404 id=404 data-nosnippet>404</a><span class="doccomment">/// A digest that changes exactly when the list's entries would.
+<a href=#405 id=405 data-nosnippet>405</a></span><span class="kw">fn </span>entries_digest(entries: <span class="kw-2">&amp;</span>[RevokedCertificate]) -&gt; [u8; <span class="number">32</span>] {
+<a href=#406 id=406 data-nosnippet>406</a>    <span class="kw">let </span><span class="kw-2">mut </span>hasher = Sha256::new();
+<a href=#407 id=407 data-nosnippet>407</a>    <span class="kw">for </span>entry <span class="kw">in </span>entries {
+<a href=#408 id=408 data-nosnippet>408</a>        hasher.update(entry.fingerprint.as_bytes());
+<a href=#409 id=409 data-nosnippet>409</a>        hasher.update(<span class="string">b":"</span>);
+<a href=#410 id=410 data-nosnippet>410</a>        hasher.update(revocation_time(entry).timestamp().to_be_bytes());
+<a href=#411 id=411 data-nosnippet>411</a>        hasher.update(<span class="string">b"\n"</span>);
+<a href=#412 id=412 data-nosnippet>412</a>    }
+<a href=#413 id=413 data-nosnippet>413</a>    hasher.finalize().into()
+<a href=#414 id=414 data-nosnippet>414</a>}
+<a href=#415 id=415 data-nosnippet>415</a>
+<a href=#416 id=416 data-nosnippet>416</a><span class="doccomment">/// The date an entry states: when AXIAM recorded the revocation, or — for a
+<a href=#417 id=417 data-nosnippet>417</a>/// certificate revoked before the date was kept — its own `notBefore`, the
+<a href=#418 id=418 data-nosnippet>418</a>/// earliest moment anyone could have relied on it.
+<a href=#419 id=419 data-nosnippet>419</a></span><span class="kw">fn </span>revocation_time(entry: <span class="kw-2">&amp;</span>RevokedCertificate) -&gt; DateTime&lt;Utc&gt; {
+<a href=#420 id=420 data-nosnippet>420</a>    entry.revoked_at.unwrap_or(entry.not_before)
+<a href=#421 id=421 data-nosnippet>421</a>}
+<a href=#422 id=422 data-nosnippet>422</a>
+<a href=#423 id=423 data-nosnippet>423</a><span class="kw">fn </span>to_offset(t: DateTime&lt;Utc&gt;) -&gt; AxiamResult&lt;time::OffsetDateTime&gt; {
+<a href=#424 id=424 data-nosnippet>424</a>    time::OffsetDateTime::from_unix_timestamp(t.timestamp())
+<a href=#425 id=425 data-nosnippet>425</a>        .map_err(|e| AxiamError::Internal(<span class="macro">format!</span>(<span class="string">"CRL time out of range: {e}"</span>)))
+<a href=#426 id=426 data-nosnippet>426</a>}
+<a href=#427 id=427 data-nosnippet>427</a>
+<a href=#428 id=428 data-nosnippet>428</a><span class="doccomment">/// Sign a CRL over `entries` with the CA's key. Pure and blocking — the caller
+<a href=#429 id=429 data-nosnippet>429</a>/// runs it under the crypto semaphore, off the async runtime.
+<a href=#430 id=430 data-nosnippet>430</a>///
+<a href=#431 id=431 data-nosnippet>431</a>/// A revoked certificate whose PEM does not parse fails the whole list rather
+<a href=#432 id=432 data-nosnippet>432</a>/// than being left off it: a list that silently omits a revocation is worse
+<a href=#433 id=433 data-nosnippet>433</a>/// than no list, because a relying party trusts what it says.
+<a href=#434 id=434 data-nosnippet>434</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>sign_crl(
+<a href=#435 id=435 data-nosnippet>435</a>    ca_cert_pem: <span class="kw-2">&amp;</span>str,
+<a href=#436 id=436 data-nosnippet>436</a>    <span class="kw-2">mut </span>ca_key_pem: String,
+<a href=#437 id=437 data-nosnippet>437</a>    entries: <span class="kw-2">&amp;</span>[RevokedCertificate],
+<a href=#438 id=438 data-nosnippet>438</a>    this_update: DateTime&lt;Utc&gt;,
+<a href=#439 id=439 data-nosnippet>439</a>    next_update: DateTime&lt;Utc&gt;,
+<a href=#440 id=440 data-nosnippet>440</a>    crl_number: u64,
+<a href=#441 id=441 data-nosnippet>441</a>) -&gt; AxiamResult&lt;Vec&lt;u8&gt;&gt; {
+<a href=#442 id=442 data-nosnippet>442</a>    <span class="kw">let </span>key_pair = KeyPair::from_pem(<span class="kw-2">&amp;</span>ca_key_pem)
+<a href=#443 id=443 data-nosnippet>443</a>        .map_err(|e| AxiamError::Certificate(<span class="macro">format!</span>(<span class="string">"invalid CA private key: {e}"</span>)));
+<a href=#444 id=444 data-nosnippet>444</a>    <span class="comment">// Scrubbed as soon as it is parsed, as on the leaf path.
+<a href=#445 id=445 data-nosnippet>445</a>    </span>ca_key_pem.zeroize();
+<a href=#446 id=446 data-nosnippet>446</a>    <span class="kw">let </span>key_pair = key_pair<span class="question-mark">?</span>;
+<a href=#447 id=447 data-nosnippet>447</a>
+<a href=#448 id=448 data-nosnippet>448</a>    <span class="comment">// The authority key identifier must equal the CA certificate's subject key
+<a href=#449 id=449 data-nosnippet>449</a>    // identifier, whatever method produced it — an imported CA's is usually a
+<a href=#450 id=450 data-nosnippet>450</a>    // SHA-1 of its key, not rcgen's default — so it is read from the
+<a href=#451 id=451 data-nosnippet>451</a>    // certificate rather than derived again.
+<a href=#452 id=452 data-nosnippet>452</a>    </span><span class="kw">let </span>(<span class="kw">_</span>, ca_block) = x509_parser::pem::parse_x509_pem(ca_cert_pem.as_bytes())
+<a href=#453 id=453 data-nosnippet>453</a>        .map_err(|e| AxiamError::Certificate(<span class="macro">format!</span>(<span class="string">"invalid CA certificate PEM: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#454 id=454 data-nosnippet>454</a>    <span class="kw">let </span>(<span class="kw">_</span>, ca_x509) = X509Certificate::from_der(<span class="kw-2">&amp;</span>ca_block.contents)
+<a href=#455 id=455 data-nosnippet>455</a>        .map_err(|e| AxiamError::Certificate(<span class="macro">format!</span>(<span class="string">"invalid CA certificate: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#456 id=456 data-nosnippet>456</a>    <span class="kw">let </span>key_identifier_method = ca_x509
+<a href=#457 id=457 data-nosnippet>457</a>        .extensions()
+<a href=#458 id=458 data-nosnippet>458</a>        .iter()
+<a href=#459 id=459 data-nosnippet>459</a>        .find_map(|ext| <span class="kw">match </span>ext.parsed_extension() {
+<a href=#460 id=460 data-nosnippet>460</a>            ParsedExtension::SubjectKeyIdentifier(kid) =&gt; <span class="prelude-val">Some</span>(kid.<span class="number">0</span>.to_vec()),
+<a href=#461 id=461 data-nosnippet>461</a>            <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#462 id=462 data-nosnippet>462</a>        })
+<a href=#463 id=463 data-nosnippet>463</a>        .map_or(KeyIdMethod::Sha256, KeyIdMethod::PreSpecified);
+<a href=#464 id=464 data-nosnippet>464</a>
+<a href=#465 id=465 data-nosnippet>465</a>    <span class="kw">let </span>issuer = Issuer::from_ca_cert_pem(ca_cert_pem, key_pair)
+<a href=#466 id=466 data-nosnippet>466</a>        .map_err(|e| AxiamError::Certificate(<span class="macro">format!</span>(<span class="string">"invalid CA certificate PEM: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#467 id=467 data-nosnippet>467</a>
+<a href=#468 id=468 data-nosnippet>468</a>    <span class="kw">let </span>revoked_certs = entries
+<a href=#469 id=469 data-nosnippet>469</a>        .iter()
+<a href=#470 id=470 data-nosnippet>470</a>        .map(|entry| {
+<a href=#471 id=471 data-nosnippet>471</a>            <span class="kw">let </span>(<span class="kw">_</span>, block) = x509_parser::pem::parse_x509_pem(entry.public_cert_pem.as_bytes())
+<a href=#472 id=472 data-nosnippet>472</a>                .map_err(|e| {
+<a href=#473 id=473 data-nosnippet>473</a>                    AxiamError::Internal(<span class="macro">format!</span>(
+<a href=#474 id=474 data-nosnippet>474</a>                        <span class="string">"revoked certificate {} is not PEM: {e}"</span>,
+<a href=#475 id=475 data-nosnippet>475</a>                        entry.fingerprint
+<a href=#476 id=476 data-nosnippet>476</a>                    ))
+<a href=#477 id=477 data-nosnippet>477</a>                })<span class="question-mark">?</span>;
+<a href=#478 id=478 data-nosnippet>478</a>            <span class="kw">let </span>(<span class="kw">_</span>, cert) = X509Certificate::from_der(<span class="kw-2">&amp;</span>block.contents).map_err(|e| {
+<a href=#479 id=479 data-nosnippet>479</a>                AxiamError::Internal(<span class="macro">format!</span>(
+<a href=#480 id=480 data-nosnippet>480</a>                    <span class="string">"revoked certificate {} does not parse: {e}"</span>,
+<a href=#481 id=481 data-nosnippet>481</a>                    entry.fingerprint
+<a href=#482 id=482 data-nosnippet>482</a>                ))
+<a href=#483 id=483 data-nosnippet>483</a>            })<span class="question-mark">?</span>;
+<a href=#484 id=484 data-nosnippet>484</a>            <span class="prelude-val">Ok</span>(RevokedCertParams {
+<a href=#485 id=485 data-nosnippet>485</a>                serial_number: SerialNumber::from_slice(<span class="kw-2">&amp;</span>cert.serial.to_bytes_be()),
+<a href=#486 id=486 data-nosnippet>486</a>                revocation_time: to_offset(revocation_time(entry))<span class="question-mark">?</span>,
+<a href=#487 id=487 data-nosnippet>487</a>                reason_code: <span class="prelude-val">None</span>,
+<a href=#488 id=488 data-nosnippet>488</a>                invalidity_date: <span class="prelude-val">None</span>,
+<a href=#489 id=489 data-nosnippet>489</a>            })
+<a href=#490 id=490 data-nosnippet>490</a>        })
+<a href=#491 id=491 data-nosnippet>491</a>        .collect::&lt;AxiamResult&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#492 id=492 data-nosnippet>492</a>
+<a href=#493 id=493 data-nosnippet>493</a>    <span class="kw">let </span>params = CertificateRevocationListParams {
+<a href=#494 id=494 data-nosnippet>494</a>        this_update: to_offset(this_update)<span class="question-mark">?</span>,
+<a href=#495 id=495 data-nosnippet>495</a>        next_update: to_offset(next_update)<span class="question-mark">?</span>,
+<a href=#496 id=496 data-nosnippet>496</a>        crl_number: SerialNumber::from(crl_number),
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="comment">// A complete list: every certificate this CA signed, leaves and CAs.
+<a href=#498 id=498 data-nosnippet>498</a>        </span>issuing_distribution_point: <span class="prelude-val">None</span>,
+<a href=#499 id=499 data-nosnippet>499</a>        revoked_certs,
+<a href=#500 id=500 data-nosnippet>500</a>        key_identifier_method,
+<a href=#501 id=501 data-nosnippet>501</a>    };
+<a href=#502 id=502 data-nosnippet>502</a>    <span class="kw">let </span>crl = params
+<a href=#503 id=503 data-nosnippet>503</a>        .signed_by(<span class="kw-2">&amp;</span>issuer)
+<a href=#504 id=504 data-nosnippet>504</a>        .map_err(|e| AxiamError::Certificate(<span class="macro">format!</span>(<span class="string">"CRL signing failed: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#505 id=505 data-nosnippet>505</a>    <span class="prelude-val">Ok</span>(crl.der().to_vec())
+<a href=#506 id=506 data-nosnippet>506</a>}
+<a href=#507 id=507 data-nosnippet>507</a>
+<a href=#508 id=508 data-nosnippet>508</a><span class="attr">#[cfg(test)]
+<a href=#509 id=509 data-nosnippet>509</a></span><span class="kw">mod </span>tests {
+<a href=#510 id=510 data-nosnippet>510</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#511 id=511 data-nosnippet>511</a>
+<a href=#512 id=512 data-nosnippet>512</a>    <span class="attr">#[test]
+<a href=#513 id=513 data-nosnippet>513</a>    </span><span class="kw">fn </span>the_route_is_the_one_the_distribution_point_names() {
+<a href=#514 id=514 data-nosnippet>514</a>        <span class="kw">let </span>org = Uuid::new_v4();
+<a href=#515 id=515 data-nosnippet>515</a>        <span class="kw">let </span>ca = Uuid::new_v4();
+<a href=#516 id=516 data-nosnippet>516</a>        <span class="kw">let </span>distribution = CrlDistribution::new(<span class="string">"https://id.example.com/"</span>).unwrap();
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="macro">assert_eq!</span>(
+<a href=#518 id=518 data-nosnippet>518</a>            distribution.uri_for(org, ca),
+<a href=#519 id=519 data-nosnippet>519</a>            <span class="macro">format!</span>(<span class="string">"https://id.example.com/pki/v1/{org}/ca/{ca}/crl"</span>)
+<a href=#520 id=520 data-nosnippet>520</a>        );
+<a href=#521 id=521 data-nosnippet>521</a>    }
+<a href=#522 id=522 data-nosnippet>522</a>
+<a href=#523 id=523 data-nosnippet>523</a>    <span class="attr">#[test]
+<a href=#524 id=524 data-nosnippet>524</a>    </span><span class="kw">fn </span>a_base_url_must_be_absolute_http_with_no_query() {
+<a href=#525 id=525 data-nosnippet>525</a>        <span class="kw">for </span>bad <span class="kw">in </span>[
+<a href=#526 id=526 data-nosnippet>526</a>            <span class="string">"id.example.com"</span>,
+<a href=#527 id=527 data-nosnippet>527</a>            <span class="string">"ftp://id.example.com"</span>,
+<a href=#528 id=528 data-nosnippet>528</a>            <span class="string">"https://id.example.com/?a=b"</span>,
+<a href=#529 id=529 data-nosnippet>529</a>            <span class="string">"https://id.example.com/#x"</span>,
+<a href=#530 id=530 data-nosnippet>530</a>            <span class="string">""</span>,
+<a href=#531 id=531 data-nosnippet>531</a>        ] {
+<a href=#532 id=532 data-nosnippet>532</a>            <span class="macro">assert!</span>(
+<a href=#533 id=533 data-nosnippet>533</a>                CrlDistribution::new(bad).is_err(),
+<a href=#534 id=534 data-nosnippet>534</a>                <span class="string">"{bad:?} must be refused"
+<a href=#535 id=535 data-nosnippet>535</a>            </span>);
+<a href=#536 id=536 data-nosnippet>536</a>        }
+<a href=#537 id=537 data-nosnippet>537</a>        <span class="macro">assert!</span>(CrlDistribution::new(<span class="string">"http://crl.internal:8080/axiam"</span>).is_ok());
+<a href=#538 id=538 data-nosnippet>538</a>    }
+<a href=#539 id=539 data-nosnippet>539</a>
+<a href=#540 id=540 data-nosnippet>540</a>    <span class="attr">#[test]
+<a href=#541 id=541 data-nosnippet>541</a>    </span><span class="kw">fn </span>resolve_prefers_the_explicit_value_and_never_falls_back_from_a_bad_one() {
+<a href=#542 id=542 data-nosnippet>542</a>        <span class="kw">let </span>issuer = <span class="string">"https://id.example.com"</span>;
+<a href=#543 id=543 data-nosnippet>543</a>        <span class="macro">assert_eq!</span>(
+<a href=#544 id=544 data-nosnippet>544</a>            CrlDistribution::resolve(<span class="prelude-val">None</span>, issuer).unwrap(),
+<a href=#545 id=545 data-nosnippet>545</a>            <span class="prelude-val">Some</span>(CrlDistribution::new(issuer).unwrap())
+<a href=#546 id=546 data-nosnippet>546</a>        );
+<a href=#547 id=547 data-nosnippet>547</a>        <span class="macro">assert_eq!</span>(
+<a href=#548 id=548 data-nosnippet>548</a>            CrlDistribution::resolve(<span class="prelude-val">Some</span>(<span class="string">"http://crl.internal"</span>), issuer).unwrap(),
+<a href=#549 id=549 data-nosnippet>549</a>            <span class="prelude-val">Some</span>(CrlDistribution::new(<span class="string">"http://crl.internal"</span>).unwrap())
+<a href=#550 id=550 data-nosnippet>550</a>        );
+<a href=#551 id=551 data-nosnippet>551</a>        <span class="macro">assert!</span>(CrlDistribution::resolve(<span class="prelude-val">Some</span>(<span class="string">"not a url"</span>), issuer).is_err());
+<a href=#552 id=552 data-nosnippet>552</a>        <span class="comment">// The JWT issuer fallback is often a bare name: no distribution point.
+<a href=#553 id=553 data-nosnippet>553</a>        </span><span class="macro">assert_eq!</span>(CrlDistribution::resolve(<span class="prelude-val">None</span>, <span class="string">"axiam"</span>).unwrap(), <span class="prelude-val">None</span>);
+<a href=#554 id=554 data-nosnippet>554</a>        <span class="macro">assert_eq!</span>(CrlDistribution::resolve(<span class="prelude-val">Some</span>(<span class="string">"  "</span>), <span class="string">"axiam"</span>).unwrap(), <span class="prelude-val">None</span>);
+<a href=#555 id=555 data-nosnippet>555</a>    }
+<a href=#556 id=556 data-nosnippet>556</a>
+<a href=#557 id=557 data-nosnippet>557</a>    <span class="attr">#[test]
+<a href=#558 id=558 data-nosnippet>558</a>    </span><span class="kw">fn </span>the_interval_is_bounded() {
+<a href=#559 id=559 data-nosnippet>559</a>        <span class="macro">assert!</span>(validate_next_update_secs(DEFAULT_CRL_NEXT_UPDATE_SECS).is_ok());
+<a href=#560 id=560 data-nosnippet>560</a>        <span class="macro">assert!</span>(validate_next_update_secs(MIN_CRL_NEXT_UPDATE_SECS - <span class="number">1</span>).is_err());
+<a href=#561 id=561 data-nosnippet>561</a>        <span class="macro">assert!</span>(validate_next_update_secs(MAX_CRL_NEXT_UPDATE_SECS + <span class="number">1</span>).is_err());
+<a href=#562 id=562 data-nosnippet>562</a>    }
+<a href=#563 id=563 data-nosnippet>563</a>
+<a href=#564 id=564 data-nosnippet>564</a>    <span class="attr">#[test]
+<a href=#565 id=565 data-nosnippet>565</a>    </span><span class="kw">fn </span>if_none_match_accepts_star_lists_and_weak_tags() {
+<a href=#566 id=566 data-nosnippet>566</a>        <span class="kw">let </span>crl = PublishedCrl {
+<a href=#567 id=567 data-nosnippet>567</a>            der: Arc::from(<span class="macro">vec!</span>[<span class="number">1u8</span>, <span class="number">2</span>, <span class="number">3</span>]),
+<a href=#568 id=568 data-nosnippet>568</a>            this_update: Utc::now(),
+<a href=#569 id=569 data-nosnippet>569</a>            next_update: Utc::now(),
+<a href=#570 id=570 data-nosnippet>570</a>            crl_number: <span class="number">1</span>,
+<a href=#571 id=571 data-nosnippet>571</a>            etag: <span class="string">"\"abc\""</span>.into(),
+<a href=#572 id=572 data-nosnippet>572</a>        };
+<a href=#573 id=573 data-nosnippet>573</a>        <span class="macro">assert!</span>(crl.matches_if_none_match(<span class="string">"\"abc\""</span>));
+<a href=#574 id=574 data-nosnippet>574</a>        <span class="macro">assert!</span>(crl.matches_if_none_match(<span class="string">"\"x\", W/\"abc\""</span>));
+<a href=#575 id=575 data-nosnippet>575</a>        <span class="macro">assert!</span>(crl.matches_if_none_match(<span class="string">"*"</span>));
+<a href=#576 id=576 data-nosnippet>576</a>        <span class="macro">assert!</span>(!crl.matches_if_none_match(<span class="string">"\"abd\""</span>));
+<a href=#577 id=577 data-nosnippet>577</a>    }
+<a href=#578 id=578 data-nosnippet>578</a>}
+</code></pre></div></section></main></body></html>

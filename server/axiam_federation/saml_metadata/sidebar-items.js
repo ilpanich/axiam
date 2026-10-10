@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TTL","MAX_METADATA_SIZE","MAX_TTL","MIN_TTL"],"fn":["fetch_metadata_document","guarded_metadata_fetcher","parse_idp_metadata","parse_xs_duration"],"struct":["ParsedIdpMetadata","ResolvedIdpMetadata","SamlMetadataCache","SsoHostChange"],"type":["MetadataFetcher"]};

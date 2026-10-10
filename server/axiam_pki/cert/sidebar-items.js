@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["DEFAULT_LEAF_CERT_VALIDITY_DAYS","MAX_LEAF_CERT_VALIDITY_DAYS"],"enum":["IssuingScope"],"fn":["issuer_bounded_validity_days"],"struct":["CertService"]};
+window.SIDEBAR_ITEMS = {"constant":["CUSTODIAN_REVOKE_ATTEMPTS","CUSTODIAN_REVOKE_BUDGET","DEFAULT_LEAF_CERT_VALIDITY_DAYS","MAX_LEAF_CERT_VALIDITY_DAYS"],"enum":["CustodianRevocation","IssuingScope"],"fn":["issuer_bounded_validity_days"],"struct":["CertService","TenantCertificatesRevoked"]};

@@ -32,17 +32,18 @@
 <a href=#32 id=32 data-nosnippet>32</a><span class="kw">pub use </span>messages::{MailType, OutboundMailMessage, WebhookMessage};
 <a href=#33 id=33 data-nosnippet>33</a><span class="kw">pub use </span>notification_publisher::NotificationPublisher;
 <a href=#34 id=34 data-nosnippet>34</a><span class="kw">pub use </span>outbound::{
-<a href=#35 id=35 data-nosnippet>35</a>    AmqpOutboundPublisher, InProcessConsumerEnd, InProcessOutbound, InProcessOutboundPublisher,
-<a href=#36 id=36 data-nosnippet>36</a>    OutboundConsumerError, OutboundDeliverers, OutboundRetryConfig, OutboundTopology,
-<a href=#37 id=37 data-nosnippet>37</a>    run_outbound_consumer, spawn_in_process_consumer, spawn_outbound_consumer,
-<a href=#38 id=38 data-nosnippet>38</a>};
-<a href=#39 id=39 data-nosnippet>39</a><span class="kw">pub use </span>reactor::{
-<a href=#40 id=40 data-nosnippet>40</a>    ChainResult, DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT, DEFAULT_HEALTH_LOOKBACK_HOURS,
-<a href=#41 id=41 data-nosnippet>41</a>    DispatchFailure, DispatchingReactorGate, InFlightLimiter, LapinReactorTransport,
-<a href=#42 id=42 data-nosnippet>42</a>    NoopReactorGate, REACTOR_TRANSPORT_DISCONNECTED, ReactorAuditSink, ReactorEventMessage,
-<a href=#43 id=43 data-nosnippet>43</a>    ReactorGateConfig, ReactorHealth, ReactorReply, ReactorRoutingTable, ReactorSource,
-<a href=#44 id=44 data-nosnippet>44</a>    ReactorTransport, ReplyDecision, ReplyRejection, RepositoryAuditSink, RepositoryReactorSource,
-<a href=#45 id=45 data-nosnippet>45</a>    UnavailableReactorTransport, recent_health, run_chain,
-<a href=#46 id=46 data-nosnippet>46</a>};
-<a href=#47 id=47 data-nosnippet>47</a><span class="kw">pub use </span>webhook_publisher::WebhookPublisher;
+<a href=#35 id=35 data-nosnippet>35</a>    AmqpOutboundPublisher, IN_FLIGHT_STOP_GRACE, InProcessConsumerEnd, InProcessOutbound,
+<a href=#36 id=36 data-nosnippet>36</a>    InProcessOutboundPublisher, InProcessShutdown, OutboundConsumerError, OutboundDeliverers,
+<a href=#37 id=37 data-nosnippet>37</a>    OutboundRetryConfig, OutboundTopology, STOPPED_REASON, run_outbound_consumer,
+<a href=#38 id=38 data-nosnippet>38</a>    spawn_in_process_consumer, spawn_outbound_consumer,
+<a href=#39 id=39 data-nosnippet>39</a>};
+<a href=#40 id=40 data-nosnippet>40</a><span class="kw">pub use </span>reactor::{
+<a href=#41 id=41 data-nosnippet>41</a>    ChainResult, DEFAULT_HEALTH_FAILURE_SAMPLE_LIMIT, DEFAULT_HEALTH_LOOKBACK_HOURS,
+<a href=#42 id=42 data-nosnippet>42</a>    DispatchFailure, DispatchingReactorGate, InFlightLimiter, LapinReactorTransport,
+<a href=#43 id=43 data-nosnippet>43</a>    NoopReactorGate, REACTOR_TRANSPORT_DISCONNECTED, ReactorAuditSink, ReactorEventMessage,
+<a href=#44 id=44 data-nosnippet>44</a>    ReactorGateConfig, ReactorHealth, ReactorReply, ReactorRoutingTable, ReactorSource,
+<a href=#45 id=45 data-nosnippet>45</a>    ReactorTransport, ReplyDecision, ReplyRejection, RepositoryAuditSink, RepositoryReactorSource,
+<a href=#46 id=46 data-nosnippet>46</a>    UnavailableReactorTransport, recent_health, run_chain,
+<a href=#47 id=47 data-nosnippet>47</a>};
+<a href=#48 id=48 data-nosnippet>48</a><span class="kw">pub use </span>webhook_publisher::WebhookPublisher;
 </code></pre></div></section></main></body></html>

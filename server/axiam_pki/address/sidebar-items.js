@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_RESOLVED_ADDRESSES"],"enum":["GuardError"],"fn":["guard_host","is_ip_literal","parse_allowed_networks"],"struct":["AddressPolicy","GuardedTarget","SystemResolver"],"trait":["Resolver"],"type":["ResolveFuture"]};

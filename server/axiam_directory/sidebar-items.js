@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["address","authenticator","client","config","dn","escape","frame","group_lookup","groups","mapper","sync","sync_lookup","tls"]};
+window.SIDEBAR_ITEMS = {"enum":["GuardError"],"mod":["address","authenticator","client","config","dn","escape","frame","group_lookup","groups","mapper","sync","sync_lookup","tls"],"struct":["AddressPolicy","GuardedTarget","SystemResolver"],"trait":["Resolver"]};

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AuditAttribution","AuditEvent","AuditMiddleware","AuditMiddlewareService"],"trait":["AuditEventSink"]};
+window.SIDEBAR_ITEMS = {"constant":["CHANNEL_CAPACITY","SINK_FLUSH_INTERVAL"],"struct":["AuditAttribution","AuditEvent","AuditMiddleware","AuditMiddlewareService"],"trait":["AuditEventSink"]};

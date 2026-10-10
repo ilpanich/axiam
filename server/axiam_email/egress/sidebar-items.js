@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ALLOWED_PRIVATE_NETWORKS_ENV","HOST_NOT_PERMITTED","PROVIDER_UNREACHABLE"],"enum":["GuardError"],"fn":["parse_allowed_networks"],"struct":["AddressPolicy","EgressRefusal","EmailEgress","GuardedTarget","SystemResolver"],"trait":["Resolver"],"type":["ResolveFuture"]};

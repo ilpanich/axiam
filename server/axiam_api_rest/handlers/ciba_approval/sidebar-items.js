@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["CIBA_APPROVED_AUDIT_ACTION","CIBA_DENIED_AUDIT_ACTION"],"fn":["approve","deny","get_request"],"struct":["CibaApprovalPage","CibaDecisionBody","CibaDecisionResponse","CibaStepUpRequired"]};
+window.SIDEBAR_ITEMS = {"constant":["CIBA_APPROVED_AUDIT_ACTION","CIBA_DENIED_AUDIT_ACTION"],"fn":["approve","deny","get_request","list_requests"],"struct":["CibaApprovalPage","CibaDecisionBody","CibaDecisionResponse","CibaListQuery","CibaPendingList","CibaStepUpRequired"]};

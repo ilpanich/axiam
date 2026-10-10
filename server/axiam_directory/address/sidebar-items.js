@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["ALLOWED_PRIVATE_NETWORKS_ENV","MAX_RESOLVED_ADDRESSES"],"enum":["GuardError"],"fn":["guard","parse_allowed_networks"],"struct":["AddressPolicy","GuardedTarget","NetworkGuard","SystemResolver"],"trait":["Resolver"],"type":["ResolveFuture"]};
+window.SIDEBAR_ITEMS = {"constant":["ALLOWED_PRIVATE_NETWORKS_ENV","MAX_RESOLVED_ADDRESSES"],"enum":["GuardError"],"fn":["guard","operator_reason","parse_allowed_networks"],"struct":["AddressPolicy","GuardedTarget","NetworkGuard","SystemResolver"],"trait":["Resolver"],"type":["ResolveFuture"]};

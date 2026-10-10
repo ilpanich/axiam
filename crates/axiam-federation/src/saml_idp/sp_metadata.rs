@@ -169,28 +169,20 @@ pub struct SpMetadataDraft {
 pub async fn fetch_sp_metadata(url: &str, allow_private: bool) -> Result<Vec<u8>, MetadataError> {
     use axiam_pki::ssrf::{SsrfError, guarded_fetch, read_capped_body};
 
-    let parsed = url::Url::parse(url).map_err(|_| MetadataError::UrlRefused)?;
-    if parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || (!allow_private && parsed.scheme() != "https")
-    {
-        return Err(MetadataError::UrlRefused);
-    }
-
-    let response = guarded_fetch(url, allow_private, |client, target| client.get(target))
-        .await
-        .map_err(|error| match error {
-            SsrfError::InvalidUrl
-            | SsrfError::ResolveFailed
-            | SsrfError::Blocked
-            | SsrfError::InsecureScheme
-            | SsrfError::TooManyRedirects => MetadataError::UrlRefused,
-            SsrfError::ResponseTooLarge(_) => MetadataError::NotSpMetadata,
-            SsrfError::ClientBuildFailed | SsrfError::RequestFailed(_) => {
-                MetadataError::FetchFailed
-            }
-        })?;
+    let vetted = vet_sp_metadata_url(url, allow_private)?;
+    let response = guarded_fetch(vetted.as_str(), allow_private, |client, target| {
+        client.get(target)
+    })
+    .await
+    .map_err(|error| match error {
+        SsrfError::InvalidUrl
+        | SsrfError::ResolveFailed
+        | SsrfError::Blocked
+        | SsrfError::InsecureScheme
+        | SsrfError::TooManyRedirects => MetadataError::UrlRefused,
+        SsrfError::ResponseTooLarge(_) => MetadataError::NotSpMetadata,
+        SsrfError::ClientBuildFailed | SsrfError::RequestFailed(_) => MetadataError::FetchFailed,
+    })?;
     if !response.status().is_success() {
         return Err(MetadataError::FetchFailed);
     }
@@ -200,6 +192,26 @@ pub async fn fetch_sp_metadata(url: &str, allow_private: bool) -> Result<Vec<u8>
             SsrfError::ResponseTooLarge(_) => MetadataError::NotSpMetadata,
             _ => MetadataError::FetchFailed,
         })
+}
+
+/// The URL rules [`fetch_sp_metadata`] applies before anything is resolved: a
+/// URL that parses, names a host, carries no user name or password, and —
+/// unless `allow_private`, the test seam — is `https`. Split out so the scheme
+/// refusal is decided, and tested, where no request can follow it.
+///
+/// # Errors
+///
+/// [`MetadataError::UrlRefused`], the one category every URL refusal shares.
+pub fn vet_sp_metadata_url(url: &str, allow_private: bool) -> Result<url::Url, MetadataError> {
+    let parsed = url::Url::parse(url).map_err(|_| MetadataError::UrlRefused)?;
+    if parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || (!allow_private && parsed.scheme() != "https")
+    {
+        return Err(MetadataError::UrlRefused);
+    }
+    Ok(parsed)
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,10 +1198,7 @@ mod fetch_tests {
             "https://192.168.1.10/metadata",
             "https://169.254.169.254/latest/meta-data/",
             "https://[::1]/metadata",
-            "http://sp.example.test/metadata",
-            "ftp://sp.example.test/metadata",
-            "https://user:pw@sp.example.test/metadata",
-            "not a url",
+            // Parsed as host `no-host`, which does not resolve.
             "https:///no-host",
         ] {
             assert_eq!(
@@ -1198,6 +1207,20 @@ mod fetch_tests {
                 "{url}"
             );
         }
+        // Decided by the URL alone, before anything resolves or connects.
+        for url in [
+            "http://sp.example.test/metadata",
+            "ftp://sp.example.test/metadata",
+            "https://user:pw@sp.example.test/metadata",
+            "not a url",
+        ] {
+            assert_eq!(
+                vet_sp_metadata_url(url, false),
+                Err(MetadataError::UrlRefused),
+                "{url}"
+            );
+        }
+        assert!(vet_sp_metadata_url("https://sp.example.test/metadata", false).is_ok());
     }
 
     #[tokio::test]

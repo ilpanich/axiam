@@ -492,9 +492,7 @@ async fn the_signed_assertion_is_accepted_by_axiam_own_sp_verifier() {
 
         let result = sp_accepts(&xml, Some(REQUEST_ID), Some(ACS), true)
             .await
-            .unwrap_or_else(|e| {
-                panic!("sign_responses={sign_responses}: AXIAM's SP refused it: {e:?}")
-            });
+            .unwrap_or_else(|_| panic!("sign_responses={sign_responses}: AXIAM's SP refused it"));
         assert_eq!(result.federation_link.external_subject, issued.name_id);
         assert!(result.newly_provisioned);
         assert_eq!(
@@ -583,7 +581,7 @@ async fn p23w3_08_a_sha1_signed_response_is_refused_unless_the_federation_allows
             refused,
             Err(crate::error::FederationError::SamlSignatureInvalid(_))
         ),
-        "SHA-1 is refused by default: {refused:?}"
+        "SHA-1 is refused by default, as an invalid signature"
     );
 
     // The escape hatch restores the earlier rule for this federation only.
@@ -643,7 +641,7 @@ async fn p23w3_08_a_response_carrying_a_dtd_is_refused_before_parsing() {
                         Err(crate::error::FederationError::SamlResponseFailed(m))
                             if m.contains("DTD")
                     ),
-                    "allow_sha1_signatures={allow}, {declaration}: {result:?}"
+                    "allow_sha1_signatures={allow}, {declaration}: refused for its DTD"
                 );
             }
         }
@@ -664,7 +662,7 @@ async fn p23w3_08_a_response_carrying_a_dtd_is_refused_before_parsing() {
                     Err(crate::error::FederationError::SamlResponseFailed(m))
                         if m.contains("UTF-8")
                 ),
-                "allow_sha1_signatures={allow}: {result:?}"
+                "allow_sha1_signatures={allow}: refused as not plainly UTF-8"
             );
         }
         // Comments and CDATA are not declarations.
@@ -990,7 +988,7 @@ async fn xsw1_and_xsw2_wrapped_copies_of_a_signed_response_are_refused_by_the_sp
             format!("{err:?}").contains("exactly 1 Assertion")
                 || format!("{err:?}").contains("(XSW)")
                 || matches!(err, crate::error::FederationError::SamlSignatureInvalid(_)),
-            "{shape}: refused for the wrong reason: {err:?}"
+            "{shape}: refused for the wrong reason"
         );
     }
 }
@@ -1029,7 +1027,7 @@ async fn assertion_level_wrapping_of_the_builder_output_is_refused_by_the_sp() {
             text.contains("exactly 1 Assertion")
                 || text.contains("duplicate field `Assertion`")
                 || text.contains("(XSW)"),
-            "{shape}: {err:?}"
+            "{shape}: refused for the wrong reason"
         );
     }
 }
@@ -2271,7 +2269,7 @@ fn refused_because(
             &result,
             Err(crate::error::FederationError::SamlMetadataFailed(m)) if m.contains(reason)
         ),
-        "expected a refusal naming {reason:?}: {result:?}"
+        "expected a refusal naming {reason:?}"
     );
 }
 

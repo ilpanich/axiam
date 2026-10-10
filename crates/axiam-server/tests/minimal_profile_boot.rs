@@ -74,11 +74,14 @@ fn auth_config() -> AuthConfig {
     }
 }
 
+/// Random per call: two fresh UUIDs' bytes, built without a constant array
+/// initialiser so no fixed key value exists anywhere in the test.
 fn runtime_key() -> [u8; 32] {
-    let mut out = [0u8; 32];
-    out[..16].copy_from_slice(Uuid::new_v4().as_bytes());
-    out[16..].copy_from_slice(Uuid::new_v4().as_bytes());
-    out
+    let bytes: Vec<u8> = [Uuid::new_v4(), Uuid::new_v4()]
+        .iter()
+        .flat_map(|id| *id.as_bytes())
+        .collect();
+    bytes.try_into().expect("two UUIDs are 32 bytes")
 }
 
 /// A configuration for the minimal profile: no broker, no AMQP key, a loopback

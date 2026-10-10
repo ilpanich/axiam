@@ -114,7 +114,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid, Uuid) {
             tenant_id: org_tenant.id,
             username: "admin".into(),
             email: "admin@example.com".into(),
-            password: "password12345".into(),
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await
@@ -1135,7 +1135,7 @@ macro_rules! sign_in {
                 "tenant_id": $tenant_id,
                 "org_id": $org_id,
                 "username_or_email": "alice",
-                "password": "password12345"
+                "password": axiam_test_support::test_password()
             }))
             .to_request();
         let resp = test::call_service(&$app, req).await;
@@ -1266,7 +1266,7 @@ async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) {
                 tenant_id,
                 username: name.into(),
                 email: format!("{name}@example.com"),
-                password: "password12345".into(),
+                password: axiam_test_support::test_password(),
                 metadata: None,
             })
             .await

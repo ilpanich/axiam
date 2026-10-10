@@ -66,7 +66,7 @@ async fn populate(db: &Surreal<Db>, tenant_id: Uuid) -> Uuid {
             tenant_id,
             username: "alice".into(),
             email: "alice@example.com".into(),
-            password: "password12345".into(),
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await

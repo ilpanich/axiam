@@ -1301,13 +1301,13 @@ mod tests {
         .into_iter()
         .map(|e| match e {
             OAuth2Error::InvalidClient(d) => d,
-            other => panic!("expected invalid_client, got {other:?}"),
+            _ => panic!("every mTLS failure must be invalid_client"),
         })
         .collect();
 
         assert!(
             descriptions.iter().all(|d| d == MTLS_AUTH_FAILED),
-            "all mTLS auth failures must share one description, got {descriptions:?}"
+            "all mTLS auth failures must share one description"
         );
     }
 

@@ -341,6 +341,7 @@ async fn a_revoked_leaf_is_refused_at_the_token_endpoint_under_tls_client_auth()
         Err(OAuth2Error::InvalidClient(description)) => {
             assert_eq!(description, "invalid client credentials")
         }
-        other => panic!("a revoked leaf must be refused with invalid_client, got {other:?}"),
+        Ok(_) => panic!("a revoked leaf must be refused with invalid_client, and was accepted"),
+        Err(_) => panic!("a revoked leaf must be refused with invalid_client, not another error"),
     }
 }

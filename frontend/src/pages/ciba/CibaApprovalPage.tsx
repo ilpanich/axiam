@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
 import { CheckCircle2, Loader2, ShieldAlert, ShieldQuestion, XCircle } from "lucide-react";
 import {
@@ -73,6 +74,7 @@ export function CibaApprovalPage() {
   const [deciding, setDeciding] = useState(false);
   const [error, setError] = useState("");
   const [outcome, setOutcome] = useState<Outcome | null>(null);
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     if (!requestId) return;
@@ -125,6 +127,8 @@ export function CibaApprovalPage() {
       }
     } finally {
       setDeciding(false);
+      // The user menu's badge counts this request until it is decided or gone.
+      void queryClient.invalidateQueries({ queryKey: ["ciba-pending-requests"] });
     }
   }
 

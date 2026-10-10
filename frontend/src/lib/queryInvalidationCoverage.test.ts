@@ -57,6 +57,8 @@ const STANDALONE: Record<string, string> = {
   "reactor-events": "append-only event feed, read-only",
   "scim-tokens": "shown only on the SCIM Tokens page",
   "scim-targets": "shown only on the SCIM Targets page",
+  "ciba-pending-requests":
+    "the user menu's badge: the signed-in user's own pending sign-in requests, refetched when the menu opens and invalidated by the approval page after each decision",
   "ssf-streams":
     "shown only on the SSF Streams page; the transmitter flag each row carries is refetched on mount",
   "scim-target-groups":

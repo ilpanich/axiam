@@ -675,7 +675,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           ["grant_type", "yes", "`urn:ietf:params:oauth:grant-type:token-exchange`"],
           ["subject_token", "yes", "The token being exchanged. AXIAM-issued access tokens only."],
           ["subject_token_type", "yes", "`urn:ietf:params:oauth:token-type:access_token`"],
-          ["actor_token", "no", "Present ⇒ **delegation**. Absent ⇒ **impersonation**."],
+          ["actor_token", "no", "Present ⇒ **delegation**. Absent ⇒ **impersonation**. Must have been issued to the exchanging client — its own `client_credentials` token, or a user token from its own grants; any other is `invalid_request`."],
           ["actor_token_type", "with actor_token", "Same value as above."],
           ["scope", "no", "Must be a subset of the subject's scopes. Defaults to all of them."],
           ["audience / resource", "no", "Narrows who the issued token is for. Since `1.0.0-beta16` the target must be one of AXIAM's own audiences or appear in the client's `allowed_resources`; a target registered only as one of its `redirect_uris` is still accepted for a deprecation period, with a warning naming the client and the target — move it to `allowed_resources`."],
@@ -685,6 +685,10 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "p",
         text: "Supplying an `actor_token` selects **delegation**: the issued token says *this actor is acting for this subject*, and both are visible to whatever receives it. Omitting it selects **impersonation**: the issued token speaks as the subject alone.",
+      },
+      {
+        type: "p",
+        text: "Since 1.0.0 the actor token must have been **issued to the exchanging client** (#518): a client's own `client_credentials` token, whose `sub` is its `client_id`, or a user token from its own code, refresh, CIBA or device grant. A valid token issued to another client, a console sign-in or a service account's token is refused with `invalid_request`, so a client cannot write somebody else into `act`.",
       },
       {
         type: "p",
@@ -767,7 +771,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       { type: "h", id: "delegate", text: "Act on behalf of a user" },
       {
         type: "p",
-        text: "A confidential client holding the user's access token exchanges it ([RFC 8693](#/docs/token-exchange)) for a narrower one, presenting its own token as the `actor_token`. The issued token keeps `sub` as the user and gains an `act` claim naming the agent, so a downstream service can see and log both parties. Leaving the actor token out asks for impersonation, which is refused unless the client holds an explicit grant.",
+        text: "A confidential client holding the user's access token exchanges it ([RFC 8693](#/docs/token-exchange)) for a narrower one, presenting its own token as the `actor_token` — the server refuses a token issued to anybody else. The issued token keeps `sub` as the user and gains an `act` claim naming the agent, so a downstream service can see and log both parties. Leaving the actor token out asks for impersonation, which is refused unless the client holds an explicit grant.",
       },
       {
         type: "list",
@@ -802,7 +806,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "AXIAM does not implement RFC 8693's `may_act` claim. Who may exchange is decided by which clients carry the exchange grant, by their registered scopes and `allowed_resources`, and by the subject's own privileges. Hand the exchange grant out like any capability that lets a client speak for your users.",
+        text: "AXIAM does not implement RFC 8693's `may_act` claim yet (planned for `1.0.x`). Who may exchange is decided by which clients carry the exchange grant, by their registered scopes and `allowed_resources`, and by the subject's own privileges; the actor can only be the exchanging client itself or a user signed in to it. Hand the exchange grant out like any capability that lets a client speak for your users.",
       },
       { type: "h", id: "audience", text: "Address the token at one server" },
       {

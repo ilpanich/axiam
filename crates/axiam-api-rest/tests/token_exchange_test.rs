@@ -14,7 +14,10 @@ use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
-use axiam_auth::token::{AUD_M2M, AUD_USER, issue_access_token};
+use axiam_auth::token::{
+    AUD_M2M, AUD_USER, issue_access_token, issue_access_token_for_client,
+    issue_client_credentials_token, issue_service_account_client_credentials_token,
+};
 use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
 use axiam_core::models::oauth2_client::CreateOAuth2Client;
 use axiam_core::models::organization::CreateOrganization;
@@ -296,13 +299,54 @@ fn subject_only_params(f: &Fixture, scopes: &[&str]) -> String {
 /// audience and lifetime checks: a request without an actor token never
 /// reaches them, and a test written that way would assert
 /// `unauthorized_client` while believing it was testing scope narrowing.
+///
+/// The actor is the exchanging client's own client-credentials token (#518:
+/// an actor token must have been issued to the exchanging client).
 fn subject_params(f: &Fixture, scopes: &[&str]) -> String {
+    actor_params(f, scopes, &own_actor_token(f))
+}
+
+/// Subject parameters with the given actor token.
+fn actor_params(f: &Fixture, scopes: &[&str], actor_token: &str) -> String {
     format!(
         "{}&actor_token={}&actor_token_type={}",
         subject_only_params(f, scopes),
-        subject_token(f, &["read"]),
+        actor_token,
         enc(TOKEN_TYPE_ACCESS_TOKEN)
     )
+}
+
+/// A client-credentials token for the exchanging client: `sub` is its
+/// `client_id`, the audience `axiam:m2m`, and no `client_id` claim.
+fn own_actor_token(f: &Fixture) -> String {
+    issue_client_credentials_token(
+        &f.client_id,
+        f.tenant_id,
+        f.org_id,
+        &["read".to_owned()],
+        &f.auth,
+    )
+    .unwrap()
+}
+
+/// A user token from the code grant of `client_id`, carrying RFC 9068's
+/// `client_id` claim.
+fn code_grant_token(f: &Fixture, client_id: &str) -> String {
+    issue_access_token_for_client(
+        f.user_id,
+        f.tenant_id,
+        f.org_id,
+        &["read".to_owned()],
+        &f.auth,
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+        None,
+        None,
+        Some(client_id),
+        None,
+        &[],
+    )
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -410,6 +454,109 @@ async fn an_exchanged_token_never_outlives_its_subject() {
         f.auth.access_token_lifetime_secs
     );
     assert!(expires_in > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Delegation: the actor must be the exchanging client's (#518)
+// ---------------------------------------------------------------------------
+
+/// The exchanging client's own client-credentials token is an actor it may
+/// name, and `act.sub` is that token's `sub` — the client's `client_id`.
+#[actix_web::test]
+async fn an_actor_token_issued_to_the_exchanging_client_is_named_in_act() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let (status, body) = exchange!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        subject_params(&f, &["read"])
+    );
+    assert_eq!(status, 200, "exchange returned {body:?}");
+    let claims = decode_claims(body["access_token"].as_str().unwrap());
+    assert_eq!(claims["sub"], f.user_id.to_string());
+    assert_eq!(claims["act"]["sub"], f.client_id.as_str(), "{claims}");
+
+    // A user token from this client's own code grant carries the client in
+    // its `client_id` claim, and is accepted too; `act.sub` is its `sub`.
+    let actor = code_grant_token(&f, &f.client_id);
+    let (status, body) = exchange!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        actor_params(&f, &["read"], &actor)
+    );
+    assert_eq!(status, 200, "exchange returned {body:?}");
+    let claims = decode_claims(body["access_token"].as_str().unwrap());
+    assert_eq!(claims["act"]["sub"], f.user_id.to_string(), "{claims}");
+}
+
+/// P23W1-06: a valid same-tenant token issued to **another** client — the
+/// kind an MCP server receives by design — does not name the actor. Before
+/// #518 its `sub` went into `act` and the exchange answered `200`.
+#[actix_web::test]
+async fn an_actor_token_issued_to_another_client_is_refused() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let foreign_cc = issue_client_credentials_token(
+        &f.imp_client_id,
+        f.tenant_id,
+        f.org_id,
+        &["read".to_owned()],
+        &f.auth,
+    )
+    .unwrap();
+    let foreign_code = code_grant_token(&f, &f.imp_client_id);
+    for actor in [foreign_cc, foreign_code] {
+        let (status, body) = exchange!(
+            app,
+            f,
+            f.client_id,
+            f.client_secret,
+            actor_params(&f, &["read"], &actor)
+        );
+        assert_eq!(status, 400, "body was {body:?}");
+        assert_eq!(body["error"], "invalid_request");
+        assert_eq!(
+            body["error_description"], "actor_token was not issued to the exchanging client",
+            "{body}"
+        );
+    }
+}
+
+/// A token that names no client at all — a console sign-in, or a service
+/// account's — was not issued to the exchanging client either, and is refused
+/// the same way: the exchanging client cannot show it acts as that party.
+#[actix_web::test]
+async fn an_actor_token_naming_no_client_is_refused() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    let console = subject_token(&f, &["read"]);
+    // `axiam:m2m` like a client's, but its `sub` is the account's UUID.
+    let service_account = issue_service_account_client_credentials_token(
+        Uuid::new_v4(),
+        f.tenant_id,
+        f.org_id,
+        &[],
+        &f.auth,
+    )
+    .unwrap();
+    for actor in [console, service_account] {
+        let (status, body) = exchange!(
+            app,
+            f,
+            f.client_id,
+            f.client_secret,
+            actor_params(&f, &["read"], &actor)
+        );
+        assert_eq!(status, 400, "body was {body:?}");
+        assert_eq!(body["error"], "invalid_request");
+    }
 }
 
 // ---------------------------------------------------------------------------

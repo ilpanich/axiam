@@ -102,6 +102,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   access-token lifetime). The unused-client sweep still revokes nothing; it
   evicts rows whose tokens, under the default 30-day clocks, have expired.
   Threat model 2.38.0: T-289 and T-275 amended; totals unchanged.
+- **Token exchange: the actor token must belong to the exchanging client**
+  (#518, P23W1-06). RFC 8693 delegation accepted any valid same-tenant access
+  token as `actor_token` and wrote its `sub` into the issued token's `act`
+  claim, so a client holding somebody else's token — an MCP server receives its
+  callers' tokens by design — could attribute a delegation to that party.
+  Scopes never widened, but `act` is what audit, attribution and actor-keyed
+  policy read. The actor token must now have been issued to the client that
+  authenticates the exchange: its `client_id` claim (tokens from the code,
+  refresh, CIBA and device grants) or, for a client-credentials token, its
+  `sub` must be that client's `client_id`. **Behaviour change:** an integrator
+  that passes a token issued to another client, a console sign-in or a service
+  account's token as `actor_token` now gets `400 invalid_request`
+  (`actor_token was not issued to the exchanging client`); pass the exchanging
+  client's own `client_credentials` token, the usual choice, which works as
+  before. RFC 8693's `may_act`, which would let a subject token name other
+  permitted actors, is planned for `1.0.x`. Threat model 2.38.0: T-471 entered
+  Mitigated; 471 threats, 430 mitigated / 20 open / 21 not applicable.
 
 ### Documentation
 

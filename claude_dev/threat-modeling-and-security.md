@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470 enters; T-289 and T-275 amended).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470 and T-471 enter; T-289 and T-275 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -64,8 +64,15 @@
 > tokens through one function, the administrator's before the row goes; the
 > test deletes a CIMD client, lets it re-materialise, and is refused the
 > pre-delete refresh token. The sweep still revokes nothing, and T-275 says
-> why. The model is
-> **470 threats, 429 mitigated / 20 open / 21 not applicable**.
+> why. It enters **T-471**, Mitigated (#518): token exchange took any valid
+> same-tenant access token as the `actor_token` and wrote its `sub` into `act`,
+> so a client holding somebody else's token — an MCP server holds its callers'
+> by design — could attribute a delegation to that party. The actor token must
+> now have been issued to the exchanging client (its `client_id` claim, or the
+> `sub` of its client-credentials token); the tests accept the client's own
+> tokens and refuse another client's, a console sign-in and a service account's
+> with `invalid_request`. `may_act` stays `1.0.x`. The model is
+> **471 threats, 430 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -1179,7 +1186,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 470 threats** and a
+The system is verified against a **STRIDE threat model of 471 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1202,8 +1209,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 470 |
-| Mitigated / Open | 429 / 20 |
+| Threats identified | 471 |
+| Mitigated / Open | 430 / 20 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1222,7 +1229,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 |---|---|---|---|
 | System context | 33 | 2 | 0 |
 | Authentication & session management | 36 | 0 | 0 |
-| OAuth2 / OIDC authorization server | 85 | 0 | 0 |
+| OAuth2 / OIDC authorization server | 86 | 0 | 0 |
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 31 | 2 | 0 |
@@ -1348,7 +1355,7 @@ the category recorded against it in the model.
 
 | Category | Threats | Open | Not built |
 |---|---|---|---|
-| Spoofing | 101 | 5 | 3 |
+| Spoofing | 103 | 5 | 3 |
 | Tampering | 93 | 1 | 5 |
 | Repudiation | 16 | 2 | 1 |
 | Information disclosure | 110 | 6 | 4 |
@@ -1360,8 +1367,8 @@ the category recorded against it in the model.
 | Severity | Threats | Open | Not built |
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
-| High | 196 | 10 | 9 |
-| Medium | 195 | 7 | 9 |
+| High | 196 | 9 | 9 |
+| Medium | 197 | 8 | 9 |
 | Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
@@ -2683,7 +2690,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 20 of 470. The 21
+Every threat the model records as open, most severe first — 20 of 471. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it

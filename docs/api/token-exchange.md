@@ -41,7 +41,7 @@ grant_type=urn:ietf:params:oauth:grant-type:token-exchange
 | `grant_type` | yes | `urn:ietf:params:oauth:grant-type:token-exchange` |
 | `subject_token` | yes | The token being exchanged. v1 accepts **AXIAM-issued access tokens only** |
 | `subject_token_type` | yes | `urn:ietf:params:oauth:token-type:access_token` |
-| `actor_token` | no | Present ⇒ delegation. Absent ⇒ impersonation |
+| `actor_token` | no | Present ⇒ delegation. Absent ⇒ impersonation. Must have been issued to the exchanging client (see [The actor](#the-actor)) |
 | `actor_token_type` | with `actor_token` | Same value as above |
 | `scope` | no | Space-delimited. Defaults to the subject token's own scopes |
 | `audience` | no | Must be registered to the exchanging client |
@@ -68,7 +68,7 @@ The issued token keeps `sub` = the user and gains an `act` claim naming the
 actor:
 
 ```json
-{ "sub": "user-uuid", "act": { "sub": "service-uuid" } }
+{ "sub": "user-uuid", "act": { "sub": "oa_orders_service" } }
 ```
 
 A downstream service can see both parties and log both. Re-exchanging nests
@@ -95,6 +95,30 @@ So:
 Because the impersonation gate runs before the scope, audience and lifetime
 checks, a request that omits `actor_token` by accident is refused there and
 never reaches them. If you mean delegation, send the actor token.
+
+### The actor
+
+`act.sub` is copied from the actor token, and `act` is what attribution, audit
+and actor-keyed policy at a resource server read. So the actor token must be
+one **issued to the exchanging client** (#518, since 1.0.0); a valid
+same-tenant token issued to anybody else is refused with `invalid_request`
+(`actor_token was not issued to the exchanging client`), which is RFC 8693
+§2.2.2's error for an actor token unacceptable by policy. Without the rule, a
+client holding someone else's access token — an MCP server receives such
+tokens by design — could name that party as the actor of its own delegation.
+
+AXIAM's access tokens carry no `azp`; the client a token was issued to is read
+from:
+
+| Actor token | Issued to | `act.sub` |
+|---|---|---|
+| The exchanging client's own `client_credentials` token (the usual choice) | its `sub`, which is the `client_id` (audience `axiam:m2m`) | the `client_id` |
+| A user token from the exchanging client's own code, refresh, CIBA or device grant | its `client_id` claim (RFC 9068 §2.2) | the user's id |
+| A console sign-in, a service account's token, a token minted by an exchange | no client — refused | — |
+| Any of the above for another client | that client — refused | — |
+
+RFC 8693 §4.4's `may_act` claim, which would let a subject token name other
+parties that may act for it, is not read; it is planned for `1.0.x`.
 
 ## Scope narrowing
 
@@ -246,6 +270,9 @@ All errors use the standard OAuth2 error response shape.
 | Client not registered for the exchange grant | `unauthorized_client` |
 | Client authentication fails / unknown client | `invalid_client` |
 | `act` chain already at depth 3 | `invalid_request` |
+| `actor_token_type` missing or not `access_token` | `invalid_request` |
+| `actor_token` unparseable, invalid signature, expired, or for another tenant | `invalid_grant` |
+| `actor_token` not issued to the exchanging client | `invalid_request` |
 
 A cross-tenant subject token is `invalid_grant` rather than a distinct error on
 purpose: a caller learning that a token is valid *somewhere else* is a
@@ -282,6 +309,9 @@ The grant is advertised in `grant_types_supported` at
   issuer check to "us".
 - **`refresh_token`, `id_token` and SAML assertions** as requested or subject
   token types.
+- **`may_act`** (RFC 8693 §4.4). The actor must be the exchanging client's
+  own (see [The actor](#the-actor)); a subject token naming other permitted
+  actors is planned for `1.0.x`.
 
 ## See also
 

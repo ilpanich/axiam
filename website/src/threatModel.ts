@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment, and — as a design-only diagram whose entries are recorded Not applicable — a RADIUS front end that is not built.",
  "version": "2.38.0",
  "diagramCount": 10,
- "total": 470,
+ "total": 471,
  "open": 20,
- "mitigated": 429,
+ "mitigated": 430,
  "notApplicable": 21,
  "diagrams": [
   {
@@ -2364,6 +2364,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "FAPI 2.0 Security Profile §5.3.2.1-9 requires an authorization server that rotates refresh tokens to keep accepting the previous one for a period after issuing its successor — the only recovery a client has from a rotation response lost in transit, since under immediate revocation it holds a token the server has destroyed and has not been given the replacement. Commit 065f37c implemented that as a **supersede** — the old token's `expires_at` brought forward to a 60-second grace instant — and applied it to every client on every profile. Inside that window a second presentation was answered `200` and rotated again, so a refresh token leaked at the moment of a legitimate rotation yielded a second live chain, and nothing distinguished the thief's use from the honest retry. The profile that requires the window sender-constrains every token; the `standard` profile, which does not, had been given the same window.",
        "mitigation": "Mitigated by the maintainer's decision of 2026-09-12, which is two things and needed both. **The window is now a `fapi2` behaviour.** `axiam_oauth2::fapi::refresh_rotation_grace_secs` is the gate — the same registration-decides mechanism as `auth_code_lifetime_secs`, not a second one — and `TokenService::refresh` picks a retirement lane from it: `supersede` for a `fapi2` client, `revoke_rotated` for every other, which is the pre-065f37c behaviour (`invalid_grant`, \"already consumed\", on a second presentation). What remains on `fapi2` is a 60-second window in which the previous token is redeemable by a client that also holds the private key every token on that profile is bound to. **And a replay is now marked whatever the window.** Both lanes stamp `rotated_at` in the same statement that retires the row (schema v60, additive, backfilling nothing), so a presentation of a rotated token is distinguishable from an ordinary stale credential — `find_rotated` answers `None` for one revoked at logout. Every such presentation, accepted under the grace or refused, increments a per-outcome counter on the session the token names and appends an `oauth2.refresh_token_replayed` audit row naming the client, its profile, the session and the disposition, never the token or its digest; `GET /api/v1/users/{user_id}/sessions` serves the derived verdict and the admin UI renders \"FAPI grace retry\" and \"Replay refused\" as two visibly different badges. The single-use race is untouched: both lanes keep `revoked = false AND expires_at > time::now()` in the WHERE, so the loser of two concurrent rotations still gets `NotFound`. A password or MFA reset still revokes the whole family through `revoke_all_for_user`, and T-249's `sid` extends that to the access tokens in flight. Pinned by the `t254_*` tests in `axiam-oauth2/tests/token_service.rs` and `fapi.rs`, by `refresh_token_rotation_retires_old_on_a_standard_client` and `a_refused_refresh_replay_is_audited` in `oauth2_flow_test.rs`, and by the invariant-4 twin each of them carries."
+      },
+      {
+       "number": 471,
+       "title": "A client names another party as the actor of a delegation it requests (RFC 8693 `actor_token`)",
+       "type": "Spoofing",
+       "severity": "Medium",
+       "status": "Mitigated",
+       "description": "Token exchange's delegation form writes the `sub` of the presented `actor_token` into the issued token's `act` claim, and `act` is what attribution, audit and actor-keyed policy at a resource server read. When any valid same-tenant access token is accepted as the actor, a client holding somebody else's token — an MCP server receives its callers' tokens by design — attributes a delegation to that party. Privileges do not widen (scopes stay the intersection of subject, request and client registration), but the issued token and its audit row name an actor that never acted.",
+       "mitigation": "Mitigated at model 2.38.0 (ilpanich/axiam#518, P23W1-06; decision D-5 of the 1.0.0 release plan, option 1). **The actor token must have been issued to the exchanging client.** AXIAM tokens carry no `azp`, so the client is read from the claims: RFC 9068's `client_id` (the code, refresh, CIBA and device grants) or, for an `axiam:m2m` token without it, the `sub` — a client-credentials token, whose `sub` is the `client_id` — must equal the authenticated client's `client_id`. A service account's or an exchanged token's `sub` is a UUID and a client's `client_id` an `oa_` identifier or a CIMD URL, so neither ever matches; a console sign-in names no client. Any other actor is refused with `invalid_request` (`actor_token was not issued to the exchanging client`), RFC 8693 §2.2.2's error for an actor token unacceptable by policy, after the signature and tenant checks, which still answer `invalid_grant`. Decided on the claims rather than on `sub_kind`, which stays informational (D-10). Tests: `token_exchange_test.rs::an_actor_token_issued_to_the_exchanging_client_is_named_in_act` (the client's own client-credentials token, `act.sub` its `client_id`; a user token from its own code grant, `act.sub` the user), `::an_actor_token_issued_to_another_client_is_refused` (another client's client-credentials and code-grant tokens; `200` before the fix) and `::an_actor_token_naming_no_client_is_refused` (a console sign-in and a service account's token). **Residual.** `may_act` (RFC 8693 §4.4) is not read, so a subject token cannot name a party other than the exchanging client (or a user signed in to it) as a permitted actor; planned for `1.0.x`."
       }
      ],
      "open": 0,
@@ -3856,12 +3865,12 @@ export const THREAT_MODEL: ThreatModel = {
      "notApplicable": 0
     }
    ],
-   "total": 85,
+   "total": 86,
    "open": 0,
    "notApplicable": 0,
    "bySeverity": {
     "High": 35,
-    "Medium": 39,
+    "Medium": 40,
     "Low": 6,
     "Critical": 5
    }

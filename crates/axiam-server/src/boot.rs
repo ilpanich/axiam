@@ -310,7 +310,8 @@ pub struct ServeOptions {
     /// stops accepting, gRPC stops, the audit queue is drained, the cleanup
     /// task finishes — and [`serve`] returns an error, so `main` exits non-zero
     /// (T23.8.2, P23W5-A1, P23W5-A12). This runs only if that has not finished
-    /// within [`LeaseTiming::lost_stop_deadline`]; production exits the process.
+    /// within [`LeaseTiming::lost_stop_deadline`] (a lost lease) or
+    /// `FATAL_STOP_BACKSTOP` (a dead component); production exits the process.
     pub lease_lost_backstop: OnLeaseLost,
     /// **Test seam, never set in production.** Lets the webhook and SSF push
     /// deliverers reach a loopback `http://` receiver (their own
@@ -3048,7 +3049,9 @@ where
     });
 
     // A consumer or the gRPC server that dies stops this instance the same way:
-    // in order, then non-zero, behind the same backstop (P23W5-A12).
+    // in order, then non-zero (P23W5-A12). Its backstop covers the whole stop —
+    // not the lease's 15 s, which is tied to lease safety and shorter than the
+    // REST shutdown timeout alone.
     let component_died_stop = {
         let handle = http_server.handle();
         spawn_fatal_stop(
@@ -3056,7 +3059,7 @@ where
             move || {
                 tokio::spawn(handle.stop(true));
             },
-            opts.lease_timing.lost_stop_deadline,
+            FATAL_STOP_BACKSTOP,
             Arc::clone(&opts.lease_lost_backstop),
         )
     };
@@ -3140,7 +3143,8 @@ where
 
 /// How long, in seconds, the REST listener waits for requests in flight once a
 /// stop begins (#569). Stop grace period = this + [`GRPC_STOP_DEADLINE`] +
-/// [`AUDIT_DRAIN_DEADLINE`] + margin: 20 + 5 + 5 + 10 = 40 s.
+/// [`AUDIT_DRAIN_DEADLINE`] + margin: 20 + 5 + 5 + 10 = 40 s; the fatal-stop
+/// backstop ([`FATAL_STOP_BACKSTOP`], 35 s) sits inside it.
 const REST_SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 
 /// How long the teardown waits for the gRPC server to finish its calls once the
@@ -3151,3 +3155,19 @@ const GRPC_STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5
 /// (T23.8.2). The queue holds at most 4 096 entries; written one at a time
 /// against a healthy datastore that is well under this.
 const AUDIT_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The stop grace period the shipped Compose files and Kubernetes manifest give
+/// the server (#569). Not read by the code; it is here so the check below can
+/// fail the build if the stop outgrows it.
+const SHIPPED_STOP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// When the backstop ends a process stopped by a dead consumer or gRPC server
+/// (#554): the whole orderly stop — REST shutdown, gRPC stop and audit drain —
+/// and a 5 s margin, so the backstop only runs for a stop that has overrun.
+/// A lost lease keeps its own, shorter `LeaseTiming::lost_stop_deadline`.
+const FATAL_STOP_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(
+    REST_SHUTDOWN_TIMEOUT_SECS + GRPC_STOP_DEADLINE.as_secs() + AUDIT_DRAIN_DEADLINE.as_secs() + 5,
+);
+
+// The backstop must fire before the orchestrator's own SIGKILL, or it is moot.
+const _: () = assert!(FATAL_STOP_BACKSTOP.as_secs() < SHIPPED_STOP_GRACE_PERIOD.as_secs());

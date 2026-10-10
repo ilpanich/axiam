@@ -104,8 +104,9 @@
 > had until T23.8.2. Each now raises the lost lease's stop: the REST listener
 > stops accepting, the gRPC server is told to stop and awaited (bounded at five
 > seconds) before the audit queue is drained, and `serve` returns an error naming
-> the component, so `main` exits non-zero, with the same backstop. The entry cites
-> the gRPC-death boot test, the coordinator tests and the gRPC shutdown test; an
+> the component, so `main` exits non-zero; its backstop (35 s, the whole stop and
+> a margin) is its own, since the lease's 15 s is shorter than the REST
+> shutdown. The entry cites the gRPC-death boot test, the coordinator tests and the gRPC shutdown test; an
 > AMQP consumer's death needs a broker to provoke and is covered at the
 > coordinator. The stop's budget is now set and written down (#569): the REST
 > listener waits at most 20 s for requests in flight, gRPC 5 s and the audit

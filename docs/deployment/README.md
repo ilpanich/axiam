@@ -1779,7 +1779,10 @@ keep. Compose's default is 10 s and Kubernetes' is 30 s, so both are set:
 `k8s/server/deployment.yml`. If you change the shutdown timeout, move the grace
 period with it. An instance that loses its lease, or whose consumer or gRPC
 server dies, stops accepting at once, finishes in-flight requests and exits
-non-zero; a backstop ends the process regardless 15 s after the stop began.
+non-zero. A backstop ends the process regardless if the stop overruns: 15 s
+after it began for a lost lease (which must not run beside its successor for
+longer), 35 s — the three steps and a margin, inside the grace period — for a
+dead consumer or gRPC server.
 
 ### Audit durability
 

@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flight, the gRPC server is told to stop and awaited (up to 5 s), the audit
   queue is drained, and `serve` returns an error naming the component, so the
   process still exits non-zero and the orchestrator still restarts it. The
-  `exit(1)` remains only as a backstop if that has not finished within 15 s.
+  `exit(1)` remains only as a backstop if that has not finished within 35 s (the
+  REST shutdown, the gRPC stop, the audit drain and a margin; a lost lease keeps
+  its 15 s).
   The gRPC server previously had no shutdown signal at all, so a `SIGTERM` left
   it serving, with its calls cut off, until the runtime went; it now finishes
   its calls first. `start_grpc_server` takes a trailing shutdown future

@@ -10,8 +10,9 @@
 //! [`spawn_fatal_stop`] waits on it and runs the lost-lease path's stop (the
 //! REST listener stops accepting and finishes what is in flight, the teardown
 //! after it stops gRPC, drains the audit queue and the cleanup task, and
-//! `serve` returns an error, so `main` exits non-zero), with the same backstop
-//! if that does not finish in time.
+//! `serve` returns an error, so `main` exits non-zero), with a backstop if that
+//! does not finish in time. The deadline is the caller's: it covers the whole
+//! stop, which is longer than the lease's.
 
 use std::sync::Arc;
 use std::time::Duration;

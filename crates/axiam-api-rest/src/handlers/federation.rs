@@ -35,6 +35,16 @@ use crate::state::AppState;
 /// responses (#531, D-3) — at creation, or by an update that turned it on.
 pub const AUDIT_SHA1_SIGNATURES_ALLOWED: &str = "federation.sha1_signatures_allowed";
 
+/// Audit action: an update cleared a SAML federation config's metadata
+/// signing certificate, turning the metadata signature check off (#530
+/// follow-up, T-474).
+pub const AUDIT_METADATA_SIGNING_CERT_CLEARED: &str = "federation.metadata_signing_cert_cleared";
+
+/// Audit action: an update replaced a SAML federation config's metadata
+/// signing certificate with a different one, re-pointing the metadata
+/// signature check (#530 follow-up, T-474).
+pub const AUDIT_METADATA_SIGNING_CERT_CHANGED: &str = "federation.metadata_signing_cert_changed";
+
 /// Audit action: a refetch of a SAML IdP's metadata named an SSO URL on
 /// another host than the copy it replaced (#530, P23W3-07).
 pub const AUDIT_SAML_SSO_HOST_CHANGED: &str = "federation.saml_sso_host_changed";
@@ -282,7 +292,9 @@ pub struct UpdateFederationConfigRequest {
     /// (`federation.sha1_signatures_allowed`).
     pub allow_sha1_signatures: Option<bool>,
     /// SAML only: the IdP metadata signing certificate (#530). Explicit
-    /// `null` clears it; omitted leaves it.
+    /// `null` clears it; omitted leaves it. Clearing it is audited
+    /// (`federation.metadata_signing_cert_cleared`), and so is replacing it
+    /// with a different certificate (`federation.metadata_signing_cert_changed`).
     #[serde(default, deserialize_with = "super::directory::double_option")]
     #[schema(value_type = Option<String>, nullable)]
     pub idp_metadata_signing_cert_pem: Option<Option<String>>,
@@ -725,6 +737,45 @@ async fn audit_sha1_allowed<C: Connection + Clone>(
     }
 }
 
+/// T-474: the audit row for a metadata signing certificate an update cleared
+/// or replaced — which config, which change, and who. Never fails the request:
+/// the write it describes has been done.
+async fn audit_metadata_cert_change<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+    user: &AuthenticatedUser,
+    config: &FederationConfig,
+    action: &'static str,
+) {
+    if let Err(error) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id: user.tenant_id,
+            actor_id: user.user_id,
+            actor_type: ActorType::User,
+            action: action.to_string(),
+            resource_id: Some(config.id),
+            outcome: AuditOutcome::Success,
+            ip_address: client_ip(http_req),
+            metadata: Some(serde_json::json!({
+                "federation_config_id": config.id,
+                "provider": config.provider,
+                "provider_kind": config.provider_kind.as_str(),
+                "metadata_signature_checked": config.idp_metadata_signing_cert_pem.is_some(),
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            tenant_id = %user.tenant_id,
+            config_id = %config.id,
+            action,
+            %error,
+            "a federation metadata-certificate audit row could not be written"
+        );
+    }
+}
+
 /// #530: the metadata signing certificate means something only to the SAML
 /// SP's metadata fetch, and must be a certificate.
 fn validate_metadata_signing_cert(
@@ -1151,6 +1202,20 @@ pub async fn update<C: Connection + Clone>(
     // Audited on the transition only: re-saving a form that already allows
     // SHA-1 changes nothing and writes no row.
     let sha1_turned_on = req.allow_sha1_signatures == Some(true) && !existing.allow_sha1_signatures;
+    // T-474: turning the metadata signature check off, or pointing it at
+    // another certificate, weakens or re-anchors what decides where users are
+    // sent to sign in. Setting one where there was none strengthens it and
+    // writes no row; re-saving the same certificate changes nothing.
+    let metadata_cert_change = match (
+        &req.idp_metadata_signing_cert_pem,
+        existing.idp_metadata_signing_cert_pem.as_deref(),
+    ) {
+        (Some(None), Some(_)) => Some(AUDIT_METADATA_SIGNING_CERT_CLEARED),
+        (Some(Some(new)), Some(old)) if new.trim() != old.trim() => {
+            Some(AUDIT_METADATA_SIGNING_CERT_CHANGED)
+        }
+        _ => None,
+    };
 
     // If the caller is rotating the client_secret, encrypt it before storage
     // (SEC-045). Plaintext never reaches the DB layer.
@@ -1225,6 +1290,9 @@ pub async fn update<C: Connection + Clone>(
         .await?;
     if sha1_turned_on {
         audit_sha1_allowed(&state, &http_req, &user, &config).await;
+    }
+    if let Some(action) = metadata_cert_change {
+        audit_metadata_cert_change(&state, &http_req, &user, &config, action).await;
     }
     Ok(HttpResponse::Ok().json(FederationConfigResponse::from(config)))
 }

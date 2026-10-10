@@ -431,6 +431,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first sweep after the upgrade forwards the revocations of unexpired
   `vault_pki` leaves made before it. Threat model 2.38.0: T-470 Mitigated; 474
   threats, 434 mitigated / 19 open / 21 not applicable.
+- **SAML: clearing or replacing an IdP's metadata signing certificate is
+  audited** (#530 follow-up, T-474). An update that sets
+  `idp_metadata_signing_cert_pem` to `null` turns the metadata signature check
+  off, so the IdP's sign-in URL is again trusted on the strength of its HTTPS
+  fetch; one that replaces it re-anchors the check on another certificate. The
+  first now writes a `federation.metadata_signing_cert_cleared` audit row, the
+  second `federation.metadata_signing_cert_changed`, each naming the
+  configuration, its provider and the administrator, as turning SHA-1 on
+  already writes `federation.sha1_signatures_allowed`. Setting a certificate
+  where there was none, re-saving the same one or clearing an absent one
+  writes nothing. Threat model 2.38.0: T-474 amended; totals unchanged.
 
 ### Documentation
 

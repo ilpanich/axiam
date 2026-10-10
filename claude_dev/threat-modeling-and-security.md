@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469, T-102 and T-470 closed; T-470, T-471, T-472, T-473 and T-474 enter; T-289, T-275, T-160, T-118, T-300, T-239, T-39, T-55, T-67 and T-69 amended).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469, T-102 and T-470 closed; T-470, T-471, T-472, T-473 and T-474 enter; T-289, T-275, T-160, T-118, T-300, T-239, T-39, T-55, T-67, T-69 and T-474 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -156,7 +156,11 @@
 > and a refetch that moves the sign-in host writes an audit row. The tests read
 > a signed document, refuse an unsigned one, an altered one, one signed by
 > another key or with SHA-1 and every misplaced signature, sign in twice on one
-> fetch, and find the moved host in the audit log. It closes **T-470**:
+> fetch, and find the moved host in the audit log; a later item amends it so
+> that an update clearing the metadata certificate, or replacing it with
+> another, writes an audit row too
+> (`federation.metadata_signing_cert_cleared` / `…_changed`), as turning SHA-1
+> on does. It closes **T-470**:
 > revoking a leaf of a CA whose key Vault's PKI engine holds now also revokes
 > it in Vault (`pki/revoke` by serial, through the token issuance uses), so
 > Vault's own list — the one the relying parties of such a CA read — names it.

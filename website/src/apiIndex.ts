@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta19";
-export const API_OPERATION_COUNT = 276;
-export const API_PATH_COUNT = 189;
+export const API_OPERATION_COUNT = 277;
+export const API_PATH_COUNT = 190;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -187,6 +187,11 @@ export const API_INDEX: ApiGroup[] = [
     "path": "/api/v1/auth/webauthn/setup/register/start",
     "summary": "Begin registering a passkey or security key as the **first** factor, during a forced first-login enrolment.",
     "public": true
+   },
+   {
+    "method": "GET",
+    "path": "/api/v1/ciba/requests",
+    "summary": "List the signed-in user's own pending CIBA sign-in requests."
    },
    {
     "method": "GET",

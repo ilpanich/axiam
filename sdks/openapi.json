@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta19",
-    "x-axiam-spec-digest": "sha256:a74b9a356f1dd203180a293e399e7be2532d7c8d171cebb5cfc0cb3711e0e5da"
+    "x-axiam-spec-digest": "sha256:e5aed432016a9019f3f3ffa7010ea972694c60e77b622f48efcf4a95d74b0d5c"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2573,6 +2573,59 @@
         ]
       }
     },
+    "/api/v1/ciba/requests": {
+      "get": {
+        "tags": [
+          "ciba"
+        ],
+        "summary": "List the signed-in user's own pending CIBA sign-in requests.",
+        "description": "For the account the approval mail never reaches (D-74): the console shows\nthese and opens the page by `request_id`. Console sign-in only.",
+        "operationId": "ciba_approval_list",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`pending` (the default). Any other value is a `400`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's pending, unexpired requests (possibly none)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaPendingList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`status` is something other than `pending`"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The token is not a console sign-in's: no session row behind it, or AXIAM minted it for an OAuth2 client"
+          },
+          "429": {
+            "description": "The `ciba_approval_per_min` allowance of this route is spent"
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/ciba/requests/{request_id}": {
       "get": {
         "tags": [
@@ -4339,6 +4392,7 @@
                           "events",
                           "recipient_emails",
                           "enabled",
+                          "window_minutes",
                           "created_at",
                           "updated_at"
                         ],
@@ -4379,6 +4433,13 @@
                           "updated_at": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "window_minutes": {
+                            "type": "integer",
+                            "format": "int32",
+                            "description": "Minutes in which one event type mails each recipient at most once;\nfurther events are counted and reported by the next mail (#551).",
+                            "maximum": 1440,
+                            "minimum": 1
                           }
                         }
                       }
@@ -9604,7 +9665,7 @@
             "description": "No such target in this tenant"
           },
           "409": {
-            "description": "The target changed since it was read (reload it and retry)"
+            "description": "The target changed since it was read — since the `expected_updated_at` the request carried, or, when it carried none, since the server read it during the request (reload it and retry)"
           },
           "429": {
             "description": "Rate limit"
@@ -13281,7 +13342,7 @@
           "health"
         ],
         "summary": "`GET /health/jobs` — scheduled-job liveness (T-129).",
-        "description": "Always 200, including when a job is stalled, and that is deliberate. This\nis not a readiness gate: a stuck cleanup sweep is an operational problem,\nnot a reason to pull a healthy server out of the load balancer and send its\ntraffic to replicas running the same stuck code. Alert on\n`status == \"degraded\"`, or on a specific job's `stalled`.",
+        "description": "Always 200, including when a job is stalled, and that is deliberate. This\nis not a readiness gate: a stuck cleanup sweep is an operational problem,\nnot a reason to pull a healthy server out of the load balancer and send its\ntraffic to replicas running the same stuck code. Alert on\n`status == \"degraded\"`, or on a specific job's `stalled`. `request_audit`\ncounts the request-audit rows this process lost (T-108); a loss in the last\n15 minutes is `degraded` too, and so is a full dead-letter file.",
         "operationId": "jobs",
         "responses": {
           "200": {
@@ -16387,6 +16448,22 @@
           "ping"
         ]
       },
+      "CibaPendingList": {
+        "type": "object",
+        "description": "The signed-in user's pending requests.",
+        "required": [
+          "requests"
+        ],
+        "properties": {
+          "requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CibaApprovalPage"
+            },
+            "description": "Soonest expiry first, at most 50. Each entry is what\n`GET /api/v1/ciba/requests/{request_id}` returns for its `request_id`."
+          }
+        }
+      },
       "CibaPingNotification": {
         "type": "object",
         "description": "The ping-mode notification body (CIBA Core §10.2) — the contract T23.7.2's\ndeliverer sends, as `POST` to the client's\n`backchannel_client_notification_endpoint` with\n`Authorization: Bearer <client_notification_token>` and\n`Content-Type: application/json`.\n\nNothing else is in it: the notification says *that* a request was decided,\nnever how; the client learns the outcome from the token endpoint, where it\nauthenticates.",
@@ -17107,6 +17184,17 @@
               "type": "string"
             },
             "description": "Email addresses to notify."
+          },
+          "window_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Minutes in which one event type mails each recipient at most once:\nthe first event of a window is mailed, the rest are counted and the\nnext mail says how many were not sent (#551). 1 … 1440; 15 when\nomitted.",
+            "default": 15,
+            "maximum": 1440,
+            "minimum": 1
           }
         }
       },
@@ -19145,9 +19233,20 @@
               "$ref": "#/components/schemas/JobStatus"
             }
           },
+          "request_audit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RequestAuditHealth",
+                "description": "Request-audit loss counters (T-108). Absent when the process does not\ncount them."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "status": {
             "type": "string",
-            "description": "`ok` when no job is stalled, `degraded` when at least one is."
+            "description": "`ok` when no job is stalled, no request-audit row was lost recently and\nthe dead-letter file is not full; `degraded` otherwise."
           }
         }
       },
@@ -19950,6 +20049,14 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "window_minutes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Minutes in which one event type mails each recipient at most once\n(#551, T-117): the first event of a window is mailed, the rest are\ncounted, and the next mail says how many were not sent. Between\n[`MIN_NOTIFICATION_WINDOW_MINUTES`] and\n[`MAX_NOTIFICATION_WINDOW_MINUTES`]; a rule stored before the field\nexisted reads [`DEFAULT_NOTIFICATION_WINDOW_MINUTES`].",
+            "default": 15,
+            "maximum": 1440,
+            "minimum": 1
           }
         }
       },
@@ -19964,6 +20071,7 @@
           "events",
           "recipient_emails",
           "enabled",
+          "window_minutes",
           "created_at",
           "updated_at"
         ],
@@ -20004,6 +20112,13 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "window_minutes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Minutes in which one event type mails each recipient at most once;\nfurther events are counted and reported by the next mail (#551).",
+            "maximum": 1440,
+            "minimum": 1
           }
         }
       },
@@ -22382,6 +22497,64 @@
           }
         }
       },
+      "RequestAuditHealth": {
+        "type": "object",
+        "description": "Request-audit rows that were not recorded, since this process started (T-108).\n\nThe audit middleware appends each request's row on a background worker. A row\nis lost when the worker's queue is full at the end of the request (`dropped`)\nor when the datastore refuses the append (`failed`). Both counters only go up\nand reset when the process restarts; alert on their rate, or on `recent_loss`.",
+        "required": [
+          "dropped",
+          "failed",
+          "dead_lettered",
+          "not_recoverable",
+          "dead_letter_configured",
+          "dead_letter_full",
+          "recent_loss"
+        ],
+        "properties": {
+          "dead_letter_configured": {
+            "type": "boolean",
+            "description": "Whether `AXIAM__GDPR_AUDIT_DLQ_FILE` names a dead-letter file."
+          },
+          "dead_letter_full": {
+            "type": "boolean",
+            "description": "Whether the dead-letter file has reached the request rows' share of its\nbudget (`AXIAM__GDPR_AUDIT_DLQ_MAX_BYTES`): further request rows are\nrefused by it and counted in `not_recoverable` until it is replayed and\nmoved. Turns the endpoint's `status` to `degraded`."
+          },
+          "dead_lettered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lost rows written to the dead-letter file, from which they can be replayed.",
+            "minimum": 0
+          },
+          "dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows refused because the queue was full.",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows the worker took and could not append to the datastore.",
+            "minimum": 0
+          },
+          "last_loss_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339 timestamp of the most recent lost row."
+          },
+          "not_recoverable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lost rows kept nowhere: no dead-letter file is configured, or it could not\ntake them.",
+            "minimum": 0
+          },
+          "recent_loss": {
+            "type": "boolean",
+            "description": "Whether a row was lost in the last 15 minutes. Turns the endpoint's\n`status` to `degraded`, and clears itself once rows are being recorded again."
+          }
+        }
+      },
       "RequestResetBody": {
         "type": "object",
         "description": "Body for the request-reset endpoint.\n\n`tenant_id` is optional (Open Question 1 / Assumption A4): the public\nforgot-password page has no prior tenant context, so it may instead\nsupply `org_slug`/`tenant_slug` (mirroring `handlers/auth.rs`'s\n`(Option<Uuid>, Option<&str>)` login pattern). Slug-resolution failure\nis enumeration-safe (D-05) — it funnels into the SAME uniform\n`{\"sent\": true}` response as an unknown account, never a distinct\nerror status.",
@@ -23515,6 +23688,14 @@
           "enabled": {
             "type": "boolean",
             "description": "`true` by default. A disabled target receives nothing."
+          },
+          "expected_updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The `updated_at` of the target as the client read it (P23W5-09,\nT-416). **Update only; create ignores it.** When present, the\nreplacement lands only if the target still has that version, else\n`409` (reload and retry): two administrators who opened the form at the\nsame version cannot silently overwrite each other. When absent the\nreplacement is conditional on the version the server reads during the\nrequest — last-writer-wins between administrators, as before."
           },
           "name": {
             "type": "string",
@@ -26590,6 +26771,16 @@
             "items": {
               "type": "string"
             }
+          },
+          "window_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The rule's notification window in minutes, 1 … 1440 (#551).",
+            "maximum": 1440,
+            "minimum": 1
           }
         }
       },

@@ -752,10 +752,31 @@ where
                 %tenant_id,
                 %user_id,
                 reason = %reason,
-                "refusing an OAuth2 grant: its account may no longer sign in"
+                "refusing an OAuth2 grant (or reporting its token inactive): its account may \
+                 no longer sign in"
             );
             refused()
         })
+    }
+
+    /// Whether the account behind an introspected token may still act
+    /// (#520, P23W1-12).
+    ///
+    /// [`Self::ensure_account_may_act`] answered as a yes/no: introspection
+    /// does not refuse, it reports `active: false` (RFC 7662 §2.2 — a token
+    /// whose authorization has been withdrawn is not active). A read that
+    /// fails for any other reason stays a server error rather than a guess
+    /// in either direction.
+    async fn introspected_account_may_act(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, OAuth2Error> {
+        match self.ensure_account_may_act(tenant_id, user_id).await {
+            Ok(()) => Ok(true),
+            Err(OAuth2Error::InvalidGrant(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// The evidence a refreshed ID token carries (W4, plan §4.3; D-9).
@@ -2960,6 +2981,27 @@ where
                 });
             }
 
+            // #520, P23W1-12 — introspection is the "immediate revocation"
+            // answer (T-39), so it re-reads the account a user's token names
+            // and reports a suspended one's token inactive, by the rule every
+            // grant and `/oauth2/authorize` apply (`account_may_act`). Only a
+            // user token names an account; a client-credentials or service
+            // account token does not, and its `sub` is not a user id. One
+            // indexed user read per call: this endpoint is a resource
+            // server's occasional question, not the authorization hot path
+            // (that is local verification or `CheckAccess`).
+            if claims.sub_kind == axiam_auth::token::SubjectKind::User
+                && let Ok(user_id) = claims.sub.parse::<Uuid>()
+                && !self
+                    .introspected_account_may_act(tenant_id, user_id)
+                    .await?
+            {
+                return Ok(IntrospectionResponse {
+                    active: false,
+                    ..Default::default()
+                });
+            }
+
             return Ok(IntrospectionResponse {
                 active: true,
                 scope: claims.scope.clone(),
@@ -2994,6 +3036,19 @@ where
             // Only introspect tokens belonging to the requesting
             // client — prevent cross-client information leaks.
             if stored.client_id != req.client_id {
+                return Ok(IntrospectionResponse {
+                    active: false,
+                    ..Default::default()
+                });
+            }
+
+            // #520, P23W1-12 — the refresh grant refuses a suspended account's
+            // token (P23W1-01), so introspection must not call it active.
+            if let Some(user_id) = stored.user_id
+                && !self
+                    .introspected_account_may_act(tenant_id, user_id)
+                    .await?
+            {
                 return Ok(IntrospectionResponse {
                     active: false,
                     ..Default::default()

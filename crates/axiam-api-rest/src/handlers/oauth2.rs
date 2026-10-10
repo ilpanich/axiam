@@ -3514,8 +3514,8 @@ pub async fn jwks<C: Connection + Clone>(
 /// `GET /oauth2/userinfo` -- OIDC UserInfo endpoint.
 ///
 /// Returns claims about the authenticated user. Requires a valid
-/// Bearer access token. Email and username are included based on
-/// the scopes present in the access token.
+/// Bearer access token whose account may still sign in (#520). Email and
+/// username are included based on the scopes present in the access token.
 #[utoipa::path(
     get,
     path = "/oauth2/userinfo",
@@ -3523,7 +3523,8 @@ pub async fn jwks<C: Connection + Clone>(
     responses(
         (status = 200, description = "UserInfo response",
          body = UserInfoResponse),
-        (status = 401, description = "Invalid or missing access token"),
+        (status = 401, description = "Invalid, expired, revoked or missing access token, \
+                                      or one whose account may no longer sign in"),
     ),
     security(("bearer" = []))
 )]
@@ -3583,53 +3584,74 @@ async fn userinfo_claims_for<C: Connection + Clone>(
     // a filter on it — a client may use either.
     let release = |claim: &str, scope: &str| has_scope(scope) || asked_for(claim);
 
-    // Fetch user details for email/username when the relevant
-    // scopes are present.
-    // The user row is needed by every releasable claim, so it is read when any
-    // of them might be released rather than when a particular scope is present.
-    let (email, profile) = if has_scope("email") || has_scope("profile") || !requested.is_empty() {
-        // UserInfo describes the SUBJECT of the token, and that account lives in
-        // the tenant the subject inhabits — never one it happens to be acting
-        // on. The two differ only for an organization-level principal whose
-        // request carried `X-Axiam-Tenant`; reading the acting tenant there
-        // found no account and answered with `sub` alone.
-        match state
-            .user_repo
-            .get_by_id(user.principal_tenant_id, user.user_id)
-            .await
-        {
-            Ok(u) => (
-                if release("email", "email") || asked_for("email_verified") {
-                    // Both members or neither: `email_verified` describes
-                    // `email`, so they are produced by one branch rather than
-                    // by two that could drift apart.
-                    Some((u.email, u.email_verified_at.is_some()))
-                } else {
-                    None
-                },
-                // Read whenever *any* profile claim might be released. Which
-                // ones actually appear is decided per claim below, because
-                // §5.5 lets a client ask for `nickname` without asking for
-                // `name`.
-                Some((
-                    u.username,
-                    axiam_core::models::user::ProfileClaims::from_metadata(&u.metadata),
-                    u.updated_at,
-                )),
-            ),
-            Err(e) => {
-                tracing::error!(
-                    user_id = %user.user_id,
-                    tenant_id = %user.principal_tenant_id,
-                    error = %e,
-                    "userinfo: failed to fetch user for scoped claims"
-                );
-                return HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
-                    error: "server_error".into(),
-                    error_description: "failed to retrieve user claims".into(),
-                });
-            }
+    // The account is read on every call (#520, P23W1-12), not only when a
+    // scope needs a claim from it. UserInfo used to answer a suspended user's
+    // access token until `exp`; it now applies the rule every grant and
+    // `/oauth2/authorize` apply (`account_may_act`) and answers a locked,
+    // inactive, anonymized, deleted or removed account with the same `401` an
+    // expired or revoked token gets — one shape, so the answer says nothing
+    // about which it was. One indexed read per call: UserInfo is a relying
+    // party's occasional question, not the authorization hot path.
+    //
+    // UserInfo describes the SUBJECT of the token, and that account lives in
+    // the tenant the subject inhabits — never one it happens to be acting on.
+    // The two differ only for an organization-level principal whose request
+    // carried `X-Axiam-Tenant`; reading the acting tenant there found no
+    // account and answered with `sub` alone.
+    let account = match state
+        .user_repo
+        .get_by_id(user.principal_tenant_id, user.user_id)
+        .await
+    {
+        Ok(u) => u,
+        Err(AxiamError::NotFound { .. }) => return userinfo_account_may_not_act(),
+        Err(e) => {
+            tracing::error!(
+                user_id = %user.user_id,
+                tenant_id = %user.principal_tenant_id,
+                error = %e,
+                "userinfo: failed to fetch user for scoped claims"
+            );
+            return HttpResponse::InternalServerError().json(OAuth2ErrorResponse {
+                error: "server_error".into(),
+                error_description: "failed to retrieve user claims".into(),
+            });
         }
+    };
+    if let Err(reason) = axiam_auth::service::account_may_act(&account) {
+        tracing::info!(
+            user_id = %user.user_id,
+            tenant_id = %user.principal_tenant_id,
+            reason = %reason,
+            "userinfo: refusing a token whose account may no longer sign in"
+        );
+        return userinfo_account_may_not_act();
+    }
+
+    // The row is needed by every releasable claim, so its claims are taken
+    // when any of them might be released rather than when a particular scope
+    // is present.
+    let (email, profile) = if has_scope("email") || has_scope("profile") || !requested.is_empty() {
+        let u = account;
+        (
+            if release("email", "email") || asked_for("email_verified") {
+                // Both members or neither: `email_verified` describes
+                // `email`, so they are produced by one branch rather than
+                // by two that could drift apart.
+                Some((u.email, u.email_verified_at.is_some()))
+            } else {
+                None
+            },
+            // Read whenever *any* profile claim might be released. Which
+            // ones actually appear is decided per claim below, because
+            // §5.5 lets a client ask for `nickname` without asking for
+            // `name`.
+            Some((
+                u.username,
+                axiam_core::models::user::ProfileClaims::from_metadata(&u.metadata),
+                u.updated_at,
+            )),
+        )
     } else {
         (None, None)
     };
@@ -3716,6 +3738,18 @@ async fn userinfo_claims_for<C: Connection + Clone>(
         tenant_id: user.tenant_id.to_string(),
         org_id: user.org_id.to_string(),
     })
+}
+
+/// UserInfo's answer for a token whose account may no longer act (#520,
+/// P23W1-12): the `401` the authentication extractor gives an expired or
+/// revoked token, built from the same error, so a relying party cannot tell a
+/// suspended account from a dead token.
+fn userinfo_account_may_not_act() -> HttpResponse {
+    use actix_web::ResponseError as _;
+    crate::error::AxiamApiError::from(AxiamError::AuthenticationFailed {
+        reason: "session revoked or expired".into(),
+    })
+    .error_response()
 }
 
 /// What the sensitive-scope gates allowed this UserInfo call to say.
@@ -4046,7 +4080,8 @@ impl std::fmt::Debug for UserInfoPostForm {
          body = UserInfoResponse),
         (status = 400, description = "The access token was presented by more than \
                                       one method (RFC 6750 §2)"),
-        (status = 401, description = "Invalid or missing access token"),
+        (status = 401, description = "Invalid, expired, revoked or missing access token, \
+                                      or one whose account may no longer sign in"),
     ),
     security(("bearer" = []))
 )]

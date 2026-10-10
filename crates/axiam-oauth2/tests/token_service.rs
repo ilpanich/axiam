@@ -2231,6 +2231,76 @@ async fn introspect_refresh_token_other_client_inactive() {
     assert!(!resp.active);
 }
 
+/// #520, P23W1-12 — introspection re-reads the account a token names, by the
+/// rule the grants use (`account_may_act`): a locked, inactive or deleted
+/// account, or one that no longer exists, makes both its access token and its
+/// refresh token `active: false`, with nothing else disclosed. A pending
+/// account is not suspended, and a client-credentials token names no account,
+/// so neither changes.
+#[tokio::test]
+async fn p23w1_12_introspection_reports_a_suspended_accounts_tokens_inactive() {
+    let tenant_id = client_tenant();
+    let cfg = test_config();
+    for (user, active) in [
+        (LOCKED_USER, false),
+        (INACTIVE_USER, false),
+        (DELETED_USER, false),
+        (REMOVED_USER, false),
+        (LAPSED_PENDING_USER, true),
+        (Uuid::new_v4(), true),
+    ] {
+        let access = issue_access_token(
+            user,
+            tenant_id,
+            Uuid::new_v4(),
+            &["openid".to_string()],
+            &cfg,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .unwrap();
+        let svc = build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new().with_get(make_refresh(Some(user), "client-1", &["openid"])),
+        );
+        for (what, token) in [("access", access), ("refresh", generate_refresh_token())] {
+            let resp = svc
+                .introspect_token(tenant_id, introspect_req(&token), &no_cert())
+                .await
+                .unwrap();
+            assert_eq!(resp.active, active, "{what} token of {user}");
+            if !active {
+                assert!(
+                    resp.sub.is_none() && resp.scope.is_none() && resp.exp.is_none(),
+                    "an inactive answer discloses nothing: {what} token of {user}"
+                );
+            }
+        }
+    }
+
+    let client_token = axiam_auth::token::issue_client_credentials_token(
+        "client-1",
+        tenant_id,
+        Uuid::new_v4(),
+        &[],
+        &cfg,
+    )
+    .unwrap();
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let resp = svc
+        .introspect_token(tenant_id, introspect_req(&client_token), &no_cert())
+        .await
+        .unwrap();
+    assert!(resp.active, "a client-credentials token names no account");
+}
+
 #[tokio::test]
 async fn introspect_unknown_token_inactive() {
     let svc = build(

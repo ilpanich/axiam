@@ -5,7 +5,8 @@
 //! - OIDC scope gating (openid vs email vs profile),
 //! - authentication failures (missing / invalid token),
 //! - tenant isolation (a token never returns another tenant's data),
-//! - unknown-subject handling (a token whose `sub` has no live user).
+//! - unknown-subject handling (a token whose `sub` has no live user),
+//! - the account re-read (#520): a suspended account's token is refused.
 //!
 //! Run with: cargo test -p axiam-api-grpc --features client --test grpc_userinfo_test
 
@@ -353,48 +354,87 @@ async fn userinfo_with_garbage_token_is_unauthenticated() {
 }
 
 /// A token whose subject does not exist (never provisioned, or hard-removed) →
-/// UNAUTHENTICATED, but only when a scope forces the user lookup. A token with
-/// only `openid` never hits the repo, so it still returns the token claims.
+/// UNAUTHENTICATED, whatever the scope. Until #520 (P23W1-12) a token with
+/// only `openid` skipped the user read and was answered from its own claims —
+/// a removed account's token kept answering until `exp`; the account is now
+/// read on every call.
 #[tokio::test]
-async fn userinfo_unknown_subject_is_unauthenticated_when_scope_forces_lookup() {
+async fn userinfo_unknown_subject_is_unauthenticated_whatever_the_scope() {
     let (db, seed) = setup().await;
     let auth_config = test_auth_config();
     let (endpoint, _shutdown) = start_test_server(&db, auth_config.clone()).await;
 
-    // Mint a token for a user_id that was never created in this tenant.
+    // Mint tokens for a user_id that was never created in this tenant.
     let ghost = Uuid::new_v4();
+    for scopes in [&["openid", "email"][..], &["openid"][..]] {
+        let token = mint_token(seed.tenant_id, seed.org_id, ghost, scopes, &auth_config);
+        let mut client = authed_client!(endpoint.clone(), token);
+        let status = client
+            .get_user_info(GetUserInfoRequest {})
+            .await
+            .expect_err("an unknown subject must be rejected");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated, "{scopes:?}");
+    }
+}
 
-    // With `email` scope the handler must look the user up → NotFound → UNAUTHENTICATED.
-    let token_scoped = mint_token(
-        seed.tenant_id,
-        seed.org_id,
-        ghost,
-        &["openid", "email"],
-        &auth_config,
-    );
-    let mut client = authed_client!(endpoint.clone(), token_scoped);
-    let status = client
-        .get_user_info(GetUserInfoRequest {})
-        .await
-        .expect_err("unknown subject must be rejected when a scope forces lookup");
-    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+/// **#520, P23W1-12.** The gRPC twin of REST UserInfo's account re-read: a
+/// locked, inactive, anonymized or deleted account's token is UNAUTHENTICATED
+/// (with one message whatever the status), a pending account is answered, and
+/// a reactivated one is answered as before — nothing was revoked.
+#[tokio::test]
+async fn p23w1_12_userinfo_refuses_a_suspended_accounts_token() {
+    use axiam_core::models::user::{UpdateUser, UserStatus};
 
-    // With only `openid` no lookup happens → the token claims are returned as-is.
-    let token_openid = mint_token(
-        seed.tenant_id,
-        seed.org_id,
-        ghost,
-        &["openid"],
-        &auth_config,
-    );
-    let mut client = authed_client!(endpoint, token_openid);
-    let resp = client
-        .get_user_info(GetUserInfoRequest {})
-        .await
-        .expect("openid-only userinfo must not require a user lookup")
-        .into_inner();
-    assert_eq!(resp.sub, ghost.to_string());
-    assert!(resp.email.is_none());
+    let (db, seed) = setup().await;
+    let auth_config = test_auth_config();
+    let (endpoint, _shutdown) = start_test_server(&db, auth_config.clone()).await;
+    let user_repo = SurrealUserRepository::new(db.clone());
+
+    for (status, answered) in [
+        (UserStatus::Locked, false),
+        (UserStatus::Inactive, false),
+        (UserStatus::Anonymized, false),
+        (UserStatus::Deleted, false),
+        (UserStatus::PendingVerification, true),
+        (UserStatus::Active, true),
+    ] {
+        user_repo
+            .update(
+                seed.tenant_id,
+                seed.user_id,
+                UpdateUser {
+                    status: Some(status.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let token = mint_token(
+            seed.tenant_id,
+            seed.org_id,
+            seed.user_id,
+            &["openid"],
+            &auth_config,
+        );
+        let mut client = authed_client!(endpoint.clone(), token);
+        let result = client.get_user_info(GetUserInfoRequest {}).await;
+        if answered {
+            let resp = result.expect("an acting account is answered").into_inner();
+            assert_eq!(resp.sub, seed.user_id.to_string(), "{status:?}");
+        } else {
+            let status_err = result.expect_err("a suspended account must be refused");
+            assert_eq!(
+                status_err.code(),
+                tonic::Code::Unauthenticated,
+                "{status:?}"
+            );
+            assert_eq!(
+                status_err.message(),
+                "the token's subject may no longer sign in",
+                "{status:?}"
+            );
+        }
+    }
 }
 
 /// Tenant isolation: a token for tenant A never surfaces tenant B's user data.

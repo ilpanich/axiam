@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118, T-300 and T-239 amended).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118, T-300, T-239 and T-39 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -121,7 +121,14 @@
 > `id_token_hint` — sign in again, then `login_required`, and at once under
 > `prompt=none` — and a `fapi2` client, which that lane never serves, is
 > refused it with `invalid_request`; the tests cover both lanes and the
-> ignore-lane twin. The model is
+> ignore-lane twin. It amends **T-39** (#520, P23W1-12): introspection
+> reported a suspended user's refresh token active although the refresh grant
+> refused it, and UserInfo answered the user's access token until `exp`. Both
+> — over REST and gRPC — now ask `account_may_act` on every call, one indexed
+> read: a locked, inactive, anonymized, deleted or removed account's token is
+> `active: false` at introspection and `401` (`UNAUTHENTICATED`) at UserInfo,
+> a pending account is answered, and the tests suspend an account behind live
+> tokens and reactivate it. The model is
 > **473 threats, 432 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries

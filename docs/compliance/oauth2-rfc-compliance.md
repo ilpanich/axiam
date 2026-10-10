@@ -68,6 +68,7 @@ Signals Framework transmitter), OpenID Connect CIBA Core 1.0
 | 28 | Unknown token MUST return active=false | §2.2 | Pass | `oauth2_flow_test.rs::introspect_unknown_token_returns_inactive` |
 | 29 | Introspection MUST require client authentication | §2.1 | Pass | `oauth2_flow_test.rs::introspect_requires_client_auth` |
 | 30 | Revoked token MUST be reported as inactive | §2.2 | Pass | `oauth2_flow_test.rs::introspect_revoked_refresh_token` |
+| 30a | A token whose authorization has been withdrawn — its account locked, deactivated, anonymized, deleted or removed — is reported inactive, access and refresh tokens alike (#520) | §2.2 | Pass | `oauth2_flow_test.rs::p23w1_12_userinfo_and_introspection_answer_for_a_suspended_account`; `token_service.rs::p23w1_12_introspection_reports_a_suspended_accounts_tokens_inactive` |
 
 
 ## RFC 7592 — Dynamic Client Registration Management Protocol

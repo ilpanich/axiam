@@ -999,6 +999,108 @@ async fn p23w1_01_a_suspended_accounts_refresh_token_mints_nothing_until_reactiv
     );
 }
 
+/// **#520, P23W1-12.** UserInfo and introspection re-read the account. A
+/// suspended (locked or inactive) user's access token is answered `401` at
+/// UserInfo, on GET and on POST, and introspection reports both that access
+/// token and the user's refresh token `active: false` — before the fix the
+/// three answered as if nothing had happened until `exp`. A pending account
+/// is not suspended (every federated account is pending for life), and a
+/// reactivated one is answered exactly as before: nothing was revoked.
+#[actix_rt::test]
+async fn p23w1_12_userinfo_and_introspection_answer_for_a_suspended_account() {
+    use axiam_core::models::user::{UpdateUser, UserStatus};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let access_token = body["access_token"].as_str().unwrap().to_owned();
+    let refresh_token = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let set_status = |status: UserStatus| {
+        let repo = SurrealUserRepository::new(db.clone());
+        async move {
+            repo.update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let introspect = |token: &str| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
+            .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+            .set_payload(format!(
+                "token={token}&client_id={client_id}&client_secret={client_secret}"
+            ))
+            .to_request()
+    };
+    let userinfo_get = || {
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/oauth2/userinfo")
+            .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+            .to_request()
+    };
+    let userinfo_post = || {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/oauth2/userinfo")
+            .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+            .set_payload(format!("access_token={user_jwt}"))
+            .to_request()
+    };
+
+    // `expect_active` is what an acting account is answered: a 200 at
+    // UserInfo and `active: true` for both tokens.
+    for (status, expect_active) in [
+        (UserStatus::Active, true),
+        (UserStatus::Locked, false),
+        (UserStatus::Inactive, false),
+        (UserStatus::PendingVerification, true),
+        (UserStatus::Active, true),
+    ] {
+        set_status(status.clone()).await;
+        for (what, token) in [("access", &access_token), ("refresh", &refresh_token)] {
+            let resp = test::call_service(&app, introspect(token)).await;
+            assert_eq!(resp.status().as_u16(), 200, "{status:?} {what}");
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["active"], expect_active, "{status:?} {what}: {body}");
+            if !expect_active {
+                assert!(body["sub"].is_null(), "{status:?} {what}: {body}");
+            }
+        }
+        for (method, req) in [("GET", userinfo_get()), ("POST", userinfo_post())] {
+            let resp = test::call_service(&app, req).await;
+            let want = if expect_active { 200 } else { 401 };
+            assert_eq!(resp.status().as_u16(), want, "{status:?} UserInfo {method}");
+        }
+    }
+}
+
 /// **T-254, invariant 4.** After rotation, a `standard` client's old refresh
 /// token is gone: a second presentation is refused, and the refusal says the
 /// token was consumed.

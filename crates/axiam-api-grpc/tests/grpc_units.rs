@@ -60,6 +60,17 @@ fn claims_for(tenant_id: Uuid) -> ValidatedClaims {
     axiam_auth::token::validate_access_token(&token, &auth_config()).unwrap()
 }
 
+/// A `TokenServiceImpl` whose account read finds an active user, so the
+/// introspection tests below are about the token and not the account (#520).
+fn token_service() -> TokenServiceImpl<MockUserRepo> {
+    TokenServiceImpl::new(
+        auth_config(),
+        MockUserRepo {
+            user: Some(active_user(Uuid::new_v4(), String::new())),
+        },
+    )
+}
+
 /// A **sender-constrained** token for `tenant_id` (X5.1).
 ///
 /// `cnf` is whatever the caller passes, so one helper covers the certificate
@@ -262,7 +273,7 @@ use axiam_test_support::test_password;
 #[tokio::test]
 async fn validate_token_valid_same_tenant() {
     let tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let token = token_for(tenant);
     let mut req = Request::new(ValidateTokenRequest {
         access_token: token,
@@ -275,7 +286,7 @@ async fn validate_token_valid_same_tenant() {
 
 #[tokio::test]
 async fn validate_token_missing_claims_is_unauthenticated() {
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let req = Request::new(ValidateTokenRequest {
         access_token: token_for(Uuid::new_v4()),
     });
@@ -295,7 +306,7 @@ async fn validate_token_missing_claims_is_unauthenticated() {
 #[tokio::test]
 async fn introspection_surfaces_the_confirmation_claim() {
     let tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let token = bound_token_for(
         tenant,
         axiam_auth::token::CnfClaim::from_certificate_thumbprint(TP),
@@ -322,7 +333,7 @@ async fn introspection_surfaces_the_confirmation_claim() {
 #[tokio::test]
 async fn a_dpop_bound_token_reports_its_key_and_token_type() {
     let tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let token = bound_token_for(
         tenant,
         axiam_auth::token::CnfClaim::from_dpop_thumbprint(JKT),
@@ -344,7 +355,7 @@ async fn a_dpop_bound_token_reports_its_key_and_token_type() {
 #[tokio::test]
 async fn validate_token_reports_the_confirmation_too() {
     let tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let token = bound_token_for(
         tenant,
         axiam_auth::token::CnfClaim::from_dpop_thumbprint(JKT),
@@ -365,7 +376,7 @@ async fn validate_token_reports_the_confirmation_too() {
 #[tokio::test]
 async fn an_unbound_token_reports_no_confirmation() {
     let tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let mut req = Request::new(IntrospectTokenRequest {
         access_token: token_for(tenant),
     });
@@ -386,7 +397,7 @@ async fn an_unbound_token_reports_no_confirmation() {
 async fn an_inactive_response_discloses_no_new_fields() {
     let caller_tenant = Uuid::new_v4();
     let other_tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let token = bound_token_for(
         other_tenant,
         axiam_auth::token::CnfClaim::from_certificate_thumbprint(TP),
@@ -410,7 +421,7 @@ async fn an_inactive_response_discloses_no_new_fields() {
 async fn validate_token_cross_tenant_reports_invalid() {
     let caller_tenant = Uuid::new_v4();
     let other_tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     // Token belongs to other_tenant, but caller is caller_tenant.
     let mut req = Request::new(ValidateTokenRequest {
         access_token: token_for(other_tenant),
@@ -424,7 +435,7 @@ async fn validate_token_cross_tenant_reports_invalid() {
 #[tokio::test]
 async fn validate_token_garbage_reports_invalid() {
     let tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let mut req = Request::new(ValidateTokenRequest {
         access_token: "garbage".into(),
     });
@@ -440,7 +451,7 @@ async fn validate_token_garbage_reports_invalid() {
 #[tokio::test]
 async fn introspect_token_active_same_tenant() {
     let tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let mut req = Request::new(IntrospectTokenRequest {
         access_token: token_for(tenant),
     });
@@ -453,7 +464,7 @@ async fn introspect_token_active_same_tenant() {
 
 #[tokio::test]
 async fn introspect_token_missing_claims_is_unauthenticated() {
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let req = Request::new(IntrospectTokenRequest {
         access_token: token_for(Uuid::new_v4()),
     });
@@ -463,7 +474,7 @@ async fn introspect_token_missing_claims_is_unauthenticated() {
 
 #[tokio::test]
 async fn introspect_token_cross_tenant_reports_inactive() {
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let mut req = Request::new(IntrospectTokenRequest {
         access_token: token_for(Uuid::new_v4()),
     });
@@ -475,13 +486,61 @@ async fn introspect_token_cross_tenant_reports_inactive() {
 #[tokio::test]
 async fn introspect_token_garbage_reports_inactive() {
     let tenant = Uuid::new_v4();
-    let svc = TokenServiceImpl::new(auth_config());
+    let svc = token_service();
     let mut req = Request::new(IntrospectTokenRequest {
         access_token: "garbage".into(),
     });
     req.extensions_mut().insert(claims_for(tenant));
     let resp = svc.introspect_token(req).await.unwrap().into_inner();
     assert!(!resp.active);
+}
+
+/// #520, P23W1-12 — `IntrospectToken` re-reads the account a user token
+/// names: a locked, inactive, anonymized or deleted account, or a subject that
+/// no longer exists, makes the token inactive at once (and discloses none of
+/// its claims). A pending account is not suspended, and `ValidateToken` stays
+/// the read-free local check.
+#[tokio::test]
+async fn p23w1_12_introspection_reports_a_suspended_accounts_token_inactive() {
+    let tenant = Uuid::new_v4();
+    let with_status = |status: Option<UserStatus>| {
+        TokenServiceImpl::new(
+            auth_config(),
+            MockUserRepo {
+                user: status.map(|status| User {
+                    status,
+                    ..active_user(tenant, String::new())
+                }),
+            },
+        )
+    };
+    for (status, active) in [
+        (Some(UserStatus::Active), true),
+        (Some(UserStatus::PendingVerification), true),
+        (Some(UserStatus::Locked), false),
+        (Some(UserStatus::Inactive), false),
+        (Some(UserStatus::Anonymized), false),
+        (Some(UserStatus::Deleted), false),
+        (None, false),
+    ] {
+        let svc = with_status(status.clone());
+        let mut req = Request::new(IntrospectTokenRequest {
+            access_token: token_for(tenant),
+        });
+        req.extensions_mut().insert(claims_for(tenant));
+        let resp = svc.introspect_token(req).await.unwrap().into_inner();
+        assert_eq!(resp.active, active, "{status:?}");
+        if !active {
+            assert!(resp.sub.is_empty() && resp.jti.is_empty(), "{status:?}");
+        }
+
+        let mut req = Request::new(ValidateTokenRequest {
+            access_token: token_for(tenant),
+        });
+        req.extensions_mut().insert(claims_for(tenant));
+        let resp = svc.validate_token(req).await.unwrap().into_inner();
+        assert!(resp.valid, "ValidateToken reads no account: {status:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -215,6 +215,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used to be dropped. A `sub` request without a value, and every request from
   an `ignore`-lane client, are unchanged. Threat model 2.38.0: T-239 amended;
   totals unchanged.
+- **UserInfo and introspection stop answering for a suspended account**
+  (#520, P23W1-12). Neither endpoint read the account a token names:
+  `POST /oauth2/introspect` reported a locked or deactivated user's refresh
+  token `active: true` although the refresh grant refused it, and UserInfo
+  answered the user's access token until it expired. Both now apply the rule
+  every grant and `/oauth2/authorize` use — a `Locked`, `Inactive`,
+  `Anonymized` or `Deleted` account, or one that no longer exists, may not
+  act; `PendingVerification` may. **Behaviour change:** such an account's
+  tokens are `active: false` at `POST /oauth2/introspect` (access and refresh
+  tokens) and at gRPC `TokenService/IntrospectToken` (access tokens), with no
+  other member, from the moment the status changes; `GET` and
+  `POST /oauth2/userinfo` answer them with the `401` an expired or revoked
+  token gets, and gRPC `UserInfoService/GetUserInfo` with `UNAUTHENTICATED` —
+  now also for an `openid`-only token whose account was removed, which used to
+  be answered from the token. Reactivating the account restores the answers,
+  since nothing is revoked. Client-credentials and service-account tokens,
+  and gRPC `ValidateToken`, are unchanged. Each of these calls now reads the
+  user row once (UserInfo already did whenever a scope released a claim).
+  Threat model 2.38.0: T-39 amended; totals unchanged.
 
 ### Documentation
 

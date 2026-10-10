@@ -155,6 +155,17 @@
 > writer wins — which is the residual the entry now names for SDKs and scripts
 > until contract 1.60 gives them the field. Status and totals are unchanged.
 >
+> **The webhook deliverer follows no redirect (`1.0.0`, #555, P23W5-10 — T-112
+> amended, still Mitigated).** `WebhookDelivery` sent through `guarded_fetch`,
+> which follows a redirect (every hop SSRF-checked) and re-sends the signed
+> request and its body to the `Location`, so a receiver's operator could forward
+> deliveries — personal data in event bodies — to a host the tenant never
+> registered. It now sends through `guarded_fetch_no_redirect` and a `3xx` is a
+> retry, as for the SSF, SCIM and CIBA ping deliverers; a loopback receiver
+> answering `307` is shown never followed and retried, and a source scan pins the
+> single call. A receiver behind a redirect must be registered with its final
+> URL (CHANGELOG). Status and totals are unchanged.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):

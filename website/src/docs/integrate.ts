@@ -2108,7 +2108,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Every attempt goes through the same SSRF guard the federation client uses: the host is resolved fresh, a private, loopback or link-local address is refused, the validated IP is pinned into the connection so nothing can re-resolve between the check and the send, and a non-HTTPS target is treated as blocked. The shared secret is stored AES-256-GCM encrypted under `AXIAM__AUTH__PKI_ENCRYPTION_KEY`, is never returned by any endpoint, and is decrypted in memory only to compute a signature — with no key configured the subsystem fails closed with a `503` rather than delivering unsigned.",
+        text: "Every attempt goes through the same SSRF guard the federation client uses: the host is resolved fresh, a private, loopback or link-local address is refused, the validated IP is pinned into the connection so nothing can re-resolve between the check and the send, and a non-HTTPS target is treated as blocked. A delivery is **one hop**: a redirect is never followed, so the signed body cannot be forwarded to a host you did not register. A `3xx` answer is a failed attempt, retried like any other and dead-lettered if it persists — register the receiver at its final URL, not behind a redirect. The shared secret is stored AES-256-GCM encrypted under `AXIAM__AUTH__PKI_ENCRYPTION_KEY`, is never returned by any endpoint, and is decrypted in memory only to compute a signature — with no key configured the subsystem fails closed with a `503` rather than delivering unsigned.",
       },
       { type: "h", id: "headers", text: "What arrives" },
       {

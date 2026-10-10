@@ -3257,7 +3257,7 @@ If a batch can be written and left unsigned without notice, tamper-evidence has 
 
 A tenant administrator points a webhook at an internal or cloud metadata address and uses delivery success, latency or error detail as an internal scanner.
 
-> Delivery uses the same resolve-and-pin guarded_fetch as federation: private, loopback, link-local, ULA and unspecified destinations are rejected before connect, https is enforced on every hop, and the response size is capped.
+> Delivery uses the same resolve-and-pin guard as federation, in its one-hop form `guarded_fetch_no_redirect`: private, loopback, link-local, ULA and unspecified destinations are rejected before connect, https is enforced, and the response size is capped. **A redirect is never followed** (P23W5-10, #555; until then the deliverer used `guarded_fetch`, which followed a `3xx` with every hop SSRF-checked and re-sent the signed request and its body to the `Location`): a `3xx` is returned as a response and classified as a retry, as for the SSF, SCIM and CIBA ping deliverers, so a receiver's operator cannot forward deliveries (personal data in event bodies) to a host the tenant never registered; a receiver behind a redirect must be registered with its final URL. Tests: `crates/axiam-api-rest/tests/webhook_test.rs` `a_307_from_the_receiver_is_never_followed_and_the_delivery_is_retried`; `crates/axiam-api-rest/src/webhook.rs` `delivery_goes_through_the_no_redirect_guarded_fetch_and_nothing_else`.
 
 **T-113 — Delivery replay by a party who captured one request**  
 `Webhook delivery (HMAC + guarded_fetch + retry)` (Process) · Tampering · Medium · Mitigated

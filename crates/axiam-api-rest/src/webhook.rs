@@ -14,13 +14,21 @@
 //! not by an in-process sleep (D-07).
 //!
 //! SEC-019/SECHRD-02: Delivery is routed through the shared
-//! `axiam_federation::ssrf::guarded_fetch` guard, which resolves the host
-//! fresh on every attempt, rejects private/loopback/link-local resolved
-//! addresses (DNS-rebinding defence), and — critically — pins the exact
-//! validated `IpAddr` into the connection via a fresh single-use client, so
-//! `reqwest` cannot independently re-resolve DNS between the SSRF check and
+//! `axiam_federation::ssrf::guarded_fetch_no_redirect` guard, which resolves
+//! the host fresh on every attempt, rejects private/loopback/link-local
+//! resolved addresses (DNS-rebinding defence), and — critically — pins the
+//! exact validated `IpAddr` into the connection via a fresh single-use client,
+//! so `reqwest` cannot independently re-resolve DNS between the SSRF check and
 //! the actual send (D-01c; this closes the pin gap the previous
 //! `resolve_and_validate_host` + separate `client.post()` pair left open).
+//!
+//! P23W5-10 (T-112): **a redirect is never followed.** The guard used to be
+//! `guarded_fetch`, which follows a `3xx` (each hop SSRF-checked) and re-sends
+//! the HMAC-signed request and its body — personal data in an event — to the
+//! `Location`, so a receiver's operator could forward deliveries to a host the
+//! tenant never registered. A `3xx` is now returned as a response and is a
+//! retry, as for the SSF, SCIM and CIBA ping deliverers; a receiver behind a
+//! redirect must be registered with its final URL.
 //! SEC-031: The webhook secret is stored AES-256-GCM encrypted; it is decrypted
 //! in memory for HMAC computation and never serialised in API responses.
 //!
@@ -143,7 +151,7 @@ pub struct WebhookDeliveryService<W> {
 
 impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
     pub fn new(repo: W, encryption_key: Option<[u8; 32]>) -> Self {
-        // No `reqwest::Client` is stored here any more: `ssrf::guarded_fetch`
+        // No `reqwest::Client` is stored here any more: `ssrf::guarded_fetch_no_redirect`
         // (D-01c) builds a fresh, single-use, IP-pinned client per delivery
         // attempt, so a long-lived pooled client here would sit unused for
         // sends and only invite drift back toward the un-pinned pre-25-02
@@ -228,7 +236,7 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
 
     /// Single-attempt webhook delivery (D-06/D-07). Decrypts the stored
     /// secret, computes the Stripe-style signed-timestamp signature (D-10),
-    /// and performs exactly one `ssrf::guarded_fetch` POST. Contains NO
+    /// and performs exactly one `ssrf::guarded_fetch_no_redirect` POST. Contains NO
     /// retry loop and NO in-process delay — AMQP TTL+DLX (declared via
     /// `axiam_amqp::connection::AmqpManager::declare_webhook_topology`) now
     /// owns retry scheduling. Returns `Ok(StatusCode)` (which may be a
@@ -275,29 +283,31 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
         let timestamp = Utc::now().timestamp();
         let signature = compute_signature_v2(&plaintext_secret, timestamp, &body);
 
-        // SEC-019/SECHRD-02: `guarded_fetch` resolves the host fresh on this
-        // attempt, rejects a private/loopback/link-local resolved address,
+        // SEC-019/SECHRD-02: `guarded_fetch_no_redirect` resolves the host fresh
+        // on this attempt, rejects a private/loopback/link-local resolved address,
         // and pins the exact validated IpAddr into a fresh single-use client
         // for the POST — no separate, independently-resolving `client.post()`
         // call remains, so `reqwest` cannot re-resolve DNS between the check
-        // and the send (D-01c). `allow_private=false`: this is the
-        // production delivery path, never the test seam (`self.allow_private`
-        // is `false` unless a test turned it on).
+        // and the send (D-01c). One hop: a `3xx` comes back as a response and
+        // is never followed (P23W5-10, T-112). `allow_private=false`: this is
+        // the production delivery path, never the test seam
+        // (`self.allow_private` is `false` unless a test turned it on).
         let body_for_send = body.clone();
         let timestamp_header = timestamp.to_string();
         let signature_header = signature.clone();
         let event_type_header = event_type.to_string();
         let delivery_id_header = delivery_id.to_string();
-        let result = ssrf::guarded_fetch(&webhook.url, self.allow_private, move |c, u| {
-            c.post(u)
-                .header("Content-Type", "application/json")
-                .header("X-Axiam-Timestamp", &timestamp_header)
-                .header("X-Axiam-Signature", &signature_header)
-                .header("X-Axiam-Event", &event_type_header)
-                .header("X-Axiam-Delivery", &delivery_id_header)
-                .body(body_for_send.clone())
-        })
-        .await;
+        let result =
+            ssrf::guarded_fetch_no_redirect(&webhook.url, self.allow_private, move |c, u| {
+                c.post(u)
+                    .header("Content-Type", "application/json")
+                    .header("X-Axiam-Timestamp", &timestamp_header)
+                    .header("X-Axiam-Signature", &signature_header)
+                    .header("X-Axiam-Event", &event_type_header)
+                    .header("X-Axiam-Delivery", &delivery_id_header)
+                    .body(body_for_send.clone())
+            })
+            .await;
 
         match result {
             Ok(resp) => {
@@ -330,6 +340,8 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
 /// for the generic consume loop.
 ///
 /// * 2xx: `Delivered`, carrying the status for the success audit record.
+/// * a `3xx`: `Retry` with a fixed reason; the `Location` is never followed
+///   (P23W5-10, T-112), so the receiver's operator can fix the registered URL.
 /// * any other status: `Retry` with reason `non-2xx status: <code>`.
 /// * `WebhookError` (SSRF-blocked, secret-decrypt failure, lookup failure, ...):
 ///   `Retry` with the error's text. Today's behaviour retries every failure up to
@@ -361,6 +373,10 @@ impl<W: WebhookRepository + Clone + 'static> OutboundDeliverer for WebhookDelive
             Ok(match result {
                 Ok(status) if status.is_success() => DeliveryOutcome::Delivered {
                     response_status: Some(status.as_u16()),
+                },
+                // Never followed: the body is signed for the registered URL.
+                Ok(status) if status.is_redirection() => DeliveryOutcome::Retry {
+                    reason: "the receiver answered with a redirect, which is not followed".into(),
                 },
                 Ok(status) => DeliveryOutcome::Retry {
                     reason: format!("non-2xx status: {}", status.as_u16()),
@@ -402,6 +418,21 @@ pub fn encrypt_webhook_secret(
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    /// The delivery's only way out is the one-hop guard (P23W5-10, T-112):
+    /// pinned against the source so a redirect-following `guarded_fetch` cannot
+    /// come back beside it without this test saying so.
+    #[test]
+    fn delivery_goes_through_the_no_redirect_guarded_fetch_and_nothing_else() {
+        let source = include_str!("webhook.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the production half of the file");
+        assert_eq!(production.matches("guarded_fetch_no_redirect(").count(), 1);
+        assert_eq!(production.matches("guarded_fetch(").count(), 0);
+        assert_eq!(production.matches("guarded_fetch_with_cap(").count(), 0);
+    }
 
     #[test]
     fn signature_v2_is_deterministic() {

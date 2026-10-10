@@ -45,6 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clients and scripts keep working. The console now sends the `updated_at` its
   edit form was opened from. The client SDKs gain the field with contract 1.60.
   T-416 is amended (status unchanged).
+- **The webhook deliverer no longer follows redirects (#555, P23W5-10).**
+  Webhook deliveries went through `guarded_fetch`, which follows a `3xx` (every hop
+  SSRF-checked) and re-sends the HMAC-signed request and its body to the
+  `Location`, so a receiver's operator could forward deliveries - personal data in
+  event bodies - to a host the tenant never registered. They now go through
+  `guarded_fetch_no_redirect`, like SSF push, outbound SCIM and the CIBA ping: a
+  `3xx` is never followed and the attempt is retried (then dead-lettered like any
+  failure), with the reason `the receiver answered with a redirect, which is not
+  followed`. **Behaviour change for upgraders:** a webhook whose receiver answers
+  with a redirect (an `http` to `https` upgrade, a trailing-slash or host
+  canonicalisation, a load balancer hop) used to be delivered to the final URL and
+  now fails every attempt; register the receiver at its final URL. T-112 is
+  amended (status unchanged).
 
 ### Fixed
 

@@ -364,6 +364,9 @@ optional:
 4. **First hop only.** Redirect targets are always validated strictly. A
    `Location` header is attacker-influenced response data, not the URL the
    operator chose to trust.
+   Webhook, SSF push, outbound SCIM and CIBA ping deliveries are one hop and
+   follow no redirect at all: a `3xx` is a retried failure, so a webhook
+   receiver behind a redirect must be registered with its final URL.
 5. **Cloud metadata endpoints stay unreachable**, even for an allowlisted host:
    `169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200`,
    `192.0.0.192`, and the deprecated `::/96` encoding of any of them. An

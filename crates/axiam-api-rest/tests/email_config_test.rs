@@ -57,7 +57,10 @@ type TestDb = surrealdb::engine::local::Db;
 const TEST_EMAIL_KEY: [u8; 32] = [0x42; 32];
 
 /// Test-only placeholder password — not a real credential.
-const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
+/// A per-process generated secret (never a literal: secret scanners flag one).
+fn test_secret() -> String {
+    axiam_test_support::test_password()
+}
 
 /// Arbitrary CSRF double-submit token (SEC-046).
 const CSRF_TOKEN: &str = "test-csrf-token";
@@ -182,7 +185,7 @@ async fn create_admin(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
             tenant_id,
             username: "admin".into(),
             email: "admin@example.com".into(),
-            password: TEST_PASSWORD.into(),
+            password: test_secret(),
             metadata: None,
         })
         .await
@@ -685,7 +688,7 @@ fn smtp_body(host: &str) -> serde_json::Value {
             "host": host,
             "port": 587,
             "username": "mailer",
-            "password": TEST_PASSWORD,
+            "password": test_secret(),
             "starttls": true
         }
     })
@@ -693,7 +696,7 @@ fn smtp_body(host: &str) -> serde_json::Value {
 
 fn api_body(url: &str) -> serde_json::Value {
     serde_json::json!({
-        "provider": { "kind": "resend", "api_key": TEST_PASSWORD, "api_url": url }
+        "provider": { "kind": "resend", "api_key": test_secret(), "api_url": url }
     })
 }
 
@@ -803,7 +806,7 @@ async fn the_organization_scope_is_held_to_the_same_rule() {
         ("169.254.169.254", "link-local"),
         ("metadata.example.test", HOST_NOT_PERMITTED),
     ] {
-        let mut body = sample_smtp_config_body(TEST_PASSWORD);
+        let mut body = sample_smtp_config_body(&test_secret());
         body["provider"]["host"] = host.into();
         let (status, refusal) = put(&app, &uri, &token, body).await;
         assert_eq!(status, 400, "{host}: {refusal}");
@@ -812,7 +815,7 @@ async fn the_organization_scope_is_held_to_the_same_rule() {
             "{host}: {refusal}"
         );
     }
-    let mut disabled = sample_smtp_config_body(TEST_PASSWORD);
+    let mut disabled = sample_smtp_config_body(&test_secret());
     disabled["provider"]["host"] = "loopback.example.test".into();
     disabled["enabled"] = false.into();
     let (status, _) = put(&app, &uri, &token, disabled).await;
@@ -881,7 +884,7 @@ async fn the_test_endpoint_answers_generically_for_a_refused_or_unreachable_prov
     let token = mint_token(&auth, admin_id, tenant_id, org_id);
     let repo = SurrealEmailConfigRepository::new(db.clone(), TEST_EMAIL_KEY);
     let mut org_config: axiam_core::models::email::SetOrgEmailConfig =
-        serde_json::from_value(sample_smtp_config_body(TEST_PASSWORD)).unwrap();
+        serde_json::from_value(sample_smtp_config_body(&test_secret())).unwrap();
     org_config.enabled = true;
     repo.set_org_config(org_id, org_config).await.unwrap();
 
@@ -1051,7 +1054,7 @@ async fn an_omitted_smtp_password_is_kept_only_for_the_same_server(scope: &str) 
         &app,
         &uri,
         &token,
-        smtp_destination(SERVER, 587, true, Some(TEST_PASSWORD)),
+        smtp_destination(SERVER, 587, true, Some(test_secret().as_str())),
     )
     .await;
     assert_eq!(status, 200, "{scope}: {body}");
@@ -1067,7 +1070,7 @@ async fn an_omitted_smtp_password_is_kept_only_for_the_same_server(scope: &str) 
     assert_eq!(status, 200, "{scope}: {body}");
     assert_eq!(
         stored_smtp_password(&db, scope, org_id, tenant_id).await,
-        TEST_PASSWORD
+        test_secret()
     );
 
     // Another host, another port, another TLS mode: each refused.
@@ -1098,7 +1101,7 @@ async fn an_omitted_smtp_password_is_kept_only_for_the_same_server(scope: &str) 
     assert_eq!(status, 200, "{scope}: {body}");
     assert_eq!(
         stored_smtp_password(&db, scope, org_id, tenant_id).await,
-        TEST_PASSWORD
+        test_secret()
     );
 
     // With the password supplied, the server may change.
@@ -1165,22 +1168,22 @@ async fn p23w2_05_an_omitted_api_key_is_kept_only_for_the_same_endpoint() {
     const FIRST: &str = "https://93.184.216.34/emails";
     const OTHER: &str = "https://93.184.216.35/emails";
 
-    let (status, body) = put(&app, &uri, &token, resend(Some(FIRST), Some(TEST_PASSWORD))).await;
+    let (status, body) = put(&app, &uri, &token, resend(Some(FIRST), Some(test_secret().as_str()))).await;
     assert_eq!(status, 200, "{body}");
     let (status, body) = put(&app, &uri, &token, resend(Some(FIRST), None)).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(stored_key().await.0, TEST_PASSWORD);
+    assert_eq!(stored_key().await.0, test_secret());
 
     let (status, body) = put(&app, &uri, &token, resend(Some(OTHER), None)).await;
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["error"], "validation_error", "{body}");
     assert_eq!(
         stored_key().await,
-        (TEST_PASSWORD.to_owned(), Some(FIRST.to_owned()))
+        (test_secret(), Some(FIRST.to_owned()))
     );
 
     // Back to the kind's own endpoint: kept.
     let (status, body) = put(&app, &uri, &token, resend(None, None)).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(stored_key().await, (TEST_PASSWORD.to_owned(), None));
+    assert_eq!(stored_key().await, (test_secret(), None));
 }

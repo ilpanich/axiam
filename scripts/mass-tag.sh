@@ -464,22 +464,116 @@ current_version() {
   esac ; } || true
 }
 
-# Replace every literal occurrence of $2 with $3 in file $1, recording the file
+# Run the perl substitution program $2 over the whole of file $1 (slurped, so
+# a pattern may span lines; it reads its operands from the environment) and
+# report the change under label $3. The file is recorded for staging only when
+# the program changed it. In a dry run the program runs on a scratch copy and
+# every line it would change is printed, before and after -- the release is a
+# few dozen lines across twelve repos, and those lines are what a dry run is
+# read for.
+rewrite_file() {
+  local file="$1" prog="$2" label="$3" tmp
+  tmp="$(mktemp)"
+  perl -0pe "$prog" -- "$file" >"$tmp" || { rm -f "$tmp"; die "rewriting $file failed"; }
+  if cmp -s "$file" "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if $DRY_RUN; then
+    printf '      [dry-run] %s: %s\n' "$file" "$label"
+    { diff -- "$file" "$tmp" || true; } | grep '^[<>]' | cut -c1-150 | sed 's/^/          /'
+    rm -f "$tmp"
+  else
+    cat "$tmp" >"$file"   # in place: keeps the file's mode
+    rm -f "$tmp"
+    printf '      %s: %s\n' "$file" "$label"
+  fi
+  BUMP_FILES+=("$file")
+}
+
+# The boundaries a version literal must have to count as the version, as perl
+# regex fragments around \Q$ENV{OLD}\E. Without them a literal is a substring
+# match, which is harmless while the old version carries a pre-release suffix
+# and corrupts files as soon as it does not: bumping 1.0.0 to 1.0.1 would also
+# have turned `^11.0.0` into `^11.0.1` and `^1.0.0-alpha31` into
+# `^1.0.1-alpha31` in the TypeScript SDK's package.json. Not after a digit or a
+# dot; not before an identifier character, `+`, `-`, or a dot that continues
+# the number (a sentence-ending dot is fine). `v1.0.0` and `=1.0.0` still match.
+VERSION_LB='(?<![0-9.])'
+VERSION_LA='(?![0-9A-Za-z+-]|\.[0-9])'
+
+# Replace every occurrence of version $2 with $3 in file $1, recording the file
 # for staging. No-op (silently) when the file is absent, when old == new, or
-# when the old literal is not present. Honours --dry-run.
+# when the old version is not present. Honours --dry-run.
+#
+# Only for files where every standalone occurrence of the version IS the
+# version: manifests, headers, the k8s image tags. JSON manifests, whose
+# dependency tree holds other packages' versions, go through set_json_version;
+# READMEs, whose prose says "since 1.0.0", through sub_readme.
 sub_literal() {
   local file="$1" old="$2" new="$3"
   [[ -n "$old" ]] || return 0            # empty old would match everywhere — refuse
   [[ -f "$file" ]] || return 0
   [[ "$old" == "$new" ]] && return 0
-  grep -qF -- "$old" "$file" || return 0
-  if $DRY_RUN; then
-    printf '      [dry-run] %s: "%s" -> "%s"\n' "$file" "$old" "$new"
-  else
-    OLD="$old" NEW="$new" perl -pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' "$file"
-    printf '      %s: "%s" -> "%s"\n' "$file" "$old" "$new"
-  fi
-  BUMP_FILES+=("$file")
+  OLD="$old" NEW="$new" rewrite_file "$file" \
+    "s/${VERSION_LB}\\Q\$ENV{OLD}\\E${VERSION_LA}/\$ENV{NEW}/g" "\"$old\" -> \"$new\""
+}
+
+# Replace version $2 with $3 in the Markdown file $1, but only where it is an
+# install coordinate rather than history: inside fenced code blocks (with the
+# boundaries above), and outside them only as an inline code span holding the
+# version alone (the C++ README's "Version: `1.0.0-beta17`"). Prose stays as
+# written: from 1.0.1 on, "From 1.0.0 this SDK is stable", "new in 1.0.0" and
+# "a server older than 1.0.0" are statements about 1.0.0 that a substitution
+# would have made false -- and they are in four SDK READMEs today.
+sub_readme() {
+  local file="$1" old="$2" new="$3"
+  [[ -n "$old" ]] || return 0
+  [[ -f "$file" ]] || return 0
+  [[ "$old" == "$new" ]] && return 0
+  # shellcheck disable=SC2016  # $ENV{...} and $1 are perl's, expanded by perl
+  OLD="$old" NEW="$new" rewrite_file "$file" '
+    my @l = split /^/m;
+    my $fenced = 0;
+    for (@l) {
+      if (/^[ \t]*(?:```|~~~)/) { $fenced = !$fenced; next }
+      if ($fenced) { s/'"${VERSION_LB}"'\Q$ENV{OLD}\E'"${VERSION_LA}"'/$ENV{NEW}/g }
+      else         { s/`\Q$ENV{OLD}\E`/`$ENV{NEW}`/g }
+    }
+    $_ = join "", @l;
+  ' "\"$old\" -> \"$new\" (install snippets only, not prose)"
+}
+
+# Set the package's own version in the JSON file $1 to $2: the first
+# `"version"` member (the document's own, at the top of a package.json,
+# package-lock.json or OpenAPI document's info) and, in a package-lock.json, the
+# root package's entry under `packages[""]`. Never a dependency's: a lockfile
+# holds dozens of other packages, several of them at plain `1.0.0`, which a
+# substitution of a plain old version would rewrite. Targeted rather than
+# re-serialized, so the file's formatting is untouched.
+set_json_version() {
+  local file="$1" new="$2" old="$3"
+  [[ -f "$file" ]] || return 0
+  # shellcheck disable=SC2016  # $ENV{...} and $1 are perl's, expanded by perl
+  VAL="$new" rewrite_file "$file" '
+    s/("version"[ \t]*:[ \t]*)"[^"]*"/$1"$ENV{VAL}"/;
+    s/("packages"[ \t]*:[ \t]*\{\s*""[ \t]*:[ \t]*\{[^{}]*?"version"[ \t]*:[ \t]*)"[^"]*"/$1"$ENV{VAL}"/s;
+  ' "\"$old\" -> \"$new\""
+}
+
+# Set CMake's project(... VERSION x.y.z) in file $1 to the MAJOR.MINOR.PATCH of
+# version $2. CMake rejects a pre-release suffix, so the C and C++ SDKs keep the
+# plain triple there and the full spelling elsewhere. A substitution got this
+# right only by accident: from 1.0.0 to 1.0.1 it moved the triple, but from
+# 1.0.1 to 1.1.0-rc1 it would have written `VERSION 1.1.0-rc1` and broken the
+# build. Run after sub_literal, so whatever that did here is corrected.
+set_cmake_project_version() {
+  local file="$1" triple="${2%%[-+]*}"
+  [[ -f "$file" ]] || return 0
+  # shellcheck disable=SC2016  # $ENV{...} and $1 are perl's, expanded by perl
+  VAL="$triple" rewrite_file "$file" \
+    's/(\bproject[ \t]*\([^)]*?\bVERSION[ \t]+)[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?/$1$ENV{VAL}/s' \
+    "project() VERSION -> $triple"
 }
 
 # Set the first `<prefix>"<value>"` occurrence in file $1 to $3, where $2 is a
@@ -892,7 +986,7 @@ bump_versions() {
       # then put on it — so they must rewrite the same files, or releasing one
       # would leave the tree half-bumped for the other.
       sub_literal Cargo.toml                                       "$old" "$version"
-      sub_literal sdks/openapi.json                                "$old" "$version"
+      set_json_version sdks/openapi.json                           "$version" "$old"
       # MUST follow the line above and precede the registry: the digest covers
       # info.version, and the registry mirrors both.
       restamp_openapi_digest
@@ -931,8 +1025,8 @@ bump_versions() {
       sub_literal axiam-sdk-wasm/Cargo.toml     "$old" "$version"
       ;;
     axiam-typescript-sdk)
-      sub_literal package.json       "$old" "$version"
-      sub_literal package-lock.json  "$old" "$version"
+      set_json_version package.json       "$version" "$old"
+      set_json_version package-lock.json  "$version" "$old"
       ;;
     axiam-java-sdk)
       # Every occurrence of the project version literal across the poms is the
@@ -942,7 +1036,7 @@ bump_versions() {
       sub_literal pom.xml                              "$old" "$version"
       sub_literal bom/pom.xml                          "$old" "$version"
       sub_literal examples/spring-boot-app/pom.xml     "$old" "$version"
-      sub_literal README.md                            "$old" "$version"
+      sub_readme  README.md                            "$old" "$version"
       ;;
     axiam-csharp-sdk)
       sub_literal Axiam.Sdk/Axiam.Sdk.csproj                        "$old" "$version"
@@ -960,20 +1054,20 @@ bump_versions() {
     axiam-kotlin-sdk)
       # Gradle project version lives in gradle.properties; README shows install coords.
       sub_literal gradle.properties  "$old" "$version"
-      sub_literal README.md          "$old" "$version"
+      sub_readme  README.md          "$old" "$version"
       ;;
     axiam-swift-sdk)
       # SwiftPM is tag-derived; the CocoaPods podspec carries the only in-repo version.
       sub_literal AxiamSDK.podspec   "$old" "$version"
-      sub_literal README.md          "$old" "$version"
+      sub_readme  README.md          "$old" "$version"
       ;;
     axiam-c-sdk|axiam-cplusplus-sdk)
       # C/C++ declare the release version in the vcpkg manifest (an overlay port
       # under ports/<repo>/, or the repo root), the Conan recipe, the AXIAM_VERSION
       # macro header, the CPack version in CMakeLists, and the README install
       # coords — kept in lockstep. (project() carries the plain MAJOR.MINOR.PATCH
-      # triple by design, since CMake rejects pre-release suffixes, so a
-      # prerelease bump only rewrites the full-version literals below.)
+      # triple by design, since CMake rejects pre-release suffixes; it is set
+      # from the new version's triple by set_cmake_project_version.)
       # Every vcpkg manifest is bumped, not only the one vcpkg_manifest_path
       # resolves: the C++ SDK keeps BOTH a root vcpkg.json and an overlay port
       # whose directory is not named after the repo (ports/axiam-cpp-sdk/), and
@@ -986,8 +1080,9 @@ bump_versions() {
       done
       sub_literal include/axiam/axiam.h    "$old" "$version"
       sub_literal CMakeLists.txt           "$old" "$version"
+      set_cmake_project_version CMakeLists.txt "$version"
       sub_literal conanfile.py             "$old" "$version"
-      sub_literal README.md                "$old" "$version"
+      sub_readme  README.md                "$old" "$version"
       ;;
   esac
 }

@@ -132,6 +132,18 @@
 > model is unchanged: **469 threats, 428 mitigated / 20 open / 21 not
 > applicable**, version 2.37.0.
 >
+> **Every recorded sweep is registered (`1.0.0`, #535, P23W4-06 — T-129
+> amended, still Mitigated).** Five sweeps the cleanup loop records — the SSO
+> hand-off codes, the dynamic-client, CIMD-client and registration-token
+> sweeps and the revocation-feed prune — were missing from the registered
+> list, so until their first run `GET /health/jobs` showed them as absent,
+> which reads as "not deployed". The first four are now registered on every
+> start (DCR and CIMD are tenant settings, not a process switch); the
+> revocation-feed prune is registered, and recorded, only when the feed is on.
+> The rule is pinned by a source scan over every name `cleanup.rs` records and
+> a snapshot test of the five before their first run; the entry cites both.
+> Status and totals are unchanged.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):

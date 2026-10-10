@@ -33,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Five cleanup sweeps are listed on `GET /health/jobs` from start (#535).** The
+  sweeps for SSO hand-off codes, unused dynamically registered clients, unused
+  CIMD clients and expired registration tokens, and the revocation-feed prune,
+  were recorded by the cleanup loop but not registered, so until their first run
+  the endpoint showed them as absent, which reads as "not deployed", the
+  silence T-129 exists to break. The first four are now registered on every
+  start (DCR and CIMD are tenant settings, so no process switch gates them).
+  The revocation-feed prune is registered, and recorded, only when
+  `auth.revocation_feed_enabled` is on: a deployment without the feed no longer
+  lists a `revocation_feed` job that had nothing to do. A test scans
+  `cleanup.rs` so that a sweep recorded and not registered fails the build.
+  T-129 is amended; its status is unchanged.
 - **A dying consumer or gRPC server no longer ends the process mid-flight, and
   the gRPC server now stops with the REST listener (#554).** In the full profile
   the authz, audit-ingestion and mail consumers and the gRPC server each ended

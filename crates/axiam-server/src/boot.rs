@@ -2556,9 +2556,10 @@ where
     let job_health =
         crate::job_health::JobHealth::new(Duration::from_secs(config.cleanup_interval_secs))
             .with_request_audit(audit_middleware.loss());
-    // The list is `job_health::SWEEP_JOBS`, which a test checks against what the
-    // cleanup loop records.
-    for job in crate::job_health::SWEEP_JOBS {
+    // The list is `job_health::sweep_jobs`, which a test checks against what the
+    // cleanup loop records. The revocation feed's prune is in it only when the
+    // feed is on, which is the only time the loop records it.
+    for job in crate::job_health::sweep_jobs(revoked_session_repo.is_some()) {
         job_health.register(job);
     }
 

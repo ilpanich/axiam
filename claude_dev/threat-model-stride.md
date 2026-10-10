@@ -3724,6 +3724,20 @@ The 30-day GDPR erasure grace period and certificate-expiry warnings depend on s
 > shift its traffic to replicas running the identical stuck code. Tolerates
 > three missed intervals before flagging, because a sweep that overruns its
 > interval under load is normal and an alert that fires on that gets muted.
+>
+> **Extended (#535, review P23W4-06).** The list of registered jobs is complete
+> by rule: every name the cleanup loop records is registered at start, so a
+> sweep that never ran appears as `stalled` instead of being absent. Five were
+> not — the SSO hand-off, dynamic-client, CIMD-client and registration-token
+> sweeps, now registered on every start (DCR and CIMD are tenant settings, so no
+> process switch gates them), and the revocation-feed prune, now registered and
+> recorded only when `auth.revocation_feed_enabled` is on. Tests:
+> `the_slo_sweeps_are_recorded_by_the_cleanup_loop_and_registered` (a source
+> scan over every name `cleanup.rs` records, in both directions) and
+> `the_registered_sweeps_are_listed_before_their_first_run`, in
+> `crates/axiam-server/src/job_health.rs`. Residual: the scan covers the
+> cleanup loop, the only recorder of job health; a job added elsewhere must
+> register itself.
 
 **T-130 — Datastore reachable without authentication**  
 `SurrealDB StatefulSet (cluster)` (Store) · Information disclosure · Critical · Mitigated

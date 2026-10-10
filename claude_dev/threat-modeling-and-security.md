@@ -114,6 +114,24 @@
 > since the platforms' defaults (10 s, 30 s) can kill the process during the
 > drain. Status and totals are unchanged.
 >
+> **The CIBA pending-request list (`1.0.0`, #566, P23W6-07 — T-446, T-431 and
+> T-447 amended, statuses unchanged).** D-74 mails the approval prompt only to an
+> address something vouches for, and the approval page was reached only by the
+> mail's link, so a federated account (`PendingVerification` for life, T-160)
+> never learned its request's id and the client saw `expired_token`. The decision
+> stands and the missing half is built: `GET /api/v1/ciba/requests?status=pending`
+> lists the signed-in user's own pending requests, each with the page's
+> `request_id` and `version` and never the `auth_req_id`, and the console's user
+> menu carries a badge that opens the existing page. It is an approval surface
+> under that surface's rules from its first commit: a console sign-in only (a
+> client-minted token is `403`), a rate-limit bucket of its own in
+> `ciba_approval_per_min`, and no oracle — another user's, a decided and an
+> expired request are absent. The entries cite the three tests the issue asked
+> for and the limiter test. T-160 is unchanged (it is the exchange path, and a
+> federated account is still pending for life); T-446's residual is closed. The
+> model is unchanged: **469 threats, 428 mitigated / 20 open / 21 not
+> applicable**, version 2.37.0.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):

@@ -585,12 +585,14 @@ pub struct RateLimitConfig {
     pub scim_target_admin_per_min: u32,
     /// Max requests per minute per IP to each of the CIBA approval routes — the
     /// signed-in user's half of a backchannel authentication request:
+    /// `GET /api/v1/ciba/requests` (the pending list, #566),
     /// `GET /api/v1/ciba/requests/{id}`, `POST …/approve` and `POST …/deny`
     /// (default: 30 — G-7, T23.7.2).
     ///
     /// **One bucket per route** (the counter is keyed by the route's name), so a
     /// page that reads a request and then decides it spends one from two
-    /// buckets, and a flood of reads cannot starve decisions. Not sized from
+    /// buckets, the console's list poll spends from a third, and a flood of
+    /// reads cannot starve decisions. Not sized from
     /// capacity: a person opens a handful of requests a minute at most, the
     /// routes sit behind a session and a CSRF token, and a request id is a
     /// handle rather than a secret (D-68), so the bound is on a signed-in

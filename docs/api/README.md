@@ -75,7 +75,8 @@ registry (`/api/v1/tenants/{tenant_id}/ssf/streams`) and the outbound SCIM
 targets (`/api/v1/scim-targets`) list only `bearer`, and a service-account
 token is `401` on each (contract §29.3 rule 9, §30.3 rule 8, §31.3 rule 9,
 §32.3 rule 10). **CIBA approval is narrower still**:
-`GET /api/v1/ciba/requests/{request_id}` and its `approve` / `deny` take the
+`GET /api/v1/ciba/requests` (the pending list), `GET /api/v1/ciba/requests/{request_id}` and its
+`approve` / `deny` take the
 `session` scheme above plus a CSRF token, so neither a service principal nor a
 client credential can approve a request (§33, §33.3 rule 16).
 
@@ -275,9 +276,18 @@ on another device (CIBA Core 1.0, poll and ping modes; no push mode).
   endpoint (a CIBA client is never public), starts a request
 - `POST /oauth2/token` with `grant_type=urn:openid:params:grant-type:ciba` and
   the `auth_req_id` — the client polls, or polls once after AXIAM pings it
+- `GET /api/v1/ciba/requests?status=pending` (tag `ciba`) — the signed-in
+  user's own pending requests: client name, binding message, scopes, requested
+  `acr`, expiry, and the `request_id` and `version` the approval page uses; never
+  the `auth_req_id`. Another user's, a decided and an expired request are absent.
+  Only `status=pending` exists (any other value is `400`). It is how an account
+  with no vouched address (sent no approval mail, D-74) finds a request: the
+  console's user menu shows a badge with the count. A token with a `client_id` is
+  `403`; the route has a rate-limit bucket of its own
+  (`AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN`)
 - `GET /api/v1/ciba/requests/{request_id}`, `POST …/approve`, `POST …/deny`
   (tag `ciba`) — the console page `/ciba/approve` the user decides on; not SDK
-  surface
+  surface, nor is the list
 
 Contract [§33](../../sdks/CONTRACT.md#§33-ciba--client-initiated-backchannel-authentication-contract-158);
 website [CIBA (backchannel authentication)](https://ilpanich.github.io/axiam/#/docs/ciba).

@@ -803,6 +803,17 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
             // cannot spend the allowance a decision needs; a request id is a
             // handle, not a secret (D-68), and every id that is not the
             // caller's own answers 404.
+            // The list is for the account the approval mail never reaches
+            // (D-74, #566), and a bucket of its own under the same allowance.
+            .service(
+                web::resource("/ciba/requests")
+                    .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "ciba_approval_list",
+                        rate_limit_cfg.ciba_approval_per_min,
+                    ))
+                    .route(web::get().to(handlers::ciba_approval::list_requests::<C>)),
+            )
             .service(
                 web::resource("/ciba/requests/{request_id}")
                     .wrap(build_governor(rate_limit_cfg.ciba_approval_per_min))

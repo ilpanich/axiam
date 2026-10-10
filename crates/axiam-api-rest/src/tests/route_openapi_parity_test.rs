@@ -79,6 +79,7 @@ const AUTHENTICATED_SELF_SERVICE_PATHS: &[&str] = &[
     // caller approves or refuses a request addressed to *themselves*, and the
     // service answers `404` for anyone else's; "may approve sign-in requests"
     // is not a capability an operator should hand out.
+    "/api/v1/ciba/requests",
     "/api/v1/ciba/requests/{request_id}",
     "/api/v1/ciba/requests/{request_id}/approve",
     "/api/v1/ciba/requests/{request_id}/deny",

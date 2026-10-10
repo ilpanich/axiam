@@ -220,7 +220,10 @@ describe("Topbar", () => {
     expect(
       await screen.findByText(/No other tenant is visible to you/)
     ).toBeInTheDocument();
-    expect(apiMock.get).not.toHaveBeenCalled();
+    // The only read is the user menu's pending sign-in list, never a tenant lookup.
+    for (const [url] of apiMock.get.mock.calls) {
+      expect(url).toBe("/api/v1/ciba/requests");
+    }
   });
 
   it("opens the user menu showing username/email and a sign-out option", async () => {
@@ -291,6 +294,73 @@ describe("Topbar", () => {
     await waitFor(() => expect(apiMock.post).toHaveBeenCalledWith("/api/v1/auth/logout"));
     await waitFor(() => expect(screen.getByText("Login screen")).toBeInTheDocument());
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  // ─── Pending sign-in requests (CIBA, D-74, #566) ────────────────────────────
+
+  const pendingRequest = (id: string, name: string) => ({
+    request_id: id,
+    version: 0,
+    client_id: "cc_1",
+    client_name: name,
+    scopes: ["openid"],
+    binding_message: "W4SCT",
+    requested_acr: [],
+    step_up_required: null,
+    expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+  });
+
+  it("badges the user menu with the number of waiting sign-in requests", async () => {
+    apiMock.get.mockResolvedValue(
+      res({
+        requests: [
+          pendingRequest("0b7f3a52-6c1e-4f0a-9d63-1f2a3b4c5d6e", "Call Centre"),
+          pendingRequest("1c8f4b63-7d2f-4a1b-8e74-2a3b4c5d6e7f", "Kiosk"),
+        ],
+      }),
+    );
+    renderTopbar();
+
+    expect(await screen.findByTestId("pending-sign-ins-badge")).toHaveTextContent("2");
+    expect(apiMock.get).toHaveBeenCalledWith("/api/v1/ciba/requests", {
+      params: { status: "pending" },
+    });
+    expect(
+      screen.getByRole("button", { name: "User menu, 2 sign-in requests waiting" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no badge when nothing is waiting, or when the list is refused", async () => {
+    apiMock.get.mockResolvedValue(res({ requests: [] }));
+    const { unmount } = renderTopbar();
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalled());
+    expect(screen.queryByTestId("pending-sign-ins-badge")).not.toBeInTheDocument();
+    unmount();
+
+    apiMock.get.mockRejectedValue(new Error("403"));
+    renderTopbar();
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("pending-sign-ins-badge")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("User menu")).toBeInTheDocument();
+  });
+
+  it("lists the waiting requests in the menu and opens the approval page", async () => {
+    const id = "0b7f3a52-6c1e-4f0a-9d63-1f2a3b4c5d6e";
+    apiMock.get.mockResolvedValue(res({ requests: [pendingRequest(id, "Call Centre")] }));
+    renderTopbar(vi.fn(), {
+      routes: [
+        {
+          path: "/organizations/:orgId",
+          element: <Topbar onMenuClick={vi.fn()} />,
+        },
+        { path: "/ciba/approve", element: <div>Approval page</div> },
+      ],
+    });
+    await screen.findByTestId("pending-sign-ins-badge");
+    await userEvent.click(screen.getByRole("button", { name: /^User menu/ }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /Call Centre/ }));
+
+    expect(await screen.findByText("Approval page")).toBeInTheDocument();
   });
 
   it("still clears auth and navigates to /login even when the logout request fails", async () => {

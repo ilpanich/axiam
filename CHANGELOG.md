@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A signed-in user's pending CIBA requests are listed, so an account with no
+  vouched address can approve one (#566).** D-74 mails the approval prompt only
+  to an address something vouches for, and the approval page was reached only by
+  the mail's link, so a federated account (which stays `PendingVerification`,
+  T-160) never learned its request's id and the client saw `expired_token`. New
+  `GET /api/v1/ciba/requests?status=pending` returns the caller's **own** pending,
+  unexpired requests, soonest expiry first (at most 50): the client's name, the
+  binding message, the scopes, the requested `acr`, the expiry, and the
+  `request_id` and `version` the existing approval page uses; never the
+  `auth_req_id`. Another user's, a decided and an expired request are absent, so
+  the list is no oracle (T-430). Only `status=pending` exists; any other value is
+  `400`. The route is a console surface under the approval routes' rules: a
+  console sign-in only (a token AXIAM minted for an OAuth2 client is `403`), and a
+  rate-limit bucket of its own under `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN`
+  (default 30 a minute per IP, never moved by a profile). The console's user menu
+  shows a badge with the count, refreshed about once a minute and when the menu
+  opens, and lists the requests, each opening the approval page. The decisions are
+  unchanged (CSRF, the version read, the deciding session audited). The D-74
+  decision stands; the limitation noted under 1.0.0-beta18 (a federated account
+  gets no approval mail and cannot reach the page) no longer holds. T-446, T-431
+  and T-447 are amended (statuses unchanged).
+
 ### Fixed
 
 - **A dying consumer or gRPC server no longer ends the process mid-flight, and

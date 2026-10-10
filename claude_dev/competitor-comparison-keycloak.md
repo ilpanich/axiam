@@ -51,7 +51,7 @@ question.
 | Fine-grained authorization / UMA 2.0 | Yes (UMA 2.0 mapped onto RBAC) | Yes — Authorization Services (supported, on by default), UMA 2.0 | [K3][K5] |
 | Decision API for services | **REST, gRPC and AMQP, single and batch** | Authorization Services evaluation over HTTP; OpenID AuthZEN API **experimental** | [K3][K5] |
 | Device grant, PAR, DPoP | Yes | Yes (all supported, on by default) | [K5] |
-| CIBA | **Yes** (since G-7, Phase 23 W5): poll and ping, signed authentication requests and the FAPI-CIBA client. *Not done:* no push mode, no `user_code`, and a federated account gets no approval mail (D-74); see item 6 below | Yes | [K5] |
+| CIBA | **Yes** (since G-7, Phase 23 W5): poll and ping, signed authentication requests and the FAPI-CIBA client. *Not done:* no push mode, no `user_code`; a federated account gets no approval mail (D-74) but finds its request in the console's pending list (1.0.0, #566); see item 6 below | Yes | [K5] |
 | FAPI 2.0 | Conformance runs published, not yet certified | Security Profile and Message Signing marked "Passed" | [K3] |
 | mTLS client auth, X.509 user auth | Yes, plus an **integrated per-org CA** | Yes (RFC 8705, X.509 authenticator); no built-in CA | [K3][K12] |
 | WebAuthn / passkeys / OTP | Yes, with a FIDO MDS attestation policy | Yes (passkeys supported, HOTP and TOTP, recovery codes) | [K13] |
@@ -120,9 +120,9 @@ question.
    to an address D-25's rule vouches for (`email_verified_at` set, or the account
    `Active`), so **a federated account gets no approval mail** unless an address
    was verified: it stays `PendingVerification` for life (T-160). The request is
-   still stored and answered as before, but the console approval page is reached
-   by a link only the mail carries, so without it the request runs to expiry
-   unless the user is given the link another way (D-74). The user is told by
+   still stored and answered as before, and the user finds it in the console: a
+   badge on the user menu lists their pending requests (`GET /api/v1/ciba/requests`,
+   1.0.0, #566; D-74). The user is told by
    e-mail only, with no phone push channel
    (`crates/axiam-oauth2/src/ciba.rs`, `ciba_notifier.rs`, `oidc.rs`).
 
@@ -180,6 +180,7 @@ all shipped. They now appear in §2 as parity or advantage.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-10-10 | CIBA limit restated (1.0.0, #566, documentation only): a federated account, which D-74 sends no approval mail, can now approve a request, because the console lists the signed-in user's own pending requests (`GET /api/v1/ciba/requests?status=pending`, a badge on the user menu); the "waits on a page nobody can reach" statement in the CIBA row and item 6 is withdrawn. The compared Keycloak surface is unchanged. | — |
 | 2026-10-09 | Outbound SCIM limit restated (1.0.0, #550, documentation only): the per-target breaker shipped — a target with five consecutive failures is not called again until its backoff has passed — so an unresponsive downstream no longer holds a replica's other targets back for every queued reference; more than one delivery in flight per replica is deferred to 1.0.x. | — |
 | 2026-10-06 | W6 comparison refresh (G-10, G-11). **G-10 (benchmark currency)**: the run-5 figures stay as they are, because they are still run 5's against Keycloak 26.7.0; the header, the RSS row and §4 item 1 now say that run 6 re-measures Keycloak 26.8.0, Zitadel v4.19.4 and authentik 2026.8.3 against AXIAM `1.0.0-beta18` on the same G-box with the run-5 caps, and that numbers follow. **G-11 (RADIUS)**: decided (D-77) to decline a native RADIUS front end for now; Keycloak has no RADIUS in the product (a community extension only), so no row here changes, and AXIAM publishes no CRL today (T-102 reopened), see [the record](radius-eap-tls-spike-2026-10-06.md). **Not-do statements:** CIBA has no push mode and no `user_code`, and a federated account gets no approval mail (D-74); outbound SCIM delivers one attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 (P23W5-07) is decided. | [K5][K15] |
 | 2026-10-05 | G-7 (CIBA) complete on the Phase 23 W5 branch: `POST /oauth2/bc-authorize` and the CIBA grant at the token endpoint, poll and ping modes (no push), `login_hint` and `id_token_hint`, signed authentication requests and the FAPI-CIBA client, user approval on the console after a full sign-in with step-up, an approval e-mail, rate-limit and lockout coverage of the grant (the Keycloak 26.7.x CVE class: tested), contract §33 and the website page; the row's AXIAM cell flips from No to Yes and the P2 gap item is closed. The compared Keycloak surface is unchanged. | [K5][K20] |

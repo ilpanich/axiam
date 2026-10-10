@@ -1855,6 +1855,16 @@ pub trait CibaRequestRepository: Send + Sync {
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<Option<crate::models::ciba::CibaRequest>>> + Send;
 
+    /// The `pending`, unexpired requests addressed to `user_id`, soonest
+    /// expiry first, at most `limit`. A request for nobody (`user_id` unset) is
+    /// never listed, whoever asks.
+    fn list_pending_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<crate::models::ciba::CibaRequest>>> + Send;
+
     /// `pending → approved`, conditional on `version = expected_version`, on
     /// the row's user being `user_id`, and on the request being unexpired.
     /// `false` when any precondition fails — the caller cannot tell which.

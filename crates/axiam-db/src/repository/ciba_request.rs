@@ -355,6 +355,33 @@ impl<C: Connection> CibaRequestRepository for SurrealCibaRequestRepository<C> {
         .await
     }
 
+    async fn list_pending_for_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        limit: u32,
+    ) -> AxiamResult<Vec<CibaRequest>> {
+        let mut result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT {SELECT_FIELDS} FROM ciba_request \
+                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                     AND status = 'pending' AND expires_at > time::now() \
+                 ORDER BY expires_at ASC LIMIT $limit"
+            ))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("limit", i64::from(limit)))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<CibaRequestRow> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(CibaRequestRow::try_into_request)
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     async fn approve(
         &self,
         tenant_id: Uuid,

@@ -645,7 +645,7 @@ guide holds what an operator sets.
 | **Directory** | `/directory` | `directory:read` | [LDAP and Active Directory](https://ilpanich.github.io/axiam/#/docs/directory) | [What a tenant's directory needs](../deployment/README.md#what-a-tenants-directory-needs-ldap--active-directory) |
 | **SAML Service Providers** | `/saml` | `saml_sp:read` | [AXIAM as a SAML identity provider](https://ilpanich.github.io/axiam/#/docs/saml-idp) | `AXIAM__AUTH__SAML_PAIRWISE_KEY` in [Required secrets & environment](../deployment/README.md#required-secrets--environment) |
 | **SCIM Targets** | `/scim-targets` | `scim_targets:read` | [Outbound SCIM provisioning](https://ilpanich.github.io/axiam/#/docs/scim-outbound) | — |
-| **Approve a sign-in** (CIBA) | `/ciba/approve` | a signed-in session, no permission: the user decides a request addressed to them, reached from the link in the notification mail | [CIBA (backchannel authentication)](https://ilpanich.github.io/axiam/#/docs/ciba) | — |
+| **Approve a sign-in** (CIBA) | `/ciba/approve` | a signed-in session, no permission: the user decides a request addressed to them, reached from the link in the notification mail, or from the pending-request list under the user menu's badge (an account with no vouched address is sent no mail) | [CIBA (backchannel authentication)](https://ilpanich.github.io/axiam/#/docs/ciba) | — |
 
 Three things the console does not do yet, each said on the website page it
 belongs to:

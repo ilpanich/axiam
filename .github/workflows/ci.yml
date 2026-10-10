@@ -754,6 +754,12 @@ jobs:
       - name: rl=prod posture self-test
         working-directory: benchmarks
         run: bash runner/rl-prod-posture-selftest.sh
+      # P23W6-06 (#567): every port a benchmark stack publishes is bound to
+      # ${BENCH_BIND_ADDR:-127.0.0.1}. A bare "8090:8090" binds every interface, past
+      # ufw, on a host running identity servers with their limiters raised. Hermetic.
+      - name: Benchmark bind-address self-test
+        working-directory: benchmarks
+        run: bash runner/bind-addr-selftest.sh
       # T23.10.2(a): the AXIAM deployment-profile guard. A minimal-profile pass whose
       # overlay silently did not apply would file full-profile cells under a
       # "minimal" label; the runner reads the profile off the container and refuses

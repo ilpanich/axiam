@@ -105,8 +105,8 @@ services:
     ports:
       # 9000 is the plaintext listener, 9443 the built-in HTTPS listener (a
       # self-signed certificate authentik generates itself; see README).
-      - "${BENCH_APP_PORT:-8090}:9000"
-      - "${BENCH_TLS_PORT:-8443}:9443"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_APP_PORT:-8090}:9000"
+      - "${BENCH_BIND_ADDR:-127.0.0.1}:${BENCH_TLS_PORT:-8443}:9443"
 
   worker:
     <<: *authentik-common

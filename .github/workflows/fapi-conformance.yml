@@ -173,6 +173,11 @@ jobs:
             echo "CONFORMANCE_MTLS_BASE_URL=${AXIAM_MTLS_BASE_URL}"
             echo "BENCH_COMPOSE_OVERLAYS=targets/axiam/docker-compose.conformance.yml"
             echo "BENCH_TLS_PORT=${AXIAM_MTLS_PORT}"
+            # The benchmark stacks publish on 127.0.0.1 unless told otherwise
+            # (P23W6-06), and the suite and the front door reach AXIAM at
+            # host.docker.internal:host-gateway, i.e. the Docker bridge, which a
+            # loopback binding cuts off. Throwaway runner; nothing else listens.
+            echo "BENCH_BIND_ADDR=0.0.0.0"
             # bench-up forwards this into the container as the OIDC issuer.
             echo "AXIAM__AUTH__OAUTH2_ISSUER_URL=${AXIAM_ISSUER}"
             # The conformance suite's admin-API calls go through the front door.

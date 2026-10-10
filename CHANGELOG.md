@@ -33,6 +33,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The benchmark stacks publish their ports on loopback, not on every interface
+  (#567).** Every `benchmarks/targets/*/docker-compose*.yml` published its
+  application, TLS and (AXIAM) gRPC ports as `"${BENCH_APP_PORT:-8090}:8090"`,
+  which Docker binds on `0.0.0.0` - past `ufw` - while the benchmark posture raises
+  AXIAM's limiters and lockout threshold to 1 000 000, so a benchmark host on a LAN
+  offered four identity servers with their limits off to the LAN for the length of
+  a run. Each published port (and the optional cAdvisor stack's) is now
+  `${BENCH_BIND_ADDR:-127.0.0.1}:<host port>:<container port>`. The harness drives
+  the stacks on `localhost`, so a run needs nothing. **An operator who reaches a
+  stack from a container** (through `host.docker.internal:host-gateway`, the Docker
+  bridge) must set `BENCH_BIND_ADDR=0.0.0.0`: the FAPI conformance workflow now
+  does, and the conformance runbook says so. The run-6 runbook's interim "firewall
+  the ports" instruction is replaced by the loopback default.
+  `runner/bind-addr-selftest.sh` (a new step of the CI job "Bench Harness
+  Self-Tests") fails when any `ports:` entry of any compose file under
+  `benchmarks/` lacks the variable.
 - **`rl-prod-check` lists eight limiter families it had silently dropped (#568).**
   `benchmarks/runner/rl_prod_check.py` carried no row for `bc_authorize_per_min`,
   `ciba_approval_per_min`, `device_login_per_min`, `ssf_per_min`,

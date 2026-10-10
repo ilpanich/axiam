@@ -208,6 +208,52 @@ ENDPOINTS = {
         None,
         "POST /api/v1/auth/webauthn/* (applies to each of the six ceremony routes)",
     ),
+    # --- Configured, shipped, and NOT driven by any scenario (#568, P23W6-11) --
+    #
+    # Eight families added with the Phase 23 surfaces (CIBA, device login, SSF,
+    # the SAML, directory and SCIM-target registries) were never given a row, so
+    # they vanished from the table the way the alpha38 five once did. The note
+    # above says why a vanished row is the failure this path exists to prevent;
+    # `rl-prod-posture-selftest.sh` now fails when a `*_per_min` field of
+    # `RateLimitConfig` has no row, so the next family cannot repeat it. Driving
+    # them is a separate decision, a scenario each:
+    #
+    #   bc_authorize / ciba_approval — every accepted request allocates a CIBA
+    #     row and may mail a person; the approval half needs a signed-in console
+    #     session and a CSRF token, which no k6 cell holds.
+    #   device_login — the mTLS device sign-in needs a client certificate in the
+    #     handshake, which only the p3-mtls profile presents.
+    #   ssf / ssf_admin — a receiver token and a stream, and the writes repoint
+    #     where a tenant's security events are pushed.
+    #   saml_admin / directory_admin / scim_target_admin — administrators'
+    #     writes; each resolves or contacts a tenant-chosen host, or generates an
+    #     RSA-4096 key, so a closed-loop cell would measure that, not the limiter.
+    "bc_authorize_per_min": (None, "POST /oauth2/bc-authorize (CIBA backchannel authentication)"),
+    "ciba_approval_per_min": (
+        None,
+        "GET, POST /api/v1/ciba/requests[/{id}[/approve, /deny]] (CIBA approval; one bucket per route)",
+    ),
+    "device_login_per_min": (None, "POST /api/v1/auth/device (mTLS device login)"),
+    "ssf_per_min": (
+        None,
+        "/ssf/v1/* and /.well-known/ssf-configuration (SSF receiver; one bucket per route)",
+    ),
+    "ssf_admin_per_min": (
+        None,
+        "POST, PUT, DELETE /api/v1/tenants/{id}/ssf/streams[/{stream_id}] (SSF stream registry writes)",
+    ),
+    "saml_admin_per_min": (
+        None,
+        "POST, PUT, DELETE /api/v1/tenants/{id}/saml/* (SAML service-provider registry writes)",
+    ),
+    "directory_admin_per_min": (
+        None,
+        "PUT, PATCH, DELETE /api/v1/tenants/{id}/directory and POST …/directory/links (directory registry writes)",
+    ),
+    "scim_target_admin_per_min": (
+        None,
+        "POST, PUT, DELETE /api/v1/scim-targets[/{id}[/reconcile]] (outbound SCIM target registry writes)",
+    ),
 }
 
 
@@ -258,7 +304,11 @@ def read_configured_defaults():
                   "dcr_per_min",
                   # The seventeenth family, added with the limiter that closed
                   # the unlimited /auth/webauthn/* surface.
-                  "webauthn_per_min"):
+                  "webauthn_per_min",
+                  # #568: the eight Phase 23 families; `scenario=None` above.
+                  "bc_authorize_per_min", "ciba_approval_per_min", "device_login_per_min",
+                  "ssf_per_min", "ssf_admin_per_min", "saml_admin_per_min",
+                  "directory_admin_per_min", "scim_target_admin_per_min"):
         rest_defaults[field] = _extract_int(
             default_block, rf"\b{field}:\s*([0-9_]+)", field, REST_RATE_LIMIT_RS)
 

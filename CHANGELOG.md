@@ -33,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`rl-prod-check` lists eight limiter families it had silently dropped (#568).**
+  `benchmarks/runner/rl_prod_check.py` carried no row for `bc_authorize_per_min`,
+  `ciba_approval_per_min`, `device_login_per_min`, `ssf_per_min`,
+  `ssf_admin_per_min`, `saml_admin_per_min`, `directory_admin_per_min` and
+  `scim_target_admin_per_min`, so `rl-prod-summary.md` could not say "not
+  checked" about them: a reader counting `RateLimitConfig`'s knobs against the
+  table's rows found the gap only by counting. Each now has a row with its
+  route and no scenario (driving them is a separate decision), and
+  `runner/rl-prod-posture-selftest.sh` fails when a `*_per_min` field of
+  `RateLimitConfig` has no row, so the next family cannot repeat it. Benchmark
+  tooling only; no server behaviour changes.
 - **Five cleanup sweeps are listed on `GET /health/jobs` from start (#535).** The
   sweeps for SSO hand-off codes, unused dynamically registered clients, unused
   CIMD clients and expired registration tokens, and the revocation-feed prune,

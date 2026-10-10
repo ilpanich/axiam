@@ -173,6 +173,19 @@
 > provider or the configuration supplied the pepper, and names both spellings
 > when neither did. No threat entry changes, and no variable is renamed.
 >
+> **A delivery the in-process dispatcher loses leaves a terminal row (`1.0.0`,
+> #555, P23W5-A4 — T-445 amended, still Open).** In the minimal profile a
+> webhook, SSF push, outbound SCIM or CIBA-ping delivery lost at stop, or
+> refused at enqueue, left at most a `<kind>.delivery_attempt` row. At an
+> orderly stop each kind's consumer now writes one `<kind>.delivery_abandoned`
+> row (fixed reason, outcome `Failure`) per message still queued and per retry
+> still waiting, before the audit drain and within a 2 s bound, and an enqueue
+> the queue refuses writes one too. The action is deliberately not
+> `delivery_failed`, which the `scim_delivery_failed` notification event
+> matches: a restart mails nobody. A kill, an out-of-memory kill and a stop that
+> overruns still lose the queue without a row, and mail has none, so the entry
+> stays Open. Status and totals are unchanged.
+>
 > **The conformance workflow gates on a regression (`1.0.0`, #555, P23W5-11).**
 > `fapi-conformance.yml` ended red on every unattended run (interactive modules
 > wait for a browser), so its gate signalled nothing; it now runs

@@ -880,6 +880,222 @@ async fn an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_row
 }
 
 // ---------------------------------------------------------------------------
+// A delivery lost at the stop (P23W5-A4)
+// ---------------------------------------------------------------------------
+
+/// A webhook whose receiver is down earns a retry that sleeps in the
+/// in-process dispatcher (5 s by default). When the instance stops — here
+/// through the lost lease's orderly path — the teardown writes a terminal
+/// `webhook.delivery_abandoned` row for it before the audit drain, so the trail
+/// ends in a verdict instead of at the `delivery_attempt` row. It is not
+/// `delivery_failed`, the action a notification rule matches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retry_asleep_at_the_stop_leaves_a_delivery_abandoned_row() {
+    let db = fresh_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Abandon Org".into(),
+            slug: format!("abandon-org-{}", Uuid::new_v4().simple()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org.id,
+            kind: TenantKind::Standard,
+            name: "Abandon Tenant".into(),
+            slug: format!("abandon-tenant-{}", Uuid::new_v4().simple()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    seed_permissions(&db, tenant.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    seed_default_roles(&db, tenant.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    let password = axiam_test_support::test_password();
+    let users = SurrealUserRepository::new(db.clone());
+    let admin = users
+        .create(CreateUser {
+            tenant_id: tenant.id,
+            username: "admin".into(),
+            email: "admin@example.com".into(),
+            password: password.clone(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    users
+        .update(
+            tenant.id,
+            admin.id,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let roles = SurrealRoleRepository::new(db.clone());
+    let super_admin = roles
+        .list(
+            tenant.id,
+            Pagination {
+                offset: 0,
+                limit: 10_000,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|r| r.name == "super-admin")
+        .expect("the seeded role")
+        .id;
+    roles
+        .assign_to_user(tenant.id, admin.id, super_admin, AssignmentScope::global())
+        .await
+        .unwrap();
+
+    // A receiver that is down: the port was free a moment ago and nothing
+    // listens on it, so every attempt is a transport failure, which is a retry.
+    let sealing = runtime_key();
+    let dead_port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let sealer =
+        WebhookDeliveryService::new(SurrealWebhookRepository::new(db.clone()), Some(sealing));
+    let webhook = SurrealWebhookRepository::new(db.clone())
+        .create(CreateWebhook {
+            tenant_id: tenant.id,
+            url: format!("http://127.0.0.1:{dead_port}/hook"),
+            events: vec!["user.created".into()],
+            secret: sealer
+                .encrypt_secret(&axiam_test_support::other_password())
+                .unwrap(),
+            retry_policy: None,
+        })
+        .await
+        .unwrap();
+
+    let mut config = minimal_config();
+    config.pki_encryption_key = Some(sealing);
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    axiam_auth::client_secret::install_from_config(&config.auth)
+        .expect("the client-secret hasher installs");
+    config
+        .auth
+        .resolve_keys()
+        .expect("the Ed25519 keys parse (CQ-B14)");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let rest_port = listener.local_addr().unwrap().port();
+    config.server.port = rest_port;
+    let (pool, health) = pool_over(&db);
+    let opts = ServeOptions {
+        rest_listener: Some(listener),
+        admit_private_networks_for_tests: true,
+        lease_timing: short_lease(),
+        ..ServeOptions::default()
+    };
+    let stopped = serve_on_big_stack(config, pool, health, opts);
+
+    let http = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap();
+    let base = format!("http://127.0.0.1:{rest_port}");
+    eventually("the REST listener", async || {
+        let resp = http.get(format!("{base}/health")).send().await.ok()?;
+        resp.status().is_success().then_some(())
+    })
+    .await;
+    let resp = http
+        .post(format!("{base}/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "tenant_id": tenant.id,
+            "org_id": org.id,
+            "username_or_email": "admin",
+            "password": password,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "the login is served");
+    let token = access_cookie(&resp);
+    let created = http
+        .post(format!("{base}/api/v1/users"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "username": "bob",
+            "email": "bob@example.com",
+            "password": axiam_test_support::other_password(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status().as_u16(), 201, "the user is created");
+
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let rows_of = async |action: &str| {
+        audit
+            .list(
+                tenant.id,
+                AuditLogFilter {
+                    action: Some(action.into()),
+                    ..Default::default()
+                },
+                Pagination {
+                    offset: 0,
+                    limit: 100,
+                    search: None,
+                },
+            )
+            .await
+            .unwrap()
+            .items
+    };
+    // The first attempt failed and its retry is asleep.
+    eventually("the webhook attempt row", async || {
+        let rows = rows_of("webhook.delivery_attempt").await;
+        (!rows.is_empty()).then_some(())
+    })
+    .await;
+    assert!(rows_of("webhook.delivery_abandoned").await.is_empty());
+
+    // Another instance takes the lease: the orderly stop begins.
+    axiam_db::helpers::retry_on_write_conflict(|| async {
+        db.query(
+            "UPDATE type::record('minimal_profile_lease', 'instance') \
+             SET holder = 'the-usurper', renewed_at = time::now(), expires_at = time::now() + 1h",
+        )
+        .await?
+        .check()
+        .map(drop)
+    })
+    .await
+    .expect("the takeover is written");
+    let result = tokio::time::timeout(Duration::from_secs(20), stopped)
+        .await
+        .expect("an instance whose lease was taken stops")
+        .expect("the server thread reported");
+    assert!(result.is_err(), "a lost lease is a non-zero exit");
+
+    // The sleeping retry has its terminal row, and only that row: no verdict was
+    // invented, and no dead letter (which a notification rule would match).
+    let abandoned = rows_of("webhook.delivery_abandoned").await;
+    assert_eq!(abandoned.len(), 1, "one lost delivery, one row");
+    assert_eq!(abandoned[0].resource_id, Some(webhook.id));
+    assert_eq!(abandoned[0].metadata["reason"], axiam_amqp::STOPPED_REASON);
+    assert_eq!(abandoned[0].metadata["attempts_made"], 1);
+    assert!(rows_of("webhook.delivery_failed").await.is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // A dead component (P23W5-A11, A12)
 // ---------------------------------------------------------------------------
 

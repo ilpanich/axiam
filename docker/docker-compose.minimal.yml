@@ -181,10 +181,12 @@ services:
       surrealdb:
         condition: service_healthy
     # An orderly stop lets in-flight requests finish (up to 20 s, the REST
-    # listener's shutdown timeout), stops gRPC (up to 5 s) and writes the audit
-    # rows the middleware still holds (up to 5 s) before the process exits;
+    # listener's shutdown timeout), stops gRPC (up to 5 s), writes a
+    # `delivery_abandoned` audit row for each outbound delivery still queued
+    # in-process (up to 2 s) and the audit rows the middleware still holds (up
+    # to 5 s) before the process exits;
     # SIGKILL does none of it. Compose's default grace period is 10 s, which is
-    # shorter than a slow stop needs, so give it 40 s: 20 + 5 + 5 and a margin
+    # shorter than a slow stop needs, so give it 40 s: 20 + 5 + 2 + 5 and a margin
     # (#569; docs/deployment/README.md, "Stopping, and the grace period").
     stop_grace_period: 40s
     healthcheck:

@@ -2157,6 +2157,10 @@ where
         );
         tracing::info!("CIBA ping consumer spawned");
     }
+    // All four consumers are running: what stops them in order at the teardown
+    // (P23W5-A4). The broker keeps its queues; the in-process dispatcher writes
+    // a `delivery_abandoned` row for what it still holds.
+    let outbound_shutdown = outbound.shutdown();
 
     // Spawn the mail consumer on a background task (D-14): the AMQP consumer
     // with the broker, the in-process worker without it (G-8, D-59).
@@ -2991,8 +2995,9 @@ where
     );
 
     // How long a stop waits for requests in flight (#569). actix's default is
-    // 30 s; it is set so that this, `GRPC_STOP_DEADLINE` and `AUDIT_DRAIN_DEADLINE`
-    // add up to less than the container's stop grace period (40 s in the shipped
+    // 30 s; it is set so that this, `GRPC_STOP_DEADLINE`, `OUTBOUND_DRAIN_DEADLINE`
+    // and `AUDIT_DRAIN_DEADLINE` add up to less than the container's stop grace
+    // period (40 s in the shipped
     // Compose files and Kubernetes manifests), or a stop with a request still
     // running is killed during the audit drain.
     http_server = http_server.shutdown_timeout(REST_SHUTDOWN_TIMEOUT_SECS);
@@ -3103,6 +3108,23 @@ where
     // `gdpr.user_pseudonymized` row are not separated.
     let _ = cleanup_shutdown_tx.send(true);
 
+    // The minimal profile's in-process outbound queues hold deliveries that die
+    // with this process: say so in the audit trail, one `delivery_abandoned` row
+    // per delivery queued or waiting for a retry (P23W5-A4). Nothing produces any
+    // more (the listeners have stopped; the cleanup task, signalled above, may
+    // still enqueue one, and a refused enqueue writes its own row), and the rows
+    // go straight to the repository, so this runs before the audit drain and
+    // within its own bound.
+    let unfinished = outbound_shutdown.stop(OUTBOUND_DRAIN_DEADLINE).await;
+    if !unfinished.is_empty() {
+        tracing::error!(
+            deadline_secs = OUTBOUND_DRAIN_DEADLINE.as_secs_f64(),
+            kinds = ?unfinished,
+            "in-process outbound deliveries could not be accounted for in time — they are lost \
+             without an audit row"
+        );
+    }
+
     // Write what the audit middleware still holds before the runtime goes
     // (T23.8.2). `drain` also tells the worker the close is the orderly one,
     // so a clean stop does not log `Audit worker channel closed` at WARN — see
@@ -3144,13 +3166,25 @@ where
 
 /// How long, in seconds, the REST listener waits for requests in flight once a
 /// stop begins (#569). Stop grace period = this + [`GRPC_STOP_DEADLINE`] +
-/// [`AUDIT_DRAIN_DEADLINE`] + margin: 20 + 5 + 5 + 10 = 40 s; the fatal-stop
-/// backstop ([`FATAL_STOP_BACKSTOP`], 35 s) sits inside it.
+/// [`OUTBOUND_DRAIN_DEADLINE`] + [`AUDIT_DRAIN_DEADLINE`] + margin: 20 + 5 + 2 + 5
+/// and a margin of 8 = 40 s; the fatal-stop backstop ([`FATAL_STOP_BACKSTOP`],
+/// 35 s) sits inside it.
 const REST_SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 
 /// How long the teardown waits for the gRPC server to finish its calls once the
 /// REST listener has stopped (P23W5-A11).
 const GRPC_STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the teardown waits for the in-process outbound consumers to write
+/// the `delivery_abandoned` rows of what they still hold (P23W5-A4, minimal
+/// profile). A consumer gives the attempt it is in `IN_FLIGHT_STOP_GRACE`
+/// (500 ms) to finish before it abandons it too, so a slow receiver delays the
+/// stop by at most that.
+const OUTBOUND_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+// The deadline has to outlast the grace, or a stuck attempt always overruns it.
+const _: () =
+    assert!(axiam_amqp::IN_FLIGHT_STOP_GRACE.as_millis() < OUTBOUND_DRAIN_DEADLINE.as_millis());
 
 /// How long the teardown waits for the audit middleware's queue to be written
 /// (T23.8.2). The queue holds at most 4 096 entries; written one at a time
@@ -3163,11 +3197,15 @@ const AUDIT_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs
 const SHIPPED_STOP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(40);
 
 /// When the backstop ends a process stopped by a dead consumer or gRPC server
-/// (#554): the whole orderly stop — REST shutdown, gRPC stop and audit drain —
-/// and a 5 s margin, so the backstop only runs for a stop that has overrun.
+/// (#554): the whole orderly stop — REST shutdown, gRPC stop, outbound and audit
+/// drain — and a 3 s margin, so the backstop only runs for a stop that has overrun.
 /// A lost lease keeps its own, shorter `LeaseTiming::lost_stop_deadline`.
 const FATAL_STOP_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(
-    REST_SHUTDOWN_TIMEOUT_SECS + GRPC_STOP_DEADLINE.as_secs() + AUDIT_DRAIN_DEADLINE.as_secs() + 5,
+    REST_SHUTDOWN_TIMEOUT_SECS
+        + GRPC_STOP_DEADLINE.as_secs()
+        + OUTBOUND_DRAIN_DEADLINE.as_secs()
+        + AUDIT_DRAIN_DEADLINE.as_secs()
+        + 3,
 );
 
 // The backstop must fire before the orchestrator's own SIGKILL, or it is moot.

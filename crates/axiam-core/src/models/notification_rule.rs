@@ -434,6 +434,26 @@ mod tests {
         assert_eq!(NotificationEventType::ALL.len(), 18);
     }
 
+    /// P23W5-A4: the in-process dispatcher's `<kind>.delivery_abandoned` row (a
+    /// delivery lost at a stop, or refused at enqueue) is not a dead letter, and
+    /// no notification rule matches it: a restart must not mail the tenant's
+    /// administrators as though a downstream were down.
+    #[test]
+    fn a_delivery_abandoned_row_is_no_notification_event() {
+        for kind in ["webhook", "ssf_push", "scim_push", "ciba_ping"] {
+            for outcome in ["Failure", "Success"] {
+                assert!(
+                    NotificationEventType::from_audit_action(
+                        &format!("{kind}.delivery_abandoned"),
+                        outcome
+                    )
+                    .is_empty(),
+                    "{kind}.delivery_abandoned ({outcome})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_scim_dead_letter_maps_from_the_dispatchers_audit_action() {
         // The consumer writes `<slug>.delivery_failed` with outcome `Failure`

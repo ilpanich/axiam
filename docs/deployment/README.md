@@ -1721,7 +1721,8 @@ Everything that rode a broker queue still works, on **in-process queues**:
   (`AXIAM__WEBHOOK__*`, `AXIAM__SSF_PUSH__*`, `AXIAM__SCIM_PUSH__*`,
   `AXIAM__CIBA_PING__*`: attempts, base and ceiling of the exponential
   backoff) and the *same* audit rows (`<kind>.delivery_attempt`,
-  `.delivery_succeeded`, `.delivery_failed`) as the AMQP path;
+  `.delivery_succeeded`, `.delivery_failed`) as the AMQP path, plus one the
+  broker path has no use for, `<kind>.delivery_abandoned` (below);
 * **transactional mail** (verification, password reset, notification rules, GDPR
   export notices, CIBA approval) is sent by an in-process worker with the same
   retry count and the same PII-minimal `email.delivery_failed` audit row, and
@@ -1739,14 +1740,31 @@ already logs and swallows; a retry that finds no free retry slot (1 024 may be
 sleeping at once) is dead-lettered with the reason `in-process retry capacity
 exhausted`. If a lost webhook is not acceptable, run the full profile.
 
+What the dispatcher does record is that it lost a delivery. At an orderly stop,
+and when a queue refuses an enqueue, it writes one terminal
+**`<kind>.delivery_abandoned`** audit row (outcome `Failure`, the system actor,
+the target as the resource) per lost delivery, with a fixed `reason`:
+`in-process dispatcher stopped before the delivery completed`,
+`in-process queue full; the delivery was not accepted` or
+`in-process dispatcher not running; the delivery was not accepted`, and the
+delivery id and the number of attempts already made. It is a different action
+from `delivery_failed` on purpose: a restart is not a downstream outage, so the
+`scim_delivery_failed` notification event (which matches
+`scim_push.delivery_failed` only) does not mail anyone for it. Alert on
+`delivery_abandoned` separately if a lost delivery matters to you; it is
+written only when the process gets to stop in order (see below).
+
 In audit terms, a restart loses the following, and nothing else:
 
 * **A webhook, SSF, outbound SCIM or CIBA-ping delivery that was queued or
-  waiting for a retry** leaves at most a `<kind>.delivery_attempt` row and never
-  a terminal one (`.delivery_succeeded` or `.delivery_failed`). A delivery that
-  was refused because its queue was full leaves only a log line. Outbound SCIM
-  is repaired by the next reconciliation; webhooks, SSF events and CIBA pings
-  are not redelivered.
+  waiting for a retry** at an *orderly* stop leaves a terminal
+  `<kind>.delivery_abandoned` row (above). After a `SIGKILL`, an out-of-memory
+  kill or a stop that overran its backstop it leaves at most a
+  `<kind>.delivery_attempt` row and no terminal one. A delivery refused because
+  its queue was full leaves a `delivery_abandoned` row too (and the producer's log
+  line). Outbound SCIM is repaired by the next reconciliation; webhooks, SSF
+  events and CIBA pings are not redelivered. Queued mail is not covered by the
+  row: it has no per-message audit trail of this kind.
 * **A Security Event Token** that the SSF outbox had released to the push queue
   is lost with it. Receivers must already treat SSF signals as hints (the
   threat model's T-405); in the full profile a queued push is at-least-once, in
@@ -1763,15 +1781,18 @@ An orderly stop — `SIGTERM`, or a lost lease — stops accepting connections,
 finishes the requests in flight, finishes the cleanup tick it is in (so a GDPR
 erasure and its audit row stay together) and then **writes the audit rows the
 audit middleware still holds, waiting up to 5 s for it**, before the process
-exits. A `SIGKILL` or an out-of-memory kill does none of that and loses what is
-queued.
+exits. Before that drain, in the minimal profile, each in-process outbound
+queue is closed and one `<kind>.delivery_abandoned` row is written for every
+delivery still queued or waiting for a retry. A `SIGKILL` or an out-of-memory
+kill does none of that and loses what is queued.
 
 **Give the container a termination grace period of at least 40 s.** The stop
-has three bounded steps. The REST listener waits up to **20 s** for requests in
+has four bounded steps. The REST listener waits up to **20 s** for requests in
 flight (`shutdown_timeout`, set explicitly in `boot.rs`; actix's own default is
-30 s). The gRPC server then gets up to **5 s** to finish its calls, and the audit
-queue up to **5 s** (`AUDIT_DRAIN_DEADLINE`) to be written. That is 30 s, and 40 s
-leaves a margin. A shorter grace period lets the orchestrator kill the process
+30 s). The gRPC server then gets up to **5 s** to finish its calls, the
+in-process outbound queues up to **2 s** (`OUTBOUND_DRAIN_DEADLINE`) to account
+for what they hold, and the audit queue up to **5 s** (`AUDIT_DRAIN_DEADLINE`)
+to be written. That is 32 s, and 40 s leaves a margin. A shorter grace period lets the orchestrator kill the process
 during the drain, which loses exactly the audit rows the orderly stop exists to
 keep. Compose's default is 10 s and Kubernetes' is 30 s, so both are set:
 `stop_grace_period: 40s` in `docker-compose.prod.yml` and
@@ -1781,7 +1802,7 @@ period with it. An instance that loses its lease, or whose consumer or gRPC
 server dies, stops accepting at once, finishes in-flight requests and exits
 non-zero. A backstop ends the process regardless if the stop overruns: 15 s
 after it began for a lost lease (which must not run beside its successor for
-longer), 35 s — the three steps and a margin, inside the grace period — for a
+longer), 35 s — the four steps and a margin, inside the grace period — for a
 dead consumer or gRPC server.
 
 ### Audit durability

@@ -73,6 +73,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step outcome) through `env:` instead of interpolating them into `run:` scripts,
   closing a template injection for anyone who may dispatch it. Runbook: "The CI
   gate". Release-pipeline only; no product behaviour changes.
+- **The minimal profile records a delivery its in-process dispatcher loses
+  (#555, P23W5-A4).** With `AXIAM__AMQP__ENABLED=false`, a webhook, SSF push,
+  outbound SCIM or CIBA-ping delivery that was queued or waiting for a retry when
+  the process stopped, or that a full queue refused, left at most a
+  `<kind>.delivery_attempt` audit row and no terminal one. An orderly stop now
+  writes one terminal **`<kind>.delivery_abandoned`** audit row (outcome
+  `Failure`, the system actor, the target as the resource, the delivery id, the
+  attempts made and a fixed `reason`) for every such delivery, and an enqueue the
+  queue refuses writes one too. The consumer gives an attempt already in flight
+  500 ms to finish (it keeps its own verdict if it does) and the teardown waits at
+  most 2 s (`OUTBOUND_DRAIN_DEADLINE`) before the audit drain; the 40 s grace
+  period and the 35 s fatal-stop backstop are unchanged. **For upgraders:**
+  `delivery_abandoned` is a new action, deliberately not `delivery_failed`, so a
+  tenant's `scim_delivery_failed` notification rule does not mail anyone when an
+  instance restarts; alert on `*.delivery_abandoned` separately if a lost
+  delivery matters. A `SIGKILL`, an out-of-memory kill and a stop that overruns
+  its deadline still lose the queue without a row, and queued mail has no such
+  row. The full profile is unchanged. T-445 is amended (status unchanged, still
+  Open).
 
 ### Fixed
 

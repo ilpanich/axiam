@@ -1293,7 +1293,11 @@ fn the_pairwise_name_id_differs_across_sps_tenants_users_and_keys() {
 
 #[test]
 fn the_pairwise_name_id_contains_neither_the_user_id_nor_the_tenant_id() {
-    let case = Case::new();
+    let mut case = Case::new();
+    // The NameID is 64 hex digits, so a username made only of hex letters
+    // (the fixture's "ada") appears in it by chance about once in seventy
+    // runs. A name with non-hex letters can only appear if it leaked.
+    case.user.username = "grace.hopper".into();
     let issued = case.issue_ok();
     let xml = decode(&issued);
     let name_id = one(&xml, "//*[local-name()='NameID']");

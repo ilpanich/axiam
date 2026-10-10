@@ -191,6 +191,8 @@ pub const TENANT_PURGE_ORDER: &[PurgeStep] = &[
     PurgeStep::by_scope("email_template", Configuration),
     PurgeStep::by_scope("security_settings", Configuration),
     PurgeStep::by_tenant("webhook", Configuration),
+    // A rule's notification windows (#551, schema v85) before the rule.
+    PurgeStep::by_tenant("notification_window", Configuration),
     PurgeStep::by_tenant("notification_rule", Configuration),
     PurgeStep::by_tenant("reactor", Configuration),
     PurgeStep::by_tenant("oauth2_client", Configuration),

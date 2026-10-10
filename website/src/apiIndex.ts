@@ -24,8 +24,8 @@ export interface ApiGroup {
 
 /** The API version the document was exported from. */
 export const API_VERSION = "1.0.0-beta19";
-export const API_OPERATION_COUNT = 277;
-export const API_PATH_COUNT = 190;
+export const API_OPERATION_COUNT = 278;
+export const API_PATH_COUNT = 191;
 
 export const API_INDEX: ApiGroup[] = [
  {
@@ -1114,7 +1114,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "DELETE",
     "path": "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
-    "summary": ""
+    "summary": "#523 (D-4): the tenant is tombstoned and its sessions and refresh tokens are revoked before the `204`; its data is purged afterwards by the cleanup job's `tenant_purge` sweep, on the cleanup interval."
    },
    {
     "method": "POST",
@@ -1171,7 +1171,7 @@ export const API_INDEX: ApiGroup[] = [
  {
   "id": "api-pki-certificates",
   "label": "PKI & certificates",
-  "blurb": "Certificate authorities, issued certificates, and the OpenPGP keys audit exports are signed with.",
+  "blurb": "Certificate authorities, issued certificates, each issuing CA's revocation list, and the OpenPGP keys audit exports are signed with.",
   "operations": [
    {
     "method": "GET",
@@ -1191,7 +1191,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "POST",
     "path": "/api/v1/certificates/{id}/revoke",
-    "summary": ""
+    "summary": "Under a CA whose key Vault's PKI engine holds, the certificate is revoked in Vault as well, so Vault's own revocation list names it (T-470)."
    },
    {
     "method": "POST",
@@ -1282,6 +1282,12 @@ export const API_INDEX: ApiGroup[] = [
     "method": "POST",
     "path": "/api/v1/service-accounts/{sa_id}/bind-certificate",
     "summary": ""
+   },
+   {
+    "method": "GET",
+    "path": "/pki/v1/{org_id}/ca/{ca_id}/crl",
+    "summary": "/`HEAD /pki/v1/{org_id}/ca/{ca_id}/crl`",
+    "public": true
    }
   ]
  },

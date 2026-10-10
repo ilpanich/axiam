@@ -74,6 +74,8 @@ EXCLUDED_TAGS: dict[str, str] = {
     "device": "§14 device-grant user-interaction endpoints",
     "ciba": "\u00a733.9 CIBA user-approval endpoints -- the signed-in user's own page over their own "
             "pending request, which an SDK never drives, never administration",
+    "pki": "\u00a735 certificate revocation lists -- an unauthenticated, informative GET a "
+           "relying party fetches from the CRL distribution point, not administration",
 }
 
 # Individual routes excluded from an otherwise-included tag.

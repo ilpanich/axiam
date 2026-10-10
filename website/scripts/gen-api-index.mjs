@@ -77,8 +77,8 @@ const DOMAINS = [
   },
   {
     label: "PKI & certificates",
-    blurb: "Certificate authorities, issued certificates, and the OpenPGP keys audit exports are signed with.",
-    tags: ["ca-certificates", "certificates", "pgp-keys"],
+    blurb: "Certificate authorities, issued certificates, each issuing CA's revocation list, and the OpenPGP keys audit exports are signed with.",
+    tags: ["ca-certificates", "certificates", "pki", "pgp-keys"],
   },
   {
     label: "Eventing",

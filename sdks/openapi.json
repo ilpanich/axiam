@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta19",
-    "x-axiam-spec-digest": "sha256:e5aed432016a9019f3f3ffa7010ea972694c60e77b622f48efcf4a95d74b0d5c"
+    "x-axiam-spec-digest": "sha256:b376c1f1037e800e21430623e081591ebcb26879fcea8b1d55c98ee4156871f7"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -2545,6 +2545,7 @@
           "certificates"
         ],
         "summary": "`POST /api/v1/certificates/{id}/revoke`",
+        "description": "Under a CA whose key Vault's PKI engine holds, the certificate is revoked in\nVault as well, so Vault's own revocation list names it (T-470). A Vault that\nrefuses or cannot be reached does not undo or fail the revocation: it is\nrecorded (`certificate.vault_revocation_pending`) and retried by the cleanup\njob.",
         "operationId": "revoke",
         "parameters": [
           {
@@ -2824,6 +2825,9 @@
           },
           "401": {
             "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The token is not a console sign-in's: AXIAM minted it for an OAuth2 client"
           }
         },
         "security": [
@@ -2864,6 +2868,9 @@
           },
           "401": {
             "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The token is not a console sign-in's: AXIAM minted it for an OAuth2 client"
           }
         },
         "security": [
@@ -2952,10 +2959,15 @@
                           "mints_client_secret",
                           "pkce_required",
                           "has_bundled_mark",
+                          "allow_sha1_signatures",
                           "created_at",
                           "updated_at"
                         ],
                         "properties": {
+                          "allow_sha1_signatures": {
+                            "type": "boolean",
+                            "description": "SAML only: whether IdP responses signed with SHA-1 are accepted\n(default `false`; #531)."
+                          },
                           "allow_tenant_inheritance": {
                             "type": "boolean",
                             "description": "Whether tenants of this organization may inherit this provider."
@@ -3027,6 +3039,13 @@
                           "id": {
                             "type": "string",
                             "format": "uuid"
+                          },
+                          "idp_metadata_signing_cert_pem": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "SAML only: the certificate the IdP's metadata must be signed with\n(#530); `null` when the metadata is not signature-checked."
                           },
                           "metadata_url": {
                             "type": [
@@ -5097,7 +5116,7 @@
         ],
         "responses": {
           "204": {
-            "description": "OAuth2 client deleted"
+            "description": "OAuth2 client deleted; its refresh tokens, authorization codes and pushed requests are revoked first"
           },
           "404": {
             "description": "OAuth2 client not found"
@@ -5974,6 +5993,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Validation error, or the outbound address policy refuses the provider's host"
           }
         },
         "security": [
@@ -6043,7 +6065,13 @@
             }
           },
           "400": {
-            "description": "The provider rejected it, or no configuration applies"
+            "description": "No configuration applies, or the outbound address policy refuses the provider's host"
+          },
+          "429": {
+            "description": "Too many test sends from this address"
+          },
+          "500": {
+            "description": "The provider could not be reached or did not accept the message"
           }
         },
         "security": [
@@ -6452,6 +6480,7 @@
           "tenants"
         ],
         "summary": "`DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`",
+        "description": "#523 (D-4): the tenant is tombstoned and its sessions and refresh tokens are\nrevoked before the `204`; its data is purged afterwards by the cleanup job's\n`tenant_purge` sweep, on the cleanup interval.",
         "operationId": "delete",
         "parameters": [
           {
@@ -6477,7 +6506,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Tenant deleted"
+            "description": "Tenant deleted: it is gone from every read and sign-in at once, its sessions and refresh tokens are revoked, and its data is purged by the cleanup job"
           },
           "404": {
             "description": "Tenant not found"
@@ -10809,7 +10838,7 @@
             }
           },
           "400": {
-            "description": "Validation error"
+            "description": "Validation error, or the outbound address policy refuses the provider's host"
           }
         },
         "security": [
@@ -10879,7 +10908,13 @@
             }
           },
           "400": {
-            "description": "The provider rejected it, or no configuration applies"
+            "description": "No configuration applies, or the outbound address policy refuses the provider's host"
+          },
+          "429": {
+            "description": "Too many test sends from this address"
+          },
+          "500": {
+            "description": "The provider could not be reached or did not accept the message"
           }
         },
         "security": [
@@ -13667,6 +13702,9 @@
           },
           "401": {
             "description": "No authenticated principal, and the client did not opt into the login hop"
+          },
+          "429": {
+            "description": "Rate limit exceeded (`AXIAM__RATE_LIMIT__END_SESSION_PER_MIN`, bucket `oauth2_authorize`, one allowance shared by this route and its `/t/{tenant_id}` mount)"
           }
         },
         "security": [
@@ -13996,6 +14034,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/IntrospectionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request, no client_id in the body, the Authorization header or the assertion, or a body client_id that disagrees with the header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
                 }
               }
             }
@@ -14352,7 +14400,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Client deregistered; its refresh tokens are revoked"
+            "description": "Client deregistered; its refresh tokens, authorization codes and pushed requests are revoked"
           },
           "400": {
             "description": "The token was sent in the query string",
@@ -14443,6 +14491,16 @@
           "200": {
             "description": "Token revoked (or was already invalid)"
           },
+          "400": {
+            "description": "Malformed request, no client_id in the body, the Authorization header or the assertion, or a body client_id that disagrees with the header",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuth2ErrorResponse"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Client authentication failed",
             "content": {
@@ -14515,7 +14573,7 @@
           "oidc"
         ],
         "summary": "`GET /oauth2/userinfo` -- OIDC UserInfo endpoint.",
-        "description": "Returns claims about the authenticated user. Requires a valid\nBearer access token. Email and username are included based on\nthe scopes present in the access token.",
+        "description": "Returns claims about the authenticated user. Requires a valid\nBearer access token whose account may still sign in (#520). Email and\nusername are included based on the scopes present in the access token.",
         "operationId": "userinfo",
         "responses": {
           "200": {
@@ -14529,7 +14587,7 @@
             }
           },
           "401": {
-            "description": "Invalid or missing access token"
+            "description": "Invalid, expired, revoked or missing access token, or one whose account may no longer sign in"
           }
         },
         "security": [
@@ -14571,7 +14629,7 @@
             "description": "The access token was presented by more than one method (RFC 6750 §2)"
           },
           "401": {
-            "description": "Invalid or missing access token"
+            "description": "Invalid, expired, revoked or missing access token, or one whose account may no longer sign in"
           }
         },
         "security": [
@@ -14579,6 +14637,59 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/pki/v1/{org_id}/ca/{ca_id}/crl": {
+      "get": {
+        "tags": [
+          "pki"
+        ],
+        "summary": "`GET`/`HEAD /pki/v1/{org_id}/ca/{ca_id}/crl`",
+        "description": "The CA's current CRL (RFC 5280 §5), DER, as `application/pkix-crl`:\nsigned with the CA's own key, `nextUpdate` a configured interval after\n`thisUpdate` (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`, one day by default), with\na CRL number and an authority key identifier, and an entry for every\ncertificate the CA signed and revoked that has not expired. Every\ncertificate AXIAM signs names this URL in its CRL distribution points\nextension when the deployment has a public base URL.\n\nUnauthenticated, because a relying party fetches the list before it can\nvalidate anything, and rate-limited per IP (`AXIAM__RATE_LIMIT__CRL_PER_MIN`).\n`Cache-Control: public, max-age` runs to the list's `nextUpdate`, `ETag` is\nthe list's digest and `Last-Modified` its `thisUpdate`; a matching\n`If-None-Match` answers `304`.\n\n`404` for a CA that does not exist in that organization and, alike, for one\nthat publishes no list: a revoked or expired CA (its status is on its\nparent's list), an imported trust anchor AXIAM holds no key for, and a CA\nwhose key Vault's PKI engine holds.",
+        "operationId": "get_crl",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "ca_id",
+            "in": "path",
+            "description": "Issuing CA certificate ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The CA's current certificate revocation list, DER (RFC 5280 §5). `Cache-Control: public, max-age` until its nextUpdate, `ETag`, `Last-Modified`",
+            "content": {
+              "application/pkix-crl": {
+                "schema": {
+                  "$ref": "#/components/schemas/DerCrl"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The `If-None-Match` tag names the current list"
+          },
+          "404": {
+            "description": "No such CA in this organization, or a CA that publishes no list (revoked, expired, keyless trust anchor, or a key held by Vault's PKI engine)"
+          },
+          "429": {
+            "description": "Rate limit exceeded (`AXIAM__RATE_LIMIT__CRL_PER_MIN`)"
+          }
+        }
       }
     },
     "/ready": {
@@ -16901,6 +17012,13 @@
           "client_secret"
         ],
         "properties": {
+          "allow_sha1_signatures": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "SAML only: accept IdP responses signed with SHA-1 (`rsa-sha1`). Default\n`false` — since 1.0.0 the SP verifier accepts only SHA-2 signatures.\nThe escape hatch for an IdP that cannot sign with SHA-2 yet; refused on\na non-SAML config, and audited (`federation.sha1_signatures_allowed`)\nwhen set to `true`."
+          },
           "allow_tenant_inheritance": {
             "type": [
               "boolean",
@@ -16966,6 +17084,13 @@
           "client_secret": {
             "type": "string",
             "description": "OAuth2 client secret registered with the external IdP."
+          },
+          "idp_metadata_signing_cert_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SAML only: the PEM certificate the IdP signs its metadata document\nwith (#530). When set, the metadata must carry one SHA-2 signature on\nits `EntityDescriptor` root that verifies against it, or no sign-in\nstarts. Omitted: the metadata is not signature-checked."
           },
           "idp_signing_cert_pem": {
             "type": [
@@ -18013,6 +18138,11 @@
           "delete"
         ]
       },
+      "DerCrl": {
+        "type": "string",
+        "format": "binary",
+        "description": "The response body as the OpenAPI document names it: the DER bytes of an\nRFC 5280 `CertificateList`."
+      },
       "DeviceAuthResponse": {
         "type": "object",
         "description": "Response returned when a device authenticates via certificate.",
@@ -18536,10 +18666,15 @@
           "mints_client_secret",
           "pkce_required",
           "has_bundled_mark",
+          "allow_sha1_signatures",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "allow_sha1_signatures": {
+            "type": "boolean",
+            "description": "SAML only: whether IdP responses signed with SHA-1 are accepted\n(default `false`; #531)."
+          },
           "allow_tenant_inheritance": {
             "type": "boolean",
             "description": "Whether tenants of this organization may inherit this provider."
@@ -18611,6 +18746,13 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "idp_metadata_signing_cert_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SAML only: the certificate the IdP's metadata must be signed with\n(#530); `null` when the metadata is not signature-checked."
           },
           "metadata_url": {
             "type": [
@@ -19029,8 +19171,7 @@
         "type": "object",
         "description": "RFC 7662 token introspection request.\n\nSame credential shape, and for the same reason, as [`RevokeRequest`].",
         "required": [
-          "token",
-          "client_id"
+          "token"
         ],
         "properties": {
           "client_assertion": {
@@ -19046,7 +19187,10 @@
             ]
           },
           "client_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "client_secret": {
             "type": [
@@ -20593,6 +20737,8 @@
           "id_token_signing_alg_values_supported",
           "scopes_supported",
           "token_endpoint_auth_methods_supported",
+          "revocation_endpoint_auth_methods_supported",
+          "introspection_endpoint_auth_methods_supported",
           "claims_supported",
           "grant_types_supported",
           "authorization_response_iss_parameter_supported",
@@ -20602,7 +20748,9 @@
           "acr_values_supported",
           "dpop_signing_alg_values_supported",
           "code_challenge_methods_supported",
-          "token_endpoint_auth_signing_alg_values_supported"
+          "token_endpoint_auth_signing_alg_values_supported",
+          "revocation_endpoint_auth_signing_alg_values_supported",
+          "introspection_endpoint_auth_signing_alg_values_supported"
         ],
         "properties": {
           "acr_values_supported": {
@@ -20703,6 +20851,20 @@
           "introspection_endpoint": {
             "type": "string"
           },
+          "introspection_endpoint_auth_methods_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 8414 §2 — #526 (P23W2-06). The token endpoint's list without\n`none`: introspection refuses a public client (RFC 7662 §2.1)."
+          },
+          "introspection_endpoint_auth_signing_alg_values_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 8414 §2 — as for revocation, at the introspection endpoint."
+          },
           "issuer": {
             "type": "string"
           },
@@ -20747,6 +20909,20 @@
           },
           "revocation_endpoint": {
             "type": "string"
+          },
+          "revocation_endpoint_auth_methods_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 8414 §2 — #526 (P23W2-06). The token endpoint's list: revocation\nauthenticates the client by the same code, public clients included\n(RFC 7009 §2.1). Absent, RFC 8414 reads it as `client_secret_basic`\nalone."
+          },
+          "revocation_endpoint_auth_signing_alg_values_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC 8414 §2 — the `private_key_jwt` assertion algorithms at the\nrevocation endpoint; required because the method is listed there."
           },
           "scopes_supported": {
             "type": "array",
@@ -22823,10 +22999,9 @@
       },
       "RevokeRequest": {
         "type": "object",
-        "description": "RFC 7009 token revocation request.\n\n`client_secret` is optional and the two RFC 7521 assertion parameters are\npresent because RFC 7009 §2.1 says this endpoint authenticates the client\n\"the same way as the token endpoint\" — and since SEC-093 it genuinely does.\nA client registered for `private_key_jwt` posts `client_assertion` here and\nno secret; one registered for `tls_client_auth` posts neither and is\nauthenticated by the certificate on the connection.",
+        "description": "RFC 7009 token revocation request.\n\n`client_secret` is optional and the two RFC 7521 assertion parameters are\npresent because RFC 7009 §2.1 says this endpoint authenticates the client\n\"the same way as the token endpoint\" — and since SEC-093 it genuinely does.\nA client registered for `private_key_jwt` posts `client_assertion` here and\nno secret; one registered for `tls_client_auth` posts neither and is\nauthenticated by the certificate on the connection.\n\n`client_id` is optional for the same reason it is at the token endpoint\n(#526, P23W2-06): a `client_secret_basic` client names itself in the\n`Authorization` header (RFC 6749 §2.3.1) and a `private_key_jwt` client in\nits assertion (RFC 7521 §4.2), and discovery now publishes both methods for\nthis endpoint. [`resolve_client_id`] decides, and refuses a disagreement.",
         "required": [
-          "token",
-          "client_id"
+          "token"
         ],
         "properties": {
           "client_assertion": {
@@ -22842,7 +23017,10 @@
             ]
           },
           "client_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "client_secret": {
             "type": [
@@ -26571,6 +26749,13 @@
       "UpdateFederationConfigRequest": {
         "type": "object",
         "properties": {
+          "allow_sha1_signatures": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "SAML only: accept IdP responses signed with SHA-1. Refused on a\nnon-SAML config; turning it on is audited\n(`federation.sha1_signatures_allowed`)."
+          },
           "allow_tenant_inheritance": {
             "type": [
               "boolean",
@@ -26603,14 +26788,14 @@
               "string",
               "null"
             ],
-            "description": "Apple Key ID. `Some(None)` clears it."
+            "description": "Apple Key ID. Explicit `null` clears it."
           },
           "apple_team_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Apple Team ID. `Some(None)` clears it."
+            "description": "Apple Team ID. Explicit `null` clears it."
           },
           "attribute_map": {},
           "authorization_endpoint": {
@@ -26618,14 +26803,14 @@
               "string",
               "null"
             ],
-            "description": "OAuth2-variant authorization endpoint. `Some(None)` clears it."
+            "description": "OAuth2-variant authorization endpoint. Explicit `null` clears it."
           },
           "button_icon": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Sign-in-button icon for a generic provider. `Some(None)` clears it."
+            "description": "Sign-in-button icon for a generic provider. Explicit `null` clears it."
           },
           "client_id": {
             "type": [
@@ -26645,18 +26830,26 @@
               "null"
             ]
           },
+          "idp_metadata_signing_cert_pem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SAML only: the IdP metadata signing certificate (#530). Explicit\n`null` clears it; omitted leaves it. Clearing it is audited\n(`federation.metadata_signing_cert_cleared`), and so is replacing it\nwith a different certificate (`federation.metadata_signing_cert_changed`)."
+          },
           "idp_signing_cert_pem": {
             "type": [
               "string",
               "null"
             ],
-            "description": "PEM-encoded X.509 certificate for verifying SAML assertions\n(CQ-B40/REQ-14 AC-5).  `Some(None)` clears the stored cert."
+            "description": "PEM-encoded X.509 certificate for verifying SAML assertions\n(CQ-B40/REQ-14 AC-5). Explicit `null` clears the stored cert;\nomitted leaves it."
           },
           "metadata_url": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "OIDC discovery or SAML metadata URL. Explicit `null` clears it;\nomitted leaves it."
           },
           "provider": {
             "type": [
@@ -26669,7 +26862,7 @@
               "string",
               "null"
             ],
-            "description": "Operator-chosen identifier for a `generic_*` kind. `Some(None)` clears it."
+            "description": "Operator-chosen identifier for a `generic_*` kind. Explicit `null`\nclears it."
           },
           "require_pkce": {
             "type": [
@@ -26693,7 +26886,7 @@
               "string",
               "null"
             ],
-            "description": "OAuth2-variant token endpoint. `Some(None)` clears it."
+            "description": "OAuth2-variant token endpoint. Explicit `null` clears it."
           },
           "token_exchange": {
             "oneOf": [
@@ -26711,7 +26904,7 @@
               "string",
               "null"
             ],
-            "description": "OAuth2-variant userinfo endpoint. `Some(None)` clears it."
+            "description": "OAuth2-variant userinfo endpoint. Explicit `null` clears it."
           }
         }
       },
@@ -28161,6 +28354,10 @@
     {
       "name": "certificates",
       "description": "Tenant certificate lifecycle"
+    },
+    {
+      "name": "pki",
+      "description": "Public PKI distribution — each issuing CA's certificate revocation list, unauthenticated (RFC 5280 §5)"
     },
     {
       "name": "pgp-keys",

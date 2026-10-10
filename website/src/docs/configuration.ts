@@ -214,6 +214,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "Password pepper (string) prepended before Argon2id hashing.",
             "<random string>",
           ],
+          [
+            "AXIAM__AUTH__AUTH_PEPPER",
+            "The same pepper, under the name the `env` secret provider reads (field `auth_pepper`). If both are set the provider's value wins; the boot log names which one supplied it. Prefer `AXIAM__AUTH__PEPPER`.",
+            "<random string>",
+          ],
         ],
       },
       { type: "h", id: "provider", text: "Where secrets come from" },

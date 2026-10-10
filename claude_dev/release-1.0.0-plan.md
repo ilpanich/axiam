@@ -363,6 +363,60 @@ that a beta tag did not, and what was changed so it does it correctly:
 Not verifiable from the sandbox: the full server image scan (no Docker daemon) and
 the publish jobs themselves; the first stable tag is their first real run.
 
+### 9.2 The regression gate (W4.8)
+
+Run on `ccr-7ed2207b-ouofu1` from 76fbbff to 8bbca62 (the commits in between touched
+`scripts/mass-tag.sh`, this plan and two test files, whose binaries ran after that
+commit; fmt, clippy and the doc checks were re-run at 8bbca62). Every exit code is
+the tool's own. Default features (SAML on); `CARGO_PROFILE_*_DEBUG=0`.
+
+| Step | Command | Exit | Notes |
+|---|---|---|---|
+| 1 | `cargo fmt --all --check` | 0 | re-run at 8bbca6200: 0 |
+| 2 | `cargo clippy --workspace --all-targets -- -D warnings` (CI clippy) | 0 | One non-fatal cargo-clippy notice: "MSRV in clippy.toml and Cargo.toml differ" (`clippy.toml` msrv 1.93 vs `crates/axiam-opaque/Cargo.toml:18` rust-version 1.88). Informational only. At 8bbca6200, `-p axiam-api-rest -p axiam-pki --all-targets` re-run: 0 |
+| 2 | `cargo check -p axiam-federation -p axiam-api-rest -p axiam-server --no-default-features` (CI "Build (SAML off)" runs `check` only) | 0 | |
+| 3 | `cargo test -p axiam-api-rest --lib` | 0 | 278 passed |
+| 3 | `cargo test -p axiam-api-rest --test <each>` x105 | all 0 | 105/105 binaries green, 1830 passed in total (incl. lib). Ignored: keycloak_cross_vendor (live Keycloak), saml_idp_keycloak_roundtrip x2 (Keycloak), webhook_consumer (live RabbitMQ), rate_limit_sustained_flood (65 s soak) |
+| 3 | `cargo test -p axiam-api-rest --doc` | 0 | 5 doctests are `ignore` blocks |
+| 3 | `cargo test -p axiam-core --no-fail-fast` | 0 | 521 passed |
+| 3 | `cargo test -p axiam-db --lib` / `--test <each>` x74 / `--doc` | all 0 | 292 + 698 passed. connection_resilience: 5 ignored (live SurrealDB server) |
+| 3 | `cargo test -p axiam-auth --no-fail-fast` | 0 | 444 passed, 3 ignored (timing statistical, MDS3 BLOB download, …) |
+| 3 | `cargo test -p axiam-oauth2` | 0 | 797 passed |
+| 3 | `cargo test -p axiam-federation` | 0 | 335 passed |
+| 3 | `cargo test -p axiam-pki` | 0 | 312 passed, 2 ignored |
+| 3 | `cargo test -p axiam-email` | 0 | 70 passed |
+| 3 | `cargo test -p axiam-amqp` | 0 | 273 passed, 11 ignored (reactor_containerized: live RabbitMQ / broker restart) |
+| 3 | `cargo test -p axiam-audit` | 0 | 65 passed, 1 ignored (doctest) |
+| 3 | `cargo test -p axiam-scim` | 0 | 221 passed |
+| 3 | `cargo test -p axiam-server` | 0 | 295 passed |
+| 3 | `cargo test -p axiam-authz` | 0 | 155 passed |
+| 3 | `cargo test -p axiam-api-grpc` | 0 | 111 passed, 2 ignored (doctests) |
+| 3 | `cargo test -p axiam-api-grpc --features client --test grpc_{authz,userinfo,reactor}_test` | 0/0/0 | 12/8/5 passed |
+| 3 | `cargo test -p axiam-directory` | 0 | 290 passed |
+| 3 | `cargo test -p axiam-opaque` / `-p axiam-opaque-ffi` / `-p axiam-test-support` | 0/0/0 | 8/9/4 passed |
+| 4 | frontend `npm ci` | 0 | Local node is v22.22.0, below the engines floor of 22.22.2. Install still succeeded |
+| 4 | frontend `npm run lint` / `npx tsc -b` / `npm run typecheck:e2e` | 0/0/0 | |
+| 4 | frontend `npx vitest run --coverage --coverage.reporter=text-summary` | 0 | 117 files, 2283 tests passed. **Lines 96.55%**, above the 96.1 threshold. Stmts 95.63, Branches 90.19, Funcs 94.84 |
+| 4 | frontend `npm run build` | 0 | chunk >500 kB warning only |
+| 4 | website `npm ci` / `npm run lint` / `npx tsc -b` / `npm run build` | 0/0/0/0 | node_modules for both apps deleted |
+| 5 | `git fetch --unshallow origin` | 0 | Clone was shallow, network allowed it |
+| 5 | check-amqp-transport, audit-ignore-sync, config-key-coverage, conflict-markers, crate-layering, docker-context, frontend-coverage, locale-bundle-sync, sdk-amqps, spec-digest | 0 each | |
+| 5 | `check-remediation-evidence.py` | 0 | 37 verified, 0 failed (full history) |
+| 5 | `check-sdk-artifact-drift.py` | **1** | **Expected until the SDK PRs merge.** The check reads each SDK's `main`, which still vendors contract 1.59. Every SDK PR branch vendors 8df0e11, and `sdks/` and `proto/` have not changed since 8df0e11, so the check goes green once the SDK PRs are merged |
+| 5 | `check-website-links.py` | **1** | **Environmental.** All 23 failures are `Tunnel connection failed: 403 Forbidden` from the sandbox proxy, on coveralls.io and the `ilpanich.github.io/axiam-*-sdk` docs. No HTTP 404s |
+| 5 | `bash scripts/check-doc-links.sh` | 0 | re-run at 8bbca6200: 0 |
+| 5 | `check-crate-layering.py` / `--self-test` / `--graph` | 0/0/0 | |
+| 5 | `--self-test` of conflict-markers, locale-bundle-sync, spec-digest, audit-ignore-sync, config-key-coverage, docker-context; `gen-management-registry.py --self-test` / `--check` | 0 each | |
+| 5 | `python3 -m unittest discover -s scripts` / `-s conformance/scripts` | 0/0 | |
+| 5 | benchmarks/ 11 harness self-tests (pack, median-provenance, sdk-version, scenario-filter, rl-prod-layout, nested, authentik, credential, rl-prod-posture, bind-addr, deploy-profile) + `bash -n` parse | 0 each | |
+| 6 | `cargo clean` | 0 | freed 15.7 GiB; 24 GB free |
+
+Not run (out of scope or needs services): CI `test`-job live SurrealDB/RabbitMQ tests (`#[ignore]`d, listed above); `reactor_containerized_test --ignored`; the E2E/Playwright job; cargo-audit/deny, Trivy, hadolint; coverage.yml's `cargo llvm-cov`; the `conformance-tenant-issuer-paths` job (AXIAM__AUTH__TENANT_ISSUER_PATHS=true; the same binaries passed with the flag unset).
+
+On GitHub, #589's CI at 8bbca62 is green (45 passed, 5 skipped), including Test,
+E2E, coverage, CodeQL and the OpenAPI drift gate; all eleven SDK PRs are green on
+their heads.
+
 ## 10. Hand-off (written by W4)
 
 For the maintainer, in order. Nothing below has been done by the session: no tag,

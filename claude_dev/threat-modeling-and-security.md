@@ -166,6 +166,13 @@
 > single call. A receiver behind a redirect must be registered with its final
 > URL (CHANGELOG). Status and totals are unchanged.
 >
+> **The boot log names the pepper variable an operator sets (`1.0.0`, #555).**
+> The secret-provider branch of the boot sequence reported `AXIAM__AUTH__PEPPER
+> not set` on a deployment that had set it, because only the provider's
+> spelling (`AXIAM__AUTH__AUTH_PEPPER`) was consulted; it now says whether the
+> provider or the configuration supplied the pepper, and names both spellings
+> when neither did. No threat entry changes, and no variable is renamed.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):

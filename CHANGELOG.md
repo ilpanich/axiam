@@ -61,6 +61,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The boot log no longer says the pepper is unset when it is set (#555).**
+  `AXIAM__AUTH__PEPPER` is read by the configuration layer, so a deployment that
+  set it worked (and a release build booted), but the secret-provider branch
+  logged `AXIAM__AUTH__PEPPER not set` because the provider looks for the logical
+  key `auth_pepper`, which the `env` provider resolves to
+  `AXIAM__AUTH__AUTH_PEPPER`. The log now says where the pepper came from - the
+  secret provider, or the configuration (`AXIAM__AUTH__PEPPER`) - and, when there
+  is none, `no auth pepper configured: set AXIAM__AUTH__PEPPER (or provide
+  `auth_pepper` through the secret provider; the env provider reads it from
+  AXIAM__AUTH__AUTH_PEPPER)`. Nothing is renamed: the logical key keeps its name
+  for the `file` and `vault` providers, and no variable an operator sets changes.
 - **The benchmark stacks publish their ports on loopback, not on every interface
   (#567).** Every `benchmarks/targets/*/docker-compose*.yml` published its
   application, TLS and (AXIAM) gRPC ports as `"${BENCH_APP_PORT:-8090}:8090"`,

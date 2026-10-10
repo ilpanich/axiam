@@ -73,10 +73,63 @@ where
         .collect()
 }
 
+/// The variable the configuration layer reads the password pepper from
+/// (`AppConfig::auth.pepper`): the one an operator sets, and the one the
+/// deployment guide documents.
+///
+/// It is **not** the variable the `env` secret provider reads for the logical
+/// key [`keys::AUTH_PEPPER`] — that is `AXIAM__AUTH__AUTH_PEPPER`, a spelling
+/// nobody sets, because the logical key keeps its `auth_` prefix for the `file`
+/// and `vault` providers (renaming it would move a mounted file and a Vault
+/// field). The two paths both feed `config.auth.pepper`.
+pub const PEPPER_CONFIG_VAR: &str = "AXIAM__AUTH__PEPPER";
+
+/// Where the password pepper came from, for the boot log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PepperSource {
+    /// The configured secret provider supplied it.
+    SecretProvider,
+    /// It was already in the configuration (`AXIAM__AUTH__PEPPER`).
+    Configuration,
+    /// Neither supplied one.
+    Unset,
+}
+
+impl PepperSource {
+    /// The provider's value wins over the configuration's, as in `main`.
+    #[must_use]
+    pub fn resolve(from_provider: bool, in_configuration: bool) -> Self {
+        if from_provider {
+            Self::SecretProvider
+        } else if in_configuration {
+            Self::Configuration
+        } else {
+            Self::Unset
+        }
+    }
+}
+
+/// The boot log line for an unset pepper. It names the variable an operator
+/// sets, and the secret-provider spelling second, so it never names one nobody
+/// reads (the previous line said `AXIAM__AUTH__PEPPER` was unset on a
+/// deployment that had set it, because only the provider's spelling was
+/// consulted).
+#[must_use]
+pub fn pepper_unset_message() -> String {
+    format!(
+        "no auth pepper configured: set {PEPPER_CONFIG_VAR} (or provide `{}` through the secret \
+         provider; the env provider reads it from {}) — password hashing will proceed without a \
+         pepper; client-secret hashing is mandatory-keyed and will fail closed in a release \
+         build (OBS-1)",
+        keys::AUTH_PEPPER,
+        keys::env_var_name(keys::AUTH_PEPPER),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn env(vars: &[&str]) -> HashSet<String> {
         vars.iter().map(|v| (*v).to_string()).collect()
@@ -158,5 +211,66 @@ mod tests {
     fn the_amqp_signing_key_is_not_treated_as_legacy() {
         let set = env(&["AXIAM__AMQP__SIGNING_KEY"]);
         assert!(legacy_secret_env_warnings(|v| set.contains(v)).is_empty());
+    }
+
+    /// The variable the unset-pepper line names is the one the configuration
+    /// layer actually reads for `AppConfig::auth.pepper` — so an operator who
+    /// sets it gets the pepper, and one who has set it is not told it is unset.
+    /// Driven through the same `config` builder `load_config` uses, with the
+    /// environment injected instead of `set_var`.
+    #[test]
+    fn the_variable_the_message_names_is_the_one_the_configuration_reads() {
+        let source = HashMap::from([(
+            PEPPER_CONFIG_VAR.to_owned(),
+            "a-pepper-of-at-least-sixteen-bytes".to_owned(),
+        )]);
+        let built = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("AXIAM")
+                    .separator("__")
+                    .source(Some(source)),
+            )
+            .build()
+            .expect("build");
+        let cfg: crate::boot::AppConfig = built.try_deserialize().expect("deserialize");
+        assert!(
+            cfg.auth.pepper.is_some(),
+            "{PEPPER_CONFIG_VAR} must populate auth.pepper"
+        );
+        assert!(pepper_unset_message().starts_with(&format!(
+            "no auth pepper configured: set {PEPPER_CONFIG_VAR} "
+        )));
+    }
+
+    /// And the secret-provider spelling it also names is what the provider
+    /// resolves, not a copy of it.
+    #[test]
+    fn the_provider_spelling_in_the_message_is_what_the_provider_resolves() {
+        assert_eq!(
+            keys::env_var_name(keys::AUTH_PEPPER),
+            "AXIAM__AUTH__AUTH_PEPPER"
+        );
+        let message = pepper_unset_message();
+        assert!(message.contains("AXIAM__AUTH__AUTH_PEPPER"), "{message}");
+        assert!(message.contains(keys::AUTH_PEPPER), "{message}");
+    }
+
+    /// A deployment that set the pepper in the configuration is not told it is
+    /// unset: only `Unset` produces the message.
+    #[test]
+    fn a_pepper_from_the_configuration_is_not_reported_as_unset() {
+        assert_eq!(
+            PepperSource::resolve(true, true),
+            PepperSource::SecretProvider
+        );
+        assert_eq!(
+            PepperSource::resolve(true, false),
+            PepperSource::SecretProvider
+        );
+        assert_eq!(
+            PepperSource::resolve(false, true),
+            PepperSource::Configuration
+        );
+        assert_eq!(PepperSource::resolve(false, false), PepperSource::Unset);
     }
 }

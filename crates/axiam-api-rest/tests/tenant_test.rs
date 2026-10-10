@@ -1068,3 +1068,572 @@ async fn create_tenant_seed_permissions_failure_returns_500() {
         "a seed_permissions failure must map to a 500, not succeed or panic"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #523 (P23W2-04, D-4): a deleted tenant is tombstoned, its sessions and
+// refresh tokens are revoked in the request, and the purge removes every
+// tenant-scoped row
+// ---------------------------------------------------------------------------
+
+const TEST_PEER: &str = "127.0.0.1:12345";
+
+/// `test_app!` plus the per-request session check the production server
+/// registers, so an access token whose session was revoked is refused.
+macro_rules! session_checked_app {
+    ($db:expr, $auth:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($auth.clone()))
+                .app_data(web::Data::new(Arc::new(
+                    axiam_db::repository::SurrealSessionRepository::new($db.clone()),
+                )
+                    as Arc<dyn axiam_api_rest::SessionValidator>))
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
+                    $auth.clone(),
+                )))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
+        )
+        .await
+    };
+}
+
+/// Create a tenant through the API, as an administrator does (so it carries
+/// the seeded permissions and seeder state too), and return its id.
+macro_rules! create_tenant_via_api {
+    ($app:expr, $token:expr, $org_id:expr, $slug:expr) => {{
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/v1/organizations/{}/tenants", $org_id))
+            .insert_header(("Authorization", format!("Bearer {}", $token)))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(serde_json::json!({ "name": $slug, "slug": $slug }))
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        if status == 201 {
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            Ok(Uuid::parse_str(body["id"].as_str().unwrap()).unwrap())
+        } else {
+            Err(status)
+        }
+    }};
+}
+
+/// Sign `alice` in to `tenant_id` and return `(access token, refresh token)`.
+macro_rules! sign_in {
+    ($app:expr, $org_id:expr, $tenant_id:expr) => {{
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse().unwrap())
+            .uri("/api/v1/auth/login")
+            .set_json(serde_json::json!({
+                "tenant_id": $tenant_id,
+                "org_id": $org_id,
+                "username_or_email": "alice",
+                "password": "password12345"
+            }))
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let cookie = |name: &str| {
+            resp.response()
+                .cookies()
+                .find(|c| c.name() == name)
+                .map(|c| c.value().to_owned())
+        };
+        match (cookie("axiam_access"), cookie("axiam_refresh")) {
+            (Some(access), Some(refresh)) if status == 200 => Ok((access, refresh)),
+            _ => Err(status),
+        }
+    }};
+}
+
+/// One refresh rotation; `Ok(new refresh token)` or the status it was refused
+/// with.
+macro_rules! refresh {
+    ($app:expr, $tenant_id:expr, $refresh:expr) => {{
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse().unwrap())
+            .uri("/api/v1/auth/refresh")
+            .insert_header((
+                "Cookie",
+                format!("axiam_refresh={}; axiam_csrf={CSRF_TOKEN}", $refresh),
+            ))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(serde_json::json!({ "tenant_id": $tenant_id }))
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        let status = resp.status().as_u16();
+        let rotated = resp
+            .response()
+            .cookies()
+            .find(|c| c.name() == "axiam_refresh")
+            .map(|c| c.value().to_owned());
+        match rotated {
+            Some(r) if status == 200 => Ok(r),
+            _ => Err(status),
+        }
+    }};
+}
+
+/// An access token for the organization administrator backed by a real
+/// session, so it passes the per-request session check `session_checked_app!`
+/// registers.
+async fn session_backed_token(
+    db: &Surreal<TestDb>,
+    auth: &AuthConfig,
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+) -> String {
+    use axiam_core::models::session::CreateSession;
+    use axiam_core::repository::SessionRepository;
+    let session = axiam_db::repository::SurrealSessionRepository::new(db.clone())
+        .create(CreateSession {
+            tenant_id,
+            user_id,
+            token_hash: format!("admin-{user_id}"),
+            ip_address: None,
+            user_agent: None,
+            expires_at: Utc::now() + Duration::hours(1),
+            authenticated_at: Utc::now(),
+            amr: Vec::new(),
+            browser_token_hash: None,
+        })
+        .await
+        .unwrap();
+    issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        session.id.to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap()
+}
+
+/// The status of an authenticated read made with `access`.
+macro_rules! whoami_status {
+    ($app:expr, $access:expr) => {{
+        let req = test::TestRequest::get()
+            .uri("/api/v1/auth/me")
+            .insert_header(("Authorization", format!("Bearer {}", $access)))
+            .to_request();
+        test::call_service(&$app, req).await.status().as_u16()
+    }};
+}
+
+/// Fill `tenant_id` the way a tenant in use is filled: an active `alice` who
+/// can sign in, a second account, a group and a role (with their graph edges),
+/// a permission and a resource, an OAuth2 client with two refresh tokens, a
+/// webhook, a certificate, a federation configuration, an e-mail configuration,
+/// a consent and audit entries.
+async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) {
+    use axiam_core::models::certificate::{CertificateType, KeyAlgorithm, StoreCertificate};
+    use axiam_core::models::federation::CreateFederationConfig;
+    use axiam_core::models::gdpr::CreateConsent;
+    use axiam_core::models::group::CreateGroup;
+    use axiam_core::models::oauth2_client::{CreateOAuth2Client, CreateRefreshToken};
+    use axiam_core::models::permission::CreatePermission;
+    use axiam_core::models::resource::CreateResource;
+    use axiam_core::models::role::{AssignmentScope, CreateRole};
+    use axiam_core::models::user::{UpdateUser, UserStatus};
+    use axiam_core::models::webhook::CreateWebhook;
+    use axiam_core::repository::{
+        CertificateRepository, ConsentRepository, FederationConfigRepository, GroupRepository,
+        OAuth2ClientRepository, PermissionRepository, RefreshTokenRepository, ResourceRepository,
+        RoleRepository, WebhookRepository,
+    };
+    use axiam_db::repository::{
+        SurrealCertificateRepository, SurrealConsentRepository, SurrealFederationConfigRepository,
+        SurrealGroupRepository, SurrealOAuth2ClientRepository, SurrealPermissionRepository,
+        SurrealRefreshTokenRepository, SurrealResourceRepository, SurrealRoleRepository,
+        SurrealWebhookRepository,
+    };
+
+    let users = SurrealUserRepository::new(db.clone());
+    let mut user_ids = Vec::new();
+    for name in ["alice", "bob"] {
+        let user = users
+            .create(CreateUser {
+                tenant_id,
+                username: name.into(),
+                email: format!("{name}@example.com"),
+                password: "password12345".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        users
+            .update(
+                tenant_id,
+                user.id,
+                UpdateUser {
+                    status: Some(UserStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        user_ids.push(user.id);
+    }
+    let alice = user_ids[0];
+
+    let group = SurrealGroupRepository::new(db.clone())
+        .create(CreateGroup {
+            tenant_id,
+            name: "staff".into(),
+            description: String::new(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    SurrealGroupRepository::new(db.clone())
+        .add_member(tenant_id, alice, group.id)
+        .await
+        .unwrap();
+    let roles = SurrealRoleRepository::new(db.clone());
+    let role = roles
+        .create(CreateRole {
+            tenant_id,
+            name: "editor".into(),
+            description: String::new(),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+    roles
+        .assign_to_user(tenant_id, alice, role.id, AssignmentScope::global())
+        .await
+        .unwrap();
+    SurrealPermissionRepository::new(db.clone())
+        .create(CreatePermission {
+            tenant_id,
+            action: "documents:edit".into(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+    SurrealResourceRepository::new(db.clone())
+        .create(CreateResource {
+            tenant_id,
+            name: "documents".into(),
+            resource_type: "collection".into(),
+            parent_id: None,
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let client_input: CreateOAuth2Client = serde_json::from_value(serde_json::json!({
+        "tenant_id": tenant_id,
+        "name": "portal",
+        "redirect_uris": ["https://portal.example.com/cb"],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "scopes": ["openid"],
+    }))
+    .unwrap();
+    let (client, _secret) = SurrealOAuth2ClientRepository::new(db.clone())
+        .create(client_input)
+        .await
+        .unwrap();
+    let refresh_tokens = SurrealRefreshTokenRepository::new(db.clone());
+    for n in 0..2 {
+        refresh_tokens
+            .create(CreateRefreshToken {
+                tenant_id,
+                token_hash: format!("hash-{tenant_id}-{n}"),
+                client_id: client.client_id.clone(),
+                user_id: Some(alice),
+                scopes: vec!["openid".into()],
+                session_id: None,
+                requested_userinfo_claims: Vec::new(),
+                resource: None,
+                auth_time: None,
+                acr: None,
+                amr: Vec::new(),
+                expires_at: Utc::now() + Duration::days(30),
+            })
+            .await
+            .unwrap();
+    }
+
+    SurrealWebhookRepository::new(db.clone())
+        .create(CreateWebhook {
+            tenant_id,
+            url: "https://hooks.example.com/axiam".into(),
+            events: vec!["user.created".into()],
+            secret: "whsec-0123456789abcdef".into(),
+            retry_policy: None,
+        })
+        .await
+        .unwrap();
+    SurrealCertificateRepository::new(db.clone())
+        .create(StoreCertificate {
+            tenant_id,
+            issuer_ca_id: Uuid::new_v4(),
+            subject: "device-001".into(),
+            public_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----".into(),
+            fingerprint: format!("fp-{tenant_id}"),
+            cert_type: CertificateType::User,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: Utc::now() - Duration::minutes(1),
+            not_after: Utc::now() + Duration::days(365),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let federation: CreateFederationConfig = serde_json::from_value(serde_json::json!({
+        "tenant_id": tenant_id,
+        "provider": "okta",
+        "protocol": "OidcConnect",
+        "metadata_url": "https://idp.example.com/.well-known/openid-configuration",
+        "client_id": "cid",
+        "client_secret": "federation-secret",
+    }))
+    .unwrap();
+    SurrealFederationConfigRepository::new(db.clone())
+        .create(federation)
+        .await
+        .unwrap();
+    // The tenant-scoped e-mail configuration, as an override row holds it.
+    db.query(
+        "CREATE email_config SET scope = 'tenant', scope_id = $tenant, \
+         from_name = 'Tenant', from_email = 'noreply@example.com', \
+         provider_kind = 'smtp', smtp_host = 'smtp.example.com', \
+         smtp_password_ciphertext = 'sealed', smtp_password_nonce = 'nonce'",
+    )
+    .bind(("tenant", tenant_id.to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    SurrealConsentRepository::new(db.clone())
+        .create(CreateConsent {
+            tenant_id,
+            user_id: alice,
+            consent_type: "terms".into(),
+            version: "1".into(),
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .unwrap();
+    SurrealAuditLogRepository::new(db.clone())
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: alice,
+            actor_type: ActorType::User,
+            action: "documents.edited".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: Some("192.0.2.1".into()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+}
+
+/// How many rows of each tenant-scoped table name `tenant_id`, in purge order.
+async fn tenant_rows(db: &Surreal<TestDb>, tenant_id: Uuid) -> Vec<(&'static str, u64)> {
+    use axiam_db::repository::tenant_purge::{TENANT_PURGE_ORDER, TenantKey};
+    let mut counts = Vec::new();
+    for step in TENANT_PURGE_ORDER {
+        let filter = match step.key {
+            TenantKey::TenantId => "tenant_id = $tenant",
+            TenantKey::Scope => "scope = 'tenant' AND scope_id = $tenant",
+        };
+        let mut result = db
+            .query(format!(
+                "SELECT count() AS total FROM {} WHERE {filter} GROUP ALL",
+                step.table
+            ))
+            .bind(("tenant", tenant_id.to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let rows: Vec<axiam_db::CountRow> = result.take(0).unwrap();
+        counts.push((step.table, rows.first().map_or(0, |r| r.total)));
+    }
+    counts
+}
+
+/// Rows of a graph edge table, all tenants together.
+async fn edges(db: &Surreal<TestDb>, table: &str) -> u64 {
+    let mut result = db
+        .query(format!("SELECT count() AS total FROM {table} GROUP ALL"))
+        .await
+        .unwrap();
+    let rows: Vec<axiam_db::CountRow> = result.take(0).unwrap();
+    rows.first().map_or(0, |r| r.total)
+}
+
+/// The issue's test (#523): delete a populated tenant; its last session can no
+/// longer refresh, its access token is refused and nobody can sign in to it,
+/// from the `204` on; the purge then leaves every tenant-scoped table empty for
+/// it — and another tenant of the organization keeps every row and its own
+/// sessions.
+#[actix_rt::test]
+async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table() {
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
+    let auth = test_auth_config();
+    let token = session_backed_token(&db, &auth, user_id, org_tenant, org_id).await;
+    let app = session_checked_app!(db, auth);
+
+    let doomed = create_tenant_via_api!(app, token, org_id, "doomed-populated").unwrap();
+    let bystander = create_tenant_via_api!(app, token, org_id, "bystander").unwrap();
+    populate_tenant(&db, doomed).await;
+    populate_tenant(&db, bystander).await;
+
+    // Both tenants are in use: alice is signed in to each, and her session in
+    // the doomed tenant refreshes once — its LAST session is the rotated one.
+    let (doomed_access, doomed_refresh) = sign_in!(app, org_id, doomed).unwrap();
+    let doomed_refresh = refresh!(app, doomed, doomed_refresh).expect("refresh before delete");
+    let (bystander_access, bystander_refresh) = sign_in!(app, org_id, bystander).unwrap();
+    assert_eq!(whoami_status!(app, bystander_access), 200);
+    let bystander_before = tenant_rows(&db, bystander).await;
+    for table in [
+        "user",
+        "session",
+        "oauth2_refresh_token",
+        "webhook",
+        "email_config",
+    ] {
+        let (_, n) = bystander_before.iter().find(|(t, _)| *t == table).unwrap();
+        assert!(*n > 0, "the bystander tenant has {table} rows to keep");
+    }
+    let doomed_before = tenant_rows(&db, doomed).await;
+    assert!(
+        doomed_before.iter().filter(|(_, n)| *n > 0).count() >= 15,
+        "the doomed tenant is populated: {doomed_before:?}"
+    );
+
+    let _ = export_audit_body!(app, token, org_id, doomed);
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/organizations/{org_id}/tenants/{doomed}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        204,
+        "the status code is unchanged: the purge is not the caller's to wait for"
+    );
+
+    // Immediately, before any purge: the last session cannot refresh, the
+    // access token fails the session check, nobody can sign in, and every
+    // OAuth2 refresh token of the tenant is revoked.
+    assert_eq!(refresh!(app, doomed, doomed_refresh), Err(401));
+    assert_eq!(whoami_status!(app, doomed_access), 401);
+    assert!(
+        sign_in!(app, org_id, doomed).is_err(),
+        "no sign-in to a deleted tenant"
+    );
+    let mut live = db
+        .query(
+            "SELECT count() AS total FROM oauth2_refresh_token \
+             WHERE tenant_id = $tenant AND revoked = false GROUP ALL",
+        )
+        .bind(("tenant", doomed.to_string()))
+        .await
+        .unwrap();
+    let live: Vec<axiam_db::CountRow> = live.take(0).unwrap();
+    assert_eq!(
+        live.first().map_or(0, |r| r.total),
+        0,
+        "refresh tokens revoked"
+    );
+    let tenants = SurrealTenantRepository::new(db.clone());
+    assert!(
+        tenants.get_by_id(doomed).await.is_err(),
+        "gone from every read"
+    );
+
+    // The purge (the cleanup job's `tenant_purge` sweep) empties every
+    // tenant-scoped table for the tenant, then removes its row.
+    tenants.purge_tombstoned(doomed).await.unwrap();
+    for (table, n) in tenant_rows(&db, doomed).await {
+        assert_eq!(n, 0, "{table} still holds the deleted tenant's rows");
+    }
+    assert!(tenants.list_tombstoned().await.unwrap().is_empty());
+    // The graph edges went with their records: only the bystander's remain.
+    assert_eq!(edges(&db, "member_of").await, 1);
+    let has_role = edges(&db, "has_role").await;
+    assert!(has_role >= 1, "the bystander keeps its role assignment");
+
+    // The system-log record of the deletion is kept.
+    let system = SurrealAuditLogRepository::new(db.clone())
+        .list_system(
+            AuditLogFilter {
+                action: Some(axiam_api_rest::handlers::tenants::TENANT_DELETED_ACTION.to_string()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 10,
+                search: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(system.items.iter().any(|e| e.resource_id == Some(doomed)));
+
+    // The other tenant is untouched: every row, and its session.
+    assert_eq!(tenant_rows(&db, bystander).await, bystander_before);
+    assert_eq!(whoami_status!(app, bystander_access), 200);
+    assert!(refresh!(app, bystander, bystander_refresh).is_ok());
+}
+
+/// #523: a tombstoned tenant keeps its slug until it is purged — a new tenant
+/// asking for it is refused with `409` — and the slug is free once the purge
+/// has removed the old tenant's rows.
+#[actix_rt::test]
+async fn a_deleted_tenants_slug_is_refused_until_the_purge_frees_it() {
+    let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
+    let auth = test_auth_config();
+    let token = mint_token(&auth, user_id, org_tenant, org_id);
+    let app = test_app!(db, auth);
+
+    let doomed = create_tenant_via_api!(app, token, org_id, "reused-slug").unwrap();
+    let _ = export_audit_body!(app, token, org_id, doomed);
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/v1/organizations/{org_id}/tenants/{doomed}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    assert_eq!(
+        create_tenant_via_api!(app, token, org_id, "reused-slug"),
+        Err(409),
+        "the slug of a tenant whose rows are still there is not reused"
+    );
+    // Nor does the tombstoned tenant appear in the organization's list.
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/organizations/{org_id}/tenants"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let listed: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+    assert!(
+        !listed.to_string().contains(&doomed.to_string()),
+        "a deleted tenant is not listed"
+    );
+
+    SurrealTenantRepository::new(db.clone())
+        .purge_tombstoned(doomed)
+        .await
+        .unwrap();
+    let reborn = create_tenant_via_api!(app, token, org_id, "reused-slug")
+        .expect("the slug is free once the old tenant is purged");
+    assert_ne!(reborn, doomed);
+}

@@ -5,6 +5,8 @@
 //! - `saml_assertion_replay` and `federation_login_state`: expired rows
 //! - `user`: accounts past their scheduled purge date (D-05/D-06/D-08)
 //! - `export_job`: queued jobs waiting to have their encrypted blob generated (D-12)
+//! - every tenant-scoped table: the rows of a deleted (tombstoned) tenant, then
+//!   its tenant row (#523, D-4)
 //!
 //! The task shuts down cleanly when the caller sends `true` through the watch
 //! channel (D-09, D-24).
@@ -13,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::messaging::MailTransportPublisher;
-use axiam_api_rest::handlers::gdpr::write_erasure_audit_with_dlq;
+use axiam_api_rest::handlers::gdpr::{AuditWriteSink, write_erasure_audit_with_dlq};
 use axiam_api_rest::ssf_emitter::{InitiatingEntity, with_cause};
 use axiam_auth::AuthService;
 use axiam_auth::crypto::{encrypt_separate, gdpr_pseudonym};
@@ -162,7 +164,120 @@ pub struct CleanupTask<C: Connection> {
     /// the `ciba_request` sweep marks `expired` and, after a retention, deletes.
     /// `None` runs no sweep.
     ciba_request_repo: Option<Arc<axiam_db::SurrealCibaRequestRepository<C>>>,
+    /// #523: when the `tenant_purge` sweep last looked for orphaned tenant ids
+    /// (rows whose tenant a pre-tombstone deletion removed). `None` until the
+    /// first tick, which always looks; then once per
+    /// [`ORPHAN_TENANT_SCAN_INTERVAL`].
+    last_orphan_scan: Option<std::time::Instant>,
     shutdown: watch::Receiver<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Tenant purge (#523, P23W2-04, D-4)
+// ---------------------------------------------------------------------------
+
+/// How often the `tenant_purge` sweep also looks for orphaned tenant ids.
+///
+/// The look reads every tenant-scoped table (one `GROUP BY` each), which is not
+/// something to do every minute for a residue that only an upgrade can have: a
+/// deletion made by this version tombstones, so it never leaves an orphan. Once
+/// at process start, which is when an upgraded deployment first runs this
+/// code, and once a day after that.
+pub const ORPHAN_TENANT_SCAN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// One pass of the `tenant_purge` job: purge every tombstoned tenant and, when
+/// `scan_orphans`, every orphaned tenant id.
+///
+/// A free function, and public, for the reason [`run_erasure_pipeline`] is
+/// one. Each tenant is purged by
+/// [`SurrealTenantRepository::purge_tombstoned`] — every tenant-scoped table in
+/// the order user erasure uses, its audit trail included (exported before the
+/// deletion was allowed, T-118), then the tenant row — or, for an orphan, by
+/// [`SurrealTenantRepository::purge_orphan`], which leaves the audit trail to
+/// the retention sweep. Each completed purge is recorded in the **system** log
+/// as `tenants.purged`, beside the `tenants.deleted` record the deletion wrote;
+/// neither is ever purged.
+///
+/// * `Ok(n)` is the number of tenants (and orphaned ids) purged.
+/// * One tenant's failure does not stop the others; any failure makes the sweep
+///   fail, naming how many failed and never a tenant's data. The failed tenant
+///   stays tombstoned and the next pass resumes it (every step is idempotent).
+///
+/// # Errors
+///
+/// [`AxiamError::Internal`] as above, or the datastore error that kept the
+/// tombstoned tenants or the orphans from being listed (the tombstoned tenants
+/// are still purged when only the orphans could not be).
+pub async fn sweep_tenant_purge<C, S>(
+    tenant_repo: &SurrealTenantRepository<C>,
+    audit: &S,
+    scan_orphans: bool,
+) -> Result<u64, AxiamError>
+where
+    C: Connection,
+    S: AuditWriteSink,
+{
+    let mut due: Vec<(Uuid, bool)> = tenant_repo
+        .list_tombstoned()
+        .await?
+        .into_iter()
+        .map(|id| (id, false))
+        .collect();
+    // A failed look for orphans does not hold back the tombstoned tenants: it
+    // is reported after them, and the next pass looks again.
+    let mut scan_error = None;
+    if scan_orphans {
+        match tenant_repo.orphaned_tenant_ids().await {
+            Ok(ids) => due.extend(ids.into_iter().map(|id| (id, true))),
+            Err(e) => scan_error = Some(e),
+        }
+    }
+
+    let (mut purged, mut failed) = (0u64, 0u64);
+    for (tenant_id, orphan) in due {
+        let outcome = if orphan {
+            tenant_repo.purge_orphan(tenant_id).await
+        } else {
+            tenant_repo.purge_tombstoned(tenant_id).await
+        };
+        if let Err(e) = outcome {
+            failed += 1;
+            tracing::warn!(
+                error = %e,
+                %tenant_id,
+                orphan,
+                "tenant purge incomplete; the tenant stays tombstoned and the next sweep resumes it"
+            );
+            continue;
+        }
+        purged += 1;
+        write_erasure_audit_with_dlq(
+            audit,
+            CreateAuditLogEntry {
+                tenant_id: Uuid::nil(),
+                actor_id: Uuid::nil(),
+                actor_type: ActorType::System,
+                action: axiam_api_rest::handlers::tenants::TENANT_PURGED_ACTION.to_string(),
+                resource_id: Some(tenant_id),
+                outcome: AuditOutcome::Success,
+                ip_address: None,
+                metadata: Some(serde_json::json!({ "orphan": orphan })),
+            },
+        )
+        .await;
+        tracing::info!(%tenant_id, orphan, "deleted tenant's data purged");
+    }
+
+    if failed > 0 {
+        return Err(AxiamError::Internal(format!(
+            "tenant purge was incomplete for {failed} of {} tenant(s)",
+            failed + purged
+        )));
+    }
+    if let Some(e) = scan_error {
+        return Err(e);
+    }
+    Ok(purged)
 }
 
 // ---------------------------------------------------------------------------
@@ -921,6 +1036,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             ssf_sink: None,
             scim_reconciliation: None,
             ciba_request_repo: None,
+            last_orphan_scan: None,
             shutdown,
         }
     }
@@ -1137,6 +1253,29 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         &self.job_health,
                         "cimd_unused_clients",
                         self.sweep_unused_cimd_clients().await,
+                        tracing::Level::INFO,
+                    );
+
+                    // #523 (D-4) — purge deleted tenants' data, after the GDPR
+                    // purge so an account erasure due in a tombstoned tenant
+                    // finishes before its tenant's rows go. INFO, for the audit
+                    // sweep's reason: it destroys records nothing can rebuild.
+                    let scan_orphans = self
+                        .last_orphan_scan
+                        .is_none_or(|at| at.elapsed() >= ORPHAN_TENANT_SCAN_INTERVAL);
+                    let outcome = sweep_tenant_purge(
+                        self.tenant_repo.as_ref(),
+                        self.audit_repo.as_ref(),
+                        scan_orphans,
+                    )
+                    .await;
+                    if scan_orphans && outcome.is_ok() {
+                        self.last_orphan_scan = Some(std::time::Instant::now());
+                    }
+                    Self::record(
+                        &self.job_health,
+                        "tenant_purge",
+                        outcome,
                         tracing::Level::INFO,
                     );
 

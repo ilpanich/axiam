@@ -133,6 +133,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before. RFC 8693's `may_act`, which would let a subject token name other
   permitted actors, is planned for `1.0.x`. Threat model 2.38.0: T-471 entered
   Mitigated; 471 threats, 430 mitigated / 20 open / 21 not applicable.
+- **Deleting a tenant now erases it: tombstone, revoke, purge** (#523,
+  P23W2-04, GDPR Art. 17). `DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`
+  removed the tenant row (and the directory, SAML, SSF, CIBA and SCIM
+  configuration) and nothing else: the tenant's users with their password
+  hashes, MFA secrets and contact details, its sessions, OAuth2 clients and
+  refresh tokens, federation configurations, its encrypted SMTP or provider
+  credential, webhook secrets, certificates and CA material, roles, groups,
+  consents and audit entries all stayed in the datastore — and the tenant's
+  users could keep refreshing their sessions. The deletion now **tombstones**
+  the tenant (schema v91, `tenant.deleted_at`): in the request it revokes the
+  tenant's sessions (published to the revocation feed when it is on) and its
+  OAuth2 refresh tokens, and from the `204` on the tenant is gone from every
+  read, sign-in, token issuance and refresh, so its access tokens fail the
+  per-request session check. The cleanup job's new **`tenant_purge`** sweep
+  (listed on `/health/jobs`) then removes every tenant-scoped table's rows, in
+  the order the GDPR user erasure uses, and the tenant row last; it records
+  `tenants.purged` in the system audit log beside the `tenants.deleted` record,
+  which stays. The tenant's own audit entries are purged with the rest — the
+  deletion still requires a fresh audit export first (T-118). A test pins
+  that every table with a `tenant_id` (or tenant `scope_id`) is in the purge.
+  **Behaviour change / upgrade notes:** the response is still `204`, but the
+  data is removed asynchronously, within one cleanup interval
+  (`cleanup_interval_secs`, 5 minutes by default); a deleted tenant's slug
+  stays taken (`409`) until the purge has run. On its first run after the upgrade, and daily
+  after that, the sweep also finds rows left behind by tenants deleted with an
+  earlier version — rows whose tenant no longer exists — and purges them, except
+  their audit entries, which the audit retention window governs; expect one
+  `tenants.purged` record (`metadata.orphan: true`) per such tenant. A service
+  account's access token carries no session, so it runs out within its
+  lifetime (15 minutes by default) rather than at the deletion; so does a
+  user's on gRPC unless `AXIAM__GRPC__STRICT_REVOCATION=true`. Threat model
+  2.38.0: T-472 entered Mitigated, T-118 corrected; 472 threats, 431
+  mitigated / 20 open / 21 not applicable.
 
 ### Documentation
 

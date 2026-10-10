@@ -150,6 +150,118 @@ impl<C: Connection> SurrealTenantRepository<C> {
     }
 }
 
+/// The tenant purge (#523, D-4): what the cleanup job's `tenant_purge` sweep
+/// calls. See [`super::tenant_purge`] for the order and why it is that order.
+impl<C: Connection> SurrealTenantRepository<C> {
+    /// The tenants a deletion has tombstoned and the purge has not yet removed,
+    /// oldest deletion first.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn list_tombstoned(&self) -> AxiamResult<Vec<Uuid>> {
+        #[derive(Debug, SurrealValue)]
+        struct IdRow {
+            record_id: String,
+        }
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, deleted_at FROM tenant \
+                 WHERE deleted_at != NONE ORDER BY deleted_at ASC",
+            )
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(DbError::from)?;
+        let rows: Vec<IdRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| Uuid::parse_str(&r.record_id).ok())
+            .collect())
+    }
+
+    /// Remove every tenant-scoped row of a **tombstoned** tenant, its audit
+    /// trail included, then the tenant row.
+    ///
+    /// Each table is one idempotent `DELETE`; a failure stops the purge with
+    /// the tenant still tombstoned, and calling this again resumes it. A live
+    /// tenant is refused before anything is touched — the purge never decides
+    /// on its own that a tenant is gone.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for a tenant that is not tombstoned (live, or already
+    /// purged); a datastore failure otherwise.
+    pub async fn purge_tombstoned(&self, id: Uuid) -> AxiamResult<()> {
+        if !self.list_tombstoned().await?.contains(&id) {
+            return Err(DbError::NotFound {
+                entity: "tombstoned tenant".into(),
+                id: id.to_string(),
+            }
+            .into());
+        }
+        super::tenant_purge::purge_rows(&self.db, id, super::tenant_purge::PurgeScope::Tombstoned)
+            .await?;
+        // Last, and only while still tombstoned: the guard is in the statement
+        // too, so nothing here can remove a live tenant's row.
+        self.db
+            .current()
+            .query("DELETE type::record('tenant', $id) WHERE deleted_at != NONE")
+            .bind(("id", id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(DbError::from)?;
+        Ok(())
+    }
+
+    /// Tenant ids that own rows but have no tenant row at all — the residue of
+    /// deletions made before the tombstone existed (#523), which removed the
+    /// tenant row and nothing else.
+    ///
+    /// Reads every tenant-scoped table but the audit trail (see
+    /// [`super::tenant_purge::PurgeScope::Orphan`]), so the caller runs it
+    /// rarely rather than on every sweep.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn orphaned_tenant_ids(&self) -> AxiamResult<Vec<Uuid>> {
+        Ok(super::tenant_purge::orphaned_tenant_ids(&self.db).await?)
+    }
+
+    /// Remove an orphaned tenant id's rows, as [`Self::purge_tombstoned`] does
+    /// for a tombstoned tenant, except its audit trail, which no export receipt
+    /// covers and which the audit retention sweep governs.
+    ///
+    /// # Errors
+    ///
+    /// `Conflict` when a tenant row with this id exists (live or tombstoned);
+    /// a datastore failure otherwise.
+    pub async fn purge_orphan(&self, id: Uuid) -> AxiamResult<()> {
+        let mut result = self
+            .db
+            .current()
+            .query("SELECT count() AS total FROM type::record('tenant', $id) GROUP ALL")
+            .bind(("id", id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(DbError::from)?;
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        if rows.first().is_some_and(|r| r.total > 0) {
+            return Err(axiam_core::error::AxiamError::Conflict {
+                reason: "a tenant row exists for this id; it is not an orphan".into(),
+            });
+        }
+        super::tenant_purge::purge_rows(&self.db, id, super::tenant_purge::PurgeScope::Orphan)
+            .await?;
+        Ok(())
+    }
+}
+
 impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     async fn create(&self, input: CreateTenant) -> AxiamResult<Tenant> {
         let id = new_id();
@@ -227,7 +339,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         let mut result = self
             .db
             .current()
-            .query("SELECT * FROM type::record('tenant', $id)")
+            .query("SELECT * FROM type::record('tenant', $id) WHERE deleted_at = NONE")
             .bind(("id", id_str.clone()))
             .await
             .map_err(DbError::from)?;
@@ -248,7 +360,8 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM tenant \
-                 WHERE organization_id = $org_id AND slug = $slug",
+                 WHERE organization_id = $org_id AND slug = $slug \
+                   AND deleted_at = NONE",
             )
             .bind(("org_id", org_id_str))
             .bind(("slug", slug_owned))
@@ -274,7 +387,8 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM tenant \
-                 WHERE organization_id = $org_id AND kind = 'organization'",
+                 WHERE organization_id = $org_id AND kind = 'organization' \
+                   AND deleted_at = NONE",
             )
             .bind(("org_id", org_id_str))
             .await
@@ -308,7 +422,12 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         }
         sets.push("updated_at = time::now()");
 
-        let query = format!("UPDATE type::record('tenant', $id) SET {}", sets.join(", "));
+        // #523: a tombstoned tenant is not there to update — `NotFound`, as
+        // every read answers.
+        let query = format!(
+            "UPDATE type::record('tenant', $id) SET {} WHERE deleted_at = NONE",
+            sets.join(", ")
+        );
 
         let db = self.db.current();
         let mut builder = db.query(&query).bind(("id", id_str.clone()));
@@ -338,36 +457,37 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     }
 
     async fn delete(&self, id: Uuid) -> AxiamResult<()> {
-        // The tenant's SAML service providers go with it too (T23.2.1, G-2): a
-        // registry of where this tenant's assertions may be delivered has no
-        // meaning, and no business surviving, without the tenant.
+        // #523 (P23W2-04, D-4): deleting a tenant TOMBSTONES it. The row keeps
+        // its data and gains `deleted_at`, which takes it out of every read in
+        // this file (and the settings repository's tenant lookup): sign-in,
+        // token issuance, refresh and every handler that resolves the tenant
+        // answer as for a tenant that does not exist, from this commit on. The
+        // cleanup job's `tenant_purge` sweep then removes every tenant-scoped
+        // row in the order user erasure uses (`tenant_purge`), and the tenant
+        // row last. The slug stays claimed by the tombstone until then, so a
+        // new tenant cannot take it while the old one's rows are still there.
         //
-        // So does its SAML IdP signing credential (T23.2.1, D-21): a sealed
-        // private key for a tenant that no longer exists is key material
-        // nobody can account for, and it goes in the same transaction.
+        // In the same transaction, and so in the request:
         //
-        // And so do its pending SAML `AuthnRequest`s (T23.2.3, schema v73):
-        // short-lived, but a row naming a deleted tenant's SP and ACS URL is
-        // nothing a later tenant should be able to resume.
+        // * Its sessions are deleted and its refresh tokens revoked — the
+        //   erasure's first step, so the tenant's last session cannot refresh
+        //   and its access tokens fail the per-request session check. The
+        //   handler revoked them once already, through the repositories that
+        //   publish to the revocation feed and drop the validity cache; this
+        //   pass catches a sign-in that raced it, atomically with the stamp.
         //
-        // And its SAML single-logout state (T23.2.4, schema v76): the participant
-        // rows hold the `NameID` each SP was given (an email address at an
-        // `emailAddress` SP) and the logout runs the chain of a session that no
-        // longer has a tenant. Neither is anything a later tenant may resume.
-        //
-        // And its SSF streams and their buffered events (T23.5.2, schema v77):
-        // a stream holds a sealed credential to a receiver and a buffered event
-        // may hold a subject's email address; neither outlives the tenant.
-        //
-        // The tenant's directory configuration goes with it (T23.3.1, G-3): it
-        // holds an encrypted service-account credential for the tenant's
-        // directory, and a deleted tenant must not leave that ciphertext
-        // behind. Its sync state (T23.3.5, schema v75: a watermark, a server
-        // identity, account ids) goes in the same transaction: the job must not
-        // find a deleted tenant's state, and a row naming accounts of a tenant
-        // that no longer exists has no business surviving it. Everything is one
-        // query, so the deletes commit or roll back
-        // together. (The broader cascade is issue #523.)
+        // * The rows that make AXIAM act for the tenant, or hold its credentials
+        //   for systems outside AXIAM, go now rather than at the purge, so no
+        //   background job — the directory sync, the SCIM delivery and
+        //   reconciliation, the SSF transmitter — works for a tenant that no
+        //   longer exists: its directory configuration and sync state (T23.3.1,
+        //   T23.3.5: an encrypted bind credential, account ids), its SAML
+        //   service providers, IdP signing credential, pending `AuthnRequest`s
+        //   and single-logout state (T23.2.1–T23.2.4: a sealed private key, the
+        //   `NameID` each SP was given), its SSF streams, step-up records and
+        //   buffered events (T23.5.2: a sealed receiver credential, subjects'
+        //   addresses), its CIBA requests, and its SCIM targets with their links
+        //   and delivery state.
         //
         // F4 P23W2-02: and a transaction that rolled back is an error. The
         // driver reports a failed statement inside the response, not from
@@ -378,6 +498,9 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .current()
             .query(
                 "BEGIN TRANSACTION; \
+                 DELETE session WHERE tenant_id = $id; \
+                 UPDATE oauth2_refresh_token SET revoked = true \
+                     WHERE tenant_id = $id AND revoked = false; \
                  DELETE directory_config WHERE tenant_id = $id; \
                  DELETE directory_sync_state WHERE tenant_id = $id; \
                  DELETE saml_service_provider WHERE tenant_id = $id; \
@@ -392,7 +515,9 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
                  DELETE scim_target_link WHERE tenant_id = $id; \
                  DELETE scim_target_state WHERE tenant_id = $id; \
                  DELETE scim_target WHERE tenant_id = $id; \
-                 DELETE type::record('tenant', $id); \
+                 UPDATE type::record('tenant', $id) \
+                     SET deleted_at = time::now(), updated_at = time::now() \
+                     WHERE deleted_at = NONE; \
                  COMMIT TRANSACTION;",
             )
             .bind(("id", id.to_string()))
@@ -417,7 +542,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .current()
             .query(
                 "SELECT count() AS total FROM tenant \
-                 WHERE organization_id = $org_id GROUP ALL",
+                 WHERE organization_id = $org_id AND deleted_at = NONE GROUP ALL",
             )
             .bind(("org_id", org_id_str.clone()))
             .await
@@ -430,7 +555,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .query(
                 "SELECT meta::id(id) AS record_id, * \
                  FROM tenant \
-                 WHERE organization_id = $org_id \
+                 WHERE organization_id = $org_id AND deleted_at = NONE \
                  ORDER BY created_at ASC \
                  LIMIT $limit START $offset",
             )
@@ -464,7 +589,8 @@ impl<C: Connection> axiam_core::models::ssf::DeploymentTenants for SurrealTenant
                 .current()
                 .query(
                     "SELECT count() AS total FROM tenant \
-                         WHERE kind = NONE OR kind != 'organization' GROUP ALL; \
+                         WHERE (kind = NONE OR kind != 'organization') \
+                           AND deleted_at = NONE GROUP ALL; \
                      SELECT count() AS total FROM organization GROUP ALL",
                 )
                 .await

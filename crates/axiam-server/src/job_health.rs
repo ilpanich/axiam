@@ -51,6 +51,8 @@ pub const SWEEP_JOBS: &[&str] = &[
     "gdpr_purge",
     "gdpr_export",
     "audit_retention",
+    // #523 (D-4): deleted tenants' data, purged in user-erasure order.
+    "tenant_purge",
 ];
 
 #[derive(Default, Clone)]
@@ -176,6 +178,8 @@ mod tests {
             "scim_reconcile",
             // T23.7.1 (G-7): the CIBA pending-request sweep.
             "ciba_request",
+            // #523 (D-4): the deleted tenants' purge.
+            "tenant_purge",
         ] {
             let recorded = source.match_indices("&self.job_health,").any(|(at, _)| {
                 let rest = &source[at + "&self.job_health,".len()..];
@@ -195,6 +199,7 @@ mod tests {
         assert!(names.iter().any(|n| n == "ssf_step_up"));
         assert!(names.iter().any(|n| n == "scim_reconcile"));
         assert!(names.iter().any(|n| n == "ciba_request"));
+        assert!(names.iter().any(|n| n == "tenant_purge"));
     }
 
     #[test]

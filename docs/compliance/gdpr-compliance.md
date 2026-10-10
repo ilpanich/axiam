@@ -258,6 +258,39 @@ holding no personal data; only the Art. 17 pipeline produces durable evidence of
 it. A data subject's erasure request must therefore go through
 `POST /api/v1/account/delete`, not through an administrator pressing Delete.
 
+### Tenant deletion (`DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`)
+
+Deleting a tenant erases every data subject of it (#523, P23W2-04, threat
+T-472). Before 1.0.0 the deletion removed the tenant row and a handful of
+configuration tables, and left every account, session, credential, consent and
+audit entry of the tenant in the datastore. It is now **tombstone, then purge**
+(decision D-4):
+
+- **In the request** the tenant's sessions and OAuth2 refresh tokens are
+  revoked and `tenant.deleted_at` is set; the tenant is gone from every read,
+  sign-in, token issuance and refresh from the `204` on.
+- **The cleanup job's `tenant_purge` sweep** then deletes every row of every
+  tenant-scoped table, in the order the purge pipeline above uses — grants and
+  sessions, federation links, credentials, the authorization graph, the
+  tenant's audit trail, GDPR records (consents, deletion requests, export jobs,
+  erasure proofs), the accounts, the configuration — and the tenant row last.
+  Unlike the per-user pipeline it **deletes** the accounts and the audit
+  entries rather than pseudonymizing them: nothing of the tenant is left for an
+  entry to resolve to, and the deletion is refused until the tenant's audit
+  trail has been exported (T-118), so the controller holds that copy under its
+  own retention obligations.
+- The system audit log keeps `tenants.deleted` (who deleted it, and the export
+  receipt that authorised it) and gains `tenants.purged` when the sweep is done —
+  the tenant-level counterpart of an erasure proof.
+
+Completeness is a test, not a list someone maintains:
+`schema.rs::every_tenant_scoped_table_is_purged` fails when a table with a
+`tenant_id` field (or a tenant `scope_id`) is missing from the purge. Rows left
+by deletions made before 1.0.0 are found and purged by the same sweep at
+start-up and daily, except their audit entries, which the retention window
+(§2a) governs. Proven by
+`deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table`.
+
 ---
 
 ## 2a. Audit collection minimisation (Art. 5(1)(c) — data minimisation)

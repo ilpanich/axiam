@@ -1080,6 +1080,15 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "warn",
         text: "Changing `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` breaks the linkage between existing pseudonyms and new ones — the same person will appear as two different actors either side of the change. Treat it as permanent.",
       },
+      { type: "h", id: "tenant-deletion", text: "Deleting a tenant" },
+      {
+        type: "p",
+        text: "Deleting a tenant erases it, in two steps. **In the request** — which still requires a fresh export of the tenant's audit trail and still answers `204` — the tenant's sessions and OAuth2 refresh tokens are revoked and the tenant is marked deleted, so from that moment it is gone from every read, sign-in, token issuance and refresh, and its users' access tokens fail the per-request session check. **On the cleanup interval** (5 minutes by default) the `tenant_purge` sweep removes every row of every tenant-scoped table — accounts and credentials, sessions and grants, clients, configuration and the secrets it holds for other systems, roles, groups, consents and the exported audit entries — in the order a GDPR user erasure uses, then the tenant record, and writes `tenants.purged` to the system audit log beside `tenants.deleted`, which stays.",
+      },
+      {
+        type: "note",
+        text: `A deleted tenant's slug stays taken (\`409\`) until the purge has run. After an upgrade from a version that removed only the tenant record, the sweep also purges the rows such deletions left behind — their audit entries excepted, which the retention window governs — on its first run and daily after. The step-by-step is in the [admin guide](${GH_BLOB}/docs/admin/README.md#what-the-deletion-does-and-when-the-data-is-gone).`,
+      },
       { type: "h", id: "retention", text: "Retention" },
       {
         type: "p",
@@ -1170,7 +1179,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Fourteen sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `saml_authn_request`, `saml_sp_session`, `saml_logout_run`, `directory_sync`, `scim_reconcile`, `ssf_event_buffer`, `ssf_step_up`, `ciba_request`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export` and `audit_retention`. Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
+        text: "Fifteen sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `saml_authn_request`, `saml_sp_session`, `saml_logout_run`, `directory_sync`, `scim_reconcile`, `ssf_event_buffer`, `ssf_step_up`, `ciba_request`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export`, `audit_retention` and `tenant_purge`. Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
       },
       {
         type: "table",

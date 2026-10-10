@@ -2049,3 +2049,130 @@ async fn no_sink_or_an_inactive_one_changes_nothing_about_the_erasure() {
     }
     assert!(inactive.purged.lock().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// #523 (D-4): the `tenant_purge` sweep
+// ---------------------------------------------------------------------------
+
+use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::tenant::{CreateTenant, TenantKind};
+use axiam_core::repository::{OrganizationRepository, TenantRepository};
+use axiam_db::{SurrealOrganizationRepository, SurrealTenantRepository};
+use axiam_server::cleanup::sweep_tenant_purge;
+
+/// A tenant of a fresh organization with one user in it.
+async fn tenant_with_a_user(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    org: Uuid,
+    slug: &str,
+) -> Uuid {
+    let tenant = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org,
+            kind: TenantKind::Standard,
+            name: slug.into(),
+            slug: slug.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id: tenant,
+            username: format!("user-{slug}"),
+            email: format!("{slug}@example.com"),
+            password: test_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    tenant
+}
+
+async fn users_in(db: &Surreal<surrealdb::engine::local::Db>, tenant: Uuid) -> usize {
+    SurrealUserRepository::new(db.clone())
+        .list(
+            tenant,
+            Pagination {
+                offset: 0,
+                limit: 10,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+        .len()
+}
+
+async fn purged_records(db: &Surreal<surrealdb::engine::local::Db>) -> Vec<AuditLogEntry> {
+    SurrealAuditLogRepository::new(db.clone())
+        .list_system(
+            AuditLogFilter {
+                action: Some(axiam_api_rest::handlers::tenants::TENANT_PURGED_ACTION.into()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 10,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+}
+
+/// The sweep purges a tombstoned tenant — its rows, then its row — leaves a
+/// live tenant alone, sweeps an orphaned tenant id (rows left by a deletion
+/// made before the tombstone) only when asked to look for orphans, and records
+/// each purge in the system log as `tenants.purged`.
+#[tokio::test]
+async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_records_it() {
+    let db = setup_db().await;
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org".into(),
+            slug: "purge-sweep".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let tombstoned = tenant_with_a_user(&db, org, "tombstoned").await;
+    let orphan = tenant_with_a_user(&db, org, "orphan").await;
+    let live = tenant_with_a_user(&db, org, "live").await;
+    tenants.delete(tombstoned).await.unwrap();
+    db.query("DELETE type::record('tenant', $id)")
+        .bind(("id", orphan.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    // A tick that does not look for orphans purges the tombstoned tenant only.
+    assert_eq!(
+        sweep_tenant_purge(&tenants, &audit, false).await.unwrap(),
+        1
+    );
+    assert_eq!(users_in(&db, tombstoned).await, 0);
+    assert!(tenants.list_tombstoned().await.unwrap().is_empty());
+    assert_eq!(users_in(&db, orphan).await, 1);
+
+    // The tick that looks finds the orphan.
+    assert_eq!(sweep_tenant_purge(&tenants, &audit, true).await.unwrap(), 1);
+    assert_eq!(users_in(&db, orphan).await, 0);
+    // Nothing is left to do, and the live tenant was never touched.
+    assert_eq!(sweep_tenant_purge(&tenants, &audit, true).await.unwrap(), 0);
+    assert_eq!(users_in(&db, live).await, 1);
+    assert!(tenants.get_by_id(live).await.is_ok());
+
+    let records = purged_records(&db).await;
+    let of = |id: Uuid| records.iter().find(|e| e.resource_id == Some(id));
+    assert_eq!(of(tombstoned).unwrap().metadata["orphan"], false);
+    assert_eq!(of(orphan).unwrap().metadata["orphan"], true);
+    assert!(of(live).is_none());
+}

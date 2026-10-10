@@ -467,6 +467,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "certificate_revocation_date",
         sql: SCHEMA_V90,
     },
+    Migration {
+        version: 91,
+        name: "tenant_tombstone",
+        sql: SCHEMA_V91,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4582,9 +4587,131 @@ DEFINE INDEX IF NOT EXISTS idx_cert_issuer_status ON TABLE certificate FIELDS is
 DEFINE INDEX IF NOT EXISTS idx_ca_cert_parent_status ON TABLE ca_certificate FIELDS parent_ca_id, status;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v91 — tenant tombstone (#523, P23W2-04, D-4)
+// -----------------------------------------------------------------------
+//
+// Deleting a tenant now stamps `deleted_at` instead of removing the row: the
+// tenant leaves every read path at once (each `SurrealTenantRepository` read
+// and the settings repository's tenant lookup filter on `deleted_at = NONE`),
+// its sessions and refresh tokens are revoked in the same request, and the
+// cleanup job's `tenant_purge` sweep then removes every tenant-scoped row in
+// the order user erasure uses (`repository::tenant_purge`) and the tenant row
+// last. The index serves that sweep's read of the tombstoned tenants. Additive:
+// one optional column and one index; no row is rewritten, so every tenant that
+// exists keeps `deleted_at = NONE` and stays live.
+const SCHEMA_V91: &str = "\
+DEFINE FIELD IF NOT EXISTS deleted_at ON TABLE tenant TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_tenant_deleted_at ON TABLE tenant FIELDS deleted_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tables some migration gives `field`, minus the tables a migration
+    /// removes again (`srp_credential`).
+    fn tables_defining(field: &str) -> std::collections::BTreeSet<String> {
+        let mut defined = std::collections::BTreeSet::new();
+        let mut removed = std::collections::BTreeSet::new();
+        for migration in MIGRATIONS {
+            let words: Vec<&str> = migration.sql.split_whitespace().collect();
+            for (i, pair) in words.windows(2).enumerate() {
+                let rest = &words[i + 2..];
+                let skip = |rest: &[&str]| {
+                    rest.iter()
+                        .position(|w| !matches!(*w, "IF" | "NOT" | "EXISTS" | "OVERWRITE"))
+                        .unwrap_or(rest.len())
+                };
+                if pair == ["DEFINE", "FIELD"] {
+                    let rest = &rest[skip(rest)..];
+                    if rest.first() != Some(&field) || rest.get(1) != Some(&"ON") {
+                        continue;
+                    }
+                    let rest = &rest[2..];
+                    let rest = if rest.first() == Some(&"TABLE") {
+                        &rest[1..]
+                    } else {
+                        rest
+                    };
+                    if let Some(table) = rest.first() {
+                        defined.insert(table.trim_end_matches(';').to_string());
+                    }
+                } else if pair == ["REMOVE", "TABLE"] {
+                    let rest = &rest[skip(rest)..];
+                    if let Some(table) = rest.first() {
+                        removed.insert(table.trim_end_matches(';').to_string());
+                    }
+                }
+            }
+        }
+        defined.difference(&removed).cloned().collect()
+    }
+
+    /// #523 (D-4) — the schema-scan pin: every table with a `tenant_id` field,
+    /// and every table keyed by `scope`/`scope_id`, is in the tenant purge,
+    /// keyed the way its rows name their tenant; and the purge names no table
+    /// the schema does not scope to a tenant. A tenant-scoped table added
+    /// without a purge step fails here instead of outliving its tenant.
+    #[test]
+    fn every_tenant_scoped_table_is_purged() {
+        use crate::repository::tenant_purge::{TENANT_PURGE_ORDER, TenantKey};
+
+        let by_tenant = tables_defining("tenant_id");
+        let by_scope = tables_defining("scope_id");
+        assert!(by_tenant.contains("user") && by_tenant.contains("session"));
+        assert!(by_scope.contains("email_config"));
+        assert!(
+            !by_tenant.contains("srp_credential"),
+            "a removed table is not purged"
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        for step in TENANT_PURGE_ORDER {
+            assert!(seen.insert(step.table), "{} is purged twice", step.table);
+            let expected = if by_tenant.contains(step.table) {
+                TenantKey::TenantId
+            } else if by_scope.contains(step.table) {
+                TenantKey::Scope
+            } else {
+                panic!(
+                    "{} is purged but no migration scopes it to a tenant",
+                    step.table
+                );
+            };
+            assert_eq!(step.key, expected, "{} is keyed wrongly", step.table);
+        }
+        for table in by_tenant.iter().chain(by_scope.iter()) {
+            assert!(
+                seen.contains(table.as_str()),
+                "{table} is tenant-scoped but not in TENANT_PURGE_ORDER: a deleted \
+                 tenant's rows would survive the purge (#523)"
+            );
+        }
+    }
+
+    /// #523 (D-4) — v91 adds the tenant tombstone column and its index, and
+    /// rewrites no row: every existing tenant stays live.
+    #[test]
+    fn v91_adds_only_the_tenant_tombstone() {
+        for statement in SCHEMA_V91.lines().filter(|l| l.starts_with("DEFINE")) {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v91 statements must be idempotent definitions: {statement}"
+            );
+            assert!(
+                statement.contains("ON TABLE tenant ") && statement.contains("deleted_at"),
+                "v91 defined something outside its scope: {statement}"
+            );
+        }
+        assert!(SCHEMA_V91.contains("deleted_at ON TABLE tenant TYPE option<datetime>"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V91.contains(forbidden),
+                "v91 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
 
     /// #565 (T-102) — v90 adds the revocation date to both certificate tables
     /// and the two indexes the revocation list reads, and rewrites no row.
@@ -5887,8 +6014,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&90),
-            "v90 is the newest migration (#565, T-102 — `revoked_at` on `certificate` and \
+            Some(&91),
+            "v91 is the newest migration (#523, D-4 — `tenant.deleted_at`, the tombstone a \
+             tenant deletion stamps before the cleanup job purges the tenant's rows; v90 was \
+             #565, T-102 — `revoked_at` on `certificate` and \
              `ca_certificate`, the date a certificate revocation list entry carries; v84 was \
              the W5 F4 review, T-418 / D-73 — \
              `scim_target_state.failure_notified_at`, one SCIM failure mail per target per \

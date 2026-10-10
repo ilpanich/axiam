@@ -63,15 +63,15 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.38.0",
  "diagramCount": 10,
- "total": 471,
+ "total": 472,
  "open": 20,
- "mitigated": 430,
+ "mitigated": 431,
  "notApplicable": 21,
  "areas": [
   {
    "id": 0,
    "title": "System diagram",
-   "total": 33,
+   "total": 34,
    "open": 2,
    "notApplicable": 0
   },
@@ -160,7 +160,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 110,
+   "total": 111,
    "open": 6,
    "notApplicable": 4
   },
@@ -192,7 +192,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Medium",
-   "total": 197,
+   "total": 198,
    "open": 8,
    "notApplicable": 9
   },

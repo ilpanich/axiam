@@ -59,6 +59,7 @@ mod ssf_step_up;
 mod ssf_stream;
 mod sso_handoff_code;
 mod tenant;
+pub mod tenant_purge;
 mod user;
 mod webauthn_attestation_policy;
 mod webauthn_credential;

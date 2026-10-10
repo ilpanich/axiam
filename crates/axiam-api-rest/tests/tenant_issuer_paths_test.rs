@@ -246,6 +246,19 @@ async fn setup() -> Fixture {
     setup_with(None).await
 }
 
+/// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
+/// counter pro-rates a peer first seen partway through a minute, so at the
+/// shipped 30 a test that starts late in the minute is refused after as few as
+/// three authorization requests (#532). The limit is pinned by
+/// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
+fn permissive_rate_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        end_session_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 /// The app, with the flag in whichever position the test is about.
 ///
 /// `$paths` is the *only* difference between the two modes — one boolean on
@@ -267,7 +280,7 @@ macro_rules! test_app {
                 .configure(|cfg| {
                     register_api_v1_routes_with::<TestDb>(
                         cfg,
-                        &RateLimitConfig::default(),
+                        &permissive_rate_limits(),
                         RouteOptions {
                             tenant_issuer_paths: $paths,
                             ..RouteOptions::default()

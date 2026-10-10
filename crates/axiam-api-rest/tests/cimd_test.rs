@@ -200,9 +200,12 @@ fn cimd_policy(publisher_host: &str) -> SetOrgSettings {
     }
 }
 
+/// `end_session_per_min` sizes the `oauth2_authorize` bucket, which the shared
+/// counter pro-rates for a peer first seen late in a minute (#532).
 fn permissive_rate_limits() -> RateLimitConfig {
     RateLimitConfig {
         dcr_per_min: 1_000,
+        end_session_per_min: 100_000,
         ..RateLimitConfig::default()
     }
 }

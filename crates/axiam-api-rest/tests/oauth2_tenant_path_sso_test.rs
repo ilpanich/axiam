@@ -158,6 +158,19 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     (db, org.id, tenant_id, user_id)
 }
 
+/// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
+/// counter pro-rates a peer first seen partway through a minute, so at the
+/// shipped 30 a test that starts late in the minute is refused after as few as
+/// three authorization requests (#532). The limit is pinned by
+/// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
+fn permissive_rate_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        end_session_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 /// The app, with per-tenant issuer paths on and the tenant-scope resolver the
 /// production server registers — what makes `X-Axiam-Tenant` work for an
 /// organization-level principal. No session validator: the admin tokens these
@@ -165,7 +178,7 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
 /// `oauth2_login_hop_test.rs`.
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {
-        test_app!($db, $auth, RateLimitConfig::default())
+        test_app!($db, $auth, permissive_rate_limits())
     };
     ($db:expr, $auth:expr, $limits:expr) => {{
         test::init_service(

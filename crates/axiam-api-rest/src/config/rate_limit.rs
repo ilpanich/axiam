@@ -495,6 +495,11 @@ pub struct RateLimitConfig {
     /// scripting mass logouts against guessed sessions is not free — though
     /// the real defence there is that an unverifiable `id_token_hint` ends
     /// nothing at all.
+    ///
+    /// It is also the **browser-endpoint preset**: the same number bounds
+    /// `/oauth2/authorize` (both mounts, bucket `oauth2_authorize` — #532),
+    /// the `/oauth2/authorize/logout` hop and the SAML IdP's browser routes,
+    /// each under a bucket of its own.
     pub end_session_per_min: u32,
     /// Max `POST /oauth2/register` requests per minute per IP (default: 5 —
     /// T21.4). Deliberately **not** part of [`MachineLimitPreset`]: the preset

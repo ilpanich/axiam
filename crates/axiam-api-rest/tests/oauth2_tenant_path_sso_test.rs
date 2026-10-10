@@ -1906,6 +1906,74 @@ async fn p23w1_10_the_cookie_hop_is_get_only_public_and_rate_limited() {
     );
 }
 
+/// **#532 (P23W3-09): `/oauth2/authorize` is rate-limited on both mounts**
+/// (§7 rule 6). The browser-endpoint preset `end_session_per_min` — here one
+/// request a minute — bounds the bare and the tenant mount alike, so the second
+/// request on either is `429`. Both draw on one allowance (`oauth2_authorize`,
+/// registered by both scopes), and that allowance is the authorization
+/// endpoint's own: spending it leaves the logout hop's bucket untouched.
+#[actix_rt::test]
+async fn p23w3_09_authorize_is_rate_limited_on_both_mounts() {
+    let limits = || RateLimitConfig {
+        end_session_per_min: 1,
+        ..RateLimitConfig::default()
+    };
+    let call = |uri: &str| {
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(uri)
+            .to_request()
+    };
+
+    // The bare mount first, then the tenant mount on the same allowance.
+    let (db, _org_id, tenant_id, _user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let limited = test_app!(db, auth, limits());
+    let bare = format!(
+        "/oauth2/authorize?tenant_id={tenant_id}&{}",
+        tenant_query("c")
+    );
+    let tenant = format!("{}?{}", tenant_path(tenant_id), tenant_query("c"));
+    let status = |resp: actix_web::dev::ServiceResponse| resp.status().as_u16();
+    assert_ne!(status(test::call_service(&limited, call(&bare)).await), 429);
+    assert_eq!(
+        status(test::call_service(&limited, call(&bare)).await),
+        429,
+        "the bare mount must be bounded"
+    );
+    assert_eq!(
+        status(test::call_service(&limited, call(&tenant)).await),
+        429,
+        "the tenant mount draws on the same allowance"
+    );
+    // A bucket of its own: the logout hop under the same path still answers.
+    assert_eq!(
+        status(
+            test::call_service(
+                &limited,
+                call(&format!("/oauth2/authorize/logout?tenant_id={tenant_id}"))
+            )
+            .await
+        ),
+        200,
+        "the authorization endpoint's bucket is not the logout hop's"
+    );
+
+    // The tenant mount on a fresh deployment: bounded on its own.
+    let (db, _org_id, tenant_id, _user_id) = setup_db().await;
+    let limited = test_app!(db, auth, limits());
+    let tenant = format!("{}?{}", tenant_path(tenant_id), tenant_query("c"));
+    assert_ne!(
+        status(test::call_service(&limited, call(&tenant)).await),
+        429
+    );
+    assert_eq!(
+        status(test::call_service(&limited, call(&tenant)).await),
+        429,
+        "the tenant mount must be bounded"
+    );
+}
+
 /// **Server-side revocation of somebody else's session** cannot clear that
 /// browser's cookies — it is not the browser on the line. What it guarantees
 /// instead is that the copy resolves to nothing once the row is gone. Here

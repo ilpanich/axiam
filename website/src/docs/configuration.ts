@@ -469,7 +469,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
-            "Max /oauth2/end_session per minute — and the same preset for the SAML identity provider's browser endpoints (sign-on, metadata, single logout /slo and the logout trigger), each in a bucket of its own so a flood on one cannot spend another's allowance. Never moved by a profile preset.",
+            "Max /oauth2/end_session per minute — and the same browser-endpoint preset for /oauth2/authorize (both the bare and the per-tenant mount) and the SAML identity provider's browser endpoints (sign-on, metadata, single logout /slo and the logout trigger), each in a bucket of its own so a flood on one cannot spend another's allowance. Per IP; raise it where many people start sign-ins from one address. Never moved by a profile preset.",
             "30",
           ],
           [

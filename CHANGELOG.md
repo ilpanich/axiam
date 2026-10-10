@@ -249,6 +249,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dcr_allowed_scopes` reaches a dynamically registered client's grants at its
   next `PUT`, which must drop the scope. Threat model 2.38.0: T-55 and T-289
   amended; totals unchanged.
+- **`/oauth2/authorize` is rate-limited** (#532, P23W3-09). The authorization
+  endpoint, bare and on the per-tenant mount (`/t/{tenant_id}/oauth2/authorize`),
+  carried no limiter, although every request reads the client, one carrying the
+  sign-in cookie also reads the session and the account, and on a tenant with
+  Client ID Metadata Documents a new URL-shaped `client_id` costs an outbound
+  fetch. Both mounts now carry the browser-endpoint preset the SAML sign-on
+  routes use, `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` (default 30 a minute per
+  IP, never moved by a profile), in a bucket of their own (`oauth2_authorize`)
+  that the two mounts share. **Behaviour change / upgrade notes:** a 31st
+  authorization request in a minute from one address is answered `429`; where
+  many people start sign-ins behind one NAT or proxy address, or a conformance
+  or load rig drives authorizations from one host, raise that knob. It also
+  sizes `/oauth2/end_session` and the SAML browser routes, each in its own
+  bucket.
 
 ### Documentation
 

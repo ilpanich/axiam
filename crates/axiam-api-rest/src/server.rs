@@ -1952,8 +1952,21 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             // rather than with actix's deserializer prose. Every other query
             // this extractor cannot read keeps the response it has always
             // had; see `handlers::oauth2::authorize_query_error`.
+            //
+            // #532 (P23W3-09, §7 rule 6): the browser-endpoint preset
+            // `end_session_per_min`, per IP, under a bucket of its own
+            // (`oauth2_authorize`) — the one the SAML SSO routes use. Every
+            // request reads the client, one carrying the sign-in cookie also
+            // reads the session and the account, and on a CIMD tenant a new
+            // URL-shaped `client_id` costs an outbound fetch. Both mounts
+            // register the one name, so alternating paths buys nothing.
             .service(
                 web::resource("/authorize")
+                    .wrap(build_governor(rate_limit_cfg.end_session_per_min))
+                    .wrap(RateLimitShared::<C>::new(
+                        "oauth2_authorize",
+                        rate_limit_cfg.end_session_per_min,
+                    ))
                     .app_data(
                         web::QueryConfig::default()
                             .error_handler(handlers::oauth2::authorize_query_error),

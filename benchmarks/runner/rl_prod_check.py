@@ -196,7 +196,15 @@ ENDPOINTS = {
     # the limiter and the cap, not registration. docs/methodology.md §3 has the
     # full reasoning, beside the CIMD omission.
     "dcr_per_min": (None, "POST /oauth2/register (RFC 7591 dynamic client registration)"),
-    "end_session_per_min": (None, "GET|POST /oauth2/end_session (OIDC RP-initiated logout)"),
+    # The browser-endpoint preset: one knob, a bucket per route. #532 put
+    # `/oauth2/authorize` (both mounts) under it, so `oauth2_authorize.js` and
+    # `oauth2_code_pkce.js` meet this ceiling at `rl=prod`; a scenario that
+    # graded the family would need to own one of those routes alone.
+    "end_session_per_min": (
+        None,
+        "GET|POST /oauth2/end_session (OIDC RP-initiated logout); also GET /oauth2/authorize "
+        "and /oauth2/authorize/logout, and the SAML IdP browser routes, each in its own bucket",
+    ),
     # The six /auth/webauthn/* routes carried NO limiter until alpha38, so this
     # family could not appear here even as "not checked" — a knob that does not
     # exist cannot be extracted or compared, which is precisely how an

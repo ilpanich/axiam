@@ -1108,10 +1108,19 @@ previous_release_tag() {
   printf '%s' "$t"
 }
 
-# Uppercase the first character of $1, leaving the rest untouched.
+# Uppercase the first character of $1, leaving the rest untouched -- unless its
+# first word is not a plain lowercase word. Commit subjects often open with an
+# identifier, and the changelog must spell it as the code does: capitalizing
+# printed "Tls_client_auth accepts only ...", "Rl-prod-check lists ..." and
+# "Claims.id_token.sub is honoured ..." into the 1.0.0 section.
 capitalize() {
   local s="$1"
   [[ -n "$s" ]] || return 0
+  local plain='^[a-z]+[,:;]?$'
+  if [[ ! "${s%% *}" =~ $plain ]]; then
+    printf '%s' "$s"
+    return 0
+  fi
   printf '%s%s' "$(printf '%s' "${s:0:1}" | tr '[:lower:]' '[:upper:]')" "${s:1}"
 }
 

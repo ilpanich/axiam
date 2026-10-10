@@ -127,7 +127,7 @@ links out to `docs/`, `sdks/CONTRACT.md` and the specs for anything binding.
 
 All design/planning documents live in `claude_dev/`:
 - [`claude_dev/design-document.md`](claude_dev/design-document.md) — Architecture, data model, flows, security
-- [`claude_dev/roadmap.md`](claude_dev/roadmap.md) — 64 tasks across 16 phases
+- [`claude_dev/roadmap.md`](claude_dev/roadmap.md) — 218 tasks across 25 phases (Phase 24 is the 1.0.0 release)
 
 ## Development Process
 

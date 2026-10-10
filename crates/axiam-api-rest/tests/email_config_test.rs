@@ -1168,7 +1168,13 @@ async fn p23w2_05_an_omitted_api_key_is_kept_only_for_the_same_endpoint() {
     const FIRST: &str = "https://93.184.216.34/emails";
     const OTHER: &str = "https://93.184.216.35/emails";
 
-    let (status, body) = put(&app, &uri, &token, resend(Some(FIRST), Some(test_secret().as_str()))).await;
+    let (status, body) = put(
+        &app,
+        &uri,
+        &token,
+        resend(Some(FIRST), Some(test_secret().as_str())),
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     let (status, body) = put(&app, &uri, &token, resend(Some(FIRST), None)).await;
     assert_eq!(status, 200, "{body}");
@@ -1177,10 +1183,7 @@ async fn p23w2_05_an_omitted_api_key_is_kept_only_for_the_same_endpoint() {
     let (status, body) = put(&app, &uri, &token, resend(Some(OTHER), None)).await;
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["error"], "validation_error", "{body}");
-    assert_eq!(
-        stored_key().await,
-        (test_secret(), Some(FIRST.to_owned()))
-    );
+    assert_eq!(stored_key().await, (test_secret(), Some(FIRST.to_owned())));
 
     // Back to the kind's own endpoint: kept.
     let (status, body) = put(&app, &uri, &token, resend(None, None)).await;

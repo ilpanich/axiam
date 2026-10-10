@@ -347,6 +347,8 @@ describe("ScimTargetsPage — edit", () => {
     const [url, body] = apiMock.put.mock.calls[0];
     expect(url).toBe(`${TARGETS}/s1`);
     expect(body).not.toHaveProperty("credential");
+    // The version the form was opened from travels with the replacement (T-416).
+    expect(body).toHaveProperty("expected_updated_at", "2026-10-01T00:00:00Z");
     expect(body).toMatchObject({
       name: "HR (renamed)",
       base_url: "https://scim.example.com/scim/v2",
@@ -437,6 +439,14 @@ describe("ScimTargetsPage — edit", () => {
       await screen.findByText(/Switching the authentication kind requires the client secret/),
     ).toBeInTheDocument();
     expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("sends the updated_at the form was opened from as expected_updated_at", async () => {
+    const dialog = await openEdit("Okta");
+    apiMock.put.mockResolvedValue(res(oauthTarget));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put.mock.calls[0][1].expected_updated_at).toBe(oauthTarget.updated_at);
   });
 
   it("shows a conflict from an overtaken save inside the dialog", async () => {

@@ -513,7 +513,12 @@ export function ScimTargetsPage() {
     e.preventDefault();
     setEditError("");
     if (!editTarget) return;
-    const payload = inputFrom(editForm);
+    // The version the form was opened from, so an edit overtaken by another
+    // administrator is a 409 and not a silent overwrite (T-416).
+    const payload: ScimTargetInput = {
+      ...inputFrom(editForm),
+      expected_updated_at: editTarget.updated_at,
+    };
     const reason = credentialRequiredFor(editTarget, payload);
     if (reason && !payload.credential) {
       setEditError(

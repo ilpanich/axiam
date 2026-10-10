@@ -336,6 +336,11 @@ the tenant is the token's.
 - `GET`/`PUT`/`DELETE /api/v1/scim-targets/{id}`
 - `POST /api/v1/scim-targets/{id}/reconcile` — reconcile now (`202`)
 
+`PUT` is a replacement. Send the `updated_at` you read as `expected_updated_at`
+and a target changed since is a `409` (reload and retry) instead of a silent
+overwrite of another administrator's edit; omitted, the write is conditional only
+on the version the server reads during the request, so the last writer wins.
+
 Contract [§31](../../sdks/CONTRACT.md#§31-outbound-scim-targets-management-api-contract-157);
 website [Outbound SCIM provisioning](https://ilpanich.github.io/axiam/#/docs/scim-outbound).
 

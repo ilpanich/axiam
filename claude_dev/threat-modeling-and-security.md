@@ -144,6 +144,17 @@
 > a snapshot test of the five before their first run; the entry cites both.
 > Status and totals are unchanged.
 >
+> **The SCIM target `PUT` can carry the version (`1.0.0`, #555, P23W5-09 —
+> T-416 amended, still Mitigated).** The administrators' `PUT` was conditional
+> on the version the server read during the request, so two administrators who
+> opened the edit form at the same version both saved and the second silently
+> replaced the first's scope, mapping or deprovision policy. `ScimTargetInput`
+> now takes an optional `expected_updated_at`: when present the replacement
+> lands only if the target still has that version, else `409`, and the console
+> sends the `updated_at` it read. A body without it behaves as before — last
+> writer wins — which is the residual the entry now names for SDKs and scripts
+> until contract 1.60 gives them the field. Status and totals are unchanged.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):

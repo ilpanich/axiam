@@ -1199,6 +1199,81 @@ async fn two_reads_then_two_writes_the_second_is_a_conflict() {
     assert_eq!(repo.get(w.tenant_id, target.id).await.unwrap().name, "A");
 }
 
+/// P23W5-09 (T-416): the version the client read travels in the body, so two
+/// administrators who opened the form at the same version cannot both save.
+#[actix_rt::test]
+async fn two_puts_carrying_the_same_expected_updated_at_the_second_is_409() {
+    let w = world().await;
+    let app = app!(w.state(), w);
+    let token = w.admin_token();
+    let (target, _) = w.target(w.tenant_id, true).await;
+    let uri = target_uri(&target.id.to_string());
+    let read = w
+        .repo()
+        .get(w.tenant_id, target.id)
+        .await
+        .unwrap()
+        .updated_at;
+
+    let versioned = |name: &str| {
+        let mut body = bearer_body(name, None);
+        body["expected_updated_at"] = json!(read);
+        body
+    };
+    let (status, body) = send(
+        &app,
+        request(Method::PUT, &uri, Some(&token)).set_json(versioned("First")),
+    )
+    .await;
+    assert_eq!(status, 200, "the first save of the version lands: {body}");
+    let (status, body) = send(
+        &app,
+        request(Method::PUT, &uri, Some(&token)).set_json(versioned("Second")),
+    )
+    .await;
+    assert_eq!(status, 409, "the second save of the same version: {body}");
+    assert!(json_of(&body).to_string().contains("changed"));
+    let stored = w.repo().get(w.tenant_id, target.id).await.unwrap();
+    assert_eq!(
+        stored.name, "First",
+        "the first administrator's edit survives"
+    );
+
+    // The version the first save produced is the next one to hold.
+    let mut body = bearer_body("Third", None);
+    body["expected_updated_at"] = json!(stored.updated_at);
+    let (status, text) = send(
+        &app,
+        request(Method::PUT, &uri, Some(&token)).set_json(body),
+    )
+    .await;
+    assert_eq!(status, 200, "{text}");
+}
+
+/// Additive: a body without the field is unchanged — conditional on the
+/// version the server reads during the request, last-writer-wins between
+/// administrators who each reload.
+#[actix_rt::test]
+async fn a_put_without_expected_updated_at_still_works() {
+    let w = world().await;
+    let app = app!(w.state(), w);
+    let token = w.admin_token();
+    let (target, _) = w.target(w.tenant_id, true).await;
+    let uri = target_uri(&target.id.to_string());
+    for name in ["One", "Two"] {
+        let (status, body) = send(
+            &app,
+            request(Method::PUT, &uri, Some(&token)).set_json(bearer_body(name, None)),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(
+        w.repo().get(w.tenant_id, target.id).await.unwrap().name,
+        "Two"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tenant isolation, permissions, human-only
 // ---------------------------------------------------------------------------

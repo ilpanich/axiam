@@ -31,6 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gets no approval mail and cannot reach the page) no longer holds. T-446, T-431
   and T-447 are amended (statuses unchanged).
 
+### Changed
+
+- **The SCIM target `PUT` can be made conditional on the version the
+  administrator read (#555, P23W5-09).** `PUT /api/v1/scim-targets/{id}` was
+  conditional only on the version the server read during the request, so two
+  administrators who opened the edit form at the same version both saved and the
+  second silently replaced the first's scope, mapping or deprovision policy.
+  `ScimTargetInput` gains an optional `expected_updated_at` (the `updated_at` the
+  client read): when present and the target has changed since, the answer is
+  `409` and nothing is written. The field is additive and ignored on create; a
+  body without it behaves exactly as before (last writer wins), so existing
+  clients and scripts keep working. The console now sends the `updated_at` its
+  edit form was opened from. The client SDKs gain the field with contract 1.60.
+  T-416 is amended (status unchanged).
+
 ### Fixed
 
 - **The benchmark stacks publish their ports on loopback, not on every interface

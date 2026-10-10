@@ -53,8 +53,19 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
-/// Test-only 32-byte email encryption key — not a real credential. gitleaks:allow
-const TEST_EMAIL_KEY: [u8; 32] = [0x42; 32];
+/// Test-only 32-byte email encryption key, generated once per process: the
+/// app under test and the repositories a test reads back with must share it,
+/// and a constant key is what secret scanners flag.
+fn test_email_key() -> [u8; 32] {
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *KEY.get_or_init(|| {
+        let bytes: Vec<u8> = [Uuid::new_v4(), Uuid::new_v4()]
+            .iter()
+            .flat_map(|id| *id.as_bytes())
+            .collect();
+        bytes.try_into().expect("two UUIDs are 32 bytes")
+    })
+}
 
 /// Test-only placeholder password — not a real credential.
 /// A per-process generated secret (never a literal: secret scanners flag one).
@@ -254,7 +265,7 @@ macro_rules! test_app {
                     let mut state = AppState::for_test($db.clone(), $auth.clone());
                     state.mail.email_config_repo = Some(SurrealEmailConfigRepository::new(
                         $db.clone(),
-                        TEST_EMAIL_KEY,
+                        test_email_key(),
                     ));
                     state.mail.egress = $egress;
                     state
@@ -552,7 +563,7 @@ async fn org_email_config_omitted_secret_preserves_stored_password() {
 
     // Verify the preserved secret directly via the repository (D-02) — the
     // HTTP layer never re-exposes it (D-01).
-    let repo = SurrealEmailConfigRepository::new(db.clone(), TEST_EMAIL_KEY);
+    let repo = SurrealEmailConfigRepository::new(db.clone(), test_email_key());
     let stored = repo
         .get_org_config(org_id)
         .await
@@ -772,7 +783,7 @@ async fn each_refused_class_is_refused_when_a_tenant_saves_it() {
             }
         }
     }
-    let repo = SurrealEmailConfigRepository::new(db.clone(), TEST_EMAIL_KEY);
+    let repo = SurrealEmailConfigRepository::new(db.clone(), test_email_key());
     assert!(
         repo.get_tenant_override(tenant_id).await.unwrap().is_none(),
         "no refused provider was stored"
@@ -882,7 +893,7 @@ async fn the_test_endpoint_answers_generically_for_a_refused_or_unreachable_prov
     let authz = make_authz(&db);
     let admin_id = create_admin(&db, tenant_id).await;
     let token = mint_token(&auth, admin_id, tenant_id, org_id);
-    let repo = SurrealEmailConfigRepository::new(db.clone(), TEST_EMAIL_KEY);
+    let repo = SurrealEmailConfigRepository::new(db.clone(), test_email_key());
     let mut org_config: axiam_core::models::email::SetOrgEmailConfig =
         serde_json::from_value(sample_smtp_config_body(&test_secret())).unwrap();
     org_config.enabled = true;
@@ -984,7 +995,7 @@ async fn stored_smtp_password(
     org_id: Uuid,
     tenant_id: Uuid,
 ) -> String {
-    let repo = SurrealEmailConfigRepository::new(db.clone(), TEST_EMAIL_KEY);
+    let repo = SurrealEmailConfigRepository::new(db.clone(), test_email_key());
     let provider = if scope == "org" {
         repo.get_org_config(org_id).await.unwrap().unwrap().provider
     } else {
@@ -1152,7 +1163,7 @@ async fn p23w2_05_an_omitted_api_key_is_kept_only_for_the_same_endpoint() {
         serde_json::json!({ "provider": provider })
     };
     let stored_key = || async {
-        let repo = SurrealEmailConfigRepository::new(db.clone(), TEST_EMAIL_KEY);
+        let repo = SurrealEmailConfigRepository::new(db.clone(), test_email_key());
         match repo
             .get_tenant_override(tenant_id)
             .await

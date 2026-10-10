@@ -548,12 +548,17 @@ async fn a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire() {
     // Every kept row is revoked, so every sign-in that reads it refuses it;
     // a kept CA no longer holds its key, and a kept leaf no metadata.
     let cert_repo = SurrealCertificateRepository::new(f.db.clone());
-    for leaf in [&revoked_before, &live, &under_tenant_ca, &raced] {
+    for (name, leaf) in [
+        ("revoked_before", &revoked_before),
+        ("live", &live),
+        ("under_tenant_ca", &under_tenant_ca),
+        ("raced", &raced),
+    ] {
         let row = cert_repo
             .get_by_fingerprint_global(&leaf.fingerprint)
             .await
             .expect("a revoked, unexpired leaf is kept");
-        assert_eq!(row.status, CertificateStatus::Revoked, "{}", leaf.subject);
+        assert_eq!(row.status, CertificateStatus::Revoked, "{name}");
     }
     let ca_rows = |query: &'static str| {
         let db = f.db.clone();

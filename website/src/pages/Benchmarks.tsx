@@ -560,7 +560,7 @@ const WHY_AXIAM = [
 ];
 
 const WHY_AXIAM_CONS =
-  "AXIAM is alpha: it has a fraction of Keycloak's protocol surface, extension ecosystem, hosting options and community; Zitadel's resting stack is smaller than ours (SurrealDB + RabbitMQ ride along in every AXIAM deployment); Keycloak wins one whole-stack efficiency cell outright; SurrealDB is a younger storage engine than Postgres by a decade; and every number in this document comes from one consumer laptop until the server-class re-run lands. Choosing AXIAM today means choosing a young system whose performance-per-watt, machine-first design and measurement culture you value over incumbent breadth. That trade is exactly the niche the incumbents leave open — and the measurements above are why we believe the niche is worth serving.";
+  "AXIAM is young — these runs measured 1.0.0-alpha24, and 1.0.0 is its first stable release: it has a fraction of Keycloak's protocol surface, extension ecosystem, hosting options and community; Zitadel's resting stack is smaller than ours (SurrealDB + RabbitMQ ride along in every AXIAM deployment); Keycloak wins one whole-stack efficiency cell outright; SurrealDB is a younger storage engine than Postgres by a decade; and every number in this document comes from one consumer laptop until the server-class re-run lands. Choosing AXIAM today means choosing a young system whose performance-per-watt, machine-first design and measurement culture you value over incumbent breadth. That trade is exactly the niche the incumbents leave open — and the measurements above are why we believe the niche is worth serving.";
 
 /* ---- page -------------------------------------------------------------- */
 

@@ -367,10 +367,30 @@ jobs:
         # So an SDK vendoring a binary can pin what it vendored.
         run: sha256sum * > SHA256SUMS
 
+      # The tag NAME always contains a `-` (`axiam-opaque-v…`), so
+      # `contains(github.ref_name, '-')` would mark even the stable
+      # axiam-opaque-v1.0.0 a prerelease. Strip the namespace first; what is
+      # left has a `-` only when it carries a SemVer pre-release segment.
+      - name: Classify release (stable vs pre-release)
+        id: rel
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#axiam-opaque-v}"
+          prerelease=false
+          if [[ "${version}" == *-* ]]; then prerelease=true; fi
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "axiam-opaque ${version}: prerelease=${prerelease}"
+
+      # make_latest is ALWAYS false: "Latest" belongs to the server's `v*`
+      # release (release.yml). Without this, whichever of the two releases was
+      # created last took it — and with the server release failing on beta17
+      # and beta18, `releases/latest` resolved to this library bundle.
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           fail_on_unmatched_files: true
+          prerelease: ${{ steps.rel.outputs.prerelease }}
+          make_latest: false
           body: |
             Shared OPAQUE (RFC 9807) client core — see `sdks/CONTRACT.md` §23.
 

@@ -581,10 +581,19 @@ jobs:
         env:
           OUTPUT: CHANGELOG.md
 
+      # Every release up to v1.0.0-beta18 was published with prerelease=false
+      # and claimed "Latest", because neither flag was set. A tag is a
+      # prerelease iff it has a SemVer pre-release segment; on `v*` tags the
+      # only `-` that can occur is that separator. This release — and only a
+      # stable one — owns "Latest": release-opaque.yml sets make_latest: false
+      # so the library bundle on `axiam-opaque-v*` can never take it, whichever
+      # of the two workflows finishes last.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         with:
           body_path: CHANGELOG.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           files: |
             axiam-server-x86_64-linux.tar.gz
             axiam-server-aarch64-linux.tar.gz

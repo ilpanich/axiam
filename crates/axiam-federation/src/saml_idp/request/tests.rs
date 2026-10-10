@@ -512,14 +512,17 @@ fn a_signature_anywhere_else_refuses_the_request() {
 
 #[test]
 fn a_signed_redirect_query_verifies_over_the_octets_received() {
-    let query = redirect_query(&request("_q1"), Some("relay/1+2"), sp_key());
+    // Built once: `request` stamps IssueInstant from the clock, so two calls
+    // straddling a second boundary would differ.
+    let original = request("_q1");
+    let query = redirect_query(&original, Some("relay/1+2"), sp_key());
     let parsed = RedirectQuery::parse(&query).expect("splits");
     assert!(parsed.is_signed());
     assert_eq!(parsed.verify_signature(&sp_key().cert_der), Ok(()));
     assert_eq!(parsed.relay_state().as_deref(), Some("relay/1+2"));
     assert_eq!(
         decode_redirect(&parsed.message()).expect("decodes"),
-        request("_q1")
+        original
     );
     assert_eq!(
         parsed.verify_signature(&other_key().cert_der),

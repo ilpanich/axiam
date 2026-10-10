@@ -15,6 +15,7 @@ use rcgen::{
     CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
     SanType,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -945,6 +946,64 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             .await)
     }
 
+    /// Revoke every certificate of a tenant that is being deleted, forwarding
+    /// the `vault_pki` ones to Vault (R1W1-01).
+    ///
+    /// The tenant's leaves are disowned with it: each goes on its issuer's
+    /// revocation list (AXIAM's, or Vault's for a `vault_pki` CA) instead of
+    /// staying valid to every relying party outside AXIAM until it expires.
+    /// The rows themselves outlive the tenant until they expire — the purge
+    /// keeps a revoked, unexpired certificate (`tenant_purge`) — so the lists
+    /// keep naming them and the cleanup job's sweep can still forward a
+    /// revocation Vault did not take here.
+    ///
+    /// One attempt per `vault_pki` leaf inside one [`CUSTODIAN_REVOKE_BUDGET`]
+    /// for all of them, as the sweep does, so a tenant with many leaves and an
+    /// unreachable Vault costs the deletion one timeout, not one per leaf. The
+    /// issuing CA is read once per issuer, not once per leaf.
+    pub async fn revoke_tenant(&self, tenant_id: Uuid) -> AxiamResult<TenantCertificatesRevoked> {
+        let revoked = self.cert_repo.revoke_all_for_tenant(tenant_id).await?;
+        let mut forwards_to_vault: HashMap<Uuid, bool> = HashMap::new();
+        let deadline = tokio::time::Instant::now() + CUSTODIAN_REVOKE_BUDGET;
+        let mut vault_pending = 0usize;
+        for certificate in &revoked {
+            let forwards = match forwards_to_vault.get(&certificate.issuer_ca_id) {
+                Some(forwards) => *forwards,
+                None => {
+                    // An issuer that is gone keeps no list to tell. One that
+                    // could not be read is left to `forward_revocation`, which
+                    // reports it pending for the sweep.
+                    let forwards = match self
+                        .ca_repo
+                        .get_by_issuer_id(certificate.issuer_ca_id)
+                        .await
+                    {
+                        Ok(ca) => {
+                            ca.key_custody == CaKeyCustody::VaultPki
+                                && ca.status == CertificateStatus::Active
+                        }
+                        Err(AxiamError::NotFound { .. }) => false,
+                        Err(_) => true,
+                    };
+                    forwards_to_vault.insert(certificate.issuer_ca_id, forwards);
+                    forwards
+                }
+            };
+            if !forwards {
+                continue;
+            }
+            if let CustodianRevocation::Pending { .. } =
+                self.forward_revocation(certificate, 1, deadline).await
+            {
+                vault_pending += 1;
+            }
+        }
+        Ok(TenantCertificatesRevoked {
+            revoked: revoked.len(),
+            vault_pending,
+        })
+    }
+
     /// One pass of the cleanup job's `vault_revocation` sweep (T-470): forward
     /// to Vault each revocation it does not have yet — one a revoke request
     /// could not forward, and one made without a request (a directory
@@ -1085,6 +1144,17 @@ const SWEEP_BATCH: u32 = 100;
 
 /// How long one sweep pass may spend talking to Vault.
 const SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What [`CertService::revoke_tenant`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TenantCertificatesRevoked {
+    /// Certificates this revoked (an already revoked or expired one is not
+    /// counted).
+    pub revoked: usize,
+    /// Of those, `vault_pki` leaves Vault has not taken yet; the cleanup job's
+    /// sweep forwards them.
+    pub vault_pending: usize,
+}
 
 /// Whether the custodian that signed a revoked certificate has the revocation
 /// too (T-470).

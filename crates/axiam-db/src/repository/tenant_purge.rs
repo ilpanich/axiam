@@ -39,6 +39,26 @@
 //! fails part-way stops there, leaves the tenant tombstoned, and is resumed by
 //! the next sweep; the tenant row goes only after every step succeeded.
 //!
+//! # Revocation evidence outlives the tenant (R1W1-01)
+//!
+//! Two tables are not emptied: `certificate` and `ca_certificate` keep every
+//! **revoked, unexpired** row ([`Retain::RevokedUntilExpiry`]). An issuing CA's
+//! revocation list (`axiam_pki::crl`, T-102) is read from those rows, across
+//! tenants, by issuer; deleting them took a revoked leaf off its organization
+//! CA's list and made it valid again to every relying party outside AXIAM. The
+//! deletion revoked every certificate and signing CA of the tenant already
+//! (the handler, and again the tombstone transaction), and the step revokes
+//! anything still unrevoked first, so after the purge each of the tenant's
+//! unexpired certificates is a revoked row its issuer's list names — and that
+//! every authentication path refuses, since each reads the row's status.
+//!
+//! What is kept is what the list needs and no more: the step clears a
+//! certificate's free-form `metadata` and a CA's sealed private key. The rows
+//! name a tenant id with no tenant row, which is what the orphan scan looks
+//! for; it ignores a kept row until it expires, and then the orphan purge
+//! removes it — the cleanup job deletes the evidence once no relying party can
+//! need it.
+//!
 //! # Completeness is pinned
 //!
 //! `schema::tests::every_tenant_scoped_table_is_purged` scans every migration
@@ -88,6 +108,25 @@ pub enum PurgeStage {
     Configuration,
 }
 
+/// Which of a table's rows the purge keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retain {
+    /// None: every row of the tenant goes.
+    Nothing,
+    /// A revoked certificate whose `not_after` is still ahead — the evidence
+    /// its issuer's revocation list is read from (R1W1-01; see the module
+    /// documentation). Every other row goes; an unrevoked, unexpired row is
+    /// revoked first, and a kept row has `strip` applied (an `UPDATE … SET`
+    /// clause clearing what the list does not need).
+    RevokedUntilExpiry {
+        /// The `SET` clause applied to a kept row.
+        strip: &'static str,
+    },
+}
+
+/// The condition a row the purge keeps satisfies.
+const KEPT_REVOCATION: &str = "status = 'Revoked' AND not_after > time::now()";
+
 /// One table of the purge.
 #[derive(Debug, Clone, Copy)]
 pub struct PurgeStep {
@@ -97,6 +136,8 @@ pub struct PurgeStep {
     pub key: TenantKey,
     /// Where in the erasure order it is purged.
     pub stage: PurgeStage,
+    /// Which rows outlive the purge.
+    pub retain: Retain,
 }
 
 impl PurgeStep {
@@ -105,6 +146,7 @@ impl PurgeStep {
             table,
             key: TenantKey::TenantId,
             stage,
+            retain: Retain::Nothing,
         }
     }
 
@@ -113,20 +155,54 @@ impl PurgeStep {
             table,
             key: TenantKey::Scope,
             stage,
+            retain: Retain::Nothing,
+        }
+    }
+
+    /// A certificate table: keyed by `tenant_id`, keeping revocation evidence
+    /// until it expires.
+    const fn keeping_revocations(
+        table: &'static str,
+        strip: &'static str,
+        stage: PurgeStage,
+    ) -> Self {
+        Self {
+            table,
+            key: TenantKey::TenantId,
+            stage,
+            retain: Retain::RevokedUntilExpiry { strip },
         }
     }
 
     /// The statement that removes the tenant's rows (`$id` is the tenant).
     ///
-    /// The table name is a compile-time constant of [`TENANT_PURGE_ORDER`],
-    /// never input, so formatting it into the statement is safe.
+    /// The table name and a retaining step's `strip` clause are compile-time
+    /// constants of [`TENANT_PURGE_ORDER`], never input, so formatting them
+    /// into the statement is safe.
     fn delete_statement(&self) -> String {
-        match self.key {
-            TenantKey::TenantId => format!("DELETE {} WHERE tenant_id = $id", self.table),
-            TenantKey::Scope => format!(
-                "DELETE {} WHERE scope = 'tenant' AND scope_id = $id",
-                self.table
+        let table = self.table;
+        match (self.key, self.retain) {
+            (TenantKey::TenantId, Retain::Nothing) => {
+                format!("DELETE {table} WHERE tenant_id = $id")
+            }
+            (TenantKey::TenantId, Retain::RevokedUntilExpiry { strip }) => format!(
+                "UPDATE {table} SET status = 'Revoked', revoked_at = revoked_at ?? time::now() \
+                     WHERE tenant_id = $id AND status != 'Revoked' AND not_after > time::now(); \
+                 UPDATE {table} SET {strip} WHERE tenant_id = $id AND {KEPT_REVOCATION}; \
+                 DELETE {table} WHERE tenant_id = $id AND NOT ({KEPT_REVOCATION});"
             ),
+            (TenantKey::Scope, _) => {
+                format!("DELETE {table} WHERE scope = 'tenant' AND scope_id = $id")
+            }
+        }
+    }
+
+    /// The condition, beyond the tenant, a row must meet to be purged — what
+    /// the orphan scan counts.
+    fn purgeable(&self) -> String {
+        match self.retain {
+            Retain::Nothing => "true".into(),
+            Retain::RevokedUntilExpiry { .. } => format!("NOT ({KEPT_REVOCATION})"),
         }
     }
 }
@@ -196,8 +272,14 @@ pub const TENANT_PURGE_ORDER: &[PurgeStep] = &[
     PurgeStep::by_tenant("notification_rule", Configuration),
     PurgeStep::by_tenant("reactor", Configuration),
     PurgeStep::by_tenant("oauth2_client", Configuration),
-    PurgeStep::by_tenant("certificate", Configuration),
-    PurgeStep::by_tenant("ca_certificate", Configuration),
+    // R1W1-01: revocation evidence stays until it expires; see the module
+    // documentation.
+    PurgeStep::keeping_revocations("certificate", "metadata = {}", Configuration),
+    PurgeStep::keeping_revocations(
+        "ca_certificate",
+        "encrypted_private_key = NONE",
+        Configuration,
+    ),
     PurgeStep::by_tenant("pgp_key", Configuration),
     PurgeStep::by_tenant("webauthn_attestation_policy", Configuration),
     PurgeStep::by_tenant("opaque_server_setup", Configuration),
@@ -253,6 +335,9 @@ pub(crate) async fn purge_rows<C: Connection>(
 /// Tenant ids that own rows in a tenant-scoped table (the audit trail aside,
 /// see [`PurgeScope::Orphan`]) but have no tenant row — tombstoned or live.
 ///
+/// A row a purge keeps ([`Retain::RevokedUntilExpiry`]) is not counted until
+/// it expires; then it is, and the orphan purge removes it.
+///
 /// The tables are read **before** the tenant set: a tenant row is written
 /// before any row naming it, so a tenant created while this runs is either
 /// absent from the tables read or present in the set read after them, and is
@@ -288,8 +373,9 @@ pub(crate) async fn orphaned_tenant_ids<C: Connection>(
                 let mut result = db
                     .current()
                     .query(format!(
-                        "SELECT tenant_id FROM {} GROUP BY tenant_id",
-                        step.table
+                        "SELECT tenant_id FROM {} WHERE {} GROUP BY tenant_id",
+                        step.table,
+                        step.purgeable()
                     ))
                     .await?
                     .check()?;

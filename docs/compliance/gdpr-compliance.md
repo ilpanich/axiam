@@ -267,8 +267,8 @@ configuration tables, and left every account, session, credential, consent and
 audit entry of the tenant in the datastore. It is now **tombstone, then purge**
 (decision D-4):
 
-- **In the request** the tenant's sessions and OAuth2 refresh tokens are
-  revoked and `tenant.deleted_at` is set; the tenant is gone from every read,
+- **In the request** the tenant's sessions, OAuth2 refresh tokens,
+  certificates and signing CAs are revoked and `tenant.deleted_at` is set; the tenant is gone from every read,
   sign-in, token issuance and refresh from the `204` on.
 - **The cleanup job's `tenant_purge` sweep** then deletes every row of every
   tenant-scoped table, in the order the purge pipeline above uses — grants and
@@ -280,6 +280,14 @@ audit entry of the tenant in the datastore. It is now **tombstone, then purge**
   entry to resolve to, and the deletion is refused until the tenant's audit
   trail has been exported (T-118), so the controller holds that copy under its
   own retention obligations.
+- **One retention, until expiry:** a revoked certificate or signing CA whose
+  validity has not ended is kept — the certificate as issued, its issuer, serial
+  and dates, with its free-form `metadata` and a CA's sealed key cleared —
+  because its issuer's published revocation list is computed from it, and
+  deleting it would make the certificate valid again to relying parties outside
+  AXIAM (R1W1-01). That is a legal-obligation and security retention (Art.
+  17(3)(b), Art. 32), bounded by the certificate's own `notAfter`; the cleanup
+  job deletes the row then.
 - The system audit log keeps `tenants.deleted` (who deleted it, and the export
   receipt that authorised it) and gains `tenants.purged` when the sweep is done —
   the tenant-level counterpart of an erasure proof.

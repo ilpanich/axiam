@@ -614,9 +614,11 @@ pub async fn update<C: Connection + Clone>(
 
 /// `DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`
 ///
-/// #523 (D-4): the tenant is tombstoned and its sessions and refresh tokens are
-/// revoked before the `204`; its data is purged afterwards by the cleanup job's
-/// `tenant_purge` sweep, on the cleanup interval.
+/// #523 (D-4): the tenant is tombstoned and its sessions, refresh tokens,
+/// certificates and signing CAs are revoked before the `204` (R1W1-01: the
+/// certificates go on their issuers' revocation lists and stay there until they
+/// expire); its data is purged afterwards by the cleanup job's `tenant_purge`
+/// sweep, on the cleanup interval.
 #[utoipa::path(
     delete,
     path = "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
@@ -627,8 +629,8 @@ pub async fn update<C: Connection + Clone>(
     ),
     responses(
         (status = 204, description = "Tenant deleted: it is gone from every read and \
-            sign-in at once, its sessions and refresh tokens are revoked, and its data is \
-            purged by the cleanup job"),
+            sign-in at once, its sessions, refresh tokens, certificates and signing CAs are \
+            revoked, and its data is purged by the cleanup job"),
         (status = 404, description = "Tenant not found"),
     ),
     security(("bearer" = []))
@@ -700,6 +702,19 @@ pub async fn delete<C: Connection + Clone>(
         .refresh_token_repo
         .revoke_all_for_tenant(path.tenant_id)
         .await?;
+    // R1W1-01: and its certificates, then its signing CAs — leaves first, so a
+    // `vault_pki` leaf is forwarded to Vault while its issuer is still there to
+    // take it. A deleted tenant's certificates go on their issuers' revocation
+    // lists, through the same paths a single revocation takes; the purge then
+    // keeps each revoked, unexpired row until it expires, so the lists keep
+    // naming them after the tenant is gone. A Vault forward that did not
+    // complete here is retried by the cleanup job's sweep.
+    let certificates = state.pki.cert_service.revoke_tenant(path.tenant_id).await?;
+    let signing_cas = state
+        .pki
+        .ca_service
+        .revoke_tenant_cas(path.org_id, path.tenant_id)
+        .await?;
     state.tenant_repo.delete(path.tenant_id).await?;
     // This replica stops serving the tenant from memory at once: the refresh
     // path's organization mapping and any session the second pass removed.
@@ -731,6 +746,9 @@ pub async fn delete<C: Connection + Clone>(
                 "tenant_slug": existing.slug,
                 "audit_export_receipt_id": receipt_id,
                 "audit_exported_at": exported_at,
+                "certificates_revoked": certificates.revoked,
+                "vault_revocations_pending": certificates.vault_pending,
+                "signing_cas_revoked": signing_cas,
             })),
         },
     )

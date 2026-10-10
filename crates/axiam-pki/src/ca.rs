@@ -939,6 +939,54 @@ impl<R: CaCertificateRepository> CaService<R> {
         Ok(())
     }
 
+    /// Revoke every active signing CA of a tenant that is being deleted, each
+    /// through [`Self::revoke`] — so its custodian releases the key — and
+    /// return how many (R1W1-01).
+    ///
+    /// A deleted tenant's CA is disowned with it: it goes on its parent's
+    /// revocation list, so every leaf it signed stops chaining for relying
+    /// parties outside AXIAM, instead of staying valid until it expires. Its row
+    /// outlives the tenant until it expires (`tenant_purge` keeps a revoked,
+    /// unexpired CA, without its key), so the parent's list keeps naming it.
+    pub async fn revoke_tenant_cas(
+        &self,
+        organization_id: Uuid,
+        tenant_id: Uuid,
+    ) -> AxiamResult<usize> {
+        const PAGE: u64 = 100;
+        let mut active = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = self
+                .repo
+                .list_by_tenant(
+                    organization_id,
+                    tenant_id,
+                    Pagination {
+                        offset,
+                        limit: PAGE,
+                        search: None,
+                    },
+                )
+                .await?;
+            let read = page.items.len() as u64;
+            active.extend(
+                page.items
+                    .into_iter()
+                    .filter(|ca| ca.status == CertificateStatus::Active)
+                    .map(|ca| ca.id),
+            );
+            offset += read;
+            if read < PAGE || offset >= page.total {
+                break;
+            }
+        }
+        for id in &active {
+            self.revoke(organization_id, *id).await?;
+        }
+        Ok(active.len())
+    }
+
     pub async fn list(
         &self,
         organization_id: Uuid,

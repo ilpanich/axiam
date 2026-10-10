@@ -464,3 +464,156 @@ async fn a_newly_issued_certificate_carries_the_crl_distribution_point() {
         ]
     );
 }
+
+/// R1W1-01: deleting a tenant revokes its certificates and signing CAs, and
+/// the purge keeps every revoked, unexpired one — so each stays on its
+/// issuer's list after the tombstone, after the purge, and until it expires.
+/// Another tenant's leaf under the same CA is untouched throughout.
+///
+/// Before the fix the organization CA's list held the leaf revoked before the
+/// deletion, then nothing at all once the tenant was purged: the purge
+/// un-revoked it for every relying party outside AXIAM, and every leaf the
+/// tenant still held was never revoked in the first place.
+#[tokio::test]
+async fn a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire() {
+    use axiam_core::models::certificate::CertificateStatus;
+    use axiam_core::models::tenant::{CreateTenant, TenantKind};
+    use axiam_core::repository::{CertificateRepository, TenantRepository};
+    use axiam_db::repository::SurrealTenantRepository;
+
+    let mut f = Fixture::new().await;
+    let tenants = SurrealTenantRepository::new(f.db.clone());
+    let tenant = |slug: &'static str| {
+        let tenants = tenants.clone();
+        let org = f.org;
+        async move {
+            tenants
+                .create(CreateTenant {
+                    organization_id: org,
+                    kind: TenantKind::Standard,
+                    name: slug.into(),
+                    slug: slug.into(),
+                    metadata: None,
+                })
+                .await
+                .expect("tenant")
+                .id
+        }
+    };
+    let doomed = tenant("doomed").await;
+    let bystander = tenant("bystander").await;
+
+    let root = f.root(KeyAlgorithm::Ed25519, 365).await;
+    f.tenant = bystander;
+    let bystanders = f.leaf(root.certificate.id, "bystander-device").await;
+    f.tenant = doomed;
+    let tenant_ca = f.tenant_ca(root.certificate.id).await;
+    let revoked_before = f.leaf(root.certificate.id, "revoked-before").await;
+    let live = f.leaf(root.certificate.id, "live").await;
+    let under_tenant_ca = f.leaf(tenant_ca.certificate.id, "under-tenant-ca").await;
+    f.certs.revoke(doomed, revoked_before.id).await.unwrap();
+
+    // What `DELETE …/tenants/{id}` does: the services, then the tombstone.
+    let revoked = f.certs.revoke_tenant(doomed).await.unwrap();
+    assert_eq!(
+        revoked.revoked, 2,
+        "the live leaf and the one under the tenant CA"
+    );
+    assert_eq!(revoked.vault_pending, 0);
+    assert_eq!(f.cas.revoke_tenant_cas(f.org, doomed).await.unwrap(), 1);
+    // A leaf issued while the deletion ran: the tombstone transaction revokes it.
+    let raced = f.leaf(root.certificate.id, "raced").await;
+    tenants.delete(doomed).await.unwrap();
+
+    let crls = f.crl_service(DEFAULT_CRL_NEXT_UPDATE_SECS);
+    let mut expected = vec![
+        serial_of(&revoked_before.public_cert_pem),
+        serial_of(&live.public_cert_pem),
+        serial_of(&tenant_ca.certificate.public_cert_pem),
+        serial_of(&raced.public_cert_pem),
+    ];
+    expected.sort();
+    let listed = |crl: &PublishedCrl| {
+        let mut serials = verified_serials(crl, &root.certificate.public_cert_pem);
+        serials.sort();
+        serials
+    };
+    let crl = crls.current(f.org, root.certificate.id).await.unwrap();
+    assert_eq!(listed(&crl), expected, "after the tombstone");
+
+    tenants.purge_tombstoned(doomed).await.unwrap();
+    let crl = crls.current(f.org, root.certificate.id).await.unwrap();
+    assert_eq!(listed(&crl), expected, "after the purge");
+
+    // Every kept row is revoked, so every sign-in that reads it refuses it;
+    // a kept CA no longer holds its key, and a kept leaf no metadata.
+    let cert_repo = SurrealCertificateRepository::new(f.db.clone());
+    for leaf in [&revoked_before, &live, &under_tenant_ca, &raced] {
+        let row = cert_repo
+            .get_by_fingerprint_global(&leaf.fingerprint)
+            .await
+            .expect("a revoked, unexpired leaf is kept");
+        assert_eq!(row.status, CertificateStatus::Revoked, "{}", leaf.subject);
+    }
+    let ca_rows = |query: &'static str| {
+        let db = f.db.clone();
+        async move {
+            let mut result = db
+                .query(query)
+                .bind(("t", doomed.to_string()))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            let rows: Vec<serde_json::Value> = result.take(0).unwrap();
+            rows
+        }
+    };
+    assert_eq!(
+        ca_rows("SELECT VALUE status FROM ca_certificate WHERE tenant_id = $t").await,
+        vec![serde_json::json!("Revoked")]
+    );
+    assert_eq!(
+        ca_rows(
+            "SELECT VALUE encrypted_private_key = NONE FROM ca_certificate WHERE tenant_id = $t"
+        )
+        .await,
+        vec![serde_json::json!(true)],
+        "a kept CA no longer holds its key"
+    );
+
+    // The bystander's leaf is untouched.
+    let row = cert_repo
+        .get_by_fingerprint_global(&bystanders.fingerprint)
+        .await
+        .unwrap();
+    assert_eq!(row.status, CertificateStatus::Active);
+
+    // Kept rows are not orphans until they expire; then the orphan purge
+    // removes them, and only them.
+    assert!(
+        !tenants
+            .orphaned_tenant_ids()
+            .await
+            .unwrap()
+            .contains(&doomed)
+    );
+    f.db.query("UPDATE certificate SET not_after = time::now() - 1s WHERE fingerprint = $fp")
+        .bind(("fp", revoked_before.fingerprint.clone()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(tenants.orphaned_tenant_ids().await.unwrap(), vec![doomed]);
+    tenants.purge_orphan(doomed).await.unwrap();
+    assert!(matches!(
+        cert_repo
+            .get_by_fingerprint_global(&revoked_before.fingerprint)
+            .await,
+        Err(AxiamError::NotFound { .. })
+    ));
+    let crl = crls.current(f.org, root.certificate.id).await.unwrap();
+    expected.retain(|s| *s != serial_of(&revoked_before.public_cert_pem));
+    assert_eq!(listed(&crl), expected, "an expired entry leaves the list");
+    assert!(tenants.orphaned_tenant_ids().await.unwrap().is_empty());
+}

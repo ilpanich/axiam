@@ -132,6 +132,12 @@ deployment.
 **Severity: Medium. Wave-introduced (the interaction of #523 and #565).
 Proposed for a fix in the wave.**
 
+**Resolution:** fixed in the wave by `fix(pki,tenants): a deleted tenant's
+certificates are revoked and stay on the CRL until they expire (R1W1-01)` — the
+deletion revokes every unexpired certificate and signing CA of the tenant
+(services, then the tombstone transaction), and the purge keeps revoked,
+unexpired rows until `notAfter` (the schema-scan test's one exemption).
+
 **Evidence.**
 * `crates/axiam-api-rest/src/handlers/tenants.rs:686-703` — the deletion revokes
   sessions and refresh tokens, then tombstones. No certificate and no tenant

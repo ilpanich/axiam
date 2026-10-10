@@ -2897,6 +2897,21 @@ pub trait CertificateRepository: Send + Sync {
         limit: u32,
     ) -> impl Future<Output = AxiamResult<Vec<Certificate>>> + Send;
 
+    /// Revoke every certificate of `tenant_id` that is not revoked and not yet
+    /// expired, recording when, and return the certificates this revoked
+    /// (R1W1-01).
+    ///
+    /// What deleting a tenant does to its certificates: a deleted tenant's
+    /// leaves are disowned, so they go on their issuers' revocation lists
+    /// rather than staying valid to every relying party outside AXIAM until
+    /// they expire. Returned so the caller can forward the `vault_pki` ones to
+    /// Vault, as [`Self::revoke`]'s caller does; the cleanup job's sweep
+    /// forwards whatever it could not.
+    fn revoke_all_for_tenant(
+        &self,
+        tenant_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<Certificate>>> + Send;
+
     /// Record that the custodian that signed a revoked certificate has the
     /// revocation too (`vault_revoked_at`, T-470), which takes it out of
     /// [`Self::list_unforwarded_revocations`].

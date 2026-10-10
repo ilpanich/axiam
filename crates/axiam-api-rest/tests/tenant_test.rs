@@ -1466,6 +1466,20 @@ async fn tenant_rows(db: &Surreal<TestDb>, tenant_id: Uuid) -> Vec<(&'static str
     counts
 }
 
+/// The status of `tenant_id`'s one certificate.
+async fn certificate_status(db: &Surreal<TestDb>, tenant_id: Uuid) -> String {
+    let mut result = db
+        .query("SELECT VALUE status FROM certificate WHERE tenant_id = $tenant")
+        .bind(("tenant", tenant_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let statuses: Vec<String> = result.take(0).unwrap();
+    assert_eq!(statuses.len(), 1, "one certificate per populated tenant");
+    statuses.into_iter().next().unwrap()
+}
+
 /// Rows of a graph edge table, all tenants together.
 async fn edges(db: &Surreal<TestDb>, table: &str) -> u64 {
     let mut result = db
@@ -1479,8 +1493,8 @@ async fn edges(db: &Surreal<TestDb>, table: &str) -> u64 {
 /// The issue's test (#523): delete a populated tenant; its last session can no
 /// longer refresh, its access token is refused and nobody can sign in to it,
 /// from the `204` on; the purge then leaves every tenant-scoped table empty for
-/// it — and another tenant of the organization keeps every row and its own
-/// sessions.
+/// it but for its revoked certificate (R1W1-01) — and another tenant of the
+/// organization keeps every row and its own sessions.
 #[actix_rt::test]
 async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table() {
     let (db, org_id, _tenant_id, user_id, org_tenant) = setup_db().await;
@@ -1557,13 +1571,21 @@ async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empt
         tenants.get_by_id(doomed).await.is_err(),
         "gone from every read"
     );
+    // R1W1-01: its certificate is revoked by the deletion, the bystander's is
+    // not.
+    assert_eq!(certificate_status(&db, doomed).await, "Revoked");
+    assert_eq!(certificate_status(&db, bystander).await, "Active");
 
     // The purge (the cleanup job's `tenant_purge` sweep) empties every
-    // tenant-scoped table for the tenant, then removes its row.
+    // tenant-scoped table for the tenant, then removes its row — except the
+    // revoked, unexpired certificate, which its issuer's revocation list must
+    // keep naming until it expires (R1W1-01).
     tenants.purge_tombstoned(doomed).await.unwrap();
     for (table, n) in tenant_rows(&db, doomed).await {
-        assert_eq!(n, 0, "{table} still holds the deleted tenant's rows");
+        let kept = u64::from(table == "certificate");
+        assert_eq!(n, kept, "{table} holds the deleted tenant's rows");
     }
+    assert_eq!(certificate_status(&db, doomed).await, "Revoked");
     assert!(tenants.list_tombstoned().await.unwrap().is_empty());
     // The graph edges went with their records: only the bystander's remain.
     assert_eq!(edges(&db, "member_of").await, 1);

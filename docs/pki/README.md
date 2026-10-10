@@ -1055,6 +1055,21 @@ who validates it:
 | The TLS handshake, on either listener | **No, not yet.** Neither listener's handshake consults the revocation list, so a revoked leaf still completes one. It authenticates nothing by itself — every decision above reads the status — but an access token bound to the certificate (RFC 8705 §3) before the revocation stays usable until it expires. Loading the lists into the listeners' verifiers is planned for `1.0.x` |
 | A relying party that validates AXIAM-issued certificates itself — a FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its own mTLS | **Yes, at its next fetch of the issuer's CRL** — see [Certificate revocation lists](#certificate-revocation-lists). AXIAM runs no OCSP responder, so the delay is the relying party's fetch interval, at most the list's `nextUpdate` |
 
+### Deleting a tenant revokes its certificates
+
+Deleting a tenant (`DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`)
+revokes, before its `204`, every unexpired certificate of the tenant and every
+signing CA of the tenant — through the same paths a single revocation takes, so
+a `vault_pki` leaf is forwarded to Vault and a CA's key is released by its
+custodian — and the tenant purge then **keeps** each revoked, unexpired
+certificate and CA row (without the certificate's `metadata` and without the
+CA's sealed key) until its `notAfter`, when the cleanup job removes it. So a
+deleted tenant's certificates appear on their issuers' lists from the deletion
+until they expire, the ones revoked before the deletion included, and every
+AXIAM sign-in that reads a certificate's status refuses them. Before 1.0.0
+(R1W1-01) a deletion revoked none of them, and the purge deleted the rows, which
+took a leaf revoked before the deletion back off its organization CA's list.
+
 One difference: a CA whose key Vault's PKI engine holds (`vault_pki` custody)
 publishes no list AXIAM signs. Its list is Vault's, and a revocation in AXIAM is
 forwarded to Vault so that list names the leaf (threat **T-470**, mitigated in
@@ -1084,8 +1099,9 @@ GET /pki/v1/{org_id}/ca/{ca_id}/crl
   CRL number and an authority key identifier equal to the CA's subject key
   identifier.
 - **Entries**: every certificate the CA signed and revoked that has not yet
-  expired — its leaves in every tenant, and the subordinate CAs it signed, so an
-  organization CA's list names a revoked tenant signing CA. Each carries the
+  expired — its leaves in every tenant, a deleted tenant's included, and the
+  subordinate CAs it signed, so an organization CA's list names a revoked tenant
+  signing CA. Each carries the
   serial and the revocation date; a certificate revoked before 1.0.0, when the
   date was not yet recorded, is listed from its own `notBefore`. No reason code
   is recorded, so none is listed.

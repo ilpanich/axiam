@@ -318,6 +318,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Deleting a tenant revokes its certificates, and the purge no longer takes
+  them off their issuers' revocation lists (R1W1-01, #523 with #565; T-102,
+  T-472).** A tenant deletion revoked none of the tenant's certificates or
+  signing CAs, and the `tenant_purge` sweep then deleted every `certificate` and
+  `ca_certificate` row of the tenant — so a leaf revoked before the deletion
+  dropped off its organization CA's CRL once the tenant was purged, and the
+  tenant's live leaves stayed valid to every relying party outside AXIAM until
+  they expired. `DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}` now
+  revokes every unexpired certificate of the tenant (forwarding a `vault_pki`
+  leaf to Vault, retried by the `vault_revocation` sweep) and every signing CA of
+  the tenant (releasing its key from the custodian) before the `204`, and the
+  tombstone transaction revokes once more. The purge **keeps** each revoked,
+  unexpired certificate and CA row — its `metadata`, or a CA's sealed key,
+  cleared — until its `notAfter`, so the CRL keeps naming it, and removes it
+  after; every AXIAM sign-in refuses it, as it reads the status. Upgraders: a
+  deleted tenant's certificates now appear on their issuers' CRLs, and a purged
+  tenant leaves revoked certificate rows behind until they expire; the
+  `tenants.deleted` system-log entry gains `certificates_revoked`,
+  `vault_revocations_pending` and `signing_cas_revoked`. The certificates a
+  tenant deletion made before 1.0.0 left behind (the orphan sweep's residue) are
+  revoked and kept the same way when that sweep reaches them, so they too appear
+  on their issuers' CRLs until they expire.
 - **A tarpit SCIM downstream no longer stalls every tenant's outbound provisioning
   on a replica (#550, P23W5-07, T-414).** Each replica's `scim_push` consumer
   makes one delivery at a time, so a target that accepted connections and never

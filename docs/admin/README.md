@@ -236,7 +236,9 @@ A tenant deletion is **tombstone, then purge** (#523; GDPR Art. 17):
 
 1. **In the request**, before the `204`: the tenant's sessions are revoked
    (and published to the revocation feed when it is on) and its OAuth2 refresh
-   tokens are revoked; then the tenant is marked deleted. From that moment it
+   tokens are revoked, and so are its certificates and its signing CAs, which
+   go on their issuers' revocation lists (a `vault_pki` leaf is forwarded to
+   Vault); then the tenant is marked deleted. From that moment it
    is gone from every read — `GET`, the organization's tenant list, sign-in,
    token issuance, refresh — so its users' last sessions cannot refresh and
    their access tokens fail the per-request session check. Its directory, SAML,
@@ -245,10 +247,14 @@ A tenant deletion is **tombstone, then purge** (#523; GDPR Art. 17):
 2. **On the cleanup interval** (`cleanup_interval_secs`, 5 minutes by
    default), the `tenant_purge` sweep removes every row of every
    tenant-scoped table — users and their credentials, sessions and grants,
-   OAuth2 clients, federation and e-mail configuration, webhooks, certificates
-   and CA material, roles, groups, permissions, resources, consents, and the
-   tenant's own audit entries you exported above — in the order the GDPR user
-   erasure uses, and removes the tenant record last. It then writes a
+   OAuth2 clients, federation and e-mail configuration, webhooks, expired
+   certificates and CA material, roles, groups, permissions, resources,
+   consents, and the tenant's own audit entries you exported above — in the
+   order the GDPR user erasure uses, and removes the tenant record last. A
+   revoked certificate or CA that has not yet expired is **kept** (its
+   `metadata` and a CA's sealed key cleared), because its issuer's revocation
+   list is read from it: removing it would make it valid again to every relying
+   party outside AXIAM. The same sweep removes it once it expires. It then writes a
    `tenants.purged` entry to the system audit log, beside `tenants.deleted`;
    neither is ever purged. The sweep is listed on `GET /health/jobs`: alert on
    it there, as on the GDPR erasure sweep.

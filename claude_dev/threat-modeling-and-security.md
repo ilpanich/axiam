@@ -180,6 +180,23 @@
 > durability and operations half below (T-108 and T-117 closed), model 2.39.0
 > is **474 threats, 436 mitigated / 17 open / 21 not applicable**.
 >
+> **The wave's F4 review (model 2.39.0 — T-102 and T-472 amended).** The
+> review of the first half
+> ([`security-review-release-1.0.0-w1-2026-10-10.md`](security-review-release-1.0.0-w1-2026-10-10.md))
+> found that the two halves of the wave met badly at one point (R1W1-01):
+> deleting a tenant revoked none of its certificates or signing CAs, and the
+> tenant purge deleted their rows — so a leaf revoked before the deletion
+> dropped off its organization CA's new revocation list once the tenant was
+> purged, and the tenant's live certificates stayed valid outside AXIAM until
+> they expired. The deletion now revokes every unexpired certificate and signing
+> CA of the tenant (a `vault_pki` leaf forwarded to Vault, a CA's key released),
+> and the purge keeps each revoked, unexpired row — without its metadata or a
+> CA's key — until it expires, the one exemption the purge-completeness test
+> allows, with its reason. The test deletes and purges a tenant and finds its
+> leaf revoked beforehand, its live leaf, a leaf under its signing CA, the CA
+> itself and a leaf issued during the deletion on the organization CA's list
+> throughout, another tenant's leaf untouched, and an expired entry gone.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does

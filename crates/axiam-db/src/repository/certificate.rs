@@ -424,6 +424,32 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .collect()
     }
 
+    async fn revoke_all_for_tenant(&self, tenant_id: Uuid) -> AxiamResult<Vec<Certificate>> {
+        // An expired certificate is on no list and is left as it is; a revoked
+        // one keeps its first revocation date (#565).
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM \
+                 (UPDATE certificate SET status = 'Revoked', \
+                  revoked_at = revoked_at ?? time::now() \
+                  WHERE tenant_id = $tenant_id \
+                    AND status != 'Revoked' \
+                    AND not_after > time::now())",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CertificateRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| row.try_into_entry().map_err(Into::into))
+            .collect()
+    }
+
     async fn mark_revocation_forwarded(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         let result = self
             .db

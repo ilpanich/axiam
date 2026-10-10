@@ -4788,7 +4788,15 @@ mod tests {
     /// without a purge step fails here instead of outliving its tenant.
     #[test]
     fn every_tenant_scoped_table_is_purged() {
-        use crate::repository::tenant_purge::{TENANT_PURGE_ORDER, TenantKey};
+        use crate::repository::tenant_purge::{Retain, TENANT_PURGE_ORDER, TenantKey};
+
+        // The one exemption, and why (R1W1-01): a revoked certificate or
+        // signing CA is the evidence its issuer's revocation list is read
+        // from, across tenants, by issuer (T-102). Deleting it with its tenant
+        // took it off the list and made it valid again outside AXIAM, so these
+        // two tables keep revoked rows until `not_after` and lose everything
+        // else. Any other table that keeps a row would outlive its tenant.
+        const KEEPS_REVOCATION_EVIDENCE: [&str; 2] = ["certificate", "ca_certificate"];
 
         let by_tenant = tables_defining("tenant_id");
         let by_scope = tables_defining("scope_id");
@@ -4813,6 +4821,12 @@ mod tests {
                 );
             };
             assert_eq!(step.key, expected, "{} is keyed wrongly", step.table);
+            assert_eq!(
+                step.retain != Retain::Nothing,
+                KEEPS_REVOCATION_EVIDENCE.contains(&step.table),
+                "{}: only the certificate tables may keep rows past the purge, and they must",
+                step.table
+            );
         }
         for table in by_tenant.iter().chain(by_scope.iter()) {
             assert!(

@@ -489,6 +489,14 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         //   addresses), its CIBA requests, and its SCIM targets with their links
         //   and delivery state.
         //
+        // * R1W1-01: its certificates and signing CAs are revoked. The handler
+        //   revoked them once already, through the services that forward a
+        //   `vault_pki` leaf to Vault and release a CA's key; this pass catches
+        //   one issued while it ran, atomically with the stamp. A deleted
+        //   tenant's certificates are disowned, so they go on their issuers'
+        //   revocation lists — and the purge keeps each revoked, unexpired row
+        //   until it expires, so they stay there (`tenant_purge`).
+        //
         // F4 P23W2-02: and a transaction that rolled back is an error. The
         // driver reports a failed statement inside the response, not from
         // `.await`, so without `check` a cancelled delete answered `Ok` — the
@@ -515,6 +523,14 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
                  DELETE scim_target_link WHERE tenant_id = $id; \
                  DELETE scim_target_state WHERE tenant_id = $id; \
                  DELETE scim_target WHERE tenant_id = $id; \
+                 UPDATE certificate SET status = 'Revoked', \
+                     revoked_at = revoked_at ?? time::now() \
+                     WHERE tenant_id = $id AND status != 'Revoked' \
+                       AND not_after > time::now(); \
+                 UPDATE ca_certificate SET status = 'Revoked', \
+                     revoked_at = revoked_at ?? time::now() \
+                     WHERE tenant_id = $id AND status != 'Revoked' \
+                       AND not_after > time::now(); \
                  UPDATE type::record('tenant', $id) \
                      SET deleted_at = time::now(), updated_at = time::now() \
                      WHERE deleted_at = NONE; \

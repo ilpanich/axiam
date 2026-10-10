@@ -165,6 +165,12 @@ jobs:
       - name: Vault seeder never overwrites an existing secret
         run: python3 -m unittest discover -s scripts -p 'test_*.py' --verbose
 
+      # The conformance workflow's gate (P23W5-11) decides a run's verdict, and
+      # runs only when a human dispatches the workflow; its rules are pinned here
+      # so a change to them is seen on a pull request, not at the next dispatch.
+      - name: Conformance gate rules (fixtures)
+        run: python3 -m unittest discover -s conformance/scripts -p 'test_*.py' --verbose
+
   build:
     name: Build
     runs-on: ubuntu-latest

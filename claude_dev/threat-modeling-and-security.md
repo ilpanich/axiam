@@ -173,6 +173,15 @@
 > provider or the configuration supplied the pepper, and names both spellings
 > when neither did. No threat entry changes, and no variable is renamed.
 >
+> **The conformance workflow gates on a regression (`1.0.0`, #555, P23W5-11).**
+> `fapi-conformance.yml` ended red on every unattended run (interactive modules
+> wait for a browser), so its gate signalled nothing; it now runs
+> `conformance/scripts/gate.py` against the suite's result files and
+> `conformance/baseline.json`, failing on a `FAILED` module, one below its
+> baseline or a missing plan, and tolerating `WAITING`/`SKIPPED`. The workflow's
+> dispatch inputs reach its scripts through `env:`. CI-only; no threat entry
+> changes.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):

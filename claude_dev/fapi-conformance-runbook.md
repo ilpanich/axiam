@@ -141,6 +141,45 @@ environment. The workflow writes `axiam-server.log` and `conformance-rig.log`
 Time: no browser is driven, so every interactive module costs the full
 `module_timeout` (default 180 s). Dispatch with a small value for a smoke run.
 
+### The CI gate (P23W5-11)
+
+`just conformance-run` exits non-zero for any module that is not `PASSED` or
+`SKIPPED`, and a run without a browser leaves every interactive module `WAITING`,
+so the workflow's final step used to fail every run: a gate that is red by design
+signals nothing. D-60 counts the baseline green when every non-interactive module
+matches the 2026-09-25 baseline; the gate now says exactly that, mechanically.
+`conformance/scripts/gate.py` reads the suite's `*.results.json` (the files
+`run-plan.sh` writes, the same ones `report.py` renders) and the committed
+`conformance/baseline.json`, and exits non-zero on a regression only:
+
+| Result | Gate |
+|---|---|
+| `FAILED`, `COULD_NOT_START`, `INTERRUPTED` | red |
+| still `RUNNING` (or never answered) at the module timeout | red: a non-interactive module overran; raise `module_timeout` (the 60 s and 62 s modules need more than 30 s) |
+| `PASSED` in the baseline, `REVIEW` or `WARNING` now | red: below its baseline |
+| named by the baseline, absent from the run | red |
+| a plan with no result file, or a plan in which no module `PASSED` | red: the run did not happen, or evaluated nothing |
+| `WAITING` (parked on a browser) | tolerated and named; not a pass |
+| `SKIPPED` | tolerated and named |
+| a module the baseline has never heard of | red only if it failed outright |
+
+The workflow's last step runs it over the three FAPI plans and appends its output
+to the job summary. **Green means "no regression against the baseline", not "every
+module passed"** and not "certified": the `WAITING` modules (the `REVIEW` and
+`WARNING` ones among them) are exactly what the maintainer's browser-driven run
+decides. The baseline names only `PASSED`, `REVIEW` and `WARNING` modules; the two
+`SKIPPED` modules of 2026-09-25 (one in the Basic plan, one in `private_key_jwt`)
+are not named by those reports, so any `SKIPPED` is tolerated.
+
+To re-record the baseline after the maintainer's final run (alongside, not over:
+keep the dated reports), point the script at that run's results:
+`python3 conformance/scripts/gate.py --results <dir> --write-baseline > conformance/baseline.json`.
+Run it on a browser-driven run: an unattended one has no verdict for its
+interactive modules, and they would drop out of the baseline. The gate's rules are
+unit-tested with fixture result files (`conformance/scripts/test_gate.py`, run by
+CI's docs job); the workflow also passes every `workflow_dispatch` input through
+`env:` rather than interpolating it into a `run:` script.
+
 ---
 
 ## Reading a result

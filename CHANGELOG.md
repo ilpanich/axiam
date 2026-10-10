@@ -58,6 +58,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonicalisation, a load balancer hop) used to be delivered to the final URL and
   now fails every attempt; register the receiver at its final URL. T-112 is
   amended (status unchanged).
+- **The FAPI conformance workflow is gated on a regression, not on a browser
+  (#555, P23W5-11).** `fapi-conformance.yml` drives no browser, so every
+  interactive module ends `WAITING` on an unattended run and its last step failed
+  every run: a gate that is red by design signals nothing. The step now runs
+  `conformance/scripts/gate.py` over the suite's machine-readable results and the
+  new `conformance/baseline.json` (the 2026-09-25 runs) and fails only on a module
+  that `FAILED` (or could not start, was interrupted, or overran the module
+  timeout), a module below its baseline, a baselined module the run did not
+  report, or a plan that left no result or evaluated nothing; `WAITING` and
+  `SKIPPED` are tolerated and named in the job summary. Green means "no
+  regression", not "certified". The rules are unit-tested with fixture result
+  files (run by CI). The workflow also passes `inputs.axiam_image` (and the
+  step outcome) through `env:` instead of interpolating them into `run:` scripts,
+  closing a template injection for anyone who may dispatch it. Runbook: "The CI
+  gate". Release-pipeline only; no product behaviour changes.
 
 ### Fixed
 

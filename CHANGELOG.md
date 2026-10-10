@@ -1100,17 +1100,25 @@ and v90 – v94 run at startup like every earlier one.
     defects fail a required test. No wire change; `CONTRACT.md` is the only artefact
     to re-sync, from the merge commit.
 
-- **Threat model 2.39.0: the 1.0.0 release wave's two halves in one model.** The
-  security half (W1) was written at model 2.38.0 and the durability and operations
-  half (W2) at 2.37.0, each counting its own totals, so the totals quoted in the
-  bullets above are each half's alone. Merged, the model is **474 threats, 436
-  mitigated / 17 open / 21 not applicable**: T-102, T-108, T-117, T-447, T-469 and
-  T-470 are closed, T-471 … T-474 entered Mitigated, and no open entry is an
-  unhandled defect in AXIAM's own request path. T-447 carries both halves' text
-  (the device grant's closure and the CIBA pending-request list behind the same
-  console-sign-in check). `claude_dev/threat-model-stride.md`,
+- **Threat model 2.40.0: the 1.0.0 release wave in one model.** The security half
+  (W1) was written at model 2.38.0 and the durability and operations half (W2) at
+  2.37.0, each counting its own totals, so the totals quoted in the bullets above
+  are each half's alone; 2.39.0 merged them and entered T-475 (R1W1-02), and 2.40.0
+  is the release pass. The model is **475 threats, 437 mitigated / 17 open / 21
+  not applicable**: T-102, T-108, T-117, T-447, T-469 and T-470 are closed,
+  T-471 … T-475 entered Mitigated, and no open entry — the ten at High or
+  Critical included (T-18, T-94, T-124, T-133, T-135, T-146, T-148, T-180, T-216,
+  T-306) — is an unhandled defect in AXIAM's own request path. T-447 carries both
+  halves' text (the device grant's closure and the CIBA pending-request list
+  behind the same console-sign-in check). The release pass changes no status: it
+  records as corrections what the release's two F4 reviews found the text of
+  T-102, T-108, T-118, T-470, T-472 and T-474 to overstate, each a Low or
+  Informational finding filed for `1.0.x` (#594, #595, #601 … #603, #605,
+  #607 … #609). `claude_dev/threat-model-stride.md`,
   `claude_dev/threat-modeling-and-security.md` and the website's Security section
-  carry the merged totals, register and coverage tables.
+  carry the totals, register and coverage tables; the ASVS checklist's V2.1.7
+  row reads Pass, as FINDINGS.md's F-03 has since it was fixed, and its summary
+  now counts its 106 rows (101 Pass, 5 N/A, none Deferred).
 
 - **A minimal-profile server reads no AMQP queue, and a broker confirm never means
   AXIAM recorded an event (#555, P23W5-A6).** With `AXIAM__AMQP__ENABLED=false` the

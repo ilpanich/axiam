@@ -213,6 +213,29 @@
 > same under the client's own CA authenticates. The model is **475 threats,
 > 437 mitigated / 17 open / 21 not applicable**.
 >
+> **The 1.0.0 release pass (model 2.40.0 — no status changes; T-102, T-108,
+> T-118, T-470, T-472 and T-474 corrected).** One pass over the entries the
+> wave closed or entered, against the tests their text names (every one exists)
+> and against the two F4 reviews' verdicts on the model's text. Six entries said
+> more than the code does, and each now records a correction rather than a new
+> sentence in place: until the purge a tombstoned tenant's OAuth2 client still
+> authenticates — issuance refuses, but a CIBA request, an introspection and a
+> PAR row are answered (T-472, #601); the purge deletes audit rows written after
+> the export the deletion required (T-472, T-118, #602); the Vault revocation
+> sweep re-reads the same oldest hundred rows, so revocations Vault refuses for
+> good can hold later ones off its list (T-470, #603); a byte-order mark skips
+> the "plainly UTF-8" check on federation metadata (T-474, #605); the CRL route
+> is signed per replica and read per request (T-102, #607 … #609); and the GDPR
+> request records dead-letter synchronously on the request path, in lines that
+> carry no time (T-108, #594, #595). Each is a Low or Informational finding
+> filed for `1.0.x`; none reopens its entry. The pass also corrects two counts
+> this document carried a revision behind the model — Spoofing 105 and High 197
+> since T-475 entered — and the ASVS row of the compliance table (106 controls,
+> V2.1.7 Pass since F-03 was fixed). The model is **475 threats, 437 mitigated /
+> 17 open / 21 not applicable**; the ten open at High or Critical are T-148 and
+> T-306 (Critical) and T-18, T-94, T-124, T-133, T-135, T-146, T-180 and T-216
+> (High), none of them a defect awaiting a fix in AXIAM's code.
+>
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
 > T-388 stayed open from model 2.27.0 until it existed for integrators. It does
@@ -1576,7 +1599,7 @@ The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. The five diagrams of
 AXIAM's own request path — authentication, OAuth2 and tokens, federation,
-authorization, PKI — carry **four** open items at model 2.39.0, all
+authorization, PKI — carry **four** open items at model 2.40.0, all
 residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
@@ -1695,7 +1718,7 @@ the category recorded against it in the model.
 
 | Category | Threats | Open | Not built |
 |---|---|---|---|
-| Spoofing | 104 | 4 | 3 |
+| Spoofing | 105 | 4 | 3 |
 | Tampering | 93 | 1 | 5 |
 | Repudiation | 16 | 1 | 1 |
 | Information disclosure | 112 | 6 | 4 |
@@ -1707,7 +1730,7 @@ the category recorded against it in the model.
 | Severity | Threats | Open | Not built |
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
-| High | 196 | 8 | 9 |
+| High | 197 | 8 | 9 |
 | Medium | 199 | 6 | 9 |
 | Low | 36 | 1 | 1 |
 
@@ -2992,7 +3015,7 @@ Resilience Act conformity assessment, and it says so plainly.
 
 | Framework | Scope | Status | Evidence |
 |---|---|---|---|
-| **OWASP ASVS v4.0.3 Level 2** | 103 controls across authentication, session, access control, cryptography, error handling, data protection, communications, malicious code, configuration | 94 Pass, 4 N/A, 5 Deferred — **no Deferred item is High or Critical** | [ASVS L2 checklist](../docs/compliance/asvs-l2-checklist.md) |
+| **OWASP ASVS v4.0.3 Level 2** | 106 controls across authentication, session, access control, cryptography, error handling, data protection, communications, malicious code, configuration | 101 Pass, 5 N/A, 0 Deferred — **no control is Deferred** | [ASVS L2 checklist](../docs/compliance/asvs-l2-checklist.md) |
 | **ISO/IEC 27001:2022 Annex A** | Access control, secure authentication, cryptography, logging, network security, secure development | Interpretive control-family mapping; code-level themes Pass | [Annex A mapping](security-audit.md#3-iso-27001-annex-a--control-family-mapping) |
 | **EU Cyber Resilience Act (Annex I)** | Secure-by-design, no known exploitable vulnerabilities, confidentiality, data minimisation, access control, vulnerability handling, security updates | Themes Pass; SBOM deferred | [Essential-requirement mapping](security-audit.md#4-cybersecurity-act--essential-requirement-theme-mapping) |
 | **GDPR** | Data-subject export (Art. 15), erasure (Art. 17), consent (Art. 7), pseudonymisation, data minimisation | Export excludes secrets; erasure is durable and re-selectable on failure; audit actor identities are pseudonymised; OIDC scope-release consent is per client, withdrawable in one call and re-checked on every release; every personal-data column of the user record is classified in one declared inventory that both erasure statements and the export render from, and a test introspects the live schema after migrations and fails on any column the inventory does not classify | [GDPR compliance](../docs/compliance/gdpr-compliance.md) |
@@ -3061,7 +3084,10 @@ each.
 
 None of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
-and gaps on the SDK and distribution side. The rest of this
+and gaps on the SDK and distribution side. That holds for the ten open at High
+or Critical severity — T-148 and T-306 (Critical), T-18, T-94, T-124, T-133,
+T-135, T-146, T-180 and T-216 (High) — with no exception: T-102 and T-108, the
+two High entries open when the 1.0.0 work began, are mitigated. The rest of this
 section is the same list read as a checklist — what to do about each, grouped
 by who does it.
 

@@ -215,8 +215,8 @@ export const REFERENCE_PAGES: DocPage[] = [
         rows: [
           [
             "OWASP ASVS 4.0.3 Level 2",
-            "Control-by-control checklist over V2, V3, V4, V6, V7, V8, V9, V10 and V14. Every in-scope control carries an explicit status — Pass, N/A or Deferred — with the deferrals tracked by finding id rather than left blank.",
-            `[ASVS L2 checklist](${COMPLIANCE}/asvs-l2-checklist.md), with the deferrals in the [findings register](${COMPLIANCE}/FINDINGS.md).`,
+            "Control-by-control checklist over V2, V3, V4, V6, V7, V8, V9, V10 and V14. Every in-scope control carries an explicit status — Pass, N/A or Deferred — with a deferral tracked by finding id rather than left blank; at 1.0.0 none is Deferred.",
+            `[ASVS L2 checklist](${COMPLIANCE}/asvs-l2-checklist.md), with every finding and its fix in the [findings register](${COMPLIANCE}/FINDINGS.md).`,
           ],
           [
             "GDPR",

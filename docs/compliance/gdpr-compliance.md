@@ -267,9 +267,13 @@ configuration tables, and left every account, session, credential, consent and
 audit entry of the tenant in the datastore. It is now **tombstone, then purge**
 (decision D-4):
 
-- **In the request** the tenant's sessions, OAuth2 refresh tokens,
-  certificates and signing CAs are revoked and `tenant.deleted_at` is set; the tenant is gone from every read,
-  sign-in, token issuance and refresh from the `204` on.
+- **In the request** the tenant's sessions, OAuth2 refresh tokens, and
+  unexpired certificates and signing CAs are revoked (a leaf of a Vault-held CA
+  forwarded to Vault) and `tenant.deleted_at` is set; the tenant is gone from
+  every read of it, sign-in, token issuance and refresh from the `204` on. Until
+  the purge, the tenant's OAuth2 clients still authenticate on the endpoints that
+  issue nothing — a CIBA request, introspection, revocation, PAR (#601, filed for
+  `1.0.x`); the purge removes them.
 - **The cleanup job's `tenant_purge` sweep** then deletes every row of every
   tenant-scoped table, in the order the purge pipeline above uses — grants and
   sessions, federation links, credentials, the authorization graph, the
@@ -279,7 +283,9 @@ audit entry of the tenant in the datastore. It is now **tombstone, then purge**
   entries rather than pseudonymizing them: nothing of the tenant is left for an
   entry to resolve to, and the deletion is refused until the tenant's audit
   trail has been exported (T-118), so the controller holds that copy under its
-  own retention obligations.
+  own retention obligations. The export may be up to six hours old, and rows
+  the tenant writes after it — until the purge — are deleted without being in
+  it (#602, filed for `1.0.x`).
 - **One retention, until expiry:** a revoked certificate or signing CA whose
   validity has not ended is kept — the certificate as issued, its issuer, serial
   and dates, with its free-form `metadata` and a CA's sealed key cleared —
@@ -294,11 +300,14 @@ audit entry of the tenant in the datastore. It is now **tombstone, then purge**
 
 Completeness is a test, not a list someone maintains:
 `schema.rs::every_tenant_scoped_table_is_purged` fails when a table with a
-`tenant_id` field (or a tenant `scope_id`) is missing from the purge. Rows left
+`tenant_id` field (or a tenant `scope_id`) is missing from the purge; the two
+certificate tables are its one named exemption, for the retention above. Rows left
 by deletions made before 1.0.0 are found and purged by the same sweep at
 start-up and daily, except their audit entries, which the retention window
 (§2a) governs. Proven by
-`deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table`.
+`deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empties_every_table`
+and, for the certificate retention,
+`crl_test.rs::a_deleted_tenants_certificates_stay_on_the_crl_until_they_expire`.
 
 ---
 

@@ -19,10 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write), PHP (the `poll()` docs), Go and Rust (a §16 retry never waits past the CIBA
   deadline), Kotlin and C++ (one validation error for every local refusal), Java (a decoded
   draft may lack a required member).
-  - **One incompatible SDK change, decided for 1.0.0 (D-7):** a replay store that cannot answer
-    gives no verdict — the SET stays unjudged instead of being refused as `replayed` and then
-    acknowledged and lost — so Rust's `ReplayStore::check_and_record` becomes fallible, and Go
-    and Swift change their store interfaces too.
+  - **Incompatible SDK changes, decided for 1.0.0 (D-7):** a replay store that cannot answer
+    gives no verdict — the SET stays unjudged and `verify_set` raises `NetworkError`, instead of
+    the SET being refused as `replayed` and then acknowledged and lost — so a store interface
+    conforms only with a failure channel: Rust's `ReplayStore::check_and_record` and Go's store
+    interface become fallible; Swift's already throws and, with the other eight, verifies.
+  - **Second pass: the 1.60 ports' questions answered (§34.4 C-1 … C-16).** The store failure is
+    a `NetworkError` (§2, P3); after the first store failure in a `poll` batch the remaining
+    verified SETs are unjudged, the recorded ones returned, and a new §19 `ssf_unjudged` event
+    SHOULD say so (P1); the SSF key cache expires within 10 minutes and a failed expiry refresh
+    counts toward the refetch limit (P6); a capped CIBA wait is served or `expired_token` raised
+    at once (P10); C#'s re-send remedy and the meaning of "never-retried" (P11); the scope of
+    "every local refusal", and C's input builders refusing an `_UNKNOWN` value (P12.2); a custom
+    CA keeps hostname verification (§6). The rows the eleven ports implemented in their first
+    phase are marked "port (phase 1)".
   - **Additive:** `ScimTargetInput.expected_updated_at` (§31), `window_minutes` on the
     `notification_rules` models (§27.15), the `403` on the device approval routes (§14), the
     §15.2 rule 9 on `actor_token`, and informative notes on the minimal profile (§8), client

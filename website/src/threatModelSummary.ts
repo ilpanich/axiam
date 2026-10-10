@@ -64,8 +64,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.37.0",
  "diagramCount": 10,
  "total": 469,
- "open": 21,
- "mitigated": 427,
+ "open": 20,
+ "mitigated": 428,
  "notApplicable": 21,
  "areas": [
   {
@@ -114,7 +114,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
    "total": 55,
-   "open": 3,
+   "open": 2,
    "notApplicable": 0
   },
   {
@@ -155,7 +155,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Repudiation",
    "total": 16,
-   "open": 2,
+   "open": 1,
    "notApplicable": 1
   },
   {
@@ -187,7 +187,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "High",
    "total": 196,
-   "open": 10,
+   "open": 9,
    "notApplicable": 9
   },
   {
@@ -253,16 +253,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "PKI, certificates & IoT device identity",
    "element": "Revocation (status in AXIAM's store; no CRL published)",
    "residualRisk": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM authenticates a device by its certificate, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf. Nothing else AXIAM terminates reads it (corrected by the W6 F4 review, model 2.36.1): neither listener's TLS handshake checks revocation, and OAuth2 `tls_client_auth` matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by ilpanich/axiam#565 (spike record §8, D1); this entry closes with it, together with the listeners' verifiers loading that list or `tls_client_auth` reading the certificate's status."
-  },
-  {
-   "number": 108,
-   "title": "Action succeeds while its audit write fails",
-   "category": "Repudiation",
-   "severity": "High",
-   "diagramId": 6,
-   "area": "Audit, webhooks, email & notifications",
-   "element": "Audit middleware & service",
-   "residualRisk": "Carried to the W5 F4 review (T23.8.2, review P23W5-A10). Until model 2.34.0 this entry read “audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed”; no code does either. What is built: AXIAM's own request rows are written by the audit middleware off the request path — a bounded queue of 4 096 entries and one worker — so a full queue drops the entry with an `ERROR` line and a failed append is a `WARN` line while the action stands; the GDPR erasure and tenant-deletion records dead-letter a failed write to an append-only file and a structured `axiam.audit.dlq` event (T19.27, `write_erasure_audit_with_dlq`); every orderly stop drains the queue (T-444). What is not: a fallback for any other row, the GDPR request records included (P23W5-A8), and any counter or notification when a row is dropped or fails (P23W5-A10). An attacker who can exhaust the datastore can act while the rows recording it are dropped, and only the server log says so."
   },
   {
    "number": 124,

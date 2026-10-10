@@ -28,6 +28,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`MAX_GROUP_MEMBERS`) is now pinned by a test. The issue's second option, a
   per-target concurrency budget with more than one delivery in flight per
   consumer, is **deferred to 1.0.x**.
+- **Lost request-audit rows are counted, signalled and dead-lettered (#553,
+  P23W5-A10, T-108).** The audit middleware drops a row when its 4 096-row queue
+  is full and loses one when the datastore refuses the append; each left a single
+  log line (the second at `WARN`) and nothing to alert on. Both are now counted
+  since process start and reported as a new, additive `request_audit` object on
+  `GET /health/jobs` (`dropped`, `failed`, `dead_lettered`, `not_recoverable`,
+  `dead_letter_configured`, `last_loss_at`, `recent_loss`; the endpoint's
+  exposure is unchanged). A loss in the last fifteen minutes turns the endpoint's
+  `status` to `degraded` (still HTTP 200), and the server logs the totals on the
+  `axiam.audit.loss` target at `ERROR`, the first time and then at most once a
+  minute; the per-row `Audit channel full` line is gone, so move any alert that
+  matched it. Upgraders: when `AXIAM__GDPR_AUDIT_DLQ_FILE` is set, the lost rows
+  are now also appended to that file (one `CreateAuditLogEntry` JSON line each,
+  replayable like the GDPR records) through a queue to a writer task, so the
+  request path does no file I/O. With it unset, as in any deployment that does
+  not mount a volume for it, the rows are counted and logged only and the server
+  warns at start. Rows still in memory when a process is killed rather than
+  stopped are lost; an orderly stop drains both queues.
 - **A notification rule mails each recipient once per event type and window, not
   once per event (#551, P23W5-13, T-117).** A rule for an event an attacker can
   raise in volume — failed sign-ins spread over addresses and accounts — mailed

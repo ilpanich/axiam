@@ -29,7 +29,7 @@ use axiam_api_rest::{
     HealthChecker, RateLimitConfig, RouteOptions, ServerConfig, build_cors, health_routes,
     openapi_routes, register_api_v1_routes_with,
 };
-use axiam_audit::AuditMiddleware;
+use axiam_audit::{AuditMiddleware, DEAD_LETTER_FILE_ENV, DeadLetterWriter};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::{
     AttestationCaCache, AuthService, EmailVerificationService, MfaMethodService,
@@ -2482,8 +2482,25 @@ where
     // `NotificationDispatcher` is constructed nowhere and every rule an
     // administrator configures is inert — stored, listed by the API, shown in the
     // admin UI, and consulted by nothing.
-    let audit_middleware =
-        AuditMiddleware::spawn_with_sink(audit_repo.clone(), Some(notification_sink));
+    //
+    // A request-audit row that is dropped (queue full) or fails to append is
+    // counted, reported on `/health/jobs` and, when `AXIAM__GDPR_AUDIT_DLQ_FILE`
+    // names a file, written to it (T-108).
+    let dead_letter = DeadLetterWriter::from_env();
+    if !dead_letter.is_configured() {
+        tracing::warn!(
+            env_var = DEAD_LETTER_FILE_ENV,
+            "no audit dead-letter file is configured — request-audit rows that are dropped or \
+             fail to append are counted and logged but cannot be recovered; point it at a \
+             persistent volume"
+        );
+    }
+    let audit_middleware = AuditMiddleware::spawn_configured(
+        audit_repo.clone(),
+        Some(notification_sink),
+        dead_letter,
+        axiam_audit::middleware::CHANNEL_CAPACITY,
+    );
     // A handle kept outside the App factory closure, which takes ownership of
     // the middleware. Cloning shares the shutdown flag — see
     // `AuditMiddleware::begin_shutdown` — so this is the same worker, reachable
@@ -2521,7 +2538,8 @@ where
     // because "absent from the list" and "never executed" are the same
     // silence this is meant to break.
     let job_health =
-        crate::job_health::JobHealth::new(Duration::from_secs(config.cleanup_interval_secs));
+        crate::job_health::JobHealth::new(Duration::from_secs(config.cleanup_interval_secs))
+            .with_request_audit(audit_middleware.loss());
     // The list is `job_health::SWEEP_JOBS`, which a test checks against what the
     // cleanup loop records.
     for job in crate::job_health::SWEEP_JOBS {

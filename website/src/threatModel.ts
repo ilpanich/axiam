@@ -18,8 +18,8 @@ export const THREAT_MODEL: ThreatModel = {
  "version": "2.37.0",
  "diagramCount": 10,
  "total": 469,
- "open": 21,
- "mitigated": 427,
+ "open": 20,
+ "mitigated": 428,
  "notApplicable": 21,
  "diagrams": [
   {
@@ -8398,9 +8398,9 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "Action succeeds while its audit write fails",
        "type": "Repudiation",
        "severity": "High",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "If audit writes are best-effort, an attacker who can make the audit path fail — by exhausting the datastore or triggering a specific error — performs actions that leave no trace.",
-       "mitigation": "Carried to the W5 F4 review (T23.8.2, review P23W5-A10). Until model 2.34.0 this entry read “audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed”; no code does either. What is built: AXIAM's own request rows are written by the audit middleware off the request path — a bounded queue of 4 096 entries and one worker — so a full queue drops the entry with an `ERROR` line and a failed append is a `WARN` line while the action stands; the GDPR erasure and tenant-deletion records dead-letter a failed write to an append-only file and a structured `axiam.audit.dlq` event (T19.27, `write_erasure_audit_with_dlq`); every orderly stop drains the queue (T-444). What is not: a fallback for any other row, the GDPR request records included (P23W5-A8), and any counter or notification when a row is dropped or fails (P23W5-A10). An attacker who can exhaust the datastore can act while the rows recording it are dropped, and only the server log says so."
+       "mitigation": "Built in the 1.0.0 release wave (#553, P23W5-A10). A correction first: until model 2.34.0 this entry read “audit writes share the transactional path with the action they record where the datastore allows it, and audit failures are surfaced as errors and raise a compliance notification rather than being swallowed”; no code did either, and the W5 F4 review reopened it. What is built now: the audit middleware writes each request's row off the request path, through a bounded queue of 4 096 rows and one worker, and a row that does not reach the datastore is lost in exactly two places, both now accounted for in one place (`RequestAuditLoss`). The queue is full when the request ends (`dropped`), or the append fails (`failed`). Each is counted, monotonic since the process started, and `GET /health/jobs` reports them in an additive `request_audit` object beside the jobs (`dropped`, `failed`, `dead_lettered`, `not_recoverable`, `dead_letter_configured`, `last_loss_at`, `recent_loss`); the endpoint’s exposure is unchanged. The signal to an operator is that endpoint’s `status`, which is `degraded` (still HTTP 200) while a row was lost in the last 15 minutes and returns to `ok` by itself, and an `ERROR` line on the target `axiam.audit.loss` naming the totals, logged for the first loss and then at most once a minute. The platform’s notification path was not used: a rule is per tenant and per enumerated event type, the loss is a condition of the process rather than of a tenant, and the path itself runs on the audit worker and the datastore whose failure is being reported. When `AXIAM__GDPR_AUDIT_DLQ_FILE` is set, each lost row is also appended to that file as one JSON line of the audit entry, the form the GDPR records use and an operator replays by hand (T19.27); the request path only does a non-blocking `try_send` to a bounded queue (1 024 rows) read by a writer task, so it does no file I/O. The GDPR erasure and tenant-deletion records still dead-letter synchronously to the same file and to the `axiam.audit.dlq` event (T19.27, `write_erasure_audit_with_dlq`), and every orderly stop drains the audit queue and the dead-letter queue (T-444). Tests: `tests/request_audit_loss.rs` in `axiam-audit` — `a_full_channel_counts_the_rows_it_drops`, `a_failed_append_counts_the_row` (a repository double that refuses every append), `a_dropped_row_lands_in_the_dead_letter_file_in_the_replayable_form` (appended after an existing line, each line parses back to the entry), `a_failed_row_lands_in_the_dead_letter_file`, `drain_waits_for_the_dead_letter_file`, `nothing_is_written_when_no_file_is_configured`, `an_unwritable_file_makes_the_rows_unrecoverable`; `tests/dead_letter_env.rs` `the_environment_variable_selects_the_writer`; `the_report_is_rate_limited_to_one_per_interval`; `health_test.rs` `jobs_reports_the_request_audit_counters`, `jobs_reports_degraded_while_request_audit_rows_are_being_lost`; `job_health.rs` `the_snapshot_reports_the_request_audit_loss_counters`. What stays: a row held in the queue or in the dead-letter writer’s queue when the process is killed rather than stopped is lost, uncounted; with no dead-letter file configured, which is the default outside `docker-compose.minimal.yml` until the file is provisioned by default (#552), a lost row is counted and logged but not recoverable (`not_recoverable`); a row the file cannot take is counted there too; the dead-letter file has no fsync per row, so a host crash can lose its last rows; the counters are per process and the alert is only as good as the monitoring that scrapes `/health/jobs`; and the GDPR request records (`gdpr.data_export_requested`, `gdpr.erasure_requested`) still have no fallback (#552). An attacker who exhausts the datastore can still act while the rows recording it are not written, but the loss is now visible to an operator at once and, where the file is configured, recoverable."
       },
       {
        "number": 109,
@@ -8430,7 +8430,7 @@ export const THREAT_MODEL: ThreatModel = {
        "mitigation": "Built (T23.8.2). A lost lease only raises a flag; the composition root then stops through the SIGTERM path — no new connections, in-flight requests finished, the cleanup task's current tick finished, so an erasure and its row stay together — and every orderly stop drains the audit queue with `AuditMiddleware::drain`, a FIFO barrier bounded at 5 s, before `serve` returns; after a lost lease it returns an error, the non-zero exit D-59 requires. The process exit survives only as a backstop after `LeaseTiming::lost_stop_deadline` (15 s). Tests: `crates/axiam-server/tests/minimal_profile_boot.rs` `an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_rows`; `crates/axiam-server/src/profile.rs` `a_lost_lease_starts_the_orderly_stop_at_once_and_the_backstop_only_after_the_deadline`, `an_orderly_stop_that_finishes_in_time_disarms_the_backstop`; `crates/axiam-audit/tests/service_and_middleware.rs` `drain_returns_once_every_queued_entry_is_written`, `drain_is_bounded_when_the_datastore_does_not_answer`. Residuals: a SIGKILL, an OOM kill and the backstop still lose the queue; the gRPC listener is not part of the orderly stop, and the full profile still exits mid-flight when an AMQP consumer dies (review P23W5-A11, A12)."
       }
      ],
-     "open": 1,
+     "open": 0,
      "notApplicable": 0
     },
     {
@@ -9477,7 +9477,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 55,
-   "open": 3,
+   "open": 2,
    "notApplicable": 0,
    "bySeverity": {
     "Medium": 34,

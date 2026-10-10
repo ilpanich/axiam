@@ -1807,7 +1807,49 @@ with the file — and, like every audit row, it can neither be
 updated nor deleted afterwards, so replay each line once. An empty or missing
 file means no record has been dead-lettered. (The two *request* records,
 `gdpr.data_export_requested` and `gdpr.erasure_requested`, are not covered by
-this fallback.)
+this fallback.) The same file also receives request-audit rows that were
+dropped or failed to append, below.
+
+#### Lost request-audit rows (`/health/jobs`)
+
+The audit middleware records every request on a background worker, off the
+request path, through a queue of 4 096 rows. A row is lost in two ways: the queue
+is full when the request ends (**dropped**), or the datastore refuses the append
+(**failed**). The response has already gone out either way (T-108).
+
+`GET /health/jobs` (same exposure as before: server root, internal network only)
+reports both in a `request_audit` object beside `jobs`:
+
+| Field | Meaning |
+|---|---|
+| `dropped`, `failed` | Rows lost since this process started; they only go up. |
+| `dead_lettered` | Lost rows written to the dead-letter file. |
+| `not_recoverable` | Lost rows kept nowhere: no file is configured, or it could not take them. |
+| `dead_letter_configured` | Whether `AXIAM__GDPR_AUDIT_DLQ_FILE` names a file. |
+| `last_loss_at`, `recent_loss` | When the last row was lost; whether that was in the last 15 minutes. |
+
+`status` is `degraded` while `recent_loss` is true and returns to `ok` by itself
+once rows are being recorded again; the endpoint stays HTTP 200, as for a
+stalled job. Alert on `status == "degraded"`, or on the rate of `dropped +
+failed`. The counters are per process: a restart resets them and each replica
+reports its own. The server also logs one `ERROR` line on the target
+`axiam.audit.loss` for the first lost row and then at most once a minute, naming
+the totals.
+
+**The dead-letter file takes these rows too.** When `AXIAM__GDPR_AUDIT_DLQ_FILE`
+is set, each dropped or failed row is appended to the same file as the GDPR
+records, in the same one-JSON-line form, and replayed with the same statement as
+above. The write is queued to a writer task (up to 1 024 rows), so the request
+path does no file I/O; a row the writer cannot keep is counted in
+`not_recoverable`. The lines carry no reason or time — the `axiam.audit.loss` log
+lines give the former, and the replayed row's `timestamp` is the replay's. With
+the variable unset the server logs a warning at start and lost rows are counted
+and logged only. The compose minimal profile sets the variable; set it, on a
+persistent volume the server's user can write, in any other deployment.
+
+Still lost: a row that was in the queue (or the writer's queue) when the process
+was killed rather than stopped — an orderly stop drains both — and a row refused
+when the file is not configured or not writable.
 
 #### External audit producers
 

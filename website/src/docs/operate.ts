@@ -1183,6 +1183,10 @@ export const OPERATE_PAGES: DocPage[] = [
         ],
       },
       {
+        type: "p",
+        text: "The same response carries `request_audit`, the count of request-audit rows this process lost since it started: `dropped` (the worker's 4 096-row queue was full when the request ended) and `failed` (the datastore refused the append), with `dead_lettered`, `not_recoverable`, `dead_letter_configured`, `last_loss_at` and `recent_loss`. A loss in the last fifteen minutes turns `status` to `degraded`; it clears itself once rows are being recorded again. When `AXIAM__GDPR_AUDIT_DLQ_FILE` is set the lost rows are appended to that file, in the form used for the GDPR records, and replayed by hand; when it is not, they are counted and logged only. An orderly stop drains the queue; a killed process can still lose the rows it held. The server logs the totals on the `axiam.audit.loss` target, at most once a minute.",
+      },
+      {
         type: "note",
         text: "`stalled` is computed server-side rather than left to the caller, because the sweep interval is configuration a dashboard does not have — and \"how long is too long\" is not a judgement worth re-deriving from timestamps in three places. The threshold is three missed intervals rather than one: a sweep that overruns, or a tick skipped under load, is normal and must not page anyone.",
       },

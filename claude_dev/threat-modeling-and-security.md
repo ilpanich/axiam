@@ -72,6 +72,22 @@
 > 427 mitigated / 21 open / 21 not applicable**; its version is unchanged until
 > the wave's last item.
 >
+> **Request-audit loss (`1.0.0`, #553, P23W5-A10 — T-108 closed).** The audit
+> middleware drops a request's row when its queue is full and loses one when the
+> append is refused; each left one log line and nothing to alert on, and the
+> transactional write and compliance notification the entry once described never
+> existed. Both are now counted since process start and reported as
+> `request_audit` on `GET /health/jobs`, which reads `degraded` for fifteen
+> minutes after a loss; the totals are logged at `ERROR` on `axiam.audit.loss`,
+> at most once a minute; and when `AXIAM__GDPR_AUDIT_DLQ_FILE` is set each lost
+> row is appended to it, off the request path, in the form the GDPR records use.
+> The tenant notification rules were not used: they are per tenant and per
+> enumerated event, and run on the datastore whose failure is the news. The
+> entry cites the tests and names what stays: rows in memory at a kill, no file
+> configured (counted, not recoverable), and the GDPR request records (#552).
+> The model is **469 threats, 428 mitigated / 20 open / 21 not applicable**; its
+> version is unchanged until the wave's last item.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):
@@ -1195,7 +1211,7 @@ open and says why.
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
 | Threats identified | 469 |
-| Mitigated / Open | 427 / 21 |
+| Mitigated / Open | 428 / 20 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1218,7 +1234,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 30 | 2 | 0 |
-| Audit, webhooks, email & notifications | 55 | 3 | 0 |
+| Audit, webhooks, email & notifications | 55 | 2 | 0 |
 | Deployment & platform (Kubernetes) | 29 | 6 | 0 |
 | Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
 | RADIUS front end (not built — G-11, declined) | 21 | 0 | 21 |
@@ -1321,7 +1337,9 @@ corrects that last point and adds T-469: the lockout branch of the password
 login answers without the equalising verify, so a locked account is told apart
 from an unknown name. The 1.0.0 release wave closes T-117 (#551): each rule
 mails one event type at most once per window and counts the rest, the next mail
-carrying the count.
+carrying the count; and T-108 (#553): a request-audit row that is dropped or
+fails to append is counted, shown on `/health/jobs` and, where a dead-letter
+file is configured, kept in it.
 
 ### Coverage by STRIDE category
 
@@ -1335,7 +1353,7 @@ the category recorded against it in the model.
 |---|---|---|---|
 | Spoofing | 101 | 5 | 3 |
 | Tampering | 93 | 1 | 5 |
-| Repudiation | 16 | 2 | 1 |
+| Repudiation | 16 | 1 | 1 |
 | Information disclosure | 110 | 7 | 4 |
 | Denial of service | 59 | 3 | 4 |
 | Elevation of privilege | 90 | 3 | 4 |
@@ -1345,13 +1363,13 @@ the category recorded against it in the model.
 | Severity | Threats | Open | Not built |
 |---|---|---|---|
 | Critical | 43 | 2 | 2 |
-| High | 196 | 10 | 9 |
+| High | 196 | 9 | 9 |
 | Medium | 195 | 8 | 9 |
 | Low | 35 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
-the weight the control carries. The 21 still-open items are listed one by one in
+the weight the control carries. The 20 still-open items are listed one by one in
 the open risk register under [Shared responsibility](#shared-responsibility), each
 with the element it sits on and where responsibility for it lands.
 
@@ -2660,7 +2678,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 21 of 469. The 21
+Every threat the model records as open, most severe first — 20 of 469. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -2675,7 +2693,6 @@ each.
 | T-18 — Backup or snapshot exfiltration | High | SurrealDB cluster (all tenant data) · *System diagram* |
 | T-94 — Key extracted from device firmware or flash | High | IoT device · *PKI, certificates & IoT device identity* |
 | T-102 — A revoked certificate stays valid to every relying party that does not terminate at AXIAM | High | Revocation (status in AXIAM's store; no CRL published) · *PKI, certificates & IoT device identity* |
-| T-108 — Action succeeds while its audit write fails | High | Audit middleware & service · *Audit, webhooks, email & notifications* |
 | T-124 — Operator credentials grant unaudited data access | High | Cluster operator / SRE · *Deployment & platform (Kubernetes)* |
 | T-133 — Backup media accessible outside the cluster | High | Backups / volume snapshots · *Deployment & platform (Kubernetes)* |
 | T-135 — Dependency-confusion or typosquatted SDK package | High | Integrator / developer · *Client SDKs & admin UI integration surface* |
@@ -2692,9 +2709,8 @@ each.
 | T-469 — A locked account is refused without the equalising password verify, so its cost, or its status under load, tells it apart | Medium | Login endpoints /auth/login + /auth/opaque/* · *Authentication & session management* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
-With two exceptions — T-108, request audit that drops a row with only a log
-line to say so; and T-447, a relying party's access token that can approve a
-device authorization in its user's name, each with an issue body in the W5 F4
+With one exception — T-447, a relying party's access token that can approve a
+device authorization in its user's name, with an issue body in the W5 F4
 review —
 none of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,

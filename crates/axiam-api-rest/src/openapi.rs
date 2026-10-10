@@ -408,6 +408,7 @@ use crate::handlers;
         // envelope because it is the element type of `JobsHealthResponse::jobs`
         // and utoipa does not pull nested schemas in transitively from `paths`.
         crate::health::JobsHealthResponse,
+        crate::health::RequestAuditHealth,
         crate::health::JobStatus,
         // Auth
         handlers::auth::LoginRequest,

@@ -105,15 +105,19 @@ async fn ready_returns_503_when_db_unhealthy() {
 // T-129 — scheduled-job liveness
 // ---------------------------------------------------------------------------
 
-use axiam_api_rest::health::{JobHealthReporter, JobStatus};
+use axiam_api_rest::health::{JobHealthReporter, JobStatus, RequestAuditHealth};
 
 /// Reports a fixed set of jobs, so the endpoint's aggregation can be tested
 /// without running a real sweep loop.
-struct FixedJobs(Vec<JobStatus>);
+struct FixedJobs(Vec<JobStatus>, Option<RequestAuditHealth>);
 
 impl JobHealthReporter for FixedJobs {
     fn snapshot(&self) -> Vec<JobStatus> {
         self.0.clone()
+    }
+
+    fn request_audit(&self) -> Option<RequestAuditHealth> {
+        self.1.clone()
     }
 }
 
@@ -130,11 +134,15 @@ fn job(name: &str, stalled: bool) -> JobStatus {
 
 async fn state_with_jobs(jobs: Vec<JobStatus>) -> AppState<TestDb> {
     let mut state = state_with_checker(Arc::new(MockHealthy)).await;
-    state.job_health = Arc::new(FixedJobs(jobs));
+    state.job_health = Arc::new(FixedJobs(jobs, None));
     state
 }
 
 async fn get_jobs(state: AppState<TestDb>) -> (u16, serde_json::Value) {
+    get_jobs_from(state).await
+}
+
+async fn get_jobs_from(state: AppState<TestDb>) -> (u16, serde_json::Value) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(state))
@@ -183,6 +191,56 @@ async fn jobs_reports_ok_with_an_empty_list_when_nothing_is_registered() {
     assert_eq!(status, 200);
     assert_eq!(body["status"], "ok");
     assert!(body["jobs"].as_array().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// T-108 — request-audit loss on /health/jobs
+// ---------------------------------------------------------------------------
+
+fn request_audit(recent_loss: bool) -> RequestAuditHealth {
+    RequestAuditHealth {
+        dropped: 7,
+        failed: 3,
+        dead_lettered: 9,
+        not_recoverable: 1,
+        dead_letter_configured: true,
+        last_loss_at: Some("2026-10-09T12:00:00+00:00".into()),
+        recent_loss,
+    }
+}
+
+async fn get_jobs_with_audit(audit: Option<RequestAuditHealth>) -> serde_json::Value {
+    let mut state = state_with_checker(Arc::new(MockHealthy)).await;
+    state.job_health = Arc::new(FixedJobs(vec![job("gdpr_purge", false)], audit));
+    let (status, body) = get_jobs_from(state).await;
+    assert_eq!(status, 200, "never a readiness gate");
+    body
+}
+
+#[actix_rt::test]
+async fn jobs_reports_the_request_audit_counters() {
+    let body = get_jobs_with_audit(Some(request_audit(false))).await;
+    let a = &body["request_audit"];
+    assert_eq!(a["dropped"], 7);
+    assert_eq!(a["failed"], 3);
+    assert_eq!(a["dead_lettered"], 9);
+    assert_eq!(a["not_recoverable"], 1);
+    assert_eq!(a["dead_letter_configured"], true);
+    assert_eq!(a["recent_loss"], false);
+    assert_eq!(body["status"], "ok", "a past loss alone is not degraded");
+}
+
+#[actix_rt::test]
+async fn jobs_reports_degraded_while_request_audit_rows_are_being_lost() {
+    let body = get_jobs_with_audit(Some(request_audit(true))).await;
+    assert_eq!(body["status"], "degraded");
+}
+
+#[actix_rt::test]
+async fn jobs_omits_request_audit_when_the_process_does_not_count_it() {
+    let body = get_jobs_with_audit(None).await;
+    assert!(body.get("request_audit").is_none());
+    assert_eq!(body["status"], "ok");
 }
 
 // ---------------------------------------------------------------------------

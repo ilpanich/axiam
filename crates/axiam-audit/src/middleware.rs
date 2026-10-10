@@ -18,8 +18,12 @@ use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::repository::AuditLogRepository;
 use std::time::Duration;
 
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
+
+use crate::dead_letter::DeadLetterWriter;
+use crate::loss::RequestAuditLoss;
 
 /// Paths that should not generate audit entries.
 const SKIP_PATHS: &[&str] = &["/health", "/ready"];
@@ -99,7 +103,7 @@ pub trait AuditEventSink: Send + Sync {
 }
 
 /// Default capacity for the audit write channel.
-const CHANNEL_CAPACITY: usize = 4096;
+pub const CHANNEL_CAPACITY: usize = 4096;
 
 /// What travels on the worker's channel: an entry, or [`AuditMiddleware::drain`]'s
 /// barrier, acknowledged once every entry queued before it has been written.
@@ -117,6 +121,7 @@ enum Queued {
 pub struct AuditMiddleware {
     tx: mpsc::Sender<Queued>,
     shutting_down: Arc<AtomicBool>,
+    loss: RequestAuditLoss,
 }
 
 impl AuditMiddleware {
@@ -124,8 +129,10 @@ impl AuditMiddleware {
     ///
     /// The worker reads from a bounded channel and appends entries to the
     /// given `AuditLogRepository`. The channel capacity defaults to
-    /// [`CHANNEL_CAPACITY`]; when full, new audit entries are dropped
-    /// (with a warning) to avoid blocking request handling.
+    /// [`CHANNEL_CAPACITY`]; when full, new audit entries are dropped to avoid
+    /// blocking request handling. A dropped entry, and one whose append fails,
+    /// is counted and logged ([`Self::loss`]) and, when a dead-letter file is
+    /// configured, written to it ([`Self::spawn_configured`]).
     ///
     /// No [`AuditEventSink`], so no notification rules fire. Use
     /// [`Self::spawn_with_sink`] in the composition root.
@@ -142,10 +149,40 @@ impl AuditMiddleware {
         repo: A,
         sink: Option<Arc<dyn AuditEventSink>>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        Self::spawn_configured(repo, sink, DeadLetterWriter::disabled(), CHANNEL_CAPACITY)
+    }
+
+    /// As [`Self::spawn_with_sink`], with the dead-letter writer lost rows are
+    /// routed to and the channel's capacity.
+    ///
+    /// The composition root passes [`DeadLetterWriter::from_env`]; tests pass a
+    /// small capacity to fill the channel.
+    pub fn spawn_configured<A: AuditLogRepository + 'static>(
+        repo: A,
+        sink: Option<Arc<dyn AuditEventSink>>,
+        dead_letter: DeadLetterWriter,
+        capacity: usize,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(capacity);
         let shutting_down = Arc::new(AtomicBool::new(false));
-        tokio::spawn(audit_worker(rx, repo, sink, Arc::clone(&shutting_down)));
-        Self { tx, shutting_down }
+        let loss = RequestAuditLoss::new(dead_letter);
+        tokio::spawn(audit_worker(
+            rx,
+            repo,
+            sink,
+            Arc::clone(&shutting_down),
+            loss.clone(),
+        ));
+        Self {
+            tx,
+            shutting_down,
+            loss,
+        }
+    }
+
+    /// The counters of request-audit rows that were not recorded (T-108).
+    pub fn loss(&self) -> RequestAuditLoss {
+        self.loss.clone()
     }
 
     /// Tell the worker that the channel is about to close on purpose.
@@ -192,7 +229,10 @@ impl AuditMiddleware {
         let (reached, barrier) = oneshot::channel();
         let wait = async {
             self.tx.send(Queued::Barrier(reached)).await.ok()?;
-            barrier.await.ok()
+            barrier.await.ok()?;
+            // Rows the worker could not append went to the dead-letter writer
+            // on the way; wait for the file to have them too.
+            self.loss.dead_letter().flush(within).await.then_some(())
         };
         matches!(tokio::time::timeout(within, wait).await, Ok(Some(())))
     }
@@ -211,6 +251,7 @@ async fn audit_worker<A: AuditLogRepository>(
     repo: A,
     sink: Option<Arc<dyn AuditEventSink>>,
     shutting_down: Arc<AtomicBool>,
+    loss: RequestAuditLoss,
 ) {
     let mut written: u64 = 0;
     while let Some(queued) = rx.recv().await {
@@ -227,7 +268,9 @@ async fn audit_worker<A: AuditLogRepository>(
         // best-effort on top of it, and an event nobody was emailed about is a
         // far smaller failure than one that was never recorded.
         if let Err(e) = repo.append(event.entry.clone()).await {
-            tracing::warn!(error = %e, "Failed to write audit log entry");
+            // Counted, logged (rate-limited) and sent to the dead-letter file
+            // when there is one — see `RequestAuditLoss`.
+            loss.record_failed(event.entry.clone(), &e);
         }
 
         written += 1;
@@ -265,6 +308,7 @@ where
         ready(Ok(AuditMiddlewareService {
             service,
             tx: self.tx.clone(),
+            loss: self.loss.clone(),
         }))
     }
 }
@@ -272,6 +316,7 @@ where
 pub struct AuditMiddlewareService<S> {
     service: S,
     tx: mpsc::Sender<Queued>,
+    loss: RequestAuditLoss,
 }
 
 impl<S, B> Service<ServiceRequest> for AuditMiddlewareService<S>
@@ -313,6 +358,7 @@ where
         // is read from the response's extensions after the call, not from the
         // request's before it.
         let tx = self.tx.clone();
+        let loss = self.loss.clone();
         let fut = self.service.call(req);
 
         Box::pin(async move {
@@ -366,16 +412,17 @@ where
                 })),
             };
 
-            if tx
-                .try_send(Queued::Event(AuditEvent { entry, org_id }))
-                .is_err()
-            {
-                tracing::error!(
-                    audit_dropped = true,
-                    method = %method,
-                    path = %path,
-                    "Audit channel full — entry dropped. Investigate CHANNEL_CAPACITY."
-                );
+            // `try_send`, never `send`: a full channel must not hold the
+            // response. The row it refuses comes back in the error and is
+            // counted and offered to the dead-letter queue — also non-blocking.
+            if let Err(refused) = tx.try_send(Queued::Event(AuditEvent { entry, org_id })) {
+                let (reason, queued) = match refused {
+                    TrySendError::Full(q) => ("audit channel full", q),
+                    TrySendError::Closed(q) => ("audit channel closed", q),
+                };
+                if let Queued::Event(event) = queued {
+                    loss.record_dropped(event.entry, reason);
+                }
             }
 
             result

@@ -91,6 +91,37 @@ pub struct JobStatus {
 pub trait JobHealthReporter: Send + Sync {
     /// Current status of every registered job.
     fn snapshot(&self) -> Vec<JobStatus>;
+
+    /// Request-audit loss counters (T-108), when this process counts them.
+    fn request_audit(&self) -> Option<RequestAuditHealth> {
+        None
+    }
+}
+
+/// Request-audit rows that were not recorded, since this process started (T-108).
+///
+/// The audit middleware appends each request's row on a background worker. A row
+/// is lost when the worker's queue is full at the end of the request (`dropped`)
+/// or when the datastore refuses the append (`failed`). Both counters only go up
+/// and reset when the process restarts; alert on their rate, or on `recent_loss`.
+#[derive(Serialize, utoipa::ToSchema, Clone, Debug, PartialEq, Eq)]
+pub struct RequestAuditHealth {
+    /// Rows refused because the queue was full.
+    pub dropped: u64,
+    /// Rows the worker took and could not append to the datastore.
+    pub failed: u64,
+    /// Lost rows written to the dead-letter file, from which they can be replayed.
+    pub dead_lettered: u64,
+    /// Lost rows kept nowhere: no dead-letter file is configured, or it could not
+    /// take them.
+    pub not_recoverable: u64,
+    /// Whether `AXIAM__GDPR_AUDIT_DLQ_FILE` names a dead-letter file.
+    pub dead_letter_configured: bool,
+    /// RFC 3339 timestamp of the most recent lost row.
+    pub last_loss_at: Option<String>,
+    /// Whether a row was lost in the last 15 minutes. Turns the endpoint's
+    /// `status` to `degraded`, and clears itself once rows are being recorded again.
+    pub recent_loss: bool,
 }
 
 /// Reports no jobs. The default in [`AppState::for_test`], and what a
@@ -108,9 +139,14 @@ impl JobHealthReporter for NoJobs {
 /// Response body for `GET /health/jobs`.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct JobsHealthResponse {
-    /// `ok` when no job is stalled, `degraded` when at least one is.
+    /// `ok` when no job is stalled and no request-audit row was lost recently,
+    /// `degraded` otherwise.
     pub status: &'static str,
     pub jobs: Vec<JobStatus>,
+    /// Request-audit loss counters (T-108). Absent when the process does not
+    /// count them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_audit: Option<RequestAuditHealth>,
 }
 
 /// `GET /health/jobs` — scheduled-job liveness (T-129).
@@ -119,7 +155,9 @@ pub struct JobsHealthResponse {
 /// is not a readiness gate: a stuck cleanup sweep is an operational problem,
 /// not a reason to pull a healthy server out of the load balancer and send its
 /// traffic to replicas running the same stuck code. Alert on
-/// `status == "degraded"`, or on a specific job's `stalled`.
+/// `status == "degraded"`, or on a specific job's `stalled`. `request_audit`
+/// counts the request-audit rows this process lost (T-108); a loss in the last
+/// 15 minutes is `degraded` too.
 #[utoipa::path(
     get,
     path = "/health/jobs",
@@ -130,12 +168,19 @@ pub struct JobsHealthResponse {
 )]
 pub async fn jobs<C: Connection + Clone>(state: web::Data<AppState<C>>) -> HttpResponse {
     let jobs = state.job_health.snapshot();
-    let status = if jobs.iter().any(|j| j.stalled) {
+    let request_audit = state.job_health.request_audit();
+    let status = if jobs.iter().any(|j| j.stalled)
+        || request_audit.as_ref().is_some_and(|a| a.recent_loss)
+    {
         "degraded"
     } else {
         "ok"
     };
-    HttpResponse::Ok().json(JobsHealthResponse { status, jobs })
+    HttpResponse::Ok().json(JobsHealthResponse {
+        status,
+        jobs,
+        request_audit,
+    })
 }
 
 /// Response body for `GET /health`.

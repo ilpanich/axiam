@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axiam_api_rest::health::{JobHealthReporter, JobStatus};
+use axiam_api_rest::health::{JobHealthReporter, JobStatus, RequestAuditHealth};
+use axiam_audit::RequestAuditLoss;
 use chrono::{DateTime, Utc};
 
 /// How many expected runs a job may miss before it is reported as stalled.
@@ -71,6 +72,9 @@ pub struct JobHealth {
     /// distinguished from one that has stopped running. Without this, every
     /// job reads as stalled for the first few seconds after boot.
     started_at: DateTime<Utc>,
+    /// The request-audit middleware's loss counters (T-108), reported beside
+    /// the jobs. Not a job: it has no interval and nothing to stall.
+    request_audit: Option<RequestAuditLoss>,
 }
 
 impl JobHealth {
@@ -80,7 +84,14 @@ impl JobHealth {
             inner: Arc::new(Mutex::new(BTreeMap::new())),
             interval,
             started_at: Utc::now(),
+            request_audit: None,
         }
+    }
+
+    /// Report `loss` as `request_audit` on `GET /health/jobs` (T-108).
+    pub fn with_request_audit(mut self, loss: RequestAuditLoss) -> Self {
+        self.request_audit = Some(loss);
+        self
     }
 
     /// Register a job so it appears in the snapshot before its first run.
@@ -147,6 +158,19 @@ impl JobHealthReporter for JobHealth {
             })
             .collect()
     }
+
+    fn request_audit(&self) -> Option<RequestAuditHealth> {
+        let s = self.request_audit.as_ref()?.snapshot();
+        Some(RequestAuditHealth {
+            dropped: s.dropped,
+            failed: s.failed,
+            dead_lettered: s.dead_lettered,
+            not_recoverable: s.not_recoverable,
+            dead_letter_configured: s.dead_letter_configured,
+            last_loss_at: s.last_loss_at.map(|t| t.to_rfc3339()),
+            recent_loss: s.recent_loss,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +219,42 @@ mod tests {
         assert!(names.iter().any(|n| n == "ssf_step_up"));
         assert!(names.iter().any(|n| n == "scim_reconcile"));
         assert!(names.iter().any(|n| n == "ciba_request"));
+    }
+
+    /// T-108: the request-audit counters ride on the reporter beside the jobs,
+    /// and are absent from a tracker that was not given them.
+    #[tokio::test]
+    async fn the_snapshot_reports_the_request_audit_loss_counters() {
+        use axiam_audit::DeadLetterWriter;
+        use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+
+        assert!(tracker().request_audit().is_none());
+
+        let loss = RequestAuditLoss::new(DeadLetterWriter::disabled());
+        let h = tracker().with_request_audit(loss.clone());
+        let before = h.request_audit().expect("counted");
+        assert_eq!((before.dropped, before.failed), (0, 0));
+        assert!(!before.recent_loss && before.last_loss_at.is_none());
+
+        let entry = || CreateAuditLogEntry {
+            tenant_id: uuid::Uuid::nil(),
+            actor_id: uuid::Uuid::nil(),
+            actor_type: ActorType::System,
+            action: "GET /x".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: None,
+            metadata: None,
+        };
+        loss.record_dropped(entry(), "audit channel full");
+        loss.record_failed(entry(), &"datastore down");
+        loss.record_failed(entry(), &"datastore down");
+
+        let after = h.request_audit().expect("counted");
+        assert_eq!((after.dropped, after.failed), (1, 2));
+        assert_eq!(after.not_recoverable, 3, "no file: all three are gone");
+        assert!(!after.dead_letter_configured);
+        assert!(after.recent_loss && after.last_loss_at.is_some());
     }
 
     #[test]

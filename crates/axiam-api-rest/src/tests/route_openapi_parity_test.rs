@@ -264,7 +264,7 @@ fn health_jobs_is_documented() {
         .as_ref()
         .expect("the document must carry components")
         .schemas;
-    for schema in ["JobsHealthResponse", "JobStatus"] {
+    for schema in ["JobsHealthResponse", "JobStatus", "RequestAuditHealth"] {
         assert!(
             schemas.contains_key(schema),
             "{schema} must be in components.schemas, or a generated client \

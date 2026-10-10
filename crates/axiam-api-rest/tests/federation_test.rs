@@ -987,6 +987,7 @@ async fn seed_config_row(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
             require_pkce: None,
             button_icon: None,
             allow_sha1_signatures: None,
+            idp_metadata_signing_cert_pem: None,
         })
         .await
         .unwrap()
@@ -2527,4 +2528,306 @@ async fn saml_acs_public_rejects_unknown_relay_state() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
+}
+
+// ---------------------------------------------------------------------------
+// #530 (P23W3-07): the IdP metadata signing certificate, the metadata cache
+// and the SSO-host-change audit row
+// ---------------------------------------------------------------------------
+
+/// A self-signed certificate generated now, as PEM.
+fn generated_cert_pem() -> String {
+    let pair = rcgen::KeyPair::generate().expect("key pair");
+    rcgen::CertificateParams::new(vec!["idp.example.test".to_string()])
+        .expect("params")
+        .self_signed(&pair)
+        .expect("self-signed")
+        .pem()
+}
+
+/// An unsigned IdP metadata document whose sign-in URL is `sso_url`.
+#[cfg(feature = "saml")]
+fn idp_metadata(sso_url: &str) -> String {
+    format!(
+        r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.com/metadata"><md:IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="{sso_url}"/></md:IDPSSODescriptor></md:EntityDescriptor>"#
+    )
+}
+
+#[actix_rt::test]
+async fn p23w3_07_the_metadata_signing_certificate_is_saml_only_and_round_trips() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+    let send = |method: test::TestRequest, uri: String, body: serde_json::Value| {
+        method
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(body)
+            .to_request()
+    };
+    let cert = generated_cert_pem();
+
+    // Absent by default.
+    let saml = create_saml_config(&app, &token).await;
+    assert!(saml["idp_metadata_signing_cert_pem"].is_null(), "{saml}");
+    let saml_id = saml["id"].as_str().unwrap().to_owned();
+
+    // Set by an update, returned, and cleared by `null`.
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::put(),
+            format!("/api/v1/federation-configs/{saml_id}"),
+            serde_json::json!({ "idp_metadata_signing_cert_pem": cert }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["idp_metadata_signing_cert_pem"], cert);
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::put(),
+            format!("/api/v1/federation-configs/{saml_id}"),
+            serde_json::json!({ "provider": "Renamed SAML IdP" }),
+        ),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(
+        body["idp_metadata_signing_cert_pem"], cert,
+        "an update that omits it keeps it"
+    );
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::put(),
+            format!("/api/v1/federation-configs/{saml_id}"),
+            serde_json::json!({ "idp_metadata_signing_cert_pem": null }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body["idp_metadata_signing_cert_pem"].is_null(), "{body}");
+
+    // Set at creation.
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::post(),
+            "/api/v1/federation-configs".into(),
+            serde_json::json!({
+                "provider": "Signed-metadata SAML IdP",
+                "protocol": "Saml",
+                "metadata_url": "https://signed.example.com/metadata",
+                "client_id": "https://axiam.example.com/saml/sp-signed",
+                "client_secret": "saml-dummy-secret",
+                "idp_metadata_signing_cert_pem": cert
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["idp_metadata_signing_cert_pem"], cert);
+
+    // Not a certificate: 400, at creation and by an update.
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::put(),
+            format!("/api/v1/federation-configs/{saml_id}"),
+            serde_json::json!({ "idp_metadata_signing_cert_pem": "not-a-certificate" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400);
+
+    // Refused on a non-SAML configuration.
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::post(),
+            "/api/v1/federation-configs".into(),
+            serde_json::json!({
+                "provider": "Google",
+                "protocol": "OidcConnect",
+                "metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+                "client_id": "google-client-id",
+                "client_secret": "google-secret",
+                "idp_metadata_signing_cert_pem": cert
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let oidc = create_test_config(&app, &token).await;
+    let resp = test::call_service(
+        &app,
+        send(
+            test::TestRequest::put(),
+            format!(
+                "/api/v1/federation-configs/{}",
+                oidc["id"].as_str().unwrap()
+            ),
+            serde_json::json!({ "idp_metadata_signing_cert_pem": cert }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+/// #530: SP-initiated sign-ins share one fetch of the metadata while it is
+/// fresh; an edited configuration fetches again; a refetch that moves the
+/// sign-in URL to another host is audited; and with a metadata certificate
+/// configured, an unsigned document starts no sign-in. SAML builds only: the
+/// sign-in route and the metadata cache are behind the `saml` feature.
+#[cfg(feature = "saml")]
+#[actix_rt::test]
+async fn p23w3_07_a_cached_sign_in_fetches_once_and_a_moved_sso_host_is_audited() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    // The IdP's metadata host, in memory: what it serves and how often it is
+    // asked.
+    let served = Arc::new(Mutex::new(idp_metadata("https://sso.idp.example.com/saml")));
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetcher: axiam_federation::saml_metadata::MetadataFetcher = {
+        let served = Arc::clone(&served);
+        let fetches = Arc::clone(&fetches);
+        Arc::new(move |url: String| {
+            assert_eq!(url, "https://idp.example.com/metadata");
+            fetches.fetch_add(1, Ordering::SeqCst);
+            let document = served.lock().unwrap().clone();
+            Box::pin(async move { Ok(document) })
+        })
+    };
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new({
+                let mut state = AppState::for_test(db.clone(), auth.clone());
+                state.federation.saml_federation_service = state
+                    .federation
+                    .saml_federation_service
+                    .clone()
+                    .with_metadata_fetcher(fetcher);
+                state
+            }))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+
+    let config = create_saml_config(&app, &token).await;
+    let config_id = config["id"].as_str().unwrap().to_owned();
+    let sign_in = || {
+        test::TestRequest::post()
+            .uri("/api/v1/federation/saml/authn-request")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(serde_json::json!({
+                "config_id": config_id,
+                "acs_url": "https://axiam.example.com/acs"
+            }))
+            .to_request()
+    };
+    let edit = |body: serde_json::Value| {
+        test::TestRequest::put()
+            .uri(&format!("/api/v1/federation-configs/{config_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(body)
+            .to_request()
+    };
+    let host_changes = |db: Surreal<TestDb>| async move {
+        db.query("SELECT * FROM audit_log WHERE action = 'federation.saml_sso_host_changed'")
+            .await
+            .expect("query")
+            .take::<Vec<serde_json::Value>>(0)
+            .expect("rows")
+    };
+
+    // Two sign-ins, one fetch.
+    for _ in 0..2 {
+        let resp = test::call_service(&app, sign_in()).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert!(
+            body["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://sso.idp.example.com/saml?SAMLRequest="),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        1,
+        "the second is a cache hit"
+    );
+    assert!(host_changes(db.clone()).await.is_empty());
+
+    // The metadata host now names another sign-in host. The cached copy is
+    // still served until the configuration is edited.
+    *served.lock().unwrap() = idp_metadata("https://login.elsewhere.example.net/saml");
+    let resp = test::call_service(&app, sign_in()).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    let resp = test::call_service(&app, edit(serde_json::json!({ "provider": "Moved IdP" }))).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = test::call_service(&app, sign_in()).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        body["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://login.elsewhere.example.net/saml?"),
+        "{body}"
+    );
+    assert_eq!(fetches.load(Ordering::SeqCst), 2, "an edit invalidates");
+
+    let rows = host_changes(db.clone()).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["resource_id"], config_id, "{rows:?}");
+    assert_eq!(rows[0]["actor_type"], "System", "{rows:?}");
+    assert_eq!(rows[0]["metadata"]["federation_config_id"], config_id);
+    assert_eq!(rows[0]["metadata"]["old_host"], "sso.idp.example.com");
+    assert_eq!(
+        rows[0]["metadata"]["new_host"],
+        "login.elsewhere.example.net"
+    );
+
+    // With a metadata certificate configured, the same unsigned document is
+    // refused and no AuthnRequest is built.
+    let resp = test::call_service(
+        &app,
+        edit(serde_json::json!({ "idp_metadata_signing_cert_pem": generated_cert_pem() })),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = test::call_service(&app, sign_in()).await;
+    assert!(
+        resp.status().is_server_error(),
+        "unsigned metadata starts no sign-in: {}",
+        resp.status()
+    );
+    assert_eq!(fetches.load(Ordering::SeqCst), 3);
+    assert_eq!(host_changes(db.clone()).await.len(), 1);
 }

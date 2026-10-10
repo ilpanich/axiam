@@ -35,6 +35,10 @@ use crate::state::AppState;
 /// responses (#531, D-3) — at creation, or by an update that turned it on.
 pub const AUDIT_SHA1_SIGNATURES_ALLOWED: &str = "federation.sha1_signatures_allowed";
 
+/// Audit action: a refetch of a SAML IdP's metadata named an SSO URL on
+/// another host than the copy it replaced (#530, P23W3-07).
+pub const AUDIT_SAML_SSO_HOST_CHANGED: &str = "federation.saml_sso_host_changed";
+
 // ---------------------------------------------------------------------------
 // Request / response DTOs
 // ---------------------------------------------------------------------------
@@ -200,6 +204,11 @@ pub struct CreateFederationConfigRequest {
     /// a non-SAML config, and audited (`federation.sha1_signatures_allowed`)
     /// when set to `true`.
     pub allow_sha1_signatures: Option<bool>,
+    /// SAML only: the PEM certificate the IdP signs its metadata document
+    /// with (#530). When set, the metadata must carry one SHA-2 signature on
+    /// its `EntityDescriptor` root that verifies against it, or no sign-in
+    /// starts. Omitted: the metadata is not signature-checked.
+    pub idp_metadata_signing_cert_pem: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -250,6 +259,11 @@ pub struct UpdateFederationConfigRequest {
     /// non-SAML config; turning it on is audited
     /// (`federation.sha1_signatures_allowed`).
     pub allow_sha1_signatures: Option<bool>,
+    /// SAML only: the IdP metadata signing certificate (#530). Explicit
+    /// `null` clears it; omitted leaves it.
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<String>, nullable)]
+    pub idp_metadata_signing_cert_pem: Option<Option<String>>,
 }
 
 /// Federation config response -- omits client_secret.
@@ -311,6 +325,9 @@ pub struct FederationConfigResponse {
     /// SAML only: whether IdP responses signed with SHA-1 are accepted
     /// (default `false`; #531).
     pub allow_sha1_signatures: bool,
+    /// SAML only: the certificate the IdP's metadata must be signed with
+    /// (#530); `null` when the metadata is not signature-checked.
+    pub idp_metadata_signing_cert_pem: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -348,6 +365,7 @@ impl From<FederationConfig> for FederationConfigResponse {
             has_bundled_mark: c.provider_kind.has_bundled_mark(),
             button_icon: c.button_icon.clone(),
             allow_sha1_signatures: c.allow_sha1_signatures,
+            idp_metadata_signing_cert_pem: c.idp_metadata_signing_cert_pem.clone(),
             token_exchange: c.token_exchange.into(),
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -685,6 +703,63 @@ async fn audit_sha1_allowed<C: Connection + Clone>(
     }
 }
 
+/// #530: the metadata signing certificate means something only to the SAML
+/// SP's metadata fetch, and must be a certificate.
+fn validate_metadata_signing_cert(
+    protocol: FederationProtocol,
+    pem: Option<&str>,
+) -> Result<(), AxiamApiError> {
+    let Some(pem) = pem else {
+        return Ok(());
+    };
+    if protocol != FederationProtocol::Saml {
+        return Err(validation_err(
+            "idp_metadata_signing_cert_pem is only supported for Saml providers",
+        ));
+    }
+    axiam_federation::cert::validate_pem_cert(pem)
+        .map_err(|e| validation_err(format!("idp_metadata_signing_cert_pem is invalid: {e}")))
+}
+
+/// #530 (P23W3-07): the audit row for a refetch of a SAML IdP's metadata that
+/// moved its SSO URL to another host. Written by the system (no administrator
+/// made the change; the metadata host did), in the configuration's tenant.
+/// Never fails the sign-in: the redirect it describes is already built.
+#[cfg(feature = "saml")]
+async fn audit_sso_host_change<C: Connection + Clone>(
+    state: &AppState<C>,
+    http_req: &HttpRequest,
+    tenant_id: Uuid,
+    config_id: Uuid,
+    change: &axiam_federation::saml_metadata::SsoHostChange,
+) {
+    if let Err(error) = state
+        .audit_repo
+        .append(CreateAuditLogEntry {
+            tenant_id,
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::System,
+            action: AUDIT_SAML_SSO_HOST_CHANGED.to_string(),
+            resource_id: Some(config_id),
+            outcome: AuditOutcome::Success,
+            ip_address: client_ip(http_req),
+            metadata: Some(serde_json::json!({
+                "federation_config_id": config_id,
+                "old_host": change.old_host,
+                "new_host": change.new_host,
+            })),
+        })
+        .await
+    {
+        tracing::error!(
+            %tenant_id,
+            %config_id,
+            %error,
+            "a SAML SSO host change audit row could not be written"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Federation Config CRUD
 // ---------------------------------------------------------------------------
@@ -757,6 +832,7 @@ pub async fn create<C: Connection + Clone>(
     };
     validate_login_provider_fields(protocol, &login_fields)?;
     validate_allow_sha1(protocol, req.allow_sha1_signatures)?;
+    validate_metadata_signing_cert(protocol, req.idp_metadata_signing_cert_pem.as_deref())?;
 
     // The attribute map is validated now that something reads it. Before this
     // change it was stored unchecked and consulted by nothing, so a typo was
@@ -831,6 +907,7 @@ pub async fn create<C: Connection + Clone>(
             require_pkce: req.require_pkce,
             button_icon: req.button_icon,
             allow_sha1_signatures: req.allow_sha1_signatures,
+            idp_metadata_signing_cert_pem: req.idp_metadata_signing_cert_pem,
         })
         .await?;
 
@@ -1043,6 +1120,12 @@ pub async fn update<C: Connection + Clone>(
     };
     validate_login_provider_fields(existing.protocol, &login_fields)?;
     validate_allow_sha1(existing.protocol, req.allow_sha1_signatures)?;
+    validate_metadata_signing_cert(
+        existing.protocol,
+        req.idp_metadata_signing_cert_pem
+            .as_ref()
+            .and_then(Option::as_deref),
+    )?;
     // Audited on the transition only: re-saving a form that already allows
     // SHA-1 changes nothing and writes no row.
     let sha1_turned_on = req.allow_sha1_signatures == Some(true) && !existing.allow_sha1_signatures;
@@ -1081,6 +1164,7 @@ pub async fn update<C: Connection + Clone>(
                 require_pkce: req.require_pkce,
                 button_icon: req.button_icon,
                 allow_sha1_signatures: req.allow_sha1_signatures,
+                idp_metadata_signing_cert_pem: req.idp_metadata_signing_cert_pem,
             },
         )
         .await?;
@@ -1481,6 +1565,7 @@ pub struct SamlMetadataQuery {
     security(("bearer" = []))
 )]
 pub async fn saml_authn_request<C: Connection + Clone>(
+    http_req: HttpRequest,
     user: AuthenticatedUser,
     state: web::Data<AppState<C>>,
     body: web::Json<SamlAuthnRequestRequest>,
@@ -1498,6 +1583,9 @@ pub async fn saml_authn_request<C: Connection + Clone>(
         .build_authn_request(user.tenant_id, req.config_id, &req.acs_url, req.relay_state)
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
+    if let Some(change) = &result.sso_host_change {
+        audit_sso_host_change(&state, &http_req, user.tenant_id, req.config_id, change).await;
+    }
 
     Ok(HttpResponse::Ok().json(SamlAuthnRequestResponse {
         url: result.url,
@@ -2252,6 +2340,7 @@ pub async fn saml_login_public<C: Connection + Clone>(
     // Named `app_state` (not `state`) — this handler already has a local
     // `state` variable (the RelayState CSRF value).
     app_state: web::Data<AppState<C>>,
+    http_req: HttpRequest,
     body: web::Json<SamlLoginRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use super::federation_login::{
@@ -2314,6 +2403,16 @@ pub async fn saml_login_public<C: Connection + Clone>(
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
+    if let Some(change) = &result.sso_host_change {
+        audit_sso_host_change(
+            &app_state,
+            &http_req,
+            resolved.config.tenant_id,
+            b.federation_config_id,
+            change,
+        )
+        .await;
+    }
 
     // Persist state row (nonce = "" for SAML — unused but required by schema).
     // Store the AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).

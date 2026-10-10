@@ -367,6 +367,7 @@ async fn setup(spec: TrustSpec) -> Fixture {
             require_pkce: None,
             button_icon: None,
             allow_sha1_signatures: None,
+            idp_metadata_signing_cert_pem: None,
         })
         .await
         .unwrap();

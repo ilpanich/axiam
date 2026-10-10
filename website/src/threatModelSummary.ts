@@ -63,9 +63,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.38.0",
  "diagramCount": 10,
- "total": 473,
+ "total": 474,
  "open": 20,
- "mitigated": 432,
+ "mitigated": 433,
  "notApplicable": 21,
  "areas": [
   {
@@ -92,7 +92,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 125,
+   "total": 126,
    "open": 3,
    "notApplicable": 0
   },
@@ -142,7 +142,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 103,
+   "total": 104,
    "open": 5,
    "notApplicable": 3
   },
@@ -198,7 +198,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Low",
-   "total": 35,
+   "total": 36,
    "open": 1,
    "notApplicable": 1
   }

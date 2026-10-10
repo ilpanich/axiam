@@ -88,7 +88,7 @@ pub const AUDIT_CONFIG_DELETED: &str = "directory.config_deleted";
 // ---------------------------------------------------------------------------
 
 /// `null` is not absent: `Some(None)` clears a nullable member, `None` leaves it.
-fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,

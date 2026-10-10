@@ -17,9 +17,9 @@ export const THREAT_MODEL: ThreatModel = {
  "description": "Complete IAM SW written in Rust using SurrealDB to store data and relationships. STRIDE threat model covering the system context, authentication and session management, the OAuth2/OIDC provider, inbound federation, the RBAC authorization engine, PKI and IoT device identity, audit/webhooks/email, and the Kubernetes deployment, and — as a design-only diagram whose entries are recorded Not applicable — a RADIUS front end that is not built.",
  "version": "2.38.0",
  "diagramCount": 10,
- "total": 473,
+ "total": 474,
  "open": 20,
- "mitigated": 432,
+ "mitigated": 433,
  "notApplicable": 21,
  "diagrams": [
   {
@@ -4132,6 +4132,15 @@ export const THREAT_MODEL: ThreatModel = {
        "status": "Mitigated",
        "description": "Accepting a response whose assertion is unsigned — or trusting a signed response wrapper without checking the assertion — makes every claim attacker-controlled.",
        "mitigation": "The SP fails closed: an assertion without a valid signature from the configured IdP certificate is rejected, and signature presence is not inferred from the response envelope.\n\n**Amended in the 1.0.0 release wave (#531, P23W3-08, D-3): SHA-2 only.** The verifier called `reduce_xml_to_signed` with no algorithm list, so a response signed with `rsa-sha1` over SHA-1 digests verified, while the SAML identity provider's own request receiver already refused SHA-1. `verify_signature` now passes the receiver's list (RSA- and ECDSA-SHA-256/384/512) to `reduce_xml_to_signed_with_allowed_algorithms`, which holds the signature method and its digests to it. A federation config whose IdP cannot sign with SHA-2 yet sets `allow_sha1_signatures` (default `false`, schema v92, SAML only — `400` on any other protocol), which restores the earlier rule for that config alone; turning it on, at creation or by an update, writes a `federation.sha1_signatures_allowed` audit row naming the config and the administrator. Residual: a config with the escape hatch set accepts whatever xmlsec verifies, as every config did before 1.0.0. Tests: `saml_idp::tests::p23w3_08_a_sha1_signed_response_is_refused_unless_the_federation_allows_sha1` (a valid SHA-1 signature, verified by xmlsec, refused by default and accepted with the flag; SHA-256 accepted either way) and `federation_test::p23w3_08_allow_sha1_signatures_is_saml_only_and_audited_when_turned_on` (refused on OIDC; one audit row at creation and one at the false-to-true update, none at a re-save)."
+      },
+      {
+       "number": 474,
+       "title": "Forged or re-pointed IdP metadata chooses where users are sent to sign in",
+       "type": "Spoofing",
+       "severity": "Low",
+       "status": "Mitigated",
+       "description": "The SAML SP reads an external IdP's entity ID, sign-in (SSO) URL and binding from its metadata document, fetched over HTTPS from the federation configuration's `metadata_url` (P23W3-07). The assertion signing certificate is pinned on the configuration and never taken from metadata, so forged metadata cannot forge an assertion. But no metadata signature was checked, so whoever can serve that URL — a compromised or re-pointed metadata host — chose the HTTPS URL every SP-initiated sign-in sent the user to with its `AuthnRequest`: a phishing redirect on AXIAM's authority, followed silently. And the document was fetched again on every sign-in, so every sign-in also depended on the metadata host being up.",
+       "mitigation": "Mitigated at model 2.38.0 (ilpanich/axiam#530, P23W3-07, D-23). **A signature, when the operator asks for one.** A SAML federation configuration may carry `idp_metadata_signing_cert_pem` (schema v93; validated as a PEM certificate on save; SAML only — `400` on any other protocol), distinct from the assertion certificate. When it is set, the fetched document must carry exactly one enveloped `ds:Signature`, the child of the `md:EntityDescriptor` root, with one reference naming the root's `ID`, which no other element may carry — the IdP receiver's D-23 placement function (`signature_placement`), applied to another root. Any other signature, an `EntitiesDescriptor` root, or no signature refuses the document and no sign-in starts. xmlsec verifies the one admitted signature on its node against the configured certificate with the SHA-2 algorithms only (`allow_sha1_signatures` relaxes responses, not metadata), and the SP reads xmlsec's pre-digest output — the bytes the digest covered — so nothing outside the signature is read. Every metadata document, with or without the certificate, is refused before parsing when it carries a markup declaration or is not plainly UTF-8 (#531's rule), and when its `validUntil` has passed. **A cache.** Parsed metadata is held per process (`SamlMetadataCache`), keyed by the configuration id and checked against its metadata URL and `updated_at`, so any edit misses; an entry lives for the document's `cacheDuration` (one hour when it states none), held between five minutes and 24 hours and never past `validUntil`; a refused document is never cached. `build_authn_request` reads through it, so the metadata host is asked at most once per entry rather than at every sign-in. **An audit row when the sign-in host moves.** A refetch whose SSO URL names another host than the entry it replaces writes `federation.saml_sso_host_changed` (system actor, the configuration as resource; metadata naming the configuration, the old host and the new host). Tests: `saml_idp::tests::p23w3_07_signed_metadata_is_read_through_its_signature`, `p23w3_07_unsigned_metadata_is_refused_when_a_certificate_is_configured`, `p23w3_07_tampered_metadata_is_refused_when_a_certificate_is_configured` (an altered SSO URL, another key, a valid SHA-1 signature) and `p23w3_07_a_metadata_signature_is_accepted_only_on_the_entity_descriptor_root` (on the role descriptor, naming another element, a second signature, an aggregate, a repeated ID); `saml_metadata::tests::p23w3_07_metadata_is_cached_until_it_expires_or_the_configuration_changes`, `p23w3_07_a_refetch_that_moves_the_sso_host_is_reported`, `a_refused_document_is_not_cached`, `a_document_past_its_valid_until_is_refused`, `metadata_carrying_a_dtd_is_refused_before_parsing` and `freshness_honours_cache_duration_under_the_cap_and_valid_until`; `federation_test::p23w3_07_the_metadata_signing_certificate_is_saml_only_and_round_trips` and `p23w3_07_a_cached_sign_in_fetches_once_and_a_moved_sso_host_is_audited` (two sign-ins, one fetch; an edit refetches and the moved host is one audit row; with the certificate set, the unsigned document starts no sign-in). Residual: a configuration without the certificate still trusts the HTTPS fetch alone, as every configuration did before 1.0.0 — a re-pointed metadata host now takes effect at the next refetch rather than the next sign-in, and a moved sign-in host is audited; the cache and the host comparison are per process, so a restart forgets the previous host and each replica fetches for itself."
       }
      ],
      "open": 0,
@@ -6678,14 +6687,14 @@ export const THREAT_MODEL: ThreatModel = {
      "notApplicable": 0
     }
    ],
-   "total": 125,
+   "total": 126,
    "open": 3,
    "notApplicable": 0,
    "bySeverity": {
     "High": 44,
     "Medium": 51,
     "Critical": 13,
-    "Low": 17
+    "Low": 18
    }
   },
   {

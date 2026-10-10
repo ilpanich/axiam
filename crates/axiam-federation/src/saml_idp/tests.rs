@@ -2215,3 +2215,188 @@ fn the_post_binding_echoes_relay_state_verbatim_and_carries_one_line_of_base64()
     case.relay_state = None;
     assert_eq!(case.issue_ok().binding.relay_state, None);
 }
+
+// ---------------------------------------------------------------------------
+// #530 (P23W3-07): the SP reads an IdP's metadata through its signature
+// ---------------------------------------------------------------------------
+//
+// The tenant credential stands in for an IdP's metadata signing key: what is
+// tested is the SP's reading of a signed `EntityDescriptor`, and the signing
+// path is the one the IdP side already uses.
+
+const METADATA_SSO: &str = "https://idp.example.test/sso";
+
+/// An IdP metadata document whose root carries `ID = id` and, as its first
+/// child, `inner` (a signature template, or nothing).
+fn idp_metadata_document(id: &str, inner: &str, sso: &str) -> String {
+    format!(
+        r#"<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" ID="{id}" entityID="https://idp.example.test/metadata">{inner}<md:IDPSSODescriptor ID="_idp-role" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="{sso}"/></md:IDPSSODescriptor></md:EntityDescriptor>"#
+    )
+}
+
+/// A metadata document validly signed, on its root, with the tenant credential.
+fn signed_idp_metadata() -> String {
+    let id = xml::new_id();
+    signed(&idp_metadata_document(
+        &id,
+        &sign::signature_template(&id, &cert_bytes()),
+        METADATA_SSO,
+    ))
+}
+
+/// What the SP reads from `document`, with the metadata certificate configured
+/// or not.
+fn read_idp_metadata(
+    document: &str,
+    certificate_configured: bool,
+) -> Result<crate::saml::IdpMetadata, crate::error::FederationError> {
+    crate::saml_metadata::parse_idp_metadata(
+        document,
+        certificate_configured.then_some(material().cert_pem.as_str()),
+        Utc::now(),
+    )
+    .map(|parsed| parsed.metadata)
+}
+
+fn refused_because(
+    result: Result<crate::saml::IdpMetadata, crate::error::FederationError>,
+    reason: &str,
+) {
+    assert!(
+        matches!(
+            &result,
+            Err(crate::error::FederationError::SamlMetadataFailed(m)) if m.contains(reason)
+        ),
+        "expected a refusal naming {reason:?}: {result:?}"
+    );
+}
+
+#[test]
+fn p23w3_07_signed_metadata_is_read_through_its_signature() {
+    let document = signed_idp_metadata();
+    // The oracle: xmlsec verifies it against the certificate.
+    <XmlSec as CryptoProvider>::reduce_xml_to_signed(
+        &document,
+        &[cert_der(material())],
+        ReduceMode::PreDigest,
+    )
+    .expect("a valid signature");
+
+    for certificate_configured in [true, false] {
+        let metadata = read_idp_metadata(&document, certificate_configured)
+            .unwrap_or_else(|e| panic!("configured={certificate_configured}: {e}"));
+        assert_eq!(metadata.entity_id, "https://idp.example.test/metadata");
+        assert_eq!(metadata.sso_url, METADATA_SSO);
+        assert_eq!(
+            metadata.sso_binding,
+            "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+        );
+    }
+}
+
+#[test]
+fn p23w3_07_unsigned_metadata_is_refused_when_a_certificate_is_configured() {
+    let id = xml::new_id();
+    let unsigned = idp_metadata_document(&id, "", METADATA_SSO);
+    refused_because(read_idp_metadata(&unsigned, true), "not signed");
+    // A root with no `ID` cannot be referenced, so it cannot be signed.
+    let no_id = unsigned.replace(&format!(r#" ID="{id}""#), "");
+    refused_because(read_idp_metadata(&no_id, true), "not signed");
+
+    // Without the certificate, the pre-1.0.0 rule: the HTTPS fetch is trusted.
+    assert_eq!(
+        read_idp_metadata(&unsigned, false).unwrap().sso_url,
+        METADATA_SSO
+    );
+}
+
+#[test]
+fn p23w3_07_tampered_metadata_is_refused_when_a_certificate_is_configured() {
+    // The SSO URL changed after signing: the phishing redirect the issue names.
+    let tampered = signed_idp_metadata().replace(METADATA_SSO, "https://phish.example.net/sso");
+    refused_because(read_idp_metadata(&tampered, true), "does not verify");
+    // Without the certificate nothing can tell, which is the residual.
+    assert_eq!(
+        read_idp_metadata(&tampered, false).unwrap().sso_url,
+        "https://phish.example.net/sso"
+    );
+
+    // Signed, validly, by a key that is not the configured one.
+    let other = rotated_material();
+    let other_cert = crate::cert::pem_cert_to_der(&other.cert_pem).expect("der");
+    let other_key = signing_key_from(other, credential_for(other, tenant()));
+    let id = xml::new_id();
+    let by_another_key = sign::sign(
+        &idp_metadata_document(
+            &id,
+            &sign::signature_template(&id, &other_cert),
+            METADATA_SSO,
+        ),
+        &sign::private_key_der(&other_key).expect("der"),
+    )
+    .expect("signed");
+    refused_because(read_idp_metadata(&by_another_key, true), "does not verify");
+
+    // A valid SHA-1 signature: metadata is held to SHA-2.
+    let sha1 = resigned_with_sha1(&signed_idp_metadata());
+    <XmlSec as CryptoProvider>::reduce_xml_to_signed(
+        &sha1,
+        &[cert_der(material())],
+        ReduceMode::PreDigest,
+    )
+    .expect("the SHA-1 signature is valid");
+    refused_because(read_idp_metadata(&sha1, true), "does not verify");
+}
+
+#[test]
+fn p23w3_07_a_metadata_signature_is_accepted_only_on_the_entity_descriptor_root() {
+    let only = "may only be the EntityDescriptor root's own";
+
+    // On the role descriptor, naming it: validly signed, in the wrong place.
+    let id = xml::new_id();
+    let on_the_role = signed(&idp_metadata_document(&id, "", METADATA_SSO).replace(
+        r#"protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">"#,
+        &format!(
+            r#"protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">{}"#,
+            sign::signature_template("_idp-role", &cert_bytes())
+        ),
+    ));
+    refused_because(read_idp_metadata(&on_the_role, true), only);
+
+    // On the root, naming the role descriptor.
+    let naming_another = signed(&idp_metadata_document(
+        &id,
+        &sign::signature_template("_idp-role", &cert_bytes()),
+        METADATA_SSO,
+    ));
+    refused_because(read_idp_metadata(&naming_another, true), only);
+
+    // A second, unsigned signature beside the valid one.
+    let valid = signed_idp_metadata();
+    let extra = valid.replace(
+        "</md:IDPSSODescriptor>",
+        &format!(
+            "{}</md:IDPSSODescriptor>",
+            sign::signature_template("_idp-role", &cert_bytes())
+        ),
+    );
+    refused_because(read_idp_metadata(&extra, true), only);
+
+    // A valid document inside an aggregate: the root is no longer the entity.
+    let aggregate = format!(
+        r#"<md:EntitiesDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata">{valid}</md:EntitiesDescriptor>"#
+    );
+    refused_because(
+        read_idp_metadata(&aggregate, true),
+        "one md:EntityDescriptor",
+    );
+
+    // Two elements carrying the root's ID.
+    let duplicated = valid.replace(r#"ID="_idp-role""#, &format!(r#"ID="{}""#, root_id(&valid)));
+    refused_because(read_idp_metadata(&duplicated, true), "repeats its root ID");
+}
+
+/// The `ID` of `document`'s root element.
+fn root_id(document: &str) -> String {
+    xpath(document, "/*/@ID").remove(0)
+}

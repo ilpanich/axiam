@@ -461,7 +461,7 @@ fn xs_boolean(raw: Option<String>) -> Result<bool, RequestError> {
 /// `LogoutRequest` or `LogoutResponse` in [`super::logout`] — and `root_id` its
 /// `ID`. The rule never looks at the root's name, so it cannot differ between
 /// message kinds.
-pub(super) fn signature_placement(
+pub(crate) fn signature_placement(
     doc: &libxml::tree::Document,
     root: &libxml::tree::Node,
     root_id: &str,

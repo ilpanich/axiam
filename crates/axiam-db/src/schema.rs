@@ -477,6 +477,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "federation_allow_sha1_signatures",
         sql: SCHEMA_V92,
     },
+    Migration {
+        version: 93,
+        name: "federation_idp_metadata_signing_cert",
+        sql: SCHEMA_V93,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4622,6 +4627,18 @@ const SCHEMA_V92: &str = "\
 DEFINE FIELD IF NOT EXISTS allow_sha1_signatures ON TABLE federation_config TYPE bool DEFAULT false;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v93 — SAML IdP metadata signing certificate (#530, P23W3-07)
+// -----------------------------------------------------------------------
+//
+// The certificate a SAML federation's IdP metadata document must be signed
+// with. Additive: one optional column, absent on every existing config, which
+// keeps fetching its metadata unchecked as before; no row is rewritten.
+const SCHEMA_V93: &str = "\
+DEFINE FIELD IF NOT EXISTS idp_metadata_signing_cert_pem ON TABLE federation_config \
+    TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4703,6 +4720,30 @@ mod tests {
                 seen.contains(table.as_str()),
                 "{table} is tenant-scoped but not in TENANT_PURGE_ORDER: a deleted \
                  tenant's rows would survive the purge (#523)"
+            );
+        }
+    }
+
+    /// #530 (P23W3-07) — v93 adds the optional SAML metadata signing
+    /// certificate and rewrites no row: every existing config keeps fetching
+    /// unchecked metadata until an operator sets one.
+    #[test]
+    fn v93_adds_only_the_metadata_signing_certificate() {
+        let statements: Vec<&str> = SCHEMA_V93
+            .lines()
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS idp_metadata_signing_cert_pem ON TABLE federation_config \
+              TYPE option<string>;"
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V93.contains(forbidden),
+                "v93 must not contain {forbidden}: it is additive DDL only"
             );
         }
     }
@@ -6054,9 +6095,12 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&92),
-            "v92 is the newest migration (#531, D-3 — `federation_config.allow_sha1_signatures`, \
-             the SAML SP verifier's SHA-1 escape hatch; v91 was #523, D-4 — `tenant.deleted_at`, \
+            Some(&93),
+            "v93 is the newest migration (#530, P23W3-07 — \
+             `federation_config.idp_metadata_signing_cert_pem`, the certificate a SAML IdP's \
+             metadata document must be signed with; v92 was #531, D-3 — \
+             `federation_config.allow_sha1_signatures`, the SAML SP verifier's SHA-1 escape hatch; \
+             v91 was #523, D-4 — `tenant.deleted_at`, \
              the tombstone a tenant deletion stamps before the cleanup job purges the tenant's \
              rows; v90 was \
              #565, T-102 — `revoked_at` on `certificate` and \

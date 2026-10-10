@@ -196,6 +196,7 @@ fn make_config(plaintext: &str) -> FederationConfig {
         require_pkce: false,
         button_icon: None,
         allow_sha1_signatures: false,
+        idp_metadata_signing_cert_pem: None,
     }
 }
 

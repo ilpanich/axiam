@@ -944,6 +944,7 @@ async fn post_binding_signed_end_to_end_verified_by_axiam_own_sp() {
         require_pkce: false,
         button_icon: None,
         allow_sha1_signatures: false,
+        idp_metadata_signing_cert_pem: None,
     };
     let other_tenant = create_tenant(&w.db, w.org_id, "saml-sp-side").await;
     w.state

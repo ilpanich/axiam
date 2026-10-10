@@ -1592,6 +1592,7 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
             require_pkce: None,
             button_icon: None,
             allow_sha1_signatures: None,
+            idp_metadata_signing_cert_pem: None,
         })
         .await
         .unwrap();

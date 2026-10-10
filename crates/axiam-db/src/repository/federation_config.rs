@@ -60,6 +60,8 @@ struct FederationConfigRow {
     button_icon: Option<String>,
     // #531 (schema v92) — absent on a pre-v92 row, which reads as `false`.
     allow_sha1_signatures: Option<bool>,
+    // #530 (schema v93) — absent on a pre-v93 row: no metadata signature check.
+    idp_metadata_signing_cert_pem: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -105,6 +107,8 @@ struct FederationConfigRowWithId {
     button_icon: Option<String>,
     // #531 (schema v92) — absent on a pre-v92 row, which reads as `false`.
     allow_sha1_signatures: Option<bool>,
+    // #530 (schema v93) — absent on a pre-v93 row: no metadata signature check.
+    idp_metadata_signing_cert_pem: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -150,6 +154,8 @@ struct FederationConfigListRow {
     button_icon: Option<String>,
     // #531 (schema v92) — absent on a pre-v92 row, which reads as `false`.
     allow_sha1_signatures: Option<bool>,
+    // #530 (schema v93) — absent on a pre-v93 row: no metadata signature check.
+    idp_metadata_signing_cert_pem: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -349,6 +355,7 @@ impl FederationConfigRow {
             require_pkce: lp.require_pkce,
             button_icon: lp.button_icon,
             allow_sha1_signatures: self.allow_sha1_signatures.unwrap_or(false),
+            idp_metadata_signing_cert_pem: self.idp_metadata_signing_cert_pem,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -417,6 +424,7 @@ impl FederationConfigListRow {
             require_pkce: lp.require_pkce,
             button_icon: lp.button_icon,
             allow_sha1_signatures: self.allow_sha1_signatures.unwrap_or(false),
+            idp_metadata_signing_cert_pem: self.idp_metadata_signing_cert_pem,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -481,6 +489,7 @@ impl FederationConfigRowWithId {
             require_pkce: lp.require_pkce,
             button_icon: lp.button_icon,
             allow_sha1_signatures: self.allow_sha1_signatures.unwrap_or(false),
+            idp_metadata_signing_cert_pem: self.idp_metadata_signing_cert_pem,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -527,7 +536,7 @@ impl<C: Connection> SurrealFederationConfigRepository<C> {
              allow_tenant_inheritance, scopes, authorization_endpoint, \
              token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
              apple_team_id, apple_key_id, require_pkce, button_icon, \
-             allow_sha1_signatures, created_at, updated_at \
+             allow_sha1_signatures, idp_metadata_signing_cert_pem, created_at, updated_at \
              FROM federation_config \
              WHERE tenant_id = $tenant_id \
              ORDER BY created_at ASC";
@@ -607,6 +616,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  require_pkce = $require_pkce, \
                  button_icon = $button_icon, \
                  allow_sha1_signatures = $allow_sha1_signatures, \
+                 idp_metadata_signing_cert_pem = $idp_metadata_signing_cert_pem, \
                  enabled = true, \
                  created_at = time::now(), \
                  updated_at = time::now()",
@@ -653,6 +663,10 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             .bind((
                 "allow_sha1_signatures",
                 input.allow_sha1_signatures.unwrap_or(false),
+            ))
+            .bind((
+                "idp_metadata_signing_cert_pem",
+                input.idp_metadata_signing_cert_pem,
             ))
             .await
             .map_err(DbError::from)?;
@@ -821,6 +835,20 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             set_clauses.push("allow_sha1_signatures = $allow_sha1_signatures".into());
             binds.push(("allow_sha1_signatures".into(), serde_json::json!(v)));
         }
+        // #530: `Some(None)` clears the certificate — written as `NONE`, the
+        // absent value a fresh row has, not as a bound JSON `null`.
+        match input.idp_metadata_signing_cert_pem {
+            Some(Some(ref pem)) => {
+                set_clauses
+                    .push("idp_metadata_signing_cert_pem = $idp_metadata_signing_cert_pem".into());
+                binds.push((
+                    "idp_metadata_signing_cert_pem".into(),
+                    serde_json::json!(pem),
+                ));
+            }
+            Some(None) => set_clauses.push("idp_metadata_signing_cert_pem = NONE".into()),
+            None => {}
+        }
 
         let sql = format!(
             "UPDATE type::record('federation_config', $id) SET {} \
@@ -913,7 +941,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  allow_tenant_inheritance, scopes, authorization_endpoint, \
                  token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
                  apple_team_id, apple_key_id, require_pkce, button_icon, \
-             allow_sha1_signatures, created_at, updated_at \
+             allow_sha1_signatures, idp_metadata_signing_cert_pem, created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  ORDER BY created_at DESC \
@@ -959,7 +987,7 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  allow_tenant_inheritance, scopes, authorization_endpoint, \
                  token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
                  apple_team_id, apple_key_id, require_pkce, button_icon, \
-             allow_sha1_signatures, created_at, updated_at \
+             allow_sha1_signatures, idp_metadata_signing_cert_pem, created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  AND token_exchange_enabled = true \

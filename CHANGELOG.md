@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distribution point, so point their relying parties at the route by hand; an
   invalid `AXIAM__PKI__CRL_BASE_URL` or `AXIAM__PKI__CRL_NEXT_UPDATE_SECS` stops
   startup. The OpenAPI document gains the route under a new `pki` tag.
+- **SAML: an optional metadata signing certificate for an external IdP**
+  (#530, P23W3-07). A SAML federation configuration takes
+  `idp_metadata_signing_cert_pem` (`POST`/`PUT /api/v1/federation-configs`,
+  returned by every read; *Metadata Signing Certificate* in the console's SAML
+  form): the PEM certificate the identity provider signs its metadata document
+  with, distinct from `idp_signing_cert_pem`, which verifies assertions. Set,
+  the metadata is read only through that signature (see *Security*); `null` on
+  an update clears it; a non-SAML configuration answers `400`
+  (`validation_error`). **Upgrade notes:** schema migration v93 adds the
+  optional column; no existing configuration has one, so none changes
+  behaviour until an operator sets it.
 
 ### Changed
 
@@ -305,6 +316,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or load rig drives authorizations from one host, raise that knob. It also
   sizes `/oauth2/end_session` and the SAML browser routes, each in its own
   bucket. The OpenAPI document lists the `429` among the route's responses.
+- **SAML: an identity provider's metadata can be signature-checked, and is
+  cached** (#530, P23W3-07). The service provider took an IdP's entity ID,
+  sign-in URL and binding from its metadata document on the strength of the
+  HTTPS fetch alone, and fetched it again on every SP-initiated sign-in: whoever
+  could serve the metadata URL chose where users were sent with their
+  `AuthnRequest` (the assertion certificate is pinned on the configuration and
+  never read from metadata, so assertions could not be forged), and every
+  sign-in depended on the metadata host being up. With
+  `idp_metadata_signing_cert_pem` set (*Added*), the document must carry exactly
+  one enveloped signature, on its `EntityDescriptor` root and naming the root's
+  `ID` — the placement rule AXIAM's SAML receivers use — that verifies against
+  the certificate with a SHA-2 algorithm (`allow_sha1_signatures` does not
+  apply to metadata), and only the signed bytes are read; a document that is
+  unsigned, signed by another key or with SHA-1, altered after signing, or an
+  aggregate (`EntitiesDescriptor`) is refused and no sign-in starts. Every metadata document, with or without the certificate,
+  is now refused when it declares a DTD or entity, is not plain UTF-8, or is
+  past its `validUntil`. Parsed metadata is cached per server process for the
+  document's `cacheDuration` (one hour when it states none), held between five
+  minutes and 24 hours and never past `validUntil`; editing the configuration
+  drops the cached copy, and a refused document is never cached. A refetch
+  whose sign-in URL names another host than the cached one writes a
+  `federation.saml_sso_host_changed` audit row (system actor; the configuration,
+  the old host and the new host). **Behaviour change:** an IdP that moves its
+  sign-in URL is picked up when the cached copy expires (at most 24 hours, or
+  at once by saving the configuration) rather than at the next sign-in; IdP
+  metadata carrying a `<!DOCTYPE` is refused. Threat model 2.38.0: T-474
+  enters, Mitigated.
 - **SAML: the service provider refuses a response carrying a DTD, and SHA-1
   signatures** (#531, P23W3-08). The SP verifier parsed a `SAMLResponse` with
   libxml and quick-xml, neither refusing a document type declaration, and

@@ -19,7 +19,7 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::{self, Utc};
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
-use samael::metadata::{EntityDescriptorType, HTTP_POST_BINDING, HTTP_REDIRECT_BINDING};
+use samael::metadata::{HTTP_POST_BINDING, HTTP_REDIRECT_BINDING};
 use samael::schema::{AuthnRequest, Issuer, NameIdPolicy};
 use samael::traits::ToXml;
 use serde::Serialize;
@@ -31,7 +31,9 @@ use crate::oidc::FederationCallbackResult;
 use crate::saml_idp::request::{
     ALLOWED_XML_SIGNATURE_ALGORITHMS, refuse_markup_declarations, refuse_other_encodings,
 };
-use crate::validate_metadata_url;
+use crate::saml_metadata::{
+    MetadataFetcher, SamlMetadataCache, SsoHostChange, guarded_metadata_fetcher, parse_idp_metadata,
+};
 
 /// SAML success status URI.
 const SAML_STATUS_SUCCESS: &str = "urn:oasis:names:tc:SAML:2.0:status:Success";
@@ -78,6 +80,11 @@ pub struct SamlAuthnRequestResult {
     /// Callers MUST store this in `FederationLoginState.request_id` so the
     /// ACS handler can verify `Response.InResponseTo` (SEC-005/REQ-14 AC-5).
     pub request_id: String,
+    /// #530: set when building this request fetched the IdP's metadata again
+    /// and its SSO URL now names another host than the copy it replaced. The
+    /// caller audits it; it is never sent to the browser.
+    #[serde(skip)]
+    pub sso_host_change: Option<SsoHostChange>,
 }
 
 /// Claims extracted from a SAML assertion.
@@ -118,11 +125,17 @@ pub struct SamlFederationService<FC, FL, UR, AR> {
     /// Retained for constructor API stability across the ~9 call sites in
     /// `axiam-api-rest::handlers::federation` and the `axiam-server`
     /// integration tests (out of this plan's scope). No longer read
-    /// directly: `fetch_idp_metadata` now routes through
-    /// `ssrf::guarded_fetch`, which builds its own fresh, IP-pinned client
-    /// per request rather than reusing an injected pooled client (D-01c).
+    /// directly: the metadata fetch routes through `ssrf::guarded_fetch`,
+    /// which builds its own fresh, IP-pinned client per request rather than
+    /// reusing an injected pooled client (D-01c).
     #[allow(dead_code)]
     http_client: reqwest::Client,
+    /// #530: parsed IdP metadata, per federation configuration. Shared by
+    /// every clone of the service, so one process holds one copy.
+    metadata_cache: SamlMetadataCache,
+    /// #530: how a metadata document is fetched — [`guarded_metadata_fetcher`]
+    /// everywhere but tests.
+    metadata_fetcher: MetadataFetcher,
 }
 
 impl<FC, FL, UR, AR> SamlFederationService<FC, FL, UR, AR>
@@ -146,105 +159,38 @@ where
             user_repo,
             replay_repo,
             http_client,
+            metadata_cache: SamlMetadataCache::new(),
+            metadata_fetcher: guarded_metadata_fetcher(),
         }
     }
 
-    /// Fetch and parse the IdP SAML metadata from the given URL.
+    /// Test seam: fetch IdP metadata with `fetcher` instead of over HTTPS.
     ///
-    /// Only HTTPS URLs are accepted to mitigate SSRF risks.
+    /// The production fetch refuses every non-HTTPS URL and every private or
+    /// loopback address, so no test can serve it a document; this lets an
+    /// integration test serve one from memory and count the fetches. It also
+    /// starts an empty cache. Production code never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_metadata_fetcher(mut self, fetcher: MetadataFetcher) -> Self {
+        self.metadata_fetcher = fetcher;
+        self.metadata_cache = SamlMetadataCache::new();
+        self
+    }
+
+    /// Fetch and parse the IdP SAML metadata from the given URL, uncached.
+    ///
+    /// Only HTTPS URLs are accepted, through the SSRF guard. With
+    /// `signing_cert_pem` the document is read only through its signature
+    /// (#530; see [`crate::saml_metadata`]). Sign-in goes through the cache
+    /// instead ([`Self::build_authn_request`]).
     pub async fn fetch_idp_metadata(
         &self,
         metadata_url: &str,
+        signing_cert_pem: Option<&str>,
     ) -> Result<IdpMetadata, FederationError> {
-        validate_metadata_url(metadata_url)?;
-
-        // SECHRD-02: route the metadata GET through the shared, IP-pinning
-        // SSRF guard (D-01a/b/c). Production always fails closed against
-        // private/loopback/link-local addresses and internal redirect
-        // targets — `allow_private=false`.
-        let response = crate::ssrf::guarded_fetch(metadata_url, false, |c, u| c.get(u))
-            .await
-            .map_err(|e| FederationError::SamlMetadataFailed(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(FederationError::SamlMetadataFailed(format!(
-                "HTTP {} from metadata endpoint",
-                response.status()
-            )));
-        }
-
-        // Enforce a maximum body size to prevent memory exhaustion from
-        // a large metadata document.
-        const MAX_METADATA_SIZE: usize = 512 * 1024; // 512 KiB
-        let bytes = response.bytes().await.map_err(|e| {
-            FederationError::SamlMetadataFailed(format!("Failed to read metadata body: {e}"))
-        })?;
-        if bytes.len() > MAX_METADATA_SIZE {
-            return Err(FederationError::SamlMetadataFailed(format!(
-                "Metadata document too large: {} bytes (max {})",
-                bytes.len(),
-                MAX_METADATA_SIZE
-            )));
-        }
-
-        let text = String::from_utf8(bytes.to_vec()).map_err(|e| {
-            FederationError::SamlMetadataFailed(format!("Invalid UTF-8 in metadata: {e}"))
-        })?;
-
-        let descriptor_type: EntityDescriptorType = text.parse().map_err(|e| {
-            FederationError::SamlMetadataFailed(format!("Failed to parse metadata XML: {e}"))
-        })?;
-
-        // Extract the first EntityDescriptor from the parsed metadata.
-        let ed = descriptor_type.iter().next().ok_or_else(|| {
-            FederationError::SamlMetadataFailed("No EntityDescriptor found in metadata".into())
-        })?;
-
-        let entity_id = ed.entity_id.clone().ok_or_else(|| {
-            FederationError::SamlMetadataFailed("EntityDescriptor missing entityID".into())
-        })?;
-
-        let idp_descriptors = ed.idp_sso_descriptors.as_ref().ok_or_else(|| {
-            FederationError::SamlMetadataFailed("No IDPSSODescriptor in metadata".into())
-        })?;
-
-        let idp = idp_descriptors.first().ok_or_else(|| {
-            FederationError::SamlMetadataFailed("Empty IDPSSODescriptor list in metadata".into())
-        })?;
-
-        // Prefer HTTP-POST binding, fall back to HTTP-Redirect.
-        let sso_endpoint = idp
-            .single_sign_on_services
-            .iter()
-            .find(|ep| ep.binding == HTTP_POST_BINDING)
-            .or_else(|| {
-                idp.single_sign_on_services
-                    .iter()
-                    .find(|ep| ep.binding == HTTP_REDIRECT_BINDING)
-            })
-            .ok_or_else(|| {
-                FederationError::SamlMetadataFailed(
-                    "No HTTP-POST or HTTP-Redirect SSO endpoint".into(),
-                )
-            })?;
-
-        // Validate that the SSO endpoint uses HTTPS to prevent
-        // redirecting users to insecure origins. Fail closed on
-        // parse errors — reject malformed URLs outright.
-        let sso_parsed = url::Url::parse(&sso_endpoint.location).map_err(|e| {
-            FederationError::SamlMetadataFailed(format!("IdP SSO endpoint is not a valid URL: {e}"))
-        })?;
-        if sso_parsed.scheme() != "https" {
-            return Err(FederationError::SamlMetadataFailed(
-                "IdP SSO endpoint must use HTTPS".into(),
-            ));
-        }
-
-        Ok(IdpMetadata {
-            entity_id,
-            sso_url: sso_endpoint.location.clone(),
-            sso_binding: sso_endpoint.binding.clone(),
-        })
+        let text = (self.metadata_fetcher)(metadata_url.to_owned()).await?;
+        parse_idp_metadata(&text, signing_cert_pem, Utc::now()).map(|parsed| parsed.metadata)
     }
 
     /// Build a SAML AuthnRequest for the specified federation config.
@@ -278,11 +224,24 @@ where
             ));
         }
 
-        let metadata_url = config.metadata_url.as_deref().ok_or_else(|| {
-            FederationError::SamlMetadataFailed("No metadata URL configured".into())
-        })?;
-
-        let idp = self.fetch_idp_metadata(metadata_url).await?;
+        // #530: the parsed metadata from this process's cache while it is
+        // fresh and the configuration unchanged; otherwise fetched, verified
+        // against the configuration's metadata certificate if it has one, and
+        // cached.
+        let resolved = self
+            .metadata_cache
+            .resolve(&config, Utc::now(), |url| (self.metadata_fetcher)(url))
+            .await?;
+        if let Some(change) = &resolved.sso_host_change {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                config_id = %config_id,
+                old_host = %change.old_host,
+                new_host = %change.new_host,
+                "SAML IdP metadata names a new SSO host"
+            );
+        }
+        let idp = resolved.metadata;
 
         // Deliberately v4, not `new_id()`: the AuthnRequest ID is echoed back
         // in `InResponseTo` and gates replay detection, so it must not be
@@ -348,6 +307,7 @@ where
             binding: idp.sso_binding,
             relay_state,
             request_id: authn_request_id,
+            sso_host_change: resolved.sso_host_change,
         })
     }
 
@@ -1528,6 +1488,7 @@ pub(crate) mod tests {
             require_pkce: false,
             button_icon: None,
             allow_sha1_signatures: false,
+            idp_metadata_signing_cert_pem: None,
         }
     }
 

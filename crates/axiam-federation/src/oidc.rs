@@ -2304,6 +2304,7 @@ MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n\
             require_pkce: false,
             button_icon: None,
             allow_sha1_signatures: false,
+            idp_metadata_signing_cert_pem: None,
         }
     }
 

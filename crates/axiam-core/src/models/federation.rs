@@ -839,6 +839,19 @@ pub struct FederationConfig {
     /// (`federation.sha1_signatures_allowed`) whenever it is turned on.
     #[serde(default)]
     pub allow_sha1_signatures: bool,
+    /// SAML only: the PEM certificate that signs the IdP's **metadata
+    /// document** (#530, P23W3-07). Distinct from [`Self::idp_signing_cert_pem`],
+    /// which verifies assertions: many IdPs sign their metadata with a
+    /// separate key, or a federation operator's.
+    ///
+    /// When set, a fetched metadata document must carry exactly one
+    /// enveloped signature, on its `EntityDescriptor` root, that verifies
+    /// against this certificate with a SHA-2 algorithm; an unsigned or
+    /// tampered document is refused and no sign-in starts. `None` (the
+    /// default) keeps the pre-1.0.0 rule: the document is trusted on the
+    /// strength of its HTTPS fetch alone.
+    #[serde(default)]
+    pub idp_metadata_signing_cert_pem: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -938,6 +951,10 @@ impl std::fmt::Debug for FederationConfig {
             .field("apple_key_id", &self.apple_key_id)
             .field("require_pkce", &self.require_pkce)
             .field("allow_sha1_signatures", &self.allow_sha1_signatures)
+            .field(
+                "idp_metadata_signing_cert_pem",
+                &self.idp_metadata_signing_cert_pem,
+            )
             // Length only: a 32 KiB base64 blob in a log line is noise, and
             // the one thing a reader wants to know is whether one is set.
             .field(
@@ -992,6 +1009,9 @@ pub struct CreateFederationConfig {
     pub button_icon: Option<String>,
     /// SAML only: accept SHA-1 signatures (#531). Omitted ⇒ `false`.
     pub allow_sha1_signatures: Option<bool>,
+    /// SAML only: the certificate that signs the IdP's metadata (#530).
+    /// Omitted ⇒ the metadata is not signature-checked.
+    pub idp_metadata_signing_cert_pem: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1040,6 +1060,9 @@ pub struct UpdateFederationConfig {
     pub button_icon: Option<Option<String>>,
     /// SAML only: accept SHA-1 signatures (#531).
     pub allow_sha1_signatures: Option<bool>,
+    /// SAML only: the certificate that signs the IdP's metadata (#530).
+    /// `Some(None)` clears it.
+    pub idp_metadata_signing_cert_pem: Option<Option<String>>,
 }
 
 /// Tracks the link between an AXIAM user and their external IdP identity.
@@ -1116,6 +1139,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             allow_sha1_signatures: false,
+            idp_metadata_signing_cert_pem: None,
         };
 
         let json = serde_json::to_string(&config).expect("serialization must succeed");
@@ -1366,6 +1390,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             allow_sha1_signatures: false,
+            idp_metadata_signing_cert_pem: None,
         }
     }
 

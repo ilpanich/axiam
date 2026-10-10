@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118, T-300, T-239, T-39, T-55, T-67 and T-69 amended).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472, T-473 and T-474 enter; T-289, T-275, T-160, T-118, T-300, T-239, T-39, T-55, T-67 and T-69 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -142,8 +142,21 @@
 > audited when turned on — and refuses a markup declaration, or a document that
 > is not plainly UTF-8, before parsing; the tests refuse a valid SHA-1-signed
 > response by default and accept it with the flag, and refuse each declaration
-> in front of a valid response and of a document no parser would read. The model is
-> **473 threats, 432 mitigated / 20 open / 21 not applicable**.
+> in front of a valid response and of a document no parser would read. It enters
+> **T-474**, Low and Mitigated (#530, P23W3-07): the SAML SP read an IdP's
+> sign-in URL from a metadata document it never signature-checked, and fetched
+> it again at every SP-initiated sign-in, so whoever could serve the metadata
+> URL chose where users were sent with their `AuthnRequest`, and every sign-in
+> waited on the metadata host. A configuration may now name the certificate
+> the IdP signs its metadata with; the document must then carry one SHA-2
+> signature, on its `EntityDescriptor` root (D-23's placement rule), and is
+> read only through it. Parsed metadata is cached per configuration, within
+> `validUntil` and `cacheDuration` under a 24-hour cap, invalidated by any edit,
+> and a refetch that moves the sign-in host writes an audit row. The tests read
+> a signed document, refuse an unsigned one, an altered one, one signed by
+> another key or with SHA-1 and every misplaced signature, sign in twice on one
+> fetch, and find the moved host in the audit log. The model is
+> **474 threats, 433 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -1257,7 +1270,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 473 threats** and a
+The system is verified against a **STRIDE threat model of 474 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1280,8 +1293,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 473 |
-| Mitigated / Open | 432 / 20 |
+| Threats identified | 474 |
+| Mitigated / Open | 433 / 20 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1301,7 +1314,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | System context | 34 | 2 | 0 |
 | Authentication & session management | 36 | 0 | 0 |
 | OAuth2 / OIDC authorization server | 86 | 0 | 0 |
-| Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
+| Federation (SAML SP and IdP, OIDC RP & directory) | 126 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
 | PKI, certificates & IoT device identity | 31 | 2 | 0 |
 | Audit, webhooks, email & notifications | 56 | 4 | 0 |
@@ -1426,7 +1439,7 @@ the category recorded against it in the model.
 
 | Category | Threats | Open | Not built |
 |---|---|---|---|
-| Spoofing | 103 | 5 | 3 |
+| Spoofing | 104 | 5 | 3 |
 | Tampering | 93 | 1 | 5 |
 | Repudiation | 16 | 2 | 1 |
 | Information disclosure | 112 | 6 | 4 |
@@ -1440,7 +1453,7 @@ the category recorded against it in the model.
 | Critical | 43 | 2 | 2 |
 | High | 196 | 9 | 9 |
 | Medium | 199 | 8 | 9 |
-| Low | 35 | 1 | 1 |
+| Low | 36 | 1 | 1 |
 
 Severity records the impact if the threat were realised, so it does not change
 when the threat is mitigated: a closed Critical stays Critical, because that is
@@ -2761,7 +2774,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 20 of 473. The 21
+Every threat the model records as open, most severe first — 20 of 474. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it

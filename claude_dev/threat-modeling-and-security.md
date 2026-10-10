@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118, T-300, T-239 and T-39 amended).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470, T-471, T-472 and T-473 enter; T-289, T-275, T-160, T-118, T-300, T-239, T-39 and T-55 amended).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -128,7 +128,13 @@
 > read: a locked, inactive, anonymized, deleted or removed account's token is
 > `active: false` at introspection and `401` (`UNAUTHENTICATED`) at UserInfo,
 > a pending account is answered, and the tests suspend an account behind live
-> tokens and reactivate it. The model is
+> tokens and reactivate it. It amends **T-55** and **T-289** again (#520,
+> P23W1-13): a registration narrowed by an RFC 7592 `PUT` or an
+> administrator's update left every refresh token issued earlier with the
+> wider scope list, copied forward at each rotation; the refresh grant now
+> keeps only the scopes the client is still registered for and rotates to
+> that set, and the test narrows a live grant, refreshes twice and finds the
+> narrowing permanent. The model is
 > **473 threats, 432 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries

@@ -317,6 +317,17 @@ by an update, whatever the body says. While the tenant's `dynamic_registration`
 is `disabled`, `PUT` is refused `403`; `GET` and `DELETE` keep working, so a
 client can always see and remove itself.
 
+**A narrower registration narrows the grants already made** (#520). When a
+`PUT` — or an administrator's update — removes a scope, every refresh token the
+client already holds is narrowed at its next use: the refresh grant keeps only
+the scopes the registration still names, mints the access token (and the ID
+token, while `openid` remains) with those, and rotates to a refresh token that
+holds only those. Adding the scope back to the registration later does not
+restore it to an existing grant; the end user authorizes again. A tenant that
+withdraws a scope from `dcr_allowed_scopes` reaches a client's grants through
+the client's next `PUT` (or, for a Client ID Metadata Document, its next
+fetch), which must drop the scope.
+
 **Rotation.** A successful `PUT` returns a new token and the old one stops
 working in the same database statement. Of two concurrent updates with one
 token, one succeeds and the other gets `401`. A refused update rotates nothing.

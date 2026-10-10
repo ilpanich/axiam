@@ -234,6 +234,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and gRPC `ValidateToken`, are unchanged. Each of these calls now reads the
   user row once (UserInfo already did whenever a scope released a claim).
   Threat model 2.38.0: T-39 amended; totals unchanged.
+- **Narrowing a client's scopes narrows the refresh tokens it already holds**
+  (#520, P23W1-13). A scope removed from a client's registration — by an
+  administrator (`PUT /api/v1/oauth2-clients/{id}`), by the client itself
+  through RFC 7592 (`PUT /oauth2/register/{client_id}`), or by a Client ID
+  Metadata Document re-fetched under a narrower tenant policy — stayed on
+  every refresh token issued earlier, and each rotation copied it forward. The
+  refresh grant now keeps only the scopes the client is still registered for,
+  in the grant's order. **Behaviour change:** the access token, the ID token
+  (issued only while `openid` remains) and the response's `scope` carry the
+  narrowed set, and the rotated refresh token holds it, so adding the scope
+  back to the registration does not restore it to an existing grant — the end
+  user authorizes again. A tenant withdrawing a scope from
+  `dcr_allowed_scopes` reaches a dynamically registered client's grants at its
+  next `PUT`, which must drop the scope. Threat model 2.38.0: T-55 and T-289
+  amended; totals unchanged.
 
 ### Documentation
 

@@ -1947,7 +1947,9 @@ async fn refresh_success_user_token_with_openid() {
         &["openid"],
     ));
     let svc = build(
-        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        // The registration names what the grant carries: since #520 a refresh
+        // keeps only the scopes the client is still registered for.
+        ClientOutcome::Found(make_client(&["refresh_token"], &["openid"])),
         dummy_code_repo(),
         TenantOutcome::Found,
         refresh,
@@ -1965,7 +1967,9 @@ async fn refresh_success_user_token_with_openid() {
 async fn refresh_success_machine_token_no_user() {
     let refresh = MockRefreshRepo::new().with_get(make_refresh(None, "client-1", &["api"]));
     let svc = build(
-        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        // The registration names what the grant carries: since #520 a refresh
+        // keeps only the scopes the client is still registered for.
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
         dummy_code_repo(),
         TenantOutcome::Found,
         refresh,
@@ -1977,6 +1981,72 @@ async fn refresh_success_machine_token_no_user() {
     assert!(resp.refresh_token.is_some());
     assert!(resp.id_token.is_none());
     assert_eq!(resp.scope.as_deref(), Some("api"));
+}
+
+/// #520, P23W1-13 — a refresh intersects the grant with the client's
+/// **current** registered scopes. A registration narrowed after the grant was
+/// made (RFC 7592 `PUT`, an administrator's update) narrows the access token,
+/// the ID token, the response's `scope` and the rotated refresh token — so the
+/// next rotation starts from the narrowed set — and keeps the grant's order. A
+/// scope the registration gained since is never added.
+#[tokio::test]
+async fn p23w1_13_a_refresh_narrows_the_grant_to_the_clients_current_scopes() {
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(
+        Some(Uuid::new_v4()),
+        "client-1",
+        &["profile", "openid", "email"],
+    ));
+    let created = refresh.created.clone();
+    let svc = build(
+        // `email` withdrawn; `offline_access` gained after the grant.
+        ClientOutcome::Found(make_client(
+            &["refresh_token"],
+            &["openid", "profile", "offline_access"],
+        )),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope.as_deref(), Some("profile openid"));
+    let claims =
+        axiam_auth::token::decode_access_token_any_audience(&resp.access_token, &test_config())
+            .unwrap();
+    assert_eq!(claims.scope.as_deref(), Some("profile openid"));
+    assert!(resp.id_token.is_some(), "openid is still granted");
+    {
+        let calls = created.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].scopes,
+            vec!["profile".to_owned(), "openid".to_owned()]
+        );
+    }
+
+    // `openid` withdrawn as well: no ID token, and a grant narrowed to nothing
+    // still refreshes, carrying no scope.
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(
+        Some(Uuid::new_v4()),
+        "client-1",
+        &["openid", "email"],
+    ));
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["profile"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope, None);
+    assert!(resp.id_token.is_none(), "openid was withdrawn");
+    assert!(created.lock().unwrap()[0].scopes.is_empty());
 }
 
 #[tokio::test]
@@ -2432,7 +2502,9 @@ async fn refresh_success_openid_scope_but_no_user_yields_no_id_token() {
     // somehow carries the `openid` scope must not attempt ID token issuance.
     let refresh = MockRefreshRepo::new().with_get(make_refresh(None, "client-1", &["openid"]));
     let svc = build(
-        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        // The registration names what the grant carries: since #520 a refresh
+        // keeps only the scopes the client is still registered for.
+        ClientOutcome::Found(make_client(&["refresh_token"], &["openid"])),
         dummy_code_repo(),
         TenantOutcome::Found,
         refresh,

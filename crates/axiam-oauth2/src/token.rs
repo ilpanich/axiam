@@ -2563,6 +2563,37 @@ where
             self.ensure_account_may_act(tenant_id, user_id).await?;
         }
 
+        // #520, P23W1-13 — the grant is narrowed to what the client may still
+        // be granted. The stored scopes were checked against the client's
+        // registration when the grant was made (`crate::authorize` step 5,
+        // and the device and CIBA grants likewise); a registration narrowed
+        // since — an RFC 7592 `PUT`, an administrator's update, a CIMD
+        // document re-materialised under a tenant policy that withdrew a
+        // scope — must narrow every outstanding grant at its next refresh,
+        // or the refresh token keeps the old registration alive for its
+        // whole rotating lifetime. Intersected against `client.scopes`, the
+        // set the authorization endpoint checks, so the two cannot disagree;
+        // the order of the grant is kept. Only ever narrows: a scope the
+        // registration gained is not added, because nobody asked the end
+        // user about it (the rule `resolve_bound` applies to the resource
+        // below). Everything minted from here — the access token, the rotated
+        // refresh token, the ID token and the response's `scope` — uses this.
+        let scopes: Vec<String> = stored
+            .scopes
+            .iter()
+            .filter(|s| client.scopes.contains(s))
+            .cloned()
+            .collect();
+        if scopes.len() != stored.scopes.len() {
+            tracing::info!(
+                %tenant_id,
+                client_id = %client_id,
+                granted = %stored.scopes.join(" "),
+                kept = %scopes.join(" "),
+                "refresh: narrowing a grant to the client's current registered scopes"
+            );
+        }
+
         // Resolve org_id from tenant
         let tenant = self
             .tenant_repo
@@ -2604,7 +2635,7 @@ where
                     "oauth2_client"
                 },
                 client_id,
-                &stored.scopes,
+                &scopes,
             )
             .await?;
         // T21.3 / RFC 8707 §2 — **the rule that stops a token being widened by
@@ -2630,7 +2661,7 @@ where
                 user_id,
                 tenant_id,
                 tenant.organization_id,
-                &stored.scopes,
+                &scopes,
                 &self.minting_config(ctx.issuer.as_deref()),
                 uuid::Uuid::new_v4().to_string(),
                 // RFC 8707 — the SAME audience the grant was issued for.
@@ -2659,7 +2690,7 @@ where
                 client_id,
                 tenant_id,
                 tenant.organization_id,
-                &stored.scopes,
+                &scopes,
                 &self.minting_config(ctx.issuer.as_deref()),
                 cnf,
                 ext,
@@ -2685,7 +2716,9 @@ where
                 token_hash: new_refresh_hash.clone(),
                 client_id: client_id.to_string(),
                 user_id: stored.user_id,
-                scopes: stored.scopes.clone(),
+                // P23W1-13: the narrowed set, so the successor cannot carry
+                // a scope its predecessor's grant no longer has.
+                scopes: scopes.clone(),
                 // Rotation preserves the session: the new token descends from
                 // the same login, so it must carry the same `sid`.
                 session_id: stored.session_id,
@@ -2784,7 +2817,7 @@ where
         }
 
         // Re-issue an ID token when the original grant included `openid`.
-        let id_token = if stored.scopes.iter().any(|s| s == "openid") {
+        let id_token = if scopes.iter().any(|s| s == "openid") {
             if let Some(uid) = stored.user_id {
                 let user = self
                     .user_repo
@@ -2809,7 +2842,7 @@ where
                         client_id,
                         None,
                         Some(&user.username),
-                        &stored.scopes,
+                        &scopes,
                         &self.minting_config(ctx.issuer.as_deref()),
                         // The same session the original login created: an RP
                         // that only ever sees refreshed ID tokens must still
@@ -2826,10 +2859,10 @@ where
             None
         };
 
-        let scope = if stored.scopes.is_empty() {
+        let scope = if scopes.is_empty() {
             None
         } else {
-            Some(stored.scopes.join(" "))
+            Some(scopes.join(" "))
         };
 
         Ok(TokenResponse {

@@ -1030,6 +1030,20 @@ fn not_issued_here() -> Arc<dyn axiam_oauth2::mtls::IssuedCertificateLookup> {
         > {
             Box::pin(async { Ok(axiam_oauth2::mtls::IssuedCertificateStanding::NotIssuedHere) })
         }
+
+        fn ca_records<'a>(
+            &'a self,
+            _fingerprints: &'a [String],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = AxiamResult<Vec<axiam_core::models::certificate::CaCertificate>>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
     }
     Arc::new(Empty)
 }

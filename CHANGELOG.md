@@ -318,6 +318,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`tls_client_auth` accepts only a certificate of the client's own
+  organization (R1W1-02, T-475; High).** The deployment's one mTLS listener
+  trusts every organization's flagged anchors at once, and any organization
+  administrator can flag a CA of their own — an imported one whose key they hold
+  included. OAuth2 `tls_client_auth` (RFC 8705 §2.1) asked only that a
+  certificate chained to *some* anchor and carried the client's registered
+  subject DN or SAN, so one organization could mint a certificate with another
+  organization's client DN and obtain that client's tokens. The listener now
+  records, per connection, the chain the handshake verified (fingerprints of each
+  intermediate and the anchor), and the token endpoint accepts a
+  `tls_client_auth` certificate only when AXIAM issued it in the client's own
+  tenant, or when its chain ends at a CA record of the client's organization,
+  active and in date, and passes through no CA another organization — or, for a
+  tenant signing CA, another tenant — holds. `self_signed_tls_client_auth` is
+  unchanged. **Behaviour change for upgraders:** a `tls_client_auth` client's
+  certificate must chain to its own organization's anchor. A CA you trust only
+  through your own `AXIAM__SERVER__TLS__CLIENT_CA_PATH` bundle, and never
+  imported into the client's organization, no longer authenticates such a
+  client — import it there, keyless
+  (`POST /api/v1/organizations/{org_id}/ca-certificates/import` with its
+  `public_cert_pem`); a leaf AXIAM issued in one tenant no longer authenticates
+  a client of a sibling tenant. Refusals stay `invalid_client`; the log names
+  the rule. The FAPI conformance registrar imports its CA accordingly.
 - **Deleting a tenant revokes its certificates, and the purge no longer takes
   them off their issuers' revocation lists (R1W1-01, #523 with #565; T-102,
   T-472).** A tenant deletion revoked none of the tenant's certificates or

@@ -2845,6 +2845,19 @@ pub trait CaCertificateRepository: Send + Sync {
         &self,
         parent_ca_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
+
+    /// Every CA record, in any organization and of any status, whose
+    /// certificate has one of these SHA-256 fingerprints (R1W1-02).
+    ///
+    /// Not organization-scoped: it answers "whose CA is this?" for the
+    /// certificates a client's TLS chain was verified through, so
+    /// `tls_client_auth` can refuse a chain that runs through another
+    /// organization's — or another tenant's — CA. One certificate may be
+    /// recorded by more than one organization (each imported it), hence a list.
+    fn list_by_fingerprints(
+        &self,
+        fingerprints: &[String],
+    ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
 }
 
 pub trait CertificateRepository: Send + Sync {

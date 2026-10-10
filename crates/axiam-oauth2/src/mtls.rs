@@ -56,17 +56,36 @@
 //! issuing CA is no longer `Active`. See [`IssuedCertificateLookup`]. A
 //! certificate AXIAM did not issue is not in the inventory, and is decided as
 //! before.
+//!
+//! # A `tls_client_auth` certificate belongs to the client's organization (R1W1-02)
+//!
+//! The listener is one per deployment and trusts every organization's flagged
+//! anchors at once, and any organization administrator can flag one of their
+//! CAs — an imported one whose key they hold included. A DN or SAN match under
+//! *some* anchor therefore said nothing about *whose*: an administrator of one
+//! organization could mint a certificate carrying another organization's client
+//! DN and take that client's tokens. So under `tls_client_auth`, after the
+//! status check, [`refuse_a_certificate_from_outside_the_clients_organization`]
+//! requires a certificate AXIAM issued to have been issued in the client's
+//! tenant, and any other certificate to have been verified through a chain
+//! whose trust anchor is a CA of the client's organization, with every AXIAM CA
+//! on that chain one the client's organization — and, for a tenant signing CA,
+//! the client's tenant — holds. The chain is the one the TLS handshake built,
+//! carried from the listener as fingerprints ([`PresentedCertificate::with_issuer_path`]).
+//! `self_signed_tls_client_auth` is untouched: its credential is the pinned
+//! thumbprint, not a CA's word.
 
 use std::future::Future;
 use std::pin::Pin;
 
 use axiam_core::error::{AxiamError, AxiamResult};
-use axiam_core::models::certificate::{CertTrust, CertificateStatus};
+use axiam_core::models::certificate::{CaCertificate, CertTrust, CertificateStatus};
 use axiam_core::models::oauth2_client::{ClientAuthMethod, OAuth2Client};
 use axiam_core::repository::{CaCertificateRepository, CertificateRepository};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use uuid::Uuid;
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{X509Name, parse_x509_certificate};
 
@@ -123,6 +142,12 @@ pub struct PresentedCertificate {
     /// anchor set includes their issuer — so it has to be carried from the
     /// handshake rather than recomputed here.
     pub trust: CertTrust,
+    /// SHA-256 fingerprints (lowercase hex of the DER) of the certificates the
+    /// TLS handshake verified this one through, nearest issuer first and the
+    /// trust anchor last (R1W1-02). Empty when the listener could not say —
+    /// a self-asserted certificate, or a path it could not re-derive — which
+    /// `tls_client_auth` refuses for a certificate AXIAM did not issue.
+    issuer_path: Vec<String>,
 }
 
 /// The identity fields of a certificate, parsed on demand.
@@ -179,7 +204,26 @@ impl PresentedCertificate {
             der: der.to_vec(),
             thumbprint_s256: thumbprint_s256(der),
             trust,
+            issuer_path: Vec::new(),
         }
+    }
+
+    /// Record the chain the TLS handshake verified this certificate through:
+    /// the SHA-256 fingerprints (lowercase hex) of each issuer above it,
+    /// nearest first, ending with the trust anchor (R1W1-02).
+    ///
+    /// Only the listener knows it, so only the code that lifts the certificate
+    /// off the connection sets it; with none, `tls_client_auth` accepts only a
+    /// certificate AXIAM issued in the client's own tenant.
+    #[must_use]
+    pub fn with_issuer_path(mut self, issuer_path: Vec<String>) -> Self {
+        self.issuer_path = issuer_path;
+        self
+    }
+
+    /// The chain set by [`Self::with_issuer_path`], nearest issuer first.
+    pub fn issuer_path(&self) -> &[String] {
+        &self.issuer_path
     }
 
     /// Parse the subject DN and SANs (RFC 8705 §2.1.2 matching inputs).
@@ -478,12 +522,17 @@ pub fn authenticate_mtls_client(
 pub enum IssuedCertificateStanding {
     /// AXIAM issued no certificate with these bytes: a self-signed client
     /// certificate (RFC 8705 §2.2), or one an external CA issued and a listener
-    /// anchor vouches for. Nothing in AXIAM records its status, so nothing
-    /// here can refuse it; the match above is the whole decision, as it always
-    /// was.
+    /// anchor vouches for. Nothing in AXIAM records its status, so the status
+    /// check cannot refuse it: under `self_signed_tls_client_auth` the match is
+    /// the whole decision, and under `tls_client_auth` its chain must also end
+    /// at a CA of the client's organization (R1W1-02).
     NotIssuedHere,
     /// AXIAM issued it, and it and its issuing CA are active and in date.
-    Active,
+    Active {
+        /// The tenant AXIAM issued it in — under `tls_client_auth` it must be
+        /// the client's (R1W1-02).
+        tenant_id: Uuid,
+    },
     /// AXIAM issued it and it is revoked or expired, or the CA that issued it
     /// is. The certificate still chains — that is a fact about bytes — and is
     /// refused anyway.
@@ -506,6 +555,21 @@ pub trait IssuedCertificateLookup: Send + Sync {
         &'a self,
         der: &'a [u8],
     ) -> Pin<Box<dyn Future<Output = AxiamResult<IssuedCertificateStanding>> + Send + 'a>>;
+
+    /// Every CA record — any organization, any status — whose certificate has
+    /// one of `fingerprints` (R1W1-02): whose CA each certificate of a verified
+    /// chain is.
+    ///
+    /// Required, with no default, for the reason [`TokenService::new`] takes
+    /// the lookup at all: a default answering "no records" would refuse every
+    /// externally issued `tls_client_auth` certificate silently, and one
+    /// answering anything else would admit them.
+    ///
+    /// [`TokenService::new`]: crate::token::TokenService::new
+    fn ca_records<'a>(
+        &'a self,
+        fingerprints: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<Vec<CaCertificate>>> + Send + 'a>>;
 }
 
 /// [`IssuedCertificateLookup`] over the certificate and CA repositories — the
@@ -544,6 +608,7 @@ where
                 Err(e) => return Err(e),
             };
             let now = chrono::Utc::now();
+            let tenant_id = cert.tenant_id;
             if cert.status != CertificateStatus::Active
                 || now < cert.not_before
                 || now > cert.not_after
@@ -560,7 +625,7 @@ where
                         && now >= ca.not_before
                         && now <= ca.not_after =>
                 {
-                    Ok(IssuedCertificateStanding::Active)
+                    Ok(IssuedCertificateStanding::Active { tenant_id })
                 }
                 Ok(_) | Err(AxiamError::NotFound { .. }) => {
                     Ok(IssuedCertificateStanding::NotActive)
@@ -568,6 +633,13 @@ where
                 Err(e) => Err(e),
             }
         })
+    }
+
+    fn ca_records<'a>(
+        &'a self,
+        fingerprints: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<Vec<CaCertificate>>> + Send + 'a>> {
+        Box::pin(self.ca_repo.list_by_fingerprints(fingerprints))
     }
 }
 
@@ -584,13 +656,19 @@ where
 /// The refusal is `invalid_client` with [`MTLS_AUTH_FAILED`], like every other
 /// mTLS failure; the reason goes to the log. A failed read is a server error,
 /// never an authentication.
+///
+/// Returns the standing it read, for
+/// [`refuse_a_certificate_from_outside_the_clients_organization`].
 pub async fn refuse_a_certificate_axiam_revoked(
     client: &OAuth2Client,
     presented: &PresentedCertificate,
     lookup: &dyn IssuedCertificateLookup,
-) -> Result<(), OAuth2Error> {
+) -> Result<IssuedCertificateStanding, OAuth2Error> {
     match lookup.standing(&presented.der).await {
-        Ok(IssuedCertificateStanding::NotIssuedHere | IssuedCertificateStanding::Active) => Ok(()),
+        Ok(
+            standing @ (IssuedCertificateStanding::NotIssuedHere
+            | IssuedCertificateStanding::Active { .. }),
+        ) => Ok(standing),
         Ok(IssuedCertificateStanding::NotActive) => {
             tracing::warn!(
                 client_id = %client.client_id,
@@ -604,6 +682,106 @@ pub async fn refuse_a_certificate_axiam_revoked(
             "could not read the presented client certificate's status: {e}"
         ))),
     }
+}
+
+/// Refuse, under `tls_client_auth`, a certificate that does not belong to the
+/// client's organization (R1W1-02).
+///
+/// Called by the token service after [`refuse_a_certificate_axiam_revoked`],
+/// with the standing it returned and the organization of the client's tenant:
+///
+/// - **A certificate AXIAM issued** must have been issued in the client's
+///   tenant. Its subject is a CN an administrator typed, and any tenant can be
+///   issued any CN; that it is AXIAM's says nothing about whose.
+/// - **Any other certificate** must have been verified through a chain
+///   ([`PresentedCertificate::issuer_path`]) whose **trust anchor is a CA the
+///   client's organization holds**, active and in date, and on which **every
+///   certificate AXIAM records as a CA** has such a record in the client's
+///   organization — for a tenant signing CA, in the client's tenant. A chain
+///   the listener could not report, an anchor AXIAM records for no
+///   organization (one an operator placed in a bundle by hand) and an anchor
+///   only another organization holds are all refused: the listener trusts every
+///   organization's anchors at once, so "it chained" alone says nothing about
+///   whose CA vouched for the DN.
+///
+/// `self_signed_tls_client_auth` is not checked here: its credential is the
+/// thumbprint the client registered. The refusal is `invalid_client` with
+/// [`MTLS_AUTH_FAILED`]; a failed read is a server error.
+pub async fn refuse_a_certificate_from_outside_the_clients_organization(
+    client: &OAuth2Client,
+    client_organization: Uuid,
+    presented: &PresentedCertificate,
+    standing: IssuedCertificateStanding,
+    lookup: &dyn IssuedCertificateLookup,
+) -> Result<(), OAuth2Error> {
+    let refuse = |reason: &str| {
+        tracing::warn!(
+            client_id = %client.client_id,
+            tenant_id = %client.tenant_id,
+            reason,
+            "tls_client_auth refused: the presented certificate does not belong to the \
+             client's organization (R1W1-02)"
+        );
+        Err(OAuth2Error::InvalidClient(MTLS_AUTH_FAILED.into()))
+    };
+    if client.token_endpoint_auth_method != ClientAuthMethod::TlsClientAuth {
+        return Ok(());
+    }
+    match standing {
+        IssuedCertificateStanding::Active { tenant_id } if tenant_id == client.tenant_id => {
+            return Ok(());
+        }
+        IssuedCertificateStanding::Active { .. } => {
+            return refuse("AXIAM issued it in another tenant");
+        }
+        // Refused already by `refuse_a_certificate_axiam_revoked`; never a pass.
+        IssuedCertificateStanding::NotActive => {
+            return refuse("AXIAM issued it and no longer stands behind it");
+        }
+        IssuedCertificateStanding::NotIssuedHere => {}
+    }
+
+    let path = presented.issuer_path();
+    let Some(anchor) = path.last() else {
+        return refuse(
+            "the listener reported no verified chain for a certificate AXIAM did not issue",
+        );
+    };
+    let records = lookup
+        .ca_records(path)
+        .await
+        .map_err(|e| OAuth2Error::ServerError(format!("could not read the chain's CAs: {e}")))?;
+    let now = chrono::Utc::now();
+    let in_scope = |ca: &CaCertificate| {
+        ca.organization_id == client_organization
+            && ca.tenant_id.is_none_or(|t| t == client.tenant_id)
+            && ca.status == CertificateStatus::Active
+            && now >= ca.not_before
+            && now <= ca.not_after
+    };
+    for fingerprint in path {
+        let mut held = records
+            .iter()
+            .filter(|ca| &ca.fingerprint == fingerprint)
+            .peekable();
+        if held.peek().is_none() {
+            if fingerprint == anchor {
+                return refuse("its trust anchor is no CA of the client's organization");
+            }
+            // An intermediate AXIAM does not record (an external sub-CA) adds
+            // no claim; the anchor above it decides.
+            continue;
+        }
+        if !held.any(&in_scope) {
+            return refuse(if fingerprint == anchor {
+                "its trust anchor is another organization's CA, or one the client's \
+                 organization no longer stands behind"
+            } else {
+                "its chain runs through another organization's or another tenant's CA"
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A registered value counts only when it is present *and* non-blank.
@@ -1135,8 +1313,15 @@ mod tests {
 
     // -- the inventory's verdict (#565, T-102) ---------------------------
 
-    /// A lookup that answers one verdict for every certificate.
-    struct Answers(Result<IssuedCertificateStanding, ()>);
+    /// A lookup that answers one verdict for every certificate, and holds the
+    /// CA records it is given.
+    struct Answers(Result<IssuedCertificateStanding, ()>, Vec<CaCertificate>);
+
+    impl Answers {
+        fn verdict(verdict: Result<IssuedCertificateStanding, ()>) -> Self {
+            Self(verdict, Vec::new())
+        }
+    }
 
     impl IssuedCertificateLookup for Answers {
         fn standing<'a>(
@@ -1148,6 +1333,19 @@ mod tests {
                 .0
                 .map_err(|()| AxiamError::Database("the store is down".into()));
             Box::pin(async move { verdict })
+        }
+
+        fn ca_records<'a>(
+            &'a self,
+            fingerprints: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = AxiamResult<Vec<CaCertificate>>> + Send + 'a>> {
+            let records = self
+                .1
+                .iter()
+                .filter(|ca| fingerprints.contains(&ca.fingerprint))
+                .cloned()
+                .collect();
+            Box::pin(async move { Ok(records) })
         }
     }
 
@@ -1166,12 +1364,13 @@ mod tests {
             match refuse_a_certificate_axiam_revoked(
                 registered,
                 &cert,
-                &Answers(Ok(IssuedCertificateStanding::NotActive)),
+                &Answers::verdict(Ok(IssuedCertificateStanding::NotActive)),
             )
             .await
             {
                 Err(OAuth2Error::InvalidClient(d)) => assert_eq!(d, MTLS_AUTH_FAILED),
-                other => panic!("a revoked certificate must be refused, got {other:?}"),
+                Ok(_) => panic!("a revoked certificate must be refused, and was accepted"),
+                Err(_) => panic!("a revoked certificate must be refused with invalid_client"),
             }
         }
     }
@@ -1184,11 +1383,16 @@ mod tests {
         let c = client(ClientAuthMethod::TlsClientAuth);
         for verdict in [
             IssuedCertificateStanding::NotIssuedHere,
-            IssuedCertificateStanding::Active,
+            IssuedCertificateStanding::Active {
+                tenant_id: c.tenant_id,
+            },
         ] {
-            refuse_a_certificate_axiam_revoked(&c, &cert, &Answers(Ok(verdict)))
-                .await
-                .unwrap_or_else(|e| panic!("{verdict:?} must pass, got {e:?}"));
+            assert!(
+                refuse_a_certificate_axiam_revoked(&c, &cert, &Answers::verdict(Ok(verdict)))
+                    .await
+                    .is_ok_and(|read| read == verdict),
+                "a certificate not issued here, or active, must pass and be returned"
+            );
         }
     }
 
@@ -1198,8 +1402,218 @@ mod tests {
         let (_, cert) = cert_with_sans(&["client.example.com"]);
         let c = client(ClientAuthMethod::TlsClientAuth);
         assert!(matches!(
-            refuse_a_certificate_axiam_revoked(&c, &cert, &Answers(Err(()))).await,
+            refuse_a_certificate_axiam_revoked(&c, &cert, &Answers::verdict(Err(()))).await,
             Err(OAuth2Error::ServerError(_))
         ));
+    }
+    // -- the client's organization (R1W1-02) -----------------------------
+
+    /// A CA record of `organization`, optionally a tenant signing CA.
+    fn ca_record(fingerprint: &str, organization: Uuid, tenant: Option<Uuid>) -> CaCertificate {
+        CaCertificate {
+            id: Uuid::new_v4(),
+            organization_id: organization,
+            tenant_id: tenant,
+            parent_ca_id: None,
+            subject: "CN=Test CA".into(),
+            public_cert_pem: String::new(),
+            chain_pem: None,
+            fingerprint: fingerprint.into(),
+            key_algorithm: axiam_core::models::certificate::KeyAlgorithm::Ed25519,
+            not_before: Utc::now() - chrono::Duration::days(1),
+            not_after: Utc::now() + chrono::Duration::days(365),
+            status: CertificateStatus::Active,
+            encrypted_private_key: None,
+            key_custody: axiam_core::ca_keys::CaKeyCustody::External,
+            key_locator: None,
+            mtls_trust_anchor: true,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Whether the organization check admits `cert` for `client`.
+    async fn admitted(
+        client: &OAuth2Client,
+        organization: Uuid,
+        cert: &PresentedCertificate,
+        standing: IssuedCertificateStanding,
+        records: Vec<CaCertificate>,
+    ) -> bool {
+        match refuse_a_certificate_from_outside_the_clients_organization(
+            client,
+            organization,
+            cert,
+            standing,
+            &Answers(Ok(standing), records),
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(OAuth2Error::InvalidClient(d)) => {
+                assert_eq!(d, MTLS_AUTH_FAILED);
+                false
+            }
+            Err(_) => panic!("a refusal must be invalid_client"),
+        }
+    }
+
+    /// The finding (R1W1-02): another organization's anchor vouches for a DN
+    /// that matches this client's registration. Refused; the client's own
+    /// organization's anchor, and its own tenant's signing CA beneath it, pass.
+    #[tokio::test]
+    async fn a_certificate_under_another_organizations_anchor_is_refused() {
+        let mine = Uuid::new_v4();
+        let theirs = Uuid::new_v4();
+        let c = client(ClientAuthMethod::TlsClientAuth);
+        let (_, cert) = cert_with_sans(&["client.example.com"]);
+        let cert = cert.with_issuer_path(vec!["sub".into(), "root".into()]);
+        let not_here = IssuedCertificateStanding::NotIssuedHere;
+
+        assert!(
+            !admitted(
+                &c,
+                mine,
+                &cert,
+                not_here,
+                vec![ca_record("root", theirs, None)]
+            )
+            .await,
+            "another organization's anchor"
+        );
+        assert!(
+            admitted(
+                &c,
+                mine,
+                &cert,
+                not_here,
+                vec![ca_record("root", mine, None)]
+            )
+            .await,
+            "the client's organization's anchor, the sub-CA unrecorded"
+        );
+        assert!(
+            admitted(
+                &c,
+                mine,
+                &cert,
+                not_here,
+                vec![
+                    ca_record("root", mine, None),
+                    ca_record("sub", mine, Some(c.tenant_id)),
+                ]
+            )
+            .await,
+            "the client's tenant's signing CA under its organization's anchor"
+        );
+        assert!(
+            admitted(
+                &c,
+                mine,
+                &cert,
+                not_here,
+                vec![
+                    ca_record("root", theirs, None),
+                    ca_record("root", mine, None)
+                ]
+            )
+            .await,
+            "an anchor both organizations imported is the client's too"
+        );
+    }
+
+    /// Every other shape of "not the client's" is refused: an anchor no
+    /// organization records, no reported chain, a chain through a sibling
+    /// tenant's signing CA or another organization's CA, and an anchor the
+    /// client's organization revoked.
+    #[tokio::test]
+    async fn a_chain_the_clients_organization_does_not_hold_is_refused() {
+        let mine = Uuid::new_v4();
+        let c = client(ClientAuthMethod::TlsClientAuth);
+        let (_, bare) = cert_with_sans(&["client.example.com"]);
+        let cert = bare
+            .clone()
+            .with_issuer_path(vec!["sub".into(), "root".into()]);
+        let not_here = IssuedCertificateStanding::NotIssuedHere;
+        let root = || ca_record("root", mine, None);
+
+        assert!(
+            !admitted(&c, mine, &cert, not_here, vec![]).await,
+            "unrecorded anchor"
+        );
+        assert!(
+            !admitted(&c, mine, &bare, not_here, vec![root()]).await,
+            "no chain"
+        );
+        assert!(
+            !admitted(
+                &c,
+                mine,
+                &cert,
+                not_here,
+                vec![root(), ca_record("sub", mine, Some(Uuid::new_v4()))]
+            )
+            .await,
+            "a sibling tenant's signing CA"
+        );
+        assert!(
+            !admitted(
+                &c,
+                mine,
+                &cert,
+                not_here,
+                vec![root(), ca_record("sub", Uuid::new_v4(), None)]
+            )
+            .await,
+            "another organization's sub-CA"
+        );
+        let mut revoked = root();
+        revoked.status = CertificateStatus::Revoked;
+        assert!(
+            !admitted(&c, mine, &cert, not_here, vec![revoked]).await,
+            "an anchor the organization revoked"
+        );
+    }
+
+    /// A certificate AXIAM issued is the client's only when issued in the
+    /// client's tenant, whatever its chain.
+    #[tokio::test]
+    async fn an_axiam_issued_certificate_from_another_tenant_is_refused() {
+        let mine = Uuid::new_v4();
+        let c = client(ClientAuthMethod::TlsClientAuth);
+        let (_, cert) = cert_with_sans(&["client.example.com"]);
+        let cert = cert.with_issuer_path(vec!["root".into()]);
+        let records = || vec![ca_record("root", mine, None)];
+        let elsewhere = IssuedCertificateStanding::Active {
+            tenant_id: Uuid::new_v4(),
+        };
+        let here = IssuedCertificateStanding::Active {
+            tenant_id: c.tenant_id,
+        };
+        assert!(
+            !admitted(&c, mine, &cert, elsewhere, records()).await,
+            "another tenant"
+        );
+        assert!(
+            admitted(&c, mine, &cert, here, records()).await,
+            "the client's tenant"
+        );
+    }
+
+    /// `self_signed_tls_client_auth` is not the CA's word but a pinned
+    /// thumbprint: the organization check does not apply to it.
+    #[tokio::test]
+    async fn self_signed_tls_client_auth_is_not_bound_to_an_organization() {
+        let c = client(ClientAuthMethod::SelfSignedTlsClientAuth);
+        let (_, cert) = cert_with_sans(&["client.example.com"]);
+        assert!(
+            admitted(
+                &c,
+                Uuid::new_v4(),
+                &cert,
+                IssuedCertificateStanding::NotIssuedHere,
+                vec![]
+            )
+            .await
+        );
     }
 }

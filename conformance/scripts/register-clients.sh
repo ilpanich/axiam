@@ -269,6 +269,30 @@ REDIRECT_URIS=$(jq -n \
   --arg q "$DUMMY_QS" \
   '[$r1, $r2, $r3, ($r1 + $q), ($r2 + $q), ($r3 + $q)]')
 
+# R1W1-02. A `tls_client_auth` certificate must chain to a CA the client's own
+# ORGANIZATION holds: the listener trusts every organization's anchors at once,
+# so "it chained" alone no longer says whose CA vouched for the DN. The
+# conformance CA reaches the listener through the operator's own client-CA
+# bundle, so record it in the admin's organization as a keyless import — it
+# needs no flag, since the bundle already carries it. Idempotent: an
+# organization that already holds it is left alone.
+[ -f "$CERTS/ca.crt" ] || { echo "[register] missing $CERTS/ca.crt — run 'just conformance-certs'" >&2; exit 1; }
+CA_ORG_ID=$(api GET "/api/v1/organizations" | jq -r --arg s "$AXIAM_ADMIN_ORG_SLUG" \
+  '.items[] | select(.slug == $s) | .id')
+[ -n "$CA_ORG_ID" ] || { echo "[register] no organization with slug $AXIAM_ADMIN_ORG_SLUG" >&2; exit 1; }
+CA_FINGERPRINT=$(openssl x509 -in "$CERTS/ca.crt" -outform der | openssl dgst -sha256 -r | cut -d' ' -f1)
+HELD=$(api GET "/api/v1/organizations/$CA_ORG_ID/ca-certificates?limit=100" \
+  | jq -r --arg fp "$CA_FINGERPRINT" '[.items[] | select(.fingerprint == $fp)] | length')
+if [ "$HELD" = "0" ]; then
+  echo "[register] recording the conformance CA in organization $CA_ORG_ID (keyless import)"
+  IMPORTED=$(api POST "/api/v1/organizations/$CA_ORG_ID/ca-certificates/import" "$(jq -n \
+    --rawfile pem "$CERTS/ca.crt" '{public_cert_pem: $pem}')")
+  [ "$(jq -r '.fingerprint // empty' <<<"$IMPORTED")" = "$CA_FINGERPRINT" ] || {
+    echo "[register] importing the conformance CA failed: $IMPORTED" >&2; exit 1; }
+else
+  echo "[register]   organization $CA_ORG_ID already holds the conformance CA"
+fi
+
 echo "[register] creating the tls_client_auth client"
 MTLS_RESP=$(api POST "/api/v1/oauth2-clients$TENANT_QS" "$(jq -n \
   --arg dn "$SUBJECT_DN" --argjson redirects "$REDIRECT_URIS" '{

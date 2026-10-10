@@ -200,6 +200,12 @@ unexpired rows until `notAfter` (the schema-scan test's one exemption).
 T23-era); not introduced by W1, but on the path the wave's T-102 lookup changed.
 Proposed for a decision now.**
 
+**Resolution:** fixed in the wave by `fix(oauth2,tls): tls_client_auth accepts
+only a certificate of the client's own organization (R1W1-02)` — the listener
+carries the verified chain's fingerprints, an AXIAM-issued leaf must be the
+client's tenant's, and any other must chain to a CA the client's organization
+holds (T-475).
+
 **Evidence.**
 * `crates/axiam-oauth2/src/mtls.rs:340-430` — under `tls_client_auth` the only
   conditions are that the handshake built a chain to *some* configured anchor

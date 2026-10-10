@@ -27,6 +27,7 @@ use rustls::server::{
 };
 use rustls::sign::CertifiedKey;
 use rustls::{RootCertStore, ServerConfig};
+use sha2::{Digest, Sha256};
 
 /// Number of resumption entries kept in the in-process session cache.
 ///
@@ -259,7 +260,7 @@ impl Http2Tuning {
 /// Fails fast (aborting startup) when the CA path is unset, missing/unreadable,
 /// empty, or malformed — matching this file's existing `io::Error` style so a
 /// misconfigured mTLS server never starts.
-fn read_client_ca_roots(tls: &TlsConfig) -> io::Result<RootCertStore> {
+fn read_client_ca_roots(tls: &TlsConfig) -> io::Result<ClientAnchors> {
     let ca_path = tls.client_ca_path.as_ref().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -337,6 +338,23 @@ pub fn peer_certificate_trust(
             CertTrust::SelfAsserted
         }
     }
+}
+
+/// The chain a peer certificate the live listener accepted verifies through,
+/// as fingerprints, nearest issuer first and the trust anchor last (R1W1-02).
+///
+/// Called from the `on_connect` hook beside [`peer_certificate_trust`], for a
+/// certificate that chained; see
+/// [`ReloadableClientCertVerifier::issuer_path`]. `None` when there is no live
+/// verifier or no path can be named, which `tls_client_auth` refuses for a
+/// certificate AXIAM did not issue.
+pub fn peer_certificate_issuer_path(
+    leaf: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+) -> Option<Vec<String>> {
+    LIVE_VERIFIER
+        .get()
+        .and_then(|(verifier, _)| verifier.issuer_path(leaf, intermediates))
 }
 
 /// Install `pem` as the live client trust anchor set, without a restart.
@@ -849,8 +867,73 @@ pub struct ReloadableClientCertVerifier {
 enum Anchors {
     /// No trust anchors: no client certificate is requested.
     None,
-    /// A webpki verifier over the current anchor set.
-    Some(Arc<dyn ClientCertVerifier>),
+    /// A webpki verifier over the current anchor set, and that set.
+    Some(Installed),
+}
+
+/// An installed anchor set: the verifier rustls asks, and what
+/// [`ReloadableClientCertVerifier::issuer_path`] needs to name the anchor a
+/// chain reached.
+#[derive(Debug)]
+struct Installed {
+    verifier: Arc<dyn ClientCertVerifier>,
+    roots: Arc<RootCertStore>,
+    fingerprints: Arc<Vec<AnchorFingerprint>>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+/// Which certificate an installed trust anchor came from.
+#[derive(Debug, Clone)]
+struct AnchorFingerprint {
+    /// The anchor's subject and public key, as webpki holds them.
+    subject: Vec<u8>,
+    spki: Vec<u8>,
+    /// Lowercase hex SHA-256 of the certificate's DER — how AXIAM's CA records
+    /// name it (`ca_certificate.fingerprint`).
+    fingerprint: String,
+}
+
+/// A client trust-anchor set as read from a PEM bundle: the store rustls
+/// verifies against, and which certificate each anchor is (R1W1-02).
+///
+/// A [`RootCertStore`] keeps only an anchor's subject and key, so the bundle's
+/// certificates are fingerprinted as they are read: the fingerprint is what
+/// lets `tls_client_auth` ask whose CA a client's chain ended at.
+#[derive(Debug)]
+pub struct ClientAnchors {
+    roots: RootCertStore,
+    fingerprints: Vec<AnchorFingerprint>,
+}
+
+impl Default for ClientAnchors {
+    fn default() -> Self {
+        RootCertStore::empty().into()
+    }
+}
+
+impl ClientAnchors {
+    /// How many anchors the set holds.
+    pub fn len(&self) -> usize {
+        self.roots.len()
+    }
+
+    /// Whether the set holds no anchor.
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+}
+
+/// A store with no fingerprints: its anchors verify chains, and a chain that
+/// reaches one is reported without a path, which `tls_client_auth` refuses
+/// for a certificate AXIAM did not issue. For tests that build a store
+/// directly.
+impl From<RootCertStore> for ClientAnchors {
+    fn from(roots: RootCertStore) -> Self {
+        Self {
+            roots,
+            fingerprints: Vec::new(),
+        }
+    }
 }
 
 impl ReloadableClientCertVerifier {
@@ -879,16 +962,20 @@ impl ReloadableClientCertVerifier {
     /// is what un-flagging the last CA should produce.
     pub fn replace(
         &self,
-        roots: RootCertStore,
+        anchors: impl Into<ClientAnchors>,
         provider: &Arc<rustls::crypto::CryptoProvider>,
     ) -> io::Result<usize> {
+        let ClientAnchors {
+            roots,
+            fingerprints,
+        } = anchors.into();
         if roots.is_empty() {
             self.anchors.store(Arc::new(Anchors::None));
             return Ok(0);
         }
         let count = roots.len();
-        let builder =
-            WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone());
+        let roots = Arc::new(roots);
+        let builder = WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone());
         let verifier = if self.policy == ClientAuth::Required {
             builder.build()
         } else {
@@ -896,7 +983,12 @@ impl ReloadableClientCertVerifier {
         }
         .map_err(|e| io::Error::other(format!("failed to build client cert verifier: {e}")))?;
 
-        self.anchors.store(Arc::new(Anchors::Some(verifier)));
+        self.anchors.store(Arc::new(Anchors::Some(Installed {
+            verifier,
+            roots,
+            fingerprints: Arc::new(fingerprints),
+            provider: provider.clone(),
+        })));
         Ok(count)
     }
 
@@ -904,7 +996,7 @@ impl ReloadableClientCertVerifier {
     pub fn anchor_count(&self) -> usize {
         match &**self.anchors.load() {
             Anchors::None => 0,
-            Anchors::Some(v) => v.root_hint_subjects().len(),
+            Anchors::Some(installed) => installed.verifier.root_hint_subjects().len(),
         }
     }
 
@@ -912,8 +1004,57 @@ impl ReloadableClientCertVerifier {
     fn current(&self) -> Option<Arc<dyn ClientCertVerifier>> {
         match &**self.anchors.load() {
             Anchors::None => None,
-            Anchors::Some(v) => Some(Arc::clone(v)),
+            Anchors::Some(installed) => Some(Arc::clone(&installed.verifier)),
         }
+    }
+
+    /// The chain a leaf verifies through against the installed anchors, as
+    /// SHA-256 fingerprints (lowercase hex): each intermediate it used, nearest
+    /// the leaf first, then the trust anchor (R1W1-02).
+    ///
+    /// `None` when no chain verifies — a self-asserted certificate — or the
+    /// anchor it reached was installed without its certificate's fingerprint.
+    ///
+    /// # Why the path is rebuilt here
+    ///
+    /// For the reason [`Self::chains_to_anchor`] gives: rustls's verdict
+    /// carries nothing, so which anchor the handshake reached cannot be read
+    /// off it. webpki is asked again, with the same anchors, intermediates,
+    /// signature algorithms and client-auth usage the handshake's verifier
+    /// uses, and returns the path it built. One more chain validation per mTLS
+    /// connection (not per request); the trust level it complements is free.
+    pub fn issuer_path(
+        &self,
+        leaf: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+    ) -> Option<Vec<String>> {
+        let anchors = self.anchors.load();
+        let Anchors::Some(installed) = &**anchors else {
+            return None;
+        };
+        let leaf = webpki::EndEntityCert::try_from(leaf).ok()?;
+        let path = leaf
+            .verify_for_usage(
+                installed.provider.signature_verification_algorithms.all,
+                &installed.roots.roots,
+                intermediates,
+                rustls::pki_types::UnixTime::now(),
+                webpki::KeyUsage::client_auth(),
+                None,
+                None,
+            )
+            .ok()?;
+        let anchor = path.anchor();
+        let anchor = installed.fingerprints.iter().find(|a| {
+            a.subject == anchor.subject.as_ref()
+                && a.spki == anchor.subject_public_key_info.as_ref()
+        })?;
+        let mut fingerprints: Vec<String> = path
+            .intermediate_certificates()
+            .map(|cert| hex::encode(Sha256::digest(cert.der())))
+            .collect();
+        fingerprints.push(anchor.fingerprint.clone());
+        Some(fingerprints)
     }
 
     /// Would this leaf have chained to a currently-installed trust anchor?
@@ -1123,7 +1264,7 @@ impl ClientCertVerifier for ReloadableClientCertVerifier {
 /// Shared by the boot path and the reload path so a hot-reloaded anchor set is
 /// parsed by exactly the same code as one read at startup — two parsers is how
 /// a bundle comes to be accepted at boot and rejected on reload.
-pub fn roots_from_pem(pem: &str, source: &str) -> io::Result<RootCertStore> {
+pub fn roots_from_pem(pem: &str, source: &str) -> io::Result<ClientAnchors> {
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
@@ -1133,16 +1274,25 @@ pub fn roots_from_pem(pem: &str, source: &str) -> io::Result<RootCertStore> {
             )
         })?;
 
-    let mut roots = RootCertStore::empty();
+    let invalid = |e: &dyn std::fmt::Display| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid client CA certificate in {source}: {e}"),
+        )
+    };
+    let mut anchors = ClientAnchors::default();
     for cert in certs {
-        roots.add(cert).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid client CA certificate in {source}: {e}"),
-            )
-        })?;
+        // The anchor exactly as `RootCertStore::add` derives it, so the
+        // subject and key webpki reports for a path compare equal.
+        let anchor = webpki::anchor_from_trusted_cert(&cert).map_err(|e| invalid(&e))?;
+        anchors.fingerprints.push(AnchorFingerprint {
+            subject: anchor.subject.as_ref().to_vec(),
+            spki: anchor.subject_public_key_info.as_ref().to_vec(),
+            fingerprint: hex::encode(Sha256::digest(cert.as_ref())),
+        });
+        anchors.roots.add(cert).map_err(|e| invalid(&e))?;
     }
-    Ok(roots)
+    Ok(anchors)
 }
 
 /// Build a TLS 1.3-only rustls [`ServerConfig`] from the configured PEM files.
@@ -1669,7 +1819,7 @@ pub fn build_grpc_rustls_server_config_with_client_auth(
 ///
 /// The REST reader's rules ([`read_client_ca_roots`]) over a path rather than a
 /// [`TlsConfig`], with the gRPC variable named in the errors.
-fn read_grpc_client_ca_roots(ca_path: &std::path::Path) -> io::Result<RootCertStore> {
+fn read_grpc_client_ca_roots(ca_path: &std::path::Path) -> io::Result<ClientAnchors> {
     let pem = std::fs::read_to_string(ca_path).map_err(|e| {
         io::Error::new(
             e.kind(),
@@ -2426,6 +2576,78 @@ mod tests {
 
         assert!(verifier.chains_to_anchor(&chained, &[]));
         assert!(!verifier.chains_to_anchor(&unchained, &[]));
+    }
+
+    /// R1W1-02: the chain a leaf verified through is reported as the
+    /// fingerprints AXIAM's CA records carry — each intermediate the path used,
+    /// then the anchor — so `tls_client_auth` can ask whose CA it ended at. A
+    /// self-signed leaf has no path, and neither has a chain whose anchor was
+    /// installed without its certificate.
+    #[test]
+    fn issuer_path_names_the_intermediates_and_the_anchor_a_chain_reached() {
+        let fingerprint = |der: &[u8]| hex::encode(Sha256::digest(der));
+        let root_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut root_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Path Root");
+        let root = root_params.self_signed(&root_key).unwrap();
+        let root_issuer = Issuer::from_params(&root_params, &root_key);
+        let sub_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut sub_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        sub_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        sub_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Path Sub CA");
+        let sub = sub_params.signed_by(&sub_key, &root_issuer).unwrap();
+        let sub_issuer = Issuer::from_params(&sub_params, &sub_key);
+        let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        leaf_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "client");
+        let leaf = leaf_params.signed_by(&leaf_key, &sub_issuer).unwrap();
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = ReloadableClientCertVerifier::empty(ClientAuth::OptionalSelfSigned);
+        verifier
+            .replace(
+                roots_from_pem(&root.pem(), "the test bundle").unwrap(),
+                &provider,
+            )
+            .unwrap();
+        assert_eq!(
+            verifier.issuer_path(leaf.der(), std::slice::from_ref(sub.der())),
+            Some(vec![fingerprint(sub.der()), fingerprint(root.der())]),
+            "the intermediate, then the anchor"
+        );
+        let direct_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let direct = CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .signed_by(&direct_key, &root_issuer)
+            .unwrap();
+        assert_eq!(
+            verifier.issuer_path(direct.der(), &[]),
+            Some(vec![fingerprint(root.der())]),
+            "a leaf straight under the anchor"
+        );
+        let (unchained, _key) = valid_self_signed_leaf();
+        assert_eq!(verifier.issuer_path(&unchained, &[]), None);
+        assert_eq!(
+            verifier.issuer_path(leaf.der(), &[]),
+            None,
+            "without its intermediate the leaf chains to nothing"
+        );
+
+        let mut bare = RootCertStore::empty();
+        bare.add(root.der().clone()).unwrap();
+        verifier.replace(bare, &provider).unwrap();
+        assert_eq!(
+            verifier.issuer_path(direct.der(), &[]),
+            None,
+            "an anchor installed without its certificate names no path"
+        );
     }
 
     /// Under every pre-existing policy `trust_of` answers `ChainedToAnchor`

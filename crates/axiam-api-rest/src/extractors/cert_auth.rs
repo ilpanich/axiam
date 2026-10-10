@@ -56,6 +56,12 @@ pub struct VerifiedClientCert {
     /// Lowercase hex SHA-256 of the leaf's SubjectPublicKeyInfo (the SPKI
     /// fingerprint) — a stable key-identity handle for cert-mapped identities.
     pub spki_sha256: String,
+    /// SHA-256 fingerprints (lowercase hex of the DER) of the certificates the
+    /// handshake verified this one through, nearest issuer first and the trust
+    /// anchor last; empty for a self-asserted certificate or when the listener
+    /// could not name the path (R1W1-02). OAuth2 `tls_client_auth` requires the
+    /// anchor to be a CA of the client's organization.
+    pub issuer_path: Vec<String>,
 }
 
 impl VerifiedClientCert {
@@ -96,7 +102,17 @@ impl VerifiedClientCert {
             der: der.to_vec(),
             sans,
             spki_sha256,
+            issuer_path: Vec::new(),
         })
+    }
+
+    /// Record the chain the handshake verified this certificate through (see
+    /// [`Self::issuer_path`]). Set by `axiam-server`'s `on_connect` hook, the
+    /// one place the listener's anchors and the peer chain are both in hand.
+    #[must_use]
+    pub fn with_issuer_path(mut self, issuer_path: Vec<String>) -> Self {
+        self.issuer_path = issuer_path;
+        self
     }
 
     /// Refuse this certificate for device/IoT authentication unless it chained

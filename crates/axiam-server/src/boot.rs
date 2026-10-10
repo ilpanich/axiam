@@ -3072,7 +3072,17 @@ where
                 let trust = crate::tls::peer_certificate_trust(leaf, &certs[1..]);
                 match axiam_api_rest::VerifiedClientCert::from_der(leaf.as_ref(), trust) {
                     Ok(vc) => {
-                        ext.insert(vc);
+                        // R1W1-02: the chain it verified through, so
+                        // `tls_client_auth` can require its anchor to be the
+                        // client's organization's. A self-asserted certificate
+                        // has none.
+                        let issuer_path = if trust.is_chained_to_anchor() {
+                            crate::tls::peer_certificate_issuer_path(leaf, &certs[1..])
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        ext.insert(vc.with_issuer_path(issuer_path));
                     }
                     Err(e) => {
                         tracing::warn!(

@@ -1204,17 +1204,41 @@ where
             // AXIAM issued it and has since revoked it. Read only after the
             // match, so a certificate that authenticates nothing costs no
             // lookup.
-            return match ctx.client_certificate.as_ref() {
-                Some(cert) => {
-                    crate::mtls::refuse_a_certificate_axiam_revoked(
-                        client,
-                        cert,
-                        self.issued_certificates.as_ref(),
-                    )
-                    .await
-                }
-                None => Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())),
+            let Some(cert) = ctx.client_certificate.as_ref() else {
+                return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
             };
+            let standing = crate::mtls::refuse_a_certificate_axiam_revoked(
+                client,
+                cert,
+                self.issued_certificates.as_ref(),
+            )
+            .await?;
+            // R1W1-02: under `tls_client_auth` the certificate must also be the
+            // client's organization's — issued in its tenant, or verified
+            // through a chain its organization's anchor ends. The tenant is
+            // read for its organization; a deleted one authenticates nothing.
+            if client.token_endpoint_auth_method == ClientAuthMethod::TlsClientAuth {
+                let organization = self
+                    .tenant_repo
+                    .get_by_id(client.tenant_id)
+                    .await
+                    .map_err(|e| match e {
+                        AxiamError::NotFound { .. } => {
+                            OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
+                        }
+                        other => OAuth2Error::ServerError(other.to_string()),
+                    })?
+                    .organization_id;
+                crate::mtls::refuse_a_certificate_from_outside_the_clients_organization(
+                    client,
+                    organization,
+                    cert,
+                    standing,
+                    self.issued_certificates.as_ref(),
+                )
+                .await?;
+            }
+            return Ok(());
         }
 
         if client.token_endpoint_auth_method.is_private_key_jwt() {

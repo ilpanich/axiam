@@ -926,6 +926,33 @@ you flag a CA — including yours. `optional` verifies a certificate when one is
 offered and leaves password and passkey logins working, which is what an IoT
 deployment actually wants: devices authenticate by certificate, people do not.
 
+### Whose anchor: `tls_client_auth`
+
+The listener's trust store is the union of every organization's flagged CAs,
+and any organization administrator with `ca_certificates:manage` can flag one —
+an imported CA whose key they hold offline included. Until 1.0.0 (R1W1-02) an
+OAuth2 `tls_client_auth` client was authenticated by a DN or SAN match under
+*any* of those anchors, so one organization could mint a certificate carrying
+another organization's client DN and obtain that client's tokens.
+
+The listener now records, for each client certificate, the chain the handshake
+verified it through (the fingerprints of each intermediate and of the anchor),
+and the token endpoint accepts a `tls_client_auth` certificate only when:
+
+- **AXIAM issued it in the client's own tenant** — a leaf issued in a sibling
+  tenant, even under the same organization CA, is refused; or
+- AXIAM did not issue it, and its chain **ends at a CA the client's organization
+  holds**, active and in date, with **every CA on the chain that AXIAM records**
+  held by the client's organization (a tenant signing CA: by the client's
+  tenant). An anchor no organization holds — one placed in an operator's own
+  `CLIENT_CA_PATH` bundle and never imported — is refused too: import it into
+  each organization whose clients use it (a keyless import; it needs no flag
+  when your bundle already carries it).
+
+Device sign-in is unaffected (it binds the certificate to a service account of
+one tenant), and so is `self_signed_tls_client_auth`, whose credential is the
+pinned thumbprint.
+
 ### Your own settings always win
 
 If you have set `CLIENT_AUTH` or `CLIENT_CA_PATH` yourself, AXIAM fills in only
@@ -1051,7 +1078,7 @@ who validates it:
 | Where the certificate is validated | Does a revocation reach it? |
 |---|---|
 | AXIAM's device sign-in by certificate (`POST /api/v1/auth/device`) | **Yes, at once.** `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf |
-| OAuth2 `tls_client_auth` and `self_signed_tls_client_auth` | **Yes, at once** (since #565). After the registered subject, SAN or thumbprint matches, the presented certificate is looked up by fingerprint, and one AXIAM issued that is revoked or expired — or whose issuing CA is — is refused with `invalid_client`. A certificate AXIAM did not issue (a self-signed one, or one from an external CA a listener anchors) is not in AXIAM's inventory and is decided by the match alone, as before |
+| OAuth2 `tls_client_auth` and `self_signed_tls_client_auth` | **Yes, at once** (since #565). After the registered subject, SAN or thumbprint matches, the presented certificate is looked up by fingerprint, and one AXIAM issued that is revoked or expired — or whose issuing CA is — is refused with `invalid_client`. A certificate AXIAM did not issue (a self-signed one, or one from an external CA a listener anchors) is not in AXIAM's inventory; under `self_signed_tls_client_auth` it is decided by the thumbprint, and under `tls_client_auth` by its chain's anchor, which must be a CA of the client's organization (see [Whose anchor](#whose-anchor-tls_client_auth)) |
 | The TLS handshake, on either listener | **No, not yet.** Neither listener's handshake consults the revocation list, so a revoked leaf still completes one. It authenticates nothing by itself — every decision above reads the status — but an access token bound to the certificate (RFC 8705 §3) before the revocation stays usable until it expires. Loading the lists into the listeners' verifiers is planned for `1.0.x` |
 | A relying party that validates AXIAM-issued certificates itself — a FreeRADIUS server doing EAP-TLS, a VPN gateway, a peer service terminating its own mTLS | **Yes, at its next fetch of the issuer's CRL** — see [Certificate revocation lists](#certificate-revocation-lists). AXIAM runs no OCSP responder, so the delay is the relying party's fetch interval, at most the list's `nextUpdate` |
 

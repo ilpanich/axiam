@@ -63,9 +63,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.39.0",
  "diagramCount": 10,
- "total": 474,
+ "total": 475,
  "open": 17,
- "mitigated": 436,
+ "mitigated": 437,
  "notApplicable": 21,
  "areas": [
   {
@@ -106,7 +106,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "total": 31,
+   "total": 32,
    "open": 1,
    "notApplicable": 0
   },
@@ -142,7 +142,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 104,
+   "total": 105,
    "open": 4,
    "notApplicable": 3
   },
@@ -186,7 +186,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 196,
+   "total": 197,
    "open": 8,
    "notApplicable": 9
   },

@@ -631,4 +631,33 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
             .map(|row| row.try_into_entry().map_err(Into::into))
             .collect()
     }
+
+    async fn list_by_fingerprints(
+        &self,
+        fingerprints: &[String],
+    ) -> AxiamResult<Vec<CaCertificate>> {
+        // Not organization-scoped, by design — see the trait's doc comment.
+        // Every status: the caller decides what a revoked record means.
+        if fingerprints.is_empty() {
+            return Ok(Vec::new());
+        }
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM ca_certificate \
+                 WHERE fingerprint IN $fingerprints",
+            )
+            .bind(("fingerprints", fingerprints.to_vec()))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CaCertificateRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| row.try_into_entry().map_err(Into::into))
+            .collect()
+    }
 }

@@ -180,7 +180,7 @@
 > durability and operations half below (T-108 and T-117 closed), model 2.39.0
 > is **474 threats, 436 mitigated / 17 open / 21 not applicable**.
 >
-> **The wave's F4 review (model 2.39.0 — T-102 and T-472 amended).** The
+> **The wave's F4 review (model 2.39.0 — T-475 enters, Mitigated; T-102, T-472 and T-263 amended).** The
 > review of the first half
 > ([`security-review-release-1.0.0-w1-2026-10-10.md`](security-review-release-1.0.0-w1-2026-10-10.md))
 > found that the two halves of the wave met badly at one point (R1W1-01):
@@ -196,6 +196,22 @@
 > leaf revoked beforehand, its live leaf, a leaf under its signing CA, the CA
 > itself and a leaf issued during the deletion on the organization CA's list
 > throughout, another tenant's leaf untouched, and an expired entry gone.
+> The same review found an older hole on the path #565 had just changed
+> (R1W1-02), entered as **T-475**, High, Mitigated: the deployment's one mTLS
+> listener trusts every organization's flagged anchors at once, any
+> organization administrator can flag a CA whose key they hold, and OAuth2
+> `tls_client_auth` asked only that a certificate chained to *some* anchor and
+> carried the client's registered DN — so one organization could take another's
+> client's tokens. The listener now reports the chain it verified, as
+> fingerprints, and `tls_client_auth` accepts a certificate AXIAM issued only in
+> the client's own tenant, and any other only when its chain ends at a CA the
+> client's organization holds and passes through no CA another organization or
+> tenant holds; `self_signed_tls_client_auth` is unchanged. An anchor an
+> operator placed in a bundle by hand must now be imported into each
+> organization whose clients use it. The tests mint the victim's DN under
+> another organization's CA and under a sibling tenant, and are refused; the
+> same under the client's own CA authenticates. The model is **475 threats,
+> 437 mitigated / 17 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -1504,7 +1520,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 474 threats** and a
+The system is verified against a **STRIDE threat model of 475 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1527,8 +1543,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 474 |
-| Mitigated / Open | 436 / 17 |
+| Threats identified | 475 |
+| Mitigated / Open | 437 / 17 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1550,7 +1566,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | OAuth2 / OIDC authorization server | 86 | 0 | 0 |
 | Federation (SAML SP and IdP, OIDC RP & directory) | 126 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
-| PKI, certificates & IoT device identity | 31 | 1 | 0 |
+| PKI, certificates & IoT device identity | 32 | 1 | 0 |
 | Audit, webhooks, email & notifications | 56 | 2 | 0 |
 | Deployment & platform (Kubernetes) | 29 | 6 | 0 |
 | Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
@@ -3015,7 +3031,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 17 of 474. The 21
+Every threat the model records as open, most severe first — 17 of 475. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it

@@ -42,6 +42,10 @@ actix-tls = { version = "3", features = ["rustls-0_23"] }
 # PEM parsing uses rustls-pki-types' `PemObject` (re-exported by rustls) rather
 # than the unmaintained rustls-pemfile (RUSTSEC-2025-0134).
 rustls = { workspace = true, features = ["ring"] }
+# R1W1-02: which trust anchor a client certificate's chain reached. rustls's
+# verdict carries no path, so the listener asks webpki — the same crate and
+# version rustls verifies with, already in the lock — for the path it built.
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false }
 
 # The `optional_self_signed` client-auth policy accepts a certificate webpki
 # never chain-builds, so the validity-window check webpki would have performed

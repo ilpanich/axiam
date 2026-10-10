@@ -2425,9 +2425,10 @@ pub(crate) fn token_request_context(
     // here: `authenticate_mtls_client` refuses a self-asserted certificate for
     // `tls_client_auth` (§2.1) and accepts one for `self_signed_tls_client_auth`
     // (§2.2), and this is the seam that lets it tell them apart.
-    let certificate = req
-        .conn_data::<VerifiedClientCert>()
-        .map(|verified| PresentedCertificate::from_der(&verified.der, verified.trust));
+    let certificate = req.conn_data::<VerifiedClientCert>().map(|verified| {
+        PresentedCertificate::from_der(&verified.der, verified.trust)
+            .with_issuer_path(verified.issuer_path.clone())
+    });
 
     Ok(TokenRequestContext {
         client_certificate: certificate,

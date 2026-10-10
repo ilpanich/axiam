@@ -1871,7 +1871,7 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/metadata")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_metadata", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_metadata", rate_limit_cfg))
                 .route(web::get().to(saml_idp::metadata::<C>))
                 .route(web::head().to(saml_idp::metadata::<C>))
                 .default_service(web::to(saml_idp::not_found)),
@@ -1879,7 +1879,7 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/sso")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_sso", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_sso", rate_limit_cfg))
                 .route(web::get().to(saml_idp::sso_redirect::<C>))
                 .route(web::post().to(saml_idp::sso_post::<C>))
                 .default_service(web::to(saml_idp::not_found)),
@@ -1887,16 +1887,16 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/sso/continue")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_sso_continue", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_sso_continue", rate_limit_cfg))
                 .route(web::get().to(saml_idp::sso_continue::<C>))
                 .default_service(web::to(saml_idp::not_found)),
         )
         .service(
             web::resource("/sso/idp-initiated")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new(
+                .wrap(RateLimitShared::<C>::browser_preset(
                     "saml_idp_sso_idp_initiated",
-                    per_min,
+                    rate_limit_cfg,
                 ))
                 .route(web::get().to(saml_idp::sso_idp_initiated::<C>))
                 .default_service(web::to(saml_idp::not_found)),
@@ -1907,7 +1907,7 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/sso/logout")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_sso_logout", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_sso_logout", rate_limit_cfg))
                 .route(web::get().to(saml_idp_slo::sso_logout::<C>))
                 .default_service(web::to(saml_idp::not_found)),
         )
@@ -1915,7 +1915,7 @@ fn saml_idp_scope<C: surrealdb::Connection + Clone>(
         .service(
             web::resource("/slo")
                 .wrap(build_governor(per_min))
-                .wrap(RateLimitShared::<C>::new("saml_idp_slo", per_min))
+                .wrap(RateLimitShared::<C>::browser_preset("saml_idp_slo", rate_limit_cfg))
                 .route(web::get().to(saml_idp_slo::slo_redirect::<C>))
                 .route(web::post().to(saml_idp_slo::slo_post::<C>))
                 .default_service(web::to(saml_idp::not_found)),
@@ -1963,9 +1963,9 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/authorize")
                     .wrap(build_governor(rate_limit_cfg.end_session_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(RateLimitShared::<C>::browser_preset(
                         "oauth2_authorize",
-                        rate_limit_cfg.end_session_per_min,
+                        rate_limit_cfg,
                     ))
                     .app_data(
                         web::QueryConfig::default()
@@ -2107,9 +2107,9 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/end_session")
                     .wrap(build_governor(rate_limit_cfg.end_session_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(RateLimitShared::<C>::browser_preset(
                         "oauth2_end_session",
-                        rate_limit_cfg.end_session_per_min,
+                        rate_limit_cfg,
                     ))
                     .route(web::get().to(handlers::oauth2::end_session::<C>))
                     .route(web::post().to(handlers::oauth2::end_session::<C>)),
@@ -2125,9 +2125,9 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             .service(
                 web::resource("/authorize/logout")
                     .wrap(build_governor(rate_limit_cfg.end_session_per_min))
-                    .wrap(RateLimitShared::<C>::new(
+                    .wrap(RateLimitShared::<C>::browser_preset(
                         "oauth2_end_session_cookie",
-                        rate_limit_cfg.end_session_per_min,
+                        rate_limit_cfg,
                     ))
                     .route(web::get().to(handlers::oauth2::end_session_at_cookie_path::<C>)),
             )

@@ -97,6 +97,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes, unless the same write sets it, so every writer inherits the rule;
   an unchanged number keeps its verification. No AXIAM API sets the
   timestamp today, so this guards the verification flow to come.
+- **A person first seen late in a minute gets the browser-endpoint preset in
+  full** (#532 follow-up). The shared rate-limit counter charges a key it has
+  not seen before the share of the wall-clock minute already gone, less 10 %,
+  at every limit of 20 or more — a smoothing meant for machine traffic, which
+  assumed every human-facing limit sat below 20. The browser-endpoint preset
+  (`AXIAM__RATE_LIMIT__END_SESSION_PER_MIN`, 30) does not, so since #532 put
+  `/oauth2/authorize` behind it, a person whose address first appeared in a
+  minute's last second had about three authorization requests left in it; the
+  end-session routes and the SAML identity provider's browser routes were
+  pro-rated the same way. Those buckets now skip the cold-entry seed and give a
+  newly seen address the whole preset whenever it arrives; the sliding window
+  still carries the previous minute. Machine buckets of 20 or more keep the
+  seed. `docs/deployment/rate-limit-sizing.md` is corrected.
 
 ### Security
 

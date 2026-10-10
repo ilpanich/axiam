@@ -336,8 +336,32 @@ print(m['version'], top, dict(st))
 EOF
 ```
 
-W4 fills in: the regression-gate table (W4.8) and the release-pipeline findings
-(W4.6).
+W4 fills in: the regression-gate table (W4.8, §9.2) and the release-pipeline
+findings (W4.6, §9.1).
+
+### 9.1 The release pipelines, read for the first stable tag (W4.6)
+
+A tag with no `-` segment is the first one these pipelines have seen. What it does
+that a beta tag did not, and what was changed so it does it correctly:
+
+| Pipeline | A stable tag | Finding | Change |
+|---|---|---|---|
+| `release.yml` image scan | Gates on HIGH/CRITICAL | **The beta17 and beta18 server releases failed here.** `trivy-action` in SARIF mode drops the severity filter, so `exit-code: 1` fired on MEDIUM/LOW (`libssl3`, `tzdata` in the distroless base; reproduced locally with the pinned trivy 0.70.0). Nothing in the image is HIGH/CRITICAL. | `limit-severities-for-sarif: true` (a6584ba) |
+| `release.yml` GitHub Release | `prerelease=false`, `make_latest=true` | Every beta took "Latest". | `prerelease`/`make_latest` from the tag (3f74053) |
+| `release.yml` images | `1.0.0`, `1.0`, `latest`, `sha-…` | Correct already. | — |
+| `release.yml`, `release-opaque.yml` | — | No check that the tag equals the declared versions. | `verify-tag-on-main` refuses a mismatch before any build or publish (a2334a1) |
+| `release-opaque.yml` GitHub Release | never "Latest" | The opaque release held "Latest" (a library bundle). | `make_latest: false`; prerelease from the stripped tag (3f74053) |
+| `release.yml` git-cliff `--latest` | Notes = commits since `v1.0.0-beta18` | A delta, not 1.0 notes (beta19 was never tagged). | Maintainer's choice: `body_path` to hand-written notes (§10) |
+| `scripts/mass-tag.sh` | Bumps every declared version | The C++ overlay port `ports/axiam-cpp-sdk/vcpkg.json` was never bumped (stuck at `1.0.0-alpha8`). | Every `ports/*/vcpkg.json` is bumped (627dc83); the port corrected in the C++ SDK PR |
+| Python SDK publish | PyPI `1.0.0` | No check that the tag equals `pyproject.toml`. | Tag-vs-version assertion (axiam-python-sdk c704a0b) |
+| Python SDK metadata | — | `Development Status :: 2 - Pre-Alpha`. | `5 - Production/Stable` (Python SDK PR) |
+| TypeScript SDK, `@axiam/opaque-wasm` | npm `latest` | Correct (dist-tag from the version). README badge and `@beta` install were stale. | README rewritten (TypeScript SDK PR) |
+| PHP SDK | Packagist from the tag | `branch-alias dev-main: 0.x-dev`. | `1.x-dev` (axiam-php-sdk 1fb1f73) |
+| Java, Kotlin (Maven Central), C# (NuGet), Go (`v1.0.0`, no `/vN`), Rust (crates.io, tag check present), C/C++ (Conan, vcpkg) | Publish `1.0.0` | No failure on a stable version. | — |
+| Swift | SwiftPM from the tag | The CocoaPods podspec is versioned but never published, while the README shows a `pod` line. | Maintainer's choice (§10) |
+
+Not verifiable from the sandbox: the full server image scan (no Docker daemon) and
+the publish jobs themselves; the first stable tag is their first real run.
 
 ## 10. Hand-off (written by W4)
 
@@ -349,13 +373,26 @@ table; the real `mass-tag.sh` run, platform first; the twelve pipelines and the
 
 ## 11. Wave results
 
-| Wave | PR | Closes | Left to the next wave |
+On the maintainer's instruction (the Docker Hub pull limit made per-wave PR CI
+unreliable), W1 … W4 landed on one branch, `ccr-7ed2207b-ouofu1`, and ship as
+**one platform PR, #589**; each SDK has its own PR.
+
+| Wave | Where | Closes | Left to the next wave / to 1.0.x |
 |---|---|---|---|
-| Plan | (this PR) | #541, #547, #548 | — |
-| W1 | | | |
-| W2 | | | |
-| W3 | | | |
-| W4 | | | |
+| Plan | #589 | #541, #547, #548 | — |
+| W1 — security | #589 | #549, #564, #565, #517, #518, #519, #523, #529, #520, #532, #531, #525, #524, #526, #530 | F4 review: R1W1-01 (Medium) and R1W1-02 (High) fixed in 1.0.0 (0b2bddf, adb1df4, T-475); R1W1-03 … 13 filed as #601 – #611; #612 – #614 filed from the wave's residuals |
+| W2 — durability, operations, CIBA | #589 | #550, #551, #553, #552, #554, #569, #566, #535, #555, #568, #567, #536 | F4 review: R1W2-01/02 (Medium) fixed; R1W2-03 … 14 filed as #590 – #600 |
+| W3 — contract 1.60 | #589; SDK PRs below | #588 | Contract 1.60 in four passes; SDK artefacts vendored at 8df0e11 |
+| W4 — release readiness | #589 | — | §10 |
+
+SDK PRs (contract 1.60, README stable, `[Unreleased]` written as the 1.0.0 section;
+each merges after #589): axiam-rust-sdk#125, axiam-typescript-sdk#133,
+axiam-python-sdk#95, axiam-java-sdk#110, axiam-kotlin-sdk#74,
+axiam-csharp-sdk#103, axiam-php-sdk#80, axiam-go-sdk#95, axiam-swift-sdk#72,
+axiam-c-sdk#71, axiam-cplusplus-sdk#73.
+
+Deferred, said so in public (§6): #513 (certification submissions, stays open past
+the tag), #561 (benchmark run 6), #533, #538 (1.0.x), #563 (RADIUS, on request).
 
 ---
 

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dying consumer or gRPC server no longer ends the process mid-flight, and
+  the gRPC server now stops with the REST listener (#554).** In the full profile
+  the authz, audit-ingestion and mail consumers and the gRPC server each ended
+  the process with `std::process::exit(1)` when they stopped, wherever it was:
+  audit rows still queued, requests in flight and a GDPR purge between its
+  erasure and its audit row were lost. Each now takes the stop a lost minimal-
+  profile lease takes: the REST listener stops accepting and finishes what is in
+  flight, the gRPC server is told to stop and awaited (up to 5 s), the audit
+  queue is drained, and `serve` returns an error naming the component, so the
+  process still exits non-zero and the orchestrator still restarts it. The
+  `exit(1)` remains only as a backstop if that has not finished within 15 s.
+  The gRPC server previously had no shutdown signal at all, so a `SIGTERM` left
+  it serving, with its calls cut off, until the runtime went; it now finishes
+  its calls first. `start_grpc_server` takes a trailing shutdown future
+  (`std::future::pending()` serves for the life of the process). T-444 is
+  amended; its status is unchanged.
+
 ### Security
 
 - **A tarpit SCIM downstream no longer stalls every tenant's outbound provisioning

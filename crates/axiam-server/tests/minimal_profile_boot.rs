@@ -878,3 +878,62 @@ async fn an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_row
         "the-usurper"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A dead component (P23W5-A11, A12)
+// ---------------------------------------------------------------------------
+
+/// The gRPC server failing — here, its port is taken — is one of the four
+/// deaths that used to be `std::process::exit(1)` from the task that saw it.
+/// It now stops the instance through the same orderly path as a lost lease:
+/// `serve` returns an error naming the component, which is `main`'s non-zero
+/// exit, the REST listener is gone, and the backstop was not needed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_grpc_server_stops_the_instance_in_order_and_exits_non_zero() {
+    let db = fresh_db().await;
+    let mut config = minimal_config();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    axiam_auth::client_secret::install_from_config(&config.auth)
+        .expect("the client-secret hasher installs");
+    config
+        .auth
+        .resolve_keys()
+        .expect("the Ed25519 keys parse (CQ-B14)");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let rest_port = listener.local_addr().unwrap().port();
+    config.server.port = rest_port;
+    // The gRPC port is taken, so its server fails as soon as it starts.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    config.grpc.port = taken.local_addr().unwrap().port();
+
+    let backstop_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&backstop_ran);
+    let (pool, health) = pool_over(&db);
+    let opts = ServeOptions {
+        rest_listener: Some(listener),
+        lease_timing: short_lease(),
+        lease_lost_backstop: Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst)
+        }),
+        ..ServeOptions::default()
+    };
+    let stopped = serve_on_big_stack(config, pool, health, opts);
+
+    let message = tokio::time::timeout(Duration::from_secs(20), stopped)
+        .await
+        .expect("an instance whose gRPC server died stops")
+        .expect("the server thread reported")
+        .expect_err("a dead component is a non-zero exit")
+        .to_string();
+    assert!(message.contains("gRPC server"), "{message}");
+    assert!(
+        !backstop_ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the orderly stop finished before the backstop was needed"
+    );
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", rest_port))
+            .await
+            .is_err(),
+        "the REST listener is closed"
+    );
+}

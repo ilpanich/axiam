@@ -220,6 +220,15 @@ pub enum GrpcTls {
 /// `ReactorRoutingTable` the REST admin handlers invalidate through, or a
 /// registration written over gRPC would not take effect on this replica
 /// until the routing table's TTL expired.
+///
+/// # `shutdown` (P23W5-A11)
+///
+/// The orderly stop: when it resolves the listener stops accepting, the calls
+/// in flight finish, and this returns `Ok(())`. The composition root resolves
+/// it when the REST listener has stopped and waits for this task (bounded)
+/// before it drains the audit queue, so a call that audits through this
+/// listener is not cut off by the drain. `std::future::pending()` serves for
+/// as long as the process lives.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     addr: SocketAddr,
@@ -259,6 +268,7 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     // service reads it: in the minimal profile (no broker) enabling a
     // registration is `FAILED_PRECONDITION` naming the profile.
     profile: DeploymentProfile,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     R: RoleRepository + 'static,
@@ -455,7 +465,7 @@ where
             let (fatal_tx, fatal_rx) = tokio::sync::oneshot::channel();
             let incoming = tls_incoming(listener, tls_config, fatal_tx);
             tokio::select! {
-                served = router.serve_with_incoming(incoming) => {
+                served = router.serve_with_incoming_shutdown(incoming, shutdown) => {
                     served.map_err(Into::into)
                 }
                 Ok(accept_error) = fatal_rx => {
@@ -472,7 +482,10 @@ where
             // TCP_NODELAY, and serves exactly as it always has. The E2E suite
             // and every benchmark that is not the native-TLS overlay run
             // through this arm.
-            router.serve(addr).await.map_err(Into::into)
+            router
+                .serve_with_shutdown(addr, shutdown)
+                .await
+                .map_err(Into::into)
         }
     }
 }

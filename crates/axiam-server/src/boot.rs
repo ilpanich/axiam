@@ -75,6 +75,7 @@ use surrealdb::Connection;
 use tracing_actix_web::TracingLogger;
 
 use crate::cleanup;
+use crate::fatal_stop::{FatalStop, spawn_fatal_stop};
 use crate::messaging::{MailTransportPublisher, OutboundTransport};
 use crate::profile::{self, LeaseTiming, OnLeaseLost};
 
@@ -303,12 +304,13 @@ pub struct ServeOptions {
     pub rest_listener: Option<std::net::TcpListener>,
     /// The timing of the minimal profile's singleton lease.
     pub lease_timing: LeaseTiming,
-    /// The minimal profile's **backstop** for a lost lease. An instance whose
-    /// lease another instance takes over stops in order — the REST listener
-    /// stops accepting, the audit queue is drained, the cleanup task finishes —
-    /// and [`serve`] returns an error, so `main` exits non-zero (T23.8.2,
-    /// P23W5-A1). This runs only if that has not finished within
-    /// [`LeaseTiming::lost_stop_deadline`]; production exits the process.
+    /// The **backstop** for an orderly stop forced on the instance: the
+    /// minimal profile's lost lease, or a consumer or the gRPC server that died
+    /// (full profile). Such an instance stops in order — the REST listener
+    /// stops accepting, gRPC stops, the audit queue is drained, the cleanup
+    /// task finishes — and [`serve`] returns an error, so `main` exits non-zero
+    /// (T23.8.2, P23W5-A1, P23W5-A12). This runs only if that has not finished
+    /// within [`LeaseTiming::lost_stop_deadline`]; production exits the process.
     pub lease_lost_backstop: OnLeaseLost,
     /// **Test seam, never set in production.** Lets the webhook and SSF push
     /// deliverers reach a loopback `http://` receiver (their own
@@ -366,6 +368,9 @@ where
     // Losing the lease later raises `lease_lost`; the REST listener's run below
     // waits on it and stops in order (T23.8.2, P23W5-A1).
     let (lease_lost_tx, lease_lost) = tokio::sync::watch::channel(false);
+    // A consumer or the gRPC server that dies raises this; the REST listener's
+    // run below stops in order for it as it does for a lost lease (P23W5-A12).
+    let (fatal_stop, component_died) = FatalStop::new();
     let lease_renewal = if deployment_profile.is_minimal() {
         let guards = profile::enforce_minimal_profile(
             config.authz.decision_cache_broadcast_enabled,
@@ -1904,6 +1909,7 @@ where
         };
         let amqp_signing_key_clone = amqp_signing_key.clone();
         let authz_nonce_repo = amqp_nonce_repo.clone();
+        let died = fatal_stop.clone();
         tokio::spawn(async move {
             axiam_amqp::authz_consumer::start_authz_consumer(
                 amqp_channel,
@@ -1913,8 +1919,7 @@ where
                 amqp_replay_skew,
             )
             .await;
-            tracing::error!("AMQP authz consumer exited — shutting down process");
-            std::process::exit(1);
+            died.raise("AMQP authz consumer");
         });
 
         // Create notification publisher (available for services to emit events).
@@ -1934,6 +1939,7 @@ where
         let amqp_audit_repo = audit_repo.clone();
         let audit_nonce_repo = amqp_nonce_repo.clone();
         let audit_signing_key = amqp_signing_key.clone();
+        let died = fatal_stop.clone();
         tokio::spawn(async move {
             axiam_amqp::audit_consumer::start_audit_consumer(
                 audit_channel,
@@ -1943,8 +1949,7 @@ where
                 amqp_replay_skew,
             )
             .await;
-            tracing::error!("AMQP audit consumer exited — shutting down process");
-            std::process::exit(1);
+            died.raise("AMQP audit consumer");
         });
     }
 
@@ -2173,6 +2178,7 @@ where
                 .create_channel()
                 .await
                 .expect("Failed to create AMQP mail consumer channel");
+            let died = fatal_stop.clone();
             tokio::spawn(async move {
                 axiam_amqp::start_mail_consumer(
                     mail_channel,
@@ -2184,8 +2190,7 @@ where
                     mail_org_repo,
                 )
                 .await;
-                tracing::error!("AMQP mail consumer exited — shutting down process");
-                std::process::exit(1);
+                died.raise("AMQP mail consumer");
             });
         } else if let Some(queue) = mail_queue {
             axiam_amqp::spawn_in_process_mail_worker_default(
@@ -2450,7 +2455,11 @@ where
         None => axiam_api_grpc::GrpcTls::Plaintext,
     };
 
-    tokio::spawn(async move {
+    // Resolved by the teardown once the REST listener has stopped (P23W5-A11);
+    // dropping the sender, on an early return, resolves it too.
+    let (grpc_stop, grpc_stopped) = tokio::sync::oneshot::channel::<()>();
+    let died = fatal_stop.clone();
+    let grpc_task = tokio::spawn(async move {
         if let Err(e) = start_grpc_server(
             grpc_addr,
             grpc_engine,
@@ -2469,11 +2478,14 @@ where
             grpc_lockout_policy,
             grpc_tls,
             deployment_profile,
+            async move {
+                let _ = grpc_stopped.await;
+            },
         )
         .await
         {
-            tracing::error!(error = %e, "gRPC server failed — shutting down process");
-            std::process::exit(1);
+            tracing::error!(error = %e, "gRPC server failed");
+            died.raise("gRPC server");
         }
     });
 
@@ -3028,8 +3040,38 @@ where
         )
     });
 
+    // A consumer or the gRPC server that dies stops this instance the same way:
+    // in order, then non-zero, behind the same backstop (P23W5-A12).
+    let component_died_stop = {
+        let handle = http_server.handle();
+        spawn_fatal_stop(
+            component_died.clone(),
+            move || {
+                tokio::spawn(handle.stop(true));
+            },
+            opts.lease_timing.lost_stop_deadline,
+            Arc::clone(&opts.lease_lost_backstop),
+        )
+    };
+
     http_server.await?;
     let lease_was_lost = *lease_lost.borrow();
+    let dead_component = *component_died.borrow();
+
+    // The REST listener has stopped: stop gRPC after it, and wait for it before
+    // the audit drain below, so a call that audits through gRPC is not cut off
+    // by the drain (P23W5-A11). Bounded: a client holding a stream open cannot
+    // hold the stop up.
+    let _ = grpc_stop.send(());
+    if tokio::time::timeout(GRPC_STOP_DEADLINE, grpc_task)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            deadline_secs = GRPC_STOP_DEADLINE.as_secs_f64(),
+            "the gRPC server did not stop in time — stopping without it"
+        );
+    }
 
     // An orderly stop gives the minimal profile's lease up, so a successor (a
     // rolling update's next instance) does not wait out the TTL. A lost lease
@@ -3067,7 +3109,8 @@ where
         tracing::warn!(error = ?e, "cleanup task join error");
     }
 
-    // The teardown is done: disarm the lost-lease backstop.
+    // The teardown is done: disarm the backstops.
+    component_died_stop.abort();
     if let Some(stop) = lease_loss_stop {
         stop.abort();
     }
@@ -3079,8 +3122,18 @@ where
         ));
     }
 
+    if let Some(component) = dead_component {
+        return Err(std::io::Error::other(format!(
+            "the {component} stopped; this instance stopped in order and exits non-zero"
+        )));
+    }
+
     Ok(())
 }
+
+/// How long the teardown waits for the gRPC server to finish its calls once the
+/// REST listener has stopped (P23W5-A11).
+const GRPC_STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long the teardown waits for the audit middleware's queue to be written
 /// (T23.8.2). The queue holds at most 4 096 entries; written one at a time

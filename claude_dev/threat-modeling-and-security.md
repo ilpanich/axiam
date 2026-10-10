@@ -96,6 +96,19 @@
 > The model is **469 threats, 428 mitigated / 20 open / 21 not applicable**; its
 > version is unchanged until the wave's last item.
 >
+> **Every fatal exit stops in order (`1.0.0`, #554, P23W5-A11/A12 — T-444
+> amended, still Mitigated).** The full profile ended the process with
+> `std::process::exit(1)` when the authz, audit-ingestion or mail consumer or the
+> gRPC server stopped — the audit rows still queued, the requests in flight and
+> a purge between its erasure and its audit row lost, the hazard the lost lease
+> had until T23.8.2. Each now raises the lost lease's stop: the REST listener
+> stops accepting, the gRPC server is told to stop and awaited (bounded at five
+> seconds) before the audit queue is drained, and `serve` returns an error naming
+> the component, so `main` exits non-zero, with the same backstop. The entry cites
+> the gRPC-death boot test, the coordinator tests and the gRPC shutdown test; an
+> AMQP consumer's death needs a broker to provoke and is covered at the
+> coordinator. Status and totals are unchanged.
+>
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on
 > 2026-10-06 ([`radius-eap-tls-spike-2026-10-06.md`](radius-eap-tls-spike-2026-10-06.md)):

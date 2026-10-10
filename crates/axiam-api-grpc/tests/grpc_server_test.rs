@@ -173,7 +173,10 @@ fn reactor_admin_args(
 /// so the two mode tests below differ in exactly one argument — the [`GrpcTls`]
 /// value — and a reader can see that that is the only difference.
 #[allow(clippy::type_complexity)]
-async fn boot(tls: GrpcTls) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn boot(
+    tls: GrpcTls,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (db, user_repo) = setup().await;
     let engine = make_engine(&db);
     let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
@@ -213,6 +216,7 @@ async fn boot(tls: GrpcTls) -> Result<(), Box<dyn std::error::Error + Send + Syn
         )),
         tls,
         axiam_core::models::deployment::DeploymentProfile::Full,
+        shutdown,
     )
     .await
 }
@@ -228,7 +232,11 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
     // The server serves indefinitely; time out once all setup has run and it
     // has parked on its accept loop. A timeout (not a completion) is the
     // success signal that boot reached the serving state without erroring.
-    let result = tokio::time::timeout(Duration::from_millis(400), boot(GrpcTls::Plaintext)).await;
+    let result = tokio::time::timeout(
+        Duration::from_millis(400),
+        boot(GrpcTls::Plaintext, std::future::pending()),
+    )
+    .await;
     assert!(
         result.is_err(),
         "server unexpectedly returned before timeout: {result:?}"
@@ -246,13 +254,34 @@ async fn start_grpc_server_boots_in_plaintext_mode() {
 async fn start_grpc_server_boots_in_tls_mode() {
     let result = tokio::time::timeout(
         Duration::from_millis(400),
-        boot(GrpcTls::Rustls(test_tls_config())),
+        boot(GrpcTls::Rustls(test_tls_config()), std::future::pending()),
     )
     .await;
     assert!(
         result.is_err(),
         "TLS-mode server unexpectedly returned before timeout: {result:?}"
     );
+}
+
+/// P23W5-A11 — the listener has an orderly stop. Once the shutdown future the
+/// composition root passes resolves, the server returns `Ok(())` instead of
+/// serving until the process ends, in plaintext and in TLS mode (the two arms
+/// reach tonic through different entry points).
+#[tokio::test]
+async fn start_grpc_server_stops_in_order_when_its_shutdown_future_resolves() {
+    for tls in [GrpcTls::Plaintext, GrpcTls::Rustls(test_tls_config())] {
+        let mode = matches!(tls, GrpcTls::Rustls(_));
+        let stop = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        };
+        let result = tokio::time::timeout(Duration::from_secs(10), boot(tls, stop))
+            .await
+            .unwrap_or_else(|_| panic!("the server (tls: {mode}) ignored its shutdown future"));
+        assert!(
+            result.is_ok(),
+            "an orderly stop is not an error: {result:?}"
+        );
+    }
 }
 
 /// A `GrpcTls` value is cloneable, because the composition root builds one and

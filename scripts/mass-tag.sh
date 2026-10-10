@@ -65,7 +65,9 @@
 #                      mirrors both of those fields; docs/api/openapi.json is a
 #                      symlink to the spec and follows; the frontend Sidebar
 #                      version string and its test; the two k8s deployment image
-#                      tags; and crates/axiam-opaque-wasm/Cargo.toml, which is
+#                      tags; website/src/apiIndex.ts API_VERSION (the website
+#                      mirror of info.version); and
+#                      crates/axiam-opaque-wasm/Cargo.toml, which is
 #                      outside the workspace and so inherits nothing.
 #   axiam-opaque       NOT a repo — the shared OPAQUE client core inside the
 #                      platform clone, released on its own `axiam-opaque-v*`
@@ -895,6 +897,14 @@ bump_versions() {
       # info.version, and the registry mirrors both.
       restamp_openapi_digest
       regen_management_registry
+      # The website's API reference is generated from the spec (npm run
+      # gen:api-index) and says which version it was generated from; nothing
+      # gates it, and the website deploys on every push to main, so without this
+      # the release commit publishes the new spec's index under the old version.
+      # Only info.version moves on a bump, so this one field is the whole
+      # regeneration. Set outright, like the other generated mirrors.
+      set_quoted_field website/src/apiIndex.ts 'export const API_VERSION[[:space:]]*=[[:space:]]*' \
+                       "$version" 'API_VERSION'
       sub_literal frontend/src/components/layout/Sidebar.tsx       "$old" "$version"
       sub_literal frontend/src/components/layout/Sidebar.test.tsx  "$old" "$version"
       sub_literal k8s/server/deployment.yml                        "$old" "$version"

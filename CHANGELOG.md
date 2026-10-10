@@ -758,6 +758,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Threat model 2.39.0: the 1.0.0 release wave's two halves in one model.** The
+  security half (W1) was written at model 2.38.0 and the durability and operations
+  half (W2) at 2.37.0, each counting its own totals, so the totals quoted in the
+  bullets above are each half's alone. Merged, the model is **474 threats, 436
+  mitigated / 17 open / 21 not applicable**: T-102, T-108, T-117, T-447, T-469 and
+  T-470 are closed, T-471 … T-474 entered Mitigated, and no open entry is an
+  unhandled defect in AXIAM's own request path. T-447 carries both halves' text
+  (the device grant's closure and the CIBA pending-request list behind the same
+  console-sign-in check). `claude_dev/threat-model-stride.md`,
+  `claude_dev/threat-modeling-and-security.md` and the website's Security section
+  carry the merged totals, register and coverage tables.
+
 - **SDK contract 1.60: the answers to #588 and the 1.0.0 additions.** The follow-up ports of
   contract 1.59 raised sixteen questions (A1 – A7: rows that missed an SDK showing the same
   defect; B1 – B9: clarifications that collided once implemented). `sdks/CONTRACT.md` answers

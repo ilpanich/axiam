@@ -112,7 +112,7 @@ bench-up:
       if [ ! -f "$PRIV" ] || [ ! -f "$PUB" ]; then
         command -v openssl >/dev/null || { echo "[bench-up] openssl is required to generate the JWT keypair"; exit 1; }
         echo "[bench-up] generating throwaway Ed25519 JWT keypair under docker/.secrets/ (first run)"
-        mkdir -p "$SECRETS_DIR"
+        ( umask 077; mkdir -p "$SECRETS_DIR" )   # #569: private from creation, as the .hex files below
         openssl genpkey -algorithm ed25519 -out "$PRIV"
         openssl pkey -in "$PRIV" -pubout -out "$PUB"
         chmod 600 "$PRIV"
@@ -121,7 +121,9 @@ bench-up:
       export AXIAM__AUTH__JWT_PUBLIC_KEY_PEM="${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:-$(cat "$PUB")}"
       # Stable local hex-secret helper: generate once, reuse across runs so a
       # persisted DB volume and previously-encrypted data stay decryptable.
-      genhex() { local f="$SECRETS_DIR/$1"; [ -f "$f" ] || { openssl rand -hex 32 > "$f"; chmod 600 "$f"; }; cat "$f"; }
+      # #569 / P23W6-03: written under umask 077, so the key is private from creation
+      # (`>` then `chmod` leaves it readable under the caller's umask in between).
+      genhex() { local f="$SECRETS_DIR/$1"; [ -f "$f" ] || { ( umask 077; openssl rand -hex 32 > "$f" ); chmod 600 "$f"; }; cat "$f"; }
       # AMQP master signing key (SECHRD-08 / D-05c) — mandatory at startup in the
       # release image (there is no unsigned code path).
       export AXIAM__AMQP__SIGNING_KEY="${AXIAM__AMQP__SIGNING_KEY:-$(genhex amqp_signing.hex)}"

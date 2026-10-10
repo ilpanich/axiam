@@ -18,6 +18,10 @@ spec:
         app: axiam
         component: server
     spec:
+      # An orderly stop waits up to 20 s for requests in flight, 5 s for gRPC and
+      # 5 s for the audit queue (#569). The default of 30 s leaves no margin, and
+      # a pod killed during the audit drain loses the rows it still holds.
+      terminationGracePeriodSeconds: 40
       # Pod-level restricted security context (KSV-0118). Container-level
       # contexts below remain authoritative; this satisfies the pod-scope check.
       securityContext:

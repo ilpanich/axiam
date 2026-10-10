@@ -26,6 +26,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`std::future::pending()` serves for the life of the process). T-444 is
   amended; its status is unchanged.
 
+- **The stop grace period now covers the REST shutdown plus the audit drain
+  (#569).** On `SIGTERM` the REST listener waits up to 30 s (actix's default,
+  never set) for requests in flight, and the audit drain then takes up to 5 s
+  more, but the minimal Compose file and the benchmark overlay allowed 30 s in
+  all, the full production Compose file and the Kubernetes manifest the
+  platform defaults (10 s and 30 s), so a stop with a request still running
+  could be killed during the drain and lose the audit rows the orderly stop
+  exists to keep. The shutdown timeout is now set explicitly to 20 s, and the
+  grace period is **40 s** (20 s requests, 5 s gRPC, 5 s audit queue, margin) in
+  `docker-compose.prod.yml`, `docker-compose.minimal.yml`, the benchmark
+  harness's Compose files and `k8s/server/deployment.yml`
+  (`terminationGracePeriodSeconds: 40`). Upgraders who copied these settings
+  into their own manifests should set their grace period to at least 40 s;
+  `docs/deployment/README.md` ("Stopping, and the grace period") gives the
+  arithmetic. The benchmark harness's `bench-up` now also creates the
+  `docker/.secrets/*.hex` key files (and the directory) under `umask 077`
+  instead of writing them and then running `chmod 600`.
+
 ### Security
 
 - **A tarpit SCIM downstream no longer stalls every tenant's outbound provisioning

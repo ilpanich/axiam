@@ -1689,13 +1689,15 @@ its volumes can never be the dev or prod stack's.
 
 Both ports are published on the loopback interface only: put a TLS-terminating
 proxy in front of the REST port. The compose file also gives the server a
-**30 s stop grace period** and a named volume for the audit dead-letter file
+**40 s stop grace period** and a named volume for the audit dead-letter file
 (below).
 
 **On Kubernetes** the same profile is: `AXIAM__AMQP__ENABLED=false`, no
 `AXIAM__AMQP__*` URL, TLS or signing-key settings, no RabbitMQ, **`replicas: 1`**
-with `strategy: Recreate`, a `terminationGracePeriodSeconds` of at least 30 (the
-default), and a small volume for `AXIAM__GDPR_AUDIT_DLQ_FILE` — the server's
+with `strategy: Recreate`, a `terminationGracePeriodSeconds` of at least 40 (the
+default of 30 is too short; see
+[the grace period](#stopping-and-the-grace-period)), and a small volume for
+`AXIAM__GDPR_AUDIT_DLQ_FILE` — the server's
 manifest runs with `readOnlyRootFilesystem: true`, so without a mounted path the
 file sink cannot be written. `k8s/server/deployment.yml` mounts one (an
 `emptyDir`; see [the audit dead-letter file](#the-audit-dead-letter-file) for
@@ -1764,11 +1766,20 @@ audit middleware still holds, waiting up to 5 s for it**, before the process
 exits. A `SIGKILL` or an out-of-memory kill does none of that and loses what is
 queued.
 
-**Give the container a termination grace period above 20 s.** Compose's default
-is 10 s, which is why `docker-compose.minimal.yml` sets `stop_grace_period: 30s`;
-Kubernetes' default of 30 s is enough. An instance that loses its lease stops
-accepting at once, finishes in-flight requests and exits non-zero within 15 s
-(a backstop then ends the process regardless).
+**Give the container a termination grace period of at least 40 s.** The stop
+has three bounded steps. The REST listener waits up to **20 s** for requests in
+flight (`shutdown_timeout`, set explicitly in `boot.rs`; actix's own default is
+30 s). The gRPC server then gets up to **5 s** to finish its calls, and the audit
+queue up to **5 s** (`AUDIT_DRAIN_DEADLINE`) to be written. That is 30 s, and 40 s
+leaves a margin. A shorter grace period lets the orchestrator kill the process
+during the drain, which loses exactly the audit rows the orderly stop exists to
+keep. Compose's default is 10 s and Kubernetes' is 30 s, so both are set:
+`stop_grace_period: 40s` in `docker-compose.prod.yml` and
+`docker-compose.minimal.yml`, and `terminationGracePeriodSeconds: 40` in
+`k8s/server/deployment.yml`. If you change the shutdown timeout, move the grace
+period with it. An instance that loses its lease, or whose consumer or gRPC
+server dies, stops accepting at once, finishes in-flight requests and exits
+non-zero; a backstop ends the process regardless 15 s after the stop began.
 
 ### Audit durability
 

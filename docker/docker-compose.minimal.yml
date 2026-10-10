@@ -180,12 +180,13 @@ services:
         condition: service_completed_successfully
       surrealdb:
         condition: service_healthy
-    # An orderly stop writes the audit rows the middleware still holds (up to 5 s)
-    # and lets in-flight requests finish before the process exits; SIGKILL does
-    # not. Compose's default grace period is 10 s, which is shorter than a slow
-    # stop needs, so give it 30 s (the Kubernetes default, and above the 20 s the
-    # audit-durability review asks for).
-    stop_grace_period: 30s
+    # An orderly stop lets in-flight requests finish (up to 20 s, the REST
+    # listener's shutdown timeout), stops gRPC (up to 5 s) and writes the audit
+    # rows the middleware still holds (up to 5 s) before the process exits;
+    # SIGKILL does none of it. Compose's default grace period is 10 s, which is
+    # shorter than a slow stop needs, so give it 40 s: 20 + 5 + 5 and a margin
+    # (#569; docs/deployment/README.md, "Stopping, and the grace period").
+    stop_grace_period: 40s
     healthcheck:
       # Distroless has no shell; the binary carries its own healthcheck subcommand.
       test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]

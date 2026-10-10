@@ -107,7 +107,11 @@
 > the component, so `main` exits non-zero, with the same backstop. The entry cites
 > the gRPC-death boot test, the coordinator tests and the gRPC shutdown test; an
 > AMQP consumer's death needs a broker to provoke and is covered at the
-> coordinator. Status and totals are unchanged.
+> coordinator. The stop's budget is now set and written down (#569): the REST
+> listener waits at most 20 s for requests in flight, gRPC 5 s and the audit
+> drain 5 s, and the shipped Compose files and Kubernetes manifest allow 40 s,
+> since the platforms' defaults (10 s, 30 s) can kill the process during the
+> drain. Status and totals are unchanged.
 >
 > **The RADIUS spike's threat entries (Phase 23 T23.11.1, G-11, model 2.36.0 —
 > T-448 … T-468 enter, Not applicable; T-102 reopened).** G-11 was declined on

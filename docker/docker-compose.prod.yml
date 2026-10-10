@@ -308,6 +308,11 @@ services:
       # fail closed — but with a less obvious message than "vault is unhealthy".
       vault:
         condition: service_healthy
+    # An orderly stop waits up to 20 s for requests in flight, 5 s for gRPC and 5 s
+    # for the audit queue (#569). Compose's default grace period is 10 s, which
+    # would kill a stop with a request still running before the audit rows are
+    # written, so allow those 30 s and a margin.
+    stop_grace_period: 40s
     healthcheck:
       # D-09: distroless has no shell; use the axiam-server healthcheck subcommand
       test: ["CMD", "/usr/local/bin/axiam-server", "healthcheck"]

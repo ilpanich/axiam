@@ -30,6 +30,9 @@ services:
       context: ../../..
       dockerfile: docker/Dockerfile.server
     container_name: bench-axiam-server
+    # Same stop budget as docker/docker-compose.prod.yml (#569): 20 s of requests
+    # in flight + 5 s gRPC + 5 s audit drain + margin.
+    stop_grace_period: 40s
     cpus: ${BENCH_CPUS:-2}
     mem_limit: ${BENCH_MEM:-2048m}
     ports:

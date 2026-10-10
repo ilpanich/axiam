@@ -115,7 +115,7 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "list",
         items: [
-          "**Stopping.** An orderly stop (`SIGTERM`, or a lost lease) writes the audit rows still queued, for up to 5 s, before the process exits; `SIGKILL` and an out-of-memory kill do not. Give the container a termination grace period above 20 s — the compose file sets 30 s, Kubernetes' default is enough.",
+          "**Stopping.** An orderly stop (`SIGTERM`, or a lost lease) writes the audit rows still queued, for up to 5 s, before the process exits; `SIGKILL` and an out-of-memory kill do not. Give the container a termination grace period of at least 40 s (20 s for requests in flight, 5 s for gRPC, 5 s for the audit queue, and a margin): the Compose files and the Kubernetes manifest set it, but both platforms' defaults (10 s, 30 s) are too short.",
           "**Audit dead-letter file.** An audit row the datastore refuses (the GDPR export, erasure and erasure-request records, `tenants.deleted`, and request-audit rows that are dropped or fail to append) is appended, one JSON line each, to `AXIAM__GDPR_AUDIT_DLQ_FILE`. Both Compose files put it on a **named volume**; the Kubernetes manifests on an `emptyDir`, which a container restart keeps and a pod deletion does not. The `axiam.audit.dlq` log event is the second sink for the GDPR records. An operator replays the file into the trail by hand: `docs/deployment/README.md` has the recipe.",
           "**External audit producers.** Stop or re-point every service that publishes to `axiam.audit.events` before switching: nothing consumes it and a broker left running confirms the publish anyway.",
         ],

@@ -2988,6 +2988,13 @@ where
         "TCP_NODELAY configured on the REST listener (I5)"
     );
 
+    // How long a stop waits for requests in flight (#569). actix's default is
+    // 30 s; it is set so that this, `GRPC_STOP_DEADLINE` and `AUDIT_DRAIN_DEADLINE`
+    // add up to less than the container's stop grace period (40 s in the shipped
+    // Compose files and Kubernetes manifests), or a stop with a request still
+    // running is killed during the audit drain.
+    http_server = http_server.shutdown_timeout(REST_SHUTDOWN_TIMEOUT_SECS);
+
     // Bind plaintext (proxy-terminated TLS, the default) or, when
     // `server.tls.enabled`, bind with rustls restricted to TLS 1.3 (F-04 /
     // ASVS V9.1.2). `build_rustls_server_config` fails fast on any cert/key
@@ -3130,6 +3137,11 @@ where
 
     Ok(())
 }
+
+/// How long, in seconds, the REST listener waits for requests in flight once a
+/// stop begins (#569). Stop grace period = this + [`GRPC_STOP_DEADLINE`] +
+/// [`AUDIT_DRAIN_DEADLINE`] + margin: 20 + 5 + 5 + 10 = 40 s.
+const REST_SHUTDOWN_TIMEOUT_SECS: u64 = 20;
 
 /// How long the teardown waits for the gRPC server to finish its calls once the
 /// REST listener has stopped (P23W5-A11).

@@ -28,8 +28,8 @@ function readiness(info: SamlIdpInfo): string | null {
       "SAML sign-on is switched off for this tenant (saml_idp_enabled is false), so the metadata, " +
       "sign-on and logout endpoints answer 404. Register service providers and issue a signing " +
       "credential first, then switch it on. It is the saml_idp_enabled security setting: an " +
-      "organization turns it on and a tenant may only turn it off. This console has no control " +
-      "for it yet, so change it through the settings API."
+      "organization turns it on and a tenant may only turn it off. Switch it in the organization's " +
+      "Settings tab, or for this tenant under Settings."
     );
   }
   if (!info.metadata_served) {

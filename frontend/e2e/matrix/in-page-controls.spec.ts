@@ -67,6 +67,13 @@ const GATED_CONTROLS: GatedControl[] = [
     locate: (page) => page.getByRole("button", { name: "New Token" }),
   },
   {
+    path: "/ssf",
+    label: '"New stream" button',
+    permission: "ssf_streams:write",
+    pagePermission: "ssf_streams:read",
+    locate: (page) => page.getByRole("button", { name: "New stream" }),
+  },
+  {
     path: "/audit-logs",
     label: "the tenant/system audit scope switch",
     permission: "audit_logs:list_system",

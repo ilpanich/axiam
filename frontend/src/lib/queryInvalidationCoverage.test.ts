@@ -57,6 +57,8 @@ const STANDALONE: Record<string, string> = {
   "reactor-events": "append-only event feed, read-only",
   "scim-tokens": "shown only on the SCIM Tokens page",
   "scim-targets": "shown only on the SCIM Targets page",
+  "ssf-streams":
+    "shown only on the SSF Streams page; the transmitter flag each row carries is refetched on mount",
   "scim-target-groups":
     "the group picker of the SCIM Targets form: a read-only list of the tenant's groups, fetched when the picker opens, so a stale copy costs one reopen",
   webhooks: "shown only on the Webhooks page",

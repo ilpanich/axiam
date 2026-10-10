@@ -677,6 +677,30 @@ describe("OrganizationDetailPage — settings tab", () => {
     );
   });
 
+  // P23W4-07. The org baseline is the only place either surface can be turned
+  // ON (both are disable-only for a tenant), and a save must carry the one it
+  // did not touch.
+  it("switches the SAML IdP and SSF surfaces on at the organization", async () => {
+    routeGet({ [URLS.org]: org, [URLS.settings]: settingsWithOidc });
+    apiMock.put.mockResolvedValue(res(settingsWithOidc));
+    await goToSettings();
+    const ssf = await screen.findByLabelText(/Shared Signals Framework transmitter/, {
+      exact: false,
+    });
+    expect(ssf).not.toBeChecked();
+    expect(
+      screen.getByLabelText(/SAML 2.0 identity provider/, { exact: false })
+    ).toBeChecked();
+    await userEvent.click(ssf);
+    await userEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalledTimes(1));
+    expect(apiMock.put).toHaveBeenCalledWith(
+      URLS.settings,
+      expect.objectContaining({ saml_idp_enabled: true, ssf_enabled: true })
+    );
+  });
+
   // Finding C. The DCR card shipped only on the tenant settings page, where
   // `dynamic_registration` is tighten-only against a baseline that defaults to
   // `disabled` — so before this section existed, nothing in the console could

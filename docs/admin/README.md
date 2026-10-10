@@ -644,22 +644,22 @@ guide holds what an operator sets.
 |---|---|---|---|---|
 | **Directory** | `/directory` | `directory:read` | [LDAP and Active Directory](https://ilpanich.github.io/axiam/#/docs/directory) | [What a tenant's directory needs](../deployment/README.md#what-a-tenants-directory-needs-ldap--active-directory) |
 | **SAML Service Providers** | `/saml` | `saml_sp:read` | [AXIAM as a SAML identity provider](https://ilpanich.github.io/axiam/#/docs/saml-idp) | `AXIAM__AUTH__SAML_PAIRWISE_KEY` in [Required secrets & environment](../deployment/README.md#required-secrets--environment) |
+| **SSF Streams** | `/ssf` | `ssf_streams:read` | [Shared Signals (SSF) transmitter](https://ilpanich.github.io/axiam/#/docs/ssf) | [Two ways to name a tenant](../deployment/README.md#two-ways-to-name-a-tenant) |
 | **SCIM Targets** | `/scim-targets` | `scim_targets:read` | [Outbound SCIM provisioning](https://ilpanich.github.io/axiam/#/docs/scim-outbound) | — |
 | **Approve a sign-in** (CIBA) | `/ciba/approve` | a signed-in session, no permission: the user decides a request addressed to them, reached from the link in the notification mail, or from the pending-request list under the user menu's badge (an account with no vouched address is sent no mail) | [CIBA (backchannel authentication)](https://ilpanich.github.io/axiam/#/docs/ciba) | — |
 
-Three things the console does not do yet, each said on the website page it
-belongs to:
+One thing the console does not do yet, said on the website page it belongs to:
 
-- **SSF streams have no console page.** A tenant administrator registers them
-  through `/api/v1/tenants/{tenant_id}/ssf/streams` or the SDKs' `ssf`
-  namespace; see [Shared Signals (SSF) transmitter](https://ilpanich.github.io/axiam/#/docs/ssf).
-  A deployment of more than one tenant must serve per-tenant issuers for SSF to
-  run ([Two ways to name a tenant](../deployment/README.md#two-ways-to-name-a-tenant)).
-- **`saml_idp_enabled` and `ssf_enabled` have no control.** Both are layered
-  settings, off by default, set through the settings API; the console explains
-  them.
 - **The OAuth2 client form does not carry the CIBA fields.** A CIBA client is
   registered over the admin API, or by RFC 7591/7592 with an initial access
   token.
+
+The SAML identity provider and the SSF transmitter are switched in the console:
+`saml_idp_enabled` and `ssf_enabled` are controls on the organization's
+**Settings** tab (where a surface is turned on) and on the tenant's **Settings**
+page and **Security Overrides** (where a tenant turns it off for itself; one the
+organization disabled reads "Disabled by the organization" and cannot be turned
+on). A deployment of more than one tenant must serve per-tenant issuers for SSF
+to run ([Two ways to name a tenant](../deployment/README.md#two-ways-to-name-a-tenant)).
 
 The routes behind each page are listed in [API docs](../api/README.md).

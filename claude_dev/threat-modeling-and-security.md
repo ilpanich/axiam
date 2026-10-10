@@ -144,6 +144,19 @@
 > a snapshot test of the five before their first run; the entry cites both.
 > Status and totals are unchanged.
 >
+> **The console shows and switches the SAML IdP and SSF surfaces (`1.0.0`,
+> #536, P23W4-07 — T-406 amended, still Mitigated).** The SSF Streams page
+> lists the tenant's streams and edits them; the `409` the administrators'
+> `PUT` answers when a stream changed under the form (T-406) now has its
+> consumer — the page closes the stale form, reloads the list and says the
+> stream changed — and the page never shows the write-only push header and asks
+> for it again when an edit moves the endpoint to another origin. The two
+> disable-only switches (`saml_idp_enabled`, `ssf_enabled`) are controls on the
+> organization's Settings tab and the tenant's Settings page, with the layered
+> state shown, so an administrator can see which third parties receive security
+> events and turn either surface off during an incident without the API. Status
+> and totals are unchanged.
+>
 > **The SCIM target `PUT` can carry the version (`1.0.0`, #555, P23W5-09 —
 > T-416 amended, still Mitigated).** The administrators' `PUT` was conditional
 > on the version the server read during the request, so two administrators who

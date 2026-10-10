@@ -31,6 +31,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gets no approval mail and cannot reach the page) no longer holds. T-446, T-431
   and T-447 are amended (statuses unchanged).
 
+- **The console shows and switches the SAML identity provider and the SSF
+  transmitter (#536).** Until now an administrator could not see from the
+  console which third parties receive security events about a tenant's users, nor
+  turn either surface off during an incident: `saml_idp_enabled` and
+  `ssf_enabled` were changed only through the settings API, and there was no SSF
+  page. **Settings:** both are now switches on the organization's Settings tab
+  (the only place either is turned on), on the tenant's Settings page and as a
+  group in the tenant's Security Overrides, with the layered state shown: a
+  surface the organization disabled reads "Disabled by the organization" and
+  cannot be switched on, one the tenant switched off says so, and an enabled SSF
+  transmitter that is inactive (a deployment of more than one tenant without
+  per-tenant issuers) says why. **SSF Streams** (Identity group, `/ssf`, seen with
+  `ssf_streams:read`; register, replace and delete need `ssf_streams:write`) lists
+  each stream's receiver, audience, delivery method, endpoint, status and who set
+  it, with `events_delivered` beside `events_allowed`. The push
+  `authorization_header` is write-only and never shown; the form says that moving
+  a push endpoint to another origin requires it again and refuses the save
+  without it; an edit that loses a race (`409`, T-406) reloads the list and says
+  the stream changed. T-406 is amended (status unchanged). Upgraders: the tenant
+  Settings page now sends both switches at their effective values on every save;
+  before, a tenant that had switched a surface off was put back on the
+  organization's value by an unrelated save, and so was one saved from the Security
+  Overrides panel, which now carries a group for them.
+
 ### Changed
 
 - **The SCIM target `PUT` can be made conditional on the version the

@@ -1309,7 +1309,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
           ],
           [
             "`saml_idp_enabled` is on for the tenant",
-            "A layered setting, **off by default**, with the shape of `sensitive_scopes_enabled`: the organization turns it on and a tenant may only turn it *off* again. Set it through the settings API (see [Settings](#/docs/settings)); the console explains the setting but has no control for it yet.",
+            "A layered setting, **off by default**, with the shape of `sensitive_scopes_enabled`: the organization turns it on and a tenant may only turn it *off* again. Switch it in the console (the organization's **Settings** tab turns it on; the tenant's **Settings** page, or the tenant's *Security Overrides*, turns it off for one tenant, and shows \"disabled by the organization\" where it cannot be turned on) or through the settings API (see [Settings](#/docs/settings)).",
           ],
         ],
       },
@@ -1527,7 +1527,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "enable", text: "Switch it on" },
       {
         type: "p",
-        text: "The transmitter is off until you turn it on. `ssf_enabled` is a layered setting with the shape of `saml_idp_enabled` (see [Settings](#/docs/settings)): **off by default**, turned on by the organization, and a tenant may only turn it *off* again. Set it through the settings API; the console explains the setting but has no control for it yet.",
+        text: "The transmitter is off until you turn it on. `ssf_enabled` is a layered setting with the shape of `saml_idp_enabled` (see [Settings](#/docs/settings)): **off by default**, turned on by the organization, and a tenant may only turn it *off* again. Switch it in the console (the organization's **Settings** tab turns it on; the tenant's **Settings** page turns it off for one tenant and shows \"disabled by the organization\" where it cannot be turned on) or through the settings API.",
       },
       {
         type: "p",
@@ -1552,7 +1552,7 @@ export const INTEGRATE_PAGES: DocPage[] = [
       { type: "h", id: "register", text: "Register a receiver (administrator)" },
       {
         type: "p",
-        text: "A stream is created by a **tenant administrator**, never by the receiver: deciding which third party receives security events about the tenant's users is a human administrator's act. The registry is a REST API under `/api/v1/tenants/{tenant_id}/ssf/streams` (the `ssf` namespace of the SDKs' management surface). Reading needs `ssf_streams:read` and the three writes need `ssf_streams:write`, both seeded per tenant. A service-account token is refused with `401` and another tenant's id with `403`. The admin console has no page for it yet.",
+        text: "A stream is created by a **tenant administrator**, never by the receiver: deciding which third party receives security events about the tenant's users is a human administrator's act. The registry is a REST API under `/api/v1/tenants/{tenant_id}/ssf/streams` (the `ssf` namespace of the SDKs' management surface). Reading needs `ssf_streams:read` and the three writes need `ssf_streams:write`, both seeded per tenant. A service-account token is refused with `401` and another tenant's id with `403`. In the admin console, **Identity → SSF Streams** (`/ssf`, visible with `ssf_streams:read`) lists the streams with their receiver, audience, delivery method, endpoint, status and who set it, and `events_delivered` beside `events_allowed`; registering, editing and deleting need `ssf_streams:write`. It never shows the `authorization_header` (write-only) and asks for it again when an edit moves a push endpoint to another origin. An edit that loses a race (`409`: the receiver or another administrator wrote the stream first) reloads the list and says so.",
       },
       {
         type: "steps",
@@ -1779,7 +1779,6 @@ export const INTEGRATE_PAGES: DocPage[] = [
           "**Per-tenant signing keys.** One deployment key signs every SET and is published at each tenant's JWKS. Rotating it is the deployment's key rotation, and every receiver reads it from the JWKS.",
           "**A SET that expires.** There is no `exp` and no `sub` claim, by specification and on purpose.",
           "**Certificate events.** `x509` credential changes are never sent today (see the table above).",
-          "**An `ssf` control in the console.** Registration is through the REST API and the SDKs' `ssf` management namespace.",
         ],
       },
       { type: "h", id: "sdks", text: "From the SDKs" },

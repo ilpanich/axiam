@@ -100,6 +100,58 @@ jobs:
           fi
           echo "OK: ${GITHUB_REF_NAME} (${GITHUB_SHA}) is on origin/main."
 
+      # crates.io and npm never give a version number back. A tag pushed on a
+      # tree that scripts/mass-tag.sh did not bump would publish whatever the
+      # manifests say — `1.0.0-beta19` under an `axiam-opaque-v1.0.0` tag —
+      # and that number is spent for good. publish-crate and publish-wasm both
+      # `needs:` this job, so a mismatch stops them before either registry is
+      # touched. axiam-opaque-wasm is outside the workspace and carries its own
+      # literal version, which is the one wasm-pack writes into the npm
+      # package.json. The tag reaches the script only through the runner's
+      # GITHUB_REF_NAME environment variable.
+      - name: Assert the tag matches every published manifest version
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, sys, tomllib
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          prefix = "axiam-opaque-v"
+          if not tag.startswith(prefix):
+              sys.exit(f"::error::Release tag {tag!r} does not start with {prefix!r}.")
+          want = tag[len(prefix):]
+
+          def toml(path):
+              with open(path, "rb") as f:
+                  return tomllib.load(f)
+
+          workspace = toml("Cargo.toml")["workspace"]["package"]["version"]
+
+          def crate(path):
+              v = toml(path)["package"]["version"]
+              return workspace if isinstance(v, dict) and v.get("workspace") else v
+
+          found = {
+              "crates/axiam-opaque (crates.io axiam-opaque)":
+                  crate("crates/axiam-opaque/Cargo.toml"),
+              "crates/axiam-opaque-ffi (C ABI release assets)":
+                  crate("crates/axiam-opaque-ffi/Cargo.toml"),
+              "crates/axiam-opaque-wasm (npm @axiam/opaque-wasm)":
+                  crate("crates/axiam-opaque-wasm/Cargo.toml"),
+          }
+          bad = False
+          for where, version in found.items():
+              ok = version == want
+              bad |= not ok
+              print(f"{'OK      ' if ok else 'MISMATCH'} {where}: {version}")
+          if bad:
+              print(f"::error::Tag {tag} says {want}, but a manifest declares another "
+                    "version (above). Bump with scripts/mass-tag.sh and re-tag; "
+                    "nothing has been published.")
+              sys.exit(1)
+          print(f"OK: every published manifest is {want}.")
+          PY
+
   # Everything below runs on a pull request too, in dry-run mode. A manifest
   # that cannot be packaged, a wasm build that cannot be produced or a C ABI
   # that will not link should fail on the PR that broke it, not on the tag
@@ -289,7 +341,16 @@ jobs:
         # npm >= 11 refuses to publish a prerelease under `latest`, so derive
         # the dist-tag from the version rather than hard-coding one.
         run: |
+          set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
+          # Second look, at the artifact itself, right before the one step
+          # that cannot be undone: verify-tag-on-main checked the Cargo.toml
+          # this package.json was generated from.
+          WANT="${GITHUB_REF_NAME#axiam-opaque-v}"
+          if [ "$VERSION" != "$WANT" ]; then
+            echo "::error::package.json says $VERSION but tag $GITHUB_REF_NAME says $WANT; not publishing."
+            exit 1
+          fi
           case "$VERSION" in
             *-alpha*) TAG=alpha ;;
             *-beta*)  TAG=beta ;;

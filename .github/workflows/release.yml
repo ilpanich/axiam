@@ -42,6 +42,60 @@ jobs:
           fi
           echo "OK: ${GITHUB_REF_NAME} (${GITHUB_SHA}) is on origin/main."
 
+      # The tag names the version every artifact below is published under (the
+      # image tags, the release title), while the binary reports Cargo's
+      # version and the spec and k8s manifests carry their own copy. A tag
+      # pushed on a tree that scripts/mass-tag.sh did not bump would ship
+      # `server:1.0.0` images whose binary says 1.0.0-beta19, and GHCR tags
+      # cannot be re-pointed quietly once people have pulled them. Refuse
+      # here, before anything is built or pushed. The tag reaches the script
+      # only through the runner's GITHUB_REF_NAME environment variable.
+      - name: Assert the tag matches every declared version
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, sys, tomllib
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          if not tag.startswith("v"):
+              sys.exit(f"::error::Release tag {tag!r} does not start with 'v'.")
+          want = tag[1:]
+
+          def toml(path):
+              with open(path, "rb") as f:
+                  return tomllib.load(f)
+
+          workspace = toml("Cargo.toml")["workspace"]["package"]["version"]
+          server = toml("crates/axiam-server/Cargo.toml")["package"]["version"]
+          if isinstance(server, dict) and server.get("workspace"):
+              server = workspace
+
+          found = {
+              "Cargo.toml [workspace.package] version": workspace,
+              "crates/axiam-server/Cargo.toml version": server,
+              "sdks/openapi.json info.version": json.load(open("sdks/openapi.json"))["info"]["version"],
+          }
+          for path in ("k8s/server/deployment.yml", "k8s/frontend/deployment.yml"):
+              tags = re.findall(r"^\s*image:\s*\S+/(?:server|frontend):(\S+)\s*$",
+                                open(path).read(), re.MULTILINE)
+              if not tags:
+                  sys.exit(f"::error::No AXIAM image reference found in {path}.")
+              for i, t in enumerate(tags):
+                  found[f"{path} image tag #{i + 1}"] = t
+
+          bad = False
+          for where, version in found.items():
+              ok = version == want
+              bad |= not ok
+              print(f"{'OK      ' if ok else 'MISMATCH'} {where}: {version}")
+          if bad:
+              print(f"::error::Tag {tag} says {want}, but the tree declares another "
+                    "version (above). Bump with scripts/mass-tag.sh and re-tag; "
+                    "nothing has been built or published.")
+              sys.exit(1)
+          print(f"OK: every declared version is {want}.")
+          PY
+
   # ---------------------------------------------------------------------------
   # Build each image, once per architecture, on a NATIVE runner.
   # ---------------------------------------------------------------------------
@@ -309,16 +363,23 @@ jobs:
           done
           docker buildx imagetools create "${args[@]}"
 
+      # Inspect the exact-version tag (`1.0.0`, `1.0.0-beta19`), which every
+      # release carries. metadata-action's `version` output is the
+      # highest-priority tag instead — `1.0` on a stable release, because
+      # type=match outranks type=raw — which points at the same index but reads
+      # as the wrong thing in the log. The version comes in through `env:`, not
+      # `${{ }}` inside the script: it is derived from the tag name.
       - name: Resolve manifest-list digest
         id: index
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          VERSION: ${{ steps.rel.outputs.version }}
         run: |
           set -euo pipefail
-          digest="$(docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}" --format '{{json .Manifest}}' | jq -r .digest)"
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' | jq -r .digest)"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "Multi-arch index digest: ${digest}"
-          docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}" | grep -E "Name|MediaType|Platform"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}" | grep -E "Name|MediaType|Platform"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2

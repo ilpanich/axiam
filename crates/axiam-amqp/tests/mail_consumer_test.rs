@@ -650,7 +650,14 @@ fn publisher_site(mail_type: &MailType) -> PublisherSite {
         },
         MailType::Notification => PublisherSite {
             file: "crates/axiam-audit/src/notification.rs",
-            keys: &["details", "action", "outcome", "event", "suppressed_count", "window_note"],
+            keys: &[
+                "details",
+                "action",
+                "outcome",
+                "event",
+                "suppressed_count",
+                "window_note",
+            ],
         },
         MailType::DeletionCancel => PublisherSite {
             file: "crates/axiam-api-rest/src/handlers/gdpr.rs",

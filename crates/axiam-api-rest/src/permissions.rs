@@ -510,6 +510,16 @@ pub const PUBLIC_PATHS: &[&str] = &[
     "/.well-known/ssf-configuration",
     "/.well-known/ssf-configuration/t/*",
     "/oauth2/jwks",
+    // #565 (T-102) — each issuing CA's certificate revocation list, at
+    // `/pki/v1/{org_id}/ca/{ca_id}/crl`. Public for the reason the JWKS above
+    // is, and more so: a relying party — a FreeRADIUS server, a VPN gateway —
+    // fetches it before it can validate anything, holds no AXIAM credential,
+    // and finds the URL in a certificate's CRL distribution points. The list is
+    // signed by the CA and carries only serial numbers and dates. Mounted
+    // outside every `AuthzMiddleware` scope; a prefix entry because the ids sit
+    // mid-path, and everything under `/pki/v1` is published material — the
+    // segment-aware rule keeps `/pki/v10` out.
+    "/pki/v1/*",
     // T-39/T-143. Public for the same reason as the JWKS beside it: a route
     // guard fetches it before it holds any credential, and it carries only
     // hashes — never a session id, a subject or a tenant. Mounted only where

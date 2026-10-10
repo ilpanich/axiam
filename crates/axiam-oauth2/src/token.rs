@@ -599,6 +599,14 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR, AR> {
     /// fallback to a weaker credential. See
     /// [`crate::private_key_jwt::ClientAssertionVerifier`].
     assertion_verifier: Option<std::sync::Arc<dyn crate::private_key_jwt::ClientAssertionVerifier>>,
+    /// #565 (T-102) — where an mTLS client's certificate is looked up by
+    /// fingerprint, so one AXIAM issued and revoked authenticates nothing.
+    ///
+    /// A required argument of [`Self::new`], not a builder like the verifier
+    /// above: an unwired verifier refuses its method, but an unwired status
+    /// check would *admit* a revoked certificate, and a security check whose
+    /// absence is silent is one the next composition root forgets.
+    issued_certificates: std::sync::Arc<dyn crate::mtls::IssuedCertificateLookup>,
     /// Service-account repository (client-credentials for `sa_…` clients).
     service_account_repo: SA,
     code_repo: AC,
@@ -664,10 +672,12 @@ where
         audit_repo: AR,
         auth_config: AuthConfig,
         refresh_token_lifetime_secs: i64,
+        issued_certificates: std::sync::Arc<dyn crate::mtls::IssuedCertificateLookup>,
     ) -> Self {
         Self {
             client_repo,
             assertion_verifier: None,
+            issued_certificates,
             service_account_repo,
             code_repo,
             tenant_repo,
@@ -1162,7 +1172,22 @@ where
         }
 
         if client.token_endpoint_auth_method.is_mtls() {
-            return crate::mtls::authenticate_mtls_client(client, ctx.client_certificate.as_ref());
+            crate::mtls::authenticate_mtls_client(client, ctx.client_certificate.as_ref())?;
+            // #565 (T-102): matched, so a certificate is present; refuse it if
+            // AXIAM issued it and has since revoked it. Read only after the
+            // match, so a certificate that authenticates nothing costs no
+            // lookup.
+            return match ctx.client_certificate.as_ref() {
+                Some(cert) => {
+                    crate::mtls::refuse_a_certificate_axiam_revoked(
+                        client,
+                        cert,
+                        self.issued_certificates.as_ref(),
+                    )
+                    .await
+                }
+                None => Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())),
+            };
         }
 
         if client.token_endpoint_auth_method.is_private_key_jwt() {

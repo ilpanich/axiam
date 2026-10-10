@@ -14,7 +14,9 @@ use crate::error::{AxiamError, AxiamResult};
 use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
-    certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
+    certificate::{
+        CaCertificate, Certificate, RevokedCertificate, StoreCaCertificate, StoreCertificate,
+    },
     directory::{DirectoryConfig, NewDirectoryConfig},
     directory_sync::DirectorySyncState,
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
@@ -2795,6 +2797,16 @@ pub trait CaCertificateRepository: Send + Sync {
     fn list_mtls_trust_anchors(
         &self,
     ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
+
+    /// The revoked, not yet expired CAs `parent_ca_id` signed — the CA half of
+    /// that CA's certificate revocation list (#565, T-102).
+    ///
+    /// Not organization-scoped: the parent is already resolved inside its
+    /// organization by the caller, and a child always shares it.
+    fn list_revoked_children(
+        &self,
+        parent_ca_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
 }
 
 pub trait CertificateRepository: Send + Sync {
@@ -2816,7 +2828,21 @@ pub trait CertificateRepository: Send + Sync {
         &self,
         fingerprint: &str,
     ) -> impl Future<Output = AxiamResult<Certificate>> + Send;
+    /// Mark a certificate revoked, recording when (#565): the first revocation
+    /// date stands, so revoking an already-revoked certificate changes nothing
+    /// its revocation list says.
     fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// The revoked, not yet expired leaves `issuer_ca_id` signed, in every
+    /// tenant — the leaf half of that CA's certificate revocation list (#565,
+    /// T-102).
+    ///
+    /// Across tenants on purpose: a CRL belongs to its issuer, not to a tenant,
+    /// and an organization CA's leaves may be recorded under more than one.
+    fn list_revoked_by_issuer(
+        &self,
+        issuer_ca_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
 
     /// Revoke every **active `User`-type certificate** that belongs to
     /// `user_id`, returning how many were revoked (G-3, T23.3.3, D-28).

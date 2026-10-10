@@ -648,6 +648,17 @@ pub fn register_api_v1_routes_with<C: surrealdb::Connection + Clone>(
                     .route(web::delete().to(handlers::uma::delete_resource_set::<C>)),
             ),
     );
+    // #565 (T-102) — each issuing CA's certificate revocation list. Public and
+    // outside every `AuthzMiddleware` scope: a relying party fetches it with no
+    // AXIAM credential, from the URL a certificate's distribution point names.
+    // A bucket of its own from the first commit (plan §7 rule 6), per IP.
+    cfg.service(
+        web::resource("/pki/v1/{org_id}/ca/{ca_id}/crl")
+            .wrap(build_governor(rate_limit_cfg.crl_per_min))
+            .wrap(RateLimitShared::<C>::new("crl", rate_limit_cfg.crl_per_min))
+            .route(web::get().to(handlers::crl::get_crl::<C>))
+            .route(web::head().to(handlers::crl::get_crl::<C>)),
+    );
     // G-5 / T23.5.2 — SSF 1.0 §7 transmitter metadata, at the host root like
     // every `.well-known` document, and the stream management API (§8) under
     // `/ssf/v1`. Every route has a bucket of its own (plan §7 rule 6), under

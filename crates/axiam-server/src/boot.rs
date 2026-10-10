@@ -952,13 +952,51 @@ where
         );
     }
 
+    // #565 (T-102): a certificate revocation list per issuing CA. The list's
+    // `nextUpdate` interval, and where certificates say it is published: an
+    // explicit `AXIAM__PKI__CRL_BASE_URL`, else the issuer. A value set and
+    // wrong stops startup rather than being replaced by a guess — every
+    // certificate issued afterwards carries it.
+    let crl_next_update_secs = match std::env::var("AXIAM__PKI__CRL_NEXT_UPDATE_SECS") {
+        Ok(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| e.to_string())
+            .and_then(axiam_pki::crl::validate_next_update_secs)
+            .map_err(|e| std::io::Error::other(format!("AXIAM__PKI__CRL_NEXT_UPDATE_SECS: {e}")))?,
+        _ => axiam_pki::crl::DEFAULT_CRL_NEXT_UPDATE_SECS,
+    };
+    let crl_distribution = axiam_pki::CrlDistribution::resolve(
+        std::env::var("AXIAM__PKI__CRL_BASE_URL").ok().as_deref(),
+        config.auth.root_issuer(),
+    )
+    .map_err(|e| std::io::Error::other(format!("AXIAM__PKI__CRL_BASE_URL: {e}")))?;
+    match &crl_distribution {
+        Some(distribution) => tracing::info!(
+            crl_next_update_secs,
+            example = %distribution.uri_for(uuid::Uuid::nil(), uuid::Uuid::nil()),
+            "certificate revocation lists published; every certificate AXIAM signs from now \
+             on names its issuer's list"
+        ),
+        None => tracing::warn!(
+            crl_next_update_secs,
+            "certificate revocation lists are served at /pki/v1/{{org_id}}/ca/{{ca_id}}/crl, but \
+             no certificate will name one: neither AXIAM__PKI__CRL_BASE_URL nor the \
+             issuer (AXIAM__AUTH__OAUTH2_ISSUER_URL, else AXIAM__AUTH__JWT_ISSUER) is an absolute \
+             http(s) URL, so there is no address \
+             to write into the CRL distribution points extension. Relying parties must be \
+             configured with the list's URL by hand"
+        ),
+    }
+
     let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo());
     let ca_service = CaService::new(
         ca_cert_repo.clone(),
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
         Arc::clone(&ca_custodians),
-    );
+    )
+    .with_crl_distribution(crl_distribution.clone());
     let pgp_repo = SurrealPgpKeyRepository::new(pool.handle_for_repo());
     let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore));
     let cert_service = CertService::new(
@@ -970,6 +1008,14 @@ where
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
         Arc::clone(&ca_custodians),
+    )
+    .with_crl_distribution(crl_distribution);
+    let crl_service = axiam_pki::CrlService::new(
+        SurrealCaCertificateRepository::new(pool.handle_for_repo()),
+        cert_repo.clone(),
+        Arc::clone(&crypto_semaphore),
+        Arc::clone(&ca_custodians),
+        crl_next_update_secs,
     );
     // SEC-024: DeviceAuthService now holds a CA repo for chain verification.
     // SurrealCaCertificateRepository is cloned; each clone shares the underlying Surreal<C>.
@@ -1115,6 +1161,13 @@ where
         config.auth.clone(),
         i64::try_from(config.auth.refresh_token_lifetime_secs)
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
+        // #565 (T-102) — `tls_client_auth` and `self_signed_tls_client_auth`
+        // refuse a certificate AXIAM issued and revoked, by the fingerprint
+        // lookup device sign-in makes.
+        Arc::new(axiam_oauth2::mtls::InventoryCertificateLookup::new(
+            cert_repo.clone(),
+            SurrealCaCertificateRepository::new(pool.handle_for_repo()),
+        )),
     )
     // X1 — the same gate `AuthService` holds, so `token.pre_issue` and
     // `login.post_auth` share one routing table and one per-tenant cap.
@@ -2690,6 +2743,7 @@ where
         pki: bundles::PkiState {
             ca_service: ca_service.clone(),
             cert_service: cert_service.clone(),
+            crl_service: crl_service.clone(),
             cert_repo: cert_repo.clone(),
             ca_cert_repo: SurrealCaCertificateRepository::new(db_handle.clone()),
             pgp_service: pgp_service.clone(),

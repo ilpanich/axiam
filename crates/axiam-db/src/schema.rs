@@ -462,6 +462,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "scim_failure_notification_claim",
         sql: SCHEMA_V84,
     },
+    Migration {
+        version: 90,
+        name: "certificate_revocation_date",
+        sql: SCHEMA_V90,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4556,9 +4561,53 @@ DEFINE FIELD IF NOT EXISTS failure_notified_at ON TABLE scim_target_state
     TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v90 — #565 (T-102): a certificate revocation list per issuing CA
+// -----------------------------------------------------------------------
+//
+// A CRL entry carries the date the CA processed the revocation (RFC 5280
+// §5.1.2.6), and until this version a revocation recorded only the status. The
+// date is set by the first revocation and kept by every later one. A row
+// revoked before this version has none, and its list entry states the
+// certificate's own `not_before` instead (`RevokedCertificate::revoked_at`).
+// v90 rather than the next free number: the 1.0.0 release waves split the
+// numbers, W2 taking 85 … 89 and W1 90 onwards, so the branches merge cleanly.
+// The two indexes serve the list's two reads — a CA's revoked leaves and its
+// revoked subordinate CAs — which the route runs per request. Additive: two
+// optional columns and two indexes; no row is rewritten.
+const SCHEMA_V90: &str = "\
+DEFINE FIELD IF NOT EXISTS revoked_at ON TABLE certificate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS revoked_at ON TABLE ca_certificate TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_cert_issuer_status ON TABLE certificate FIELDS issuer_ca_id, status;
+DEFINE INDEX IF NOT EXISTS idx_ca_cert_parent_status ON TABLE ca_certificate FIELDS parent_ca_id, status;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #565 (T-102) — v90 adds the revocation date to both certificate tables
+    /// and the two indexes the revocation list reads, and rewrites no row.
+    #[test]
+    fn v90_adds_only_the_revocation_date_and_its_indexes() {
+        for statement in SCHEMA_V90.lines().filter(|l| l.starts_with("DEFINE")) {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v90 statements must be idempotent definitions: {statement}"
+            );
+        }
+        for table in ["certificate", "ca_certificate"] {
+            assert!(SCHEMA_V90.contains(&format!(
+                "revoked_at ON TABLE {table} TYPE option<datetime>"
+            )));
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V90.contains(forbidden),
+                "v90 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
 
     /// W5 F4 review, T-418 — v84 is one optional column on the SCIM delivery
     /// state and nothing else.
@@ -5838,8 +5887,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&84),
-            "v84 is the newest migration (the W5 F4 review, T-418 / D-73 — \
+            Some(&90),
+            "v90 is the newest migration (#565, T-102 — `revoked_at` on `certificate` and \
+             `ca_certificate`, the date a certificate revocation list entry carries; v84 was \
+             the W5 F4 review, T-418 / D-73 — \
              `scim_target_state.failure_notified_at`, one SCIM failure mail per target per \
              hour; v83 was T23.8.1 / G-8 — the minimal profile's singleton \
              lease table `minimal_profile_lease`; v82 was T23.7.2 — the CIBA approval e-mail's template kind \

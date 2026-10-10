@@ -44,9 +44,26 @@
 //! without a JWKS parser on the authentication path. What it costs is
 //! JWKS-driven rotation: a self-signed client's new certificate must be
 //! registered rather than merely published. The operator guide says so.
+//!
+//! # A certificate AXIAM revoked authenticates nothing (#565, T-102)
+//!
+//! A chain that verifies says the certificate was issued; it does not say the
+//! certificate is still good, and neither listener's handshake consults a
+//! revocation list. So after the match succeeds, the presented certificate is
+//! looked up by fingerprint in AXIAM's own certificate inventory — the lookup
+//! device sign-in by certificate makes (`DeviceAuthService::authenticate_der`)
+//! — and refused when AXIAM issued it and it is no longer `Active`, or its
+//! issuing CA is no longer `Active`. See [`IssuedCertificateLookup`]. A
+//! certificate AXIAM did not issue is not in the inventory, and is decided as
+//! before.
 
-use axiam_core::models::certificate::CertTrust;
+use std::future::Future;
+use std::pin::Pin;
+
+use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::certificate::{CertTrust, CertificateStatus};
 use axiam_core::models::oauth2_client::{ClientAuthMethod, OAuth2Client};
+use axiam_core::repository::{CaCertificateRepository, CertificateRepository};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -453,6 +470,140 @@ pub fn authenticate_mtls_client(
     }
 
     Ok(())
+}
+
+/// What AXIAM's own certificate inventory says about a presented certificate
+/// (#565, T-102).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssuedCertificateStanding {
+    /// AXIAM issued no certificate with these bytes: a self-signed client
+    /// certificate (RFC 8705 §2.2), or one an external CA issued and a listener
+    /// anchor vouches for. Nothing in AXIAM records its status, so nothing
+    /// here can refuse it; the match above is the whole decision, as it always
+    /// was.
+    NotIssuedHere,
+    /// AXIAM issued it, and it and its issuing CA are active and in date.
+    Active,
+    /// AXIAM issued it and it is revoked or expired, or the CA that issued it
+    /// is. The certificate still chains — that is a fact about bytes — and is
+    /// refused anyway.
+    NotActive,
+}
+
+/// Looks a presented certificate up in AXIAM's certificate inventory by its
+/// SHA-256 fingerprint.
+///
+/// A port rather than a repository type parameter on `TokenService` so the
+/// token service keeps its eight, and object-safe for the reason
+/// `axiam_core::ca_keys::CaKeyStore` is: the composition root builds one and
+/// every grant shares it. [`InventoryCertificateLookup`] is the implementation.
+pub trait IssuedCertificateLookup: Send + Sync {
+    /// The standing of the certificate whose DER encoding is `der`.
+    ///
+    /// An `Err` is a failed read, never a verdict: the caller answers it as a
+    /// server error, not as "not issued here".
+    fn standing<'a>(
+        &'a self,
+        der: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<IssuedCertificateStanding>> + Send + 'a>>;
+}
+
+/// [`IssuedCertificateLookup`] over the certificate and CA repositories — the
+/// same two reads, in the same order, as device sign-in by certificate.
+#[derive(Clone)]
+pub struct InventoryCertificateLookup<CR, CCR> {
+    cert_repo: CR,
+    ca_repo: CCR,
+}
+
+impl<CR, CCR> InventoryCertificateLookup<CR, CCR> {
+    /// Look certificates up in `cert_repo`, and their issuers in `ca_repo`.
+    pub fn new(cert_repo: CR, ca_repo: CCR) -> Self {
+        Self { cert_repo, ca_repo }
+    }
+}
+
+impl<CR, CCR> IssuedCertificateLookup for InventoryCertificateLookup<CR, CCR>
+where
+    CR: CertificateRepository,
+    CCR: CaCertificateRepository,
+{
+    fn standing<'a>(
+        &'a self,
+        der: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<IssuedCertificateStanding>> + Send + 'a>> {
+        Box::pin(async move {
+            // The inventory's key: lowercase hex SHA-256 of the DER, as
+            // `axiam_pki` computes it at issuance.
+            let fingerprint = hex::encode(Sha256::digest(der));
+            let cert = match self.cert_repo.get_by_fingerprint_global(&fingerprint).await {
+                Ok(cert) => cert,
+                Err(AxiamError::NotFound { .. }) => {
+                    return Ok(IssuedCertificateStanding::NotIssuedHere);
+                }
+                Err(e) => return Err(e),
+            };
+            let now = chrono::Utc::now();
+            if cert.status != CertificateStatus::Active
+                || now < cert.not_before
+                || now > cert.not_after
+            {
+                return Ok(IssuedCertificateStanding::NotActive);
+            }
+            // The issuing CA, as `authenticate_der` reads it (SECHRD-05): a
+            // revoked tenant signing CA leaves its leaves `Active` in the
+            // inventory, and they still chain to the organization anchor above
+            // it. A CA row that is gone is not an issuer anybody vouches for.
+            match self.ca_repo.get_by_issuer_id(cert.issuer_ca_id).await {
+                Ok(ca)
+                    if ca.status == CertificateStatus::Active
+                        && now >= ca.not_before
+                        && now <= ca.not_after =>
+                {
+                    Ok(IssuedCertificateStanding::Active)
+                }
+                Ok(_) | Err(AxiamError::NotFound { .. }) => {
+                    Ok(IssuedCertificateStanding::NotActive)
+                }
+                Err(e) => Err(e),
+            }
+        })
+    }
+}
+
+/// Refuse a certificate AXIAM issued and no longer stands behind (#565,
+/// T-102).
+///
+/// Called by the token service after [`authenticate_mtls_client`] has matched
+/// `presented` to `client`, under either mTLS method: a certificate AXIAM
+/// revoked authenticates no client, whether the client registered its subject
+/// (§2.1) or its thumbprint (§2.2). A certificate AXIAM did not issue —
+/// [`IssuedCertificateStanding::NotIssuedHere`] — passes unchanged; see that
+/// variant.
+///
+/// The refusal is `invalid_client` with [`MTLS_AUTH_FAILED`], like every other
+/// mTLS failure; the reason goes to the log. A failed read is a server error,
+/// never an authentication.
+pub async fn refuse_a_certificate_axiam_revoked(
+    client: &OAuth2Client,
+    presented: &PresentedCertificate,
+    lookup: &dyn IssuedCertificateLookup,
+) -> Result<(), OAuth2Error> {
+    match lookup.standing(&presented.der).await {
+        Ok(IssuedCertificateStanding::NotIssuedHere | IssuedCertificateStanding::Active) => Ok(()),
+        Ok(IssuedCertificateStanding::NotActive) => {
+            tracing::warn!(
+                client_id = %client.client_id,
+                method = client.token_endpoint_auth_method.as_str(),
+                "mTLS client authentication refused: the presented certificate was issued by \
+                 AXIAM and is revoked or expired, or its issuing CA is"
+            );
+            Err(OAuth2Error::InvalidClient(MTLS_AUTH_FAILED.into()))
+        }
+        Err(e) => Err(OAuth2Error::ServerError(format!(
+            "could not read the presented client certificate's status: {e}"
+        ))),
+    }
 }
 
 /// A registered value counts only when it is present *and* non-blank.
@@ -980,5 +1131,75 @@ mod tests {
             descriptions.iter().all(|d| d == MTLS_AUTH_FAILED),
             "all mTLS auth failures must share one description, got {descriptions:?}"
         );
+    }
+
+    // -- the inventory's verdict (#565, T-102) ---------------------------
+
+    /// A lookup that answers one verdict for every certificate.
+    struct Answers(Result<IssuedCertificateStanding, ()>);
+
+    impl IssuedCertificateLookup for Answers {
+        fn standing<'a>(
+            &'a self,
+            _der: &'a [u8],
+        ) -> Pin<Box<dyn Future<Output = AxiamResult<IssuedCertificateStanding>> + Send + 'a>>
+        {
+            let verdict = self
+                .0
+                .map_err(|()| AxiamError::Database("the store is down".into()));
+            Box::pin(async move { verdict })
+        }
+    }
+
+    /// A certificate AXIAM issued and revoked is refused under both methods,
+    /// with the description every other mTLS failure carries.
+    #[tokio::test]
+    async fn a_certificate_axiam_revoked_authenticates_no_client() {
+        let (der, cert) = cert_with_sans(&["client.example.com"]);
+        let mut by_name = client(ClientAuthMethod::TlsClientAuth);
+        by_name.tls_client_auth_san_dns = Some("client.example.com".into());
+        let mut by_thumbprint = client(ClientAuthMethod::SelfSignedTlsClientAuth);
+        by_thumbprint.self_signed_tls_client_auth_thumbprints = vec![thumbprint_s256(&der)];
+
+        for registered in [&by_name, &by_thumbprint] {
+            authenticate_mtls_client(registered, Some(&cert)).expect("the certificate matches");
+            match refuse_a_certificate_axiam_revoked(
+                registered,
+                &cert,
+                &Answers(Ok(IssuedCertificateStanding::NotActive)),
+            )
+            .await
+            {
+                Err(OAuth2Error::InvalidClient(d)) => assert_eq!(d, MTLS_AUTH_FAILED),
+                other => panic!("a revoked certificate must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    /// A certificate AXIAM did not issue — self-signed, or from an external CA
+    /// — and an active one AXIAM did issue are decided by the match alone.
+    #[tokio::test]
+    async fn a_certificate_axiam_did_not_issue_or_still_stands_behind_passes() {
+        let (_, cert) = cert_with_sans(&["client.example.com"]);
+        let c = client(ClientAuthMethod::TlsClientAuth);
+        for verdict in [
+            IssuedCertificateStanding::NotIssuedHere,
+            IssuedCertificateStanding::Active,
+        ] {
+            refuse_a_certificate_axiam_revoked(&c, &cert, &Answers(Ok(verdict)))
+                .await
+                .unwrap_or_else(|e| panic!("{verdict:?} must pass, got {e:?}"));
+        }
+    }
+
+    /// A read that fails is a server error, never "not issued here".
+    #[tokio::test]
+    async fn a_failed_status_read_is_a_server_error_not_a_pass() {
+        let (_, cert) = cert_with_sans(&["client.example.com"]);
+        let c = client(ClientAuthMethod::TlsClientAuth);
+        assert!(matches!(
+            refuse_a_certificate_axiam_revoked(&c, &cert, &Answers(Err(()))).await,
+            Err(OAuth2Error::ServerError(_))
+        ));
     }
 }

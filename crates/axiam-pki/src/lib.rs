@@ -2,13 +2,15 @@
 //!
 //! Provides X.509 certificate lifecycle management (generation, signing,
 //! revocation, rotation), CA certificate management at organization level,
-//! IoT device certificate authentication, and GnuPG/OpenPGP key management
-//! for audit signing and encrypted data exports.
+//! IoT device certificate authentication, a certificate revocation list per
+//! issuing CA, and GnuPG/OpenPGP key management for audit signing and encrypted
+//! data exports.
 
 pub mod ca;
 pub mod ca_key_store;
 pub mod cert;
 pub mod config;
+pub mod crl;
 mod crypto;
 pub mod mds;
 pub mod mtls;
@@ -27,6 +29,7 @@ pub use cert::{
     CertService, DEFAULT_LEAF_CERT_VALIDITY_DAYS, IssuingScope, MAX_LEAF_CERT_VALIDITY_DAYS,
 };
 pub use config::PkiConfig;
+pub use crl::{CrlDistribution, CrlService, PublishedCrl};
 pub use mtls::DeviceAuthService;
 pub use pgp::PgpService;
 pub use saml_signing::{

@@ -25,6 +25,7 @@ use zeroize::Zeroize;
 use crate::PkiConfig;
 use crate::ca::{self, CaService, join_pem};
 use crate::ca_key_store::CaKeyCustodians;
+use crate::crl::CrlDistribution;
 use crate::crypto::{compute_fingerprint, generate_keypair};
 use crate::subject::subject_common_name;
 
@@ -152,6 +153,9 @@ pub struct CertService<CA, CR> {
     crypto_semaphore: Arc<Semaphore>,
     /// Who holds the CA signing keys. See [`crate::ca_key_store`].
     custodians: Arc<CaKeyCustodians>,
+    /// Where the issuing CA's revocation list is published (#565). `None`
+    /// writes no distribution point: see [`Self::with_crl_distribution`].
+    crl_distribution: Option<CrlDistribution>,
 }
 
 impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR> {
@@ -168,7 +172,24 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             config,
             crypto_semaphore,
             custodians,
+            crl_distribution: None,
         }
+    }
+
+    /// Write a CRL distribution point naming the issuing CA's list into every
+    /// leaf this service signs in-process (#565, T-102).
+    ///
+    /// Builder-style so every existing construction keeps issuing exactly what
+    /// it did. `None` — no public base URL configured — writes none: a
+    /// distribution point must be an absolute URL a relying party can fetch,
+    /// and a guessed one is worse than none. A leaf signed by a custodian that
+    /// signs remotely (`vault_pki`) never carries one: that signer applies its
+    /// own profile, and AXIAM publishes no list for such a CA
+    /// ([`crate::crl`]).
+    #[must_use]
+    pub fn with_crl_distribution(mut self, distribution: Option<CrlDistribution>) -> Self {
+        self.crl_distribution = distribution;
+        self
     }
 
     /// Everything both leaf paths must establish before a certificate can be
@@ -441,6 +462,10 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
         let key_algorithm = input.key_algorithm.clone();
         let not_before_ts = not_before.timestamp();
         let not_after_ts = not_after.timestamp();
+        let crl_point = self
+            .crl_distribution
+            .as_ref()
+            .map(|d| d.point_for(&ca_cert));
 
         let (private_key_pem, public_cert_pem, fingerprint) =
             tokio::task::spawn_blocking(move || -> AxiamResult<(String, String, String)> {
@@ -469,8 +494,14 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                 // Build end-entity certificate request — from the same
                 // function `sign_csr` overwrites a caller's parameters with, so
                 // the two paths cannot issue different shapes.
-                let ee_params =
-                    leaf_params(&ee_subject, not_before_ts, not_after_ts, &sans, &profile)?;
+                let ee_params = leaf_params(
+                    &ee_subject,
+                    not_before_ts,
+                    not_after_ts,
+                    &sans,
+                    &profile,
+                    crl_point,
+                )?;
 
                 let cert = ee_params.signed_by(&ee_key_pair, &ca_issuer).map_err(|e| {
                     AxiamError::Certificate(format!("certificate signing failed: {e}"))
@@ -781,6 +812,10 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             let subject = facts.common_name.clone();
             let not_before_ts = not_before.timestamp();
             let not_after_ts = not_after.timestamp();
+            let crl_point = self
+                .crl_distribution
+                .as_ref()
+                .map(|d| d.point_for(&ca_cert));
 
             let (pem, fingerprint) =
                 tokio::task::spawn_blocking(move || -> AxiamResult<(String, String)> {
@@ -807,8 +842,14 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
                     // AXIAM has decided it is — the same leaf parameters
                     // `generate` builds, so the two paths issue the same shape
                     // of certificate for the same request.
-                    request.params =
-                        leaf_params(&subject, not_before_ts, not_after_ts, &sans, &profile)?;
+                    request.params = leaf_params(
+                        &subject,
+                        not_before_ts,
+                        not_after_ts,
+                        &sans,
+                        &profile,
+                        crl_point,
+                    )?;
                     // Deliberately **not** `use_authority_key_identifier_extension`,
                     // which the intermediate CSR path sets. Setting it here put
                     // an authorityKeyIdentifier on a CSR-signed leaf that a
@@ -901,8 +942,9 @@ struct IssuedLeaf {
 }
 
 /// The parameters every AXIAM leaf certificate is built from: the common name,
-/// the validity window, `CA:FALSE`, the SANs the name fence admitted, and the
-/// per-type usage profile (S-7).
+/// the validity window, `CA:FALSE`, the SANs the name fence admitted, the
+/// per-type usage profile (S-7), and — where the deployment publishes one — the
+/// distribution point of the issuing CA's revocation list (#565).
 ///
 /// The SANs are empty for every type but `Server`, and are only ever the names
 /// [`check_leaf_names`] returned — never anything from a CSR. The profile is
@@ -921,12 +963,14 @@ fn leaf_params(
     not_after_ts: i64,
     sans: &[RequestedName],
     profile: &LeafProfile,
+    crl_point: Option<rcgen::CrlDistributionPoint>,
 ) -> AxiamResult<CertificateParams> {
     let mut params = CertificateParams::new(Vec::<String>::new())
         .map_err(|e| AxiamError::Certificate(e.to_string()))?;
     params.distinguished_name.push(DnType::CommonName, subject);
     params.is_ca = IsCa::NoCa;
     params.subject_alt_names = san_types(sans)?;
+    params.crl_distribution_points = crl_point.into_iter().collect();
     params.key_usages = profile
         .key_usage
         .iter()

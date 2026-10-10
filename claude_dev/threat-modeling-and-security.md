@@ -25,7 +25,7 @@
 > `1.0.0-beta17`
 > ([`website-security-beta17-update-plan.md`](website-security-beta17-update-plan.md)).
 >
-> **The 1.0.0 release wave (model 2.38.0 — T-447 and T-469 closed).** The W5 F4 review
+> **The 1.0.0 release wave (model 2.38.0 — T-447, T-469 and T-102 closed; T-470 enters).** The W5 F4 review
 > had closed T-447 for CIBA and reported the device grant, where it was true
 > since B2: `/api/v1/device/verify` and `/decide` admitted an access token AXIAM
 > minted for an OAuth2 client, so a relying party holding one of its user's
@@ -40,8 +40,24 @@
 > directory is contacted, and never against the account's own hash — and gRPC
 > `ValidateCredentials` runs it on every refusal, so with no permit to be had a
 > locked account answers the `503` an unknown name answers, and every gRPC
-> refusal the `UNAVAILABLE` a wrong password answers. The model is **469
-> threats, 428 mitigated / 20 open / 21 not applicable**.
+> refusal the `UNAVAILABLE` a wrong password answers. It closes **T-102** too
+> (#565): every issuing CA whose key AXIAM holds publishes a signed RFC 5280
+> certificate revocation list at the unauthenticated, rate-limited
+> `GET /pki/v1/{org_id}/ca/{ca_id}/crl` — `nextUpdate` a configured interval
+> ahead, a CRL number, the CA's key identifier, an entry for every revoked and
+> unexpired leaf and subordinate CA it signed, caching headers to `nextUpdate` —
+> and every certificate AXIAM signs from then on names that list in a CRL
+> distribution point; OAuth2 `tls_client_auth` and `self_signed_tls_client_auth`
+> look the presented certificate up by fingerprint, as device sign-in does, and
+> refuse one AXIAM issued and revoked. The tests parse the list, verify it under
+> the CA's key for an Ed25519 and an RSA-4096 CA, check `nextUpdate`, the limiter
+> and the distribution point, and refuse a revoked leaf at the token endpoint
+> that the same endpoint accepted before the revocation. By decision D-6 the
+> listeners' TLS handshakes still consult no list and there is no OCSP
+> responder; both are `1.0.x` and stand in T-102 as residuals. The pass enters
+> **T-470**, Open: a CA whose key Vault's PKI engine holds publishes no list
+> AXIAM can sign, and AXIAM's revocations do not reach Vault's own. The model is
+> **470 threats, 429 mitigated / 20 open / 21 not applicable**.
 >
 > **The contract 1.58 SDK fan-out (model 2.37.0 — T-388 closed).** A SET carries
 > no `exp`, so refusing a replayed one was always the receiver's control, and
@@ -1155,7 +1171,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 469 threats** and a
+The system is verified against a **STRIDE threat model of 470 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -1178,8 +1194,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 469 |
-| Mitigated / Open | 428 / 20 |
+| Threats identified | 470 |
+| Mitigated / Open | 429 / 20 |
 | Not applicable (specified, not built) | 21 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -1201,7 +1217,7 @@ each becomes mitigated or open in the commit that builds what it describes.
 | OAuth2 / OIDC authorization server | 85 | 0 | 0 |
 | Federation (SAML SP and IdP, OIDC RP & directory) | 125 | 3 | 0 |
 | Authorization engine (RBAC, hierarchy, scopes) | 27 | 0 | 0 |
-| PKI, certificates & IoT device identity | 30 | 2 | 0 |
+| PKI, certificates & IoT device identity | 31 | 2 | 0 |
 | Audit, webhooks, email & notifications | 55 | 4 | 0 |
 | Deployment & platform (Kubernetes) | 29 | 6 | 0 |
 | Client SDKs & admin-UI integration surface | 28 | 3 | 0 |
@@ -1216,10 +1232,14 @@ residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
 providers pinned (T-306) and a service provider's own session outliving the
-AXIAM session (T-380). One is not, and has a fix filed: no published
-certificate revocation list (T-102). Two more closed at model 2.38.0: a
-relying party's access token approving a device authorization (T-447, #549)
-and a locked account told apart from an unknown name (T-469, #564). The directory identity source carries none:
+AXIAM session (T-380). One is a gap with its fix named for `1.0.x`: a CA whose
+key Vault's PKI engine holds publishes no revocation list, and AXIAM's
+revocations do not reach Vault's own (T-470). Three more closed at model
+2.38.0: a relying party's access token approving a device authorization (T-447,
+#549), a locked account told apart from an unknown name (T-469, #564), and no
+published certificate revocation list (T-102, #565) — each issuing CA whose key
+AXIAM holds now publishes one, and the OAuth2 mTLS client methods read a
+certificate's status as device sign-in does. The directory identity source carries none:
 its last open item — with just-in-time provisioning on, a sign-in for a name
 AXIAM holds no account for reached the directory with no AXIAM counter in front
 of it (T-332) — closed with a failure counter per tenant and login name, as the
@@ -1301,7 +1321,9 @@ mitigated. The same pass re-judged T-102 and reopened it: AXIAM publishes no
 certificate revocation list, so a relying party that validates AXIAM-issued
 certificates itself cannot learn of a revocation, and inside AXIAM only device
 authentication by certificate reads a certificate's status (not the TLS
-handshake, nor OAuth2 `tls_client_auth`). The W6 F4 review (model 2.36.1)
+handshake, nor OAuth2 `tls_client_auth`) — closed at model 2.38.0, when each
+issuing CA began publishing a list and `tls_client_auth` began reading status
+(#565). The W6 F4 review (model 2.36.1)
 corrects that last point and adds T-469: the lockout branch of the password
 login answers without the equalising verify, so a locked account is told apart
 from an unknown name — closed at model 2.38.0, when that branch and every gRPC
@@ -2238,19 +2260,24 @@ writes to it, and the directory, not AXIAM, decides whether a password is right:
   an unknown, untrusted, self-asserted or unbound certificate — is a `401`; the
   unbound case had been a `403`, reached by matching the text of an error
   message, and the bodies stay distinct.
-- **Revocation is enforced where AXIAM authenticates a device by its
-  certificate, and nowhere else.** Device sign-in reads the certificate's status
-  on every authentication; neither listener's TLS handshake does, and OAuth2
-  `tls_client_auth` matches the client's registered name, so a revoked
-  AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the
-  registration changes. AXIAM publishes no certificate revocation list and runs no OCSP
-  responder — its CAs carry the `cRLSign` key-usage bit, and nothing serves a
-  list. A relying party that validates AXIAM-issued certificates itself — a
-  FreeRADIUS server doing 802.1X, a VPN gateway, a peer service terminating its
-  own mTLS — has no way to learn of a revocation and accepts a revoked
-  certificate until it expires (T-102, open). Earlier revisions of the threat
-  model and the design document described a CRL; there has never been one.
-  Publishing one per issuing CA is tracked by ilpanich/axiam#565.
+- **A revocation reaches every place AXIAM authenticates by a certificate, and
+  every relying party that fetches the list.** Device sign-in and both OAuth2
+  mTLS client methods (`tls_client_auth`, `self_signed_tls_client_auth`) look
+  the presented certificate up by fingerprint and refuse one AXIAM issued that
+  is revoked or expired, or whose issuing CA is (#565); a certificate AXIAM did
+  not issue is decided as before. Each issuing CA whose key AXIAM holds
+  publishes a signed RFC 5280 certificate revocation list at the
+  unauthenticated, rate-limited `GET /pki/v1/{org_id}/ca/{ca_id}/crl`, with
+  `nextUpdate` a configured interval ahead (a day by default) and caching
+  headers to it, and every certificate AXIAM signs from then on names that
+  list in a CRL distribution point — so a FreeRADIUS server, a VPN gateway or a
+  peer service learns of a revocation at its next fetch (T-102, mitigated).
+  Two things are deferred to `1.0.x`: neither listener's TLS handshake consults
+  the list (the handshake alone authenticates nothing, but a token bound to the
+  certificate before the revocation lives out its fifteen minutes), and there
+  is no OCSP responder. A CA whose key Vault's PKI engine holds publishes no
+  list, and a revocation in AXIAM does not reach Vault's own (T-470, open).
+  Earlier revisions of the threat model described a CRL before one existed.
 - **A device's token is as strong as its handshake.** A device authenticates by
   a TLS handshake with a client certificate — the strongest thing it can prove —
   and until `1.0.0-beta17` got back a plain bearer token, so a token read off
@@ -2648,7 +2675,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 20 of 469. The 21
+Every threat the model records as open, most severe first — 20 of 470. The 21
 entries recorded *not applicable*, for the RADIUS front end that is not built,
 are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -2662,7 +2689,6 @@ each.
 | T-306 — A leaked signing key keeps forging assertions after the credential is retired | Critical | SAML service provider (registered per tenant) · *Federation — SAML SP & OIDC relying party* |
 | T-18 — Backup or snapshot exfiltration | High | SurrealDB cluster (all tenant data) · *System diagram* |
 | T-94 — Key extracted from device firmware or flash | High | IoT device · *PKI, certificates & IoT device identity* |
-| T-102 — A revoked certificate stays valid to every relying party that does not terminate at AXIAM | High | Revocation (status in AXIAM's store; no CRL published) · *PKI, certificates & IoT device identity* |
 | T-108 — Action succeeds while its audit write fails | High | Audit middleware & service · *Audit, webhooks, email & notifications* |
 | T-124 — Operator credentials grant unaudited data access | High | Cluster operator / SRE · *Deployment & platform (Kubernetes)* |
 | T-133 — Backup media accessible outside the cluster | High | Backups / volume snapshots · *Deployment & platform (Kubernetes)* |
@@ -2677,6 +2703,7 @@ each.
 | T-380 — SP sessions outlive the AXIAM session they came from | Medium | SAML SLO endpoint (/saml/v2/{tenant}/slo) · *Federation — SAML SP & OIDC relying party* |
 | T-405 — A security event is lost and nobody is told | Medium | SET push / poll response · *Audit, webhooks, email & notifications* |
 | T-445 — The minimal profile loses queued deliveries and mail, and the audit rows they would have written, on restart | Medium | AXIAM deployment (N replicas, HPA) · *Deployment & platform (Kubernetes)* |
+| T-470 — A certificate issued under a CA whose key Vault's PKI engine holds has no published revocation | Medium | Revocation (status in AXIAM's store; CRL per issuing CA) · *PKI, certificates & IoT device identity* |
 | T-161 — A partner's IdP silently populates the AXIAM user table (X4) | Low | Attribute mapping & JIT provisioning · *Federation — SAML SP & OIDC relying party* |
 
 With two exceptions — T-108, request audit that drops a row with only a log
@@ -2685,8 +2712,9 @@ request path, each with an issue body in the W5 F4 review —
 none of these is an unhandled defect in AXIAM's own request path: they are
 accepted design trade-offs, responsibilities that land on whoever deploys AXIAM,
 and gaps on the SDK and distribution side — and one on the PKI's publication
-side: T-102, a revoked certificate that a relying party outside AXIAM cannot
-learn about, because no revocation list is published yet. The rest of this
+side: T-470, a leaf of a CA whose key Vault's PKI engine holds, whose revocation
+a relying party outside AXIAM cannot learn about because AXIAM cannot sign that
+CA's list and does not forward the revocation to Vault. The rest of this
 section is the same list read as a checklist — what to do about each, grouped
 by who does it.
 
@@ -2794,15 +2822,14 @@ by who does it.
   nobody polls narrows nothing. Attaching it cannot admit anything local
   verification would have refused — it only ever rejects — and a guard that
   cannot reach it behaves exactly as one without it.
-- **Keep certificates short-lived wherever a relying party other than AXIAM
-  validates them.** AXIAM publishes no revocation list, so a FreeRADIUS server, a
-  VPN gateway or a peer service that checks an AXIAM-issued certificate itself
-  accepts a revoked one until it expires (T-102). Cap leaf validity per tenant
-  (`max_cert_validity_days`) to the window you can accept, or let the device
-  authenticate at AXIAM and present the certificate-bound token it receives, so
-  the check happens at AXIAM's device sign-in. For an OAuth2 client
-  authenticating with `tls_client_auth`, revoke by changing the client's
-  registration, since that path does not read the certificate's status.
+- **Point every relying party that validates AXIAM-issued certificates at the
+  revocation list.** A FreeRADIUS server, a VPN gateway or a peer service learns
+  of a revocation only by fetching its issuer's CRL — the URL is in every
+  certificate AXIAM signs once `AXIAM__PKI__CRL_BASE_URL` or the issuer URL is
+  set — and only as often as it fetches, at most `nextUpdate` apart (T-102).
+  Leaves of a CA whose key Vault's PKI engine holds have no list AXIAM signs
+  (T-470): keep those short-lived (`max_cert_validity_days`), or let the device
+  authenticate at AXIAM and present the certificate-bound token it receives.
 - Prefer **mTLS or short-lived workload identity** over static client secrets;
   rotate secrets through the rotation endpoint and enable secret scanning on your
   own repositories.

@@ -63,9 +63,9 @@ export interface ThreatModelSummary {
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.38.0",
  "diagramCount": 10,
- "total": 469,
+ "total": 470,
  "open": 20,
- "mitigated": 428,
+ "mitigated": 429,
  "notApplicable": 21,
  "areas": [
   {
@@ -106,7 +106,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "total": 30,
+   "total": 31,
    "open": 2,
    "notApplicable": 0
   },
@@ -142,7 +142,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 101,
+   "total": 102,
    "open": 5,
    "notApplicable": 3
   },
@@ -187,13 +187,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "High",
    "total": 196,
-   "open": 10,
+   "open": 9,
    "notApplicable": 9
   },
   {
    "name": "Medium",
-   "total": 195,
-   "open": 7,
+   "total": 196,
+   "open": 8,
    "notApplicable": 9
   },
   {
@@ -243,16 +243,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "PKI, certificates & IoT device identity",
    "element": "IoT device",
    "residualRisk": "Outside AXIAM's control: private keys are generated for the device and returned once, never stored server-side, but hardware protection is the integrator's responsibility. AXIAM limits the blast radius with per-device certificates, a maximum validity policy and immediate revocation."
-  },
-  {
-   "number": 102,
-   "title": "A revoked certificate stays valid to every relying party that does not terminate at AXIAM",
-   "category": "Spoofing",
-   "severity": "High",
-   "diagramId": 5,
-   "area": "PKI, certificates & IoT device identity",
-   "element": "Revocation (status in AXIAM's store; no CRL published)",
-   "residualRisk": "Open since model 2.36.0 (T23.11.1, item D7 of the RADIUS spike). Where AXIAM authenticates a device by its certificate, revocation takes effect at once: `DeviceAuthService::authenticate_der` reads the certificate's status on every device sign-in, and a revoked CA anywhere in the chain refuses the leaf. Nothing else AXIAM terminates reads it (corrected by the W6 F4 review, model 2.36.1): neither listener's TLS handshake checks revocation, and OAuth2 `tls_client_auth` matches the client's registered subject DN or SAN on a certificate that chains to a trust anchor, so a revoked AXIAM-issued leaf keeps authenticating its OAuth2 client until it expires or the registration changes. Outside AXIAM there is no revocation channel: the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`, so a relying party that needs revocation today must let the connection terminate at AXIAM (the device authenticates there and presents the certificate-bound token it receives, T-283) or rely on short-lived leaves. Publishing a CRL per issuing CA, and deciding on OCSP, is tracked by ilpanich/axiam#565 (spike record §8, D1); this entry closes with it, together with the listeners' verifiers loading that list or `tls_client_auth` reading the certificate's status."
   },
   {
    "number": 108,
@@ -393,6 +383,16 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Deployment & platform (Kubernetes)",
    "element": "AXIAM deployment (N replicas, HPA)",
    "residualRisk": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
+  },
+  {
+   "number": 470,
+   "title": "A certificate issued under a CA whose key Vault's PKI engine holds has no published revocation",
+   "category": "Spoofing",
+   "severity": "Medium",
+   "diagramId": 5,
+   "area": "PKI, certificates & IoT device identity",
+   "element": "Revocation (status in AXIAM's store; CRL per issuing CA)",
+   "residualRisk": "Open, entered with ilpanich/axiam#565 at model 2.38.0. Inside AXIAM a revocation takes effect at once whatever the custody: device sign-in and both mTLS client methods read the certificate's status by fingerprint (T-102). Outside it the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`; the PKI guide says so. Closes when revoking a leaf of such a CA also revokes it in Vault (`pki/revoke` by serial), so the list Vault serves, at the distribution point the operator configures on the mount (`pki/config/urls`), names it. Tracked for 1.0.x."
   },
   {
    "number": 161,

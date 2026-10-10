@@ -453,6 +453,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "30",
           ],
           [
+            "AXIAM__RATE_LIMIT__CRL_PER_MIN",
+            "Max requests per minute, per IP, to GET /pki/v1/{org_id}/ca/{ca_id}/crl, each issuing CA's certificate revocation list. Unauthenticated, because a relying party fetches the list before it can validate anything; it does so once per nextUpdate and revalidates with If-None-Match between. The list is signed once and cached, so an admitted request costs a database read, not a signature. Never moved by a profile preset.",
+            "60",
+          ],
+          [
             "AXIAM__RATE_LIMIT__END_SESSION_PER_MIN",
             "Max /oauth2/end_session per minute — and the same preset for the SAML identity provider's browser endpoints (sign-on, metadata, single logout /slo and the logout trigger), each in a bucket of its own so a flood on one cannot spend another's allowance. Never moved by a profile preset.",
             "30",
@@ -686,6 +691,27 @@ export const CONFIGURATION_PAGES: DocPage[] = [
       {
         type: "p",
         text: "The bound applies to attestation only. A ceremony that requests no attestation consults no metadata, so stale metadata cannot have misled it.",
+      },
+      { type: "h", id: "crl", text: "Certificate revocation lists" },
+      {
+        type: "p",
+        text: "Each issuing CA whose key AXIAM holds publishes a signed RFC 5280 certificate revocation list at `GET /pki/v1/{org_id}/ca/{ca_id}/crl`, unauthenticated and rate-limited (`AXIAM__RATE_LIMIT__CRL_PER_MIN`), and every certificate AXIAM signs names that list in a CRL distribution point. Two variables shape it; the PKI guide covers the rest.",
+      },
+      {
+        type: "table",
+        headers: ["Variable", "Meaning", "Example"],
+        rows: [
+          [
+            "AXIAM__PKI__CRL_NEXT_UPDATE_SECS",
+            "Seconds from a list's `thisUpdate` to its `nextUpdate` — how long a relying party may keep a copy, and so how late it can learn of a revocation. Default `86400` (a day); 300 to 604800 accepted, anything else stops startup.",
+            "3600",
+          ],
+          [
+            "AXIAM__PKI__CRL_BASE_URL",
+            "The absolute `http` or `https` base written into the CRL distribution point of every certificate AXIAM signs. Defaults to the issuer URL; with neither an absolute URL the extension is omitted and the server warns at startup. A value that is not one stops startup.",
+            "http://crl.iam.example.com",
+          ],
+        ],
       },
       { type: "h", id: "ca-key-custody", text: "CA signing key custody" },
       {

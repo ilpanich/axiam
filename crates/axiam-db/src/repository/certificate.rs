@@ -3,7 +3,8 @@
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::certificate::{
-    Certificate, CertificateStatus, CertificateType, KeyAlgorithm, StoreCertificate,
+    Certificate, CertificateStatus, CertificateType, KeyAlgorithm, RevokedCertificate,
+    StoreCertificate,
 };
 use axiam_core::repository::{CertificateRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -58,6 +59,26 @@ struct CertificateRowWithId {
 struct RevokedCertificateRow {
     #[allow(dead_code)]
     record_id: String,
+}
+
+/// One entry of an issuing CA's revocation list (#565).
+#[derive(Debug, SurrealValue)]
+struct RevokedEntryRow {
+    public_cert_pem: String,
+    fingerprint: String,
+    revoked_at: Option<DateTime<Utc>>,
+    not_before: DateTime<Utc>,
+}
+
+impl From<RevokedEntryRow> for RevokedCertificate {
+    fn from(row: RevokedEntryRow) -> Self {
+        Self {
+            public_cert_pem: row.public_cert_pem,
+            fingerprint: row.fingerprint,
+            revoked_at: row.revoked_at,
+            not_before: row.not_before,
+        }
+    }
 }
 
 #[derive(Debug, SurrealValue)]
@@ -323,8 +344,12 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .db
             .current()
             .query(
+                // #565: the first revocation's date stands — a CRL entry says
+                // when the CA processed the revocation, and a second revoke of
+                // the same certificate is not a second revocation.
                 "UPDATE type::record('certificate', $id) SET \
-                 status = $status \
+                 status = $status, \
+                 revoked_at = revoked_at ?? time::now() \
                  WHERE tenant_id = $tenant_id",
             )
             .bind(("id", id.to_string()))
@@ -348,6 +373,30 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         Ok(())
     }
 
+    async fn list_revoked_by_issuer(
+        &self,
+        issuer_ca_id: Uuid,
+    ) -> AxiamResult<Vec<RevokedCertificate>> {
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT public_cert_pem, fingerprint, revoked_at, not_before FROM certificate \
+                 WHERE issuer_ca_id = $issuer_ca_id \
+                   AND status = 'Revoked' \
+                   AND not_after > time::now() \
+                 ORDER BY fingerprint",
+            )
+            .bind(("issuer_ca_id", issuer_ca_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<RevokedEntryRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     async fn revoke_user_certificates(
         &self,
         tenant_id: Uuid,
@@ -369,7 +418,7 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
             .current()
             .query(
                 "SELECT meta::id(id) AS record_id FROM \
-                 (UPDATE certificate SET status = 'Revoked' \
+                 (UPDATE certificate SET status = 'Revoked', revoked_at = time::now() \
                   WHERE tenant_id = $tenant_id \
                     AND cert_type = 'User' \
                     AND status = 'Active' \

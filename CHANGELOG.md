@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A certificate revocation list per issuing CA** (#565, P23W6-10). Each CA
+  whose key AXIAM holds publishes a signed RFC 5280 CRL (version 2, DER,
+  `application/pkix-crl`) at `GET /pki/v1/{org_id}/ca/{ca_id}/crl`:
+  unauthenticated, rate-limited per IP in a bucket of its own
+  (`AXIAM__RATE_LIMIT__CRL_PER_MIN`, default 60), signed with the CA's key
+  through the custodian that holds it (RSA-4096 and Ed25519), with a CRL
+  number, the CA's key identifier, `nextUpdate` a configured interval ahead
+  (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`, default one day, 300 s – 7 days, never
+  past the CA's expiry) and an entry for every revoked, unexpired leaf and
+  subordinate CA it signed. `Cache-Control: public, max-age` runs to
+  `nextUpdate`, with `ETag`, `Last-Modified` and `304` on `If-None-Match`. Every
+  certificate AXIAM signs from now on — generated and CSR-signed leaves, and
+  tenant signing CAs — carries a CRL distribution point naming its issuer's
+  list, built from the new `AXIAM__PKI__CRL_BASE_URL`, else the issuer URL;
+  with neither an absolute URL the extension is omitted and the server warns at
+  startup. A revoked or expired CA, a keyless imported anchor and a `vault_pki`
+  CA answer `404`. **Upgrade notes:** schema migration v90 adds a revocation
+  date to both certificate tables (a certificate revoked earlier is listed from
+  its `notBefore`); certificates issued before this release carry no
+  distribution point, so point their relying parties at the route by hand; an
+  invalid `AXIAM__PKI__CRL_BASE_URL` or `AXIAM__PKI__CRL_NEXT_UPDATE_SECS` stops
+  startup. The OpenAPI document gains the route under a new `pki` tag.
+
 ### Security
 
 - **Device grant: only a console sign-in reads or decides a device
@@ -45,6 +70,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers `UNAVAILABLE`, exactly as a wrong password does; a refusal also now
   takes as long as one. Threat model 2.38.0: T-469 Mitigated and T-30's residual
   removed; 469 threats, 428 mitigated / 20 open / 21 not applicable.
+- **OAuth2 mTLS client authentication refuses a certificate AXIAM revoked**
+  (#565, P23W6-10, T-102). `tls_client_auth` matched the client's registered
+  subject DN or SAN on any certificate that chained to a listener anchor, and
+  flagging an AXIAM CA as an anchor wrote it into that bundle — so a revoked
+  AXIAM-issued leaf kept authenticating its OAuth2 client at AXIAM's own token
+  endpoint (and PAR, CIBA, introspection and revocation, which share the
+  client authentication) until it expired. After the match, `tls_client_auth`
+  and `self_signed_tls_client_auth` now look the certificate up by fingerprint,
+  as device sign-in does, and refuse with `invalid_client` one AXIAM issued
+  that is revoked or expired, or whose issuing CA is. A certificate AXIAM did
+  not issue — self-signed, or from an external CA — is decided by the match
+  alone, as before. **Behaviour change:** a client presenting a revoked
+  AXIAM-issued certificate is refused at once; each mTLS client authentication
+  costs one more database read. Not in this release (planned for `1.0.x`): the
+  listeners' TLS handshakes do not consult the revocation list, there is no
+  OCSP responder, and a `vault_pki` CA's revocations do not reach Vault's own
+  list (T-470). Threat model 2.38.0: T-102 Mitigated, T-470 entered Open; 470
+  threats, 429 mitigated / 20 open / 21 not applicable.
 
 ### Documentation
 

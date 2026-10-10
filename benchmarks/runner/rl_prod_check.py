@@ -208,6 +208,12 @@ ENDPOINTS = {
         None,
         "POST /api/v1/auth/webauthn/* (applies to each of the six ceremony routes)",
     ),
+    # #565 (T-102). The certificate revocation list route carries its limiter
+    # from the commit that added it, so it has a row from that commit too.
+    # Unmeasured because nothing in the bench drives it: a relying party
+    # fetches a list once per nextUpdate, so it is not a throughput path, and a
+    # cell would need a CA and a revoked certificate seeded per run.
+    "crl_per_min": (None, "GET /pki/v1/{org_id}/ca/{ca_id}/crl (certificate revocation list)"),
 }
 
 
@@ -258,7 +264,9 @@ def read_configured_defaults():
                   "dcr_per_min",
                   # The seventeenth family, added with the limiter that closed
                   # the unlimited /auth/webauthn/* surface.
-                  "webauthn_per_min"):
+                  "webauthn_per_min",
+                  # #565: the certificate revocation list route.
+                  "crl_per_min"):
         rest_defaults[field] = _extract_int(
             default_block, rf"\b{field}:\s*([0-9_]+)", field, REST_RATE_LIMIT_RS)
 

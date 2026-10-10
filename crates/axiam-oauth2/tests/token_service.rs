@@ -1007,6 +1007,30 @@ impl axiam_core::repository::AuditLogRepository for MockAuditRepo {
     }
 }
 
+/// The certificate inventory as these mocks have it: empty, so every
+/// presented certificate is one AXIAM did not issue and is decided by the
+/// match alone (#565). The revoked case is `mtls.rs`'s unit tests and the REST
+/// crate's `crl_test.rs`, against a real inventory.
+fn not_issued_here() -> Arc<dyn axiam_oauth2::mtls::IssuedCertificateLookup> {
+    struct Empty;
+    impl axiam_oauth2::mtls::IssuedCertificateLookup for Empty {
+        fn standing<'a>(
+            &'a self,
+            _der: &'a [u8],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = AxiamResult<axiam_oauth2::mtls::IssuedCertificateStanding>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(axiam_oauth2::mtls::IssuedCertificateStanding::NotIssuedHere) })
+        }
+    }
+    Arc::new(Empty)
+}
+
 type Svc = TokenService<
     MockClientRepo,
     MockCodeRepo,
@@ -1048,6 +1072,7 @@ fn build_with_upgrade_log(
         MockAuditRepo::default(),
         test_config(),
         2_592_000,
+        not_issued_here(),
     );
     (svc, log)
 }
@@ -1073,6 +1098,7 @@ fn build_with_session_log(
         MockAuditRepo::default(),
         test_config(),
         2_592_000,
+        not_issued_here(),
     );
     (svc, sessions)
 }
@@ -2659,6 +2685,7 @@ fn build_t254(client: ClientOutcome, refresh: MockRefreshRepo) -> (Svc, ReplayLo
         audit,
         test_config(),
         2_592_000,
+        not_issued_here(),
     );
     (svc, replays, audit_log)
 }
@@ -2676,6 +2703,7 @@ fn build_sa(sa: SaOutcome) -> (Svc, UpgradeLog) {
         MockAuditRepo::default(),
         test_config(),
         2_592_000,
+        not_issued_here(),
     );
     (svc, log)
 }
@@ -4416,6 +4444,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
             MockAuditRepo::default(),
             test_config(),
             2_592_000,
+            not_issued_here(),
         )
     };
 

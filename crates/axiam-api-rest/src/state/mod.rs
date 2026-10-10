@@ -171,6 +171,11 @@ pub type CertServiceT<C> =
 
 pub type PgpServiceT<C> = PgpService<axiam_db::SurrealPgpKeyRepository<C>>;
 
+pub type CrlServiceT<C> = axiam_pki::CrlService<
+    axiam_db::SurrealCaCertificateRepository<C>,
+    SurrealCertificateRepository<C>,
+>;
+
 pub type DeviceAuthServiceT<C> =
     DeviceAuthService<SurrealCertificateRepository<C>, axiam_db::SurrealCaCertificateRepository<C>>;
 
@@ -652,12 +657,19 @@ impl<C: Connection + Clone> AppState<C> {
             axiam_pki::custodians_from_env(Some([0u8; 32]))
                 .expect("test CA key custody construction"),
         );
+        // #565: the distribution point is derived from the issuer exactly as
+        // the composition root derives it when no explicit base is set, so a
+        // certificate issued through this state carries the URL a deployment
+        // with the same issuer would write.
+        let crl_distribution = axiam_pki::CrlDistribution::resolve(None, auth_config.root_issuer())
+            .expect("no explicit CRL base URL to refuse");
         let ca_service = CaService::new(
             ca_cert_repo.clone(),
             pki_config.clone(),
             Arc::clone(&crypto_semaphore),
             Arc::clone(&ca_custodians),
-        );
+        )
+        .with_crl_distribution(crl_distribution.clone());
         let saml_idp = bundles::SamlIdpState {
             sp_repo: axiam_db::SurrealSamlServiceProviderRepository::new(db.clone()),
             pending_repo: axiam_db::SurrealPendingSamlRequestRepository::new(db.clone()),
@@ -689,6 +701,14 @@ impl<C: Connection + Clone> AppState<C> {
             pki_config.clone(),
             Arc::clone(&crypto_semaphore),
             Arc::clone(&ca_custodians),
+        )
+        .with_crl_distribution(crl_distribution);
+        let crl_service = axiam_pki::CrlService::new(
+            ca_cert_repo.clone(),
+            cert_repo.clone(),
+            Arc::clone(&crypto_semaphore),
+            Arc::clone(&ca_custodians),
+            axiam_pki::crl::DEFAULT_CRL_NEXT_UPDATE_SECS,
         );
         let pgp_service = PgpService::new(
             pgp_repo.clone(),
@@ -717,6 +737,12 @@ impl<C: Connection + Clone> AppState<C> {
             SurrealAuditLogRepository::new(db.clone()),
             auth_config.clone(),
             2_592_000,
+            // #565 (T-102): an mTLS client's certificate is looked up in the
+            // same inventory device sign-in reads.
+            Arc::new(axiam_oauth2::mtls::InventoryCertificateLookup::new(
+                cert_repo.clone(),
+                ca_cert_repo.clone(),
+            )),
         );
         // B2: the URI the user is told to visit. Derived from the OIDC issuer
         // rather than configured separately — a verification URI on a
@@ -838,6 +864,7 @@ impl<C: Connection + Clone> AppState<C> {
             pki: bundles::PkiState {
                 ca_service,
                 cert_service,
+                crl_service,
                 cert_repo,
                 ca_cert_repo: axiam_db::SurrealCaCertificateRepository::new(db.clone()),
                 pgp_service,

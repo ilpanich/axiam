@@ -37,7 +37,8 @@ use super::*;
 /// Certificate authority, X.509 issuance, PGP and device certificate auth.
 ///
 /// Everything behind `/api/v1/ca-certificates`, `/api/v1/certificates`,
-/// `/api/v1/pgp-keys` and the mTLS device-auth path. Grouped because they share
+/// `/api/v1/pgp-keys`, the revocation lists under `/pki/v1` and the mTLS
+/// device-auth path. Grouped because they share
 /// one subject -- key material this deployment issues or verifies -- and because
 /// nothing outside those four handlers has any business reaching a signing
 /// service.
@@ -45,6 +46,9 @@ use super::*;
 pub struct PkiState<C: Connection + Clone> {
     pub ca_service: CaServiceT<C>,
     pub cert_service: CertServiceT<C>,
+    /// Each issuing CA's certificate revocation list, signed on request and
+    /// cached (#565). Behind the unauthenticated `GET /pki/v1/…/crl`.
+    pub crl_service: CrlServiceT<C>,
     pub cert_repo: SurrealCertificateRepository<C>,
     /// The CA rows themselves, for the handful of operations that are about a
     /// CA record rather than about signing with it — today, toggling

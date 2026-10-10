@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.0.0-beta19",
-    "x-axiam-spec-digest": "sha256:b376c1f1037e800e21430623e081591ebcb26879fcea8b1d55c98ee4156871f7"
+    "x-axiam-spec-digest": "sha256:9fe9e025540dbbb945910b2230f4d7303671c22e4faa93123892f7f0168fee4c"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -6480,7 +6480,7 @@
           "tenants"
         ],
         "summary": "`DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`",
-        "description": "#523 (D-4): the tenant is tombstoned and its sessions and refresh tokens are\nrevoked before the `204`; its data is purged afterwards by the cleanup job's\n`tenant_purge` sweep, on the cleanup interval.",
+        "description": "#523 (D-4): the tenant is tombstoned and its sessions, refresh tokens,\ncertificates and signing CAs are revoked before the `204` (R1W1-01: the\ncertificates go on their issuers' revocation lists and stay there until they\nexpire); its data is purged afterwards by the cleanup job's `tenant_purge`\nsweep, on the cleanup interval.",
         "operationId": "delete",
         "parameters": [
           {
@@ -6506,7 +6506,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Tenant deleted: it is gone from every read and sign-in at once, its sessions and refresh tokens are revoked, and its data is purged by the cleanup job"
+            "description": "Tenant deleted: it is gone from every read and sign-in at once, its sessions, refresh tokens, certificates and signing CAs are revoked, and its data is purged by the cleanup job"
           },
           "404": {
             "description": "Tenant not found"

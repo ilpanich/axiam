@@ -1114,7 +1114,7 @@ export const API_INDEX: ApiGroup[] = [
    {
     "method": "DELETE",
     "path": "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
-    "summary": "#523 (D-4): the tenant is tombstoned and its sessions and refresh tokens are revoked before the `204`; its data is purged afterwards by the cleanup job's `tenant_purge` sweep, on the cleanup interval."
+    "summary": "#523 (D-4): the tenant is tombstoned and its sessions, refresh tokens, certificates and signing CAs are revoked before the `204` (R1W1-01: the certificates go on their issuers' revocation lists and stay there until they expire); its data is purged afterwards by the cleanup job's `tenant_purge` sweep, on the cleanup interval."
    },
    {
     "method": "POST",

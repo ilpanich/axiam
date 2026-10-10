@@ -246,6 +246,19 @@ async fn setup() -> Fixture {
     setup_with(None).await
 }
 
+/// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
+/// counter pro-rates a peer first seen partway through a minute, so at the
+/// shipped 30 a test that starts late in the minute is refused after as few as
+/// three authorization requests (#532). The limit is pinned by
+/// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
+fn permissive_rate_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        end_session_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 /// The app, with the flag in whichever position the test is about.
 ///
 /// `$paths` is the *only* difference between the two modes — one boolean on
@@ -267,7 +280,7 @@ macro_rules! test_app {
                 .configure(|cfg| {
                     register_api_v1_routes_with::<TestDb>(
                         cfg,
-                        &RateLimitConfig::default(),
+                        &permissive_rate_limits(),
                         RouteOptions {
                             tenant_issuer_paths: $paths,
                             ..RouteOptions::default()
@@ -1144,4 +1157,65 @@ async fn the_deployment_wide_endpoints_still_mint_the_root_issuer() {
         ROOT_ISSUER
     );
     assert_eq!(iss_of(tokens["id_token"].as_str().unwrap()), ROOT_ISSUER);
+}
+
+/// **#526 (P23W2-06).** Every discovery document — the deployment-wide OIDC and
+/// RFC 8414 ones, their `?tenant_id=` forms, and the three per-tenant path
+/// forms — publishes the auth methods of the revocation and introspection
+/// endpoints, derived from `token_endpoint_auth_methods_supported`: revocation
+/// the same list (it serves a public client, RFC 7009 §2.1), introspection the
+/// list without `none` (it refuses one, RFC 7662 §2.1). Absent, RFC 8414 §2
+/// reads both as `client_secret_basic` alone. Their signing-algorithm members,
+/// required once `private_key_jwt` is listed, are the token endpoint's.
+#[actix_rt::test]
+async fn p23w2_06_every_discovery_document_publishes_revocation_and_introspection_auth_methods() {
+    let f = setup().await;
+    let app = test_app!(f, true);
+    let t = f.a.id;
+
+    for path in [
+        "/.well-known/openid-configuration".to_owned(),
+        "/.well-known/oauth-authorization-server".to_owned(),
+        format!("/.well-known/openid-configuration?tenant_id={t}"),
+        format!("/.well-known/oauth-authorization-server?tenant_id={t}"),
+        format!("/.well-known/oauth-authorization-server/t/{t}"),
+        format!("/.well-known/openid-configuration/t/{t}"),
+        format!("/t/{t}/.well-known/openid-configuration"),
+    ] {
+        let resp = get(&app, &path).await;
+        assert_eq!(resp.status().as_u16(), 200, "{path}");
+        let doc: Value = test::read_body_json(resp).await;
+        let list = |member: &str| -> Vec<String> {
+            doc[member]
+                .as_array()
+                .unwrap_or_else(|| panic!("{path}: {member} must be an array"))
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect()
+        };
+
+        let token = list("token_endpoint_auth_methods_supported");
+        assert!(token.contains(&"none".to_owned()), "{path}: {token:?}");
+        assert_eq!(
+            list("revocation_endpoint_auth_methods_supported"),
+            token,
+            "{path}: revocation authenticates exactly as the token endpoint does"
+        );
+        let without_none: Vec<String> = token.iter().filter(|m| *m != "none").cloned().collect();
+        assert_eq!(
+            list("introspection_endpoint_auth_methods_supported"),
+            without_none,
+            "{path}: introspection refuses a public client"
+        );
+        for member in [
+            "revocation_endpoint_auth_signing_alg_values_supported",
+            "introspection_endpoint_auth_signing_alg_values_supported",
+        ] {
+            assert_eq!(
+                list(member),
+                list("token_endpoint_auth_signing_alg_values_supported"),
+                "{path}: {member}"
+            );
+        }
+    }
 }

@@ -18,6 +18,7 @@ use axiam_core::repository::{
     AuditLogRepository, EmailConfigRepository, EmailTemplateRepository, OrganizationRepository,
     TenantRepository, UserRepository,
 };
+use axiam_email::EmailEgress;
 use axiam_email::service::EmailService;
 use axiam_email::template::{TemplateContext, render_email, resolve_template};
 use futures_lite::StreamExt;
@@ -213,6 +214,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub async fn send_with_retry_and_audit<E, A, U, T, N, O>(
     msg: &OutboundMailMessage,
+    egress: &EmailEgress,
     email_config_repo: &E,
     audit_repo: &A,
     user_repo: &U,
@@ -238,8 +240,9 @@ where
         return Err(SendError("no email config for org/tenant".into()));
     };
 
-    // 2. Build EmailService from resolved config.
-    let svc = EmailService::from_config(&config).map_err(|e| SendError(e.to_string()))?;
+    // 2. Build EmailService from resolved config, its provider held to the
+    //    deployment's outbound address policy at the send (#529).
+    let svc = EmailService::from_config(&config, egress).map_err(|e| SendError(e.to_string()))?;
 
     // 3. Resolve the effective template: tenant custom → org custom → built-in
     //    (FUNC-03 / D-05). Each fetch is fail-safe (D-06): a DB error logs a
@@ -457,6 +460,7 @@ fn error_class_for(error_msg: &str) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 pub async fn start_mail_consumer<E, A, U, T, N, O>(
     channel: Channel,
+    egress: EmailEgress,
     email_config_repo: E,
     audit_repo: A,
     user_repo: U,
@@ -522,6 +526,7 @@ pub async fn start_mail_consumer<E, A, U, T, N, O>(
 
         let outcome = send_with_retry_and_audit(
             &msg,
+            &egress,
             &email_config_repo,
             &audit_repo,
             &user_repo,

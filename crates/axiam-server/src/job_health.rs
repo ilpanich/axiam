@@ -61,6 +61,10 @@ pub const SWEEP_JOBS: &[&str] = &[
     "dcr_unused_clients",
     "cimd_unused_clients",
     "dcr_registration_tokens",
+    // #523 (D-4): deleted tenants' data, purged in user-erasure order.
+    "tenant_purge",
+    // T-470: `vault_pki` revocations Vault does not have yet.
+    "vault_revocation",
 ];
 
 /// The revocation-feed prune (T-39/T-143, P23W4-06). The one sweep in the loop
@@ -241,6 +245,10 @@ mod tests {
             "ssf_step_up",
             "scim_reconcile",
             "ciba_request",
+            // #523 (D-4): the deleted tenants' purge.
+            "tenant_purge",
+            // T-470: revocations forwarded to Vault.
+            "vault_revocation",
         ] {
             assert!(recorded.contains(&job), "{job} is swept by the loop");
             assert!(SWEEP_JOBS.contains(&job), "{job} is registered");

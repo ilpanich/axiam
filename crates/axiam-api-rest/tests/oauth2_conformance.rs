@@ -150,6 +150,19 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
     .unwrap()
 }
 
+/// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
+/// counter pro-rates a peer first seen partway through a minute, so at the
+/// shipped 30 a test that starts late in the minute is refused after as few as
+/// three authorization requests (#532). The limit is pinned by
+/// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
+fn permissive_rate_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        end_session_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {{
         test::init_service(
@@ -167,7 +180,7 @@ macro_rules! test_app {
                     // routes and the issuer agree in both CI modes.
                     register_api_v1_routes_with::<TestDb>(
                         cfg,
-                        &RateLimitConfig::default(),
+                        &permissive_rate_limits(),
                         axiam_api_rest::RouteOptions {
                             tenant_issuer_paths: tenant_issuer_paths(),
                             ..axiam_api_rest::RouteOptions::default()

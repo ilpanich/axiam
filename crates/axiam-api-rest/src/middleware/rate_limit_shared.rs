@@ -64,7 +64,7 @@ use actix_web::{Error, HttpMessage, HttpResponse, web};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
 
-use crate::config::rate_limit::RateLimitKeyMode;
+use crate::config::rate_limit::{RateLimitConfig, RateLimitKeyMode};
 use crate::extractors::rate_limit::{
     RateLimitClientId, XForwardedForKeyExtractor, extract_client_id,
 };
@@ -151,6 +151,11 @@ pub struct RateLimitShared<C: Connection + Clone> {
     /// for every other resource (including `/auth/login`), which never
     /// touches the request body and always keys per-IP.
     client_identity_aware: bool,
+    /// Whether a person spends this bucket at human speed — the
+    /// browser-endpoint preset ([`RateLimitShared::browser_preset`]) — so a
+    /// key the counter has not seen gets its whole budget
+    /// ([`axiam_db::SharedRateLimitCounter::check_at_human`]).
+    human: bool,
     _marker: PhantomData<C>,
 }
 
@@ -167,7 +172,26 @@ impl<C: Connection + Clone> RateLimitShared<C> {
             limit,
             key_mode: RateLimitKeyMode::Ip,
             client_identity_aware: false,
+            human: false,
             _marker: PhantomData,
+        }
+    }
+
+    /// The **browser-endpoint preset**: `end_session_per_min` per IP, for a
+    /// route a person reaches by navigation — `/oauth2/authorize`, the
+    /// end-session routes and the SAML IdP's browser routes — under a bucket of
+    /// its own.
+    ///
+    /// Unlike [`Self::new`] with the same number, a key the counter has not
+    /// seen gets the whole preset whenever in the minute it arrives: the
+    /// counter's cold-entry seed, which pro-rates a newly seen key at limits of
+    /// 20 and up, is for machine traffic, and at 30 it left a person first seen
+    /// late in a minute about three authorizations. The preset owns that
+    /// property, so a route cannot take the number without it.
+    pub fn browser_preset(endpoint: &'static str, rate_limit_cfg: &RateLimitConfig) -> Self {
+        Self {
+            human: true,
+            ..Self::new(endpoint, rate_limit_cfg.end_session_per_min)
         }
     }
 
@@ -199,6 +223,7 @@ impl<C: Connection + Clone> RateLimitShared<C> {
             limit,
             key_mode,
             client_identity_aware: true,
+            human: false,
             _marker: PhantomData,
         }
     }
@@ -211,6 +236,7 @@ impl<C: Connection + Clone> Clone for RateLimitShared<C> {
             limit: self.limit,
             key_mode: self.key_mode,
             client_identity_aware: self.client_identity_aware,
+            human: self.human,
             _marker: PhantomData,
         }
     }
@@ -235,6 +261,7 @@ where
             limit: self.limit,
             key_mode: self.key_mode,
             client_identity_aware: self.client_identity_aware,
+            human: self.human,
             _marker: PhantomData,
         }))
     }
@@ -250,6 +277,7 @@ pub struct RateLimitSharedService<S, C: Connection + Clone> {
     limit: u32,
     key_mode: RateLimitKeyMode,
     client_identity_aware: bool,
+    human: bool,
     _marker: PhantomData<C>,
 }
 
@@ -275,6 +303,7 @@ where
         let limit = self.limit;
         let key_mode = self.key_mode;
         let client_identity_aware = self.client_identity_aware;
+        let human = self.human;
         let inner = Rc::clone(&self.inner);
 
         // Reuse the EXACT fixed IP-key extraction logic (D-01d) so the
@@ -366,7 +395,14 @@ where
                     // inside the window the request landed and can apply the
                     // sliding-window bound that closes the run-5 J1
                     // over-admission (`axiam_db::rate_limit_counter::WindowMode`).
-                    let allow = counter.check_at(&key, now, limit);
+                    //
+                    // The browser-endpoint preset skips the counter's
+                    // cold-entry seed: its buckets are a person's.
+                    let allow = if human {
+                        counter.check_at_human(&key, now, limit)
+                    } else {
+                        counter.check_at(&key, now, limit)
+                    };
                     Some((counter, key, allow))
                 }
                 // No key part (IP unavailable) or no counter registered —
@@ -431,5 +467,27 @@ mod window_contract_tests {
 
         assert_eq!(start.timestamp() % WINDOW_SECS, 0, "aligned to the window");
         assert!(start <= now && now.timestamp() - start.timestamp() < WINDOW_SECS);
+    }
+
+    /// The browser-endpoint preset takes its number from
+    /// `end_session_per_min` and is the one constructor that marks its bucket
+    /// human-facing; `new` with the same number keeps the machine shape.
+    #[test]
+    fn the_browser_preset_is_human_facing_and_new_is_not() {
+        let cfg = RateLimitConfig {
+            end_session_per_min: 30,
+            ..RateLimitConfig::default()
+        };
+        let preset = RateLimitShared::<surrealdb::engine::local::Db>::browser_preset(
+            "oauth2_authorize",
+            &cfg,
+        );
+        assert_eq!(preset.limit, 30);
+        assert!(preset.human);
+        assert!(!preset.client_identity_aware);
+        assert!(preset.clone().human, "a clone keeps the flag");
+
+        let plain = RateLimitShared::<surrealdb::engine::local::Db>::new("revoke", 30);
+        assert!(!plain.human);
     }
 }

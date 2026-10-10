@@ -29,6 +29,7 @@ use x509_parser::time::ASN1Time;
 use zeroize::Zeroize;
 
 use crate::ca_key_store::CaKeyCustodians;
+use crate::crl::CrlDistribution;
 use crate::crypto::{compute_fingerprint, generate_keypair};
 use crate::subject::subject_common_name;
 
@@ -51,6 +52,9 @@ pub struct CaService<R> {
     crypto_semaphore: Arc<Semaphore>,
     /// Who holds the signing keys. See [`crate::ca_key_store`].
     custodians: Arc<CaKeyCustodians>,
+    /// Where a parent CA's revocation list is published (#565). See
+    /// [`Self::with_crl_distribution`].
+    crl_distribution: Option<CrlDistribution>,
 }
 
 impl<R: CaCertificateRepository> CaService<R> {
@@ -65,7 +69,21 @@ impl<R: CaCertificateRepository> CaService<R> {
             config,
             crypto_semaphore,
             custodians,
+            crl_distribution: None,
         }
+    }
+
+    /// Write a CRL distribution point naming the parent's revocation list into
+    /// every subordinate CA this service signs in-process (#565, T-102).
+    ///
+    /// The parent's list names a revoked tenant signing CA, and a relying party
+    /// that walks the chain finds that list through this extension. The same
+    /// rules as `CertService::with_crl_distribution`: `None` writes nothing,
+    /// and an intermediate Vault's PKI engine creates carries Vault's profile.
+    #[must_use]
+    pub fn with_crl_distribution(mut self, distribution: Option<CrlDistribution>) -> Self {
+        self.crl_distribution = distribution;
+        self
     }
 
     /// Generate a new CA certificate.
@@ -452,6 +470,7 @@ impl<R: CaCertificateRepository> CaService<R> {
         let key_algorithm = input.key_algorithm.clone();
         let not_before_ts = not_before.timestamp();
         let not_after_ts = not_after.timestamp();
+        let crl_points = self.crl_points_under(&parent);
 
         let (private_key_pem, public_cert_pem, fingerprint) =
             tokio::task::spawn_blocking(move || -> AxiamResult<(String, String, String)> {
@@ -474,6 +493,7 @@ impl<R: CaCertificateRepository> CaService<R> {
 
                 let mut params = intermediate_params(&subject, not_before_ts, not_after_ts)?;
                 params.use_authority_key_identifier_extension = true;
+                params.crl_distribution_points = crl_points;
 
                 let cert = params.signed_by(&key_pair, &issuer).map_err(|e| {
                     AxiamError::Certificate(format!("intermediate CA signing failed: {e}"))
@@ -621,6 +641,7 @@ impl<R: CaCertificateRepository> CaService<R> {
         let subject = csr_subject.clone();
         let not_before_ts = not_before.timestamp();
         let not_after_ts = not_after.timestamp();
+        let crl_points = self.crl_points_under(&parent);
 
         let (public_cert_pem, fingerprint) =
             tokio::task::spawn_blocking(move || -> AxiamResult<(String, String)> {
@@ -649,6 +670,7 @@ impl<R: CaCertificateRepository> CaService<R> {
                 // certificate cannot disagree.
                 request.params = intermediate_params(&subject, not_before_ts, not_after_ts)?;
                 request.params.use_authority_key_identifier_extension = true;
+                request.params.crl_distribution_points = crl_points;
 
                 let cert = request.signed_by(&issuer).map_err(|e| {
                     AxiamError::Certificate(format!("intermediate CA signing failed: {e}"))
@@ -742,6 +764,16 @@ impl<R: CaCertificateRepository> CaService<R> {
     }
 
     /// A [`CaKeyRef`] for one CA, for the signing path to load its key with.
+    /// The distribution point a certificate `parent` signs carries — its
+    /// list's URL — or none when the deployment publishes no base URL.
+    fn crl_points_under(&self, parent: &CaCertificate) -> Vec<rcgen::CrlDistributionPoint> {
+        self.crl_distribution
+            .as_ref()
+            .map(|d| d.point_for(parent))
+            .into_iter()
+            .collect()
+    }
+
     pub fn key_ref(certificate: &CaCertificate) -> CaKeyRef {
         CaKeyRef {
             organization_id: certificate.organization_id,

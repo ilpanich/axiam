@@ -9,6 +9,7 @@ use axiam_core::models::oauth2_client::{
     OAuth2Client, UpdateOAuth2Client,
 };
 use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
+use axiam_oauth2::client_grants::ClientGrantStores;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Connection;
@@ -1022,7 +1023,7 @@ pub async fn update<C: Connection + Clone>(
     tag = "oauth2-clients",
     params(("id" = Uuid, Path, description = "OAuth2 client ID")),
     responses(
-        (status = 204, description = "OAuth2 client deleted"),
+        (status = 204, description = "OAuth2 client deleted; its refresh tokens, authorization codes and pushed requests are revoked first"),
         (status = 404, description = "OAuth2 client not found"),
     ),
     security(("bearer" = []))
@@ -1037,8 +1038,53 @@ pub async fn delete<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let id = path.into_inner();
+    let client = state
+        .oauth2_client_repo
+        .get_by_id(user.tenant_id, id)
+        .await?;
+
+    // #517 — revoke first, and refuse the delete if that fails. The other
+    // order would leave a row-less client whose grants are still live, and a
+    // retry would answer `404`: for a `managed_by: cimd` client the next
+    // request re-materialises the row under the same `client_id` and every one
+    // of those refresh tokens, codes and pushed requests works again.
+    revoke_client_grants(&state, user.tenant_id, &client.client_id).await?;
     state.oauth2_client_repo.delete(user.tenant_id, id).await?;
+
+    // A refresh or an authorization that read the row before the delete can
+    // still have written a token or a code between the two writes above; one
+    // more pass leaves nothing live.
+    // Logged rather than returned, because the client is already gone.
+    if let Err(e) = revoke_client_grants(&state, user.tenant_id, &client.client_id).await {
+        tracing::error!(
+            error = %e,
+            tenant_id = %user.tenant_id,
+            client_id = %client.client_id,
+            "a deleted client's grants could not be revoked a second time"
+        );
+    }
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// Revoke what deleting a client must revoke: its refresh tokens, its
+/// authorization codes and its pushed requests (#517). Both deletion paths
+/// call it — `DELETE /api/v1/oauth2-clients/{id}` (an administrator) and RFC
+/// 7592's `DELETE /oauth2/register/{client_id}` (the client itself) — and the
+/// unused-client sweep calls the same [`ClientGrantStores::revoke`]. What is
+/// revoked, what is not, and why, is written once on
+/// [`axiam_oauth2::client_grants`].
+pub(crate) async fn revoke_client_grants<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    client_id: &str,
+) -> Result<(), axiam_core::error::AxiamError> {
+    ClientGrantStores::new(
+        state.refresh_token_repo.clone(),
+        axiam_db::SurrealAuthorizationCodeRepository::new(state.db.clone()),
+        axiam_db::SurrealPushedAuthRequestRepository::new(state.db.clone()),
+    )
+    .revoke(tenant_id, client_id)
+    .await
 }
 
 #[cfg(test)]

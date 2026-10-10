@@ -127,6 +127,19 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
     .unwrap()
 }
 
+/// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
+/// counter pro-rates a peer first seen partway through a minute, so at the
+/// shipped 30 a test that starts late in the minute is refused after as few as
+/// three authorization requests (#532). The limit is pinned by
+/// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
+fn permissive_rate_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        end_session_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {{
         test::init_service(
@@ -139,9 +152,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
-                .configure(|cfg| {
-                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
-                }),
+                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &permissive_rate_limits())),
         )
         .await
     }};
@@ -996,6 +1007,221 @@ async fn p23w1_01_a_suspended_accounts_refresh_token_mints_nothing_until_reactiv
         resp.status().as_u16(),
         200,
         "the refusal consumed nothing: a reactivated account's grant still works"
+    );
+}
+
+/// **#520, P23W1-12.** UserInfo and introspection re-read the account. A
+/// suspended (locked or inactive) user's access token is answered `401` at
+/// UserInfo, on GET and on POST, and introspection reports both that access
+/// token and the user's refresh token `active: false` — before the fix the
+/// three answered as if nothing had happened until `exp`. A pending account
+/// is not suspended (every federated account is pending for life), and a
+/// reactivated one is answered exactly as before: nothing was revoked.
+#[actix_rt::test]
+async fn p23w1_12_userinfo_and_introspection_answer_for_a_suspended_account() {
+    use axiam_core::models::user::{UpdateUser, UserStatus};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
+    let code = do_authorize(&app, &user_jwt, &client_id, &redirect_uri, None, None).await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let access_token = body["access_token"].as_str().unwrap().to_owned();
+    let refresh_token = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let set_status = |status: UserStatus| {
+        let repo = SurrealUserRepository::new(db.clone());
+        async move {
+            repo.update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+    };
+    let introspect = |token: &str| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/introspect?tenant_id={tenant_id}"))
+            .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+            .set_payload(format!(
+                "token={token}&client_id={client_id}&client_secret={client_secret}"
+            ))
+            .to_request()
+    };
+    let userinfo_get = || {
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/oauth2/userinfo")
+            .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+            .to_request()
+    };
+    let userinfo_post = || {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/oauth2/userinfo")
+            .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+            .set_payload(format!("access_token={user_jwt}"))
+            .to_request()
+    };
+
+    // `expect_active` is what an acting account is answered: a 200 at
+    // UserInfo and `active: true` for both tokens.
+    for (status, expect_active) in [
+        (UserStatus::Active, true),
+        (UserStatus::Locked, false),
+        (UserStatus::Inactive, false),
+        (UserStatus::PendingVerification, true),
+        (UserStatus::Active, true),
+    ] {
+        set_status(status.clone()).await;
+        for (what, token) in [("access", &access_token), ("refresh", &refresh_token)] {
+            let resp = test::call_service(&app, introspect(token)).await;
+            assert_eq!(resp.status().as_u16(), 200, "{status:?} {what}");
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["active"], expect_active, "{status:?} {what}: {body}");
+            if !expect_active {
+                assert!(body["sub"].is_null(), "{status:?} {what}: {body}");
+            }
+        }
+        for (method, req) in [("GET", userinfo_get()), ("POST", userinfo_post())] {
+            let resp = test::call_service(&app, req).await;
+            let want = if expect_active { 200 } else { 401 };
+            assert_eq!(resp.status().as_u16(), want, "{status:?} UserInfo {method}");
+        }
+    }
+}
+
+/// **#520, P23W1-13.** Narrowing a client's registered scopes narrows the
+/// grants it already holds. A grant for `openid profile` is made; an
+/// administrator then removes `profile` from the registration
+/// (`PUT /api/v1/oauth2-clients/{id}`; an RFC 7592 `PUT` writes the same
+/// column). The next refresh mints an access token carrying only `openid`, says
+/// so in `scope`, and rotates to a refresh token holding only `openid` — so
+/// putting `profile` back on the registration does not restore it to the grant.
+/// Before the fix the refresh copied the wider list forward on every rotation.
+#[actix_rt::test]
+async fn p23w1_13_narrowing_a_clients_scopes_narrows_its_refresh_tokens() {
+    use axiam_core::repository::OAuth2ClientRepository;
+    use axiam_db::repository::SurrealOAuth2ClientRepository;
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
+    let client_row_id = SurrealOAuth2ClientRepository::new(db.clone())
+        .get_by_client_id(tenant_id, &client_id)
+        .await
+        .unwrap()
+        .id;
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?response_type=code&client_id={client_id}\
+             &redirect_uri={redirect_uri}&scope=openid%20profile"
+        ))
+        .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let location = resp.headers().get("Location").unwrap().to_str().unwrap();
+    let code = url::Url::parse(location)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.into_owned())
+        .expect("a code");
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["scope"], "openid profile");
+    let mut refresh_token = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let set_scopes = |scopes: serde_json::Value| {
+        test::TestRequest::put()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/api/v1/oauth2-clients/{client_row_id}"))
+            .insert_header(("Authorization", format!("Bearer {user_jwt}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(serde_json::json!({ "scopes": scopes }))
+            .to_request()
+    };
+    let refresh = |token: &str| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+            .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+            .set_payload(format!(
+                "grant_type=refresh_token&refresh_token={token}\
+                 &client_id={client_id}&client_secret={client_secret}"
+            ))
+            .to_request()
+    };
+    let access_scope = |jwt: &str| -> serde_json::Value {
+        let payload = jwt.split('.').nth(1).unwrap();
+        let claims: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+        claims["scope"].clone()
+    };
+
+    let resp = test::call_service(&app, set_scopes(serde_json::json!(["openid"]))).await;
+    assert_eq!(resp.status().as_u16(), 200, "narrow the registration");
+
+    let resp = test::call_service(&app, refresh(&refresh_token)).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["scope"], "openid", "{body}");
+    assert_eq!(
+        access_scope(body["access_token"].as_str().unwrap()),
+        "openid"
+    );
+    refresh_token = body["refresh_token"].as_str().unwrap().to_owned();
+
+    // The rotated token holds the narrowed grant: widening the registration
+    // again gives the grant nothing back.
+    let resp = test::call_service(&app, set_scopes(serde_json::json!(["openid", "profile"]))).await;
+    assert_eq!(resp.status().as_u16(), 200, "widen the registration again");
+    let resp = test::call_service(&app, refresh(&refresh_token)).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["scope"], "openid", "{body}");
+    assert_eq!(
+        access_scope(body["access_token"].as_str().unwrap()),
+        "openid"
     );
 }
 

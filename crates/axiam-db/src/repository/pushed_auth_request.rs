@@ -390,4 +390,26 @@ impl<C: Connection> PushedAuthRequestRepository for SurrealPushedAuthRequestRepo
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.first().map(|r| r.c.max(0) as u64).unwrap_or(0))
     }
+
+    async fn delete_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS c FROM (DELETE pushed_auth_request \
+                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+                 RETURN BEFORE) GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        #[derive(Debug, SurrealValue)]
+        struct CountRow {
+            c: i64,
+        }
+        let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows.first().map(|r| r.c.max(0) as u64).unwrap_or(0))
+    }
 }

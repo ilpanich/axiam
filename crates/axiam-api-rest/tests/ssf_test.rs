@@ -485,10 +485,14 @@ impl World {
     }
 }
 
+/// `end_session_per_min` sizes the `oauth2_authorize` bucket the step-up
+/// return legs go through, which the shared counter pro-rates for a peer first
+/// seen late in a minute (#532).
 fn permissive_limits() -> RateLimitConfig {
     RateLimitConfig {
         ssf_per_min: 100_000,
         ssf_admin_per_min: 100_000,
+        end_session_per_min: 100_000,
         ..RateLimitConfig::default()
     }
 }

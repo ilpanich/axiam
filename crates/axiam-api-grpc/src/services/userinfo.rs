@@ -25,6 +25,10 @@ impl<U: UserRepository> UserInfoServiceImpl<U> {
     }
 }
 
+/// The one UNAUTHENTICATED message for a subject that may not act, whether it
+/// was suspended or removed.
+const ACCOUNT_MAY_NOT_ACT: &str = "the token's subject may no longer sign in";
+
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, Status> {
     value
         .parse::<Uuid>()
@@ -58,31 +62,34 @@ impl<U: UserRepository + 'static> UserInfoService for UserInfoServiceImpl<U> {
             .collect();
         let has_scope = |s: &str| scopes.contains(&s);
 
-        // Fetch user details only when email/profile scope requires them.
-        let (email, preferred_username) = if has_scope("email") || has_scope("profile") {
-            match self.user_repo.get_by_id(tenant_id, user_id).await {
-                Ok(u) => (
-                    has_scope("email").then_some(u.email),
-                    has_scope("profile").then_some(u.username),
-                ),
-                // Subject not found (never provisioned, or hard-removed): the
-                // token no longer maps to a live user, so report UNAUTHENTICATED.
-                // Any other repo error is INTERNAL, without leaking backend
-                // detail (mirrors the REST handler's fail-closed posture,
-                // adapted to gRPC status codes). Note: the standard `delete` is a
-                // soft-delete (status→Inactive, row retained), so a soft-deleted
-                // user still resolves here — matching REST userinfo, which also
-                // does not status-gate.
-                Err(AxiamError::NotFound { .. }) => {
-                    return Err(Status::unauthenticated("subject not found"));
-                }
-                Err(_) => {
-                    return Err(Status::internal("failed to retrieve user claims"));
-                }
+        // The account is read on every call and must still be allowed to act
+        // (#520, P23W1-12) — the rule REST UserInfo, every OAuth2 grant and
+        // `/oauth2/authorize` apply (`axiam_auth::service::account_may_act`).
+        // A locked, inactive, anonymized or deleted account, or a subject that
+        // no longer exists, is UNAUTHENTICATED with one message, so the answer
+        // does not say which. Any other repo error is INTERNAL, without
+        // leaking backend detail. One indexed read per call: identity reads
+        // are not the authorization hot path (`CheckAccess` is).
+        let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
+            Ok(u) => u,
+            Err(AxiamError::NotFound { .. }) => {
+                return Err(Status::unauthenticated(ACCOUNT_MAY_NOT_ACT));
             }
-        } else {
-            (None, None)
+            Err(_) => {
+                return Err(Status::internal("failed to retrieve user claims"));
+            }
         };
+        if let Err(reason) = axiam_auth::service::account_may_act(&user) {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                reason = %reason,
+                "grpc userinfo: refusing a token whose account may no longer sign in"
+            );
+            return Err(Status::unauthenticated(ACCOUNT_MAY_NOT_ACT));
+        }
+        let email = has_scope("email").then_some(user.email);
+        let preferred_username = has_scope("profile").then_some(user.username);
 
         Ok(Response::new(GetUserInfoResponse {
             sub: claims.sub,

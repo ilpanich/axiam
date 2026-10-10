@@ -159,7 +159,11 @@ EXEMPT: dict[str, str] = {
     # page's minimal-profile section and in docs/deployment: the compose file
     # that ships with that profile is the first deployment to set it, and the
     # audit-durability review (A7) asked for the exemption to go.
-    "AXIAM__PKI__SSRF_ALLOWED_HOSTS": "egress allow-list for metadata fetches",
+    # `AXIAM__PKI__SSRF_ALLOWED_HOSTS` was exempt here ("egress allow-list for
+    # metadata fetches"). #529 sends an email provider's `api_url` through the
+    # same guard, so a deployment whose provider endpoint is internal reaches
+    # for it: the configuration page's email-provider section names it, and the
+    # exemption is gone.
     # `AXIAM__GRPC__STRICT_REVOCATION` was exempt here as an opt-in the
     # read-path guide covered. Since 1.0.0-beta11 the gRPC listener may be
     # published through the edge, and the hardening rule for doing so tells an

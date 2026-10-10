@@ -167,6 +167,8 @@ interface ConfigFieldsProps {
   buttonIcon: string;
   allowTenantInheritance: boolean;
   requirePkce: boolean;
+  allowSha1Signatures: boolean;
+  idpMetadataSigningCertPem: string;
   // Handlers
   onProviderChange: (v: string) => void;
   onProviderKindChange: (v: ProviderKind) => void;
@@ -188,6 +190,8 @@ interface ConfigFieldsProps {
   onButtonIconChange: (v: string) => void;
   onAllowTenantInheritanceChange: (v: boolean) => void;
   onRequirePkceChange: (v: boolean) => void;
+  onAllowSha1SignaturesChange: (v: boolean) => void;
+  onIdpMetadataSigningCertPemChange: (v: string) => void;
   idPrefix: string;
   isEditMode?: boolean;
   /** Whether this principal can offer the provider to the organization's tenants. */
@@ -223,6 +227,8 @@ function ConfigFields(props: ConfigFieldsProps) {
     buttonIcon,
     allowTenantInheritance,
     requirePkce,
+    allowSha1Signatures,
+    idpMetadataSigningCertPem,
     idPrefix,
     isEditMode = false,
     canOfferInheritance = false,
@@ -559,6 +565,44 @@ function ConfigFields(props: ConfigFieldsProps) {
         </div>
       )}
 
+      {/* #530: the certificate the IdP's metadata document is signed with.
+          Optional; once set, unsigned or tampered metadata stops sign-in. */}
+      {isSaml && (
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}-metadata-cert`}>
+            Metadata Signing Certificate (PEM)
+          </Label>
+          <Textarea
+            id={`${idPrefix}-metadata-cert`}
+            value={idpMetadataSigningCertPem}
+            onChange={(e) =>
+              props.onIdpMetadataSigningCertPemChange(e.target.value)
+            }
+            placeholder="-----BEGIN CERTIFICATE-----"
+            rows={4}
+            className="font-mono text-xs"
+          />
+          <p className="text-xs text-muted-foreground">
+            Optional. When set, the metadata document must carry a SHA-2
+            signature on its EntityDescriptor that verifies against this
+            certificate; an unsigned or altered document is refused and no
+            sign-in starts. Leave empty to trust the HTTPS fetch alone.
+          </p>
+        </div>
+      )}
+
+      {/* #531: SHA-1 is refused since 1.0.0; this is the per-provider escape
+          hatch, audited server-side when it is turned on. */}
+      {isSaml && (
+        <ToggleField
+          id={`${idPrefix}-allow-sha1`}
+          label="Accept SHA-1 signatures"
+          checked={allowSha1Signatures}
+          onChange={props.onAllowSha1SignaturesChange}
+          description="Only for an identity provider that cannot sign with SHA-2 yet. SHA-1 is refused by default; turning this on is recorded in the audit log. Turn it off once the provider signs with SHA-256."
+        />
+      )}
+
       {/* Accepted signature algorithms. Rendered for OIDC as well as SAML —
           it was SAML-only, which is why an Apple config (ES256-signed client
           secret, and providers that sign with something other than RS256)
@@ -675,6 +719,9 @@ function useConfigFormState() {
   const [buttonIcon, setButtonIcon] = useState("");
   const [allowTenantInheritance, setAllowTenantInheritance] = useState(false);
   const [requirePkce, setRequirePkce] = useState(false);
+  const [allowSha1Signatures, setAllowSha1Signatures] = useState(false);
+  const [idpMetadataSigningCertPem, setIdpMetadataSigningCertPem] =
+    useState("");
   const [enabled, setEnabled] = useState(true);
   const [error, setError] = useState("");
   const [tokenExchange, setTokenExchange] = useState<TokenExchangeTrust>(
@@ -738,6 +785,8 @@ function useConfigFormState() {
     setButtonIcon("");
     setAllowTenantInheritance(false);
     setRequirePkce(false);
+    setAllowSha1Signatures(false);
+    setIdpMetadataSigningCertPem("");
     setEnabled(true);
     setError("");
     setTokenExchange(DEFAULT_TOKEN_EXCHANGE_TRUST);
@@ -776,6 +825,10 @@ function useConfigFormState() {
     setButtonIcon(config.button_icon ?? "");
     setAllowTenantInheritance(config.allow_tenant_inheritance ?? false);
     setRequirePkce(config.pkce_required ?? false);
+    setAllowSha1Signatures(config.allow_sha1_signatures ?? false);
+    // A certificate is public, so unlike the client secret it is returned
+    // and prefilled; emptying the field clears it.
+    setIdpMetadataSigningCertPem(config.idp_metadata_signing_cert_pem ?? "");
     setEnabled(config.enabled);
     setError("");
     const trust = config.token_exchange ?? DEFAULT_TOKEN_EXCHANGE_TRUST;
@@ -857,6 +910,10 @@ function useConfigFormState() {
     setAllowTenantInheritance,
     requirePkce,
     setRequirePkce,
+    allowSha1Signatures,
+    setAllowSha1Signatures,
+    idpMetadataSigningCertPem,
+    setIdpMetadataSigningCertPem,
     enabled,
     setEnabled,
     error,
@@ -905,6 +962,8 @@ function configFieldProps(
     buttonIcon: form.buttonIcon,
     allowTenantInheritance: form.allowTenantInheritance,
     requirePkce: form.requirePkce,
+    allowSha1Signatures: form.allowSha1Signatures,
+    idpMetadataSigningCertPem: form.idpMetadataSigningCertPem,
     onProviderChange: form.setProvider,
     onProviderKindChange: form.setProviderKind,
     onProviderSlugChange: form.setProviderSlug,
@@ -925,6 +984,8 @@ function configFieldProps(
     onButtonIconChange: form.setButtonIcon,
     onAllowTenantInheritanceChange: form.setAllowTenantInheritance,
     onRequirePkceChange: form.setRequirePkce,
+    onAllowSha1SignaturesChange: form.setAllowSha1Signatures,
+    onIdpMetadataSigningCertPemChange: form.setIdpMetadataSigningCertPem,
   };
 }
 
@@ -1049,6 +1110,9 @@ export function FederationPage() {
 
     if (createForm.protocol === "Saml") {
       payload.idp_signing_cert_pem = createForm.idpSigningCertPem.trim();
+      payload.allow_sha1_signatures = createForm.allowSha1Signatures;
+      const metadataCert = createForm.idpMetadataSigningCertPem.trim();
+      if (metadataCert) payload.idp_metadata_signing_cert_pem = metadataCert;
     }
     // Sent for every protocol but OAuth2, where the field is meaningless —
     // there is no signature to constrain.
@@ -1129,6 +1193,9 @@ export function FederationPage() {
     if (editConfig.protocol === "Saml") {
       const cert = editForm.idpSigningCertPem.trim();
       if (cert) payload.idp_signing_cert_pem = cert;
+      payload.allow_sha1_signatures = editForm.allowSha1Signatures;
+      payload.idp_metadata_signing_cert_pem =
+        editForm.idpMetadataSigningCertPem.trim() || null;
     }
     if (editConfig.protocol !== "OAuth2") {
       payload.allowed_algorithms = parseList(editForm.allowedAlgorithms);

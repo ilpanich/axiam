@@ -171,6 +171,33 @@ impl<C: Connection> SurrealRefreshTokenRepository<C> {
     }
 }
 
+impl<C: Connection> SurrealRefreshTokenRepository<C> {
+    /// Revoke every refresh token of a tenant — with its sessions, the first
+    /// step of a tenant deletion (#523, D-4). Returns how many were live.
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure, including a statement-level one.
+    pub async fn revoke_all_for_tenant(&self, tenant_id: Uuid) -> AxiamResult<u64> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM oauth2_refresh_token \
+                     WHERE tenant_id = $tenant_id AND revoked = false GROUP ALL; \
+                 UPDATE oauth2_refresh_token SET revoked = true \
+                     WHERE tenant_id = $tenant_id AND revoked = false",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let counted: Vec<crate::helpers::CountRow> = result.take(0).map_err(DbError::from)?;
+        Ok(counted.first().map_or(0, |r| r.total))
+    }
+}
+
 impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> {
     async fn create(&self, input: CreateRefreshToken) -> AxiamResult<RefreshToken> {
         let id = new_id();

@@ -362,6 +362,20 @@ impl AuthenticatedUser {
             SubjectScope::Tenant
         }
     }
+
+    /// Whether AXIAM minted this token for an OAuth2 client — through the
+    /// code, refresh, CIBA or device grant — rather than for a console
+    /// sign-in, whose token carries no `client_id`.
+    ///
+    /// Such a token names the user and a live session, and this extractor
+    /// admits it like a console sign-in's (it reads `sid` so that the token
+    /// works at UserInfo). An approval surface — the CIBA approval page, the
+    /// device verification page — is the person's own act and refuses it with
+    /// `403` (T-447): a relying party holding one of its user's tokens must
+    /// not approve in the user's name.
+    pub fn minted_for_client(&self) -> bool {
+        self.claims.0.client_id.is_some()
+    }
 }
 
 impl actix_web::FromRequest for AuthenticatedUser {

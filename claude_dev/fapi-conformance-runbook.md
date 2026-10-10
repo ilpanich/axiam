@@ -54,6 +54,13 @@ Two consequences shape everything below.
   certificate is rejected during the TLS handshake, *before* AXIAM sees a
   request — so AXIAM's own logs show nothing and the suite reports a transport
   error.
+- **The authorization endpoint's limiter must be out of the way.** A plan sweep
+  sends dozens of authorizations a minute from the suite's one address, and
+  `/oauth2/authorize` (both mounts) carries the browser-endpoint preset,
+  `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` — 30 a minute per IP by default
+  (#532). `bench-up`'s default `rl=neutralized` lifts it; against any other
+  deployment set that knob well above the sweep's rate, or modules fail with
+  `429` at the authorization request.
 - An admin bearer token for the tenant under test, in `AXIAM_ADMIN_TOKEN`.
 
 ---

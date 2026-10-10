@@ -368,6 +368,16 @@ To retire a row immediately, delete it through the admin API, or remove the
 publisher from `cimd.trusted_client_id_domains` — the second also stops it
 being recreated by the next request.
 
+**Removing a row revokes what it was granted.** Both
+`DELETE /api/v1/oauth2-clients/{id}` and the sweep revoke the client's refresh
+tokens and void its outstanding authorization codes and pushed requests before
+they remove the row (#517), so a row the next request brings back starts with
+none, and every user signs in to that client again. Before 1.0.0 neither
+revoked anything, and since the re-materialised row has the same `client_id` —
+the document's URL — every refresh token, code and pushed request issued
+before the row went worked again. Access tokens are not revoked; they run out
+within the access-token lifetime.
+
 Setting `cimd.enabled` back to `false` stops every URL-shaped `client_id`
 resolving immediately. It does not delete the rows already materialised; those
 become ordinary unused clients, refusing every request that needs a fresh

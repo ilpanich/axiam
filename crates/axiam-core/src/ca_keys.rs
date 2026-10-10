@@ -452,6 +452,30 @@ pub trait CaKeyStore: Send + Sync {
         })
     }
 
+    /// Revoke, in the custodian's own records, a certificate it signed (T-470).
+    ///
+    /// Only called when [`Self::signs_remotely`] is true. A custodian that
+    /// hands its key over has AXIAM sign the CA's revocation list, which reads
+    /// the revocation from AXIAM's own row; a remote signer publishes its own
+    /// list, which learns of a revocation through this call and nothing else.
+    /// `serial_hex` is the certificate's serial as colon-separated lowercase
+    /// hex bytes. Revoking a certificate the custodian already revoked must
+    /// succeed: the caller retries until it is told the revocation is there.
+    fn revoke_signed<'a>(
+        &'a self,
+        key_ref: &'a CaKeyRef,
+        serial_hex: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        let _ = (key_ref, serial_hex);
+        Box::pin(async {
+            Err(AxiamError::Internal(
+                "this CA key custodian does not sign, so it keeps no revocations: AXIAM's \
+                 own list names them"
+                    .into(),
+            ))
+        })
+    }
+
     /// Which custodian this is. Recorded on the CA row at creation.
     fn custody(&self) -> CaKeyCustody;
 
@@ -599,7 +623,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_remote_signing_default_refuses_while_signs_remotely_is_false() {
-        // These three are only ever called when `signs_remotely()` is true, so
+        // These four are only ever called when `signs_remotely()` is true, so
         // reaching a default body means the caller asked a custodian to do
         // something it never claimed it could. Refusing keeps that a visible
         // error instead of a silently unsigned or wrongly-signed certificate.
@@ -642,6 +666,7 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(custodian.revoke_signed(&parent, "01:02").await.is_err());
     }
 
     #[tokio::test]

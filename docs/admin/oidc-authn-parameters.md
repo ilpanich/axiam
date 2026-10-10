@@ -18,7 +18,7 @@ change what a token *means*:
 | `prompt=login` | authenticate them again, whatever session exists |
 | `max_age` | do not hand me a token minted from an authentication older than this |
 | `acr_values` / `claims.id_token.acr` | tell me which class of authentication this was, and prefer this one |
-| `id_token_hint` | I believe *this* end user is present; confirm or correct me |
+| `id_token_hint` / `claims.id_token.sub` with a `value` | I believe *this* end user is present; confirm or correct me — and never give me a token for anybody else |
 
 Until W4, AXIAM accepted all five and acted on none. That is a conformant
 answer to nothing: a relying party that sent `max_age=60` and received a code
@@ -144,7 +144,7 @@ back to English.
 
 | Answer | When |
 |---|---|
-| `login_required` | `prompt=none` with no usable session, a `max_age` an authentication cannot meet, an `id_token_hint` naming somebody else |
+| `login_required` | `prompt=none` with no usable session, a `max_age` an authentication cannot meet, an `id_token_hint` or a `claims.id_token.sub` value naming somebody else |
 | `account_selection_required` | as above, when `prompt=select_account` was asked |
 | `unmet_authentication_requirements` | an **essential** `claims.id_token.acr` the end user cannot reach — typically a request for MFA from a user with no second factor enrolled |
 | `invalid_request` | a value AXIAM cannot parse (`max_age=abc`), `prompt=none` combined with another value, an authentication-request parameter on the query string beside a `request_uri` |
@@ -204,6 +204,22 @@ so an anonymous browser is sent to sign in first and the request is then
 refused rather than converted into a code — no token is ever issued behind an
 interaction the relying party forbade, but the failure is not the tidy
 `login_required` the inline form produces.
+
+**`claims.id_token.sub` is answered like `id_token_hint`** (OIDC Core §5.5.1;
+#520). A `claims` parameter whose `id_token.sub` carries a `value` (or
+`values`) is compared, as the exact string, with the `sub` AXIAM would put in
+the ID token — the user's id. A match changes nothing. A mismatch sends the
+browser to sign in again, because the request can be satisfied by signing in
+*as* the named user; if the sign-in still produces somebody else, or the
+request carried `prompt=none`, the answer is `login_required`
+(`account_selection_required` under `prompt=select_account`) and no code is
+issued. An anonymous browser is sent to sign in before the value is read, so
+it steers nothing until somebody has authenticated. A `sub` member that is not
+`null` or an object, or whose `value` is not a string, is `invalid_request`.
+`"sub": null` asks for nothing beyond the `sub` every ID token carries. A
+`fapi2` client, which this lane never serves, is refused a `claims` carrying a
+`sub` value with `invalid_request` — the same answer it gets for
+`id_token_hint` — rather than having the constraint dropped.
 
 **A federated sign-in is `1fa`.** AXIAM records `amr = ["fed"]` and nothing
 else: what the upstream provider did to produce its assertion is the

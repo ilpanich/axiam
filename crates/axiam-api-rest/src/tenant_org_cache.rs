@@ -29,9 +29,10 @@
 //! The TTL therefore is not a correctness mechanism for staleness; it exists
 //! so that a **deleted** tenant stops being served from memory within a bounded
 //! time, and so the map cannot grow without bound in a deployment that churns
-//! tenants. Deletion is the only transition that matters here, and a rotated
-//! access token for a deleted tenant fails at the next authorization check
-//! regardless — the tenant's rows are gone.
+//! tenants. Deletion is the only transition that matters here, and a warm
+//! entry for a deleted tenant mints nothing: the deletion revokes the tenant's
+//! sessions in the request (#523), so the refresh it would serve finds no
+//! session to rotate, and the deleting replica drops the entry at once.
 //!
 //! What this cache deliberately does **not** do: it never answers "does this
 //! tenant exist" for anything except this mapping, and it is never consulted

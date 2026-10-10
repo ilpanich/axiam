@@ -130,6 +130,19 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
     (db, org.id, tenant.id, user.id)
 }
 
+/// The shipped limits with the browser-endpoint preset (`end_session_per_min`,
+/// which sizes the `oauth2_authorize` bucket) lifted out of reach. The shared
+/// counter pro-rates a peer first seen partway through a minute, so at the
+/// shipped 30 a test that starts late in the minute is refused after as few as
+/// three authorization requests (#532). The limit is pinned by
+/// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
+fn permissive_rate_limits() -> RateLimitConfig {
+    RateLimitConfig {
+        end_session_per_min: 100_000,
+        ..RateLimitConfig::default()
+    }
+}
+
 macro_rules! test_app {
     ($db:expr, $auth:expr) => {{
         test::init_service(
@@ -142,9 +155,7 @@ macro_rules! test_app {
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))
-                .configure(|cfg| {
-                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
-                }),
+                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &permissive_rate_limits())),
         )
         .await
     }};
@@ -1876,6 +1887,80 @@ async fn m7_a_fapi2_return_leg_without_pkce_gets_the_fapi_pkce_refusal() {
     assert!(
         loc.starts_with(REDIRECT_URI) && loc.contains("code="),
         "control: the same pushed request with PKCE is authorized: {loc}"
+    );
+}
+
+/// **#524 (P23W2-03).** An anonymous browser sending a `require_par` client's
+/// parameters inline is refused `ParRequired` before the login hop, in place:
+/// `400`, no `Location` (neither `/login` nor the inline `redirect_uri`) and
+/// the PAR wording — as a page for a browser and as the JSON object otherwise.
+/// Until #524 it was sent to `/login`, and refused only on the return leg.
+/// The control: the same client's pushed request still takes the hop.
+#[actix_rt::test]
+async fn p23w2_03_an_anonymous_unpushed_request_of_a_require_par_client_is_refused_before_the_hop()
+{
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let client_id = create_client(&app, &jwt, fapi_browser_client()).await;
+    let inline = format!(
+        "{}&code_challenge={PKCE_CHALLENGE}&code_challenge_method=S256",
+        inline_query(&client_id, tenant_id)
+    );
+
+    // A browser: the page, not a sign-in.
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/authorize?{inline}"))
+        .insert_header(("Accept", "text/html,application/xhtml+xml"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(
+        resp.headers().get("Location").is_none(),
+        "refused in place, never sent to /login: {}",
+        location(&resp)
+    );
+    let page = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+    assert!(
+        page.contains(
+            "this client must use pushed authorization requests (RFC 9126); \
+             send parameters to /oauth2/par first"
+        ),
+        "{page}"
+    );
+
+    // Not a browser: the same refusal as the JSON object.
+    let resp = anonymous_authorize(&app, &inline, None).await;
+    assert_eq!(resp.status().as_u16(), 400);
+    assert!(resp.headers().get("Location").is_none());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("must use pushed authorization requests (RFC 9126)"),
+        "{body}"
+    );
+
+    // Control: a pushed request is what this client may send, and it hops.
+    let pushed = push_handle_with_pkce(&db, tenant_id, &client_id).await;
+    let resp = anonymous_authorize(
+        &app,
+        &format!(
+            "client_id={client_id}&request_uri={}&tenant_id={tenant_id}",
+            urlencoding_encode(&pushed)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    assert!(
+        location(&resp).starts_with("/login?"),
+        "{}",
+        location(&resp)
     );
 }
 

@@ -7,29 +7,11 @@ pub mod resend;
 pub mod sendgrid;
 pub mod smtp;
 
-use std::time::Duration;
-
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::email::ProviderConfig;
-use reqwest::Client;
-use reqwest::redirect::Policy;
 
+use crate::egress::EmailEgress;
 use crate::provider::EmailProvider;
-
-/// Default timeout for outbound email-provider HTTP requests.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Build a hardened HTTP client for email providers.
-///
-/// - 30-second timeout to prevent hanging tasks.
-/// - Redirects disabled to prevent credential leakage / SSRF bypass.
-pub(crate) fn build_http_client() -> AxiamResult<Client> {
-    Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .redirect(Policy::none())
-        .build()
-        .map_err(|e| AxiamError::EmailDelivery(format!("failed to build HTTP client: {e}")))
-}
 
 /// Reject a provider config carrying no credential.
 ///
@@ -46,10 +28,11 @@ pub(crate) fn build_http_client() -> AxiamResult<Client> {
 /// mysterious provider rejection.
 fn reject_missing_credential(config: &ProviderConfig) -> AxiamResult<()> {
     let missing = match config {
-        // SMTP genuinely allows an unauthenticated relay (a local MTA on
-        // localhost:25 with no credentials is a normal deployment), so an
-        // empty password is not by itself a misconfiguration. An empty host
-        // is.
+        // SMTP genuinely allows an unauthenticated relay (an MTA the
+        // deployment runs, accepting mail from AXIAM's network without
+        // credentials), so an empty password is not by itself a
+        // misconfiguration. An empty host is. Where that relay may be is the
+        // outbound address policy's question (#529), asked at every send.
         ProviderConfig::Smtp(c) => c.host.trim().is_empty().then_some("SMTP host"),
         ProviderConfig::SendGrid(c) => c.api_key.is_empty().then_some("SendGrid API key"),
         ProviderConfig::Postmark(c) => c.api_key.is_empty().then_some("Postmark server token"),
@@ -65,15 +48,20 @@ fn reject_missing_credential(config: &ProviderConfig) -> AxiamResult<()> {
     }
 }
 
-/// Construct a boxed `EmailProvider` from a `ProviderConfig`.
-pub fn build_provider(config: &ProviderConfig) -> AxiamResult<Box<dyn EmailProvider>> {
+/// Construct a boxed `EmailProvider` from a `ProviderConfig`, held to the
+/// deployment's outbound rule `egress` at every send (#529).
+pub fn build_provider(
+    config: &ProviderConfig,
+    egress: &EmailEgress,
+) -> AxiamResult<Box<dyn EmailProvider>> {
     reject_missing_credential(config)?;
+    let egress = egress.clone();
     match config {
-        ProviderConfig::Smtp(c) => Ok(Box::new(smtp::SmtpProvider::new(c)?)),
-        ProviderConfig::SendGrid(c) => Ok(Box::new(sendgrid::SendGridProvider::new(c)?)),
-        ProviderConfig::Postmark(c) => Ok(Box::new(postmark::PostmarkProvider::new(c)?)),
-        ProviderConfig::Resend(c) => Ok(Box::new(resend::ResendProvider::new(c)?)),
-        ProviderConfig::Brevo(c) => Ok(Box::new(brevo::BrevoProvider::new(c)?)),
+        ProviderConfig::Smtp(c) => Ok(Box::new(smtp::SmtpProvider::new(c, egress)?)),
+        ProviderConfig::SendGrid(c) => Ok(Box::new(sendgrid::SendGridProvider::new(c, egress)?)),
+        ProviderConfig::Postmark(c) => Ok(Box::new(postmark::PostmarkProvider::new(c, egress)?)),
+        ProviderConfig::Resend(c) => Ok(Box::new(resend::ResendProvider::new(c, egress)?)),
+        ProviderConfig::Brevo(c) => Ok(Box::new(brevo::BrevoProvider::new(c, egress)?)),
     }
 }
 
@@ -120,7 +108,7 @@ mod tests {
             ProviderConfig::Brevo(api("")),
         ] {
             let name = provider_name(&config);
-            let err = build_provider(&config)
+            let err = build_provider(&config, &EmailEgress::default())
                 .err()
                 .unwrap_or_else(|| panic!("{name} must refuse an empty credential"));
             let msg = err.to_string();
@@ -139,7 +127,7 @@ mod tests {
             ProviderConfig::Resend(api("k")),
             ProviderConfig::Brevo(api("k")),
         ] {
-            assert!(build_provider(&config).is_ok());
+            assert!(build_provider(&config, &EmailEgress::default()).is_ok());
         }
     }
 
@@ -147,8 +135,16 @@ mod tests {
     fn smtp_refuses_an_empty_host_but_allows_an_empty_password() {
         // An unauthenticated local relay is a legitimate SMTP deployment, so
         // only the host is required.
-        assert!(build_provider(&ProviderConfig::Smtp(smtp(""))).is_err());
-        assert!(build_provider(&ProviderConfig::Smtp(smtp("   "))).is_err());
-        assert!(build_provider(&ProviderConfig::Smtp(smtp("localhost"))).is_ok());
+        assert!(build_provider(&ProviderConfig::Smtp(smtp("")), &EmailEgress::default()).is_err());
+        assert!(
+            build_provider(&ProviderConfig::Smtp(smtp("   ")), &EmailEgress::default()).is_err()
+        );
+        assert!(
+            build_provider(
+                &ProviderConfig::Smtp(smtp("localhost")),
+                &EmailEgress::default()
+            )
+            .is_ok()
+        );
     }
 }

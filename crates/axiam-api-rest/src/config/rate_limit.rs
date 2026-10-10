@@ -223,6 +223,10 @@ pub const ENV_SSF_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SSF_ADMIN_PER_MIN";
 pub const ENV_SCIM_TARGET_ADMIN_PER_MIN: &str = "AXIAM__RATE_LIMIT__SCIM_TARGET_ADMIN_PER_MIN";
 /// `AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN` — G-7 / T23.7.2, never preset.
 pub const ENV_CIBA_APPROVAL_PER_MIN: &str = "AXIAM__RATE_LIMIT__CIBA_APPROVAL_PER_MIN";
+/// `AXIAM__RATE_LIMIT__CRL_PER_MIN` — #565 (T-102), never preset.
+pub const ENV_CRL_PER_MIN: &str = "AXIAM__RATE_LIMIT__CRL_PER_MIN";
+/// `AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN` — #529 (T-473), never preset.
+pub const ENV_EMAIL_TEST_PER_MIN: &str = "AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN` — X2.
 pub const ENV_UMA_PERM_PER_MIN: &str = "AXIAM__RATE_LIMIT__UMA_PERM_PER_MIN";
 /// `AXIAM__RATE_LIMIT__UMA_TICKET_PER_MIN` — X2.
@@ -491,6 +495,11 @@ pub struct RateLimitConfig {
     /// scripting mass logouts against guessed sessions is not free — though
     /// the real defence there is that an unverifiable `id_token_hint` ends
     /// nothing at all.
+    ///
+    /// It is also the **browser-endpoint preset**: the same number bounds
+    /// `/oauth2/authorize` (both mounts, bucket `oauth2_authorize` — #532),
+    /// the `/oauth2/authorize/logout` hop and the SAML IdP's browser routes,
+    /// each under a bucket of its own.
     pub end_session_per_min: u32,
     /// Max `POST /oauth2/register` requests per minute per IP (default: 5 —
     /// T21.4). Deliberately **not** part of [`MachineLimitPreset`]: the preset
@@ -599,6 +608,41 @@ pub struct RateLimitConfig {
     /// account probing ids — which all answer `404` whoever's they are. Per-IP;
     /// never preset.
     pub ciba_approval_per_min: u32,
+    /// Max `GET /pki/v1/{org_id}/ca/{ca_id}/crl` requests per minute per IP
+    /// (default: 60 — #565, T-102).
+    ///
+    /// The certificate revocation list of each issuing CA, unauthenticated
+    /// because a relying party must be able to fetch it before it can validate
+    /// anything. **Sized from the honest traffic.** A relying party — a
+    /// FreeRADIUS server, a VPN gateway, a peer service — fetches a list when
+    /// its copy reaches `nextUpdate` (a day by default) and revalidates with
+    /// `If-None-Match` in between; sixty a minute from one address covers a
+    /// relying party per issuing CA many times over, and a whole NAT'd fleet of
+    /// devices that validate one another. What it bounds is a caller trying to
+    /// spend database reads on the route: the list is signed once and cached,
+    /// so no request it admits costs a signature unless a revocation changed
+    /// the list.
+    ///
+    /// One bucket for the route, per IP; never preset — a relying party's
+    /// fetch rate is set by `nextUpdate`, not by the deployment's capacity.
+    pub crl_per_min: u32,
+    /// Max `POST …/email-config/test` requests per minute per IP, on each of
+    /// the organization and tenant routes (default: 10 — #529, P23W3-11,
+    /// T-473).
+    ///
+    /// The delivery self-test resolves the effective provider's host, opens a
+    /// connection to it and sends a message to the caller. The outbound address
+    /// policy decides *where* it may connect; this bounds *how often*: an
+    /// administrator — or a stolen administrator token — looping on the route
+    /// would otherwise turn it into a resolver of chosen names and a connection
+    /// timer at the server's expense, and mail the administrator's own inbox
+    /// with every call. A person checking a configuration sends one, fixes
+    /// something, and sends another; ten a minute is far more than that and
+    /// far less than a loop.
+    ///
+    /// **One bucket per route** (`email_test_org`, `email_test_tenant`), per
+    /// IP. Never preset: a person's console traffic, not a capacity question.
+    pub email_test_per_min: u32,
     /// Max `/scim/v2/*` requests per minute per IP (default: 600 — R3.1/B4).
     ///
     /// **One bucket for the whole `/scim/v2` surface**, reads and writes
@@ -762,6 +806,12 @@ impl Default for RateLimitConfig {
             scim_target_admin_per_min: 30,
             // G-7 / T23.7.2 — see the field docs. Human-driven, per route.
             ciba_approval_per_min: 30,
+            // #565 (T-102) — see the field docs. A relying party fetches once
+            // per `nextUpdate`.
+            crl_per_min: 60,
+            // #529 (T-473) — see the field docs. Each call connects to the
+            // provider and mails the caller.
+            email_test_per_min: 10,
             // --- R3.1/B4 SCIM: the REST administrative surface -------------
             // 600/min == the gRPC Admin family's absolute ceiling
             // (ADMIN_PER_SEC_DEFAULT 10/s), copied deliberately and for the
@@ -998,6 +1048,11 @@ impl RateLimitConfig {
             self.ciba_approval_per_min >= 1,
             "ciba_approval_per_min must be >= 1"
         );
+        assert!(self.crl_per_min >= 1, "crl_per_min must be >= 1");
+        assert!(
+            self.email_test_per_min >= 1,
+            "email_test_per_min must be >= 1"
+        );
         assert!(self.webauthn_per_min >= 1, "webauthn_per_min must be >= 1");
         // B2: the user-code brute-force bound is arithmetic, not judgement, so
         // it is asserted rather than commented. `device_verify_per_min` gates
@@ -1139,6 +1194,8 @@ mod tests {
             (ENV_SSF_ADMIN_PER_MIN, d.ssf_admin_per_min),
             (ENV_SCIM_TARGET_ADMIN_PER_MIN, d.scim_target_admin_per_min),
             (ENV_CIBA_APPROVAL_PER_MIN, d.ciba_approval_per_min),
+            (ENV_CRL_PER_MIN, d.crl_per_min),
+            (ENV_EMAIL_TEST_PER_MIN, d.email_test_per_min),
         ] {
             assert_eq!(
                 documented_u32(&table, env, 0),
@@ -1212,6 +1269,8 @@ mod tests {
                 shipped.scim_target_admin_per_min
             );
             assert_eq!(cfg.ciba_approval_per_min, shipped.ciba_approval_per_min);
+            assert_eq!(cfg.crl_per_min, shipped.crl_per_min);
+            assert_eq!(cfg.email_test_per_min, shipped.email_test_per_min);
             for env in [
                 ENV_LOGIN_PER_MIN,
                 ENV_REGISTER_PER_MIN,
@@ -1225,6 +1284,8 @@ mod tests {
                 ENV_SSF_ADMIN_PER_MIN,
                 ENV_SCIM_TARGET_ADMIN_PER_MIN,
                 ENV_CIBA_APPROVAL_PER_MIN,
+                ENV_CRL_PER_MIN,
+                ENV_EMAIL_TEST_PER_MIN,
             ] {
                 assert_eq!(
                     documented_u32(&table, env, column),
@@ -1441,6 +1502,8 @@ mod tests {
         assert_eq!(d.ssf_admin_per_min, 30);
         assert_eq!(d.scim_target_admin_per_min, 30);
         assert_eq!(d.ciba_approval_per_min, 30);
+        assert_eq!(d.crl_per_min, 60);
+        assert_eq!(d.email_test_per_min, 10);
         // The relationship is the point, not the literal. `RateLimitShared`
         // keys per `"{endpoint}:{ip}"`, so each of the six webauthn routes
         // carries this allowance independently and a ceremony spends one from

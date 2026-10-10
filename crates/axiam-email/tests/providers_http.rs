@@ -5,8 +5,15 @@
 //! response-parsing paths are covered without hitting real APIs. The SMTP
 //! provider is exercised for its construction and pre-connection error
 //! paths (address parsing / empty body) which do not require a live relay.
+//!
+//! Every provider is held to the outbound address policy (#529), so the mock
+//! servers on loopback are reached through the tests-only seams:
+//! `allowing_private_http_for_tests` (plain-`http` loopback for the REST
+//! providers) and `admitting_loopback_for_tests` (the SMTP guard). What the
+//! policy refuses is tested in `egress_test.rs`.
 
 use axiam_core::models::email::{ApiProviderConfig, SmtpConfig};
+use axiam_email::egress::{AddressPolicy, EmailEgress, PROVIDER_UNREACHABLE};
 use axiam_email::message::EmailMessage;
 use axiam_email::provider::EmailProvider;
 use axiam_email::providers::brevo::BrevoProvider;
@@ -24,6 +31,16 @@ fn full_message() -> EmailMessage {
         html_body: Some("<h1>Hi</h1>".to_string()),
         text_body: Some("Hi".to_string()),
     }
+}
+
+/// The REST providers' seam: a plain-`http` loopback mock server is reachable.
+fn http_seam() -> EmailEgress {
+    EmailEgress::default().allowing_private_http_for_tests()
+}
+
+/// The SMTP seam: loopback admitted, every other rule unchanged.
+fn smtp_seam() -> EmailEgress {
+    EmailEgress::new(AddressPolicy::new().admitting_loopback_for_tests())
 }
 
 fn api_config(url: &str) -> ApiProviderConfig {
@@ -46,7 +63,7 @@ async fn sendgrid_send_success_reads_message_id_header() {
         .await;
 
     let url = format!("{}/v3/mail/send", server.uri());
-    let provider = SendGridProvider::new(&api_config(&url)).unwrap();
+    let provider = SendGridProvider::new(&api_config(&url), http_seam()).unwrap();
     let result = provider
         .send(
             "AXIAM",
@@ -68,7 +85,7 @@ async fn sendgrid_send_error_status_returns_delivery_error() {
         .mount(&server)
         .await;
 
-    let provider = SendGridProvider::new(&api_config(&server.uri())).unwrap();
+    let provider = SendGridProvider::new(&api_config(&server.uri()), http_seam()).unwrap();
     let err = provider
         .send("AXIAM", "noreply@example.com", None, &full_message())
         .await
@@ -84,7 +101,7 @@ async fn sendgrid_text_only_body() {
         .respond_with(ResponseTemplate::new(202))
         .mount(&server)
         .await;
-    let provider = SendGridProvider::new(&api_config(&server.uri())).unwrap();
+    let provider = SendGridProvider::new(&api_config(&server.uri()), http_seam()).unwrap();
     let msg = EmailMessage {
         to: "r@example.com".into(),
         subject: "s".into(),
@@ -111,7 +128,7 @@ async fn postmark_send_success_parses_message_id() {
         )
         .mount(&server)
         .await;
-    let provider = PostmarkProvider::new(&api_config(&server.uri())).unwrap();
+    let provider = PostmarkProvider::new(&api_config(&server.uri()), http_seam()).unwrap();
     let result = provider
         .send(
             "AXIAM",
@@ -132,7 +149,7 @@ async fn postmark_send_error_status() {
         .respond_with(ResponseTemplate::new(422).set_body_string("nope"))
         .mount(&server)
         .await;
-    let provider = PostmarkProvider::new(&api_config(&server.uri())).unwrap();
+    let provider = PostmarkProvider::new(&api_config(&server.uri()), http_seam()).unwrap();
     let err = provider
         .send("AXIAM", "noreply@example.com", None, &full_message())
         .await
@@ -151,7 +168,7 @@ async fn resend_send_success_parses_id() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "re-77"})))
         .mount(&server)
         .await;
-    let provider = ResendProvider::new(&api_config(&server.uri())).unwrap();
+    let provider = ResendProvider::new(&api_config(&server.uri()), http_seam()).unwrap();
     let result = provider
         .send(
             "AXIAM",
@@ -172,7 +189,7 @@ async fn resend_send_error_status() {
         .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
         .mount(&server)
         .await;
-    let provider = ResendProvider::new(&api_config(&server.uri())).unwrap();
+    let provider = ResendProvider::new(&api_config(&server.uri()), http_seam()).unwrap();
     let err = provider
         .send("AXIAM", "noreply@example.com", None, &full_message())
         .await
@@ -193,7 +210,7 @@ async fn brevo_send_success_parses_id() {
         )
         .mount(&server)
         .await;
-    let provider = BrevoProvider::new(&api_config(&server.uri())).unwrap();
+    let provider = BrevoProvider::new(&api_config(&server.uri()), http_seam()).unwrap();
     let result = provider
         .send(
             "AXIAM",
@@ -214,7 +231,7 @@ async fn brevo_send_error_status() {
         .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
         .mount(&server)
         .await;
-    let provider = BrevoProvider::new(&api_config(&server.uri())).unwrap();
+    let provider = BrevoProvider::new(&api_config(&server.uri()), http_seam()).unwrap();
     let err = provider
         .send("AXIAM", "noreply@example.com", None, &full_message())
         .await
@@ -227,15 +244,20 @@ async fn brevo_send_error_status() {
 
 #[tokio::test]
 async fn resend_request_failure_when_unreachable() {
-    // Port 1 is not listening; reqwest returns a transport error, exercising
-    // the `map_err(... request failed ...)` branch.
-    let provider = ResendProvider::new(&api_config("http://127.0.0.1:1/emails")).unwrap();
+    // Port 1 is not listening; reqwest returns a transport error, which is
+    // answered as the one "could not be reached" sentence (#529).
+    let provider =
+        ResendProvider::new(&api_config("http://127.0.0.1:1/emails"), http_seam()).unwrap();
     let err = provider
         .send("AXIAM", "noreply@example.com", None, &full_message())
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("Resend request failed"), "got: {err}");
+    assert!(err.contains(PROVIDER_UNREACHABLE), "got: {err}");
+    assert!(
+        !err.contains("refused"),
+        "the cause stays in the log: {err}"
+    );
 }
 
 // --- SMTP construction and pre-connection error paths ---
@@ -252,15 +274,15 @@ fn smtp_config(starttls: bool) -> SmtpConfig {
 
 #[test]
 fn smtp_new_starttls_and_implicit_tls_build() {
-    let p1 = SmtpProvider::new(&smtp_config(true)).unwrap();
+    let p1 = SmtpProvider::new(&smtp_config(true), EmailEgress::default()).unwrap();
     assert_eq!(p1.provider_name(), "smtp");
-    let p2 = SmtpProvider::new(&smtp_config(false)).unwrap();
+    let p2 = SmtpProvider::new(&smtp_config(false), EmailEgress::default()).unwrap();
     assert_eq!(p2.provider_name(), "smtp");
 }
 
 #[tokio::test]
 async fn smtp_send_invalid_to_address_errors() {
-    let provider = SmtpProvider::new(&smtp_config(true)).unwrap();
+    let provider = SmtpProvider::new(&smtp_config(true), EmailEgress::default()).unwrap();
     let msg = EmailMessage {
         to: "not-an-email".to_string(),
         subject: "s".into(),
@@ -277,7 +299,7 @@ async fn smtp_send_invalid_to_address_errors() {
 
 #[tokio::test]
 async fn smtp_send_invalid_from_address_errors() {
-    let provider = SmtpProvider::new(&smtp_config(false)).unwrap();
+    let provider = SmtpProvider::new(&smtp_config(false), EmailEgress::default()).unwrap();
     let err = provider
         .send("AXIAM", "not a valid addr @@", None, &full_message())
         .await
@@ -288,7 +310,7 @@ async fn smtp_send_invalid_from_address_errors() {
 
 #[tokio::test]
 async fn smtp_send_invalid_reply_to_errors() {
-    let provider = SmtpProvider::new(&smtp_config(true)).unwrap();
+    let provider = SmtpProvider::new(&smtp_config(true), EmailEgress::default()).unwrap();
     let err = provider
         .send(
             "AXIAM",
@@ -303,9 +325,10 @@ async fn smtp_send_invalid_reply_to_errors() {
 }
 
 fn smtp_config_unreachable() -> SmtpConfig {
-    // Loopback port 1 refuses connections immediately, so the transport
-    // build succeeds and `send` fails fast at connect time — after the
-    // message body has been assembled (covering the builder branches).
+    // Loopback port 1 refuses connections immediately, so the guard (under
+    // the loopback seam) admits it and `send` fails fast at connect time —
+    // after the message body has been assembled (covering the builder
+    // branches).
     SmtpConfig {
         host: "127.0.0.1".to_string(),
         port: 1,
@@ -317,7 +340,7 @@ fn smtp_config_unreachable() -> SmtpConfig {
 
 #[tokio::test]
 async fn smtp_send_multipart_build_then_connect_error() {
-    let provider = SmtpProvider::new(&smtp_config_unreachable()).unwrap();
+    let provider = SmtpProvider::new(&smtp_config_unreachable(), smtp_seam()).unwrap();
     // html + text -> multipart alternative branch.
     let err = provider
         .send(
@@ -329,12 +352,12 @@ async fn smtp_send_multipart_build_then_connect_error() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("SMTP send failed"), "got: {err}");
+    assert!(err.contains(PROVIDER_UNREACHABLE), "got: {err}");
 }
 
 #[tokio::test]
 async fn smtp_send_html_only_build_then_connect_error() {
-    let provider = SmtpProvider::new(&smtp_config_unreachable()).unwrap();
+    let provider = SmtpProvider::new(&smtp_config_unreachable(), smtp_seam()).unwrap();
     let msg = EmailMessage {
         to: "recipient@example.com".to_string(),
         subject: "s".into(),
@@ -346,12 +369,12 @@ async fn smtp_send_html_only_build_then_connect_error() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("SMTP send failed"), "got: {err}");
+    assert!(err.contains(PROVIDER_UNREACHABLE), "got: {err}");
 }
 
 #[tokio::test]
 async fn smtp_send_text_only_build_then_connect_error() {
-    let provider = SmtpProvider::new(&smtp_config_unreachable()).unwrap();
+    let provider = SmtpProvider::new(&smtp_config_unreachable(), smtp_seam()).unwrap();
     let msg = EmailMessage {
         to: "recipient@example.com".to_string(),
         subject: "s".into(),
@@ -363,12 +386,12 @@ async fn smtp_send_text_only_build_then_connect_error() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("SMTP send failed"), "got: {err}");
+    assert!(err.contains(PROVIDER_UNREACHABLE), "got: {err}");
 }
 
 #[tokio::test]
 async fn smtp_send_no_body_errors() {
-    let provider = SmtpProvider::new(&smtp_config(true)).unwrap();
+    let provider = SmtpProvider::new(&smtp_config(true), EmailEgress::default()).unwrap();
     let msg = EmailMessage {
         to: "recipient@example.com".to_string(),
         subject: "s".into(),

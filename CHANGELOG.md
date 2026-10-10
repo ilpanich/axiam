@@ -55,6 +55,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   organization's value by an unrelated save, and so was one saved from the Security
   Overrides panel, which now carries a group for them.
 
+- **A certificate revocation list per issuing CA** (#565, P23W6-10). Each CA
+  whose key AXIAM holds publishes a signed RFC 5280 CRL (version 2, DER,
+  `application/pkix-crl`) at `GET /pki/v1/{org_id}/ca/{ca_id}/crl`:
+  unauthenticated, rate-limited per IP in a bucket of its own
+  (`AXIAM__RATE_LIMIT__CRL_PER_MIN`, default 60), signed with the CA's key
+  through the custodian that holds it (RSA-4096 and Ed25519), with a CRL
+  number, the CA's key identifier, `nextUpdate` a configured interval ahead
+  (`AXIAM__PKI__CRL_NEXT_UPDATE_SECS`, default one day, 300 s – 7 days, never
+  past the CA's expiry) and an entry for every revoked, unexpired leaf and
+  subordinate CA it signed. `Cache-Control: public, max-age` runs to
+  `nextUpdate`, with `ETag`, `Last-Modified` and `304` on `If-None-Match`. Every
+  certificate AXIAM signs from now on — generated and CSR-signed leaves, and
+  tenant signing CAs — carries a CRL distribution point naming its issuer's
+  list, built from the new `AXIAM__PKI__CRL_BASE_URL`, else the issuer URL;
+  with neither an absolute URL the extension is omitted and the server warns at
+  startup. A revoked or expired CA, a keyless imported anchor and a `vault_pki`
+  CA answer `404`. **Upgrade notes:** schema migration v90 adds a revocation
+  date to both certificate tables (a certificate revoked earlier is listed from
+  its `notBefore`); certificates issued before this release carry no
+  distribution point, so point their relying parties at the route by hand; an
+  invalid `AXIAM__PKI__CRL_BASE_URL` or `AXIAM__PKI__CRL_NEXT_UPDATE_SECS` stops
+  startup. The OpenAPI document gains the route under a new `pki` tag.
+- **SAML: an optional metadata signing certificate for an external IdP**
+  (#530, P23W3-07). A SAML federation configuration takes
+  `idp_metadata_signing_cert_pem` (`POST`/`PUT /api/v1/federation-configs`,
+  returned by every read; *Metadata Signing Certificate* in the console's SAML
+  form): the PEM certificate the identity provider signs its metadata document
+  with, distinct from `idp_signing_cert_pem`, which verifies assertions. Set,
+  the metadata is read only through that signature (see *Security*); `null` on
+  an update clears it; a non-SAML configuration answers `400`
+  (`validation_error`). **Upgrade notes:** schema migration v93 adds the
+  optional column; no existing configuration has one, so none changes
+  behaviour until an operator sets it.
+
 ### Changed
 
 - **The SCIM target `PUT` can be made conditional on the version the
@@ -116,6 +150,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its deadline still lose the queue without a row, and queued mail has no such
   row. The full profile is unchanged. T-445 is amended (status unchanged, still
   Open).
+
+- **SAML: identity-provider responses signed with SHA-1 are refused**
+  (#531, P23W3-08, decision D-3). AXIAM's SAML service provider now verifies an
+  IdP's response with the SHA-2 RSA and ECDSA algorithms only (RSA- and
+  ECDSA-SHA-256, -384 and -512, for the signature and its digests), as its own
+  SAML identity provider already did for the requests it receives. **Behaviour
+  change / upgrade notes:** sign-in through an IdP that still signs with
+  `rsa-sha1` fails at the signature check after upgrading. Move the IdP to
+  SHA-256; if it cannot yet, set the new per-federation escape hatch
+  `allow_sha1_signatures: true` on that configuration
+  (`POST`/`PUT /api/v1/federation-configs`, or *Accept SHA-1 signatures* in the
+  console), which restores the earlier rule for that provider alone and is
+  recorded in the audit log (`federation.sha1_signatures_allowed`, naming the
+  configuration and the administrator). The field defaults to `false`, is
+  refused (`400`) on an OIDC or OAuth2 configuration, and arrives with schema
+  migration v92, which rewrites no row.
 
 ### Fixed
 
@@ -205,6 +255,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arithmetic. The benchmark harness's `bench-up` now also creates the
   `docker/.secrets/*.hex` key files (and the directory) under `umask 077`
   instead of writing them and then running `chmod 600`.
+
+- **Federated users' sessions keep refreshing after the email-verification
+  grace period** (#519, P23W1-07). The AXIAM session refresh
+  (`POST /api/v1/auth/refresh`, which keeps the admin console signed in)
+  applied the password sign-in's status rule, email-verification grace
+  included. Federated accounts stay pending verification for life, so their
+  sessions were refused a refresh once the grace period (24 hours by default)
+  had passed since the account was provisioned. The refresh now applies the
+  rule every other credential-to-principal path uses: a locked, inactive,
+  anonymized or deleted account is refused, a pending one never. Password
+  sign-in keeps the grace period. Threat model 2.38.0: T-160 amended.
+- **Discovery publishes how the revocation and introspection endpoints
+  authenticate** (#526, P23W2-06). The discovery documents — bare and
+  per-tenant `/.well-known/openid-configuration` and the RFC 8414
+  `/.well-known/oauth-authorization-server` metadata — named neither
+  `revocation_endpoint_auth_methods_supported` nor
+  `introspection_endpoint_auth_methods_supported`, which RFC 8414 reads as
+  `client_secret_basic` alone, although both endpoints accept every method the
+  token endpoint does. They now publish the token endpoint's list (revocation)
+  and that list without `none` (introspection, which refuses a public client),
+  with the matching `…_auth_signing_alg_values_supported` members that
+  `private_key_jwt` requires. To make the published `client_secret_basic`
+  true, both endpoints now also take a Basic client's `client_id` from the
+  `Authorization` header alone (and a `private_key_jwt` client's from its
+  assertion), as the token endpoint does; a body `client_id` that disagrees
+  with the header is `400 invalid_request`. **Upgrade note:** `client_id` in
+  the `RevokeRequest` and `IntrospectRequest` form bodies becomes optional in
+  the OpenAPI document; a request that sends it is unaffected.
+- **A changed telephone number loses its verification** (#526, P23W2-07). A
+  SCIM `PUT` or `PATCH` replacing `phoneNumbers` left `phone_number_verified_at`
+  as it was, so `phone_number_verified` could vouch for a number nobody
+  verified. `UserRepository::update` now clears it whenever the stored number
+  changes, unless the same write sets it, so every writer inherits the rule;
+  an unchanged number keeps its verification. No AXIAM API sets the
+  timestamp today, so this guards the verification flow to come.
+- **A person first seen late in a minute gets the browser-endpoint preset in
+  full** (#532 follow-up). The shared rate-limit counter charges a key it has
+  not seen before the share of the wall-clock minute already gone, less 10 %,
+  at every limit of 20 or more — a smoothing meant for machine traffic, which
+  assumed every human-facing limit sat below 20. The browser-endpoint preset
+  (`AXIAM__RATE_LIMIT__END_SESSION_PER_MIN`, 30) does not, so since #532 put
+  `/oauth2/authorize` behind it, a person whose address first appeared in a
+  minute's last second had about three authorization requests left in it; the
+  end-session routes and the SAML identity provider's browser routes were
+  pro-rated the same way. Those buckets now skip the cold-entry seed and give a
+  newly seen address the whole preset whenever it arrives; the sliding window
+  still carries the previous minute. Machine buckets of 20 or more keep the
+  seed. `docs/deployment/rate-limit-sizing.md` is corrected.
+- **An explicit `null` clears a federation configuration's nullable fields.**
+  `PUT /api/v1/federation-configs/{id}` documented `null` as clearing
+  `idp_signing_cert_pem`, `provider_slug`, the three OAuth2 endpoints, the two
+  Apple identifiers and `button_icon`, but read `null` as absent and left each
+  as it was; `metadata_url` behaved the same. Each is now cleared by an explicit
+  `null` and kept when omitted, as contract §27 requires of a sparse update
+  (only `idp_metadata_signing_cert_pem` already did). A `null` still meets the
+  relational rules: an OAuth2 configuration's endpoints are required, so
+  clearing one is `400`, and the Apple identifiers clear only together.
+  **Behaviour change:** a client that sends these fields as `null` — a
+  serializer that emits every member, for instance — now clears them; send
+  only the fields you mean to change.
 
 ### Security
 
@@ -327,6 +437,324 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `axiam.audit.notification` at most once a minute), never request-audit rows. A
   count a replica holds is lost if the process is killed before its next flush,
   and on several replicas a count can be reported one window late.
+
+- **Device grant: only a console sign-in reads or decides a device
+  authorization** (#549, P23W5-06, T-447). `GET /api/v1/device/verify` and
+  `POST /api/v1/device/decide` admitted any live user access token, including
+  one AXIAM minted for an OAuth2 client through the code, refresh, CIBA or
+  device grant — and CSRF does not apply to a bearer token. A relying party
+  holding one of its user's tokens could start a device authorization for a
+  device client it controls, so it knew the `user_code`, and approve it in the
+  user's name: the device client then redeemed that client's registered scopes
+  and a refresh token without the user ever seeing the page. Both routes now
+  answer such a token `403` (`authorization_denied`) before the code is looked
+  up — the rule the CIBA approval routes have applied since 1.0.0-beta18, now
+  one check both surfaces call. **Behaviour change:** an integrator that
+  approved or inspected device flows with a token from its own OAuth2 client
+  gets `403`; the user must approve on the verification page with a console
+  sign-in. The OpenAPI annotations of both routes list the `403`. Threat model
+  2.38.0: T-447 Mitigated; 469 threats, 427 mitigated / 21 open / 21 not
+  applicable.
+- **A locked account costs the password verify an unknown name costs** (#564,
+  P23W6-09, T-469). The password login refused an account serving a temporary
+  lockout before it took a hash permit or ran any Argon2id verify, while an
+  unknown name and a wrong password each cost one (SEC-026). Since the lockout
+  is triggered by the caller's own failures, a name that answered fast after N
+  wrong passwords was an existing account, and when the hash permits were
+  saturated it answered `401` where every other branch answered `503`. gRPC
+  `UserService/ValidateCredentials` answered an unknown name, and a locked,
+  non-active or directory account, `valid: false` with no verify at all. The
+  lockout branch now runs the equalising dummy verify under the same permit
+  and timeout before it refuses — still before the directory is contacted, and
+  never against the account's own hash, so a correct password during a lockout
+  neither succeeds nor shows — and `ValidateCredentials` takes its permit before
+  it branches and runs the dummy verify on every refusal. **Behaviour change:**
+  under hash-permit saturation a locked account now answers `503` on
+  `POST /api/v1/auth/login`, and every refused `ValidateCredentials` call
+  answers `UNAVAILABLE`, exactly as a wrong password does; a refusal also now
+  takes as long as one. Threat model 2.38.0: T-469 Mitigated and T-30's residual
+  removed; 469 threats, 428 mitigated / 20 open / 21 not applicable.
+- **OAuth2 mTLS client authentication refuses a certificate AXIAM revoked**
+  (#565, P23W6-10, T-102). `tls_client_auth` matched the client's registered
+  subject DN or SAN on any certificate that chained to a listener anchor, and
+  flagging an AXIAM CA as an anchor wrote it into that bundle — so a revoked
+  AXIAM-issued leaf kept authenticating its OAuth2 client at AXIAM's own token
+  endpoint (and PAR, CIBA, introspection and revocation, which share the
+  client authentication) until it expired. After the match, `tls_client_auth`
+  and `self_signed_tls_client_auth` now look the certificate up by fingerprint,
+  as device sign-in does, and refuse with `invalid_client` one AXIAM issued
+  that is revoked or expired, or whose issuing CA is. A certificate AXIAM did
+  not issue — self-signed, or from an external CA — is decided by the match
+  alone, as before. **Behaviour change:** a client presenting a revoked
+  AXIAM-issued certificate is refused at once; each mTLS client authentication
+  costs one more database read. Not in this release (planned for `1.0.x`): the
+  listeners' TLS handshakes do not consult the revocation list, there is no
+  OCSP responder, and a `vault_pki` CA's revocations do not reach Vault's own
+  list (T-470). Threat model 2.38.0: T-102 Mitigated, T-470 entered Open; 470
+  threats, 429 mitigated / 20 open / 21 not applicable.
+- **Deleting or sweeping an OAuth2 client revokes what it was granted** (#517,
+  P23W1-05). `DELETE /api/v1/oauth2-clients/{id}` and the unused-client sweep
+  removed the client row and revoked nothing. For a client discovered through a
+  Client ID Metadata Document (`managed_by: cimd`) the `client_id` is the
+  document's URL, so the client's next request re-created the row and every
+  refresh token, authorization code and pushed authorization request issued
+  before the row went worked again. Both now revoke the client's refresh tokens
+  and delete its outstanding codes and pushed requests before they remove the
+  row — the same function RFC 7592's `DELETE /oauth2/register/{client_id}` now
+  calls — and keep the row if that fails (the admin route answers `500`).
+  **Behaviour change:** deleting a client, or the sweep evicting one, signs its
+  users out of it at the next refresh and voids any authorization in flight,
+  for every kind of client; access tokens already issued still run out on their
+  own (at most the access-token lifetime). Threat model 2.38.0: T-289 and T-275
+  amended; totals unchanged.
+- **Token exchange: the actor token must belong to the exchanging client**
+  (#518, P23W1-06). RFC 8693 delegation accepted any valid same-tenant access
+  token as `actor_token` and wrote its `sub` into the issued token's `act`
+  claim, so a client holding somebody else's token — an MCP server receives its
+  callers' tokens by design — could attribute a delegation to that party.
+  Scopes never widened, but `act` is what audit, attribution and actor-keyed
+  policy read. The actor token must now have been issued to the client that
+  authenticates the exchange: its `client_id` claim (tokens from the code,
+  refresh, CIBA and device grants) or, for a client-credentials token, its
+  `sub` must be that client's `client_id`. **Behaviour change:** an integrator
+  that passes a token issued to another client, a console sign-in or a service
+  account's token as `actor_token` now gets `400 invalid_request`
+  (`actor_token was not issued to the exchanging client`); pass the exchanging
+  client's own `client_credentials` token, the usual choice, which works as
+  before. RFC 8693's `may_act`, which would let a subject token name other
+  permitted actors, is planned for `1.0.x`. Threat model 2.38.0: T-471 entered
+  Mitigated; 471 threats, 430 mitigated / 20 open / 21 not applicable.
+- **Deleting a tenant now erases it: tombstone, revoke, purge** (#523,
+  P23W2-04, GDPR Art. 17). `DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`
+  removed the tenant row (and the directory, SAML, SSF, CIBA and SCIM
+  configuration) and nothing else: the tenant's users with their password
+  hashes, MFA secrets and contact details, its sessions, OAuth2 clients and
+  refresh tokens, federation configurations, its encrypted SMTP or provider
+  credential, webhook secrets, certificates and CA material, roles, groups,
+  consents and audit entries all stayed in the datastore — and the tenant's
+  users could keep refreshing their sessions. The deletion now **tombstones**
+  the tenant (schema v91, `tenant.deleted_at`): in the request it revokes the
+  tenant's sessions (published to the revocation feed when it is on) and its
+  OAuth2 refresh tokens, and from the `204` on the tenant is gone from every
+  read, sign-in, token issuance and refresh, so its access tokens fail the
+  per-request session check. The cleanup job's new **`tenant_purge`** sweep
+  (listed on `/health/jobs`) then removes every tenant-scoped table's rows, in
+  the order the GDPR user erasure uses, and the tenant row last; it records
+  `tenants.purged` in the system audit log beside the `tenants.deleted` record,
+  which stays. The tenant's own audit entries are purged with the rest — the
+  deletion still requires a fresh audit export first (T-118). A test pins
+  that every table with a `tenant_id` (or tenant `scope_id`) is in the purge.
+  **Behaviour change / upgrade notes:** the response is still `204`, but the
+  data is removed asynchronously, within one cleanup interval
+  (`cleanup_interval_secs`, 5 minutes by default); a deleted tenant's slug
+  stays taken (`409`) until the purge has run. On its first run after the upgrade, and daily
+  after that, the sweep also finds rows left behind by tenants deleted with an
+  earlier version — rows whose tenant no longer exists — and purges them, except
+  their audit entries, which the audit retention window governs; expect one
+  `tenants.purged` record (`metadata.orphan: true`) per such tenant. A service
+  account's access token carries no session, so it runs out within its
+  lifetime (15 minutes by default) rather than at the deletion; so does a
+  user's on gRPC unless `AXIAM__GRPC__STRICT_REVOCATION=true`. Threat model
+  2.38.0: T-472 entered Mitigated, T-118 corrected; 472 threats, 431
+  mitigated / 20 open / 21 not applicable.
+- **The email provider is held to an outbound address policy** (#529,
+  P23W3-11, T-473). An organization or tenant administrator's SMTP host and
+  port, or an HTTP provider's `api_url`, was dialled as written — `lettre`
+  resolved the host itself and `reqwest` the URL — so a saved configuration,
+  or one press of `POST …/email-config/test`, made AXIAM open connections to
+  loopback, the cloud metadata service or the pod network and send an SMTP
+  greeting, or a `POST` carrying the provider's API key, there. The SMTP host
+  now gets the directory connector's address guard (moved, unchanged, to
+  `axiam_pki::address`, so both share one implementation): resolved once;
+  loopback, link-local (the metadata service), unspecified, multicast and
+  special-purpose addresses, and this host's addresses on AXIAM's REST and gRPC
+  ports, always refused; a private address only inside the new operator
+  allow-list **`AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`** (comma-separated CIDR
+  blocks, unset admits none); and the connection pinned to the vetted address
+  with the configured host as the TLS name. An explicit `api_url` goes through
+  `guarded_fetch_no_redirect`: `https`, globally routable, never redirected,
+  with `AXIAM__PKI__SSRF_ALLOWED_HOSTS` as its exception list. Both are checked
+  on `PUT` at organization and tenant scope (a `400`) and at every send. A host
+  name's refusal is one sentence whatever it resolved to, and a connection that
+  fails after the check — refused, reset, timed out — is one generic answer, at
+  the self-test and in the `email.delivery_failed` audit row's `error_class`
+  (`connection_error`). The two self-test routes get their own limiter,
+  **`AXIAM__RATE_LIMIT__EMAIL_TEST_PER_MIN`** (default 10 a minute per IP per
+  route, never moved by a profile). **Behaviour change / upgrade notes:** an
+  email provider on a private address now needs its network listed in
+  `AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`, or every send to it fails; a relay
+  on `localhost` is refused whatever the list says (run it as a service on a
+  listed network); an `api_url` must be `https`; a stored configuration that
+  breaks the rule keeps its row and fails at the send, so check the mail
+  consumer's log after upgrading. `axiam-email` moves from layer 1 to layer 2
+  of the crate layering. Threat model 2.38.0: T-473 entered Mitigated, T-300
+  amended; 473 threats, 432 mitigated / 20 open / 21 not applicable.
+- **`claims.id_token.sub` with a value is honoured, or refused — never
+  dropped** (#520, P23W1-11). OIDC Core §5.5.1 lets a relying party name the
+  subject it expects in the `claims` parameter
+  (`{"id_token":{"sub":{"value":"…"}}}`) and forbids a token for anybody else;
+  AXIAM ignored the member on every lane. On a client registered
+  `authn_request_params: honour` it is now answered exactly as a mismatched
+  `id_token_hint` is: a signed-in user who is not the named subject is sent to
+  sign in again, and if that sign-in still produces somebody else — or the
+  request carried `prompt=none` — the answer is `login_required`
+  (`account_selection_required` under `prompt=select_account`) and no code is
+  issued; a `sub` member that cannot be read is `invalid_request`.
+  **Behaviour change:** a `fapi2` client sending a `claims` whose
+  `id_token.sub` carries a `value` (or `values`) is refused `invalid_request`
+  at the authorization endpoint, inline or pushed, where the constraint
+  used to be dropped. A `sub` request without a value, and every request from
+  an `ignore`-lane client, are unchanged. Threat model 2.38.0: T-239 amended;
+  totals unchanged.
+- **UserInfo and introspection stop answering for a suspended account**
+  (#520, P23W1-12). Neither endpoint read the account a token names:
+  `POST /oauth2/introspect` reported a locked or deactivated user's refresh
+  token `active: true` although the refresh grant refused it, and UserInfo
+  answered the user's access token until it expired. Both now apply the rule
+  every grant and `/oauth2/authorize` use — a `Locked`, `Inactive`,
+  `Anonymized` or `Deleted` account, or one that no longer exists, may not
+  act; `PendingVerification` may. **Behaviour change:** such an account's
+  tokens are `active: false` at `POST /oauth2/introspect` (access and refresh
+  tokens) and at gRPC `TokenService/IntrospectToken` (access tokens), with no
+  other member, from the moment the status changes; `GET` and
+  `POST /oauth2/userinfo` answer them with the `401` an expired or revoked
+  token gets, and gRPC `UserInfoService/GetUserInfo` with `UNAUTHENTICATED` —
+  now also for an `openid`-only token whose account was removed, which used to
+  be answered from the token. Reactivating the account restores the answers,
+  since nothing is revoked. Client-credentials and service-account tokens,
+  and gRPC `ValidateToken`, are unchanged. Each of these calls now reads the
+  user row once (UserInfo already did whenever a scope released a claim).
+  Threat model 2.38.0: T-39 amended; totals unchanged.
+- **Narrowing a client's scopes narrows the refresh tokens it already holds**
+  (#520, P23W1-13). A scope removed from a client's registration — by an
+  administrator (`PUT /api/v1/oauth2-clients/{id}`), by the client itself
+  through RFC 7592 (`PUT /oauth2/register/{client_id}`), or by a Client ID
+  Metadata Document re-fetched under a narrower tenant policy — stayed on
+  every refresh token issued earlier, and each rotation copied it forward. The
+  refresh grant now keeps only the scopes the client is still registered for,
+  in the grant's order. **Behaviour change:** the access token, the ID token
+  (issued only while `openid` remains) and the response's `scope` carry the
+  narrowed set, and the rotated refresh token holds it, so adding the scope
+  back to the registration does not restore it to an existing grant — the end
+  user authorizes again. A tenant withdrawing a scope from
+  `dcr_allowed_scopes` reaches a dynamically registered client's grants at its
+  next `PUT`, which must drop the scope. Threat model 2.38.0: T-55 and T-289
+  amended; totals unchanged.
+- **`/oauth2/authorize` is rate-limited** (#532, P23W3-09). The authorization
+  endpoint, bare and on the per-tenant mount (`/t/{tenant_id}/oauth2/authorize`),
+  carried no limiter, although every request reads the client, one carrying the
+  sign-in cookie also reads the session and the account, and on a tenant with
+  Client ID Metadata Documents a new URL-shaped `client_id` costs an outbound
+  fetch. Both mounts now carry the browser-endpoint preset the SAML sign-on
+  routes use, `AXIAM__RATE_LIMIT__END_SESSION_PER_MIN` (default 30 a minute per
+  IP, never moved by a profile), in a bucket of their own (`oauth2_authorize`)
+  that the two mounts share. **Behaviour change / upgrade notes:** a 31st
+  authorization request in a minute from one address is answered `429`; where
+  many people start sign-ins behind one NAT or proxy address, or a conformance
+  or load rig drives authorizations from one host, raise that knob. It also
+  sizes `/oauth2/end_session` and the SAML browser routes, each in its own
+  bucket. The OpenAPI document lists the `429` among the route's responses.
+- **SAML: an identity provider's metadata can be signature-checked, and is
+  cached** (#530, P23W3-07). The service provider took an IdP's entity ID,
+  sign-in URL and binding from its metadata document on the strength of the
+  HTTPS fetch alone, and fetched it again on every SP-initiated sign-in: whoever
+  could serve the metadata URL chose where users were sent with their
+  `AuthnRequest` (the assertion certificate is pinned on the configuration and
+  never read from metadata, so assertions could not be forged), and every
+  sign-in depended on the metadata host being up. With
+  `idp_metadata_signing_cert_pem` set (*Added*), the document must carry exactly
+  one enveloped signature, on its `EntityDescriptor` root and naming the root's
+  `ID` — the placement rule AXIAM's SAML receivers use — that verifies against
+  the certificate with a SHA-2 algorithm (`allow_sha1_signatures` does not
+  apply to metadata), and only the signed bytes are read; a document that is
+  unsigned, signed by another key or with SHA-1, altered after signing, or an
+  aggregate (`EntitiesDescriptor`) is refused and no sign-in starts. Every metadata document, with or without the certificate,
+  is now refused when it declares a DTD or entity, is not plain UTF-8, or is
+  past its `validUntil`. Parsed metadata is cached per server process for the
+  document's `cacheDuration` (one hour when it states none), held between five
+  minutes and 24 hours and never past `validUntil`; editing the configuration
+  drops the cached copy, and a refused document is never cached. A refetch
+  whose sign-in URL names another host than the cached one writes a
+  `federation.saml_sso_host_changed` audit row (system actor; the configuration,
+  the old host and the new host). **Behaviour change:** an IdP that moves its
+  sign-in URL is picked up when the cached copy expires (at most 24 hours, or
+  at once by saving the configuration) rather than at the next sign-in; IdP
+  metadata carrying a `<!DOCTYPE` is refused. Threat model 2.38.0: T-474
+  enters, Mitigated.
+- **SAML: the service provider refuses a response carrying a DTD, and SHA-1
+  signatures** (#531, P23W3-08). The SP verifier parsed a `SAMLResponse` with
+  libxml and quick-xml, neither refusing a document type declaration, and
+  accepted `rsa-sha1` signatures; AXIAM's own IdP receiver refused both.
+  Neither was exploitable (entities are not substituted, canonicalisation
+  refuses entity references, and a SHA-1 collision needs the IdP to sign
+  attacker-prepared content), so this is hardening. A response that contains a
+  markup declaration (`<!DOCTYPE`, `<!ENTITY`, `<!ELEMENT`, `<!ATTLIST`) or is
+  not plainly UTF-8 is now refused before either parser reads it, whatever the
+  configuration; SHA-1 is refused as described under *Changed*. Threat model
+  2.38.0: T-67 and T-69 amended; totals unchanged.
+- **An email provider's stored secret follows only the same server** (#525,
+  P23W2-05). Saving an email configuration without re-entering the secret
+  kept the stored one whenever the provider kind was unchanged, whatever the
+  destination — so an administrator who could edit the configuration, but
+  was never given the SMTP password, could point `host` at a server they run
+  and receive the password in the next `AUTH`. At organization and tenant
+  scope alike, an omitted SMTP password is now kept only when `host` (compared
+  without case), `port` and the TLS mode (`starttls`) are unchanged, and an
+  omitted API key only when `api_url` is unchanged or removed (the provider's
+  own endpoint); otherwise `PUT …/email-config` answers `400`
+  (`validation_error`) and stores nothing. A stored secret that is empty (an
+  unauthenticated relay) is not protected and follows the change as before.
+  **Behaviour change:** moving a configuration to another SMTP server, port
+  or TLS mode, or to another `api_url`, now requires entering the password or
+  API key in the same request.
+- **A `require_par` client's unpushed authorization request is refused before
+  the sign-in page** (#524, P23W2-03). A browser with no session that reached
+  `/oauth2/authorize` (or `/t/{tenant_id}/oauth2/authorize`) for a
+  `browser_sso` client registered `require_par` — every `fapi2` client is —
+  with its parameters inline rather than a `request_uri` was sent through the
+  login hop, and the request was refused only on the return leg: a person
+  signed in for nothing, and a FAPI conformance reviewer saw a sign-in page
+  before the error page. The refusal no longer needs a principal: it is
+  answered at once, in place (`400`, never a redirect, an error page for a
+  browser and the JSON error object otherwise), with the same
+  `invalid_request` and wording a signed-in caller gets. A pushed request is
+  unaffected. `docs/conformance/REVIEW-JUDGEMENTS.md` open point 6 is closed;
+  the certification sign-off run confirms the screenshot.
+- **A revocation of a `vault_pki` CA's leaf reaches Vault's own revocation
+  list** (T-470). Vault's PKI engine, not AXIAM, signs the list of a CA whose
+  key it holds, and a leaf revoked in AXIAM was never revoked in Vault, so a
+  relying party validating such a leaf itself — a VPN gateway, a FreeRADIUS
+  server — never learnt of the revocation. `POST
+  /api/v1/certificates/{id}/revoke` now also calls Vault's `POST
+  <int_mount>/revoke` with the certificate's serial, through the address and
+  token issuance uses. AXIAM's revocation is written first and stands whatever
+  Vault answers; if Vault refuses or cannot be reached (two attempts within ten
+  seconds) the route still answers `200`, an audit row
+  `certificate.vault_revocation_pending` records why, and the cleanup job's new
+  `vault_revocation` sweep (listed in `GET /health/jobs`, failing while any
+  revocation is pending) forwards it on a later tick — together with
+  revocations no request made, such as a directory deprovisioning's. AXIAM's
+  CRL route still answers `404` for a `vault_pki` CA: relying parties read
+  Vault's per-issuer list, `/v1/<int_mount>/issuer/<issuer_id>/crl/der`, which
+  Vault names in its leaves once the operator sets `config/urls` on the mount;
+  the PKI guide shows how. **Upgrade notes:** the Vault token's policy needs
+  `update` on `<int_mount>/revoke` (`pki_int/revoke` by default) — without it
+  every revocation of such a leaf is audited as pending and the sweep keeps
+  failing; schema migration v94 adds `certificate.vault_revoked_at`, and the
+  first sweep after the upgrade forwards the revocations of unexpired
+  `vault_pki` leaves made before it. Threat model 2.38.0: T-470 Mitigated; 474
+  threats, 434 mitigated / 19 open / 21 not applicable.
+- **SAML: clearing or replacing an IdP's metadata signing certificate is
+  audited** (#530 follow-up, T-474). An update that sets
+  `idp_metadata_signing_cert_pem` to `null` turns the metadata signature check
+  off, so the IdP's sign-in URL is again trusted on the strength of its HTTPS
+  fetch; one that replaces it re-anchors the check on another certificate. The
+  first now writes a `federation.metadata_signing_cert_cleared` audit row, the
+  second `federation.metadata_signing_cert_changed`, each naming the
+  configuration, its provider and the administrator, as turning SHA-1 on
+  already writes `federation.sha1_signatures_allowed`. Setting a certificate
+  where there was none, re-saving the same one or clearing an absent one
+  writes nothing. Threat model 2.38.0: T-474 amended; totals unchanged.
 
 ### Documentation
 

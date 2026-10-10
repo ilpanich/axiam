@@ -93,7 +93,8 @@ pub const NAME_ID_FORMAT_UNSPECIFIED: &str =
 const NAME_ID_FORMAT_ENTITY: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:entity";
 
 /// The signature algorithms an enveloped request signature may use: no SHA-1.
-const ALLOWED_XML_SIGNATURE_ALGORITHMS: [AllowedSignatureAlgorithm; 6] = [
+/// The SAML SP verifier takes the same list (#531).
+pub(crate) const ALLOWED_XML_SIGNATURE_ALGORITHMS: [AllowedSignatureAlgorithm; 6] = [
     AllowedSignatureAlgorithm::RsaSha256,
     AllowedSignatureAlgorithm::RsaSha384,
     AllowedSignatureAlgorithm::RsaSha512,
@@ -460,7 +461,7 @@ fn xs_boolean(raw: Option<String>) -> Result<bool, RequestError> {
 /// `LogoutRequest` or `LogoutResponse` in [`super::logout`] — and `root_id` its
 /// `ID`. The rule never looks at the root's name, so it cannot differ between
 /// message kinds.
-pub(super) fn signature_placement(
+pub(crate) fn signature_placement(
     doc: &libxml::tree::Document,
     root: &libxml::tree::Node,
     root_id: &str,

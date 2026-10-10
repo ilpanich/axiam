@@ -347,11 +347,11 @@ where
     // the interceptor-verified bearer token (no request body), mirroring the
     // REST `/oauth2/userinfo` endpoint. Guarded by the same AuthInterceptor.
     let user_info_svc = UserInfoServiceServer::with_interceptor(
-        UserInfoServiceImpl::new(user_repo),
+        UserInfoServiceImpl::new(user_repo.clone()),
         AuthInterceptor::new(auth_config.clone()),
     );
     let token_svc = TokenServiceServer::with_interceptor(
-        TokenServiceImpl::new(auth_config.clone()),
+        TokenServiceImpl::new(auth_config.clone(), user_repo),
         AuthInterceptor::new(auth_config.clone()),
     );
     // X1 / R2.3 — reactor admin CRUD over gRPC, mirroring the REST

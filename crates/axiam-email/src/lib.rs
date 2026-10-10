@@ -2,8 +2,11 @@
 //!
 //! Supports multiple providers: SMTP (via `lettre`), SendGrid,
 //! Postmark, Resend, and Brevo (via `reqwest` REST calls).
-//! Provider is configured at org level; tenants can override.
+//! Provider is configured at org level; tenants can override. Every
+//! provider connection is held to the deployment's outbound address policy
+//! ([`egress`], #529).
 
+pub mod egress;
 pub mod message;
 pub mod provider;
 pub mod providers;
@@ -11,6 +14,7 @@ pub mod service;
 pub mod template;
 
 // Re-exports for convenience.
+pub use egress::EmailEgress;
 pub use message::EmailMessage;
 pub use provider::{EmailProvider, SendResult};
 pub use service::EmailService;
@@ -146,7 +150,7 @@ mod tests {
             api_url: None,
         }));
         config.enabled = false;
-        let result = EmailService::from_config(&config);
+        let result = EmailService::from_config(&config, &crate::egress::EmailEgress::default());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("disabled"));
     }
@@ -159,7 +163,8 @@ mod tests {
             api_key: "sg_test".to_string(),
             api_url: None,
         });
-        let provider = providers::build_provider(&config).unwrap();
+        let provider =
+            providers::build_provider(&config, &crate::egress::EmailEgress::default()).unwrap();
         assert_eq!(provider.provider_name(), "sendgrid");
     }
 
@@ -169,7 +174,8 @@ mod tests {
             api_key: "pm_test".to_string(),
             api_url: None,
         });
-        let provider = providers::build_provider(&config).unwrap();
+        let provider =
+            providers::build_provider(&config, &crate::egress::EmailEgress::default()).unwrap();
         assert_eq!(provider.provider_name(), "postmark");
     }
 
@@ -179,7 +185,8 @@ mod tests {
             api_key: "re_test".to_string(),
             api_url: None,
         });
-        let provider = providers::build_provider(&config).unwrap();
+        let provider =
+            providers::build_provider(&config, &crate::egress::EmailEgress::default()).unwrap();
         assert_eq!(provider.provider_name(), "resend");
     }
 
@@ -189,7 +196,8 @@ mod tests {
             api_key: "xkeysib_test".to_string(),
             api_url: None,
         });
-        let provider = providers::build_provider(&config).unwrap();
+        let provider =
+            providers::build_provider(&config, &crate::egress::EmailEgress::default()).unwrap();
         assert_eq!(provider.provider_name(), "brevo");
     }
 

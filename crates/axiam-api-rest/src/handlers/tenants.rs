@@ -75,10 +75,17 @@ use axiam_authz::types::SubjectScope;
 pub const AUDIT_EXPORT_ACTION: &str = "tenants.audit_exported";
 
 /// Audit action recorded — in the **system** log, not the tenant's — when a
-/// tenant is deleted. The tenant's own entries are gone by then; this is what
-/// is left to say the deletion happened, who did it, and which export receipt
-/// authorised it.
+/// tenant is deleted. The tenant's own entries are purged with the rest of its
+/// data (#523); this is what is left to say the deletion happened, who did it,
+/// and which export receipt authorised it.
 pub const TENANT_DELETED_ACTION: &str = "tenants.deleted";
+
+/// Audit action the cleanup job records in the **system** log when it has
+/// purged a deleted tenant's data (#523, D-4) — the evidence that the deletion
+/// recorded by [`TENANT_DELETED_ACTION`] was carried out, as an erasure proof
+/// is for one account. `metadata.orphan` is `true` for a tenant id whose row
+/// a deletion made before the tombstone existed had already removed.
+pub const TENANT_PURGED_ACTION: &str = "tenants.purged";
 
 /// How recent the export receipt must be for [`delete`] to accept it.
 ///
@@ -606,6 +613,10 @@ pub async fn update<C: Connection + Clone>(
 }
 
 /// `DELETE /api/v1/organizations/{org_id}/tenants/{tenant_id}`
+///
+/// #523 (D-4): the tenant is tombstoned and its sessions and refresh tokens are
+/// revoked before the `204`; its data is purged afterwards by the cleanup job's
+/// `tenant_purge` sweep, on the cleanup interval.
 #[utoipa::path(
     delete,
     path = "/api/v1/organizations/{org_id}/tenants/{tenant_id}",
@@ -615,7 +626,9 @@ pub async fn update<C: Connection + Clone>(
         ("tenant_id" = Uuid, Path, description = "Tenant ID"),
     ),
     responses(
-        (status = 204, description = "Tenant deleted"),
+        (status = 204, description = "Tenant deleted: it is gone from every read and \
+            sign-in at once, its sessions and refresh tokens are revoked, and its data is \
+            purged by the cleanup job"),
         (status = 404, description = "Tenant not found"),
     ),
     security(("bearer" = []))
@@ -671,14 +684,38 @@ pub async fn delete<C: Connection + Clone>(
         .into());
     };
 
+    // #523 (P23W2-04, D-4): revoke, tombstone — the erasure's order, its first
+    // step in the request. The tenant's sessions go first, through the
+    // repository that publishes them to the revocation feed and drops them from
+    // the validity cache, then its refresh tokens; so its last session can no
+    // longer refresh and its access tokens fail the per-request session check.
+    // A failure here leaves the tenant live and the DELETE retryable. The
+    // tombstone then takes the tenant out of every read path, revoking once
+    // more in the same transaction (a sign-in that raced the first pass).
+    state
+        .session_repo
+        .invalidate_tenant_sessions(path.tenant_id)
+        .await?;
+    state
+        .refresh_token_repo
+        .revoke_all_for_tenant(path.tenant_id)
+        .await?;
     state.tenant_repo.delete(path.tenant_id).await?;
+    // This replica stops serving the tenant from memory at once: the refresh
+    // path's organization mapping and any session the second pass removed.
+    state.tenant_org_cache.invalidate(path.tenant_id);
+    if let Some(cache) = state.session_repo.validation_cache() {
+        cache.invalidate_tenant(path.tenant_id);
+    }
 
     // The tenant's own audit entries — including the export receipt just
-    // checked — went with it, so this record goes to the SYSTEM log (nil
-    // tenant), which is the only part of the trail that outlives the tenant.
-    // Written through the dead-lettering sink for the same reason the erasure
-    // records are: this is the last chance to record it, and a transient
-    // datastore failure must not be how it gets lost.
+    // checked — are removed by the cleanup job's `tenant_purge` sweep with the
+    // rest of its data (they were exported first, T-118). So this record goes
+    // to the SYSTEM log (nil tenant), which the purge never touches and which
+    // is the only part of the trail that outlives the tenant. Written through
+    // the dead-lettering sink for the same reason the erasure records are:
+    // this is the last chance to record it, and a transient datastore failure
+    // must not be how it gets lost.
     write_audit_with_dead_letter(
         &state.audit_repo,
         CreateAuditLogEntry {

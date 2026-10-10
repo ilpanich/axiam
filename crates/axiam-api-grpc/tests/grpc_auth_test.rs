@@ -253,7 +253,7 @@ async fn start_test_server<U: UserRepository + Clone + 'static>(
     // AuthInterceptor chokepoint as AuthorizationService — mirrors server.rs.
     let user_svc = UserServiceServer::with_interceptor(
         UserServiceImpl::with_static_lockout_policy(
-            user_repo,
+            user_repo.clone(),
             auth_config.clone(),
             // B1: in production this is a clone of `AppState`'s process-wide
             // Argon2id gate; these interceptor tests never reach the verify,
@@ -263,7 +263,7 @@ async fn start_test_server<U: UserRepository + Clone + 'static>(
         AuthInterceptor::new(auth_config.clone()),
     );
     let token_svc = TokenServiceServer::with_interceptor(
-        TokenServiceImpl::new(auth_config.clone()),
+        TokenServiceImpl::new(auth_config.clone(), user_repo),
         AuthInterceptor::new(auth_config),
     );
 

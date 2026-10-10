@@ -467,6 +467,31 @@ static MIGRATIONS: &[Migration] = &[
         name: "notification_rule_window",
         sql: SCHEMA_V85,
     },
+    Migration {
+        version: 90,
+        name: "certificate_revocation_date",
+        sql: SCHEMA_V90,
+    },
+    Migration {
+        version: 91,
+        name: "tenant_tombstone",
+        sql: SCHEMA_V91,
+    },
+    Migration {
+        version: 92,
+        name: "federation_allow_sha1_signatures",
+        sql: SCHEMA_V92,
+    },
+    Migration {
+        version: 93,
+        name: "federation_idp_metadata_signing_cert",
+        sql: SCHEMA_V93,
+    },
+    Migration {
+        version: 94,
+        name: "certificate_vault_revocation",
+        sql: SCHEMA_V94,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4589,6 +4614,84 @@ DEFINE INDEX IF NOT EXISTS idx_notification_window_rule ON TABLE notification_wi
     COLUMNS tenant_id, rule_id;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v90 — #565 (T-102): a certificate revocation list per issuing CA
+// -----------------------------------------------------------------------
+//
+// A CRL entry carries the date the CA processed the revocation (RFC 5280
+// §5.1.2.6), and until this version a revocation recorded only the status. The
+// date is set by the first revocation and kept by every later one. A row
+// revoked before this version has none, and its list entry states the
+// certificate's own `not_before` instead (`RevokedCertificate::revoked_at`).
+// v90 rather than the next free number: the 1.0.0 release waves split the
+// numbers, W2 taking 85 … 89 and W1 90 onwards, so the branches merge cleanly.
+// The two indexes serve the list's two reads — a CA's revoked leaves and its
+// revoked subordinate CAs — which the route runs per request. Additive: two
+// optional columns and two indexes; no row is rewritten.
+const SCHEMA_V90: &str = "\
+DEFINE FIELD IF NOT EXISTS revoked_at ON TABLE certificate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS revoked_at ON TABLE ca_certificate TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_cert_issuer_status ON TABLE certificate FIELDS issuer_ca_id, status;
+DEFINE INDEX IF NOT EXISTS idx_ca_cert_parent_status ON TABLE ca_certificate FIELDS parent_ca_id, status;
+";
+
+// -----------------------------------------------------------------------
+// Schema v91 — tenant tombstone (#523, P23W2-04, D-4)
+// -----------------------------------------------------------------------
+//
+// Deleting a tenant now stamps `deleted_at` instead of removing the row: the
+// tenant leaves every read path at once (each `SurrealTenantRepository` read
+// and the settings repository's tenant lookup filter on `deleted_at = NONE`),
+// its sessions and refresh tokens are revoked in the same request, and the
+// cleanup job's `tenant_purge` sweep then removes every tenant-scoped row in
+// the order user erasure uses (`repository::tenant_purge`) and the tenant row
+// last. The index serves that sweep's read of the tombstoned tenants. Additive:
+// one optional column and one index; no row is rewritten, so every tenant that
+// exists keeps `deleted_at = NONE` and stays live.
+const SCHEMA_V91: &str = "\
+DEFINE FIELD IF NOT EXISTS deleted_at ON TABLE tenant TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_tenant_deleted_at ON TABLE tenant FIELDS deleted_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v92 — SAML SHA-1 escape hatch (#531, P23W3-08, D-3)
+// -----------------------------------------------------------------------
+//
+// Since 1.0.0 the SAML SP verifier accepts only SHA-2 signatures. A federation
+// config whose IdP still signs with SHA-1 sets `allow_sha1_signatures` to keep
+// signing in. Additive: one column, `false` by default, so every existing
+// config takes the new rule; no row is rewritten.
+const SCHEMA_V92: &str = "\
+DEFINE FIELD IF NOT EXISTS allow_sha1_signatures ON TABLE federation_config TYPE bool DEFAULT false;
+";
+
+// -----------------------------------------------------------------------
+// Schema v93 — SAML IdP metadata signing certificate (#530, P23W3-07)
+// -----------------------------------------------------------------------
+//
+// The certificate a SAML federation's IdP metadata document must be signed
+// with. Additive: one optional column, absent on every existing config, which
+// keeps fetching its metadata unchecked as before; no row is rewritten.
+const SCHEMA_V93: &str = "\
+DEFINE FIELD IF NOT EXISTS idp_metadata_signing_cert_pem ON TABLE federation_config \
+    TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v94 — a `vault_pki` leaf's revocation forwarded to Vault (T-470)
+// -----------------------------------------------------------------------
+//
+// A leaf of a CA whose key Vault's PKI engine holds is revoked in Vault as well
+// as in AXIAM, because Vault — not AXIAM — signs that CA's revocation list.
+// `vault_revoked_at` is set once Vault has accepted the revocation; a revoked
+// row of such a CA without it is one the cleanup job's `vault_revocation` sweep
+// still has to forward. Additive: one optional column, absent on every
+// existing row — so a leaf revoked before this version is forwarded by the
+// first sweep — and no row is rewritten.
+const SCHEMA_V94: &str = "\
+DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE certificate TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4613,6 +4716,202 @@ mod tests {
             assert!(
                 !SCHEMA_V85.contains(forbidden),
                 "v85 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// T-470 — v94 adds the forwarded-to-Vault stamp and rewrites no row.
+    #[test]
+    fn v94_adds_only_the_vault_revocation_stamp() {
+        let statements: Vec<&str> = SCHEMA_V94
+            .lines()
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE certificate \
+                 TYPE option<datetime>;"
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V94.contains(forbidden),
+                "v94 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// The tables some migration gives `field`, minus the tables a migration
+    /// removes again (`srp_credential`).
+    fn tables_defining(field: &str) -> std::collections::BTreeSet<String> {
+        let mut defined = std::collections::BTreeSet::new();
+        let mut removed = std::collections::BTreeSet::new();
+        for migration in MIGRATIONS {
+            let words: Vec<&str> = migration.sql.split_whitespace().collect();
+            for (i, pair) in words.windows(2).enumerate() {
+                let rest = &words[i + 2..];
+                let skip = |rest: &[&str]| {
+                    rest.iter()
+                        .position(|w| !matches!(*w, "IF" | "NOT" | "EXISTS" | "OVERWRITE"))
+                        .unwrap_or(rest.len())
+                };
+                if pair == ["DEFINE", "FIELD"] {
+                    let rest = &rest[skip(rest)..];
+                    if rest.first() != Some(&field) || rest.get(1) != Some(&"ON") {
+                        continue;
+                    }
+                    let rest = &rest[2..];
+                    let rest = if rest.first() == Some(&"TABLE") {
+                        &rest[1..]
+                    } else {
+                        rest
+                    };
+                    if let Some(table) = rest.first() {
+                        defined.insert(table.trim_end_matches(';').to_string());
+                    }
+                } else if pair == ["REMOVE", "TABLE"] {
+                    let rest = &rest[skip(rest)..];
+                    if let Some(table) = rest.first() {
+                        removed.insert(table.trim_end_matches(';').to_string());
+                    }
+                }
+            }
+        }
+        defined.difference(&removed).cloned().collect()
+    }
+
+    /// #523 (D-4) — the schema-scan pin: every table with a `tenant_id` field,
+    /// and every table keyed by `scope`/`scope_id`, is in the tenant purge,
+    /// keyed the way its rows name their tenant; and the purge names no table
+    /// the schema does not scope to a tenant. A tenant-scoped table added
+    /// without a purge step fails here instead of outliving its tenant.
+    #[test]
+    fn every_tenant_scoped_table_is_purged() {
+        use crate::repository::tenant_purge::{TENANT_PURGE_ORDER, TenantKey};
+
+        let by_tenant = tables_defining("tenant_id");
+        let by_scope = tables_defining("scope_id");
+        assert!(by_tenant.contains("user") && by_tenant.contains("session"));
+        assert!(by_scope.contains("email_config"));
+        assert!(
+            !by_tenant.contains("srp_credential"),
+            "a removed table is not purged"
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        for step in TENANT_PURGE_ORDER {
+            assert!(seen.insert(step.table), "{} is purged twice", step.table);
+            let expected = if by_tenant.contains(step.table) {
+                TenantKey::TenantId
+            } else if by_scope.contains(step.table) {
+                TenantKey::Scope
+            } else {
+                panic!(
+                    "{} is purged but no migration scopes it to a tenant",
+                    step.table
+                );
+            };
+            assert_eq!(step.key, expected, "{} is keyed wrongly", step.table);
+        }
+        for table in by_tenant.iter().chain(by_scope.iter()) {
+            assert!(
+                seen.contains(table.as_str()),
+                "{table} is tenant-scoped but not in TENANT_PURGE_ORDER: a deleted \
+                 tenant's rows would survive the purge (#523)"
+            );
+        }
+    }
+
+    /// #530 (P23W3-07) — v93 adds the optional SAML metadata signing
+    /// certificate and rewrites no row: every existing config keeps fetching
+    /// unchecked metadata until an operator sets one.
+    #[test]
+    fn v93_adds_only_the_metadata_signing_certificate() {
+        let statements: Vec<&str> = SCHEMA_V93
+            .lines()
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS idp_metadata_signing_cert_pem ON TABLE federation_config \
+              TYPE option<string>;"
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V93.contains(forbidden),
+                "v93 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #531 (D-3) — v92 adds the SAML SHA-1 escape hatch, `false` by default,
+    /// and rewrites no row: every existing config refuses SHA-1.
+    #[test]
+    fn v92_adds_only_the_sha1_escape_hatch() {
+        let statements: Vec<&str> = SCHEMA_V92
+            .lines()
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS allow_sha1_signatures ON TABLE federation_config \
+              TYPE bool DEFAULT false;"
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V92.contains(forbidden),
+                "v92 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #523 (D-4) — v91 adds the tenant tombstone column and its index, and
+    /// rewrites no row: every existing tenant stays live.
+    #[test]
+    fn v91_adds_only_the_tenant_tombstone() {
+        for statement in SCHEMA_V91.lines().filter(|l| l.starts_with("DEFINE")) {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v91 statements must be idempotent definitions: {statement}"
+            );
+            assert!(
+                statement.contains("ON TABLE tenant ") && statement.contains("deleted_at"),
+                "v91 defined something outside its scope: {statement}"
+            );
+        }
+        assert!(SCHEMA_V91.contains("deleted_at ON TABLE tenant TYPE option<datetime>"));
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V91.contains(forbidden),
+                "v91 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
+
+    /// #565 (T-102) — v90 adds the revocation date to both certificate tables
+    /// and the two indexes the revocation list reads, and rewrites no row.
+    #[test]
+    fn v90_adds_only_the_revocation_date_and_its_indexes() {
+        for statement in SCHEMA_V90.lines().filter(|l| l.starts_with("DEFINE")) {
+            assert!(
+                statement.contains("IF NOT EXISTS"),
+                "v90 statements must be idempotent definitions: {statement}"
+            );
+        }
+        for table in ["certificate", "ca_certificate"] {
+            assert!(SCHEMA_V90.contains(&format!(
+                "revoked_at ON TABLE {table} TYPE option<datetime>"
+            )));
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE"] {
+            assert!(
+                !SCHEMA_V90.contains(forbidden),
+                "v90 must not contain {forbidden}: it is additive DDL only"
             );
         }
     }
@@ -5895,10 +6194,23 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&85),
-            "v85 is the newest migration (#551, T-117 — `notification_rule.window_minutes` \
+            Some(&94),
+            "v94 is the newest migration (T-470 — `certificate.vault_revoked_at`, set once \
+             Vault has accepted the revocation of a `vault_pki` CA's leaf; v93 was #530, \
+             P23W3-07 — \
+             `federation_config.idp_metadata_signing_cert_pem`, the certificate a SAML IdP's \
+             metadata document must be signed with; v92 was #531, D-3 — \
+             `federation_config.allow_sha1_signatures`, the SAML SP verifier's SHA-1 escape hatch; \
+             v91 was #523, D-4 — `tenant.deleted_at`, \
+             the tombstone a tenant deletion stamps before the cleanup job purges the tenant's \
+             rows; v90 was \
+             #565, T-102 — `revoked_at` on `certificate` and \
+             `ca_certificate`, the date a certificate revocation list entry carries; v85 was \
+             #551, T-117 — `notification_rule.window_minutes` \
              and the `notification_window` table, one notification mail per rule, event and \
-             window; v84 was the W5 F4 review, T-418 / D-73 — \
+             window; v89 … v86 are unclaimed (the 1.0.0 release waves split the numbers, \
+             W2 taking 85 … 89 and W1 90 onwards); v84 was \
+             the W5 F4 review, T-418 / D-73 — \
              `scim_target_state.failure_notified_at`, one SCIM failure mail per target per \
              hour; v83 was T23.8.1 / G-8 — the minimal profile's singleton \
              lease table `minimal_profile_lease`; v82 was T23.7.2 — the CIBA approval e-mail's template kind \

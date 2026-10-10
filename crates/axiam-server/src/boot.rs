@@ -269,6 +269,51 @@ pub fn directory_client(config: &AppConfig) -> Arc<axiam_directory::DirectoryCli
     )
 }
 
+/// The email provider's outbound address policy (#529, T-473): the SMTP host
+/// through the connector address guard the directory uses — loopback,
+/// link-local (the metadata service), unspecified, multicast and
+/// special-purpose addresses always refused, private ranges only inside
+/// `AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`, this host's addresses on AXIAM's
+/// own REST and gRPC ports never, the connection pinned to the vetted address —
+/// and an HTTP provider's `api_url` through `guarded_fetch_no_redirect`
+/// (`AXIAM__PKI__SSRF_ALLOWED_HOSTS` is its exception list). Deployment
+/// configuration a tenant administrator cannot change, logged here once.
+pub fn email_egress(config: &AppConfig) -> axiam_email::EmailEgress {
+    use axiam_email::egress::{
+        ALLOWED_PRIVATE_NETWORKS_ENV, AddressPolicy, EmailEgress, parse_allowed_networks,
+    };
+
+    let raw_networks = std::env::var(ALLOWED_PRIVATE_NETWORKS_ENV).unwrap_or_default();
+    let (networks, rejected) = parse_allowed_networks(&raw_networks);
+    if !rejected.is_empty() {
+        // A typo admits nothing (fail closed), but it must not pass silently.
+        tracing::error!(
+            setting = ALLOWED_PRIVATE_NETWORKS_ENV,
+            rejected = %rejected.join(","),
+            "email allow-list entries that are not CIDR blocks or addresses were ignored"
+        );
+    }
+    if networks.is_empty() {
+        tracing::info!(
+            "email address guard: no private network admitted ({} unset) — an SMTP \
+             provider must resolve to a globally routable address",
+            ALLOWED_PRIVATE_NETWORKS_ENV
+        );
+    } else {
+        tracing::warn!(
+            networks = %networks.iter().map(ToString::to_string).collect::<Vec<_>>().join(","),
+            "email address guard: SMTP providers may resolve into these private networks \
+             ({}); loopback, link-local, metadata and AXIAM's own listeners stay refused",
+            ALLOWED_PRIVATE_NETWORKS_ENV
+        );
+    }
+    EmailEgress::new(
+        AddressPolicy::new()
+            .with_allowed_private_networks(networks)
+            .with_listener_ports([config.server.port, config.grpc.port]),
+    )
+}
+
 impl Default for AppConfig {
     /// The configuration of a server with nothing set: every section at its
     /// default, no secret. What `serde(default)` gives each field, so an
@@ -958,13 +1003,51 @@ where
         );
     }
 
+    // #565 (T-102): a certificate revocation list per issuing CA. The list's
+    // `nextUpdate` interval, and where certificates say it is published: an
+    // explicit `AXIAM__PKI__CRL_BASE_URL`, else the issuer. A value set and
+    // wrong stops startup rather than being replaced by a guess — every
+    // certificate issued afterwards carries it.
+    let crl_next_update_secs = match std::env::var("AXIAM__PKI__CRL_NEXT_UPDATE_SECS") {
+        Ok(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| e.to_string())
+            .and_then(axiam_pki::crl::validate_next_update_secs)
+            .map_err(|e| std::io::Error::other(format!("AXIAM__PKI__CRL_NEXT_UPDATE_SECS: {e}")))?,
+        _ => axiam_pki::crl::DEFAULT_CRL_NEXT_UPDATE_SECS,
+    };
+    let crl_distribution = axiam_pki::CrlDistribution::resolve(
+        std::env::var("AXIAM__PKI__CRL_BASE_URL").ok().as_deref(),
+        config.auth.root_issuer(),
+    )
+    .map_err(|e| std::io::Error::other(format!("AXIAM__PKI__CRL_BASE_URL: {e}")))?;
+    match &crl_distribution {
+        Some(distribution) => tracing::info!(
+            crl_next_update_secs,
+            example = %distribution.uri_for(uuid::Uuid::nil(), uuid::Uuid::nil()),
+            "certificate revocation lists published; every certificate AXIAM signs from now \
+             on names its issuer's list"
+        ),
+        None => tracing::warn!(
+            crl_next_update_secs,
+            "certificate revocation lists are served at /pki/v1/{{org_id}}/ca/{{ca_id}}/crl, but \
+             no certificate will name one: neither AXIAM__PKI__CRL_BASE_URL nor the \
+             issuer (AXIAM__AUTH__OAUTH2_ISSUER_URL, else AXIAM__AUTH__JWT_ISSUER) is an absolute \
+             http(s) URL, so there is no address \
+             to write into the CRL distribution points extension. Relying parties must be \
+             configured with the list's URL by hand"
+        ),
+    }
+
     let cert_repo = SurrealCertificateRepository::new(pool.handle_for_repo());
     let ca_service = CaService::new(
         ca_cert_repo.clone(),
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
         Arc::clone(&ca_custodians),
-    );
+    )
+    .with_crl_distribution(crl_distribution.clone());
     let pgp_repo = SurrealPgpKeyRepository::new(pool.handle_for_repo());
     let pgp_service = PgpService::new(pgp_repo, pki_config.clone(), Arc::clone(&crypto_semaphore));
     let cert_service = CertService::new(
@@ -976,6 +1059,14 @@ where
         pki_config.clone(),
         Arc::clone(&crypto_semaphore),
         Arc::clone(&ca_custodians),
+    )
+    .with_crl_distribution(crl_distribution);
+    let crl_service = axiam_pki::CrlService::new(
+        SurrealCaCertificateRepository::new(pool.handle_for_repo()),
+        cert_repo.clone(),
+        Arc::clone(&crypto_semaphore),
+        Arc::clone(&ca_custodians),
+        crl_next_update_secs,
     );
     // SEC-024: DeviceAuthService now holds a CA repo for chain verification.
     // SurrealCaCertificateRepository is cloned; each clone shares the underlying Surreal<C>.
@@ -1121,6 +1212,13 @@ where
         config.auth.clone(),
         i64::try_from(config.auth.refresh_token_lifetime_secs)
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
+        // #565 (T-102) — `tls_client_auth` and `self_signed_tls_client_auth`
+        // refuse a certificate AXIAM issued and revoked, by the fingerprint
+        // lookup device sign-in makes.
+        Arc::new(axiam_oauth2::mtls::InventoryCertificateLookup::new(
+            cert_repo.clone(),
+            SurrealCaCertificateRepository::new(pool.handle_for_repo()),
+        )),
     )
     // X1 — the same gate `AuthService` holds, so `token.pre_issue` and
     // `login.post_auth` share one routing table and one per-tenant cap.
@@ -2162,11 +2260,16 @@ where
     // a `delivery_abandoned` row for what it still holds.
     let outbound_shutdown = outbound.shutdown();
 
+    // #529: one outbound rule for every email provider connection — the
+    // consumer's sends and the management routes' save check and test send.
+    let email_outbound = email_egress(&config);
+
     // Spawn the mail consumer on a background task (D-14): the AMQP consumer
     // with the broker, the in-process worker without it (G-8, D-59).
     // Only spawned when AXIAM__AUTH__EMAIL_ENCRYPTION_KEY is present; otherwise
     // mail delivery is disabled and a warning was logged at startup (T-5-key-absent).
     if let Some(email_key) = config.email_encryption_key {
+        let mail_egress = email_outbound.clone();
         let mail_email_config_repo =
             SurrealEmailConfigRepository::new(db_handle.clone(), email_key);
         let mail_audit_repo = audit_repo.clone();
@@ -2187,6 +2290,7 @@ where
             tokio::spawn(async move {
                 axiam_amqp::start_mail_consumer(
                     mail_channel,
+                    mail_egress,
                     mail_email_config_repo,
                     mail_audit_repo,
                     mail_user_repo,
@@ -2200,6 +2304,7 @@ where
         } else if let Some(queue) = mail_queue {
             axiam_amqp::spawn_in_process_mail_worker_default(
                 queue,
+                mail_egress,
                 mail_email_config_repo,
                 mail_audit_repo,
                 mail_user_repo,
@@ -2620,6 +2725,12 @@ where
         Arc::new(oauth2_client_repo.clone()),
         Arc::new(oauth2_registration_token_repo.clone()),
         Arc::new(settings_repo.clone()),
+        // #517 — a swept client's refresh tokens, codes and pushed requests.
+        Arc::new(cleanup::SweptClientGrants::new(
+            axiam_db::SurrealRefreshTokenRepository::new(db_handle.clone()),
+            axiam_db::SurrealAuthorizationCodeRepository::new(db_handle.clone()),
+            axiam_db::SurrealPushedAuthRequestRepository::new(db_handle.clone()),
+        )),
         job_health.clone(),
         cleanup_shutdown_rx,
     )
@@ -2649,7 +2760,9 @@ where
         ssf_account_sink.clone(),
     )
     // G-7 (T23.7.1): the CIBA pending-request expiry.
-    .with_ciba(Arc::new(ciba_request_repo.clone()));
+    .with_ciba(Arc::new(ciba_request_repo.clone()))
+    // T-470: `vault_pki` revocations a revoke request could not forward.
+    .with_vault_revocations(Arc::new(cert_service.clone()));
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared
@@ -2745,6 +2858,7 @@ where
         pki: bundles::PkiState {
             ca_service: ca_service.clone(),
             cert_service: cert_service.clone(),
+            crl_service: crl_service.clone(),
             cert_repo: cert_repo.clone(),
             ca_cert_repo: SurrealCaCertificateRepository::new(db_handle.clone()),
             pgp_service: pgp_service.clone(),
@@ -2771,6 +2885,7 @@ where
                 as Arc<dyn axiam_api_rest::state::DynMailPublisher>,
             email_config_repo: email_config_repo.clone(),
             email_encryption_key: config.email_encryption_key,
+            egress: email_outbound.clone(),
             email_verification_service: email_verification_service.clone(),
             password_reset_service: password_reset_service.clone(),
         },

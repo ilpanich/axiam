@@ -16,6 +16,7 @@ use axiam_db::{
     SurrealAuditLogRepository, SurrealEmailConfigRepository, SurrealEmailTemplateRepository,
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
+use axiam_email::EmailEgress;
 use chrono::Utc;
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
@@ -113,6 +114,7 @@ async fn delivery_failure_first_attempt_returns_retry_needed() {
     let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
     let outcome = send_with_retry_and_audit(
         &msg,
+        &EmailEgress::default(),
         &email_repo,
         &audit_repo,
         &user_repo,
@@ -155,6 +157,7 @@ async fn exhausted_retries_writes_delivery_failed_audit_without_recipient() {
 
     let outcome = send_with_retry_and_audit(
         &msg,
+        &EmailEgress::default(),
         &email_repo,
         &audit_repo,
         &user_repo,
@@ -234,6 +237,7 @@ async fn missing_email_config_returns_send_error() {
     let msg = make_msg(MailType::PasswordReset, Uuid::new_v4(), Uuid::new_v4(), 0);
     let result = send_with_retry_and_audit(
         &msg,
+        &EmailEgress::default(),
         &email_repo,
         &audit_repo,
         &user_repo,
@@ -294,6 +298,7 @@ async fn export_ready_resolves_real_org_id() {
 
     let outcome = send_with_retry_and_audit(
         &msg,
+        &EmailEgress::default(),
         &email_repo,
         &audit_repo,
         &user_repo,
@@ -316,6 +321,7 @@ async fn export_ready_resolves_real_org_id() {
     nil_org_msg.org_id = Uuid::nil();
     let nil_result = send_with_retry_and_audit(
         &nil_org_msg,
+        &EmailEgress::default(),
         &email_repo,
         &audit_repo,
         &user_repo,

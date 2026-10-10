@@ -3,7 +3,7 @@
 use axiam_core::ca_keys::CaKeyCustody;
 use axiam_core::error::AxiamResult;
 use axiam_core::models::certificate::{
-    CaCertificate, CertificateStatus, KeyAlgorithm, StoreCaCertificate,
+    CaCertificate, CertificateStatus, KeyAlgorithm, RevokedCertificate, StoreCaCertificate,
 };
 use axiam_core::repository::{CaCertificateRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -46,6 +46,16 @@ struct CaCertificateRow {
     /// a CA nobody has flagged is not a trust anchor.
     mtls_trust_anchor: Option<bool>,
     created_at: DateTime<Utc>,
+}
+
+/// One subordinate CA on its parent's revocation list (#565).
+#[derive(Debug, SurrealValue)]
+struct RevokedCaRow {
+    public_cert_pem: String,
+    fingerprint: String,
+    /// Schema v90. `None` for a CA revoked before it.
+    revoked_at: Option<DateTime<Utc>>,
+    not_before: DateTime<Utc>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -327,8 +337,11 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
             .db
             .current()
             .query(
+                // #565: the first revocation's date stands, as on the leaf
+                // table — it is what the parent's revocation list states.
                 "UPDATE type::record('ca_certificate', $id) SET \
-                 status = $status \
+                 status = $status, \
+                 revoked_at = revoked_at ?? time::now() \
                  WHERE organization_id = $org_id",
             )
             .bind(("id", id.to_string()))
@@ -556,6 +569,38 @@ impl<C: Connection> CaCertificateRepository for SurrealCaCertificateRepository<C
         })?;
 
         Ok(row.into_entry(id)?)
+    }
+
+    async fn list_revoked_children(
+        &self,
+        parent_ca_id: Uuid,
+    ) -> AxiamResult<Vec<RevokedCertificate>> {
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT public_cert_pem, fingerprint, revoked_at, not_before FROM ca_certificate \
+                 WHERE parent_ca_id = $parent_ca_id \
+                   AND status = 'Revoked' \
+                   AND not_after > time::now() \
+                 ORDER BY fingerprint",
+            )
+            .bind(("parent_ca_id", parent_ca_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<RevokedCaRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| RevokedCertificate {
+                public_cert_pem: row.public_cert_pem,
+                fingerprint: row.fingerprint,
+                revoked_at: row.revoked_at,
+                not_before: row.not_before,
+            })
+            .collect())
     }
 
     async fn list_mtls_trust_anchors(&self) -> AxiamResult<Vec<CaCertificate>> {

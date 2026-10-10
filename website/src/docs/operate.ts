@@ -623,7 +623,7 @@ export const OPERATE_PAGES: DocPage[] = [
         headers: ["Field", "Meaning"],
         rows: [
           ["email_verification_required", "Whether an unverified address blocks sign-in."],
-          ["email_verification_grace_period_hours", "How long an unverified account keeps working before it does."],
+          ["email_verification_grace_period_hours", "How long an unverified account can still sign in with a password before verification blocks it. It governs new password sign-ins only: a session already open keeps refreshing, and federated accounts, which stay unverified for life, are not held to it."],
           ["default_cert_validity_days", "Stored and returned by the settings API, but not read at issuance: every issuance request states its own `validity_days`."],
           ["max_cert_validity_days", "Stored and returned by the settings API, but not read at issuance. The ceiling issuance enforces is the tenant's `max_certificate_validity_days` metadata key — 365 days when unset, never more than 825."],
           ["webauthn_user_verification", "`discouraged` | `preferred` | `required` — whether a WebAuthn ceremony must prove user *verification* and not only presence. Default `preferred`, ordered `required` > `preferred` > `discouraged` for the tighten-only rule. See [Passkeys & WebAuthn](#/docs/passkeys#uv-policy)."],
@@ -799,7 +799,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: `**Revocation is checked at AXIAM's device sign-in, and nowhere else.** A revoked certificate is refused on its next certificate sign-in; an OAuth2 client authenticating with \`tls_client_auth\` is matched by its registered name and not by the certificate's status, so revoke it by changing the client's registration. AXIAM publishes no CRL and runs no OCSP responder yet (T-102), so a relying party that validates AXIAM-issued certificates itself, such as a FreeRADIUS server or a VPN gateway, cannot learn of a revocation; keep leaf lifetimes short there. AXIAM does not speak RADIUS either: the G-11 spike declined a native front end for now and keeps a FreeRADIUS-backend route for when a named adopter asks, with publishing a CRL as the step that stands on its own ([decision record](${GH_BLOB}/claude_dev/radius-eap-tls-spike-2026-10-06.md)).`,
+        text: `**A revocation reaches every place AXIAM authenticates by a certificate, and every relying party that fetches the list.** Device sign-in and the OAuth2 mTLS client methods (\`tls_client_auth\`, \`self_signed_tls_client_auth\`) refuse a certificate AXIAM issued and revoked on its next use. Each issuing CA publishes a signed certificate revocation list at \`/pki/v1/{org_id}/ca/{ca_id}/crl\`, named in every certificate AXIAM signs, so a relying party that validates AXIAM-issued certificates itself, such as a FreeRADIUS server or a VPN gateway, learns of a revocation at its next fetch, within the list's \`nextUpdate\` (a day by default). Not yet: the listeners' own TLS handshakes do not consult the list, there is no OCSP responder (both planned for 1.0.x). A CA whose key Vault's PKI engine holds publishes no list AXIAM signs: Vault publishes it, AXIAM forwards each revocation of its leaves to Vault (`pki/revoke` by serial, retried by the cleanup job's `vault_revocation` sweep until Vault accepts), and their relying parties read Vault's per-issuer list (T-470). AXIAM does not speak RADIUS either: the G-11 spike declined a native front end for now and keeps a FreeRADIUS-backend route for when a named adopter asks; the revocation list was the step of that route that stands on its own, and it now exists ([decision record](${GH_BLOB}/claude_dev/radius-eap-tls-spike-2026-10-06.md)).`,
       },
       {
         type: "note",
@@ -1084,6 +1084,15 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "warn",
         text: "Changing `AXIAM__AUTH__GDPR_PSEUDONYM_PEPPER` breaks the linkage between existing pseudonyms and new ones — the same person will appear as two different actors either side of the change. Treat it as permanent.",
       },
+      { type: "h", id: "tenant-deletion", text: "Deleting a tenant" },
+      {
+        type: "p",
+        text: "Deleting a tenant erases it, in two steps. **In the request** — which still requires a fresh export of the tenant's audit trail and still answers `204` — the tenant's sessions and OAuth2 refresh tokens are revoked and the tenant is marked deleted, so from that moment it is gone from every read, sign-in, token issuance and refresh, and its users' access tokens fail the per-request session check. **On the cleanup interval** (5 minutes by default) the `tenant_purge` sweep removes every row of every tenant-scoped table — accounts and credentials, sessions and grants, clients, configuration and the secrets it holds for other systems, roles, groups, consents and the exported audit entries — in the order a GDPR user erasure uses, then the tenant record, and writes `tenants.purged` to the system audit log beside `tenants.deleted`, which stays.",
+      },
+      {
+        type: "note",
+        text: `A deleted tenant's slug stays taken (\`409\`) until the purge has run. After an upgrade from a version that removed only the tenant record, the sweep also purges the rows such deletions left behind — their audit entries excepted, which the retention window governs — on its first run and daily after. The step-by-step is in the [admin guide](${GH_BLOB}/docs/admin/README.md#what-the-deletion-does-and-when-the-data-is-gone).`,
+      },
       { type: "h", id: "retention", text: "Retention" },
       {
         type: "p",
@@ -1174,7 +1183,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Fourteen sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `saml_authn_request`, `saml_sp_session`, `saml_logout_run`, `directory_sync`, `scim_reconcile`, `ssf_event_buffer`, `ssf_step_up`, `ciba_request`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export` and `audit_retention`. Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
+        text: "Sixteen sweeps are registered: `saml_assertion_replay`, `federation_login_state`, `saml_authn_request`, `saml_sp_session`, `saml_logout_run`, `directory_sync`, `scim_reconcile`, `ssf_event_buffer`, `ssf_step_up`, `ciba_request`, `amqp_nonce_replay`, `gdpr_purge`, `gdpr_export`, `audit_retention`, `tenant_purge` and `vault_revocation` (which forwards to Vault the revocations of leaves of a `vault_pki` CA that Vault has not yet accepted, and fails while any remains). Each appears in the snapshot from startup, before its first run — so a job that has never once succeeded is visible as such rather than simply absent.",
       },
       {
         type: "table",

@@ -230,6 +230,45 @@ that authorised it. It cannot prove you kept the file. Streaming the export to
 The admin UI does this for you: confirming **Delete Tenant** downloads the
 trail to your browser and then deletes.
 
+### What the deletion does, and when the data is gone
+
+A tenant deletion is **tombstone, then purge** (#523; GDPR Art. 17):
+
+1. **In the request**, before the `204`: the tenant's sessions are revoked
+   (and published to the revocation feed when it is on) and its OAuth2 refresh
+   tokens are revoked; then the tenant is marked deleted. From that moment it
+   is gone from every read — `GET`, the organization's tenant list, sign-in,
+   token issuance, refresh — so its users' last sessions cannot refresh and
+   their access tokens fail the per-request session check. Its directory, SAML,
+   SSF, CIBA and SCIM configuration is removed in the same transaction, so no
+   background job works for it any more. The response is still `204`.
+2. **On the cleanup interval** (`cleanup_interval_secs`, 5 minutes by
+   default), the `tenant_purge` sweep removes every row of every
+   tenant-scoped table — users and their credentials, sessions and grants,
+   OAuth2 clients, federation and e-mail configuration, webhooks, certificates
+   and CA material, roles, groups, permissions, resources, consents, and the
+   tenant's own audit entries you exported above — in the order the GDPR user
+   erasure uses, and removes the tenant record last. It then writes a
+   `tenants.purged` entry to the system audit log, beside `tenants.deleted`;
+   neither is ever purged. The sweep is listed on `GET /health/jobs`: alert on
+   it there, as on the GDPR erasure sweep.
+
+Until the purge has run, the deleted tenant's **slug stays taken**: creating a
+tenant with the same slug answers `409`. Wait one cleanup interval and retry.
+
+A service account's access token carries no session, so it is not revoked by
+the deletion; it runs out within its lifetime (15 minutes by default), and the
+purge removes the account itself. The same holds for a user's access token on
+gRPC unless `AXIAM__GRPC__STRICT_REVOCATION=true`, since only then does gRPC
+re-check the session.
+
+**Upgrading from a version before #523.** Earlier versions removed only the
+tenant record and left the rest. On its first run after the upgrade, and once
+a day after that, the sweep also finds rows whose tenant no longer exists and
+purges them — except their audit entries, which no export receipt covers and
+which the audit retention window (`AXIAM__AUDIT_RETENTION_DAYS`) governs. Each
+such tenant gets a `tenants.purged` system entry with `metadata.orphan: true`.
+
 ## Creating users
 
 To create a user in your tenant (requires the `users:create` permission):

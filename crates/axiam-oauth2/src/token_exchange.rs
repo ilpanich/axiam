@@ -20,8 +20,8 @@ use std::pin::Pin;
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    AUD_M2M, AUD_USER, ActClaim, ExtExchangeClaim, MAX_ACT_CHAIN_DEPTH, SubjectKind,
-    decode_access_token, issue_exchanged_token, unverified_issuer_of,
+    AUD_M2M, AUD_USER, AccessTokenClaims, ActClaim, ExtExchangeClaim, MAX_ACT_CHAIN_DEPTH,
+    SubjectKind, decode_access_token, issue_exchanged_token, unverified_issuer_of,
 };
 use axiam_core::models::oauth2_client::OAuth2Client;
 use axiam_core::repository::TenantRepository;
@@ -69,6 +69,30 @@ pub const TOKEN_TYPE_ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token
 /// needs no migration, and an operator reading `grant_types` sees this
 /// capability in the same place as every other one.
 pub const MAY_IMPERSONATE_GRANT: &str = "urn:axiam:params:oauth:grant-type:may-impersonate";
+
+/// The OAuth2 client an AXIAM access token was issued to, as far as the token
+/// says (#518).
+///
+/// AXIAM tokens carry no `azp`. A token from the code, refresh, CIBA or device
+/// grant carries RFC 9068's `client_id`. A client-credentials token carries
+/// none, because its `sub` *is* the `client_id` and its audience is
+/// [`AUD_M2M`]; so for an `axiam:m2m` token without the claim the `sub` is
+/// returned. That never confuses a service account's token (also `axiam:m2m`)
+/// or an exchanged one for a client's: their `sub` is a UUID, and a client's
+/// `client_id` is an `oa_` identifier or a CIMD document URL, so it compares
+/// unequal to every client. A console sign-in carries neither and names no
+/// client at all. Read from the claims rather than `sub_kind`, which stays
+/// informational (D-10).
+///
+/// `may_act` (RFC 8693 §4.4), which would let a subject token name other
+/// parties allowed to act for it, is not read; it is planned for `1.0.x`.
+fn actor_token_client(actor: &AccessTokenClaims) -> Option<&str> {
+    match (&actor.client_id, actor.aud.as_deref()) {
+        (Some(client_id), _) => Some(client_id.as_str()),
+        (None, Some(AUD_M2M)) => Some(actor.sub.as_str()),
+        (None, _) => None,
+    }
+}
 
 /// `POST /oauth2/token` with `grant_type=…:token-exchange` (RFC 8693 §2.1).
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
@@ -647,6 +671,17 @@ where
                     .map_err(|_| OAuth2Error::InvalidGrant("actor token is not valid".into()))?;
                 if actor.tenant_id != tenant_id.to_string() {
                     return Err(OAuth2Error::InvalidGrant("actor token is not valid".into()));
+                }
+                // #518 — the actor is a party the exchanging client can show
+                // it *is*: a token issued to that client. Any other same-tenant
+                // token is somebody else's, and naming it in `act` would let
+                // the client attribute the delegation to that party. RFC 8693
+                // §2.2.2: an actor token "unacceptable based on policy" is
+                // `invalid_request`.
+                if actor_token_client(&actor) != Some(client.client_id.as_str()) {
+                    return Err(OAuth2Error::InvalidRequest(
+                        "actor_token was not issued to the exchanging client".into(),
+                    ));
                 }
                 (ExchangeKind::Delegation, Some(actor.sub))
             }

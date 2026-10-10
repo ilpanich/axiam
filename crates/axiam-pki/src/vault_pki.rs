@@ -21,6 +21,8 @@
 //! 4. `POST <int_mount>/intermediate/set-signed` — the signed certificate goes
 //!    back to the mount holding its key, which is now an issuer.
 //! 5. `POST <int_mount>/issuer/<int>/sign-verbatim` — every leaf, thereafter.
+//! 6. `POST <int_mount>/revoke` — every leaf AXIAM revokes, so that Vault's own
+//!    revocation list names it (T-470).
 //!
 //! The two-tier structure is not ceremony. A root that signs exactly one
 //! intermediate and nothing else can have that intermediate revoked and
@@ -262,6 +264,24 @@ impl VaultPkiCaKeyStore {
     /// that silently turns a requested ten-year root into a month-long one, and
     /// the single most likely way a working configuration surprises an operator.
     async fn post(&self, url: &str, body: serde_json::Value) -> AxiamResult<serde_json::Value> {
+        let (status, payload) = self.post_checked(url, body).await?;
+        payload
+            .get("data")
+            .cloned()
+            .filter(|d| !d.is_null())
+            .ok_or_else(|| {
+                AxiamError::Internal(format!("vault pki: {url} answered {status} with no `data`"))
+            })
+    }
+
+    /// `POST` a JSON body, refuse a non-success answer, and log Vault's
+    /// warnings — the part of [`Self::post`] a call that needs no `data`
+    /// shares with it.
+    async fn post_checked(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+    ) -> AxiamResult<(reqwest::StatusCode, serde_json::Value)> {
         let response = self
             .client
             .post(url)
@@ -283,14 +303,7 @@ impl VaultPkiCaKeyStore {
         }
 
         log_warnings(url, &payload);
-
-        payload
-            .get("data")
-            .cloned()
-            .filter(|d| !d.is_null())
-            .ok_or_else(|| {
-                AxiamError::Internal(format!("vault pki: {url} answered {status} with no `data`"))
-            })
+        Ok((status, payload))
     }
 
     /// `DELETE` a path, treating "already gone" as success.
@@ -808,6 +821,28 @@ impl CaKeyStore for VaultPkiCaKeyStore {
                 certificate_pem,
                 chain_pem: issuing_ca.into_iter().collect(),
             })
+        })
+    }
+
+    /// `POST <issuing mount>/revoke` with the serial (T-470).
+    ///
+    /// The mount the leaf was signed from is the one that stored it
+    /// (`sign-verbatim` keeps what it issues), so its list — at
+    /// `<mount>/issuer/<issuer>/crl`, and at whatever distribution point the
+    /// operator configured with `config/urls` — names the certificate from the
+    /// next rebuild on. Vault answers a second revocation of the same serial
+    /// with success, which is what lets the cleanup sweep retry blindly.
+    fn revoke_signed<'a>(
+        &'a self,
+        key_ref: &'a CaKeyRef,
+        serial_hex: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AxiamResult<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let locator = VaultPkiLocator::parse(&key_ref.locator)?;
+            let url = self.url(&locator.issuing.mount, "revoke");
+            self.post_checked(&url, serde_json::json!({ "serial_number": serial_hex }))
+                .await?;
+            Ok(())
         })
     }
 

@@ -396,6 +396,9 @@ impl AuthorizationCodeRepository for MockCodeRepo {
     async fn delete_expired(&self) -> AxiamResult<u64> {
         Ok(0)
     }
+    async fn delete_all_for_client(&self, _: Uuid, _: &str) -> AxiamResult<u64> {
+        Ok(0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,6 +1010,30 @@ impl axiam_core::repository::AuditLogRepository for MockAuditRepo {
     }
 }
 
+/// The certificate inventory as these mocks have it: empty, so every
+/// presented certificate is one AXIAM did not issue and is decided by the
+/// match alone (#565). The revoked case is `mtls.rs`'s unit tests and the REST
+/// crate's `crl_test.rs`, against a real inventory.
+fn not_issued_here() -> Arc<dyn axiam_oauth2::mtls::IssuedCertificateLookup> {
+    struct Empty;
+    impl axiam_oauth2::mtls::IssuedCertificateLookup for Empty {
+        fn standing<'a>(
+            &'a self,
+            _der: &'a [u8],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = AxiamResult<axiam_oauth2::mtls::IssuedCertificateStanding>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(axiam_oauth2::mtls::IssuedCertificateStanding::NotIssuedHere) })
+        }
+    }
+    Arc::new(Empty)
+}
+
 type Svc = TokenService<
     MockClientRepo,
     MockCodeRepo,
@@ -1048,6 +1075,7 @@ fn build_with_upgrade_log(
         MockAuditRepo::default(),
         test_config(),
         2_592_000,
+        not_issued_here(),
     );
     (svc, log)
 }
@@ -1073,6 +1101,7 @@ fn build_with_session_log(
         MockAuditRepo::default(),
         test_config(),
         2_592_000,
+        not_issued_here(),
     );
     (svc, sessions)
 }
@@ -1918,7 +1947,9 @@ async fn refresh_success_user_token_with_openid() {
         &["openid"],
     ));
     let svc = build(
-        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        // The registration names what the grant carries: since #520 a refresh
+        // keeps only the scopes the client is still registered for.
+        ClientOutcome::Found(make_client(&["refresh_token"], &["openid"])),
         dummy_code_repo(),
         TenantOutcome::Found,
         refresh,
@@ -1936,7 +1967,9 @@ async fn refresh_success_user_token_with_openid() {
 async fn refresh_success_machine_token_no_user() {
     let refresh = MockRefreshRepo::new().with_get(make_refresh(None, "client-1", &["api"]));
     let svc = build(
-        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        // The registration names what the grant carries: since #520 a refresh
+        // keeps only the scopes the client is still registered for.
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
         dummy_code_repo(),
         TenantOutcome::Found,
         refresh,
@@ -1948,6 +1981,72 @@ async fn refresh_success_machine_token_no_user() {
     assert!(resp.refresh_token.is_some());
     assert!(resp.id_token.is_none());
     assert_eq!(resp.scope.as_deref(), Some("api"));
+}
+
+/// #520, P23W1-13 — a refresh intersects the grant with the client's
+/// **current** registered scopes. A registration narrowed after the grant was
+/// made (RFC 7592 `PUT`, an administrator's update) narrows the access token,
+/// the ID token, the response's `scope` and the rotated refresh token — so the
+/// next rotation starts from the narrowed set — and keeps the grant's order. A
+/// scope the registration gained since is never added.
+#[tokio::test]
+async fn p23w1_13_a_refresh_narrows_the_grant_to_the_clients_current_scopes() {
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(
+        Some(Uuid::new_v4()),
+        "client-1",
+        &["profile", "openid", "email"],
+    ));
+    let created = refresh.created.clone();
+    let svc = build(
+        // `email` withdrawn; `offline_access` gained after the grant.
+        ClientOutcome::Found(make_client(
+            &["refresh_token"],
+            &["openid", "profile", "offline_access"],
+        )),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope.as_deref(), Some("profile openid"));
+    let claims =
+        axiam_auth::token::decode_access_token_any_audience(&resp.access_token, &test_config())
+            .unwrap();
+    assert_eq!(claims.scope.as_deref(), Some("profile openid"));
+    assert!(resp.id_token.is_some(), "openid is still granted");
+    {
+        let calls = created.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].scopes,
+            vec!["profile".to_owned(), "openid".to_owned()]
+        );
+    }
+
+    // `openid` withdrawn as well: no ID token, and a grant narrowed to nothing
+    // still refreshes, carrying no scope.
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(
+        Some(Uuid::new_v4()),
+        "client-1",
+        &["openid", "email"],
+    ));
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["profile"])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let resp = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(resp.scope, None);
+    assert!(resp.id_token.is_none(), "openid was withdrawn");
+    assert!(created.lock().unwrap()[0].scopes.is_empty());
 }
 
 #[tokio::test]
@@ -1998,7 +2097,7 @@ fn revoke_req(token: &str) -> RevokeRequest {
     RevokeRequest {
         token: token.into(),
         token_type_hint: None,
-        client_id: "client-1".into(),
+        client_id: Some("client-1".into()),
         client_secret: Some(SECRET.into()),
         client_assertion: None,
         client_assertion_type: None,
@@ -2075,7 +2174,7 @@ fn introspect_req(token: &str) -> IntrospectRequest {
     IntrospectRequest {
         token: token.into(),
         token_type_hint: None,
-        client_id: "client-1".into(),
+        client_id: Some("client-1".into()),
         client_secret: Some(SECRET.into()),
         client_assertion: None,
         client_assertion_type: None,
@@ -2200,6 +2299,76 @@ async fn introspect_refresh_token_other_client_inactive() {
         .await
         .unwrap();
     assert!(!resp.active);
+}
+
+/// #520, P23W1-12 — introspection re-reads the account a token names, by the
+/// rule the grants use (`account_may_act`): a locked, inactive or deleted
+/// account, or one that no longer exists, makes both its access token and its
+/// refresh token `active: false`, with nothing else disclosed. A pending
+/// account is not suspended, and a client-credentials token names no account,
+/// so neither changes.
+#[tokio::test]
+async fn p23w1_12_introspection_reports_a_suspended_accounts_tokens_inactive() {
+    let tenant_id = client_tenant();
+    let cfg = test_config();
+    for (user, active) in [
+        (LOCKED_USER, false),
+        (INACTIVE_USER, false),
+        (DELETED_USER, false),
+        (REMOVED_USER, false),
+        (LAPSED_PENDING_USER, true),
+        (Uuid::new_v4(), true),
+    ] {
+        let access = issue_access_token(
+            user,
+            tenant_id,
+            Uuid::new_v4(),
+            &["openid".to_string()],
+            &cfg,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .unwrap();
+        let svc = build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            MockRefreshRepo::new().with_get(make_refresh(Some(user), "client-1", &["openid"])),
+        );
+        for (what, token) in [("access", access), ("refresh", generate_refresh_token())] {
+            let resp = svc
+                .introspect_token(tenant_id, introspect_req(&token), &no_cert())
+                .await
+                .unwrap();
+            assert_eq!(resp.active, active, "{what} token of {user}");
+            if !active {
+                assert!(
+                    resp.sub.is_none() && resp.scope.is_none() && resp.exp.is_none(),
+                    "an inactive answer discloses nothing: {what} token of {user}"
+                );
+            }
+        }
+    }
+
+    let client_token = axiam_auth::token::issue_client_credentials_token(
+        "client-1",
+        tenant_id,
+        Uuid::new_v4(),
+        &[],
+        &cfg,
+    )
+    .unwrap();
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let resp = svc
+        .introspect_token(tenant_id, introspect_req(&client_token), &no_cert())
+        .await
+        .unwrap();
+    assert!(resp.active, "a client-credentials token names no account");
 }
 
 #[tokio::test]
@@ -2333,7 +2502,9 @@ async fn refresh_success_openid_scope_but_no_user_yields_no_id_token() {
     // somehow carries the `openid` scope must not attempt ID token issuance.
     let refresh = MockRefreshRepo::new().with_get(make_refresh(None, "client-1", &["openid"]));
     let svc = build(
-        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        // The registration names what the grant carries: since #520 a refresh
+        // keeps only the scopes the client is still registered for.
+        ClientOutcome::Found(make_client(&["refresh_token"], &["openid"])),
         dummy_code_repo(),
         TenantOutcome::Found,
         refresh,
@@ -2659,6 +2830,7 @@ fn build_t254(client: ClientOutcome, refresh: MockRefreshRepo) -> (Svc, ReplayLo
         audit,
         test_config(),
         2_592_000,
+        not_issued_here(),
     );
     (svc, replays, audit_log)
 }
@@ -2676,6 +2848,7 @@ fn build_sa(sa: SaOutcome) -> (Svc, UpgradeLog) {
         MockAuditRepo::default(),
         test_config(),
         2_592_000,
+        not_issued_here(),
     );
     (svc, log)
 }
@@ -4416,6 +4589,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
             MockAuditRepo::default(),
             test_config(),
             2_592_000,
+            not_issued_here(),
         )
     };
 

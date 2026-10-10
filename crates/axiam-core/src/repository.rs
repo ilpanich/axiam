@@ -14,7 +14,9 @@ use crate::error::{AxiamError, AxiamResult};
 use crate::models::mail::OutboundMailMessage;
 use crate::models::{
     audit::{AuditLogEntry, CreateAuditLogEntry},
-    certificate::{CaCertificate, Certificate, StoreCaCertificate, StoreCertificate},
+    certificate::{
+        CaCertificate, Certificate, RevokedCertificate, StoreCaCertificate, StoreCertificate,
+    },
     directory::{DirectoryConfig, NewDirectoryConfig},
     directory_sync::DirectorySyncState,
     email::{EmailConfig, EmailConfigOverride, SetOrgEmailConfig, SetTenantEmailOverride},
@@ -2084,6 +2086,16 @@ pub trait PushedAuthRequestRepository: Send + Sync {
 
     /// Remove expired requests. Returns the number deleted.
     fn cleanup_expired(&self, tenant_id: Uuid) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every request pushed by `client_id` in `tenant_id`, spent or not
+    /// (#517). Called when the client is deleted, so a `managed_by: cimd`
+    /// client that re-materialises under the same `client_id` cannot spend a
+    /// `request_uri` pushed before the delete. Returns the number deleted.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait AuthorizationCodeRepository: Send + Sync {
@@ -2145,6 +2157,22 @@ pub trait AuthorizationCodeRepository: Send + Sync {
 
     /// Delete expired and already-used codes (garbage collection).
     fn delete_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// Delete every code issued to `client_id` in `tenant_id`, redeemed or
+    /// not (#517). Called when the client is deleted, so a `managed_by: cimd`
+    /// client that re-materialises under the same `client_id` cannot redeem a
+    /// code issued before the delete.
+    ///
+    /// **Deleted, never marked `used`.** A used code presented again is a
+    /// replay, and the token endpoint answers a replay by revoking the session
+    /// the code came from ([`Self::replayed_session`]); a code voided because
+    /// its client went away is no evidence of theft and must answer as an
+    /// unknown code does. Returns the number deleted.
+    fn delete_all_for_client(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 pub trait RefreshTokenRepository: Send + Sync {
@@ -2807,6 +2835,16 @@ pub trait CaCertificateRepository: Send + Sync {
     fn list_mtls_trust_anchors(
         &self,
     ) -> impl Future<Output = AxiamResult<Vec<CaCertificate>>> + Send;
+
+    /// The revoked, not yet expired CAs `parent_ca_id` signed — the CA half of
+    /// that CA's certificate revocation list (#565, T-102).
+    ///
+    /// Not organization-scoped: the parent is already resolved inside its
+    /// organization by the caller, and a child always shares it.
+    fn list_revoked_children(
+        &self,
+        parent_ca_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
 }
 
 pub trait CertificateRepository: Send + Sync {
@@ -2828,7 +2866,45 @@ pub trait CertificateRepository: Send + Sync {
         &self,
         fingerprint: &str,
     ) -> impl Future<Output = AxiamResult<Certificate>> + Send;
+    /// Mark a certificate revoked, recording when (#565): the first revocation
+    /// date stands, so revoking an already-revoked certificate changes nothing
+    /// its revocation list says.
     fn revoke(&self, tenant_id: Uuid, id: Uuid) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// The revoked, not yet expired leaves `issuer_ca_id` signed, in every
+    /// tenant — the leaf half of that CA's certificate revocation list (#565,
+    /// T-102).
+    ///
+    /// Across tenants on purpose: a CRL belongs to its issuer, not to a tenant,
+    /// and an organization CA's leaves may be recorded under more than one.
+    fn list_revoked_by_issuer(
+        &self,
+        issuer_ca_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
+
+    /// Revoked, not yet expired leaves of an **active `vault_pki` CA** whose
+    /// revocation Vault has not yet been told of, oldest revocation first, at
+    /// most `limit` (T-470).
+    ///
+    /// Vault signs such a CA's list, not AXIAM, so a revocation reaches it only
+    /// by being forwarded; this is what the cleanup sweep reads to forward the
+    /// ones a revoke request could not, and the revocations that never went
+    /// through one (a directory deprovisioning revokes in bulk). Across tenants:
+    /// the sweep is deployment-wide. A revoked CA's leaves are left out, since
+    /// revoking the CA removed its issuer from Vault.
+    fn list_unforwarded_revocations(
+        &self,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<Certificate>>> + Send;
+
+    /// Record that the custodian that signed a revoked certificate has the
+    /// revocation too (`vault_revoked_at`, T-470), which takes it out of
+    /// [`Self::list_unforwarded_revocations`].
+    fn mark_revocation_forwarded(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
 
     /// Revoke every **active `User`-type certificate** that belongs to
     /// `user_id`, returning how many were revoked (G-3, T23.3.3, D-28).

@@ -208,11 +208,17 @@ pub struct TokenResponse {
 /// A client registered for `private_key_jwt` posts `client_assertion` here and
 /// no secret; one registered for `tls_client_auth` posts neither and is
 /// authenticated by the certificate on the connection.
+///
+/// `client_id` is optional for the same reason it is at the token endpoint
+/// (#526, P23W2-06): a `client_secret_basic` client names itself in the
+/// `Authorization` header (RFC 6749 §2.3.1) and a `private_key_jwt` client in
+/// its assertion (RFC 7521 §4.2), and discovery now publishes both methods for
+/// this endpoint. [`resolve_client_id`] decides, and refuses a disagreement.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RevokeRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
-    pub client_id: String,
+    pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub client_assertion: Option<String>,
     pub client_assertion_type: Option<String>,
@@ -225,7 +231,7 @@ pub struct RevokeRequest {
 pub struct IntrospectRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
-    pub client_id: String,
+    pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub client_assertion: Option<String>,
     pub client_assertion_type: Option<String>,
@@ -599,6 +605,14 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR, AR> {
     /// fallback to a weaker credential. See
     /// [`crate::private_key_jwt::ClientAssertionVerifier`].
     assertion_verifier: Option<std::sync::Arc<dyn crate::private_key_jwt::ClientAssertionVerifier>>,
+    /// #565 (T-102) — where an mTLS client's certificate is looked up by
+    /// fingerprint, so one AXIAM issued and revoked authenticates nothing.
+    ///
+    /// A required argument of [`Self::new`], not a builder like the verifier
+    /// above: an unwired verifier refuses its method, but an unwired status
+    /// check would *admit* a revoked certificate, and a security check whose
+    /// absence is silent is one the next composition root forgets.
+    issued_certificates: std::sync::Arc<dyn crate::mtls::IssuedCertificateLookup>,
     /// Service-account repository (client-credentials for `sa_…` clients).
     service_account_repo: SA,
     code_repo: AC,
@@ -664,10 +678,12 @@ where
         audit_repo: AR,
         auth_config: AuthConfig,
         refresh_token_lifetime_secs: i64,
+        issued_certificates: std::sync::Arc<dyn crate::mtls::IssuedCertificateLookup>,
     ) -> Self {
         Self {
             client_repo,
             assertion_verifier: None,
+            issued_certificates,
             service_account_repo,
             code_repo,
             tenant_repo,
@@ -742,10 +758,31 @@ where
                 %tenant_id,
                 %user_id,
                 reason = %reason,
-                "refusing an OAuth2 grant: its account may no longer sign in"
+                "refusing an OAuth2 grant (or reporting its token inactive): its account may \
+                 no longer sign in"
             );
             refused()
         })
+    }
+
+    /// Whether the account behind an introspected token may still act
+    /// (#520, P23W1-12).
+    ///
+    /// [`Self::ensure_account_may_act`] answered as a yes/no: introspection
+    /// does not refuse, it reports `active: false` (RFC 7662 §2.2 — a token
+    /// whose authorization has been withdrawn is not active). A read that
+    /// fails for any other reason stays a server error rather than a guess
+    /// in either direction.
+    async fn introspected_account_may_act(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, OAuth2Error> {
+        match self.ensure_account_may_act(tenant_id, user_id).await {
+            Ok(()) => Ok(true),
+            Err(OAuth2Error::InvalidGrant(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// The evidence a refreshed ID token carries (W4, plan §4.3; D-9).
@@ -1162,7 +1199,22 @@ where
         }
 
         if client.token_endpoint_auth_method.is_mtls() {
-            return crate::mtls::authenticate_mtls_client(client, ctx.client_certificate.as_ref());
+            crate::mtls::authenticate_mtls_client(client, ctx.client_certificate.as_ref())?;
+            // #565 (T-102): matched, so a certificate is present; refuse it if
+            // AXIAM issued it and has since revoked it. Read only after the
+            // match, so a certificate that authenticates nothing costs no
+            // lookup.
+            return match ctx.client_certificate.as_ref() {
+                Some(cert) => {
+                    crate::mtls::refuse_a_certificate_axiam_revoked(
+                        client,
+                        cert,
+                        self.issued_certificates.as_ref(),
+                    )
+                    .await
+                }
+                None => Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())),
+            };
         }
 
         if client.token_endpoint_auth_method.is_private_key_jwt() {
@@ -2517,6 +2569,37 @@ where
             self.ensure_account_may_act(tenant_id, user_id).await?;
         }
 
+        // #520, P23W1-13 — the grant is narrowed to what the client may still
+        // be granted. The stored scopes were checked against the client's
+        // registration when the grant was made (`crate::authorize` step 5,
+        // and the device and CIBA grants likewise); a registration narrowed
+        // since — an RFC 7592 `PUT`, an administrator's update, a CIMD
+        // document re-materialised under a tenant policy that withdrew a
+        // scope — must narrow every outstanding grant at its next refresh,
+        // or the refresh token keeps the old registration alive for its
+        // whole rotating lifetime. Intersected against `client.scopes`, the
+        // set the authorization endpoint checks, so the two cannot disagree;
+        // the order of the grant is kept. Only ever narrows: a scope the
+        // registration gained is not added, because nobody asked the end
+        // user about it (the rule `resolve_bound` applies to the resource
+        // below). Everything minted from here — the access token, the rotated
+        // refresh token, the ID token and the response's `scope` — uses this.
+        let scopes: Vec<String> = stored
+            .scopes
+            .iter()
+            .filter(|s| client.scopes.contains(s))
+            .cloned()
+            .collect();
+        if scopes.len() != stored.scopes.len() {
+            tracing::info!(
+                %tenant_id,
+                client_id = %client_id,
+                granted = %stored.scopes.join(" "),
+                kept = %scopes.join(" "),
+                "refresh: narrowing a grant to the client's current registered scopes"
+            );
+        }
+
         // Resolve org_id from tenant
         let tenant = self
             .tenant_repo
@@ -2558,7 +2641,7 @@ where
                     "oauth2_client"
                 },
                 client_id,
-                &stored.scopes,
+                &scopes,
             )
             .await?;
         // T21.3 / RFC 8707 §2 — **the rule that stops a token being widened by
@@ -2584,7 +2667,7 @@ where
                 user_id,
                 tenant_id,
                 tenant.organization_id,
-                &stored.scopes,
+                &scopes,
                 &self.minting_config(ctx.issuer.as_deref()),
                 uuid::Uuid::new_v4().to_string(),
                 // RFC 8707 — the SAME audience the grant was issued for.
@@ -2613,7 +2696,7 @@ where
                 client_id,
                 tenant_id,
                 tenant.organization_id,
-                &stored.scopes,
+                &scopes,
                 &self.minting_config(ctx.issuer.as_deref()),
                 cnf,
                 ext,
@@ -2639,7 +2722,9 @@ where
                 token_hash: new_refresh_hash.clone(),
                 client_id: client_id.to_string(),
                 user_id: stored.user_id,
-                scopes: stored.scopes.clone(),
+                // P23W1-13: the narrowed set, so the successor cannot carry
+                // a scope its predecessor's grant no longer has.
+                scopes: scopes.clone(),
                 // Rotation preserves the session: the new token descends from
                 // the same login, so it must carry the same `sid`.
                 session_id: stored.session_id,
@@ -2738,7 +2823,7 @@ where
         }
 
         // Re-issue an ID token when the original grant included `openid`.
-        let id_token = if stored.scopes.iter().any(|s| s == "openid") {
+        let id_token = if scopes.iter().any(|s| s == "openid") {
             if let Some(uid) = stored.user_id {
                 let user = self
                     .user_repo
@@ -2763,7 +2848,7 @@ where
                         client_id,
                         None,
                         Some(&user.username),
-                        &stored.scopes,
+                        &scopes,
                         &self.minting_config(ctx.issuer.as_deref()),
                         // The same session the original login created: an RP
                         // that only ever sees refreshed ID tokens must still
@@ -2780,10 +2865,10 @@ where
             None
         };
 
-        let scope = if stored.scopes.is_empty() {
+        let scope = if scopes.is_empty() {
             None
         } else {
-            Some(stored.scopes.join(" "))
+            Some(scopes.join(" "))
         };
 
         Ok(TokenResponse {
@@ -2812,13 +2897,9 @@ where
             req.client_assertion.as_deref(),
             req.client_assertion_type.as_deref(),
         );
+        let client_id = resolve_client_id(req.client_id.as_deref(), &ctx)?.to_owned();
         let client = self
-            .authenticate_client(
-                tenant_id,
-                &req.client_id,
-                req.client_secret.as_deref(),
-                &ctx,
-            )
+            .authenticate_client(tenant_id, &client_id, req.client_secret.as_deref(), &ctx)
             .await?;
 
         // D-17 (T23.1.5) — the profile's client-authentication rule, at
@@ -2841,7 +2922,7 @@ where
             .refresh_token_repo
             .get_by_token_hash(tenant_id, &token_hash)
             .await
-            && stored.client_id == req.client_id
+            && stored.client_id == client_id
         {
             self.refresh_token_repo
                 .revoke(tenant_id, &token_hash)
@@ -2865,13 +2946,9 @@ where
             req.client_assertion.as_deref(),
             req.client_assertion_type.as_deref(),
         );
+        let client_id = resolve_client_id(req.client_id.as_deref(), &ctx)?.to_owned();
         let client = self
-            .authenticate_client(
-                tenant_id,
-                &req.client_id,
-                req.client_secret.as_deref(),
-                &ctx,
-            )
+            .authenticate_client(tenant_id, &client_id, req.client_secret.as_deref(), &ctx)
             .await?;
 
         // D-17 (T23.1.5) — as at revoke: the profile's client-authentication
@@ -2935,6 +3012,27 @@ where
                 });
             }
 
+            // #520, P23W1-12 — introspection is the "immediate revocation"
+            // answer (T-39), so it re-reads the account a user's token names
+            // and reports a suspended one's token inactive, by the rule every
+            // grant and `/oauth2/authorize` apply (`account_may_act`). Only a
+            // user token names an account; a client-credentials or service
+            // account token does not, and its `sub` is not a user id. One
+            // indexed user read per call: this endpoint is a resource
+            // server's occasional question, not the authorization hot path
+            // (that is local verification or `CheckAccess`).
+            if claims.sub_kind == axiam_auth::token::SubjectKind::User
+                && let Ok(user_id) = claims.sub.parse::<Uuid>()
+                && !self
+                    .introspected_account_may_act(tenant_id, user_id)
+                    .await?
+            {
+                return Ok(IntrospectionResponse {
+                    active: false,
+                    ..Default::default()
+                });
+            }
+
             return Ok(IntrospectionResponse {
                 active: true,
                 scope: claims.scope.clone(),
@@ -2968,7 +3066,20 @@ where
         {
             // Only introspect tokens belonging to the requesting
             // client — prevent cross-client information leaks.
-            if stored.client_id != req.client_id {
+            if stored.client_id != client_id {
+                return Ok(IntrospectionResponse {
+                    active: false,
+                    ..Default::default()
+                });
+            }
+
+            // #520, P23W1-12 — the refresh grant refuses a suspended account's
+            // token (P23W1-01), so introspection must not call it active.
+            if let Some(user_id) = stored.user_id
+                && !self
+                    .introspected_account_may_act(tenant_id, user_id)
+                    .await?
+            {
                 return Ok(IntrospectionResponse {
                     active: false,
                     ..Default::default()

@@ -292,8 +292,109 @@ describe("FederationPage", () => {
         require_pkce: false,
         button_icon: null,
         idp_signing_cert_pem: "-----BEGIN CERTIFICATE-----abc",
+        // #531: SHA-1 stays refused unless the switch is turned on.
+        allow_sha1_signatures: false,
         allowed_algorithms: ["RS256", "RS384"],
       }),
+    );
+  });
+
+  it("offers the SHA-1 escape hatch for SAML only and sends it when on (#531)", async () => {
+    apiMock.get.mockResolvedValue(res(configs));
+    apiMock.post.mockResolvedValue(res({ ...configs[1], id: "f5" }));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
+    const dialog = screen.getByRole("dialog");
+    // Not on an OIDC form: there is no XML signature to relax.
+    expect(
+      within(dialog).queryByLabelText("Accept SHA-1 signatures"),
+    ).not.toBeInTheDocument();
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Legacy");
+    await userEvent.type(within(dialog).getByLabelText("Client ID *"), "legacy-sp");
+    await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "shh");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Provider *"),
+      "generic_saml",
+    );
+    await userEvent.type(
+      within(dialog).getByLabelText(/IdP Signing Certificate/),
+      "-----BEGIN CERTIFICATE-----abc",
+    );
+    const sha1 = within(dialog).getByLabelText("Accept SHA-1 signatures");
+    expect(sha1).not.toBeChecked();
+    await userEvent.click(sha1);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/federation-configs",
+        expect.objectContaining({
+          protocol: "Saml",
+          allow_sha1_signatures: true,
+        }),
+      ),
+    );
+  });
+
+  it("offers a metadata signing certificate for SAML only and sends it when set (#530)", async () => {
+    apiMock.get.mockResolvedValue(res(configs));
+    apiMock.post.mockResolvedValue(res({ ...configs[1], id: "f6" }));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /New Config/ }));
+    const dialog = screen.getByRole("dialog");
+    // Not on an OIDC form: there is no SAML metadata to verify.
+    expect(
+      within(dialog).queryByLabelText(/Metadata Signing Certificate/),
+    ).not.toBeInTheDocument();
+    await userEvent.type(within(dialog).getByLabelText("Display name *"), "Shib");
+    await userEvent.type(within(dialog).getByLabelText("Client ID *"), "shib-sp");
+    await userEvent.type(within(dialog).getByLabelText(/Client Secret/), "shh");
+    await userEvent.selectOptions(
+      within(dialog).getByLabelText("Provider *"),
+      "generic_saml",
+    );
+    await userEvent.type(
+      within(dialog).getByLabelText(/IdP Signing Certificate/),
+      "-----BEGIN CERTIFICATE-----abc",
+    );
+    await userEvent.type(
+      within(dialog).getByLabelText(/Metadata Signing Certificate/),
+      "-----BEGIN CERTIFICATE-----meta",
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        "/api/v1/federation-configs",
+        expect.objectContaining({
+          protocol: "Saml",
+          idp_signing_cert_pem: "-----BEGIN CERTIFICATE-----abc",
+          idp_metadata_signing_cert_pem: "-----BEGIN CERTIFICATE-----meta",
+        }),
+      ),
+    );
+  });
+
+  it("prefills the metadata signing certificate on edit and clears it when emptied (#530)", async () => {
+    const withCert = [
+      configs[0],
+      { ...configs[1], idp_metadata_signing_cert_pem: "-----BEGIN CERTIFICATE-----meta" },
+    ];
+    apiMock.get.mockResolvedValue(res(withCert));
+    apiMock.put.mockResolvedValue(res(configs[1]));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit ADFS" }));
+    const dialog = screen.getByRole("dialog");
+    const field = within(dialog).getByLabelText(/Metadata Signing Certificate/);
+    expect(field).toHaveValue("-----BEGIN CERTIFICATE-----meta");
+    await userEvent.clear(field);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/federation-configs/f2",
+        expect.objectContaining({ idp_metadata_signing_cert_pem: null }),
+      ),
     );
   });
 

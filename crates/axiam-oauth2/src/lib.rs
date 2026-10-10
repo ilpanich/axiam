@@ -9,6 +9,7 @@ pub mod ciba_ping;
 pub mod ciba_signed_request;
 pub mod cimd;
 pub mod claims_request;
+pub mod client_grants;
 pub mod client_secret_basic;
 pub mod dcr;
 pub mod device;

@@ -59,6 +59,7 @@ Signals Framework transmitter), OpenID Connect CIBA Core 1.0
 |---|------|---------|--------|----------|
 | 25 | Revocation MUST invalidate the refresh token | §2 | Pass | `oauth2_flow_test.rs::revoke_refresh_token` |
 | 26 | Revocation of unknown token MUST return 200 | §2.2 | Pass | `oauth2_flow_test.rs::revoke_unknown_token_returns_200` |
+| 26a | The client authenticates "the same way as the token endpoint" (§2.1): every method the token endpoint accepts, a Basic client's `client_id` from the header alone, and discovery publishes the list (`revocation_endpoint_auth_methods_supported`, RFC 8414 §2; #526) | §2.1 | Pass | `client_secret_basic_test.rs::p23w2_06_revoke_and_introspect_take_the_client_id_from_the_basic_header`; `tenant_issuer_paths_test.rs::p23w2_06_every_discovery_document_publishes_revocation_and_introspection_auth_methods` |
 
 ## RFC 7662 — Token Introspection
 
@@ -67,7 +68,9 @@ Signals Framework transmitter), OpenID Connect CIBA Core 1.0
 | 27 | Active token introspection MUST return active=true | §2.2 | Pass | `oauth2_flow_test.rs::introspect_active_access_token` |
 | 28 | Unknown token MUST return active=false | §2.2 | Pass | `oauth2_flow_test.rs::introspect_unknown_token_returns_inactive` |
 | 29 | Introspection MUST require client authentication | §2.1 | Pass | `oauth2_flow_test.rs::introspect_requires_client_auth` |
+| 29a | Discovery publishes how (`introspection_endpoint_auth_methods_supported`, RFC 8414 §2; #526): the token endpoint's methods without `none`, which this endpoint refuses; a Basic client's `client_id` may come from the header alone | §2.1 | Pass | `tenant_issuer_paths_test.rs::p23w2_06_every_discovery_document_publishes_revocation_and_introspection_auth_methods`; `client_secret_basic_test.rs::p23w2_06_revoke_and_introspect_take_the_client_id_from_the_basic_header` |
 | 30 | Revoked token MUST be reported as inactive | §2.2 | Pass | `oauth2_flow_test.rs::introspect_revoked_refresh_token` |
+| 30a | A token whose authorization has been withdrawn — its account locked, deactivated, anonymized, deleted or removed — is reported inactive, access and refresh tokens alike (#520) | §2.2 | Pass | `oauth2_flow_test.rs::p23w1_12_userinfo_and_introspection_answer_for_a_suspended_account`; `token_service.rs::p23w1_12_introspection_reports_a_suspended_accounts_tokens_inactive` |
 
 
 ## RFC 7592 — Dynamic Client Registration Management Protocol

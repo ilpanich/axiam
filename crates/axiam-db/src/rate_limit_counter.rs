@@ -639,6 +639,12 @@ const COLD_ENTRY_BURST_FRACTION: f64 = 0.1;
 /// mfa 5) and far below every machine one (revoke 60, token 120, introspect
 /// 600, authz 1 800, gRPC families 6 000+), so the split lands exactly on the
 /// distinction that already exists in the posture tables.
+///
+/// One human-facing family sits above it: the REST browser-endpoint preset
+/// (`end_session_per_min`, 30 — `/oauth2/authorize`, end-session and the SAML
+/// IdP's browser routes). A number cannot tell that bucket from a machine one,
+/// so the caller says so instead: [`SharedRateLimitCounter::check_at_human`]
+/// skips the seed at every limit.
 const COLD_ENTRY_MIN_LIMIT: u32 = 20;
 
 // ---------------------------------------------------------------------------
@@ -866,6 +872,36 @@ impl SharedRateLimitCounter {
     /// the I3 machine-traffic advisory below tallies allow/deny ratios
     /// independently of what gets flushed.
     pub fn check_at(&self, key: &str, now: DateTime<Utc>, limit: u32) -> bool {
+        self.check_at_seeded(key, now, limit, limit >= COLD_ENTRY_MIN_LIMIT)
+    }
+
+    /// [`Self::check_at`] for a bucket a **person** spends at human speed —
+    /// the REST browser-endpoint preset — whatever its limit: a newly seen key
+    /// gets its whole budget, with no cold-entry seed.
+    ///
+    /// The seed exists to stop a flood arriving late in a window from being
+    /// handed a whole window's budget for its last seconds. It is keyed on the
+    /// limit ([`COLD_ENTRY_MIN_LIMIT`]) because the limit is all `check_at` is
+    /// told, and every human-facing limit used to sit below the threshold. The
+    /// browser-endpoint preset does not: at 30 a minute, a person whose address
+    /// was first seen in a minute's last second was left about three
+    /// authorization requests in it. What bounds those routes is the small
+    /// absolute number, as at `login` and `mfa`, so they skip the seed too. The
+    /// sliding-window carry still applies, so the boundary-doubling artifact
+    /// stays closed.
+    pub fn check_at_human(&self, key: &str, now: DateTime<Utc>, limit: u32) -> bool {
+        self.check_at_seeded(key, now, limit, false)
+    }
+
+    /// [`Self::check_at`]'s body; `cold_entry_seed` says whether a key first
+    /// seen partway through a window is charged the share already gone.
+    fn check_at_seeded(
+        &self,
+        key: &str,
+        now: DateTime<Utc>,
+        limit: u32,
+        cold_entry_seed: bool,
+    ) -> bool {
         if !self.inner.config.enabled {
             return true;
         }
@@ -884,9 +920,9 @@ impl SharedRateLimitCounter {
         let sliding = self.inner.config.window_mode == WindowMode::Sliding;
         // Pro-rata backfill for a key first seen partway through a window —
         // only meaningful in sliding mode (where windows are continuous), and
-        // only at limits large enough for smoothing to mean anything
-        // ([`COLD_ENTRY_MIN_LIMIT`]).
-        let cold_seed = if sliding && limit >= COLD_ENTRY_MIN_LIMIT {
+        // only for machine buckets at limits large enough for smoothing to
+        // mean anything ([`COLD_ENTRY_MIN_LIMIT`], [`Self::check_at_human`]).
+        let cold_seed = if sliding && cold_entry_seed {
             (elapsed_frac * f64::from(limit) * (1.0 - COLD_ENTRY_BURST_FRACTION)) as u64
         } else {
             0
@@ -2335,6 +2371,52 @@ mod window_mode_tests {
             admitted < 600,
             "a 600/min endpoint arriving 3/4 through a window must NOT get the \
              whole budget (admitted {admitted}) — that is the +48% run 5 measured"
+        );
+    }
+
+    /// The browser-endpoint preset (30 a minute) is human-facing although it
+    /// is above the threshold: a key first seen at second 59 still gets all
+    /// thirty, where a machine bucket of the same limit is pro-rated.
+    #[test]
+    fn a_browser_preset_key_first_seen_late_gets_its_full_limit() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let last_second = aligned_start() + chrono::Duration::seconds(59);
+
+        let admitted = (0..100)
+            .filter(|_| counter.check_at_human("oauth2_authorize:203.0.113.7", last_second, 30))
+            .count();
+        assert_eq!(
+            admitted, 30,
+            "a person first seen in a minute's last second keeps the whole preset"
+        );
+
+        let machine = (0..100)
+            .filter(|_| counter.check_at("revoke:203.0.113.7", last_second, 30))
+            .count();
+        assert!(
+            machine < 30,
+            "a machine bucket of the same limit keeps the pro-rata seed (admitted {machine})"
+        );
+    }
+
+    /// Skipping the seed is all `check_at_human` changes: the sliding-window
+    /// carry still applies, so a person who spent a whole minute's budget
+    /// cannot spend another at once in the next.
+    #[test]
+    fn a_browser_preset_key_still_carries_the_sliding_window() {
+        let counter = counter_with_mode(WindowMode::Sliding);
+        let start = aligned_start();
+        for _ in 0..30 {
+            assert!(counter.check_at_human("oauth2_authorize:203.0.113.8", start, 30));
+        }
+        let next = start + chrono::Duration::seconds(61);
+        let admitted = (0..100)
+            .filter(|_| counter.check_at_human("oauth2_authorize:203.0.113.8", next, 30))
+            .count();
+        assert!(
+            admitted <= 1,
+            "one second into the next minute nearly all of the previous one still \
+             counts (admitted {admitted})"
         );
     }
 

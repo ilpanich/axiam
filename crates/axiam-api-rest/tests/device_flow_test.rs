@@ -617,6 +617,155 @@ async fn deciding_twice_reports_failure_rather_than_overwriting() {
     assert_eq!(body["ok"], false);
 }
 
+/// A relying party that holds a user's access token — one AXIAM minted for it
+/// through the authorization-code grant — starts a device authorization for a
+/// device client it controls, so it knows the user code. That token is not a
+/// console sign-in: it can neither read the grant nor approve or refuse it
+/// (T-447, the rule the CIBA approval routes apply). The user's own console
+/// sign-in still can.
+#[actix_web::test]
+async fn a_token_minted_for_a_client_cannot_verify_or_approve_a_device() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let console = mint_token(&f);
+    let client_held = redeem_code_grant_token(&f, &app, &console).await;
+
+    let (_, user_code) = seed_grant(&f, DeviceGrantStatus::Pending, 600).await;
+    let verify = |token: &str| {
+        test::TestRequest::get()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(&format!("/api/v1/device/verify?user_code={user_code}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
+    let decide = |token: &str, approved: bool| {
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/device/decide")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .set_json(serde_json::json!({"user_code": user_code, "approved": approved}))
+            .to_request()
+    };
+
+    let resp = test::call_service(&app, verify(&client_held)).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "a client's token read the grant"
+    );
+    for approved in [true, false] {
+        let resp = test::call_service(&app, decide(&client_held, approved)).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            403,
+            "a client's token decided approved={approved}"
+        );
+    }
+
+    // The grant is untouched: the console sign-in still finds it pending and
+    // approves it.
+    let body: Value = test::read_body_json(test::call_service(&app, verify(&console)).await).await;
+    assert_eq!(body["found"], true);
+    let body: Value =
+        test::read_body_json(test::call_service(&app, decide(&console, true)).await).await;
+    assert_eq!(body["ok"], true);
+}
+
+/// Register a confidential authorization-code client, authorize it with the
+/// user's console sign-in and redeem the code: the access token AXIAM mints
+/// for that client in the user's name.
+async fn redeem_code_grant_token(
+    f: &Fixture,
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    console: &str,
+) -> String {
+    let redirect_uri = "https://rp.example.com/callback";
+    let (client, secret) = SurrealOAuth2ClientRepository::new(f.db.clone())
+        .create(CreateOAuth2Client {
+            tenant_id: f.tenant_id,
+            name: "relying-party".into(),
+            redirect_uris: vec![redirect_uri.into()],
+            grant_types: vec!["authorization_code".into()],
+            scopes: vec!["openid".into()],
+            post_logout_redirect_uris: Vec::new(),
+            backchannel_logout_uri: None,
+            require_par: false,
+            profile: axiam_core::models::oauth2_client::ClientProfile::Standard,
+            token_endpoint_auth_method:
+                axiam_core::models::oauth2_client::ClientAuthMethod::ClientSecretPost,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            self_signed_tls_client_auth_thumbprints: vec![],
+            tls_client_certificate_bound_access_tokens: false,
+            jwks: None,
+            jwks_uri: None,
+            dpop_bound_access_tokens: false,
+            dpop_require_nonce: false,
+            authn_request_params: AuthnRequestParamsMode::Ignore,
+            browser_sso: false,
+            allowed_resources: Vec::new(),
+            managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
+            ciba: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?response_type=code&client_id={}&redirect_uri={redirect_uri}&scope=openid",
+            client.client_id
+        ))
+        .insert_header(("Authorization", format!("Bearer {console}")))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 302, "authorize must redirect");
+    let location = resp.headers().get("Location").unwrap().to_str().unwrap();
+    let code = url::Url::parse(location)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.into_owned())
+        .expect("a code in the redirect");
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={}", f.tenant_id))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={redirect_uri}\
+             &client_id={}&client_secret={secret}",
+            client.client_id
+        ))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "the code redeems");
+    let body: Value = test::read_body_json(resp).await;
+    let token = body["access_token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        decode_unverified(&token)["client_id"],
+        client.client_id,
+        "the token is the relying party's"
+    );
+    token
+}
+
+fn decode_unverified(jwt: &str) -> Value {
+    use base64::Engine;
+    let payload = jwt.split('.').nth(1).expect("a JWT has a payload");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------

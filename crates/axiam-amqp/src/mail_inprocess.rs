@@ -39,6 +39,8 @@ use axiam_core::repository::{
     OrganizationRepository, TenantRepository, UserRepository,
 };
 
+use axiam_email::EmailEgress;
+
 use crate::mail_consumer::{
     SendError, SendOutcome, default_retry_delay, send_with_retry_and_audit,
 };
@@ -132,6 +134,7 @@ trait MailAttempt: Send + Sync + 'static {
 }
 
 struct Repos<E, A, U, T, N, O> {
+    egress: EmailEgress,
     email_config: E,
     audit: A,
     user: U,
@@ -152,6 +155,7 @@ where
     async fn attempt(&self, msg: &OutboundMailMessage) -> Result<SendOutcome, SendError> {
         send_with_retry_and_audit(
             msg,
+            &self.egress,
             &self.email_config,
             &self.audit,
             &self.user,
@@ -249,6 +253,7 @@ async fn run_mail_worker<M: MailAttempt>(
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_in_process_mail_worker<E, A, U, T, N, O>(
     queue: InProcessMailQueue,
+    egress: EmailEgress,
     email_config_repo: E,
     audit_repo: A,
     user_repo: U,
@@ -268,6 +273,7 @@ where
     tokio::spawn(run_mail_worker(
         queue,
         Arc::new(Repos {
+            egress,
             email_config: email_config_repo,
             audit: audit_repo,
             user: user_repo,
@@ -284,6 +290,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_in_process_mail_worker_default<E, A, U, T, N, O>(
     queue: InProcessMailQueue,
+    egress: EmailEgress,
     email_config_repo: E,
     audit_repo: A,
     user_repo: U,
@@ -301,6 +308,7 @@ where
 {
     spawn_in_process_mail_worker(
         queue,
+        egress,
         email_config_repo,
         audit_repo,
         user_repo,

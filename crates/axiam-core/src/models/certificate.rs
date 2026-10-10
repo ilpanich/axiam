@@ -586,6 +586,35 @@ pub struct Certificate {
     pub created_at: DateTime<Utc>,
 }
 
+/// A certificate an issuing CA has revoked, as a certificate revocation list
+/// entry needs it (#565, T-102).
+///
+/// Read for leaves ([`crate::repository::CertificateRepository::list_revoked_by_issuer`])
+/// and for subordinate CAs
+/// ([`crate::repository::CaCertificateRepository::list_revoked_children`]) alike:
+/// a CA's list names every certificate it signed and then disowned, whatever
+/// that certificate is for. Only certificates still inside their validity
+/// window are returned — RFC 5280 §3.3 lets an entry leave the list once the
+/// certificate has expired, and an expired certificate fails validation on its
+/// own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedCertificate {
+    /// The certificate as issued. The serial number a CRL entry carries is read
+    /// from it rather than stored beside it, so the entry cannot name a serial
+    /// the certificate does not carry.
+    pub public_cert_pem: String,
+    /// SHA-256 fingerprint of the certificate, hex — what identifies the entry
+    /// when deciding whether a list has changed.
+    pub fingerprint: String,
+    /// When AXIAM recorded the revocation. `None` for a certificate revoked
+    /// before the date was recorded (schema v90); the list then states the
+    /// certificate's own `not_before`, the earliest moment anyone could have
+    /// relied on it.
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// The certificate's validity start.
+    pub not_before: DateTime<Utc>,
+}
+
 /// Fields required to generate a new tenant certificate (user-facing DTO).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateCertificate {

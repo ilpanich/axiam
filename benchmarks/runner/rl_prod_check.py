@@ -196,7 +196,15 @@ ENDPOINTS = {
     # the limiter and the cap, not registration. docs/methodology.md §3 has the
     # full reasoning, beside the CIMD omission.
     "dcr_per_min": (None, "POST /oauth2/register (RFC 7591 dynamic client registration)"),
-    "end_session_per_min": (None, "GET|POST /oauth2/end_session (OIDC RP-initiated logout)"),
+    # The browser-endpoint preset: one knob, a bucket per route. #532 put
+    # `/oauth2/authorize` (both mounts) under it, so `oauth2_authorize.js` and
+    # `oauth2_code_pkce.js` meet this ceiling at `rl=prod`; a scenario that
+    # graded the family would need to own one of those routes alone.
+    "end_session_per_min": (
+        None,
+        "GET|POST /oauth2/end_session (OIDC RP-initiated logout); also GET /oauth2/authorize "
+        "and /oauth2/authorize/logout, and the SAML IdP browser routes, each in its own bucket",
+    ),
     # The six /auth/webauthn/* routes carried NO limiter until alpha38, so this
     # family could not appear here even as "not checked" — a knob that does not
     # exist cannot be extracted or compared, which is precisely how an
@@ -254,6 +262,21 @@ ENDPOINTS = {
         None,
         "POST, PUT, DELETE /api/v1/scim-targets[/{id}[/reconcile]] (outbound SCIM target registry writes)",
     ),
+    # #565 (T-102). The certificate revocation list route carries its limiter
+    # from the commit that added it, so it has a row from that commit too.
+    # Unmeasured because nothing in the bench drives it: a relying party
+    # fetches a list once per nextUpdate, so it is not a throughput path, and a
+    # cell would need a CA and a revoked certificate seeded per run.
+    "crl_per_min": (None, "GET /pki/v1/{org_id}/ca/{ca_id}/crl (certificate revocation list)"),
+    # #529 (T-473). The email delivery self-test carries its limiter from the
+    # commit that added it. Unmeasured: each call connects to a real email
+    # provider and mails the caller, which no bench target has, and it is an
+    # administrator's console action, not a throughput path.
+    "email_test_per_min": (
+        None,
+        "POST /api/v1/{organizations/{org_id},tenants/{tenant_id}}/email-config/test "
+        "(email delivery self-test; one bucket per route)",
+    ),
 }
 
 
@@ -308,7 +331,11 @@ def read_configured_defaults():
                   # #568: the eight Phase 23 families; `scenario=None` above.
                   "bc_authorize_per_min", "ciba_approval_per_min", "device_login_per_min",
                   "ssf_per_min", "ssf_admin_per_min", "saml_admin_per_min",
-                  "directory_admin_per_min", "scim_target_admin_per_min"):
+                  "directory_admin_per_min", "scim_target_admin_per_min",
+                  # #565: the certificate revocation list route.
+                  "crl_per_min",
+                  # #529: the email delivery self-test routes.
+                  "email_test_per_min"):
         rest_defaults[field] = _extract_int(
             default_block, rf"\b{field}:\s*([0-9_]+)", field, REST_RATE_LIMIT_RS)
 

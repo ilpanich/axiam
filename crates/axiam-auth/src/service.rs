@@ -368,9 +368,17 @@ impl<
         //    is refused without the directory hearing anything, so AXIAM cannot
         //    be used to run up the failed-bind count that locks the account in
         //    Active Directory (T-302).
+        //
+        //    It still costs one verify under the hash permit, against the dummy
+        //    hash and never the real one (T-469, SEC-026): a lockout the
+        //    attacker's own failures triggered must not answer faster than an
+        //    unknown name — an enumeration oracle — nor `401` where every
+        //    hashing branch answers `503` under saturation. A correct password
+        //    during the lockout neither succeeds nor shows.
         if let Some(locked_until) = user.locked_until
             && locked_until > Utc::now()
         {
+            self.equalising_dummy_verify().await?;
             return Err(AuthError::InvalidCredentials.into());
         }
 
@@ -1188,17 +1196,17 @@ impl<
             return Err(AuthError::TokenExpired.into());
         }
 
-        // 3. Verify user is still active.
+        // 3. Verify the account may still act (#519, P23W1-07). Not the
+        //    password login's rule: the email-verification grace period is
+        //    about signing in with a password, and every federated account is
+        //    `PendingVerification` for life, so applying it here ended every
+        //    federated user's session a day after the account was provisioned.
         let t_user = std::time::Instant::now();
         let user = self
             .user_repo
             .get_by_id(input.tenant_id, session.user_id)
             .await?;
-        Self::check_user_status(
-            &user.status,
-            user.created_at,
-            self.config.email_verification_grace_period_hours,
-        )?;
+        account_may_act(&user)?;
         let user_lookup_us = t_user.elapsed().as_micros() as u64;
 
         // 4. Create new session with rotated refresh token.
@@ -1913,7 +1921,8 @@ impl<
 ///
 /// The question every place that turns a long-lived credential back into a
 /// principal asks — `/oauth2/authorize` resolving the OP cookie
-/// ([`AuthService::check_session_holder`]), the OAuth2 `authorization_code`
+/// ([`AuthService::check_session_holder`]), the session refresh
+/// ([`AuthService::refresh`], #519), the OAuth2 `authorization_code`
 /// and `refresh_token` grants in `axiam-oauth2`, and a federated sign-in,
 /// whose identity provider vouches for the person and not for the account
 /// (F4 P23W1-04). An

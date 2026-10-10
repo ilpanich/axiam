@@ -1,4 +1,5 @@
-//! CA generation, import, issuance and revocation against Vault's PKI engine.
+//! CA generation, import, issuance and revocation against Vault's PKI engine,
+//! and a revoked leaf's revocation forwarded to Vault (T-470).
 //!
 //! Every test here drives the real [`CaService`] and [`CertService`] against a
 //! real SurrealDB and an HTTP server standing in for Vault, because the thing
@@ -10,13 +11,16 @@
 use axiam_core::ca_keys::{CaKeyCustody, CaKeyRef, CaKeyStore};
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::{
-    CertificateType, CreateCaCertificate, CreateCertificate, ImportCaCertificate, KeyAlgorithm,
-    SubjectAltName,
+    CertificateStatus, CertificateType, CreateCaCertificate, CreateCertificate,
+    ImportCaCertificate, KeyAlgorithm, SubjectAltName,
 };
+use axiam_core::repository::CertificateRepository;
 use axiam_db::repository::{SurrealCaCertificateRepository, SurrealCertificateRepository};
 use axiam_pki::ca::{CaService, PkiConfig};
+use axiam_pki::cert::CUSTODIAN_REVOKE_ATTEMPTS;
 use axiam_pki::{
-    CaKeyCustodians, CertService, IssuingScope, VaultPkiCaKeyStore, VaultPkiConfig, VaultPkiLocator,
+    CaKeyCustodians, CertService, CustodianRevocation, IssuingScope, VaultPkiCaKeyStore,
+    VaultPkiConfig, VaultPkiLocator,
 };
 use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use serde_json::json;
@@ -1309,4 +1313,225 @@ async fn under_vault_an_empty_allow_list_refuses_server_and_nothing_else() {
         .generate(org, IssuingScope::Organization, device, Some(90), &[])
         .await
         .expect("a pre-S-7 Device request is unchanged");
+}
+
+// ---------------------------------------------------------------------------
+// revocation reaches Vault (T-470)
+// ---------------------------------------------------------------------------
+//
+// Vault, not AXIAM, signs a `vault_pki` CA's revocation list, so a revocation
+// made in AXIAM is on no list a relying party reads until Vault is told. These
+// pin that it is told, by serial, through the same token issuance uses; that a
+// Vault which will not listen leaves AXIAM's revocation standing and the row
+// pending; and that the cleanup sweep forwards what is pending.
+
+/// A `vault_pki` CA with one leaf issued under it, and the means to revoke it.
+struct RevocationFixture {
+    certs:
+        CertService<SurrealCaCertificateRepository<TestDb>, SurrealCertificateRepository<TestDb>>,
+    cert_repo: SurrealCertificateRepository<TestDb>,
+    tenant: Uuid,
+    leaf: Uuid,
+    /// The leaf's serial as Vault spells it.
+    serial: String,
+    server: MockServer,
+}
+
+async fn revocation_fixture() -> RevocationFixture {
+    let server = MockServer::start().await;
+    let root = ca_pair("Acme Root", None);
+    let int = ca_pair("Acme Intermediate", Some(&root));
+    mock_generation(&server, &root, &int).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/issuer/int-issuer-id/sign-verbatim"))
+        .respond_with(SignVerbatim {
+            issuer_key_pem: int.0.clone(),
+            issuer_cert_pem: int.1.clone(),
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let db = setup_db().await;
+    let org = Uuid::new_v4();
+    let ca = ca_service(db.clone(), &server)
+        .generate(create_ca("Acme Root", org))
+        .await
+        .unwrap();
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let certs = CertService::new(
+        SurrealCaCertificateRepository::new(db),
+        cert_repo.clone(),
+        PkiConfig::default(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        custodians(&server),
+    );
+    let tenant = Uuid::new_v4();
+    let issued = certs
+        .generate(
+            org,
+            IssuingScope::Organization,
+            CreateCertificate {
+                tenant_id: tenant,
+                issuer_ca_id: ca.certificate.id,
+                subject: "device-revoked".into(),
+                cert_type: CertificateType::Device,
+                key_algorithm: KeyAlgorithm::Ed25519,
+                validity_days: 30,
+                metadata: None,
+                subject_alt_names: vec![],
+            },
+            Some(90),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let (_, block) =
+        x509_parser::pem::parse_x509_pem(issued.certificate.public_cert_pem.as_bytes()).unwrap();
+    let (_, x509) = <x509_parser::certificate::X509Certificate as x509_parser::prelude::FromDer<
+        _,
+    >>::from_der(&block.contents)
+    .unwrap();
+    let serial = x509
+        .serial
+        .to_bytes_be()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":");
+
+    RevocationFixture {
+        certs,
+        cert_repo,
+        tenant,
+        leaf: issued.certificate.id,
+        serial,
+        server,
+    }
+}
+
+/// Vault's `revoke`, answering `status` and recording the serial each call
+/// named. `expect` is how many calls the test allows.
+async fn mount_revoke(
+    server: &MockServer,
+    status: u16,
+    expect: u64,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    struct Revoke {
+        status: u16,
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl Respond for Revoke {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            self.seen.lock().unwrap().push(
+                body["serial_number"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+            if self.status == 200 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "data": { "revocation_time": 1_700_000_000, "state": "revoked" }
+                }))
+            } else {
+                ResponseTemplate::new(self.status)
+                    .set_body_json(json!({ "errors": ["storage unavailable"] }))
+            }
+        }
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/revoke"))
+        .and(header("X-Vault-Token", TOKEN))
+        .respond_with(Revoke {
+            status,
+            seen: Arc::clone(&seen),
+        })
+        .expect(expect)
+        .mount(server)
+        .await;
+    seen
+}
+
+#[tokio::test]
+async fn revoking_a_leaf_revokes_it_in_vault_by_serial() {
+    let f = revocation_fixture().await;
+    let seen = mount_revoke(&f.server, 200, 1).await;
+
+    let outcome = f.certs.revoke(f.tenant, f.leaf).await.unwrap();
+
+    assert_eq!(outcome, CustodianRevocation::Forwarded);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        std::slice::from_ref(&f.serial),
+        "Vault must be told the serial of the certificate AXIAM revoked"
+    );
+    assert!(
+        f.cert_repo
+            .list_unforwarded_revocations(10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a forwarded revocation is not pending"
+    );
+    // Nothing left for the sweep: the `.expect(1)` above fails on a second call.
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_vault_that_refuses_leaves_the_leaf_revoked_and_the_sweep_forwards_it_later() {
+    let f = revocation_fixture().await;
+    // The request's attempts, then one sweep while Vault still refuses.
+    mount_revoke(&f.server, 503, u64::from(CUSTODIAN_REVOKE_ATTEMPTS) + 1).await;
+
+    let outcome = f
+        .certs
+        .revoke(f.tenant, f.leaf)
+        .await
+        .expect("Vault's refusal must not fail the revocation");
+    assert!(
+        matches!(&outcome, CustodianRevocation::Pending { reason } if reason.contains("storage unavailable")),
+        "got {outcome:?}"
+    );
+    assert_eq!(
+        f.certs.get(f.tenant, f.leaf).await.unwrap().status,
+        CertificateStatus::Revoked,
+        "AXIAM's revocation stands whatever Vault answered"
+    );
+    let pending = f.cert_repo.list_unforwarded_revocations(10).await.unwrap();
+    assert_eq!(pending.iter().map(|c| c.id).collect::<Vec<_>>(), [f.leaf]);
+
+    // A sweep while Vault still refuses reports it, and keeps the row pending.
+    assert!(f.certs.forward_pending_revocations().await.is_err());
+    f.server.verify().await;
+    f.server.reset().await;
+
+    let seen = mount_revoke(&f.server, 200, 1).await;
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
+    assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
+    assert!(
+        f.cert_repo
+            .list_unforwarded_revocations(10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn the_sweep_forwards_a_revocation_no_request_forwarded() {
+    let f = revocation_fixture().await;
+    let seen = mount_revoke(&f.server, 200, 1).await;
+
+    // The repository's write alone, as a bulk path (a directory
+    // deprovisioning) revokes: nothing has told Vault.
+    f.cert_repo.revoke(f.tenant, f.leaf).await.unwrap();
+    assert!(seen.lock().unwrap().is_empty());
+
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 1);
+    assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&f.serial));
+    assert_eq!(f.certs.forward_pending_revocations().await.unwrap(), 0);
 }

@@ -2705,7 +2705,9 @@ where
         ssf_account_sink.clone(),
     )
     // G-7 (T23.7.1): the CIBA pending-request expiry.
-    .with_ciba(Arc::new(ciba_request_repo.clone()));
+    .with_ciba(Arc::new(ciba_request_repo.clone()))
+    // T-470: `vault_pki` revocations a revoke request could not forward.
+    .with_vault_revocations(Arc::new(cert_service.clone()));
     let cleanup_handle = tokio::spawn(cleanup.run());
 
     // SECHRD-03 / D-01a (H2 performance fix): ONE write-behind shared

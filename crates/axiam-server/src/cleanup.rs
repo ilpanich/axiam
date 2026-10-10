@@ -77,6 +77,13 @@ pub type SweptClientGrants<C> = ClientGrantStores<
 // CleanupTask
 // ---------------------------------------------------------------------------
 
+/// The certificate service the `vault_revocation` sweep forwards through
+/// (T-470).
+pub type VaultRevocationForwarder<C> = axiam_pki::CertService<
+    axiam_db::SurrealCaCertificateRepository<C>,
+    axiam_db::SurrealCertificateRepository<C>,
+>;
+
 /// Background task that sweeps expired rows and runs GDPR purge + export jobs.
 pub struct CleanupTask<C: Connection> {
     // Existing federation cleanup repos.
@@ -164,6 +171,9 @@ pub struct CleanupTask<C: Connection> {
     /// the `ciba_request` sweep marks `expired` and, after a retention, deletes.
     /// `None` runs no sweep.
     ciba_request_repo: Option<Arc<axiam_db::SurrealCibaRequestRepository<C>>>,
+    /// T-470: forwards to Vault the revocations of `vault_pki` leaves it does
+    /// not have yet, as the `vault_revocation` job. `None` runs no sweep.
+    vault_revocations: Option<Arc<VaultRevocationForwarder<C>>>,
     /// #523: when the `tenant_purge` sweep last looked for orphaned tenant ids
     /// (rows whose tenant a pre-tombstone deletion removed). `None` until the
     /// first tick, which always looks; then once per
@@ -1036,6 +1046,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             ssf_sink: None,
             scim_reconciliation: None,
             ciba_request_repo: None,
+            vault_revocations: None,
             last_orphan_scan: None,
             shutdown,
         }
@@ -1048,6 +1059,16 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     #[must_use]
     pub fn with_ciba(mut self, repo: Arc<axiam_db::SurrealCibaRequestRepository<C>>) -> Self {
         self.ciba_request_repo = Some(repo);
+        self
+    }
+
+    /// Forward to Vault the `vault_pki` revocations it does not have yet
+    /// (T-470), as the `vault_revocation` job.
+    ///
+    /// A builder step for the reason [`Self::with_ssf`] is one.
+    #[must_use]
+    pub fn with_vault_revocations(mut self, certs: Arc<VaultRevocationForwarder<C>>) -> Self {
+        self.vault_revocations = Some(certs);
         self
     }
 
@@ -1228,6 +1249,20 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
                         self.sweep_ciba_requests().await,
                         tracing::Level::DEBUG,
                     );
+
+                    // T-470: a `vault_pki` leaf revoked in AXIAM whose
+                    // revocation Vault does not have yet — a revoke request
+                    // could not reach it, or the revocation came from a bulk
+                    // path. WARN on failure (`record`), since until it runs
+                    // Vault's list omits a revoked certificate.
+                    if let Some(certs) = &self.vault_revocations {
+                        Self::record(
+                            &self.job_health,
+                            "vault_revocation",
+                            certs.forward_pending_revocations().await,
+                            tracing::Level::INFO,
+                        );
+                    }
 
                     // T21.4 — delete self-registered clients nobody has used.
                     // INFO rather than DEBUG, and for the audit sweep's

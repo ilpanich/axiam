@@ -40,9 +40,13 @@
 //!   sign anything, a list included;
 //! - **a CA whose key Vault's PKI engine holds** (`vault_pki`). Vault signs on
 //!   AXIAM's behalf only certificate requests; it has no operation that signs a
-//!   list AXIAM composed, and AXIAM never holds the key. Leaves of such a CA
-//!   carry no distribution point either — Vault issues them with its own
-//!   profile — so nothing points at a route that cannot answer (T-470).
+//!   list AXIAM composed, and AXIAM never holds the key. Vault publishes that
+//!   CA's list itself, and AXIAM revokes each leaf there too
+//!   ([`crate::CertService::revoke`], T-470), so Vault's list names it. Leaves of
+//!   such a CA carry no AXIAM distribution point — Vault issues them with its
+//!   own profile, naming whatever the operator configured on the mount
+//!   (`config/urls`) — so nothing points at a route that cannot answer, and
+//!   relying parties read Vault's list (`/v1/<mount>/issuer/<issuer>/crl/der`).
 //!
 //! # Signing on request, and the cache in front of it
 //!
@@ -305,7 +309,7 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CrlService<CA, CR> 
                 %organization_id,
                 %ca_id,
                 "no CRL is published for this CA: its key is held by a custodian that signs \
-                 certificate requests only (vault_pki)"
+                 certificate requests only (vault_pki), and publishes the CA's list itself"
             );
             return Err(not_published());
         }

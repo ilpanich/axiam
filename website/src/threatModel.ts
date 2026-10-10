@@ -18,8 +18,8 @@ export const THREAT_MODEL: ThreatModel = {
  "version": "2.38.0",
  "diagramCount": 10,
  "total": 474,
- "open": 20,
- "mitigated": 433,
+ "open": 19,
+ "mitigated": 434,
  "notApplicable": 21,
  "diagrams": [
   {
@@ -7777,12 +7777,12 @@ export const THREAT_MODEL: ThreatModel = {
        "title": "A certificate issued under a CA whose key Vault's PKI engine holds has no published revocation",
        "type": "Spoofing",
        "severity": "Medium",
-       "status": "Open",
+       "status": "Mitigated",
        "description": "Under `vault_pki` custody the CA key never leaves Vault, and Vault signs on AXIAM's behalf only certificate requests: it has no operation that signs a list AXIAM composed. The CRL route therefore answers `404` for such a CA, and its leaves carry no AXIAM distribution point (Vault issues them with its own profile). Revoking one of those leaves in AXIAM sets its row's status and does not revoke it in Vault, so a list Vault publishes from its own mount does not name it either: a relying party that validates such a leaf itself cannot learn of the revocation — T-102's gap, for this custody mode.",
-       "mitigation": "Open, entered with ilpanich/axiam#565 at model 2.38.0. Inside AXIAM a revocation takes effect at once whatever the custody: device sign-in and both mTLS client methods read the certificate's status by fingerprint (T-102). Outside it the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`; the PKI guide says so. Closes when revoking a leaf of such a CA also revokes it in Vault (`pki/revoke` by serial), so the list Vault serves, at the distribution point the operator configures on the mount (`pki/config/urls`), names it. Tracked for 1.0.x."
+       "mitigation": "Mitigated at model 2.38.0 (1.0.0 release wave, W1; entered Open with ilpanich/axiam#565). A revocation in AXIAM now reaches Vault, which publishes the list of a CA whose key its PKI engine holds. `CertService::revoke` writes AXIAM's revocation first, and it stands whatever Vault answers: device sign-in and both mTLS client methods refuse the leaf at once (T-102). For a leaf of an active `vault_pki` CA it then calls Vault's `POST <issuing mount>/revoke` with the certificate's serial, through the address and token issuance uses (`VaultPkiCaKeyStore::revoke_signed`), twice at most within ten seconds; once Vault accepts, the row records `vault_revoked_at` (schema v94). Refused or unreachable, the revoke route still answers `200`, an audit row `certificate.vault_revocation_pending` (outcome `Failure`) records the reason beside an error log, and the cleanup job's `vault_revocation` sweep forwards every revoked, unexpired leaf of an active `vault_pki` CA that lacks `vault_revoked_at` — so also the revocations no request made (a directory deprovisioning revokes in bulk) and those made before the upgrade — one attempt each within a 30-second budget per pass, failing the job in `/health/jobs` while any stays pending. Vault answers a repeated revocation with success, so a retry is harmless. AXIAM's CRL route still answers `404` for such a CA, as it does for every CA that publishes no list it signs, and the leaves carry Vault's own profile: relying parties read Vault's per-issuer list (`/v1/<mount>/issuer/<issuer>/crl/der`), at the distribution point the operator configures on the mount (`config/urls`), as the PKI guide says. Tests: `crates/axiam-pki/tests/vault_pki_test.rs` `revoking_a_leaf_revokes_it_in_vault_by_serial` (the serial reaches Vault's `revoke` with the token, and nothing is left pending), `a_vault_that_refuses_leaves_the_leaf_revoked_and_the_sweep_forwards_it_later` (a refusing Vault leaves the leaf revoked and pending, a sweep against it fails, and a sweep once Vault accepts forwards the serial and clears it), `the_sweep_forwards_a_revocation_no_request_forwarded` (a revocation written by the repository alone is forwarded by the sweep, once); `crates/axiam-api-rest/tests/certificate_test.rs` `a_revocation_vault_refuses_still_stands_and_is_audited` (the route answers `200`, the certificate reads `Revoked`, and one `certificate.vault_revocation_pending` row names the reason). Residuals: until Vault accepts, its list omits the leaf — the outage plus one cleanup interval; the list is only as fresh as Vault's CRL rebuild setting and only as reachable as the operator makes it; and revoking a `vault_pki` tenant signing CA deletes its issuer from Vault but does not revoke the CA's own certificate on its parent's list in Vault, so a relying party holding that intermediate learns of its revocation only from AXIAM (the leaves it signed stop being issued, and AXIAM refuses them)."
       }
      ],
-     "open": 1,
+     "open": 0,
      "notApplicable": 0
     },
     {
@@ -8264,7 +8264,7 @@ export const THREAT_MODEL: ThreatModel = {
     }
    ],
    "total": 31,
-   "open": 2,
+   "open": 1,
    "notApplicable": 0,
    "bySeverity": {
     "Critical": 7,

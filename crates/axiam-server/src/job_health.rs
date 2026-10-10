@@ -53,6 +53,8 @@ pub const SWEEP_JOBS: &[&str] = &[
     "audit_retention",
     // #523 (D-4): deleted tenants' data, purged in user-erasure order.
     "tenant_purge",
+    // T-470: `vault_pki` revocations Vault does not have yet.
+    "vault_revocation",
 ];
 
 #[derive(Default, Clone)]
@@ -180,6 +182,8 @@ mod tests {
             "ciba_request",
             // #523 (D-4): the deleted tenants' purge.
             "tenant_purge",
+            // T-470: revocations forwarded to Vault.
+            "vault_revocation",
         ] {
             let recorded = source.match_indices("&self.job_health,").any(|(at, _)| {
                 let rest = &source[at + "&self.job_health,".len()..];
@@ -200,6 +204,7 @@ mod tests {
         assert!(names.iter().any(|n| n == "scim_reconcile"));
         assert!(names.iter().any(|n| n == "ciba_request"));
         assert!(names.iter().any(|n| n == "tenant_purge"));
+        assert!(names.iter().any(|n| n == "vault_revocation"));
     }
 
     #[test]

@@ -64,8 +64,8 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "version": "2.38.0",
  "diagramCount": 10,
  "total": 474,
- "open": 20,
- "mitigated": 433,
+ "open": 19,
+ "mitigated": 434,
  "notApplicable": 21,
  "areas": [
   {
@@ -107,7 +107,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
    "total": 31,
-   "open": 2,
+   "open": 1,
    "notApplicable": 0
   },
   {
@@ -143,7 +143,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Spoofing",
    "total": 104,
-   "open": 5,
+   "open": 4,
    "notApplicable": 3
   },
   {
@@ -193,7 +193,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "name": "Medium",
    "total": 199,
-   "open": 8,
+   "open": 7,
    "notApplicable": 9
   },
   {
@@ -383,16 +383,6 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
    "area": "Deployment & platform (Kubernetes)",
    "element": "AXIAM deployment (N replicas, HPA)",
    "residualRisk": "Accepted design trade-off (D-59): the profile exists to run without a broker, and a SurrealDB-backed durable queue was rejected as a second dispatcher. What bounds it: the profile is opt-in (`true` is the default) and says what it lacks at boot (a `WARN` naming the in-process queues as lost on restart and external audit ingestion as unavailable), in `/health` (`profile: minimal`; `unavailable` lists `amqp_audit_ingestion`) and in the deployment guide; AXIAM's own audit rows never rode the broker and are written directly in both profiles, and an orderly stop drains them (T-444); the GDPR erasure records keep their dead-letter fallback (T19.27); a delivery that exhausts its attempts writes `<kind>.delivery_failed` in both profiles; outbound SCIM is repaired by the next reconciliation. The review (`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`) states what the deployment documentation must say and proposes a terminal row for a delivery abandoned at stop or refused at enqueue (P23W5-A4). Open because the loss is real."
-  },
-  {
-   "number": 470,
-   "title": "A certificate issued under a CA whose key Vault's PKI engine holds has no published revocation",
-   "category": "Spoofing",
-   "severity": "Medium",
-   "diagramId": 5,
-   "area": "PKI, certificates & IoT device identity",
-   "element": "Revocation (status in AXIAM's store; CRL per issuing CA)",
-   "residualRisk": "Open, entered with ilpanich/axiam#565 at model 2.38.0. Inside AXIAM a revocation takes effect at once whatever the custody: device sign-in and both mTLS client methods read the certificate's status by fingerprint (T-102). Outside it the only bound is the leaf's own validity, capped per tenant by `max_cert_validity_days`; the PKI guide says so. Closes when revoking a leaf of such a CA also revokes it in Vault (`pki/revoke` by serial), so the list Vault serves, at the distribution point the operator configures on the mount (`pki/config/urls`), names it. Tracked for 1.0.x."
   },
   {
    "number": 161,

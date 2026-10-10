@@ -27,7 +27,8 @@ pub use ca_key_store::{
     custodians_from_env,
 };
 pub use cert::{
-    CertService, DEFAULT_LEAF_CERT_VALIDITY_DAYS, IssuingScope, MAX_LEAF_CERT_VALIDITY_DAYS,
+    CertService, CustodianRevocation, DEFAULT_LEAF_CERT_VALIDITY_DAYS, IssuingScope,
+    MAX_LEAF_CERT_VALIDITY_DAYS,
 };
 pub use config::PkiConfig;
 pub use crl::{CrlDistribution, CrlService, PublishedCrl};

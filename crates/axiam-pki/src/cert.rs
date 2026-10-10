@@ -1,6 +1,6 @@
 //! Tenant certificate generation service — signs certificates with a CA key.
 
-use axiam_core::ca_keys::LeafSigningRequest;
+use axiam_core::ca_keys::{CaKeyCustody, LeafSigningRequest};
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::certificate::{
     Certificate, CertificateStatus, CertificateType, CreateCertificate, GeneratedCertificate,
@@ -921,8 +921,142 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
             .await
     }
 
-    pub async fn revoke(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
-        self.cert_repo.revoke(tenant_id, id).await
+    /// Revoke a certificate, and — when its issuing CA's key is held by a
+    /// custodian that signs remotely (`vault_pki`) — revoke it there too
+    /// (T-470).
+    ///
+    /// AXIAM's revocation is written first and stands whatever the custodian
+    /// answers: every AXIAM decision reads the row, so the certificate
+    /// authenticates nothing from this moment. Vault, which signs such a CA's
+    /// list, is then told, within [`CUSTODIAN_REVOKE_ATTEMPTS`] attempts and
+    /// [`CUSTODIAN_REVOKE_BUDGET`]; a refusal or an unreachable Vault is logged
+    /// and answered as [`CustodianRevocation::Pending`], for the caller to
+    /// record, and the cleanup job's sweep ([`Self::forward_pending_revocations`])
+    /// tries again.
+    pub async fn revoke(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<CustodianRevocation> {
+        self.cert_repo.revoke(tenant_id, id).await?;
+        let certificate = self.cert_repo.get_by_id(tenant_id, id).await?;
+        Ok(self
+            .forward_revocation(
+                &certificate,
+                CUSTODIAN_REVOKE_ATTEMPTS,
+                tokio::time::Instant::now() + CUSTODIAN_REVOKE_BUDGET,
+            )
+            .await)
+    }
+
+    /// One pass of the cleanup job's `vault_revocation` sweep (T-470): forward
+    /// to Vault each revocation it does not have yet — one a revoke request
+    /// could not forward, and one made without a request (a directory
+    /// deprovisioning revokes in bulk) — returning how many it accepted.
+    ///
+    /// One attempt per row, inside one [`SWEEP_BUDGET`] for the pass, so an
+    /// unreachable Vault costs one timeout per tick rather than one per row.
+    /// Any row left pending makes the pass an error, which `/health/jobs`
+    /// shows; the next tick resumes.
+    pub async fn forward_pending_revocations(&self) -> AxiamResult<u64> {
+        let deadline = tokio::time::Instant::now() + SWEEP_BUDGET;
+        let pending = self
+            .cert_repo
+            .list_unforwarded_revocations(SWEEP_BATCH)
+            .await?;
+        let mut forwarded = 0u64;
+        let mut failed = 0usize;
+        for certificate in &pending {
+            if tokio::time::Instant::now() >= deadline {
+                failed += 1;
+                continue;
+            }
+            match self.forward_revocation(certificate, 1, deadline).await {
+                CustodianRevocation::Forwarded => forwarded += 1,
+                CustodianRevocation::NotNeeded => {}
+                CustodianRevocation::Pending { .. } => failed += 1,
+            }
+        }
+        if failed > 0 {
+            return Err(AxiamError::Internal(format!(
+                "{failed} certificate revocation(s) could not be forwarded to Vault and stay \
+                 pending ({forwarded} forwarded)"
+            )));
+        }
+        Ok(forwarded)
+    }
+
+    /// Tell the custodian that signed `certificate` it is revoked, if that
+    /// custodian keeps its own list. Never fails: the outcome is the answer.
+    async fn forward_revocation(
+        &self,
+        certificate: &Certificate,
+        attempts: u32,
+        deadline: tokio::time::Instant,
+    ) -> CustodianRevocation {
+        let pending = |reason: String| {
+            tracing::error!(
+                certificate_id = %certificate.id,
+                tenant_id = %certificate.tenant_id,
+                issuer_ca_id = %certificate.issuer_ca_id,
+                reason = %reason,
+                "certificate revoked in AXIAM but not yet in Vault, whose revocation list \
+                 therefore does not name it; the cleanup job retries"
+            );
+            CustodianRevocation::Pending { reason }
+        };
+
+        let ca = match self
+            .ca_repo
+            .get_by_issuer_id(certificate.issuer_ca_id)
+            .await
+        {
+            Ok(ca) => ca,
+            Err(e) => return pending(format!("the issuing CA could not be read: {e}")),
+        };
+        // Revoking a `vault_pki` CA removes its issuer from Vault, so there is
+        // nothing left there to revoke a leaf of; the CA's own revocation
+        // covers it.
+        if ca.key_custody != CaKeyCustody::VaultPki || ca.status != CertificateStatus::Active {
+            return CustodianRevocation::NotNeeded;
+        }
+        let store = match self.custodians.store_for(ca.key_custody) {
+            Ok(store) if store.signs_remotely() => store,
+            Ok(_) => return CustodianRevocation::NotNeeded,
+            Err(e) => return pending(e.to_string()),
+        };
+        let serial = match serial_hex(&certificate.public_cert_pem) {
+            Ok(serial) => serial,
+            Err(e) => return pending(e.to_string()),
+        };
+
+        let key_ref = CaService::<CA>::key_ref(&ca);
+        let mut last_error = String::new();
+        for attempt in 1..=attempts.max(1) {
+            if attempt > 1 {
+                tokio::time::sleep(CUSTODIAN_REVOKE_PAUSE).await;
+            }
+            match tokio::time::timeout_at(deadline, store.revoke_signed(&key_ref, &serial)).await {
+                Ok(Ok(())) => {
+                    if let Err(e) = self
+                        .cert_repo
+                        .mark_revocation_forwarded(certificate.tenant_id, certificate.id)
+                        .await
+                    {
+                        // Vault has it; the next sweep forwards it again,
+                        // which Vault answers with success.
+                        tracing::warn!(
+                            certificate_id = %certificate.id,
+                            error = %e,
+                            "Vault accepted the revocation, but recording that failed"
+                        );
+                    }
+                    return CustodianRevocation::Forwarded;
+                }
+                Ok(Err(e)) => last_error = e.to_string(),
+                Err(_) => {
+                    last_error = "Vault did not answer in time".into();
+                    break;
+                }
+            }
+        }
+        pending(last_error)
     }
 
     pub async fn list(
@@ -932,6 +1066,58 @@ impl<CA: CaCertificateRepository, CR: CertificateRepository> CertService<CA, CR>
     ) -> AxiamResult<PaginatedResult<Certificate>> {
         self.cert_repo.list(tenant_id, pagination).await
     }
+}
+
+/// Attempts a revoke request makes at forwarding the revocation to Vault
+/// (T-470) before it leaves the rest to the cleanup sweep.
+pub const CUSTODIAN_REVOKE_ATTEMPTS: u32 = 2;
+
+/// How long a revoke request may spend forwarding to Vault, all attempts
+/// together. The revocation in AXIAM is already written; this bounds only how
+/// long the caller waits to be told whether Vault has it too.
+pub const CUSTODIAN_REVOKE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The pause between two in-request attempts.
+const CUSTODIAN_REVOKE_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Revocations one sweep pass forwards at most.
+const SWEEP_BATCH: u32 = 100;
+
+/// How long one sweep pass may spend talking to Vault.
+const SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether the custodian that signed a revoked certificate has the revocation
+/// too (T-470).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustodianRevocation {
+    /// The issuing CA's list is AXIAM's own, which reads the revocation from
+    /// the row: there was nothing to forward.
+    NotNeeded,
+    /// Vault accepted the revocation; its list names the certificate from its
+    /// next rebuild.
+    Forwarded,
+    /// Vault refused or could not be reached. AXIAM's revocation stands; the
+    /// cleanup job's sweep tries again.
+    Pending {
+        /// Why, for the caller's audit record and the operator.
+        reason: String,
+    },
+}
+
+/// A certificate's serial as Vault spells one: colon-separated lowercase hex
+/// bytes, without the sign byte DER may prepend.
+fn serial_hex(public_cert_pem: &str) -> AxiamResult<String> {
+    let (_, block) = x509_parser::pem::parse_x509_pem(public_cert_pem.as_bytes())
+        .map_err(|e| AxiamError::Certificate(format!("the certificate is not PEM: {e}")))?;
+    let (_, cert) = X509Certificate::from_der(&block.contents)
+        .map_err(|e| AxiamError::Certificate(format!("the certificate does not parse: {e}")))?;
+    Ok(cert
+        .serial
+        .to_bytes_be()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":"))
 }
 
 /// What a certificate a remote signer returned actually says about itself.

@@ -800,6 +800,10 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         text: "Both ways in are supported. Generating a CA has Vault create the root and the intermediate, and the response carries **no** `private_key_pem` because there is none — keep the `chain_pem` it returns instead, since Vault hands over a generated root's certificate exactly once and nothing outside Vault can validate a chain without it. Importing a CA with a `private_key_pem` sends the key and certificate to Vault as one bundle; the key passes through AXIAM's memory on the way, because AXIAM is what received the request, but it is never stored here.",
       },
       {
+        type: "p",
+        text: "Revoking a leaf of a `vault_pki` CA revokes it in Vault too (`POST <int_mount>/revoke` with its serial, so the token's policy needs `update` on `pki_int/revoke`), because Vault, not AXIAM, signs that CA's revocation list — AXIAM's CRL route answers `404` for it. AXIAM's revocation stands whatever Vault answers; a refusal or an unreachable Vault is audited as `certificate.vault_revocation_pending` and retried by the cleanup job's `vault_revocation` sweep until Vault accepts. Relying parties fetch Vault's per-issuer list, `/v1/pki_int/issuer/<issuer_id>/crl/der`, which Vault names in its leaves once `pki_int/config/urls` sets the distribution point.",
+      },
+      {
         type: "note",
         text: "Tune the mounts. A PKI mount's `max_lease_ttl` defaults to 30 days and Vault silently caps a longer request to it rather than failing, so an untuned mount turns a ten-year root into a month-long one. AXIAM records the certificate that came back rather than the one it asked for, and logs Vault's warning — neither is a substitute for `vault secrets tune -max-lease-ttl=87600h pki`.",
       },

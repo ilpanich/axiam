@@ -382,6 +382,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invalid_request` and wording a signed-in caller gets. A pushed request is
   unaffected. `docs/conformance/REVIEW-JUDGEMENTS.md` open point 6 is closed;
   the certification sign-off run confirms the screenshot.
+- **A revocation of a `vault_pki` CA's leaf reaches Vault's own revocation
+  list** (T-470). Vault's PKI engine, not AXIAM, signs the list of a CA whose
+  key it holds, and a leaf revoked in AXIAM was never revoked in Vault, so a
+  relying party validating such a leaf itself — a VPN gateway, a FreeRADIUS
+  server — never learnt of the revocation. `POST
+  /api/v1/certificates/{id}/revoke` now also calls Vault's `POST
+  <int_mount>/revoke` with the certificate's serial, through the address and
+  token issuance uses. AXIAM's revocation is written first and stands whatever
+  Vault answers; if Vault refuses or cannot be reached (two attempts within ten
+  seconds) the route still answers `200`, an audit row
+  `certificate.vault_revocation_pending` records why, and the cleanup job's new
+  `vault_revocation` sweep (listed in `GET /health/jobs`, failing while any
+  revocation is pending) forwards it on a later tick — together with
+  revocations no request made, such as a directory deprovisioning's. AXIAM's
+  CRL route still answers `404` for a `vault_pki` CA: relying parties read
+  Vault's per-issuer list, `/v1/<int_mount>/issuer/<issuer_id>/crl/der`, which
+  Vault names in its leaves once the operator sets `config/urls` on the mount;
+  the PKI guide shows how. **Upgrade notes:** the Vault token's policy needs
+  `update` on `<int_mount>/revoke` (`pki_int/revoke` by default) — without it
+  every revocation of such a leaf is audited as pending and the sweep keeps
+  failing; schema migration v94 adds `certificate.vault_revoked_at`, and the
+  first sweep after the upgrade forwards the revocations of unexpired
+  `vault_pki` leaves made before it. Threat model 2.38.0: T-470 Mitigated; 474
+  threats, 434 mitigated / 19 open / 21 not applicable.
 
 ### Documentation
 

@@ -482,6 +482,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "federation_idp_metadata_signing_cert",
         sql: SCHEMA_V93,
     },
+    Migration {
+        version: 94,
+        name: "certificate_vault_revocation",
+        sql: SCHEMA_V94,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -4639,9 +4644,46 @@ DEFINE FIELD IF NOT EXISTS idp_metadata_signing_cert_pem ON TABLE federation_con
     TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v94 — a `vault_pki` leaf's revocation forwarded to Vault (T-470)
+// -----------------------------------------------------------------------
+//
+// A leaf of a CA whose key Vault's PKI engine holds is revoked in Vault as well
+// as in AXIAM, because Vault — not AXIAM — signs that CA's revocation list.
+// `vault_revoked_at` is set once Vault has accepted the revocation; a revoked
+// row of such a CA without it is one the cleanup job's `vault_revocation` sweep
+// still has to forward. Additive: one optional column, absent on every
+// existing row — so a leaf revoked before this version is forwarded by the
+// first sweep — and no row is rewritten.
+const SCHEMA_V94: &str = "\
+DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE certificate TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-470 — v94 adds the forwarded-to-Vault stamp and rewrites no row.
+    #[test]
+    fn v94_adds_only_the_vault_revocation_stamp() {
+        let statements: Vec<&str> = SCHEMA_V94
+            .lines()
+            .filter(|l| l.starts_with("DEFINE"))
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS vault_revoked_at ON TABLE certificate \
+                 TYPE option<datetime>;"
+            ]
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V94.contains(forbidden),
+                "v94 must not contain {forbidden}: it is additive DDL only"
+            );
+        }
+    }
 
     /// The tables some migration gives `field`, minus the tables a migration
     /// removes again (`srp_credential`).
@@ -6095,8 +6137,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&93),
-            "v93 is the newest migration (#530, P23W3-07 — \
+            Some(&94),
+            "v94 is the newest migration (T-470 — `certificate.vault_revoked_at`, set once \
+             Vault has accepted the revocation of a `vault_pki` CA's leaf; v93 was #530, \
+             P23W3-07 — \
              `federation_config.idp_metadata_signing_cert_pem`, the certificate a SAML IdP's \
              metadata document must be signed with; v92 was #531, D-3 — \
              `federation_config.allow_sha1_signatures`, the SAML SP verifier's SHA-1 escape hatch; \

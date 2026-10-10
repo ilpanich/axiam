@@ -397,6 +397,61 @@ impl<C: Connection> CertificateRepository for SurrealCertificateRepository<C> {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    async fn list_unforwarded_revocations(&self, limit: u32) -> AxiamResult<Vec<Certificate>> {
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id, * FROM certificate \
+                 WHERE status = 'Revoked' \
+                   AND vault_revoked_at = NONE \
+                   AND not_after > time::now() \
+                   AND issuer_ca_id IN (SELECT VALUE meta::id(id) FROM ca_certificate \
+                                        WHERE key_custody = 'vault_pki' \
+                                          AND status = 'Active') \
+                 ORDER BY revoked_at \
+                 LIMIT $limit",
+            )
+            .bind(("limit", limit))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<CertificateRowWithId> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|row| row.try_into_entry().map_err(Into::into))
+            .collect()
+    }
+
+    async fn mark_revocation_forwarded(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
+        let result = self
+            .db
+            .current()
+            .query(
+                // The first forwarding's time stands, as the revocation's does.
+                "UPDATE type::record('certificate', $id) SET \
+                 vault_revoked_at = vault_revoked_at ?? time::now() \
+                 WHERE tenant_id = $tenant_id AND status = 'Revoked'",
+            )
+            .bind(("id", id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let row: Option<CertificateRow> = result.take(0).map_err(DbError::from)?;
+        if row.is_none() {
+            return Err(DbError::NotFound {
+                entity: "certificate".into(),
+                id: id.to_string(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     async fn revoke_user_certificates(
         &self,
         tenant_id: Uuid,

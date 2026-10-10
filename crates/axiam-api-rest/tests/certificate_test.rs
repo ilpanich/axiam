@@ -456,6 +456,168 @@ async fn revoke_certificate() {
     assert_eq!(body["status"], "Revoked");
 }
 
+/// T-470 — a leaf of a CA whose key Vault's PKI engine holds is revoked in
+/// Vault as well; when Vault refuses, AXIAM's revocation still stands, the
+/// route still answers `200`, and the refusal is audited
+/// (`certificate.vault_revocation_pending`) for the cleanup job to retry.
+#[actix_rt::test]
+async fn a_revocation_vault_refuses_still_stands_and_is_audited() {
+    use axiam_core::ca_keys::CaKeyCustody;
+    use axiam_core::models::certificate::{
+        CertificateType, KeyAlgorithm, StoreCaCertificate, StoreCertificate,
+    };
+    use axiam_core::repository::{CaCertificateRepository, CertificateRepository};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+
+    // A Vault that refuses every revocation, as often as the request tries.
+    let vault = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/pki_int/revoke"))
+        .respond_with(
+            ResponseTemplate::new(503).set_body_json(serde_json::json!({ "errors": ["sealed"] })),
+        )
+        .expect(u64::from(axiam_pki::cert::CUSTODIAN_REVOKE_ATTEMPTS))
+        .mount(&vault)
+        .await;
+    let custodians = Arc::new(
+        axiam_pki::CaKeyCustodians::new(
+            None,
+            None,
+            Some(
+                axiam_pki::VaultPkiCaKeyStore::new(axiam_pki::VaultPkiConfig {
+                    address: vault.uri(),
+                    token: "hvs.test-only-not-a-real-token".into(), // gitleaks:allow
+                    root_mount: "pki".into(),
+                    int_mount: "pki_int".into(),
+                    ca_cert_path: None,
+                })
+                .unwrap(),
+            ),
+            Some(CaKeyCustody::VaultPki),
+        )
+        .unwrap(),
+    );
+
+    // The CA and its leaf as rows: issuance through Vault is vault_pki_test's.
+    let now = chrono::Utc::now();
+    let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "Vault Issuing CA");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let ca_repo = SurrealCaCertificateRepository::new(db.clone());
+    let ca = ca_repo
+        .create(StoreCaCertificate {
+            id: Uuid::new_v4(),
+            organization_id: org_id,
+            tenant_id: Some(tenant_id),
+            parent_ca_id: None,
+            subject: "Vault Issuing CA".into(),
+            public_cert_pem: ca_cert.pem(),
+            chain_pem: None,
+            fingerprint: "vault-issuing-ca".into(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: now - chrono::Duration::days(1),
+            not_after: now + chrono::Duration::days(365),
+            encrypted_private_key: None,
+            key_custody: CaKeyCustody::VaultPki,
+            key_locator: Some(
+                serde_json::json!({
+                    "issuing": { "mount": "pki_int", "issuer": "int-issuer-id", "key": "int-key-id" }
+                })
+                .to_string(),
+            ),
+        })
+        .await
+        .unwrap();
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut leaf_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    leaf_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "vault-leaf");
+    let leaf_pem = leaf_params
+        .signed_by(&leaf_key, &rcgen::Issuer::new(ca_params, ca_key))
+        .unwrap()
+        .pem();
+    let cert_repo = SurrealCertificateRepository::new(db.clone());
+    let leaf = cert_repo
+        .create(StoreCertificate {
+            tenant_id,
+            issuer_ca_id: ca.id,
+            subject: "vault-leaf".into(),
+            public_cert_pem: leaf_pem,
+            fingerprint: "vault-leaf".into(),
+            cert_type: CertificateType::Device,
+            key_algorithm: KeyAlgorithm::Ed25519,
+            not_before: now - chrono::Duration::days(1),
+            not_after: now + chrono::Duration::days(30),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new({
+                let mut state = AppState::for_test(db.clone(), auth.clone());
+                state.pki.cert_service = CertService::new(
+                    ca_repo,
+                    cert_repo,
+                    PkiConfig::default(),
+                    Arc::new(tokio::sync::Semaphore::new(4)),
+                    custodians,
+                );
+                state
+            }))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/v1/certificates/{}/revoke", leaf.id))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "Vault's refusal fails nothing");
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/v1/certificates/{}", leaf.id))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let body: serde_json::Value = test::read_body_json(test::call_service(&app, req).await).await;
+    assert_eq!(body["status"], "Revoked", "AXIAM's revocation stands");
+
+    let rows: Vec<serde_json::Value> = db
+        .query("SELECT * FROM audit_log WHERE action = 'certificate.vault_revocation_pending'")
+        .await
+        .unwrap()
+        .take(0)
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the refusal is audited once: {rows:?}");
+    assert_eq!(rows[0]["resource_id"], leaf.id.to_string());
+    assert_eq!(rows[0]["outcome"], "Failure");
+    assert!(
+        rows[0]["metadata"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("sealed")),
+        "the audit row says why: {rows:?}"
+    );
+}
+
 /// A leaf that would outlive its issuer is refused, and the error says by how
 /// much it may live instead.
 ///

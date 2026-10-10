@@ -2870,6 +2870,30 @@ pub trait CertificateRepository: Send + Sync {
         issuer_ca_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RevokedCertificate>>> + Send;
 
+    /// Revoked, not yet expired leaves of an **active `vault_pki` CA** whose
+    /// revocation Vault has not yet been told of, oldest revocation first, at
+    /// most `limit` (T-470).
+    ///
+    /// Vault signs such a CA's list, not AXIAM, so a revocation reaches it only
+    /// by being forwarded; this is what the cleanup sweep reads to forward the
+    /// ones a revoke request could not, and the revocations that never went
+    /// through one (a directory deprovisioning revokes in bulk). Across tenants:
+    /// the sweep is deployment-wide. A revoked CA's leaves are left out, since
+    /// revoking the CA removed its issuer from Vault.
+    fn list_unforwarded_revocations(
+        &self,
+        limit: u32,
+    ) -> impl Future<Output = AxiamResult<Vec<Certificate>>> + Send;
+
+    /// Record that the custodian that signed a revoked certificate has the
+    /// revocation too (`vault_revoked_at`, T-470), which takes it out of
+    /// [`Self::list_unforwarded_revocations`].
+    fn mark_revocation_forwarded(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
     /// Revoke every **active `User`-type certificate** that belongs to
     /// `user_id`, returning how many were revoked (G-3, T23.3.3, D-28).
     ///

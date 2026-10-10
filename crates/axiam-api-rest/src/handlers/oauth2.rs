@@ -1362,6 +1362,10 @@ async fn resolve_external_consent<C: Connection + Clone>(
         (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
         (status = 401, description = "No authenticated principal, and the \
                                       client did not opt into the login hop"),
+        (status = 429, description = "Rate limit exceeded \
+                                      (`AXIAM__RATE_LIMIT__END_SESSION_PER_MIN`, bucket \
+                                      `oauth2_authorize`, one allowance shared by this \
+                                      route and its `/t/{tenant_id}` mount)"),
     ),
     security(("bearer" = []))
 )]

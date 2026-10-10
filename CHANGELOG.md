@@ -280,7 +280,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   many people start sign-ins behind one NAT or proxy address, or a conformance
   or load rig drives authorizations from one host, raise that knob. It also
   sizes `/oauth2/end_session` and the SAML browser routes, each in its own
-  bucket.
+  bucket. The OpenAPI document lists the `429` among the route's responses.
 - **SAML: the service provider refuses a response carrying a DTD, and SHA-1
   signatures** (#531, P23W3-08). The SP verifier parsed a `SAMLResponse` with
   libxml and quick-xml, neither refusing a document type declaration, and

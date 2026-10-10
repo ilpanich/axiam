@@ -62,6 +62,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule every other credential-to-principal path uses: a locked, inactive,
   anonymized or deleted account is refused, a pending one never. Password
   sign-in keeps the grace period. Threat model 2.38.0: T-160 amended.
+- **Discovery publishes how the revocation and introspection endpoints
+  authenticate** (#526, P23W2-06). The discovery documents — bare and
+  per-tenant `/.well-known/openid-configuration` and the RFC 8414
+  `/.well-known/oauth-authorization-server` metadata — named neither
+  `revocation_endpoint_auth_methods_supported` nor
+  `introspection_endpoint_auth_methods_supported`, which RFC 8414 reads as
+  `client_secret_basic` alone, although both endpoints accept every method the
+  token endpoint does. They now publish the token endpoint's list (revocation)
+  and that list without `none` (introspection, which refuses a public client),
+  with the matching `…_auth_signing_alg_values_supported` members that
+  `private_key_jwt` requires. To make the published `client_secret_basic`
+  true, both endpoints now also take a Basic client's `client_id` from the
+  `Authorization` header alone (and a `private_key_jwt` client's from its
+  assertion), as the token endpoint does; a body `client_id` that disagrees
+  with the header is `400 invalid_request`. **Upgrade note:** `client_id` in
+  the `RevokeRequest` and `IntrospectRequest` form bodies becomes optional in
+  the OpenAPI document; a request that sends it is unaffected.
+- **A changed telephone number loses its verification** (#526, P23W2-07). A
+  SCIM `PUT` or `PATCH` replacing `phoneNumbers` left `phone_number_verified_at`
+  as it was, so `phone_number_verified` could vouch for a number nobody
+  verified. `UserRepository::update` now clears it whenever the stored number
+  changes, unless the same write sets it, so every writer inherits the rule;
+  an unchanged number keeps its verification. No AXIAM API sets the
+  timestamp today, so this guards the verification flow to come.
 
 ### Security
 

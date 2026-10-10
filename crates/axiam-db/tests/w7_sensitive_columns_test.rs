@@ -203,6 +203,81 @@ async fn an_empty_address_is_stored_as_no_address() {
     assert_eq!(repo.get_by_id(tenant_id, id).await.unwrap().address, None);
 }
 
+/// #526 (P23W2-07). A verification vouches for the number it saw, so a write
+/// that changes the stored number clears `phone_number_verified_at` — in
+/// `update` itself, so that SCIM and every other writer inherit it. Rewriting
+/// the same number keeps the verification; removing the number removes it; a
+/// write that changes the number and sets the timestamp in the same breath is
+/// the one way to have both.
+#[tokio::test]
+async fn p23w2_07_a_changed_phone_number_loses_its_verification() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealUserRepository::new(db);
+    let id = a_user_with_sensitive_data(&repo, tenant_id, "renumber").await;
+    let verified = repo
+        .get_by_id(tenant_id, id)
+        .await
+        .unwrap()
+        .phone_number_verified_at
+        .expect("the fixture verifies its number");
+    let set_number = |number: Option<&str>| UpdateUser {
+        phone_number: Some(number.map(str::to_owned)),
+        ..Default::default()
+    };
+
+    // The same number, rewritten: still verified, at the same instant.
+    repo.update(tenant_id, id, set_number(Some(A_NUMBER)))
+        .await
+        .unwrap();
+    let read = repo.get_by_id(tenant_id, id).await.unwrap();
+    assert_eq!(read.phone_number_verified_at, Some(verified));
+
+    // A write that leaves the number alone leaves the verification alone.
+    repo.update(
+        tenant_id,
+        id,
+        UpdateUser {
+            address: Some(Some(an_address())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let read = repo.get_by_id(tenant_id, id).await.unwrap();
+    assert_eq!(read.phone_number_verified_at, Some(verified));
+
+    // A different number: no longer verified.
+    repo.update(tenant_id, id, set_number(Some("+390298765432")))
+        .await
+        .unwrap();
+    let read = repo.get_by_id(tenant_id, id).await.unwrap();
+    assert_eq!(read.phone_number.as_deref(), Some("+390298765432"));
+    assert_eq!(read.phone_number_verified_at, None);
+
+    // A number changed together with an explicit verification keeps it.
+    let reverified = chrono::Utc::now();
+    repo.update(
+        tenant_id,
+        id,
+        UpdateUser {
+            phone_number: Some(Some(A_NUMBER.into())),
+            phone_number_verified_at: Some(Some(reverified)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let read = repo.get_by_id(tenant_id, id).await.unwrap();
+    assert_eq!(read.phone_number.as_deref(), Some(A_NUMBER));
+    assert!(read.phone_number_verified_at.is_some());
+
+    // The number removed: the verification goes with it.
+    repo.update(tenant_id, id, set_number(None)).await.unwrap();
+    let read = repo.get_by_id(tenant_id, id).await.unwrap();
+    assert_eq!(read.phone_number, None);
+    assert_eq!(read.phone_number_verified_at, None);
+}
+
 // ---------------------------------------------------------------------------
 // Erasure — the plan's §4.8 claim, checked
 // ---------------------------------------------------------------------------

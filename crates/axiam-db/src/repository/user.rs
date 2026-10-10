@@ -687,6 +687,19 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             // clear direction is not decoration — it is how a data subject
             // withdrawing a telephone number gets it removed rather than hidden.
             if input.phone_number.is_some() {
+                // #526 (P23W2-07). A verification vouches for the number it
+                // saw: a write that changes the stored number clears the
+                // timestamp unless the same write sets it, so SCIM's `PUT` and
+                // `PATCH` and every other writer inherit the rule. Placed
+                // before the number's own assignment so that it compares
+                // against the stored value whichever way the `SET` list is
+                // evaluated; an unchanged number keeps its verification.
+                if input.phone_number_verified_at.is_none() {
+                    sets.push(
+                        "phone_number_verified_at = IF phone_number = $phone_number \
+                         THEN phone_number_verified_at ELSE NONE END",
+                    );
+                }
                 sets.push("phone_number = $phone_number");
             }
             if input.phone_number_verified_at.is_some() {

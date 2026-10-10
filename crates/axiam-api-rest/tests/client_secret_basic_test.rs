@@ -1603,3 +1603,46 @@ async fn present_wrong(
         )),
     )
 }
+
+// --- #526: revocation and introspection, header-only ------------------------
+
+/// **#526 (P23W2-06).** Discovery now publishes `client_secret_basic` for the
+/// revocation and introspection endpoints, so they must serve a Basic client
+/// the way the token endpoint does (T9.2): the `client_id` may arrive in the
+/// header alone, and a body `client_id` that disagrees with it is refused
+/// `invalid_request` before any secret is checked. Until #526 both endpoints
+/// required the body's `client_id`, so such a client was answered `400` for a
+/// missing field.
+#[actix_rt::test]
+async fn p23w2_06_revoke_and_introspect_take_the_client_id_from_the_basic_header() {
+    let f = setup().await;
+    let app = test_app!(f);
+
+    for path in ["/oauth2/revoke", "/oauth2/introspect"] {
+        let call = |body: String| {
+            test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri(&format!("{path}?tenant_id={}", f.tenant_id))
+                .insert_header(("content-type", "application/x-www-form-urlencoded"))
+                .insert_header(("Authorization", good_basic_value(&f)))
+                .set_payload(body)
+                .to_request()
+        };
+
+        let resp = test::call_service(&app, call("token=not-a-token".into())).await;
+        assert_eq!(resp.status().as_u16(), 200, "{path}: header-only client_id");
+        if path == "/oauth2/introspect" {
+            let body: Value = test::read_body_json(resp).await;
+            assert_eq!(body["active"], false, "{path}: {body}");
+        }
+
+        let resp = test::call_service(
+            &app,
+            call(format!("token=not-a-token&client_id={}", f.post_client_id)),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 400, "{path}: disagreeing client_id");
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"], "invalid_request", "{path}: {body}");
+    }
+}

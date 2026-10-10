@@ -208,11 +208,17 @@ pub struct TokenResponse {
 /// A client registered for `private_key_jwt` posts `client_assertion` here and
 /// no secret; one registered for `tls_client_auth` posts neither and is
 /// authenticated by the certificate on the connection.
+///
+/// `client_id` is optional for the same reason it is at the token endpoint
+/// (#526, P23W2-06): a `client_secret_basic` client names itself in the
+/// `Authorization` header (RFC 6749 §2.3.1) and a `private_key_jwt` client in
+/// its assertion (RFC 7521 §4.2), and discovery now publishes both methods for
+/// this endpoint. [`resolve_client_id`] decides, and refuses a disagreement.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RevokeRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
-    pub client_id: String,
+    pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub client_assertion: Option<String>,
     pub client_assertion_type: Option<String>,
@@ -225,7 +231,7 @@ pub struct RevokeRequest {
 pub struct IntrospectRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
-    pub client_id: String,
+    pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub client_assertion: Option<String>,
     pub client_assertion_type: Option<String>,
@@ -2891,13 +2897,9 @@ where
             req.client_assertion.as_deref(),
             req.client_assertion_type.as_deref(),
         );
+        let client_id = resolve_client_id(req.client_id.as_deref(), &ctx)?.to_owned();
         let client = self
-            .authenticate_client(
-                tenant_id,
-                &req.client_id,
-                req.client_secret.as_deref(),
-                &ctx,
-            )
+            .authenticate_client(tenant_id, &client_id, req.client_secret.as_deref(), &ctx)
             .await?;
 
         // D-17 (T23.1.5) — the profile's client-authentication rule, at
@@ -2920,7 +2922,7 @@ where
             .refresh_token_repo
             .get_by_token_hash(tenant_id, &token_hash)
             .await
-            && stored.client_id == req.client_id
+            && stored.client_id == client_id
         {
             self.refresh_token_repo
                 .revoke(tenant_id, &token_hash)
@@ -2944,13 +2946,9 @@ where
             req.client_assertion.as_deref(),
             req.client_assertion_type.as_deref(),
         );
+        let client_id = resolve_client_id(req.client_id.as_deref(), &ctx)?.to_owned();
         let client = self
-            .authenticate_client(
-                tenant_id,
-                &req.client_id,
-                req.client_secret.as_deref(),
-                &ctx,
-            )
+            .authenticate_client(tenant_id, &client_id, req.client_secret.as_deref(), &ctx)
             .await?;
 
         // D-17 (T23.1.5) — as at revoke: the profile's client-authentication
@@ -3068,7 +3066,7 @@ where
         {
             // Only introspect tokens belonging to the requesting
             // client — prevent cross-client information leaks.
-            if stored.client_id != req.client_id {
+            if stored.client_id != client_id {
                 return Ok(IntrospectionResponse {
                     active: false,
                     ..Default::default()

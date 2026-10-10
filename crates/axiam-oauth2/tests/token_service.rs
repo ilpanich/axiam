@@ -2097,7 +2097,7 @@ fn revoke_req(token: &str) -> RevokeRequest {
     RevokeRequest {
         token: token.into(),
         token_type_hint: None,
-        client_id: "client-1".into(),
+        client_id: Some("client-1".into()),
         client_secret: Some(SECRET.into()),
         client_assertion: None,
         client_assertion_type: None,
@@ -2174,7 +2174,7 @@ fn introspect_req(token: &str) -> IntrospectRequest {
     IntrospectRequest {
         token: token.into(),
         token_type_hint: None,
-        client_id: "client-1".into(),
+        client_id: Some("client-1".into()),
         client_secret: Some(SECRET.into()),
         client_assertion: None,
         client_assertion_type: None,

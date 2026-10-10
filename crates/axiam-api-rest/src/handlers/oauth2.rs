@@ -2931,6 +2931,10 @@ pub(crate) async fn append_client_auth_failure_audit<C: Connection + Clone>(
     ),
     responses(
         (status = 200, description = "Token revoked (or was already invalid)"),
+        (status = 400, description = "Malformed request, no client_id in the body, the \
+                                      Authorization header or the assertion, or a body \
+                                      client_id that disagrees with the header",
+         body = OAuth2ErrorResponse),
         (status = 401, description = "Client authentication failed",
          body = OAuth2ErrorResponse),
     ),
@@ -2994,6 +2998,10 @@ async fn revoke_inner<C: Connection + Clone>(
     responses(
         (status = 200, description = "Token introspection result",
          body = IntrospectionResponse),
+        (status = 400, description = "Malformed request, no client_id in the body, the \
+                                      Authorization header or the assertion, or a body \
+                                      client_id that disagrees with the header",
+         body = OAuth2ErrorResponse),
         (status = 401, description = "Client authentication failed",
          body = OAuth2ErrorResponse),
     ),

@@ -78,6 +78,13 @@ Once up:
 Stop with `just prod-down` (keeps volumes) or `just prod-clean` (also removes
 volumes).
 
+The stack has one volume the server writes to besides the datastore's:
+`gdpr-audit-dlq`, the audit dead-letter file (`AXIAM__GDPR_AUDIT_DLQ_FILE`). It
+holds audit rows the datastore refused, so `just prod-clean` deletes the only
+copy of any not yet replayed — see [the audit dead-letter
+file](#the-audit-dead-letter-file) before cleaning a stack that has had a
+datastore outage.
+
 For local development (not production-like), use `just dev-up` /
 `just dev-down` ([`docker/docker-compose.dev.yml`](../../docker/docker-compose.dev.yml))
 to run only SurrealDB + RabbitMQ while running `axiam-server` natively.
@@ -131,6 +138,12 @@ Key manifests:
   same for all four consumers.
 - **On a single Raspberry Pi 5 with k3s**, all of this is scripted:
   [`docs/deployment/rpi5-k3s.md`](rpi5-k3s.md) and `infra/rpi5-k3s/`.
+
+The server pod mounts one volume it writes to: an `emptyDir` for the audit
+dead-letter file (`AXIAM__GDPR_AUDIT_DLQ_FILE`, set in the ConfigMap). It is lost
+with the pod, so replay it before a rollout while it holds rows — see [the audit
+dead-letter file](#the-audit-dead-letter-file) for why it is not a claim and what
+to do if it must be.
 
 Before applying, an operator must:
 0. Install cert-manager and apply [`k8s/certs/`](../../k8s/certs/) (or create
@@ -1649,7 +1662,7 @@ The clocks of two instances sharing a datastore must agree to well within the
 just minimal-up      # SurrealDB + axiam-server, no broker
 curl -s http://localhost:8090/health
 just minimal-down    # stop; the data volumes are kept
-just minimal-clean   # stop and DELETE the datastore and the GDPR dead-letter file
+just minimal-clean   # stop and DELETE the datastore and the audit dead-letter file
 ```
 
 [`docker/docker-compose.minimal.yml`](../../docker/docker-compose.minimal.yml)
@@ -1676,7 +1689,7 @@ its volumes can never be the dev or prod stack's.
 
 Both ports are published on the loopback interface only: put a TLS-terminating
 proxy in front of the REST port. The compose file also gives the server a
-**30 s stop grace period** and a named volume for the GDPR dead-letter file
+**30 s stop grace period** and a named volume for the audit dead-letter file
 (below).
 
 **On Kubernetes** the same profile is: `AXIAM__AMQP__ENABLED=false`, no
@@ -1684,7 +1697,9 @@ proxy in front of the REST port. The compose file also gives the server a
 with `strategy: Recreate`, a `terminationGracePeriodSeconds` of at least 30 (the
 default), and a small volume for `AXIAM__GDPR_AUDIT_DLQ_FILE` — the server's
 manifest runs with `readOnlyRootFilesystem: true`, so without a mounted path the
-file sink cannot be written.
+file sink cannot be written. `k8s/server/deployment.yml` mounts one (an
+`emptyDir`; see [the audit dead-letter file](#the-audit-dead-letter-file) for
+what that survives).
 
 ### What it does not provide
 
@@ -1763,52 +1778,114 @@ rows of deliveries lost on restart, external audit ingestion — is reviewed pat
 by path in
 [`claude_dev/audit-durability-review-minimal-profile-2026-10-05.md`](../../claude_dev/audit-durability-review-minimal-profile-2026-10-05.md).
 
-#### The GDPR dead-letter file
+#### The audit dead-letter file
 
-A failed datastore write of the two legally significant GDPR records —
-`gdpr.user_pseudonymized` (the erasure) and `tenants.deleted` — is never lost to
-a log line alone (T19.27). It goes to two sinks:
+An audit row the datastore refuses is never lost to a log line alone (T19.27,
+T-108). These go to a dead-letter file when `AXIAM__GDPR_AUDIT_DLQ_FILE` names
+one:
+
+* the two legally significant GDPR records written by the cleanup sweep and the
+  tenant API, `gdpr.user_pseudonymized` (the erasure) and `tenants.deleted`;
+* the two GDPR *request* records, `gdpr.data_export_requested` and
+  `gdpr.erasure_requested` (the request itself has succeeded by then; only the
+  record of it was refused);
+* request-audit rows that were dropped or failed to append (below).
+
+The records written by the sweep and by the GDPR handlers also go to a second
+sink, a structured log event on the target `axiam.audit.dlq`.
 
 1. **An append-only file**, named by `AXIAM__GDPR_AUDIT_DLQ_FILE`. One JSON line
    per record, the fields of an audit entry (`tenant_id`, `actor_id`,
    `actor_type`, `action`, `resource_id`, `outcome`, `ip_address`, `metadata`);
-   the server opens it for append and never rewrites or truncates it.
-   `docker-compose.minimal.yml` sets it to
-   `/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl` on the **named volume**
-   `gdpr-audit-dlq`, so it outlives the container; back the volume up with the
-   datastore. The path must be writable by the server's user (65532 in the
-   shipped image) — the compose file's `volume-init` service sees to that.
-2. **A structured log event** on the target `axiam.audit.dlq`. It is the only
-   sink when the file variable is unset, so collect the container log as well.
+   the server opens it for append and never rewrites or truncates it. It is
+   configured in every shipped deployment, always at
+   `/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl`:
+
+   | Deployment | Volume | Survives |
+   |---|---|---|
+   | `docker-compose.minimal.yml` (project `axiam-minimal`) | named volume `gdpr-audit-dlq` | container removal and recreation; lost only by `just minimal-clean` |
+   | `docker-compose.prod.yml` (project `docker`) | named volume `gdpr-audit-dlq` | container removal and recreation; lost by `just prod-clean` (`down -v`) |
+   | `k8s/` | `emptyDir` named `audit-dlq`, `sizeLimit: 256Mi` | a container restart (OOMKill, failed probe); **not** the pod's deletion (rollout, drain, eviction, node loss) |
+
+   Back the Compose volumes up with the datastore. A volume Compose creates is
+   root-owned, so each file has a one-shot init service (`volume-init`,
+   `gdpr-audit-dlq-init`) that hands it to the server's user (65532).
+
+   **Why the Kubernetes volume is an `emptyDir`.** `axiam-server` is a
+   Deployment of 2–10 replicas under an HPA, and the file is per replica. One
+   PersistentVolumeClaim would be a `ReadWriteOnce` volume shared by every
+   replica (a pod on another node cannot attach it), and one claim per replica
+   means a StatefulSet, a different workload with a different rollout. So the
+   manifests choose a spill volume that survives what is most likely, a
+   container restart, and **replay the file before you roll the Deployment**
+   while it holds rows. If the file must outlive the pod, replace the volume in
+   `k8s/server/deployment.yml` with a per-replica one (a StatefulSet's
+   `volumeClaimTemplates`, or a CSI ephemeral volume) and keep the path. The
+   `sizeLimit` bounds a datastore outage: a pod that exceeds it is evicted,
+   which is louder than filling the node's disk (a line is a few hundred
+   bytes). The path is the ConfigMap key `AXIAM__GDPR_AUDIT_DLQ_FILE` in
+   `k8s/server/configmap.yml`, so an overlay that replaces the container's
+   `env` (the Raspberry Pi overlay does) keeps it.
+2. **A structured log event** on the target `axiam.audit.dlq`, for the GDPR
+   records. It is the only sink for them when the file variable is unset, so
+   collect the container log as well.
+
+**With the variable unset** the server logs one `WARN` at start (naming the
+variable), a refused request-audit row is counted and logged only, and a refused
+GDPR record is logged on `axiam.audit.dlq` only. Neither is recoverable from the
+server afterwards.
 
 The server does not read the file back. An operator **replays it into the trail
-by hand**, once the datastore is healthy, and then keeps or archives the file.
-Each line maps one-to-one onto a `CREATE audit_log SET …` statement; a JSON
-`null` has to become `NONE` (SurrealDB refuses `NULL` for an optional field).
-With `jq` and the SurrealDB shell (the namespace and database are
-`AXIAM__DB__NAMESPACE` / `AXIAM__DB__DATABASE`, both `axiam` in the compose
-file):
+by hand**, once the datastore is healthy. There is no replay command; the file
+is the recipe's input and each line maps one-to-one onto a `CREATE audit_log
+SET …` statement. A JSON `null` has to become `NONE` (SurrealDB refuses `NULL`
+for an optional field). With `jq` and the SurrealDB shell (the namespace and
+database are `AXIAM__DB__NAMESPACE` / `AXIAM__DB__DATABASE`, both `axiam` in the
+shipped files). Minimal profile; for `docker-compose.prod.yml` use the volume
+`docker_gdpr-audit-dlq`, the container `axiam-surrealdb` and the credentials in
+`docker/.secrets/stack-credentials.env`:
 
 ```bash
 source docker/.secrets/minimal-credentials.env   # the datastore credentials
 # a distroless image has no shell, so read the volume rather than the container:
 docker run --rm -v axiam-minimal_gdpr-audit-dlq:/d busybox cat /d/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl
 
-jq -r '"CREATE audit_log SET tenant_id = \(.tenant_id|@json), actor_id = \(.actor_id|@json), actor_type = \(.actor_type|@json), action = \(.action|@json), resource_id = \(.resource_id // null | if . == null then "NONE" else @json end), outcome = \(.outcome|@json), ip_address = \(.ip_address // null | if . == null then "NONE" else @json end), metadata = \(.metadata // {} | tojson);"' \
+jq -r '"CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \(.tenant_id|@json), actor_id = \(.actor_id|@json), actor_type = \(.actor_type|@json), action = \(.action|@json), resource_id = \(.resource_id // null | if . == null then "NONE" else @json end), outcome = \(.outcome|@json), ip_address = \(.ip_address // null | if . == null then "NONE" else @json end), metadata = \(.metadata // {} | tojson);"' \
     gdpr-audit-dlq.jsonl \
   | docker exec -i axiam-minimal-surrealdb /surreal sql --endpoint ws://127.0.0.1:8000 \
       --user "$AXIAM__DB__USERNAME" --pass "$AXIAM__DB__PASSWORD" --ns axiam --db axiam --hide-welcome
 ```
 
-The statement was exercised against a SurrealDB 3.2 datastore migrated by the
-server. The replayed row's `timestamp` is the moment of replay — when the
-original write failed is in the `axiam.audit.dlq` log event, so keep the log
-with the file — and, like every audit row, it can neither be
-updated nor deleted afterwards, so replay each line once. An empty or missing
-file means no record has been dead-lettered. (The two *request* records,
-`gdpr.data_export_requested` and `gdpr.erasure_requested`, are not covered by
-this fallback.) The same file also receives request-audit rows that were
-dropped or failed to append, below.
+On Kubernetes the pipeline is the same with two substitutions. Read the file from
+the pod with an ephemeral container that shares the server's process namespace
+(the image has no shell and no `tar`, so `kubectl cp` does not work):
+`kubectl -n axiam debug -it <axiam-server-pod> --image=busybox --target=axiam-server -- cat /proc/1/root/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl`
+(the namespace enforces Pod Security `restricted`, so add `--profile=restricted` where
+your `kubectl` has it). And pipe the statements into
+`kubectl -n axiam exec -i surrealdb-0 -- /surreal sql …` with the datastore's
+credentials. Do this for **each replica's** file. This path was not exercised against a cluster;
+the statements are the same ones the test below checks.
+
+The format and the statement are checked by `gdpr_audit_dlq_test.rs`
+(`the_replay_recipe_in_the_docs_restores_dead_lettered_rows`): it takes the
+`jq` filter out of this page, runs it over lines written by the dead-letter
+writer, applies the statements to a migrated datastore and reads the rows back
+and, because it reads the rows back through the audit repository, that each
+replayed row is one AXIAM can list. The statement gives the row a UUID record
+id (`rand::uuid::v7()`); an earlier form of this recipe let SurrealDB generate
+the id, and AXIAM's audit list fails for the whole tenant while such a row is in
+it (`invalid UUID`). Rows replayed with that form have to be removed with the
+datastore's root account, which the table's append-only permission does not bind,
+and replayed again with this one. The replayed row's `timestamp` is the moment of
+replay — when the original write failed is in the `axiam.audit.dlq` log event, so keep the log
+with the file — and, like every audit row, it can neither be updated nor
+deleted afterwards, so **replay each line once**. Note how many lines you
+replayed (`wc -l gdpr-audit-dlq.jsonl`) and start the next replay after them
+(`tail -n +N`). Do not rename or delete the file while the server runs: the
+request-audit writer keeps its handle open and would keep appending to the
+renamed file. To start a fresh one, stop the server, move the file, start it.
+An empty or missing file means no record has been dead-lettered. The same file
+also receives request-audit rows that were dropped or failed to append, below.
 
 #### Lost request-audit rows (`/health/jobs`)
 
@@ -1843,9 +1920,10 @@ above. The write is queued to a writer task (up to 1 024 rows), so the request
 path does no file I/O; a row the writer cannot keep is counted in
 `not_recoverable`. The lines carry no reason or time — the `axiam.audit.loss` log
 lines give the former, and the replayed row's `timestamp` is the replay's. With
-the variable unset the server logs a warning at start and lost rows are counted
-and logged only. The compose minimal profile sets the variable; set it, on a
-persistent volume the server's user can write, in any other deployment.
+the variable unset the server logs one warning at start (it covers these rows
+and the GDPR records alike) and lost rows are counted and logged only. Both
+Compose files and the Kubernetes manifests set the variable; set it, on a
+volume the server's user can write, in any other deployment.
 
 Still lost: a row that was in the queue (or the writer's queue) when the process
 was killed rather than stopped — an orderly stop drains both — and a row refused

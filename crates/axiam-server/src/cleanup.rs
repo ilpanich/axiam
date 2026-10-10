@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::messaging::MailTransportPublisher;
-use axiam_api_rest::handlers::gdpr::write_erasure_audit_with_dlq;
+use axiam_api_rest::handlers::gdpr::write_audit_with_dead_letter;
 use axiam_api_rest::ssf_emitter::{InitiatingEntity, with_cause};
 use axiam_auth::AuthService;
 use axiam_auth::crypto::{encrypt_separate, gdpr_pseudonym};
@@ -1540,7 +1540,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         // A DB-write failure here is dead-lettered to BOTH an append-only
         // file AND a structured audit event (SECHRD-12 / D-02, T-24-61) —
         // this legally-significant record must never be silently lost.
-        write_erasure_audit_with_dlq(
+        write_audit_with_dead_letter(
             self.audit_repo.as_ref(),
             CreateAuditLogEntry {
                 tenant_id,

@@ -81,10 +81,18 @@
 > minutes after a loss; the totals are logged at `ERROR` on `axiam.audit.loss`,
 > at most once a minute; and when `AXIAM__GDPR_AUDIT_DLQ_FILE` is set each lost
 > row is appended to it, off the request path, in the form the GDPR records use.
+> The GDPR request records (`gdpr.data_export_requested`,
+> `gdpr.erasure_requested`), which only logged a refused append, now take the
+> same dead-letter route (#552, P23W5-A7/A8), and the file is provisioned in every
+> shipped deployment: a named volume in both Compose files, an `emptyDir` in the
+> Kubernetes manifests (it survives a container restart, not the pod's
+> deletion, so it is replayed before a rollout), with one boot warning when it is
+> unset.
 > The tenant notification rules were not used: they are per tenant and per
 > enumerated event, and run on the datastore whose failure is the news. The
 > entry cites the tests and names what stays: rows in memory at a kill, no file
-> configured (counted, not recoverable), and the GDPR request records (#552).
+> configured (counted, not recoverable), and on Kubernetes a file that does not
+> outlive its pod.
 > The model is **469 threats, 428 mitigated / 20 open / 21 not applicable**; its
 > version is unchanged until the wave's last item.
 >

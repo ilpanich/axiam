@@ -58,7 +58,7 @@ use uuid::Uuid;
 use crate::authz::{AuthzData, RequirePermission};
 use crate::error::AxiamApiError;
 use crate::extractors::auth::AuthenticatedUser;
-use crate::handlers::gdpr::write_erasure_audit_with_dlq;
+use crate::handlers::gdpr::write_audit_with_dead_letter;
 use crate::permissions::PERMISSION_REGISTRY;
 use crate::state::AppState;
 use axiam_authz::types::SubjectScope;
@@ -679,7 +679,7 @@ pub async fn delete<C: Connection + Clone>(
     // Written through the dead-lettering sink for the same reason the erasure
     // records are: this is the last chance to record it, and a transient
     // datastore failure must not be how it gets lost.
-    write_erasure_audit_with_dlq(
+    write_audit_with_dead_letter(
         &state.audit_repo,
         CreateAuditLogEntry {
             tenant_id: Uuid::nil(),

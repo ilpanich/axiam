@@ -2485,14 +2485,17 @@ where
     //
     // A request-audit row that is dropped (queue full) or fails to append is
     // counted, reported on `/health/jobs` and, when `AXIAM__GDPR_AUDIT_DLQ_FILE`
-    // names a file, written to it (T-108).
+    // names a file, written to it (T-108). The GDPR records (the export and
+    // erasure requests, the erasure sweep's, a tenant deletion's) take the same
+    // file, so this is the one boot-time warning for all of them (#552).
     let dead_letter = DeadLetterWriter::from_env();
     if !dead_letter.is_configured() {
         tracing::warn!(
             env_var = DEAD_LETTER_FILE_ENV,
-            "no audit dead-letter file is configured — request-audit rows that are dropped or \
-             fail to append are counted and logged but cannot be recovered; point it at a \
-             persistent volume"
+            "no audit dead-letter file is configured — an audit row the datastore refuses \
+             (request-audit rows that are dropped or fail to append, and the GDPR export, \
+             erasure and tenant-deletion records) is counted and logged but cannot be \
+             recovered; point it at a volume that outlives the container"
         );
     }
     let audit_middleware = AuditMiddleware::spawn_configured(

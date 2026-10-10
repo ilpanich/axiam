@@ -5,7 +5,7 @@
 //! [`CreateAuditLogEntry`] as JSON per line. That line is the replayable form:
 //! an operator (or a later replay job) reads each line back into a
 //! `CreateAuditLogEntry` and appends it once the datastore is healthy. The GDPR
-//! erasure record's dead letter (`write_erasure_audit_with_dlq`) and the
+//! records' dead letter (`write_audit_with_dead_letter`) and the
 //! request-audit worker's both write it, through [`encode_line`], so the two
 //! cannot drift apart.
 //!

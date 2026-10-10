@@ -46,6 +46,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not mount a volume for it, the rows are counted and logged only and the server
   warns at start. Rows still in memory when a process is killed rather than
   stopped are lost; an orderly stop drains both queues.
+- **The audit dead-letter file is provisioned in the production Compose file and
+  the Kubernetes manifests, and the GDPR request records use it (#552,
+  P23W5-A7/A8, T-108).** `AXIAM__GDPR_AUDIT_DLQ_FILE` was set only by
+  `docker-compose.minimal.yml`; in `docker-compose.prod.yml` and `k8s/` (whose
+  server runs with `readOnlyRootFilesystem: true`) it was unset, so an audit row
+  the datastore refused was logged and gone. **Operators: this adds a volume and a
+  setting.** `docker-compose.prod.yml` gets a named volume `gdpr-audit-dlq`
+  (project `docker`, so `docker_gdpr-audit-dlq`), a one-shot `gdpr-audit-dlq-init`
+  service that hands it to the server's user (the server now waits for it) and
+  `AXIAM__GDPR_AUDIT_DLQ_FILE=/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl`;
+  `just prod-clean` (`down -v`) deletes the volume, so replay it first. The
+  Kubernetes server gets the same key in the `axiam-config` ConfigMap (so an
+  overlay that replaces the container's `env`, like the Raspberry Pi one, keeps
+  it) and an `emptyDir` volume `audit-dlq` with `sizeLimit: 256Mi`, mounted at
+  `/var/lib/axiam/audit-dlq`. An `emptyDir` survives a container restart and not
+  the pod's deletion (a rollout, a drain, an eviction): the Deployment is 2 to 10
+  replicas under an HPA and the file is per replica, so a shared ReadWriteOnce
+  claim does not fit and a per-replica one means a StatefulSet. Replay the file
+  before rolling the Deployment while it holds rows, or mount a per-replica volume
+  of your own at that path. Behaviour: the two GDPR request records,
+  `gdpr.data_export_requested` and `gdpr.erasure_requested`, whose refused append
+  was only logged, now take the same route as the erasure records (file and
+  `axiam.audit.dlq` event; the request itself still succeeds); the helper behind
+  it is renamed `write_audit_with_dead_letter`. With the variable unset the server
+  now logs one warning at start covering the request-audit rows and the GDPR
+  records alike. `docs/deployment/README.md` ("The audit dead-letter file") has the
+  replay recipe and what each volume survives. The recipe is now checked by a test
+  that runs its `jq` filter over lines the writer produced and reads the rows back
+  through the audit repository, and that test found a **defect in the previous
+  recipe**: its `CREATE audit_log SET …` let SurrealDB generate the record id, and
+  AXIAM's audit list cannot parse such an id (`invalid UUID`). The statement now
+  creates `type::record("audit_log", <string>rand::uuid::v7())`. If you replayed a
+  dead-letter file with the old statement, those rows make that tenant's audit
+  listing fail; find them by their non-UUID record id, remove them as the
+  datastore's root user (the append-only rule is a table permission) and replay
+  them with the new statement.
 - **A notification rule mails each recipient once per event type and window, not
   once per event (#551, P23W5-13, T-117).** A rule for an event an attacker can
   raise in volume — failed sign-ins spread over addresses and accounts — mailed

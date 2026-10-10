@@ -114,6 +114,17 @@ data:
   # §11. Turn this on only if the ingress performs the mTLS handshake AND
   # overwrites the header on every request it forwards.
   AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT: "false"
+  # ---------------------------------------------------------------------
+  # Audit dead-letter file (P23W5-A7)
+  # ---------------------------------------------------------------------
+  #
+  # Where an audit row goes when the datastore refuses it: one JSON line per
+  # row, appended. The root filesystem is read-only, so the path is on the
+  # `audit-dlq` volume that k8s/server/deployment.yml mounts at this directory --
+  # change the two together. That volume is an emptyDir and the reason, and what
+  # it does and does not survive, are written beside it in the Deployment.
+  # Replay: docs/deployment/README.md, "The audit dead-letter file".
+  AXIAM__GDPR_AUDIT_DLQ_FILE: "/var/lib/axiam/audit-dlq/gdpr-audit-dlq.jsonl"
   # SEC-052: Narrow RUST_LOG — no internal module exposure in production
   RUST_LOG: "info"
   # ---------------------------------------------------------------------

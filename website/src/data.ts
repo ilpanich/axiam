@@ -492,7 +492,7 @@ void handler(axiam::Client& axiam,
 export const POSTS: Post[] = [
   {
     slug: "axiam-1-0-0",
-    date: "2026-MM-DD",
+    date: "2026-10-10",
     dateShort: "2026-MM",
     tag: "Release",
     author: "The AXIAM team",

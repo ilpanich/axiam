@@ -5185,6 +5185,15 @@ same transport configuration §6.1 already defines for device mTLS, and sends
 required nor harmful — but omitting the certificate is fatal, and produces the
 same uniform `invalid_client` as every other client-authentication failure.
 
+*Contract 1.60 (informative, R1W1-02).* Under `tls_client_auth` the server accepts a
+client certificate only when AXIAM issued it in the client's own tenant, or when the
+chain the TLS handshake verified ends at a CA held by the client's organization and
+passes through no CA held only by another organization or tenant; a certificate
+chained to another organization's anchor is refused with the same `invalid_client`.
+A CA that a deployment trusts only through its listener's client-CA bundle is
+imported (keyless) into each organization whose clients present certificates from
+it. `self_signed_tls_client_auth` is unaffected. An SDK needs no change.
+
 SDKs are NOT required to implement mTLS client authentication. Where an SDK does
 not, it MUST NOT claim §21 conformance for the client role; §10.1 rule 9 (the
 guard role) is required of everyone regardless.

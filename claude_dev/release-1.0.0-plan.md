@@ -365,11 +365,69 @@ the publish jobs themselves; the first stable tag is their first real run.
 
 ## 10. Hand-off (written by W4)
 
-To be written at the end of W4: merge W4; pull `main` in all twelve clones; the
-dry run; the Basic OP and FAPI 2.0 suites against the release-candidate image per
-[`fapi-conformance-runbook.md`](fapi-conformance-runbook.md) and the sign-off
-table; the real `mass-tag.sh` run, platform first; the twelve pipelines and the
-`latest` tags.
+For the maintainer, in order. Nothing below has been done by the session: no tag,
+no merge, no conformance run, no benchmark run.
+
+1. **Decide the open items.** Milestones `1.0.0` / `1.0.x` and the D-11 issue
+   moves (§8). The release date (D-2): fill `2026-MM-DD` / `2026-MM` in the
+   "AXIAM 1.0.0" post in `website/src/data.ts`. `website-publish.yml` deploys on
+   every push to `main`, so the post and the "first stable release" wording go live
+   when #589 merges — merge it on, or just before, the tag day.
+2. **Merge #589** (platform), then the eleven SDK PRs (§11). Each SDK vendors the
+   platform's artefacts at 8df0e11; `sdk-artifact-drift.yml` compares them with
+   `main` and stays red until both sides are merged.
+3. **Pull `main` in all twelve clones**, each unshallowed with tags
+   (`git fetch --unshallow --tags` where needed): the changelog ranges start at
+   `v1.0.0-beta18` (platform) and `v1.0.0-beta17` (SDKs).
+4. **The dry run**, from the platform clone, and read it:
+   ```bash
+   scripts/mass-tag.sh --repos all --branch main --tag v1.0.0 \
+     --message "AXIAM 1.0.0" --changelog --pull --dry-run --root <dir holding the 12 clones>
+   ```
+   W4.7 ran it against throwaway copies of the final branches (exit 0, all 13
+   targets; log in the session's scratchpad `w47-dry6.log`): every manifest, the
+   spec re-stamp and registry, `API_VERSION`, both k8s tags, the C++ vcpkg port;
+   exactly one empty `## [Unreleased]` per repo with the hand-written prose kept
+   as written. `--repos all` includes `axiam-opaque`: it tags
+   `axiam-opaque-v1.0.0` and publishes the OPAQUE crates and npm package at 1.0.0
+   — leave it out if that should wait.
+5. **Conformance.** Build the release-candidate image from `main`, run the OpenID
+   Basic OP and FAPI 2.0 suites per
+   [`fapi-conformance-runbook.md`](fapi-conformance-runbook.md), and fill the
+   sign-off table in `docs/conformance/REVIEW-JUDGEMENTS.md` (#513 stays open for
+   the certification submissions). The FAPI registrar now imports its client CA
+   into the test organization (R1W1-02); this is its first run with that change.
+6. **The final verification pass**, on the release-candidate commit, as a small PR:
+   move `SECURITY_VERIFIED_RELEASE` and `DOCS_VERIFIED_RELEASE` to `"1.0.0"`,
+   restamp the handoff block in `claude_dev/threat-modeling-and-security.md`
+   (model 2.40.0) and the docs "Last verified" lines — only for what was checked.
+7. **The real run**, platform first: the same command without `--dry-run`.
+8. **Watch the twelve release pipelines and the `latest` tags.** `release.yml`
+   should publish `1.0.0`, `1.0` and `latest` images and a non-prerelease GitHub
+   Release marked Latest; `release-opaque.yml` a release that is never Latest;
+   each SDK its registry (§9.1). The release body is git-cliff's delta since
+   `v1.0.0-beta18` — point `body_path` at hand-written notes if you want the 1.0
+   summary there instead.
+
+**Upgrade notes that need an operator** (also in the CHANGELOG's "Upgrading from
+the beta line"): `tls_client_auth` clients whose CA is trusted only through
+`AXIAM__SERVER__TLS__CLIENT_CA_PATH` need that CA imported, keyless, into their
+organization (R1W1-02); a Vault token needs `update` on `pki_int/revoke` (T-470);
+SAML IdPs signing with SHA-1 need `allow_sha1_signatures` until moved (#531);
+webhooks behind redirects must be re-registered (#555); give the server a 40 s
+stop grace (#569); private SMTP relays need `AXIAM__EMAIL__ALLOWED_PRIVATE_NETWORKS`
+(#529); replay the k8s dead-letter file before a rollout (#552).
+
+**Known, not blocking, for 1.0.x:** the F4 follow-ups #590 – #614; a pre-1.0
+server omits `NotificationRuleResponse.window_minutes`, which the SDKs require
+(a contract "absent reads 15" sentence would let them read old servers); Java's
+generated records have positional constructors, so an additive member breaks a
+direct constructor call (the README points at the builders); the distroless base
+should move once a build ships libssl3 3.0.22; `crates/axiam-opaque-wasm/Cargo.lock`
+and the C/C++ `Doxyfile` `PROJECT_NUMBER` still name beta07; the Rust SDK tracks
+`vendor/axiam-opaque/target/` (kept out of the published crate by its `include`
+list); the Swift podspec is versioned but never published to CocoaPods while the
+README shows a `pod` line.
 
 ## 11. Wave results
 

@@ -272,9 +272,29 @@ fi
 # Overridable, so an operator reproducing a throttling question can put it back.
 export AXIAM__RATE_LIMIT__LOGIN_PER_MIN="${AXIAM__RATE_LIMIT__LOGIN_PER_MIN:-600}"
 
+# Authorization-endpoint rate limit — raised for the harness, for the same reason.
+#
+# Since 7700973a1 (#532) `/oauth2/authorize` is bounded by the browser-endpoint
+# preset, whose number is `end_session_per_min` (30 per IP by default; it also
+# bounds end-session, the `/oauth2/authorize/logout` hop and the SAML IdP's
+# browser routes). Every module opens at least one authorization, several open
+# two or three, and the suite and the browser driver all reach AXIAM from the one
+# docker gateway address — so a sweep exhausts thirty a minute by its second plan.
+#
+# What that looked like on 2026-10-10: the mTLS plan, first in the sweep, came out
+# clean; the self-signed plan behind it got `{"error":"rate_limit_exceeded"}` on
+# `/oauth2/authorize`, two modules that pass went to REVIEW, and the driver
+# uploaded the 429 page as their evidence. The shared limiter answers that 429
+# without logging it, so AXIAM's log showed nothing wrong.
+#
+# Not a relaxation of anything the suite measures, as above: no OIDF module tests
+# authorization-endpoint throughput. Overridable for the same reason.
+export AXIAM__RATE_LIMIT__END_SESSION_PER_MIN="${AXIAM__RATE_LIMIT__END_SESSION_PER_MIN:-600}"
+
 echo "[serve] issuer    $AXIAM__AUTH__OAUTH2_ISSUER_URL (served by the nginx sidecar)"
 echo "[serve] mTLS base $AXIAM__AUTH__OAUTH2_MTLS_BASE_URL"
 echo "[serve] login/min $AXIAM__RATE_LIMIT__LOGIN_PER_MIN (raised for the harness; see the comment)"
+echo "[serve] authorize/min $AXIAM__RATE_LIMIT__END_SESSION_PER_MIN (browser-endpoint preset, raised for the harness; see the comment)"
 echo "[serve] tenant    ${AXIAM__AUTH__OAUTH2_DEFAULT_TENANT_ID:-<none — authorizations will fail>}"
 echo "[serve] listener  https://$AXIAM__SERVER__HOST:$AXIAM__SERVER__PORT (client_auth=$AXIAM__SERVER__TLS__CLIENT_AUTH)"
 echo "[serve] cert      $CERT"

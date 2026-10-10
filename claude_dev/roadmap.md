@@ -1126,7 +1126,7 @@ open, with issue numbers — closes §5 of the plan.
 
 ---
 
-## Phase 24: 1.0.0 release — IN PROGRESS (W1 and W2 landed on their branches 2026-10-09 … 10; W1.13 … W1.F4, W3 and W4 open)
+## Phase 24: 1.0.0 release — IN PROGRESS (W1, W2 and W3 done 2026-10-09 … 10 on `ccr-7ed2207b-ouofu1`, pull request #589; W4, release readiness, in progress)
 
 Bring the platform and the eleven SDKs to the state in which the maintainer tags
 `v1.0.0`, in the waves, with the decisions, of
@@ -1158,10 +1158,10 @@ against [`threat-model-stride.md`](threat-model-stride.md).
 | T24.W1.10 | #532: `/oauth2/authorize`, both mounts, under the browser-endpoint preset | Opus 5.5 | W1 | ✓ |
 | T24.W1.11 | #531: the SAML SP verifier refuses SHA-1 (per-federation `allow_sha1_signatures`, D-3) and markup declarations | Opus 5.5 | W1 | ✓ |
 | T24.W1.12 | #525: an omitted SMTP password kept only when host, port and TLS mode are unchanged | Opus 5.5 | W1 | ✓ |
-| T24.W1.13 | #524: a `require_par` client's unpushed request refused before the login hop | Opus 5.5 | W1 | |
-| T24.W1.14 | #526: revocation and introspection endpoint auth methods published; `phone_number_verified_at` cleared when the number changes | Opus 5.5 | W1 | |
-| T24.W1.15 | #530: optional SAML metadata signing certificate; metadata cache honouring `validUntil`/`cacheDuration`; SSO-host-change audit | Opus 5.5 | W1 | |
-| T24.W1.F4 | F4 security review of the wave diff; findings filed on `1.0.x` unless Medium or higher | Opus 5.5 | W1 | |
+| T24.W1.13 | #524: a `require_par` client's unpushed request refused before the login hop | Opus 5.5 | W1 | ✓ |
+| T24.W1.14 | #526: revocation and introspection endpoint auth methods published; `phone_number_verified_at` cleared when the number changes | Opus 5.5 | W1 | ✓ |
+| T24.W1.15 | #530: optional SAML metadata signing certificate; metadata cache honouring `validUntil`/`cacheDuration`; SSO-host-change audit | Opus 5.5 | W1 | ✓ |
+| T24.W1.F4 | F4 security review of the wave diff ([`security-review-release-1.0.0-w1-2026-10-10.md`](security-review-release-1.0.0-w1-2026-10-10.md)): R1W1-01 (a tenant purge un-revoked certificates on the CRL, Medium) and R1W1-02 (`tls_client_auth` trusted another organization's anchor, High) fixed in the wave; R1W1-03 … 13 filed on `1.0.x` (#601 … #611) | Opus 5.5 | W1 | ✓ |
 | T24.W2.1 | #550: a per-target breaker in the SCIM deliverer; loopback tarpit and 10 001-member dead-letter tests | Opus 5.5 | W2 | ✓ |
 | T24.W2.2 | #551: a per-(tenant, rule, event) notification window claimed in the datastore; T-117 closed | Opus 5.5 | W2 | ✓ |
 | T24.W2.3 | #553: dropped and failed request-audit entries counted in `/health/jobs` and dead-lettered; T-108 re-closed | Sonnet 5.5 | W2 | ✓ |
@@ -1172,9 +1172,9 @@ against [`threat-model-stride.md`](threat-model-stride.md).
 | T24.W2.8 | #555: `expected_updated_at` on `ScimTargetInput`; the webhook deliverer follows no redirect; the FAPI gate on a machine-readable summary; `delivery_abandoned` audit rows; the CONTRACT §8 note | Sonnet 5.5 | W2 | ✓ |
 | T24.W2.9 | #568, #567: a row per missing limiter family and the self-test; benchmark ports on loopback unless told otherwise | Sonnet 5.5 | W2 | ✓ |
 | T24.W2.10 | #536: the `saml_idp_enabled` / `ssf_enabled` settings controls and the SSF streams page (D-8: in 1.0.0) | Sonnet 5.5 | W2 | ✓ |
-| T24.W2.F4 | F4 security review of the wave diff ([`security-review-release-1.0.0-w2-2026-10-10.md`](security-review-release-1.0.0-w2-2026-10-10.md)) | Opus 5.5 | W2 | ✓ |
-| T24.W3.1 | Contract 1.60: the answers to every question in #588 (A1 … A7, B1 … B9), the 1.0.0 additions (§31, §14, §15, §8, §34.4, the CRL section), `openapi.json` and `management-registry.json` regenerated | Sonnet 5.5 | W3 | |
-| T24.W3.2 | The eleven SDK ports of contract 1.60, one pull request per `axiam-<lang>-sdk` repository, each vendoring the `axiam` W3 head; the rows 1.60 assigns fixed per SDK (D-7, D-9) | Sonnet 5.5 | W3 | |
+| T24.W2.F4 | F4 security review of the wave diff ([`security-review-release-1.0.0-w2-2026-10-10.md`](security-review-release-1.0.0-w2-2026-10-10.md)): R1W2-01 (the notification window serialized the audit worker) and R1W2-02 (an unbounded dead-letter file), both Medium, fixed in the wave; the Low and Informational findings filed on `1.0.x` (#590 … #600) | Opus 5.5 | W2 | ✓ |
+| T24.W3.1 | Contract 1.60: the answers to every question in #588 (A1 … A7, B1 … B9), the 1.0.0 additions (§31, §14, §15, §8, §34.4, the CRL section), `openapi.json` and `management-registry.json` regenerated | Sonnet 5.5 | W3 | ✓ |
+| T24.W3.2 | The eleven SDK ports of contract 1.60, one pull request per `axiam-<lang>-sdk` repository, each vendoring the `axiam` W3 head; the rows 1.60 assigns fixed per SDK (D-7, D-9) | Sonnet 5.5 | W3 | ✓ |
 | T24.W4.1 | The beta wording rewritten to what 1.0.0 claims (D-1): README, SECURITY, `docs/`, the website; the "no known High holes" lines re-verified | Sonnet 5.5 | W4 | |
 | T24.W4.2 | The CHANGELOG `## [Unreleased]` as the `[1.0.0]` narrative | Sonnet 5.5 | W4 | |
 | T24.W4.3 | This phase in `roadmap.md`; the website roadmap's phase 20 `focus` and a 1.0.0 row | Sonnet 5.5 | W4 | |
@@ -1185,11 +1185,20 @@ against [`threat-model-stride.md`](threat-model-stride.md).
 | T24.W4.8 | The regression gate, each exit code from the tool | Sonnet 5.5 | W4 | |
 | T24.W4.9 | The hand-off: what the maintainer runs, in order (conformance suites, `mass-tag.sh`, the twelve pipelines) | Sonnet 5.5 | W4 | |
 
+W1 closes the fifteen issues of its table (#549, #564, #565, #517, #518, #519,
+#523, #529, #520, #532, #531, #525, #524, #526, #530); W2 closes ten items'
+twelve issues (#550, #551, #553, #552, #554, #569, #566, #535, #555, #568, #567,
+#536); W3 writes contract 1.60 (#588) and ports it to the eleven SDKs, one pull
+request per repository. W4 (W4.1 … W4.9) is in progress on
+`claude/release-1.0.0-w4`; the verified-release stamps move only in its final
+pass against the release-candidate commit.
+
 Deferred and said so in public: #513 (the certification submissions; the
 maintainer's), #561 (benchmark run 6), #533 and #538 (`1.0.x`), #563 (open,
 unscheduled), and, carried into `1.0.x` from items that ship, the SCIM per-target
 concurrency budget (#550), CRLs in the rustls verifiers and OCSP (#565) and
-`may_act` (#518).
+`may_act` (#518). The two F4 reviews and the waves filed their Low and
+Informational findings and follow-ups as #590 … #614, all on `1.0.x`.
 
 ---
 
@@ -1221,8 +1230,8 @@ concurrency budget (#550), CRLs in the rustls verifiers and OCSP (#565) and
 | Phase 21 | 9 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) |
 | Phase 22 | 20 | Dogfooding remediation from `axiam-domo-demo` (PKI tenant scope, device-login rate limit, certificate-bound device tokens, status codes, server certificates, gRPC client auth, service accounts on management, non-inheritable assignments, contracts 1.51/1.52 and the eleven SDK ports) |
 | Phase 23 | 47 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) — **complete** with W6a; T23.10.2(b) (run 6, seventh benchmark draft) rides W6b, #561 |
-| Phase 24 | 38 | 1.0.0 release (the security findings that must not ship in a 1.0, durability and operations, contract 1.60 and the eleven SDK ports, release readiness) — **in progress**: W1.1 … W1.12 and all of W2 done, W1.13 … W1.F4, W3 and W4 open |
+| Phase 24 | 38 | 1.0.0 release (the security findings that must not ship in a 1.0, durability and operations, contract 1.60 and the eleven SDK ports, release readiness) — **in progress**: W1, W2 and W3 done (PR #589), W4 in progress |
 
-**Total: 217 tasks across 25 phases** (24 complete; Phase 24, the 1.0.0 release, has 23 of its 38 tasks done; Phase 23's T23.10.2(b), the run-6 report, rides W6b — #561)
+**Total: 218 tasks across 25 phases** (24 complete; Phase 24, the 1.0.0 release, has 29 of its 38 tasks done — W1, W2 and W3 — and W4's nine in progress; Phase 23's T23.10.2(b), the run-6 report, rides W6b — #561)
 
 Each task is designed to be a self-contained unit of work with a clear deliverable and a signed commit, fitting within a single Claude Code session.

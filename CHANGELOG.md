@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-10
+
 #### What 1.0.0 means
 
 AXIAM 1.0.0 is the first stable release. REST, gRPC, AMQP and the SDK contract
@@ -282,6 +284,14 @@ and v90 – v94 run at startup like every earlier one.
   organization's value by an unrelated save, and so was one saved from the Security
   Overrides panel, which now carries a group for them.
 
+#### Commit summaries
+
+- Updated website to 1.0.0
+
+- Show and switch the SAML IdP and SSF surfaces; SSF streams page (#536)
+
+- List a signed-in user's pending requests so an unmailed account can approve (#566)
+
 ### Changed
 
 #### SAML federation
@@ -366,6 +376,106 @@ and v90 – v94 run at startup like every earlier one.
   step outcome) through `env:` instead of interpolating them into `run:` scripts,
   closing a template injection for anyone who may dispatch it. Runbook: "The CI
   gate". Release-pipeline only; no product behaviour changes.
+
+#### Commit summaries
+
+- The Keycloak round trip prints AXIAM's refusal reason when a leg fails
+
+- Release plan — the regression gate table (W4.8)
+
+- Release plan — the maintainer hand-off (W4.9)
+
+- Release plan — the pipeline findings (W4.6) and the wave results
+
+- Threat model 2.40.0 — the 1.0.0 release pass, six corrections, no status change
+
+- 1.60 — tls_client_auth accepts only the client's own organization's chain (R1W1-02)
+
+- Regenerate the spec, the registry and the API index after R1W1-01
+
+- The roadmap's real totals — 218 tasks across 25 phases
+
+- The AXIAM 1.0.0 post, the SDK reference page at contract 1.60
+
+- Phase 24 at W4 — W1, W2 and W3 done, the total corrected to 218
+
+- The remaining beta wording — the dated posts' cautions, the benchmark page, the AsyncAPI milestone
+
+- 1.60 third pass — the W1 items (#520, #524, #525, #526, #530, #531, #532) and the federation null rule
+
+- The CRL handler's row in the frontend coverage matrix (#565)
+
+- Rustfmt the email-config test
+
+- Regenerate the spec and the registry after W1; the CRL route's pki tag placed
+
+- F4 review of release 1.0.0 wave W1
+
+- The redirect-query test builds its request once
+
+- The pairwise NameID leak test uses a username hex cannot spell
+
+- Rustfmt the notification publisher's key list
+
+- The notification publisher is credited with the window keys (#551)
+
+- The authorize tests do not share a pro-rated limiter minute (#532)
+
+- The auth-contract mocks answer the user menu's pending-request list (#566)
+
+- The dead-letter test takes the generated test password (#552)
+
+- Cover the W2 console pages to the coverage floor
+
+- Regenerate the spec and the management registry after W2
+
+- /oauth2/authorize documents its 429 (#532)
+
+- Phase 24 — the 1.0.0 release
+
+- The 1.0.0 wording — beta, pre-1.0 and "not until a stable release" rewritten to what 1.0.0 claims
+
+- Refuse a tag whose version the tree does not declare
+
+- Mark prereleases, and let only the server release be Latest
+
+- Make the image scan gate on HIGH/CRITICAL as it says it does
+
+- 1.60 second pass — the eleven ports' questions answered
+
+- 1.60 — the #588 answers and the 1.0.0 additions (§34.4, §31, §14, §15, §8, §35)
+
+- Document AXIAM__AUTH__AUTH_PEPPER, the env provider's spelling of the pepper (#555)
+
+- F4 review of release 1.0.0 wave W2
+
+- A minimal-profile server reads no AMQP queue; a broker confirm is not a record (#555)
+
+- Release 1.0.0 plan — decisions D-1 … D-10 accepted; one pull request for all waves
+
+- Release 1.0.0 plan — state measured, triage of the 36 open issues, waves W1–W4
+
+- 1.59 — the cross-SDK review of the Phase 23 ports (§28.12, §29–§33)
+
+- The Security and Docs sections at 1.0.0-beta19 — model 2.37.0, contract 1.58, the beta18/19 post
+
+- Bring the repository documentation to Phase 23 — design chapters 8f–8j, API and PKI guides, compliance matrices
+
+- T-388 closes with the contract 1.58 fan-out — model 2.37.0
+
+- Phase 23 close-out plan — the threat model and the docs at the shipped state
+
+- Time the dummy-verify floor against a bracketing reference
+
+- Bump rustls
+
+- Bump dtolnay/rust-toolchain
+
+- Bump the npm_and_yarn group across 2 directories with 2 updates
+
+- Bump config
+
+- Bump the minor-patch group in /frontend with 7 updates
 
 ### Fixed
 
@@ -529,6 +639,120 @@ and v90 – v94 run at startup like every earlier one.
   `runner/rl-prod-posture-selftest.sh` fails when a `*_per_min` field of
   `RateLimitConfig` has no row, so the next family cannot repeat it. Benchmark
   tooling only; no server behaviour changes.
+
+#### Commit summaries
+
+- Raise the authorize rate limit for the harness, as login's is
+
+- The email-config key is generated, and the CRL purge test names its leaves
+
+- mass-tag leaves an identifier at the start of a commit summary as spelled
+
+- mass-tag rewrites only the version, not every string that contains it
+
+- mass-tag bumps the website API index's API_VERSION
+
+- mass-tag's dry-run orphan warning names CHANGELOG.md, not the scratch copy
+
+- mass-tag keeps the hand-written [Unreleased] block intact when folding it
+
+- mass-tag dry run simulates the platform bump for the SDKs
+
+- No secret-bearing values in assertion messages, no literal passwords or keys
+
+- mass-tag bumps every vcpkg manifest of the C and C++ SDKs
+
+- tls_client_auth accepts only a certificate of the client's own organization (R1W1-02)
+
+- A deleted tenant's certificates are revoked and stay on the CRL until they expire (R1W1-01)
+
+- Escape the operate page's inner backticks; the email-config test takes a generated secret
+
+- The tenant purge removes W2's notification windows
+
+- Clearing or replacing a SAML metadata signing certificate is audited (T-474)
+
+- An explicit null clears a federation config's nullable fields
+
+- The browser-endpoint preset gives a newly seen address its whole budget (#532)
+
+- A vault_pki leaf's revocation reaches Vault's own list (T-470)
+
+- The SAML SP reads IdP metadata through its signature and caches it (#530)
+
+- Discovery publishes revocation and introspection auth methods; a changed phone number loses its verification (#526)
+
+- A require_par client's unpushed request is refused before the login hop (#524)
+
+- An omitted provider secret follows only the same server (#525)
+
+- The SAML SP verifier refuses SHA-1 and DTDs (#531)
+
+- rate-limit /oauth2/authorize on both mounts (#532)
+
+- A refresh narrows the grant to the client's current scopes (#520)
+
+- The dead-letter file has a byte budget with a reserve for the GDPR records (#553, #552, R1W2-02)
+
+- UserInfo and introspection ask account_may_act (#520)
+
+- The notification window is claimed off the audit worker, once per replica and window (#551, R1W2-01)
+
+- claims.id_token.sub is honoured on the honour lane and refused on fapi2 (#520)
+
+- Hold the email provider to the outbound address policy (#529)
+
+- The approval page refreshes the pending-request badge after a decision (#566)
+
+- Deleting a tenant tombstones, revokes and purges it (#523)
+
+- The in-process dispatcher records a delivery it loses at stop or refuses (#555)
+
+- The FAPI conformance gate fails on a regression, not on a missing browser (#555)
+
+- The boot log names the pepper variable an operator sets (#555)
+
+- The deliverer follows no redirect; a 3xx is a retry (#555)
+
+- The target PUT takes the version the administrator read (#555)
+
+- Deleting or sweeping a client also voids its codes and pushed requests (#517)
+
+- The benchmark stacks publish their ports on loopback unless told otherwise (#567)
+
+- rl-prod-check lists the eight limiter families it had no row for (#568)
+
+- Every sweep the cleanup loop records is registered on /health/jobs (#535)
+
+- The fatal-stop backstop covers the whole orderly stop (#554)
+
+- A session refresh asks account_may_act, not the sign-in rule (#519)
+
+- The stop grace period covers the REST shutdown and the audit drain (#569)
+
+- A dead consumer or gRPC server stops the full profile in order (#554)
+
+- An RFC 8693 actor token must be the exchanging client's (#518)
+
+- The audit dead-letter file is provisioned in prod compose and k8s, and the GDPR request records use it (#552)
+
+- Deleting a client revokes its refresh tokens first (#517)
+
+- Lost request-audit rows are counted, signalled and dead-lettered (#553)
+
+- Publish a CRL per issuing CA; tls_client_auth refuses a revoked leaf (#565)
+
+- A notification rule mails once per event type and window, not once per event (#551)
+
+- A per-target breaker so a tarpit downstream cannot stall a replica's provisioning (#550)
+
+- A locked account costs the verify an unknown name costs (#564)
+
+- Only a console sign-in reads or decides a device authorization (#549)
+
+- Read the dashboard's clock once, not during render
+
+- Retry a conflicted SAML participant record instead of assuming a winner
 
 ### Security
 
